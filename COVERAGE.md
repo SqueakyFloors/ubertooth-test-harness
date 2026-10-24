@@ -53,7 +53,7 @@ Harness-wide checks that use the CLIs:
 | `-s` | MCU serial | Covered | Ubertooth identity, preflight, cleanup identity check |
 | `-p` | part ID | Covered | Ubertooth identity, util compositions (smoke) |
 | `-b` | board ID | Covered | Ubertooth identity, util compositions (smoke) |
-| `-a[0-7]` | get/set PA level | Covered | Get and set: Radio setting transitions (smoke). Repeated and invalid `-a9`: comprehensive. `-a0` is a query, so level 0 cannot be set |
+| `-a[0-7]` | get/set PA level | Covered | Get and set: Radio setting transitions (smoke). Repeated and invalid `-a9`: comprehensive. `-a0` is a query, so level 0 cannot be set. Boot and reset default is 7 (docs: [ubertooth#160](https://github.com/SqueakyFloors/ubertooth/issues/160)) |
 | `-c[2402-2480]` | get/set channel (MHz) | Covered | Radio setting transitions (smoke). Repeated and mixed with `-C`: comprehensive. Out-of-range error is not tested |
 | `-C[0-78]` | get/set channel (index) | Covered | Get: smoke. Set, repeated, and mixed: comprehensive. Out-of-range error is not tested |
 | `-z[level]` | get/set squelch | Covered | Radio setting transitions (smoke); repeated: comprehensive |
@@ -79,12 +79,12 @@ Combinations to test:
 - `-c`/`-C` share one value in both orders: Covered (comprehensive).
 - Rejected set followed by a successful report still exits nonzero (`-a9 -v`): Covered (comprehensive).
 - Settings kept by a stop from idle and reset by an active-mode stop: Covered (smoke; USR LED comprehensive).
-- Two or more modes rejected before any mode starts (`-q -n -e -t -x -I`): Partial. The test exists but needs `allow RF transmission` and is in no plan until fork issue #82 is fixed.
+- Two or more modes rejected before any mode starts (`-q -n -e -t -x -I`): Partial. The `Ubertooth util conflicts` test exists but is in no plan. Fork #82 is fixed (#134), so it can go into the release plan after a hardware run ([#25](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/25)).
 - `-f`/`-i` combined with another mode is rejected: Not covered (risk: an accepted pair strands the board).
 - `-U all` with a setter or mode is rejected: Not covered. Host-side; needs no second board.
 - Read-only queries without `-U` while several boards are attached list every board: Not covered. The single-board path is covered by Exclusive topology.
-- Squelch combined with a mode is dropped: Not covered.
-- A detached optional value (`-c 2426`) is parsed as a positional argument: Not covered.
+- `-z` combined with `-q`, `-n`, `-e`, or `-t` is silently ignored (fork bug [ubertooth#159](https://github.com/SqueakyFloors/ubertooth/issues/159)): Not covered. Add a case once the fork picks apply-or-reject.
+- A value given as the next word (`-c 2426`, `-z -70`) sets the same as an attached one, and a stray argument is rejected (fork #156): Not covered ([#25](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/25)).
 
 ## ubertooth-btle
 
@@ -345,7 +345,7 @@ Ordered by value/effort:
 7. Raw receive replay: `ubertooth-rx -i <fixture>` with `-r`/`-q`/`-d`. Needs a public, synthetic fixture.
 8. Implement BLE monitor / Classic Bluetooth receive (`ubertooth-rx -z -t N`,
    `ubertooth-dump -c/-l -d`, `ubertooth-ego -r -c`), checking exit and output shape, not content.
-9. Add Ubertooth util conflicts to the release plan once fork issue #82 is fixed;
+9. Add Ubertooth util conflicts to the release plan (fork #82 is fixed; [#25](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/25));
    add `-f`/`-i` rejection cases only if no accepted pair can reach those modes.
 10. Headless `ubertooth-specan-ui -h` and argument checks; `btle-extcap --extcap-interfaces/--extcap-dlts/--extcap-config`.
 11. Add `ubertooth-scan -h` and `ubertooth-follow -h` to Host CLI surface on BlueZ builds.
