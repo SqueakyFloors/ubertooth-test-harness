@@ -22,6 +22,11 @@ suites:
         Ubertooth: default
         coverage: smoke
 
+    - Argument validation:
+        hosts: each
+        Ubertooth: default
+        coverage: smoke
+
     - Radio setting transitions:
         hosts: each
         Ubertooth: default

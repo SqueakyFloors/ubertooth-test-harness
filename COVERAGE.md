@@ -54,8 +54,8 @@ Harness-wide checks that use the CLIs:
 | `-p` | part ID | Covered | Ubertooth identity, util compositions (smoke) |
 | `-b` | board ID | Covered | Ubertooth identity, util compositions (smoke) |
 | `-a[0-7]` | get/set PA level | Covered | Get and set: Radio setting transitions (smoke). Repeated and invalid `-a9`: comprehensive. `-a0` is a query, so level 0 cannot be set. Boot and reset default is 7 (docs: [ubertooth#160](https://github.com/SqueakyFloors/ubertooth/issues/160)) |
-| `-c[2402-2480]` | get/set channel (MHz) | Covered | Radio setting transitions (smoke). Repeated and mixed with `-C`: comprehensive. Out-of-range error is not tested |
-| `-C[0-78]` | get/set channel (index) | Covered | Get: smoke. Set, repeated, and mixed: comprehensive. Out-of-range error is not tested |
+| `-c[2402-2480]` | get/set channel (MHz) | Covered | Radio setting transitions (smoke). Repeated and mixed with `-C`: comprehensive. Out-of-range `-c2401`/`-c2481` rejected with no change: Argument validation (comprehensive; `-c2401` smoke) |
+| `-C[0-78]` | get/set channel (index) | Covered | Get: smoke. Set, repeated, and mixed: comprehensive. `-C79` rejected: Argument validation (comprehensive) |
 | `-z[level]` | get/set squelch | Covered | Radio setting transitions (smoke); repeated: comprehensive |
 | `-l[0-1]` | get/set USR LED | Covered | Get: util compositions (smoke). Set across a mode stop and repeated: comprehensive |
 | `-d[0-1]` | get/set all LEDs | Covered | `-d1` and the `-d` readback in every setting case (smoke); repeated `-d`: comprehensive |
@@ -81,7 +81,7 @@ Combinations to test:
 - Settings kept by a stop from idle and reset by an active-mode stop: Covered (smoke; USR LED comprehensive).
 - Two or more modes rejected before any mode starts (`-q -n -e -t -x -I`): Partial. The `Ubertooth util conflicts` test exists but is in no plan. Fork #82 is fixed (#134), so it can go into the release plan after a hardware run ([#25](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/25)).
 - `-f`/`-i` combined with another mode is rejected: Not covered (risk: an accepted pair strands the board).
-- `-U all` with a setter or mode is rejected: Not covered. Host-side; needs no second board.
+- `-U all` with a setter (`-a5`) or mode (`-x`) is rejected with no change: Covered (Argument validation, comprehensive).
 - Read-only queries without `-U` while several boards are attached list every board: Not covered. The single-board path is covered by Exclusive topology.
 - `-z` combined with `-q`, `-n`, `-e`, or `-t` is silently ignored (fork bug [ubertooth#159](https://github.com/SqueakyFloors/ubertooth/issues/159)): Not covered. Add a case once the fork picks apply-or-reject.
 - A value given as the next word (`-c 2426`, `-z -70`) sets the same as an attached one, and a stray argument is rejected (fork #156): Not covered ([#25](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/25)).
@@ -96,16 +96,16 @@ Combinations to test:
 | `-p` | promiscuous | Partial | Only BLE mode conflicts (release). Never run alone; a useful test needs an active connection |
 | `-a[addr]` | get/set access address | Not covered | Get/set needs no peer; `-r` clears it |
 | `-s<mac>` | faux peripheral mode | Hard | Transmits RF; needs a central peer |
-| `-t<mac[/mask]>`, `-tnone` | set/unset follow target | Not covered | Parsing and the set path are testable; a useful filter test needs a peer |
+| `-t<mac[/mask]>`, `-tnone` | set/unset follow target | Partial | A malformed MAC is rejected (Argument validation, comprehensive). The set path is not tested; a useful filter test needs a peer |
 | `-i` / `-j` | interfere once (`-j` alias) | Hard | Jams a live connection (transmits RF) |
 | `-I` / `-J` | interfere continuously (`-J` alias) | Hard | Same as `-i` |
 | `-U<index\|serial>` | select device | Covered | Every btle case uses a serial |
 | `-r<file>` | PCAPNG capture | Covered | BLE CRC transitions: the header and link type 256 are checked (smoke with `-n`, comprehensive with `-n` and `-f`). `-r -` (stdout) and packet content are not tested |
 | `-q<file>` | PCAP (LE_LL_WITH_PHDR) | Covered | As `-r`: pcap with link type 256 |
 | `-c<file>` | PCAP (PPI) | Covered | As `-r`: pcap with link type 192 |
-| `-A<37-39>` | advertising channel | Covered | 37 in smoke; 37, 38, and 39 in comprehensive. An invalid index is not tested |
+| `-A<37-39>` | advertising channel | Covered | 37 in smoke; 37, 38, and 39 in comprehensive. `-A36`/`-A40` rejected: Argument validation (comprehensive) |
 | `-v[01]` | get/set CRC check | Covered | Get, set, and applied by a mode (smoke); `-v0` and repeated `-v` (comprehensive) |
-| `-x<0-32>` | allowed access-address errors | Not covered | Range check (>32 rejected) is host-side and easy |
+| `-x<0-32>` | allowed access-address errors | Partial | `-x33` rejected: Argument validation (smoke). Accepted values 0-32 are not tested |
 
 Combinations to test:
 
@@ -152,11 +152,11 @@ Combinations: `-d` without `-r` (board stays in DFU): Not covered (Hard: leaves 
 | `-g` | feedgnuplot output | Not covered | |
 | `-G` | 3D feedgnuplot output | Not covered | |
 | `-d <file>` | write output to a file | Not covered | |
-| `-l <2402-2480>` | lower frequency | Not covered | |
-| `-u <2402-2480>` | upper frequency | Not covered | |
+| `-l <2402-2480>` | lower frequency | Partial | `-l 2401` rejected: Argument validation (smoke). A real range run is not tested |
+| `-u <2402-2480>` | upper frequency | Partial | `-u 2481` rejected: Argument validation (comprehensive). A real range run is not tested |
 | `-U <index\|serial>` | select device | Not covered | Spectrum analyzer and Spectrum RSSI sanity are catalog-only |
 
-Combinations: `-l` > `-u` rejected: Not covered. `-g` vs `-G` output shape: Not covered. Every reported frequency falls between `-l` and `-u`: Not covered.
+Combinations: `-l` > `-u` rejected: Covered (Argument validation, comprehensive). `-g` vs `-G` output shape: Not covered. Every reported frequency falls between `-l` and `-u`: Not covered.
 
 ## ubertooth-specan-ui (Python, GUI)
 
@@ -190,7 +190,7 @@ Combinations: `--padding` without `--wifi`, `--wifi` with `-l`/`-u`: Not covered
 | `-V` | version | Covered | Host CLI surface (fast, release): host version line |
 | `-U <0-7>` | select device | Not covered | |
 
-Combinations: `-u` without `-l` rejected: Not covered. `-z -t N` exits after N s: Not covered. `-i` replay into `-r`/`-q`: Not covered.
+Combinations: `-u` without `-l` rejected: Covered (Argument validation, smoke). `-z` with an address rejected: Covered (Argument validation, comprehensive). `-z -t N` exits after N s: Not covered. `-i` replay into `-r`/`-q`: Not covered.
 
 ## ubertooth-dump
 
@@ -240,7 +240,7 @@ Combinations: `-c` with `-l` (last-wins or rejected?): Not covered. Output size 
 | `-r` | continuous RX on one channel | Not covered | Runs without a peer (no packets expected) |
 | `-i` / `-j` | interfere (`-j` alias) | Hard | Transmits RF |
 | `-c <2402-2480>` | RX channel (MHz) | Not covered | Used with `-r` |
-| `-l <1-48>` | capture length | Not covered | The range check is host-side |
+| `-l <1-48>` | capture length | Partial | `-l0` (smoke) and `-l49` rejected: Argument validation. Accepted lengths are not tested |
 | `-a <code>` | access code | Not covered | |
 | `-U <index\|serial>` | select device | Not covered | |
 
@@ -253,8 +253,8 @@ Combinations: two or more of `-f`/`-r`/`-i` (last-wins on `do_mode`?): Not cover
 | `-h` | help | Covered | Host CLI surface |
 | `-q[uuid]` | send a quack | Hard | Transmits RF; needs an Uberducky (backlog) |
 | `-b` | Uberducky bootloader | Hard | Transmits; changes the peer's firmware state |
-| `-A <37-39>` | advertising channel | Not covered | The range check is host-side |
-| `-a <bdaddr>` | source address | Hard | Only matters with `-q` |
+| `-A <37-39>` | advertising channel | Partial | `-A36` (smoke) and `-A40` rejected: Argument validation. Only matters with `-q` |
+| `-a <bdaddr>` | source address | Partial | A malformed address is rejected (Argument validation, comprehensive). Using it needs `-q` (transmits) |
 | `-s` | sarcastic output (undocumented) | N/A | Cosmetic |
 | `-U <index\|serial>` | select device | Hard | Only matters with `-q` |
 
@@ -329,10 +329,7 @@ Combinations: two or more of `-f`/`-r`/`-i` (last-wins on `do_mode`?): Not cover
 
 Ordered by value/effort:
 
-1. Host-only argument errors (no device): `ubertooth-util -C79`, `-c2401`,
-   `-U all -a5`; `ubertooth-btle -x33`, `-A40`; `ubertooth-ego -l49`; `ubertooth-ducky -A36`;
-   `ubertooth-rx -u 12` without `-l`; `ubertooth-specan -l 2480 -u 2402`. Each must exit
-   nonzero with no device change.
+1. Done (#27): host-side argument rejections across util, btle, ego, ducky, rx, specan (`Argument validation`). Still open: `ubertooth-dump -c -l` (last-wins, not a rejection) and `ubertooth-rx -e5`.
 2. Done (#28): `--host-version`, `-N`, `-V` on rx/tx/afh, BlueZ tool help.
 3. `ubertooth-dfu -s` (suffix a binary; host-only) and `-u` read-back compared with the last
    flashed image.

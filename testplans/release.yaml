@@ -17,6 +17,11 @@ suites:
         Ubertooth: default
         coverage: comprehensive
 
+    - Argument validation:
+        hosts: each
+        Ubertooth: default
+        coverage: comprehensive
+
     - Radio setting transitions:
         hosts: each
         Ubertooth: default

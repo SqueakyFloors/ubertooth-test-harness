@@ -586,6 +586,12 @@ def builtin_catalog() -> TestCatalog:
             continue_on_case_failure=True,
         ),
         stateful_test(
+            "Argument validation",
+            "Arguments each tool refuses leave the device unchanged",
+            transitions.argument_validation_cases,
+            continue_on_case_failure=True,
+        ),
+        stateful_test(
             "Radio setting transitions",
             "Channel, PA level, squelch, and LED set/stop/reset/restore transitions",
             transitions.radio_setting_cases,
