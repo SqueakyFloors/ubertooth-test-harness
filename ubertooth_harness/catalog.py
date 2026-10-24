@@ -15,7 +15,7 @@ from ubertooth_harness.patterns import (
 )
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
-    dfu_cases, receive_cases, tool_cases, transitions, util_cases,
+    dfu_cases, python_cases, receive_cases, tool_cases, transitions, util_cases,
 )
 
 
@@ -703,6 +703,25 @@ def builtin_catalog() -> TestCatalog:
             MappingProxyType({}),
             command_builder=receive_cases.replay_cases,
             continue_on_case_failure=True,
+        ),
+        TestDefinition(
+            "Python tools",
+            "ubertooth-specan-ui -h without a display and btle-extcap DLT and "
+            "config listings, with no Ubertooth (needs --build --with-python "
+            "for specan-ui)",
+            MappingProxyType({"hosts": HOSTS, "coverage": COVERAGE}),
+            MappingProxyType({}),
+            command_builder=python_cases.python_tool_cases,
+            continue_on_case_failure=True,
+        ),
+        TestDefinition(
+            "BLE extcap interfaces",
+            "btle-extcap --extcap-interfaces lists every attached Ubertooth",
+            MappingProxyType({"hosts": HOSTS, "Ubertooth": UBERTOOTH, "coverage": COVERAGE}),
+            MappingProxyType({"Ubertooth": "Ubertooth"}),
+            command_builder=python_cases.extcap_interface_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
         ),
         TestDefinition(
             "CLI usage smoke",

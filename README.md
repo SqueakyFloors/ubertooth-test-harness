@@ -224,8 +224,8 @@ parent YAML item reports one aggregate outcome. Remaining named tests are
 catalog-validated and resource-planned but gain their hardcoded implementations
 in subsequent slices.
 
-`Host CLI surface` and `Raw receive replay` need no Ubertooth, so
-`testplans/host.yaml` runs on a host with none registered or attached; a
+`Host CLI surface`, `Raw receive replay`, and `Python tools` need no
+Ubertooth, so `testplans/host.yaml` runs on a host with none registered or attached; a
 registry holding just the `Host` entry is enough:
 
 ```sh
@@ -239,6 +239,17 @@ python -m ubertooth_harness run-suite --plan testplans/host.yaml --suite host \
 `ubertooth_harness/rxreplay.py` (spec sync words, HEC, whitening, and a DH1
 CRC, so libbtbb derives a known UAP); no over-the-air capture is used or
 stored.
+
+`Python tools` runs `ubertooth-specan-ui -h` with no display (`DISPLAY`,
+`WAYLAND_DISPLAY`, and `QT_QPA_PLATFORM` removed) from a
+`--build --with-python` prefix, and `btle-extcap.py` (which CMake never
+installs) exactly as it is in the resolved Ubertooth commit, read with
+`git show`. specan-ui imports numpy, qtpy, and a Qt binding before it parses
+`-h`, so its case is skipped, with the reason, when the run has no Python-tool
+build or that interpreter lacks one of them. `BLE extcap interfaces` runs
+`btle-extcap.py --extcap-interfaces`, which opens every attached board through
+`ubertooth-util -s`, so it leases and guards them like `Ubertooth count`.
+Both run through `ubertooth_harness/pytools.py`.
 
 ## Option compositions and stateful transitions
 
@@ -268,6 +279,8 @@ python -m ubertooth_harness run-suite \
 | `Spectrum analyzer` | one full-band sweep (`duration` long): every frequency 2402-2480 reported, none outside, int8 RSSI | adds narrow, single, and top-of-band ranges, `-g`, `-G`, `-v`, and `-d` (binary file checked by `specandump.py`); ranges after a different range report no stale samples (fork #173, fixed in 20bcf11); stopping a bounded run with `-S` turns the preset LEDs off and resets channel 2441 MHz and squelch -120, PA kept (fork #191, fixed in aa4f620) |
 | `Classic Bluetooth receive` | `ubertooth-rx -z -t N` survey (exits 0 by itself, N = `duration` in whole seconds, no earlier than N-0.5 s, survey lines are piconet addresses); `-t N -r` PCAPNG with link type 255; `ubertooth-afh -t N` with no piconet in range says no packet arrived and exits 2 after about N s, printing no map (fork #187, 3b22c95) | adds `-t N` without `-z`; `-c 39` (every packet on channel 39); `-e 0` and `-e 4` (no packet over the limit); `-s` deprecation notice; `-q` PCAP (link type 255); repeated `-r` (first wins, extra file never created); `-d` (68-byte BR records, checked by `rxdump.py`); `afh -t N -e 2` (same exit 2); `afh -r` one map line per second; `afh` with an unknown `-U` exits 1 (fork #185, fixed in 219a5b0) |
 | `Raw receive` | `ubertooth-dump -d` (68-byte records) and `-b -d` (401-byte bitstream records), checked by `rxdump.py` with at least 50 records per second; `ubertooth-ego -r -c 2440` runs until stopped | adds `dump -l`, `-l -c`, `-c -l` (the last modulation wins, read back from CC2400 MDMCTRL with `ubertooth-debug`); `ego -l 1`, `-l 48`, `-a 630f9ffe`; `ego -a zz` rejected |
+| `Python tools` | no Ubertooth; `host` and `fast` plans, and CI: `ubertooth-specan-ui -h` without a display shows its argparse usage (`-U`, `-l`, `-u`, `--wifi`, `--padding`), skipped without `--build --with-python` or numpy/qtpy/Qt; `btle-extcap.py -h` exits 0; `--extcap-dlts` lists DLT 256 (`DLT_BLUETOOTH_LE_LL_WITH_PHDR`); `--extcap-config` lists the `--channel` selector with 37 (default), 38, 39 | adds `--extcap-dlts` with no interface and `--extcap-config` with a non-Ubertooth interface (exit 1), an unknown option (exit 2, usage); strict: `-h` names the real options (fork #268) |
+| `BLE extcap interfaces` | `btle-extcap.py --extcap-interfaces` lists one `ubertooth<N>` interface per attached board, `N` from 0, guards unchanged | strict: each line shows the board's serial; with two or more boards it shows `0:` (fork #269) |
 | `Raw receive replay` | no Ubertooth; `host` and `fast` plans, and CI: `ubertooth-rx -i` on a synthetic fixture (`rxreplay.py`, built from the spec encoding, never a real capture) prints exactly the fixture's LAP/error/channel lines and skips the decoy records; `-l <LAP>` derives the UAP (CLK6 0); `-r` PCAPNG and `-q` PCAP with link type 255 and one packet per line | adds `-z` (both piconets, one with its UAP); `-l` of an ID-only LAP (no UAP); `-l -u` with the right UAP (confirmed, hop reversal) and a wrong one (nothing confirmed); `-e 0` drops the one-error access code; `-d` writes the packet records back byte for byte (and passes `rxdump.py`); `-l -q` captures one LAP; empty file exit 0; cut last record ignored, exit 0; missing file exit 1; strict: lines carry the recorded systime (fork #202) and `-i <directory>` exits 1 (fork #203); both are fixed on fork main after 3b22c95 |
 | `Ubertooth util modes` | `-I` blinks every LED, `-q120` (-120 dBm) lights every LED; each returns at once, keeps channel and PA, and `-S` ends it with the idle reset (LEDs off, 2441 MHz, squelch -120, PA kept); originals are restored; `-m` after `-r` says `no range test result yet` (fork #190) | adds `-q20` and bare `-q` (-85 dBm) running until `-S`, `-I` ending `-q` and `-q` ending `-I` (the new mode starts at 2441 MHz), `-s -I`. A failed LED read (fork #213) is retried once and the retry recorded; two in a row fail the case |
 | `Multi-board selection` | needs two or more registered boards on the host (a one-board host skips it): `-U all -s` and `-s` without `-U` list every registered board and only those; `-N` counts them; each `-U<index>` opens the board the listing names at that index | adds `-U all -vVspb` and `-vVspb` without `-U` (five lines per board), `-C` without `-U` refused; `-U<n>` past the last board is refused with `no Ubertooth at index` (fork #188, fixed in 0c7e9c0) |
@@ -377,7 +390,8 @@ and channel are recorded and restored. Pairs with `-I` never exit on their own
 ### Guard Ubertooths
 
 Every test in the [table above](#option-compositions-and-stateful-transitions)
-except `Raw receive replay` (which opens no Ubertooth), and `Ubertooth count`,
+except `Raw receive replay` and `Python tools` (which open no Ubertooth), and
+`Ubertooth count` and `BLE extcap interfaces`,
 binds each other registered Ubertooth on the host as a `guard Ubertooth 1`,
 `2`, ... resource of the same invocation, so the
 [Results table, transcript](#run-output-runjsonl-and-reportmd), and manifest
@@ -449,20 +463,28 @@ python -m ubertooth_harness run-suite --plan testplans/fast.yaml --suite fast \
   --hardware hardware.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref feature/my-change \
   --libbtbb-source /path/to/libbtbb --libbtbb-ref master \
-  --build [--with-firmware] --output runs
+  --build [--with-firmware] [--with-python[=PYTHON]] --output runs
 ```
 
 The resolved commits are cloned into `<run>/build/src` (the source checkouts
 are never modified), built out of tree, and installed into `<run>/build/prefix`.
 Every test and preflight command then runs with that prefix first on `PATH`, so
 the run tests what it built. Host tools use `-DREQUIRE_ALL=ON` on Linux (BlueZ
-exists only there), with Python tools and udev rules off. `--with-firmware`
+exists only there), with udev rules off and the Python tools off unless
+`--with-python` is given. `--with-python` builds them (`-DENABLE_PYTHON=ON`)
+for the named interpreter, `python3` on `PATH` by default, passed as
+`-DPython3_EXECUTABLE` (a virtual environment's `python` is kept as given, so
+its packages are used). The installed `ubertooth-specan-ui` and
+`ubertooth-btbr` must name that interpreter on their first line, and the
+manifest records its path and version. specan-ui itself needs numpy, qtpy, and
+a Qt binding (PyQt5/6 or PySide2/6) in that interpreter. `--with-firmware`
 also builds `bluetooth_rxtx.dfu` with the built `ubertooth-dfu`; the image is
 hashed into the manifest, not flashed. The built `ubertooth-util -H` must
 report both resolved revisions, without a modified-source `*`.
 
 The manifest records the toolchain (CMake, C compiler, pkg-config, libusb,
-BlueZ on Linux, and the ARM compiler when building firmware), the CMake flags,
+BlueZ on Linux, the ARM compiler when building firmware, and the Python with
+`--with-python`), the CMake flags,
 every build command with its exit code, and hashes of every built tool,
 library, and firmware image. Every host tool the catalog runs must be in the
 prefix, so a missing one cannot fall through to an installed copy. The build
@@ -1077,8 +1099,9 @@ python -m unittest discover -s tests -v
 
 CI runs the suite and validates the long plan with Python 3.12 on Ubuntu 24.04
 and the current macOS (`macos-latest`; see `.github/workflows/test.yml`). The
-build job also builds the fork's host tools and runs `testplans/host.yaml`
-(Host CLI surface and Raw receive replay smoke, which need no Ubertooth) with
+build job also builds the fork's host tools, with the Python tools, and runs
+`testplans/host.yaml` (Host CLI surface, Raw receive replay, and Python tools
+smoke, which need no Ubertooth; specan-ui is skipped there) with
 them against a one-host registry. The
 checks themselves are in `scripts/ci.sh`. To run them on an exact commit
 without GitHub Actions, locally or on another host over SSH:
