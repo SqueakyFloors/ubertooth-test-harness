@@ -113,7 +113,7 @@ Combinations to test:
 - `-v[01]` applied after the mode starts, overriding an opposite preset: Covered (smoke, comprehensive).
 - Repeated `-v` is last-wins: Covered (comprehensive).
 - Repeated capture options are first-wins and the extra file is never created (`-r -r`, `-q -c`, `-c -q`): Covered (comprehensive).
-- `-r` together with `-q` or `-c` (separate handles; are both written?): Not covered.
+- `-r` together with `-q` (separate handles): both files written: Covered (comprehensive). `-r` with `-c`: Not covered.
 - Capture with each CRC value and mode: Covered (comprehensive).
 - `-i`/`-I` without `-f`/`-p`: Not covered (should be rejected or ignored; check source).
 - `-a`/`-v` get and set without a mode do not start sniffing: Partial (covered for `-v` only).
