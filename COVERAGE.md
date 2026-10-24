@@ -44,10 +44,10 @@ Harness-wide checks that use the CLIs:
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
 | `-h` | help | Covered | Host CLI surface (fast, release): exit 0 and tool name in the output |
-| `-H`, `--host-version` | host tools version | Partial | `-H` runs in preflight on every run. `--host-version` is never run |
+| `-H`, `--host-version` | host tools version | Covered | `-H` in preflight on every run; `--host-version` in Host CLI surface (fast, release) |
 | `-U<index\|serial>` | select device | Partial | Every device test selects by serial. Repeated `-U` (index 99, then serial) is last-wins (util compositions, comprehensive). Selecting a real index is not tested |
 | `-U all` | identity queries for every board | Not covered | Needs two or more boards |
-| `-N` | count devices | Not covered | Easy to add (compare with the registry) |
+| `-N` | count devices | Covered | Ubertooth count (fast, release): equals the registered boards on the host |
 | `-v` | firmware revision | Covered | Ubertooth identity (fast, release), preflight, util compositions (smoke) |
 | `-V` | compile info | Covered | Ubertooth identity, preflight, util compositions (smoke) |
 | `-s` | MCU serial | Covered | Ubertooth identity, preflight, cleanup identity check |
@@ -162,7 +162,7 @@ Combinations: `-l` > `-u` rejected: Covered (Argument validation, comprehensive)
 
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
-| `-h` | help (argparse) | Not covered | Testable without a display |
+| `-h` | help (argparse) | Not covered | The harness builds with `ENABLE_PYTHON=OFF`, so specan-ui is not installed ([#37](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/37)) |
 | `-U <index\|serial>` | select device | Hard | Qt GUI |
 | `-l <freq>` | lower frequency | Hard | GUI. The argument checks could run before the window opens |
 | `-u <freq>` | upper frequency | Hard | GUI; `-u` < `-l` must be rejected |
@@ -187,7 +187,7 @@ Combinations: `--padding` without `--wifi`, `--wifi` with `-l`/`-u`: Not covered
 | `-q<file>` | PCAP capture | Not covered | |
 | `-d<file>` | binary dump | Not covered | |
 | `-s` | deprecated sweep flag | Not covered | Prints a deprecation notice only |
-| `-V` | version | Not covered | Easy |
+| `-V` | version | Covered | Host CLI surface (fast, release): host version line |
 | `-U <0-7>` | select device | Not covered | |
 
 Combinations: `-u` without `-l` rejected: Covered (Argument validation, smoke). `-z` with an address rejected: Covered (Argument validation, comprehensive). `-z -t N` exits after N s: Not covered. `-i` replay into `-r`/`-q`: Not covered.
@@ -213,7 +213,7 @@ Combinations: `-c` with `-l` (last-wins or rejected?): Not covered. Output size 
 | `-l <LAP>` | target LAP | N/A | The tool does nothing (its usage text says so) |
 | `-u <UAP>` | target UAP | N/A | Same |
 | `-t <s>` | timeout | N/A | Same |
-| `-V` | version | Not covered | Easy |
+| `-V` | version | Covered | Host CLI surface (fast, release): host version line |
 | `-U <0-7>` | select device | N/A | Same |
 
 ## ubertooth-afh
@@ -228,7 +228,7 @@ Combinations: `-c` with `-l` (last-wins or rejected?): Not covered. Output size 
 | `-t <s>` | initial detection timeout | Not covered | Timeout without a piconet is testable |
 | `-e <0-4>` | max access-code errors | Not covered | |
 | `-a <map>` | initial AFH map (undocumented) | N/A | Parsed and ignored (the code is commented out) |
-| `-V` | version | Not covered | Easy |
+| `-V` | version | Covered | Host CLI surface (fast, release): host version line |
 | `-U <0-7>` | select device | Not covered | |
 
 ## ubertooth-ego
@@ -262,7 +262,7 @@ Combinations: two or more of `-f`/`-r`/`-i` (last-wins on `do_mode`?): Not cover
 
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
-| `-h` | help | Not covered | Not in Host CLI surface (BlueZ-only build); exit 1 |
+| `-h` | help | Covered | Host CLI surface (exit 1); skipped where not built (no BlueZ) |
 | `-s` | BlueZ HCI scan | Hard | Needs a Bluetooth adapter and discoverable peers |
 | `-x` | extended inquiry | Hard | Same |
 | `-t <s>` | scan time | Hard | Same |
@@ -274,7 +274,7 @@ Combinations: two or more of `-f`/`-r`/`-i` (last-wins on `do_mode`?): Not cover
 
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
-| `-h` | help | Not covered | Not in Host CLI surface; exit 1 |
+| `-h` | help | Covered | Host CLI surface (exit 1); skipped where not built (no BlueZ) |
 | `-l<LAP>` | target LAP | Hard | Needs a BR/EDR piconet and an adapter (backlog) |
 | `-u<UAP>` | target UAP | Hard | Same |
 | `-U<0-7>` | select device | Hard | Same |
@@ -298,9 +298,9 @@ Combinations: two or more of `-f`/`-r`/`-i` (last-wins on `do_mode`?): Not cover
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
 | `-h`, `--help` | help | Not covered | |
-| `--extcap-interfaces` | list interfaces | Not covered | Host-side; easy |
-| `--extcap-dlts` | list DLTs | Not covered | Host-side; easy |
-| `--extcap-config` | config options | Not covered | Host-side; easy |
+| `--extcap-interfaces` | list interfaces | Not covered | Host-side; needs the Python tools installed ([#37](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/37)) |
+| `--extcap-dlts` | list DLTs | Not covered | Host-side; needs the Python tools installed ([#37](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/37)) |
+| `--extcap-config` | config options | Not covered | Host-side; needs the Python tools installed ([#37](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/37)) |
 | `--capture` | start a capture | Not covered | Needs a device; check the FIFO header |
 | `--extcap-interface=` | interface | Not covered | |
 | `--fifo=` | output FIFO | Not covered | |
@@ -330,8 +330,7 @@ Combinations: two or more of `-f`/`-r`/`-i` (last-wins on `do_mode`?): Not cover
 Ordered by value/effort:
 
 1. Done (#27): host-side argument rejections across util, btle, ego, ducky, rx, specan (`Argument validation`). Still open: `ubertooth-dump -c -l` (last-wins, not a rejection) and `ubertooth-rx -e5`.
-2. Version and count: `ubertooth-util --host-version`, `-N`; `ubertooth-rx -V`,
-   `ubertooth-tx -V`, `ubertooth-afh -V`.
+2. Done (#28): `--host-version`, `-N`, `-V` on rx/tx/afh, BlueZ tool help.
 3. `ubertooth-dfu -s` (suffix a binary; host-only) and `-u` read-back compared with the last
    flashed image.
 4. Implement Spectrum analyzer: `ubertooth-specan -l/-u` (bounded by `timeout`),

@@ -5,7 +5,7 @@ import re
 from types import MappingProxyType
 from typing import Callable, Mapping
 
-from ubertooth_harness.cases import CommandCase, FlashCase
+from ubertooth_harness.cases import CommandCase, FlashCase, guard_roles
 from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
     COMPILE_INFO_PATTERN,
@@ -274,6 +274,10 @@ def _device_test(name, description, argv=None, extra=None):
     )
 
 
+# print_version() in libubertooth: "libubertooth <ver> (<rev>), libbtbb <ver> (<rev>)".
+_HOST_VERSION_PATTERN = r"libubertooth \S+ \(\S+\), libbtbb \S+ \(\S+\)"
+
+
 def _host_cli_surface_cases(_arguments, _resources, _resource_identities):
     expected = (
         ("ubertooth-util", 0),
@@ -288,7 +292,7 @@ def _host_cli_surface_cases(_arguments, _resources, _resource_identities):
         ("ubertooth-afh", 1),
         ("ubertooth-ducky", 1),
     )
-    return tuple(
+    cases = [
         CommandCase(
             f"{tool}-help",
             f"{tool} help",
@@ -297,6 +301,52 @@ def _host_cli_surface_cases(_arguments, _resources, _resource_identities):
             expected_returncodes=(returncode,),
         )
         for tool, returncode in expected
+    ]
+    # Built only with BlueZ (libbluetooth); skipped where they are not built.
+    cases.extend(
+        CommandCase(
+            f"{tool}-help",
+            f"{tool} help (BlueZ builds)",
+            (tool, "-h"),
+            (re.escape(tool),),
+            expected_returncodes=(1,),
+            optional_tool=True,
+        )
+        for tool in ("ubertooth-scan", "ubertooth-follow")
+    )
+    # Host-tools version, no device needed: the long -H form and -V on the
+    # tools that have it.
+    cases.append(
+        CommandCase(
+            "ubertooth-util-host-version-long",
+            "ubertooth-util --host-version",
+            ("ubertooth-util", "--host-version"),
+            (_HOST_VERSION_PATTERN,),
+        )
+    )
+    cases.extend(
+        CommandCase(
+            f"{tool}-version",
+            f"{tool} -V",
+            (tool, "-V"),
+            (_HOST_VERSION_PATTERN,),
+        )
+        for tool in ("ubertooth-rx", "ubertooth-tx", "ubertooth-afh")
+    )
+    return tuple(cases)
+
+
+def _ubertooth_count_cases(_arguments, _resources, resource_identities):
+    """ubertooth-util -N counts every attached board: the selected one plus
+    every other registered board (bound as guards) and nothing else."""
+    expected = 1 + len(guard_roles(resource_identities))
+    return (
+        CommandCase(
+            "ubertooth-count",
+            f"ubertooth-util -N reports {expected} attached board(s)",
+            ("ubertooth-util", "-N"),
+            (rf"(?m)^{expected}$",),
+        ),
     )
 
 
@@ -496,6 +546,14 @@ def builtin_catalog() -> TestCatalog:
             MappingProxyType({}),
             command_builder=_host_cli_surface_cases,
             continue_on_case_failure=True,
+        ),
+        TestDefinition(
+            "Ubertooth count",
+            "ubertooth-util -N matches the registered Ubertooths on the host",
+            MappingProxyType({"hosts": HOSTS, "Ubertooth": UBERTOOTH}),
+            MappingProxyType({"Ubertooth": "Ubertooth"}),
+            command_builder=_ubertooth_count_cases,
+            guards_other_ubertooths=True,
         ),
         _device_test("Firmware version", "Firmware revision"),
         _device_test("Firmware compile info", "Firmware compile identity"),
