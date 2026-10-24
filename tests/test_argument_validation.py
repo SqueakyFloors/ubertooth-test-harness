@@ -128,6 +128,21 @@ class ArgumentValidationTests(unittest.TestCase):
         self.assertIn("Verify PA level unchanged", summary.failure_reason)
         self.assertEqual("7", device.state["pa"])  # cleanup restored the original
 
+    def test_a_host_with_the_old_q_range_fails_the_q_range_cases(self):
+        # Before fork aa4f620 the host took -q1 to -q225: 19, 121, and 183
+        # (where the old int8 threshold first wrapped, #189) were accepted.
+        old = {"util-led-specan-threshold-19", "util-led-specan-threshold-121",
+               "util-led-specan-threshold-183"}
+        device = ParsingUbertooth(crc="1", accept=old)
+
+        summary, events = run_test("Argument validation", device, coverage="comprehensive")
+
+        self.assertFalse(summary.passed)
+        failed = self.failed_cases(events)
+        self.assertEqual(sorted(old), sorted(n for n in old
+                                             if any(c.endswith(f"reject-{n}") for c in failed)))
+        self.assertEqual(3, len(failed))
+
     def test_tools_before_strict_parsing_and_the_z_mode_check_fail_those_cases(self):
         # Before fork 658730c (#172) a bad value read as a query or 0, and
         # before 4ed4a1d (#159) -z with a mode was dropped; both exit 0.
@@ -137,7 +152,7 @@ class ArgumentValidationTests(unittest.TestCase):
                 "(got" in r.error or "-z cannot be combined" in r.error
             )
         }
-        self.assertEqual(19, len(new))
+        self.assertEqual(21, len(new))
 
         class PreFix(ParsingUbertooth):
             def _apply(self, options):

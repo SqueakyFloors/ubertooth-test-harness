@@ -11,15 +11,17 @@ with the usual cleanup. Command contracts come from the fork sources
 (host/ubertooth-tools/src, host/libubertooth/src/ubertooth.c and
 ubertooth_callback.c).
 
-Some comprehensive cases assert the documented behavior that the fork does not
-deliver yet; they fail until the linked fork issue is fixed:
+Some comprehensive cases assert the documented behavior that the commit under
+test (fork 3b22c95) does not deliver yet; they fail until the linked fork fix
+is on that commit:
 
-- SqueakyFloors/ubertooth#185: ubertooth-afh crashes (exit 139) when the
-  selected board is not found.
 - SqueakyFloors/ubertooth#202: ubertooth-rx -i prints the replay time, not
-  the recorded systime.
+  the recorded systime (fixed on fork main by #212, a55ac89, after 3b22c95).
 - SqueakyFloors/ubertooth#203: ubertooth-rx -i of an unreadable file (a
-  directory) exits 0 without an error.
+  directory) exits 0 without an error (also fixed by #212, after 3b22c95).
+
+ubertooth-afh with an unknown -U exited 139 (segfault) before fork 219a5b0
+(SqueakyFloors/ubertooth#185); that case is an ordinary one now.
 """
 
 from __future__ import annotations
@@ -212,14 +214,24 @@ def _rx_case(serial, seconds, case_id, name, options, expected_state, *,
 # ---------------------------------------------------------------------------
 # ubertooth-afh
 #
-# Needs -l and -u. With -t N it detects the initial map for N s, prints
-# "AFH map: 0x<20 hex>", then monitors map changes until signalled; with no
-# piconet in range nothing more is printed (SqueakyFloors/ubertooth#187: the
-# no-packet map is all zeros). -r prints "<time> <80 x 0/1>" every second.
+# Needs -l and -u. With -t N it detects the initial map for N s. If a packet
+# from the piconet arrived it prints "AFH map: 0x<20 hex>" and monitors map
+# changes until signalled; if none did (no piconet in range, as on the lab
+# bench) it says so on stderr, stops the board, and exits 2 (fork 3b22c95,
+# SqueakyFloors/ubertooth#187: it used to print an all-zero map and keep
+# running). -r prints "<time> <80 x 0/1>" every second until signalled.
 
 _AFH_MAP = r"(?m)^AFH map: 0x[0-9a-f]{20}$"
-_AFH_TARGET = ("-l", "446688", "-u", "22")
+_AFH_LAP, _AFH_UAP = "446688", "22"
+_AFH_TARGET = ("-l", _AFH_LAP, "-u", _AFH_UAP)
 _AFH_R_LINE = re.compile(r"^\d+ [01]{80}$")
+AFH_NO_PACKETS_EXIT = 2
+
+
+def afh_no_packets_pattern(seconds):
+    address = ":".join((_AFH_UAP,) + tuple(_AFH_LAP[i:i + 2] for i in (0, 2, 4)))
+    return (rf"error: no packets from \?\?:\?\?:{address} within {seconds} s; "
+            r"AFH map unknown, not monitoring")
 
 
 def afh_r_check(minimum):
@@ -242,12 +254,24 @@ def _afh(serial, *options):
 def _afh_case(serial, seconds, case_id, name, options, expected_state, *, check=None,
               patterns=(_AFH_MAP,)):
     return _case(serial, case_id, name, (
-        Step("receive", name, _afh(serial, *options),
-             timeout_s=seconds + 3.0 if "-t" in options else float(seconds),
+        Step("receive", name, _afh(serial, *options), timeout_s=float(seconds),
              mutates=True, continuous=True, output_patterns=patterns,
              output_check=check),
         _stop(serial),
     ), expected_state)
+
+
+def _afh_no_packets_case(serial, seconds, case_id, name, options, expected_state):
+    """-t N with no piconet: exit 2 by itself about N s later, saying so."""
+    return _case(serial, case_id, name, (
+        Step("receive", name, _afh(serial, "-t", str(seconds), *options),
+             timeout_s=seconds + EXIT_SLACK_S, min_duration_s=seconds - EARLY_EXIT_S,
+             expected_returncodes=(AFH_NO_PACKETS_EXIT,), mutates=True,
+             output_patterns=(afh_no_packets_pattern(seconds),),
+             forbidden_patterns=(_AFH_MAP,)),
+        _stop(serial),
+    ), f"exits {AFH_NO_PACKETS_EXIT} by itself after about {seconds}s, saying no "
+       "packet arrived; no map printed; " + expected_state)
 
 
 def classic_receive_cases(arguments, _resources, resource_identities):
@@ -263,9 +287,9 @@ def classic_receive_cases(arguments, _resources, resource_identities):
                  files=(("-r", "rx.pcapng"),),
                  verify=(_capture_header("verify-capture", "Verify the -r file header",
                                          "rx.pcapng", "pcapng"),)),
-        _afh_case(serial, n, "afh-initial-timeout", "AFH map after the -t detection timeout",
-                  ("-t", str(n)),
-                  "initial map printed after -t, then monitoring until stopped"),
+        _afh_no_packets_case(serial, n, "afh-timeout-no-packets",
+                             "AFH -t with no piconet in range", (),
+                             "the board stopped"),
     ]
     if arguments["coverage"] == "comprehensive":
         cases += [
@@ -302,17 +326,18 @@ def classic_receive_cases(arguments, _resources, resource_identities):
                      files=(("-d", "rx.dump"),),
                      verify=(_dump_check("verify-dump", "Verify the -d file records",
                                          "rx.dump", "full", types="br"),)),
-            _afh_case(serial, n, "afh-ac-errors", "AFH with -e 2 accepted",
-                      ("-t", str(n), "-e", "2"), "accepted; initial map printed"),
+            _afh_no_packets_case(serial, n, "afh-ac-errors", "AFH with -e 2 accepted",
+                                 ("-e", "2"), "-e 2 accepted"),
             _afh_case(serial, n, "afh-map-every-second", "AFH map every second (-r)",
                       ("-r",), "one '<time> <80 bits>' line per second",
                       check=afh_r_check(max(1, n - 2)), patterns=()),  # start-up eats about a second
-            # Fails until SqueakyFloors/ubertooth#185: exit 139 (segfault).
+            # Exited 139 (segfault) before fork 219a5b0
+            # (SqueakyFloors/ubertooth#185).
             _case(serial, "afh-board-not-found", "AFH with an unknown -U exits 1", (
                 Step("reject", "ubertooth-afh -U <absent serial>",
                      ("ubertooth-afh", "-U", absent) + _AFH_TARGET + ("-t", "1"),
                      expected_returncodes=(1,),
-                     output_patterns=(r"no Ubertooth found",)),
+                     output_patterns=(rf"no Ubertooth found with serial matching '{absent}'",)),
             ), "exit 1 with a message; the selected board untouched"),
         ]
     return tuple(cases)

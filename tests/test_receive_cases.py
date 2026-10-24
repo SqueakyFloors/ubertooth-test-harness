@@ -34,7 +34,8 @@ class ReceiveUbertooth(ToolUbertooth):
 
     rx-ignores-timeout, rx-exits-early, rx-ignores-channel, rx-ignores-errors,
     rx-no-deprecation, rx-link-type, rx-writes-extra, rx-dump-trailing,
-    rx-no-survey, afh-exits, afh-no-map, afh-r-silent, afh-segfault (#185),
+    rx-no-survey, afh-zero-map (#187), afh-no-message, afh-exits-0, afh-exits-early,
+    afh-r-silent, afh-segfault (#185),
     dump-trailing, dump-bits-garbage, dump-ignores-l, dump-first-wins,
     dump-stalls, ego-exits, ego-ignores-channel, ego-ignores-length,
     ego-accepts-bad-ac, reject:<tool>:<option>.
@@ -137,6 +138,9 @@ class ReceiveUbertooth(ToolUbertooth):
 
     # ubertooth-afh -------------------------------------------------------
     def _afh(self, command, serial, options, timeout_s, on_output):
+        """fork 3b22c95: -t N with no packet from the piconet (the bench has
+        none) says so on stderr and exits 2 after N s; -r prints a line per
+        second until signalled."""
         if serial != self.serial:
             if "afh-segfault" in self.bugs:
                 return self._result(command, -11, "",
@@ -149,12 +153,20 @@ class ReceiveUbertooth(ToolUbertooth):
         if "-r" in options:
             count = 0 if "afh-r-silent" in self.bugs else int(timeout_s)
             out = "".join(f"{1792838727 + i} {'0' * 80}\n" for i in range(count))
-        else:
-            out = "" if "afh-no-map" in self.bugs else "AFH map: 0x00000000000000000000\n"
-        if "afh-exits" in self.bugs and "-t" in options:
-            return self._timed(command, 0, out, "", timeout_s - 3, on_output)
-        return self._timed(command, 124, out, "HARD TIMEOUT\n", timeout_s, on_output,
-                           timed_out=True)
+            return self._timed(command, 124, out, "HARD TIMEOUT\n", timeout_s, on_output,
+                               timed_out=True)
+        seconds = int(self._value(options, "-t"))
+        if "afh-zero-map" in self.bugs:
+            # #187, fork builds before 3b22c95: an all-zero map, then monitoring.
+            return self._timed(command, 124, "AFH map: 0x00000000000000000000\n",
+                               "HARD TIMEOUT\n", timeout_s, on_output, timed_out=True)
+        stderr = ("error: no packets from ??:??:22:44:66:88 within "
+                  f"{seconds} s; AFH map unknown, not monitoring\n")
+        if "afh-no-message" in self.bugs:
+            stderr = ""
+        code = 0 if "afh-exits-0" in self.bugs else 2
+        duration = 0.2 if "afh-exits-early" in self.bugs else seconds + 0.3
+        return self._timed(command, code, "", stderr, duration, on_output)
 
     # ubertooth-dump ------------------------------------------------------
     def _dump(self, command, serial, options, timeout_s, on_output):
@@ -231,7 +243,7 @@ class ReceiveCaseGenerationTests(unittest.TestCase):
 
     def test_smoke_and_comprehensive_case_sets(self):
         _a, smoke = cases_for(CLASSIC, "smoke")
-        self.assertEqual(["rx-survey-timeout", "rx-capture-pcapng", "afh-initial-timeout"],
+        self.assertEqual(["rx-survey-timeout", "rx-capture-pcapng", "afh-timeout-no-packets"],
                          [c.case_id for c in smoke])
         _a, full = cases_for(CLASSIC, "comprehensive")
         self.assertEqual(14, len(full))
@@ -314,8 +326,11 @@ class ClassicReceiveTests(unittest.TestCase):
             "reject:ubertooth-rx:-e": ["No access-code errors (-e 0)",
                                        "Four access-code errors (-e 4)"],
             "rx-no-deprecation": ["-s prints its deprecation notice"],
-            "afh-exits": ["AFH map after the -t detection timeout", "AFH with -e 2 accepted"],
-            "afh-no-map": ["AFH map after the -t detection timeout", "AFH with -e 2 accepted"],
+            # #187 (fork builds before 3b22c95) and regressions of its fix.
+            "afh-zero-map": ["AFH -t with no piconet in range", "AFH with -e 2 accepted"],
+            "afh-no-message": ["AFH -t with no piconet in range", "AFH with -e 2 accepted"],
+            "afh-exits-0": ["AFH -t with no piconet in range", "AFH with -e 2 accepted"],
+            "afh-exits-early": ["AFH -t with no piconet in range", "AFH with -e 2 accepted"],
             "reject:ubertooth-afh:-e": ["AFH with -e 2 accepted"],
             "afh-r-silent": ["AFH map every second (-r)"],
             "afh-segfault": ["AFH with an unknown -U exits 1"],
@@ -410,6 +425,19 @@ class CheckerTests(unittest.TestCase):
         self.assertEqual("", survey("Survey Results\n"))
         self.assertIn("not piconet addresses", survey("Survey Results\n9e8b33\n"))
         self.assertIn("no 'Survey Results'", survey(""))
+
+    def test_afh_no_packets_message(self):
+        # The fork's own message for -l 446688 -u 22 -t 3 (ubertooth-afh.c).
+        line = ("error: no packets from ??:??:22:44:66:88 within 3 s; AFH map unknown, "
+                "not monitoring")
+        self.assertRegex(line, receive_cases.afh_no_packets_pattern(3))
+        self.assertNotRegex(line, receive_cases.afh_no_packets_pattern(2))
+        _a, smoke = cases_for(CLASSIC, "smoke", duration="3s")
+        step = next(c for c in smoke if c.case_id == "afh-timeout-no-packets").steps[-2]
+        self.assertEqual((2,), step.expected_returncodes)
+        self.assertFalse(step.continuous)
+        self.assertEqual(2.5, step.min_duration_s)
+        self.assertEqual(8.0, step.timeout_s)
 
     def test_afh_r_and_ego_checks(self):
         check = receive_cases.afh_r_check(2)
