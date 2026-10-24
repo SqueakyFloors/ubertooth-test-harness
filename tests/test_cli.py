@@ -151,16 +151,16 @@ suites:
   UT_0:
     type: Ubertooth
     attached to: Host_Local
-    identity: {{serial: aaaa0000}}
+    identity: {{serial: aaaa0000aaaa0000aaaa0000aaaa0000}}
   UT_1:
     type: Ubertooth
     attached to: Host_Local
-    identity: {{serial: bbbb1111}}
+    identity: {{serial: bbbb1111bbbb1111bbbb1111bbbb1111}}
 """)
             executor = FlashDeviceExecutor(
                 f"git-{short}",
                 {str(test_image.resolve()): f"git-{short}", str(kgv_image.resolve()): "2020-12-R1"},
-                "aaaa0000", "bbbb1111",
+                "aaaa0000aaaa0000aaaa0000aaaa0000", "bbbb1111bbbb1111bbbb1111bbbb1111",
             )
             output = root / "runs"
             summary_output = io.StringIO()
@@ -183,11 +183,11 @@ suites:
             self.assertEqual(["report.md", "run.jsonl"], sorted(p.name for p in run_dir.iterdir()))
             flashes = [c for c in executor.commands if c[0] == "ubertooth-dfu"]
             self.assertEqual(4, len(flashes))
-            self.assertTrue(all(c[2] == "aaaa0000" for c in flashes))
+            self.assertTrue(all(c[2] == "aaaa0000aaaa0000aaaa0000aaaa0000" for c in flashes))
             # The guard board is read before the run and after every flash.
-            self.assertEqual(5, executor.commands.count(("ubertooth-util", "-U", "bbbb1111", "-v")))
+            self.assertEqual(5, executor.commands.count(("ubertooth-util", "-U", "bbbb1111bbbb1111bbbb1111bbbb1111", "-v")))
             # Firmware is written by the test, so preflight checks identity only.
-            self.assertNotIn(("ubertooth-util", "-U", "aaaa0000", "-V"), executor.commands)
+            self.assertNotIn(("ubertooth-util", "-U", "aaaa0000aaaa0000aaaa0000aaaa0000", "-V"), executor.commands)
             events = [json.loads(line) for line in (run_dir / "run.jsonl").read_text().splitlines()]
             types = [e["event_type"] for e in events]
             self.assertEqual("run_started", types[0])
@@ -196,7 +196,7 @@ suites:
             report = (run_dir / "report.md").read_text()
             self.assertIn("=== TEST 001-Flash reliability: Flash reliability on Host_Local", report)
             self.assertIn("    +++ flash 1: test_build", report)
-            self.assertIn("[C] ubertooth-dfu -U aaaa0000 -d", report)
+            self.assertIn("[C] ubertooth-dfu -U aaaa0000aaaa0000aaaa0000aaaa0000 -d", report)
             self.assertIn("    --- flash reliability EXIT: passed, 4/4 verified ---", report)
             # The selected and guard boards were leased for the whole run.
             manifest = next(e for e in events if e["event_type"] == "manifest")
@@ -205,8 +205,8 @@ suites:
                 [item["resource"] for item in manifest["details"]["manifest"]["leases"]],
             )
             self.assertIn("| Board leases | UT_0 since ", report)
-            self.assertIn("aaaa0000", report)  # serials are shown by default
-            self.assertIn("UT_0 serial aaaa0000: firmware written by this run", report)
+            self.assertIn("aaaa0000aaaa0000aaaa0000aaaa0000", report)  # serials are shown by default
+            self.assertIn("UT_0 serial aaaa0000aaaa0000aaaa0000aaaa0000: firmware written by this run", report)
 
 
     def test_alternate_ubertooths_rotates_flashes_across_registered_boards(self):

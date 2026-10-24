@@ -19,6 +19,7 @@ import fcntl
 import getpass
 import json
 import os
+import re
 import socket
 import time
 from dataclasses import dataclass, field
@@ -32,6 +33,7 @@ DEFAULT_LEASE_DIR = Path.home() / ".ubertooth-harness" / "leases"
 # that probe never fails a run that did not ask to wait.
 _BUSY_GRACE_S = 1.0
 _POLL_S = 0.25
+_FULL_SERIAL = re.compile(r"[0-9a-f]{32}")
 
 
 class LeaseError(RuntimeError):
@@ -71,12 +73,19 @@ def lease_dir(override: Path | str | None = None) -> Path:
 
 
 def board_key(alias: str, identity: Mapping) -> str:
-    """Lock-file key: the lowercase serial, else the alias (still host-local)."""
+    """Lock-file key: the board's full serial, lowercase.
+
+    libubertooth matches -U against the END of a serial, so a short serial
+    and the full one select the same board but would take different locks.
+    Only a full 32-hex-digit serial identifies a board unambiguously.
+    """
     serial = str(identity.get("serial", "") or "").strip().lower()
-    if serial and all(c.isalnum() for c in serial):
-        return serial
-    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in alias)
-    return f"alias-{safe}"
+    if not _FULL_SERIAL.fullmatch(serial) or serial.isdigit():
+        raise LeaseError(
+            f"{alias} needs a full 32-hex-digit serial in the hardware registry "
+            f"to be leased; registered '{serial}'"
+        )
+    return serial
 
 
 def _observes_every_board(invocation) -> bool:
@@ -144,6 +153,14 @@ def describe_holder(holder: Mapping) -> str:
     return ", ".join(parts)
 
 
+def _stamp(fd: int, record: Mapping | None) -> None:
+    """Record the holder in a lock file we hold; None clears it on release."""
+    data = b"" if record is None else (json.dumps(record, sort_keys=True) + "\n").encode()
+    os.ftruncate(fd, 0)
+    if data:
+        os.pwrite(fd, data, 0)
+
+
 def _try_lock(path: Path, mode: int) -> int | None:
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
     try:
@@ -165,6 +182,10 @@ class LeaseSet:
     def release(self) -> None:
         while self.leases:
             lease = self.leases.pop()
+            try:
+                _stamp(lease.fd, None)  # nobody reads a stale holder later
+            except OSError:
+                pass
             try:
                 os.close(lease.fd)
             except OSError:
@@ -198,7 +219,12 @@ def acquire(
     except OSError as error:
         raise LeaseError(f"cannot create lease directory {root}: {error}") from error
     deadline = clock() + max(wait_s, _BUSY_GRACE_S)
-    ordered = sorted(boards, key=lambda b: b.key)
+    # One lock per board: flock is per open file description, so opening the
+    # same file twice in one process would conflict with itself.
+    unique: dict[str, Board] = {}
+    for board in boards:
+        unique.setdefault(board.key, board)  # first alias wins, as in boards_for_invocations
+    ordered = sorted(unique.values(), key=lambda b: b.key)
     while True:
         held: list[Lease] = []
         busy: tuple[Board, Path] | None = None
@@ -210,15 +236,11 @@ def acquire(
                     busy = (board, path)
                     break
                 held.append(Lease(board, path, fd, holder))
+                _stamp(fd, dict(holder, resource=board.alias))
         except OSError as error:
             LeaseSet(held).release()
             raise LeaseError(f"cannot lease boards in {root}: {error}") from error
         if busy is None:
-            for lease in held:
-                record = dict(holder, resource=lease.board.alias)
-                data = (json.dumps(record, sort_keys=True) + "\n").encode()
-                os.ftruncate(lease.fd, 0)
-                os.pwrite(lease.fd, data, 0)
             return LeaseSet(held)
         LeaseSet(held).release()
         board, path = busy
@@ -250,6 +272,11 @@ def board_states(
                 os.close(fd)
         states.append(state)
     return states
+
+
+def exit_status(returncode: int) -> int:
+    """A shell-style exit status: a child killed by signal N exits 128 + N."""
+    return 128 - returncode if returncode < 0 else returncode
 
 
 def held_for(holder: Mapping, now: datetime.datetime | None = None) -> str:

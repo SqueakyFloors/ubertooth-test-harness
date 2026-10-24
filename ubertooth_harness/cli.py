@@ -78,6 +78,13 @@ def _add_build_options(parser: argparse.ArgumentParser, *, optional: bool) -> No
     )
 
 
+def _minutes(value: str) -> float:
+    minutes = float(value)
+    if not 0 <= minutes <= 24 * 60:
+        raise argparse.ArgumentTypeError("must be between 0 and 1440 minutes")
+    return minutes
+
+
 def _add_lease_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--owner",
@@ -85,7 +92,7 @@ def _add_lease_options(parser: argparse.ArgumentParser) -> None:
         f"${board_leases.OWNER_ENV} or the user name",
     )
     parser.add_argument(
-        "--wait-for-boards", type=float, default=0.0, metavar="MINUTES",
+        "--wait-for-boards", type=_minutes, default=0.0, metavar="MINUTES",
         help="wait up to MINUTES for leased boards instead of failing at once",
     )
     # Tests and unusual hosts only; the default is shared by every agent.
@@ -570,30 +577,51 @@ def _run_leased(
 
 
 def _registered_boards(registry, host: str | None = None):
+    """(board, None) for each leasable Ubertooth, or (alias, reason) if not."""
     boards = []
     for resource in sorted(registry.resources.values(), key=lambda r: r.alias):
         if resource.type != "Ubertooth":
             continue
         if host and resource.attached_to != host:
             continue
-        boards.append(board_leases.Board(
-            resource.alias, board_leases.board_key(resource.alias, resource.identity)
-        ))
+        try:
+            key = board_leases.board_key(resource.alias, resource.identity)
+        except board_leases.LeaseError as error:
+            boards.append((resource.alias, str(error)))
+            continue
+        boards.append((board_leases.Board(resource.alias, key), None))
     return boards
 
 
 def _boards_command(args: argparse.Namespace) -> int:
     registry = FileResourceRegistry.load(args.hardware)
+    hosts = [resource.alias for resource in registry.hosts()]
     if args.host:
-        registry.get(args.host)
+        if registry.get(args.host).type != "Host":
+            raise HarnessError(f"resource {args.host} is not a Host")
+    elif len(hosts) == 1:
+        args.host = hosts[0]
+    else:
+        # Leases are host-local; another host's boards would all look free.
+        raise HarnessError(
+            "boards needs --host: leases are local, so name the host this runs on "
+            f"({', '.join(hosts) or 'none registered'})"
+        )
+    registered = _registered_boards(registry, args.host)
     states = board_leases.board_states(
-        _registered_boards(registry, args.host), directory=args.lease_dir
+        [board for board, problem in registered if problem is None], directory=args.lease_dir
     )
+    states += [
+        {"resource": alias, "key": None, "held": False, "holder": {}, "unleasable": problem}
+        for alias, problem in registered if problem is not None
+    ]
     if args.json:
         print(json.dumps(states, indent=2, sort_keys=True))
         return 0
     for state in states:
-        if state["held"]:
+        if state.get("unleasable"):
+            print(f"{state['resource']:<12} not leasable: {state['unleasable']}")
+        elif state["held"]:
             holder = state["holder"]
             since = board_leases.held_for(holder)
             detail = board_leases.describe_holder(holder)
@@ -625,7 +653,7 @@ def _lease_command(args: argparse.Namespace) -> int:
         fds = [lease.fd for lease in held.leases]
         for fd in fds:
             os.set_inheritable(fd, True)
-        return subprocess.call(command, pass_fds=fds)
+        return board_leases.exit_status(subprocess.call(command, pass_fds=fds))
 
 
 def main(argv: list[str] | None = None) -> int:
