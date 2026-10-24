@@ -250,6 +250,8 @@ python -m ubertooth_harness run-suite \
 | `BLE settings` | set and read back the access address; set, mask, and clear the follow target | adds `ubertooth-util -r` resets the access address to 8e89bed6; `-x0`/`-x32`; strict: `-a -v` reports both and `-azzzz` is rejected (fail until fork #171) |
 | `Debug registers` | register list `0x02,0x01,0x00` in order, nothing changed | adds a range, a reversed range, `-v0`/`-v1`/`-v2` output, rejected `-r 0x100` and `-v3`; a successful read exits 0 (`-r 0x01` and the range fail on fork builds before #164's fix, 89afc1c) |
 | `Spectrum analyzer` | one full-band sweep (`duration` long): every frequency 2402-2480 reported, none outside, int8 RSSI | adds narrow, single, and top-of-band ranges, `-g`, `-G`, `-v`, and `-d` (binary file checked by `specandump.py`); ranges after a different range fail until fork #173 |
+| `Classic Bluetooth receive` | `ubertooth-rx -z -t N` survey (exits 0 by itself, N = `duration` in whole seconds, no earlier than N-0.5 s, survey lines are piconet addresses); `-t N -r` PCAPNG with link type 255; `ubertooth-afh -t N` prints the initial map and keeps monitoring until stopped | adds `-t N` without `-z`; `-c 39` (every packet on channel 39); `-e 0` and `-e 4` (no packet over the limit); `-s` deprecation notice; `-q` PCAP (link type 255); repeated `-r` (first wins, extra file never created); `-d` (68-byte BR records, checked by `rxdump.py`); `afh -e 2`; `afh -r` one map line per second; strict: `afh` with an unknown `-U` exits 1 (fails until fork #185) |
+| `Raw receive` | `ubertooth-dump -d` (68-byte records) and `-b -d` (401-byte bitstream records), checked by `rxdump.py` with at least 50 records per second; `ubertooth-ego -r -c 2440` runs until stopped | adds `dump -l`, `-l -c`, `-c -l` (the last modulation wins, read back from CC2400 MDMCTRL with `ubertooth-debug`); `ego -l 1`, `-l 48`, `-a 630f9ffe`; `ego -a zz` rejected |
 | `Ubertooth util modes` | `-I` blinks every LED, `-q182` lights every LED; each returns at once, keeps channel and PA, ends on `-S`, and originals are restored; `-m` after `-r` exits 0 with no result values | adds `-q1`, `-I` ending `-q` and `-q` ending `-I`, `-s -I`; strict: `-q225` and bare `-q` light every LED (fork #189), `-S` after `-q` runs the idle reset (fork #191), `-m` says there is no result (fork #190) |
 | `Multi-board selection` | needs two or more registered boards on the host (a one-board host skips it): `-U all -s` and `-s` without `-U` list every registered board and only those; `-N` counts them; each `-U<index>` opens the board the listing names at that index | adds `-U all -vVspb` and `-vVspb` without `-U` (five lines per board), `-C` without `-U` refused; strict: `-U<n>` past the last board is refused (fork #188) |
 | `BLE mode conflicts` | no `coverage` argument; release plan | every combination of `ubertooth-btle -f -n -p` must be rejected before sniffing |
@@ -272,16 +274,24 @@ matching a leftover value; the CRC re-read after the mode is the check.
 
 Capture cases write to `captures/<invocation>/<case>/` in the run directory
 and check the file header with `ubertooth_harness/capturefile.py`, run by path:
-PCAPNG and `-q` PCAP must have link type 256
+`ubertooth-btle` `-r` PCAPNG and `-q` PCAP must have link type 256
 (`LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR`), `-c` PCAP link type 192
-(`LINKTYPE_PPI`). Only the header is read; nothing from the packets is logged.
+(`LINKTYPE_PPI`). `ubertooth-rx` `-r` PCAPNG and `-q` PCAP must have link type
+255 (`LINKTYPE_BLUETOOTH_BREDR_BB`). `ubertooth-dump -d` and `ubertooth-rx -d`
+files are checked with `ubertooth_harness/rxdump.py` (record size, packet
+type, channel index, host times), which prints only a record count. Only the
+header is read; nothing from the packets is logged.
 Capture files can hold nearby devices' traffic, so they stay in the run
-directory and must never be committed.
+directory and must never be committed. The receive tools' own output (the
+`ubertooth-rx` packet lines with nearby LAPs) is logged like any other
+command output.
 
 Not checked or restored, because no option the cases use can read it: the
 modulation (the firmware stop returns it to basic rate), the BR/EDR target
-address and LE advertising channel (cleared by a mode stop), and the BLE
-follow target. The BLE access address (reset to 8e89bed6 by `-r`) is read with
+address and LE advertising channel (cleared by a mode stop), the BLE
+follow target, and the E-GO capture length and access code (`Raw receive`
+sets `ubertooth-ego -l1`/`-l48`/`-a`; a later `-l`/`-a` or `-r` replaces them).
+The BLE access address (reset to 8e89bed6 by `-r`) is read with
 `ubertooth-btle -a`: `BLE settings` records and restores it; other cases leave
 it alone.
 

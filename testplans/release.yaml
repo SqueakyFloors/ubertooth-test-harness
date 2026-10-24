@@ -39,8 +39,14 @@ suites:
     # Add "Ubertooth util conflicts" once SqueakyFloors/ubertooth#82 is fixed;
     # until then it fails against main by design.
 
-    # Their strict cases fail until fork #171, #173, #188, #189, and #190 are
-    # fixed (and on builds before the #164 fix). A cleanly failed test no
+    - Raw receive:
+        hosts: each
+        Ubertooth: default
+        coverage: comprehensive
+        duration: 3s
+
+    # Their strict cases fail until fork #171, #173, #185, #188, #189, and #190
+    # are fixed (and on builds before the #164 fix). A cleanly failed test no
     # longer ends the run (#41).
     - Debug registers:
         hosts: each
@@ -63,8 +69,14 @@ suites:
         Ubertooth: default
         coverage: comprehensive
 
-    # Needs two or more registered Ubertooths on every selected host.
+    # Skipped on a host with fewer than two registered Ubertooths.
     - Multi-board selection:
         hosts: each
         Ubertooth: default
         coverage: comprehensive
+
+    - Classic Bluetooth receive:
+        hosts: each
+        Ubertooth: default
+        coverage: comprehensive
+        duration: 3s

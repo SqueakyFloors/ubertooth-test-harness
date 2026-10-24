@@ -14,7 +14,7 @@ from ubertooth_harness.patterns import (
     serial_pattern,
 )
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
-from ubertooth_harness import tool_cases, transitions, util_cases
+from ubertooth_harness import receive_cases, tool_cases, transitions, util_cases
 
 
 class CatalogError(ValueError):
@@ -666,8 +666,30 @@ def builtin_catalog() -> TestCatalog:
         _device_test(
             "Spectrum RSSI sanity", "Validate live spectrum RSSI", extra={"duration": DURATION}
         ),
-        _device_test(
-            "Classic Bluetooth receive", "Receive BR/EDR traffic", extra={"duration": DURATION}
+        TestDefinition(
+            "Classic Bluetooth receive",
+            "ubertooth-rx and ubertooth-afh bounded receive runs without a peer: "
+            "timeouts, options, and capture files",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH, "coverage": COVERAGE,
+                "duration": DURATION,
+            }),
+            MappingProxyType({"Ubertooth": "Ubertooth"}),
+            command_builder=receive_cases.classic_receive_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+        ),
+        TestDefinition(
+            "Raw receive",
+            "ubertooth-dump symbol streams and ubertooth-ego receive without a peer",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH, "coverage": COVERAGE,
+                "duration": DURATION,
+            }),
+            MappingProxyType({"Ubertooth": "Ubertooth"}),
+            command_builder=receive_cases.raw_receive_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
         ),
         TestDefinition(
             "CLI usage smoke",

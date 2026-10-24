@@ -1,4 +1,5 @@
-"""Read the format and link type of a capture file written by ubertooth-btle.
+"""Read the format and link type of a capture file written by ubertooth-btle
+or ubertooth-rx.
 
 A transition step runs ``python <this file> PATH`` as an ordinary logged
 command. It imports only the standard library, so it runs from any working
@@ -17,6 +18,10 @@ Link types written by ubertooth-btle through libbtbb:
 - ``-r`` PCAPNG: one interface, LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR (256)
 - ``-q`` PCAP: LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR (256)
 - ``-c`` PCAP: LINKTYPE_PPI (192), wrapping LINKTYPE_BLUETOOTH_LE_LL
+
+and by ubertooth-rx (BR/EDR):
+
+- ``-r`` PCAPNG and ``-q`` PCAP: LINKTYPE_BLUETOOTH_BREDR_BB (255)
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ import sys
 from pathlib import Path
 
 LINKTYPE_PPI = 192
+LINKTYPE_BLUETOOTH_BREDR_BB = 255
 LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR = 256
 
 _PCAP_MAGIC = {

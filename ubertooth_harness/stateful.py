@@ -124,6 +124,9 @@ class Step:
     # or "" when it is acceptable; for outputs too varied for patterns, such
     # as a spectrum sweep.
     output_check: Callable[[str], str] | None = None
+    # A command that should stop itself after a timeout of its own (for
+    # example ubertooth-rx -t N) must not exit before this many seconds.
+    min_duration_s: float = 0.0
 
     def resolve_argv(self, context: Context) -> tuple[str, ...]:
         value = self.argv(context) if callable(self.argv) else self.argv
@@ -153,6 +156,12 @@ class Step:
         elif result.returncode not in self.expected_returncodes:
             return StepOutcome(
                 f"{self.name}: command exited {result.returncode}", expected
+            )
+        elif result.duration_s < self.min_duration_s:
+            return StepOutcome(
+                f"{self.name}: exited after {result.duration_s:.1f}s, before "
+                f"its {self.min_duration_s:g}s minimum",
+                expected,
             )
         output = result.stdout + result.stderr
         for pattern in self.output_patterns:
