@@ -50,14 +50,15 @@ latest-main, one-logical-commit, testing, and published-history requirements.
 
 ## Time budget and the good-enough call
 
-CI is minimal: the `test` and `build` jobs on the two runners listed in
-`.github/workflows/test.yml`, run once per PR head (branch pushes do not start
-a second run).
+GitHub Actions CI is the merge gate. It is deliberately minimal: the `test` and
+`build` jobs on Ubuntu 24.04 and the current macOS (`macos-latest`) only, run
+once per PR head (branch pushes do not start a second run). Do not add other
+OS versions or runners without the maintainer asking.
 
 - **No CI wait** for changes limited to documentation or agent rules
   (`*.md`, `.kiro/steering/`): merge once the PR is otherwise ready.
-- **Wait in the background** and keep working meanwhile. Never block on
-  `sleep` polling loops.
+- **Wait in the background** and keep working meanwhile; check status every
+  30 seconds.
 - **Start deadline, 5 minutes**: if no job has started 5 minutes after the
   push, stop waiting, say so, and decide with the maintainer.
 - **Run deadline, 10 minutes after jobs start**: then use a bounded watch,
@@ -72,9 +73,8 @@ a second run).
 
 ### Local CI when GitHub Actions cannot run
 
-GitHub Actions is currently unavailable (the account is over its free-tier
-minutes). Ignore Actions results entirely: do not wait for them, rerun them, or
-treat their failures as blockers. Local CI is the gate instead:
+Only when Actions jobs cannot run at all (runner, billing, or capacity errors
+with no step executed), use local CI instead, after telling the maintainer:
 
 - Run `scripts/local-ci.sh` on the exact PR head on a macOS host and on a
   Linux (Ubuntu 24.04) host. For the lab Linux host, through the jump:
@@ -82,6 +82,5 @@ treat their failures as blockers. Local CI is the gate instead:
   Run both in the background, in parallel.
 - Both must print `LOCAL CI PASSED <sha>` for the same SHA that will be
   squashed. Post both lines in a PR comment before merging.
-- Any new commit on the branch needs a new pair of passes.
 - The script tests a commit exported with `git archive`, never the working
   tree, so uncommitted changes cannot leak into a pass.
