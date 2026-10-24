@@ -17,8 +17,8 @@
 # An option wins over the environment, which wins over the file. An empty
 # HARNESS_JUMP is a choice (no jump host) and wins; an empty HARNESS_HOST or
 # HARNESS_PORT is nothing to go on and falls through to the file. The file is
-# sourced as shell, so it must be owned by you; the script refuses it
-# otherwise.
+# sourced as shell, so it must be owned by you and not writable by anyone
+# else; the script refuses it otherwise.
 #
 # Both ends are loopback only: the forward is
 # -L 127.0.0.1:LOCAL:127.0.0.1:PORT, so nothing else on the laptop's network
@@ -56,6 +56,11 @@ say() { printf 'harness-open: %s\n' "$*" >&2; }
 die() { printf 'harness-open: error: %s\n' "$*" >&2; exit 1; }
 usage() { sed -n '2,/^set -euo/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; }
 
+# Before anything that can fail, so --help works even with a bad config file.
+for arg in "$@"; do
+    case $arg in -h|--help) usage; exit 0 ;; esac
+done
+
 config=${HARNESS_OPEN_CONFIG:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/ubertooth-harness/harness-open.conf}
 # The environment wins over the config file, so remember it before sourcing.
 env_host=${HARNESS_HOST-}
@@ -63,13 +68,24 @@ env_jump=${HARNESS_JUMP-}
 env_jump_set=${HARNESS_JUMP+yes}
 env_port=${HARNESS_PORT-}
 if [ -f "$config" ]; then
-    # Sourcing runs whatever the file contains, so only accept your own file;
-    # $HARNESS_OPEN_CONFIG could otherwise point at a shared one.
+    # Sourcing runs whatever the file contains, so accept only a file that is
+    # yours and that no one else can write; $HARNESS_OPEN_CONFIG could
+    # otherwise point at a file another local user controls.
     [ -O "$config" ] || die "$config is not owned by you; refusing to source it"
+    mode=$(stat -f '%Lp' "$config" 2>/dev/null) || mode=$(stat -c '%a' "$config" 2>/dev/null) || mode=
+    if [ -n "$mode" ] && [ "$(( 0$mode & 0022 ))" -ne 0 ]; then
+        die "$config is writable by others (mode $mode); chmod go-w it"
+    fi
+    # Read it like a shell profile: a failing line inside must not kill this
+    # script without a word, so drop errexit and check the status instead.
+    set +e
     # The file is the user's own and lives outside the repository, so there
     # is nothing for a linter to follow.
     # shellcheck source=/dev/null
     . "$config"
+    status=$?
+    set -e
+    [ "$status" -eq 0 ] || die "$config failed (status $status); fix it or unset HARNESS_OPEN_CONFIG"
 fi
 [ -z "$env_host" ] || HARNESS_HOST=$env_host
 [ -z "$env_jump_set" ] || HARNESS_JUMP=$env_jump
@@ -129,7 +145,7 @@ check_name() {
 }
 if [ -z "$host" ]; then
     [ "$host_option" = 0 ] || die "--host must not be empty"
-    die "no lab host: pass --host HOST, set HARNESS_HOST, or put HARNESS_HOST=... in $config"
+    die "no lab host: pass --host HOST, set HARNESS_HOST, or name one in $config"
 fi
 check_name --host "$host"
 [ -z "$jump" ] || check_name --jump "$jump"

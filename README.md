@@ -944,9 +944,9 @@ outstanding request, and each caller has its own timeout.
 
 Single-node deploy: the controller and one runner run as systemd user services
 of the account that owns the checkout (no sudo needed), the GUI is opened from
-the desktop or through a tunnel. The scripts
-touch only the checkout's `.venv`, the harness data directory, the two user
-units, and the desktop launcher. Linux with systemd only for now; on macOS
+the desktop or through a tunnel. The scripts touch only the checkout's
+`.venv`, the harness data directory, the two user units, and the desktop
+launcher. Linux with systemd only for now; on macOS
 `deploy.sh` stops with an error (launchd is not supported yet).
 
 As the service user, from a clone of this repository (`git pull` it to
@@ -1029,19 +1029,22 @@ private config file names the lab host, and `--jump` / `HARNESS_JUMP` /
 `HARNESS_JUMP=...` the jump host (unset or empty means a direct connection).
 `HARNESS_PORT` sets the default port. An option wins over the environment,
 which wins over the file; with no host the script stops and says how to set
-one.
+one. An empty `HARNESS_JUMP` is a choice (no jump host) and wins, while an
+empty `HARNESS_HOST` or `HARNESS_PORT` falls through to the file.
 
 The config file is `$HARNESS_OPEN_CONFIG`, by default
 `$XDG_CONFIG_HOME/ubertooth-harness/harness-open.conf` (so
 `~/.config/ubertooth-harness/harness-open.conf` unless `XDG_CONFIG_HOME` is
 set), outside the checkout and never committed. It is sourced as shell, so it
-must be owned by you; the script refuses it otherwise.
+must be owned by you and not writable by anyone else; the script refuses it
+otherwise, and reports a file that fails rather than exiting silently.
 
 The forward is `-L 127.0.0.1:LOCAL:127.0.0.1:PORT` on every hop: it binds
 only the laptop's loopback and reaches only the controller's loopback listener
 (no `-g`, no `GatewayPorts`). When a jump host is set, it relays the
-connection (`-J`). Use `--two-hop` when the jump host refuses that ("administratively
-prohibited" or "stdio forwarding failed") or when the lab host's name is known
+connection (`-J`). Use `--two-hop` when the jump host refuses that
+("administratively prohibited" or "stdio forwarding failed") or when the lab
+host's name is known
 only to the jump host's SSH configuration. It relays through a Unix socket on
 the jump host that only your account there can open (mode 0600, default
 `/tmp/ubertooth-harness-USER-PORT.sock`, `--jump-socket` to pick another),

@@ -25,6 +25,9 @@ when rules differ, follow the stricter requirement.
 This repository is public. Everything published from it — code, tests,
 fixtures, plan files, file names, docs, comments, commit messages, branch
 names, issues, pull requests and their comments, and CI output — is covered.
+So is anything a text search cannot read: committed screenshots and other
+images, and committed run output (`run.jsonl`, `report.md`, captures). Those
+must be synthetic or scrubbed, because a real one leaks past every scan.
 
 - MUST NOT name lab machines: no host names, SSH aliases, IP addresses,
   `user@host` strings, or lab home-directory paths. Write "the lab", "the lab

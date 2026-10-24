@@ -534,11 +534,19 @@ class HarnessOpenTest(unittest.TestCase):
         for line in HARNESS_OPEN.read_text(encoding="utf-8").splitlines():
             if line.lstrip().startswith("#"):
                 continue
-            # host and jump may only come from HARNESS_* or an option value,
-            # never from a literal or a literal fallback.
-            for name, value in re.findall(r"\b(host|jump)=([^\s;]*)", line):
+            # Any assignment that can decide the host or jump host may only
+            # take its value from HARNESS_* or an option value, never from a
+            # literal or a literal fallback. Covers env_host=, HARNESS_HOST=
+            # and := defaults as well as host= itself. The expansion fallback
+            # must be empty, so ${HARNESS_HOST:-a-real-host} fails too, and a
+            # quoted literal reads as an empty value, which also fails.
+            for name, value in re.findall(
+                r"(?i)\b(?:env_|harness_)?(host|jump)[:]?=([^\s;\"]*)", line
+            ):
                 self.assertRegex(
-                    value, r"^(\$\{HARNESS_[A-Z_]+-\}|\$2)$", f"{name}: {line}"
+                    value,
+                    r"^(\$\{HARNESS_[A-Z_]+:?[-+]\}|\$2|\$env_\w+)$",
+                    f"{name}: {line}",
                 )
 
     @unittest.skipIf(os.geteuid() == 0, "running as root owns every file")
@@ -548,6 +556,45 @@ class HarnessOpenTest(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("not owned by you", result.stderr)
+
+    def test_refuses_a_config_file_others_can_write(self):
+        config = self.lab.root / "writable.conf"
+        config.write_text("HARNESS_HOST=conf-host.example\n", encoding="utf-8")
+        config.chmod(0o666)
+        result = self.lab.run(
+            "harness-open", "--dry-run", HARNESS_OPEN_CONFIG=str(config),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("writable by others", result.stderr)
+
+    def test_a_failing_config_file_is_reported(self):
+        # Read like a shell profile: an earlier failure does not stop it, but
+        # the file's own exit status is reported rather than killing us mute.
+        broken = self.lab.root / "broken.conf"
+        broken.write_text("HARNESS_HOST=conf-host.example\nfalse\n", encoding="utf-8")
+        result = self.lab.run(
+            "harness-open", "--dry-run", HARNESS_OPEN_CONFIG=str(broken),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("failed (status 1)", result.stderr)
+
+        survives = self.lab.root / "noisy.conf"
+        survives.write_text("false\nHARNESS_HOST=conf-host.example\n", encoding="utf-8")
+        argv = self._dry_run_env(
+            HARNESS_HOST=None, HARNESS_JUMP=None,
+            HARNESS_OPEN_CONFIG=str(survives),
+        )
+        self.assertTrue(argv.endswith("conf-host.example"), argv)
+
+    def test_help_works_without_a_usable_config_or_host(self):
+        for env in (
+            {"HARNESS_OPEN_CONFIG": "/etc/hosts"},
+            {"HARNESS_HOST": None, "HARNESS_JUMP": None},
+        ):
+            with self.subTest(env=sorted(env)):
+                result = self.lab.run("harness-open", "--help", **env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("--two-hop", result.stdout)
 
     def test_refuses_to_run_without_a_host(self):
         result = self.lab.run("harness-open", "--dry-run", HARNESS_HOST=None)

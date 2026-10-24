@@ -568,7 +568,8 @@ so the harness treats it carefully.
 **Known-good version (KGV) = a pinned artifact, not a version string.** Two
 different binaries can both report `2020-12-R1` (observed: a local rebuild,
 carrying its own builder and build host in the version string, vs. the
-authentic upstream `mikeryan@steel` release). The KGV must be a specific
+authentic upstream `mikeryan@steel` release, which is a published release string and
+stays). The KGV must be a specific
 `.dfu` file pinned by sha256. Current KGV: the upstream
 2020-12-R1 `bluetooth_rxtx.dfu`, sha256 `e3fcb486…bb11`.
 
