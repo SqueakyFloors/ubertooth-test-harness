@@ -39,9 +39,9 @@ suites:
     # Add "Ubertooth util conflicts" once SqueakyFloors/ubertooth#82 is fixed;
     # until then it fails against main by design.
 
-    # Last: their strict cases fail until fork #171, #173, #188, #189, and #190
-    # are fixed (and on builds before the #164 fix), and a failed test ends
-    # the run (#41).
+    # Their strict cases fail until fork #171, #173, #188, #189, and #190 are
+    # fixed (and on builds before the #164 fix). A cleanly failed test no
+    # longer ends the run (#41).
     - Debug registers:
         hosts: each
         Ubertooth: default
