@@ -46,7 +46,6 @@ from ubertooth_harness.transitions import (
     _cleanup,
     _crc_read,
     _identity,
-    _pa_restore_if_settable,
     _read_originals,
     _serial,
     _stop,
@@ -198,8 +197,8 @@ def stop_reset_steps(serial, run_step):
     target = CHANNEL.pick(0)
     return (
         _stop(serial, "establish-idle", "Establish idle before reading"),
-        # Without PA_LEVEL's reject: no step writes PA, so a board at PA 0
-        # still runs the case (cleanup then only re-reads PA).
+        # No step writes PA; cleanup restores it anyway (-a0 sets PA 0, so
+        # a board at PA 0 runs the case too).
         Step("read-pa-level", "Read PA level", _util(serial, PA_LEVEL.query),
              observe=Observation(PA_LEVEL.original, PA_LEVEL.pattern)),
         *_read_originals(serial, MODE_RESET_SETTINGS),
@@ -241,8 +240,7 @@ def _specan_stop_reset_case(serial, seconds):
         "stop-resets-board",
         "Stopping ubertooth-specan resets LEDs, channel, and squelch",
         stop_reset_steps(serial, run),
-        _cleanup(serial, MODE_RESET_SETTINGS)[:-1] + _pa_restore_if_settable(serial)
-        + (_identity(serial),),
+        _cleanup(serial, MODE_RESET_SETTINGS + (PA_LEVEL,)),
         expected_state=f"full-band sweep; {STOP_RESET_STATE}; originals restored",
     )
 
@@ -446,6 +444,15 @@ def btle_settings_cases(arguments, _resources, resource_identities):
             _aa_read(serial, "verify-set", "Verify access address", "access address after set",
                      other_aa),
         ), expected_state="access address set and read back, then the original restored"),
+        # The value as the next word (fork 0b63b01, SqueakyFloors/ubertooth#155).
+        _btle_case(serial, "access-address-next-word", "-a <address> as the next word sets it", (
+            Step("set", "Set access address with -a <address>",
+                 lambda c: _btle(serial, "-a", other_aa(c)),
+                 output_patterns=(r"access address set to: [0-9a-f]{8}",),
+                 forbidden_patterns=(r"unexpected argument",), mutates=True),
+            _aa_read(serial, "verify-set", "Verify access address", "access address after set",
+                     other_aa),
+        ), expected_state="access address set by the next word, then the original restored"),
         _btle_case(serial, "follow-target", "Set and clear the follow target", (
             Step("set-target", "Set follow target", _btle(serial, "-t22:44:66:88:aa:cc"),
                  output_patterns=(r"target set to: 22:44:66:88:aa:cc/48",), mutates=True),
@@ -516,8 +523,8 @@ def _promisc_stop_reset_case(serial):
                   "original access address"),
          _crc_read(serial, "read-original-crc", "Read original CRC", "original crc"))
         + steps[1:],
-        _cleanup(serial, MODE_RESET_SETTINGS, crc=True)[:-1]
-        + _pa_restore_if_settable(serial) + _aa_restore(serial) + (_identity(serial),),
+        _cleanup(serial, MODE_RESET_SETTINGS + (PA_LEVEL,), crc=True)[:-1]
+        + _aa_restore(serial) + (_identity(serial),),
         expected_state=(f"-p runs until stopped; {STOP_RESET_STATE}; originals, "
                         "access address, and CRC restored"),
     )

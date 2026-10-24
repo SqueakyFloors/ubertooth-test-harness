@@ -55,7 +55,6 @@ from ubertooth_harness.transitions import (
     _cleanup,
     _crc_read,
     _identity,
-    _pa_restore_if_settable,
     _read_originals,
     _serial,
     _stop,
@@ -179,13 +178,7 @@ def _mode_case(serial, case_id, name, options, start, behavior, *, prior=None,
     label, check = behavior
     steps = [
         _stop(serial, "establish-idle", "Establish idle before reading"),
-        # Without PA_LEVEL's reject: -I and -q never write PA, so a board at
-        # PA 0 still runs the case (cleanup then only re-reads PA).
-        Step(
-            "read-pa-level", "Read PA level",
-            _util(serial, PA_LEVEL.query),
-            observe=Observation(PA_LEVEL.original, PA_LEVEL.pattern),
-        ),
+        PA_LEVEL.read_original(serial),
         *_read_originals(serial, MODE_RESET_SETTINGS),
         Step(
             "set-non-defaults",
@@ -249,9 +242,7 @@ def _mode_case(serial, case_id, name, options, start, behavior, *, prior=None,
         case_id,
         name,
         tuple(steps),
-        _cleanup(serial, MODE_RESET_SETTINGS)[:-1]
-        + _pa_restore_if_settable(serial)
-        + (_identity(serial),),
+        _cleanup(serial, MODE_RESET_SETTINGS + (PA_LEVEL,)),
         expected_state=(
             f"{command} returns at once and the board {label}; {kept} while it "
             f"runs; {stopped}; original channel, squelch, LEDs, and PA restored"
