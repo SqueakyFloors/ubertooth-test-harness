@@ -15,7 +15,9 @@ checkoff, and a countdown/ETA in a web GUI.
 > tested against a stub controller. The controller (target registry, run
 > dispatch, results store, REST and live WebSocket API; `127.0.0.1` only) is
 > implemented and tested against scripted runners and the real runner, and it
-> serves the web GUI (targets, run setup, live checklist, history). GLaDOS
+> serves the web GUI (targets, run setup, live checklist, history). A
+> single-node deploy script installs the controller and a runner as systemd
+> user services on one Linux host (Ansible multi-node deploy remains). GLaDOS
 > soak execution and radio fixtures remain design-only. Multi-node, firmware-flash, and radio behaviour require the lab
 > rack; see the
 > [core Ubertooth lab plan](https://github.com/SqueakyFloors/ubertooth/blob/main/TEST_LAB.md).
@@ -662,6 +664,23 @@ served from memory by exact name.
 
 ## 5. Deploy flow (Ansible)
 
+Now (single node): [`scripts/deploy.sh`](scripts/deploy.sh), run on the lab
+host as the service user from its clone, bootstraps `.venv` and installs the
+controller and one runner as systemd **user** units
+(`ubertooth-harness-controller.service`, `ubertooth-harness-runner.service`;
+the runner is ordered after the controller, both `Restart=on-failure`). The
+controller binds `127.0.0.1`; the runner dials it over loopback. It is
+idempotent (a unit and its service change only when the content, which records
+the checkout commit, changes), never runs sudo, and prints the one-time
+`sudo loginctl enable-linger <user>` when linger is off, since user services
+otherwise stop at logout. `scripts/install-desktop-shortcut.sh` adds a GUI
+launcher for the desktop user, and `scripts/harness-open` opens a
+loopback-to-loopback SSH tunnel (`-J`, or `--two-hop` through an
+owner-only Unix socket on the jump host, never a TCP port there) and the
+browser from a laptop. See README "Deploy on the lab host". Linux only; launchd is not done.
+
+Later (multi-node), Ansible:
+
 - **Laptop → lab server:** install controller (FastAPI app, service unit),
   Python deps, config. `ansible-playbook deploy-controller.yml`.
 - **Server → targets:** install target runner + deps + build prerequisites + ARM
@@ -687,7 +706,11 @@ served from memory by exact name.
    WebSocket API, `127.0.0.1` only) and the GUI (targets, run setup, live
    checklist with a countdown when estimates exist, history with failure
    summaries). Catalog duration estimates and multi-target runs remain.
-5. **Ansible** deploy (laptop→server, server→targets) + firmware-flash step.
+5. **Deploy** — single node implemented: `scripts/deploy.sh` (systemd user
+   units for controller + runner on one Linux host), desktop launcher, and
+   `scripts/harness-open` for laptop access over SSH. Ansible
+   (laptop→server, server→targets), launchd, and the firmware-flash step
+   remain.
 6. **eero beacon emitter step** — once its control interface is known.
 7. **Harden** — long-soak sampling, history/graphs, failure diagnostics.
 
@@ -723,6 +746,11 @@ Resolved:
   so targets on DHCP/behind NAT work and the live status stream stays open.
 - **Local development exposure:** controller/GUI binds to `127.0.0.1`; remote
   development uses an authenticated SSH tunnel.
+- **Single-node lab deploy:** systemd user services of a non-root service user
+  (`scripts/deploy.sh`), still `127.0.0.1` only; people use the lab host's own
+  desktop browser, a loopback-to-loopback SSH tunnel (`scripts/harness-open`),
+  or screen sharing. Linger is enabled once by an administrator, never by the
+  script.
 - **Results store:** flat JSON files per run, **plus a printed summary of
   failures to act on** (per failed step: target, git ref, step id, reason, and
   a log snippet) emitted at run end and shown in the GUI history.

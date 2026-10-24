@@ -862,6 +862,106 @@ all timed out (504) is kept for a grace period (60 s) so a late answer still
 takes effect, then dropped. Overlapping cancels of one run share the
 outstanding request, and each caller has its own timeout.
 
+## Deploy on the lab host
+
+Single-node deploy: the controller and one runner run as systemd user services
+of the account that owns the checkout (on the lab host, `deploy`; no sudo
+needed), the GUI is opened from the desktop or through a tunnel. The scripts
+touch only the checkout's `.venv`, the harness data directory, the two user
+units, and the desktop launcher. Linux with systemd only for now; on macOS
+`deploy.sh` stops with an error (launchd is not supported yet).
+
+As the service user, from a clone of this repository (`git pull` it to
+update), with `hardware.yaml` describing the host:
+
+```sh
+scripts/deploy.sh --runner-host Host_Linux --ubertooth-source ~/ubertooth
+```
+
+It runs `python3 bootstrap.py`, writes `ubertooth-harness-controller.service`
+and `ubertooth-harness-runner.service` to `~/.config/systemd/user/`, then
+`systemctl --user daemon-reload` and `enable --now`, and prints their status
+and the GUI URL. The controller runs `.venv/bin/python -m ubertooth_harness
+controller` on `127.0.0.1:8765` (`--port N` to change it) with results in
+`${XDG_DATA_HOME:-~/.local/share}/ubertooth-harness/controller/runs`; the
+runner (`After=`/`Wants=` the controller) dials
+`ws://127.0.0.1:PORT/ws/runner` and writes its run directories to
+`.../ubertooth-harness/runner/runs`. Both have `Restart=on-failure`. Options:
+
+| Option | |
+|---|---|
+| `--runner-host NAME` | registry Host resource of this machine (required) |
+| `--ubertooth-source DIR` | Ubertooth checkout the runner resolves refs in (required; keep it fetched) |
+| `--hardware FILE` | resource registry (default `hardware.yaml` in the checkout) |
+| `--plans-dir DIR` | plans for the GUI and the runner (default `testplans/`) |
+| `--ubertooth-repo URL` | repository whose refs the GUI offers (default the public fork) |
+| `--libbtbb-source DIR`, `--libbtbb-ref REF`, `--allow-power-changes` | passed to the runner |
+| `--port N` | controller port on `127.0.0.1` (default 8765) |
+| `--no-start` | write the units (and daemon-reload) only |
+| `--uninstall` | stop, disable and remove the two units only; the venv and results stay |
+| `--force` | restart even while a run is active (cancels it) |
+| `--dry-run` | print what it would do, change nothing |
+
+Rerunning with the same options changes nothing. A unit is rewritten, and its
+service restarted, only when its content changes; the units record the
+checkout's commit, so a deploy after `git pull` restarts both. Uncommitted
+edits and dependency updates alone do not change the units; restart by hand
+after those (`systemctl --user restart ubertooth-harness-controller.service
+ubertooth-harness-runner.service`). Restarting either service cancels an
+active run (cleanly, restoring its boards), so a deploy that would restart
+them refuses while the controller reports an active run; `--force` restarts
+anyway.
+
+User services stop when the user's last session ends unless systemd linger
+is on. `deploy.sh` checks `loginctl show-user $USER -p Linger` and, when it is
+`no`, prints the one-time command for an administrator; it never runs sudo
+itself:
+
+```sh
+sudo loginctl enable-linger deploy
+```
+
+**Desktop shortcut.** On the lab host's own desktop, run as the desktop
+(auto-login) user, not the service user:
+
+```sh
+scripts/install-desktop-shortcut.sh [--port 8765]   # --uninstall removes it
+```
+
+It writes `~/.local/share/applications/ubertooth-harness.desktop` (and a copy
+on `~/Desktop` when that exists, marked trusted with `gio`) that runs
+`xdg-open http://127.0.0.1:PORT/ui/`. The controller is on the machine's
+loopback, so any local user's browser reaches it (see the trust boundary in
+[Controller](#controller)). The script is self-contained; copy it if the
+desktop user cannot read the service user's checkout.
+
+**From a laptop.** `scripts/harness-open` (macOS or Linux) opens the tunnel,
+waits until it answers, opens the GUI in the browser, and keeps the tunnel in
+the foreground until Ctrl-C:
+
+```sh
+scripts/harness-open                     # ssh -J asf sf-control-server-103
+scripts/harness-open --two-hop           # ssh asf, then ssh sf-control-server-103
+scripts/harness-open --host lab2 --jump bastion --port 8765 --dry-run
+```
+
+The forward is `-L 127.0.0.1:LOCAL:127.0.0.1:PORT` on every hop: it binds
+only the laptop's loopback and reaches only the controller's loopback listener
+(no `-g`, no `GatewayPorts`). By default the jump host relays the connection
+(`-J`). Use `--two-hop` when the jump host refuses that ("administratively
+prohibited" or "stdio forwarding failed") or when the lab host's name is known
+only to the jump host's SSH configuration. It relays through a Unix socket on
+the jump host that only your account there can open (mode 0600, default
+`/tmp/ubertooth-harness-USER-PORT.sock`, `--jump-socket` to pick another),
+not a TCP port: the controller has no authentication, so a loopback port on
+a shared jump host would let every user there drive it. Keep
+`--local-port` equal to `--port`: the controller accepts only
+`Host: 127.0.0.1:PORT`.
+
+**Screen sharing** of the lab host's desktop (for example GNOME Remote
+Desktop or VNC, itself through an SSH tunnel) is an alternative when a browser
+on the lab host is easier than a tunnel; it needs no harness changes.
+
 ## Tests
 
 [`COVERAGE.md`](COVERAGE.md) lists every Ubertooth host CLI option, which
@@ -889,7 +989,10 @@ page, assets and security headers, path traversal, the refs and plans
 endpoints (with a scripted `git ls-remote`, plus the real git against a local
 repository), ref validation, and statically that the page wires to the
 expected endpoints and has no HTML injection sinks; there is no browser
-automation. Provisioning, soak execution, and radio fixtures remain later
+automation. The deploy-script tests run `scripts/deploy.sh`,
+`install-desktop-shortcut.sh` and `harness-open` against a temporary home with
+fake `systemctl`, `loginctl`, `ssh` and browser commands (no systemd or
+network), plus `bash -n` and, when installed, `shellcheck`. Provisioning, soak execution, and radio fixtures remain later
 slices.
 
 ## Repository boundary
