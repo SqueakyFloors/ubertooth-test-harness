@@ -99,11 +99,11 @@ class FakeUbertooth:
             return CommandResult(command, 130, "", "canceled\n", 0.0, False, True)
         if self.fail(command):
             return self._result(command, 1, "", "injected failure\n", on_output)
-        if command[:3] == (sys.executable, "-m", "ubertooth_harness.capturefile"):
+        if command[:2] == (sys.executable, transitions._CAPTURE_CHECKER):
             # The real header check, on the files this fake wrote.
             out = io.StringIO()
             with redirect_stdout(out):
-                code = capturefile.main(list(command[3:]))
+                code = capturefile.main(list(command[2:]))
             return self._result(command, code, out.getvalue(), "", on_output)
         selections = [command[i + 1] for i, item in enumerate(command) if item == "-U"]
         assert selections and selections[-1] == self.serial, command
@@ -180,7 +180,7 @@ class FakeUbertooth:
 
     @staticmethod
     def _pcapng_header(link):
-        # libbtbb pads the section header block to 32 KiB (seen on hardware).
+        # libbtbb sizes the section header block in pages (32 KiB on macOS).
         size = 0x8000
         shb = (struct.pack("<IIIHHq", 0x0A0D0D0A, size, 0x1A2B3C4D, 1, 0, -1)
                + bytes(size - 28) + struct.pack("<I", size))
@@ -535,6 +535,7 @@ class TransitionExecutionTests(unittest.TestCase):
                     self.assertIn(f"crc-{state}-during-{mode}-capture-{label}", full_ids)
         for pair in ("pcapng-then-pcapng", "pcap-le-phdr-then-pcap-ppi", "pcap-ppi-then-pcap-le-phdr"):
             self.assertIn(f"capture-repeated-{pair}-first-wins", full_ids)
+        self.assertIn("capture-pcapng-and-pcap-both-written", full_ids)
         self.assertTrue(all(c.capture_dir for c in full if "capture" in c.case_id))
 
     def test_capture_cases_verify_link_types_and_first_option_wins(self):
@@ -583,6 +584,7 @@ class TransitionExecutionTests(unittest.TestCase):
         failed = [e for e in steps(events, step_id="verify-capture") if e.status == "failed"]
         self.assertEqual(2, len(failed))  # -q and -c in smoke; -r is pcapng
         self.assertIn("link type: 1", failed[0].details["observed"])
+
     def test_crc_transitions_pass_and_restore_original(self):
         device = FakeUbertooth(crc="1")
 

@@ -46,6 +46,7 @@ import subprocess
 import sys
 from typing import Callable, Mapping
 
+from ubertooth_harness import capturefile
 from ubertooth_harness.cases import CommandCase, guard_roles
 from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
@@ -796,6 +797,9 @@ _CAPTURE_FORMATS = (
     ("-q", "pcap-le-phdr", "capture.pcap", "pcap", "256"),
     ("-c", "pcap-ppi", "capture-ppi.pcap", "pcap", "192"),
 )
+# Run the checker by path: it needs only the standard library, so it does not
+# depend on the working directory the executor uses.
+_CAPTURE_CHECKER = str(Path(capturefile.__file__).resolve())
 _CAPTURE_PATTERN = r"Capture format: (?P<value>\w+, link type: \d+)"
 
 
@@ -810,8 +814,7 @@ def _capture_check(step_id, name, file_name, key, header_format, link_type):
         step_id,
         name,
         lambda context: (
-            sys.executable, "-m", "ubertooth_harness.capturefile",
-            _capture_path(file_name)(context),
+            sys.executable, _CAPTURE_CHECKER, _capture_path(file_name)(context),
         ),
         observe=Observation(
             key, _CAPTURE_PATTERN, f"{header_format}, link type: {link_type}"
@@ -824,8 +827,7 @@ def _capture_absent(step_id, name, file_name):
         step_id,
         name,
         lambda context: (
-            sys.executable, "-m", "ubertooth_harness.capturefile", "--absent",
-            _capture_path(file_name)(context),
+            sys.executable, _CAPTURE_CHECKER, "--absent", _capture_path(file_name)(context),
         ),
         output_patterns=(r"Capture file absent: ",),
     )
@@ -924,6 +926,39 @@ def _repeated_capture_case(first, second):
     return case
 
 
+def _two_handle_capture_case(serial):
+    """-r (PCAPNG) and -q (PCAP) use separate handles: both files are written."""
+    _, _, file_ng, format_ng, link_ng = _FORMATS["-r"]
+    _, _, file_q, format_q, link_q = _FORMATS["-q"]
+    return StateCase(
+        "capture-pcapng-and-pcap-both-written",
+        "Capture -r and -q together writes both files",
+        _capture_reads(serial) + (
+            Step(
+                "mode",
+                "Sniff with capture -r and -q",
+                lambda context: _btle(
+                    serial, "-n", "-A37",
+                    "-r", _capture_path(file_ng)(context),
+                    "-q", _capture_path(file_q)(context),
+                ),
+                timeout_s=MODE_TIMEOUT_S,
+                forbidden_patterns=(r"Ignoring extra capture file",),
+                mutates=True,
+                continuous=True,
+            ),
+            _stop(serial),
+            _capture_check("verify-pcapng", "Verify the -r file was written",
+                           file_ng, "pcapng header", format_ng, link_ng),
+            _capture_check("verify-pcap", "Verify the -q file was written",
+                           file_q, "pcap header", format_q, link_q),
+        ),
+        _cleanup(serial, MODE_RESET_SETTINGS, crc=True),
+        expected_state="both capture files written; every setting restored",
+        capture_dir=True,
+    )
+
+
 _FORMATS = {item[0]: item for item in _CAPTURE_FORMATS}
 _REPEATED_CAPTURES = tuple(
     _repeated_capture_case(_FORMATS[a], _FORMATS[b])
@@ -950,6 +985,7 @@ def ble_crc_cases(arguments, _resources, resource_identities):
             )
         )
         cases.extend(build(serial) for build in _REPEATED_CAPTURES)
+        cases.append(_two_handle_capture_case(serial))
     else:
         # One capture case per format keeps every output format in smoke.
         cases.extend(

@@ -49,7 +49,7 @@ class CaptureFileTests(unittest.TestCase):
         self.assertEqual(("pcapng", 251), capturefile.read_header(self.write("b", pcapng(251, ">"))))
 
     def test_finds_the_interface_after_a_large_section_header(self):
-        # libbtbb pads its section header block to 32 KiB (seen on hardware).
+        # libbtbb sizes its section header block in pages (32 KiB on macOS).
         path = self.write("big", pcapng(256, shb_length=0x8000))
         self.assertEqual(("pcapng", 256), capturefile.read_header(path))
 
@@ -60,6 +60,25 @@ class CaptureFileTests(unittest.TestCase):
         shb_only = pcapng(256)[:28]
         with self.assertRaises(capturefile.CaptureFileError):
             capturefile.read_header(self.write("no-idb", shb_only))
+
+    def test_rejects_a_truncated_or_inconsistent_interface_block(self):
+        whole = pcapng(256)
+        with self.assertRaises(capturefile.CaptureFileError):
+            capturefile.read_header(self.write("cut", whole[:-6]))
+        bad_trailer = whole[:-4] + struct.pack("<I", 24)
+        with self.assertRaises(capturefile.CaptureFileError):
+            capturefile.read_header(self.write("trailer", bad_trailer))
+
+    def test_runs_by_path_from_any_directory(self):
+        import subprocess
+        import sys
+        path = self.write("x.pcap", pcap(256))
+        result = subprocess.run(
+            [sys.executable, capturefile.__file__, str(path)],
+            capture_output=True, text=True, cwd=self.dir, timeout=30,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("Capture format: pcap, link type: 256", result.stdout.strip())
 
     def test_cli_prints_one_line_and_exit_status(self):
         path = self.write("x.pcap", pcap(192))

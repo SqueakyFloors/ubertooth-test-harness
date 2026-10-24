@@ -1,6 +1,8 @@
 """Read the format and link type of a capture file written by ubertooth-btle.
 
-Run as ``python -m ubertooth_harness.capturefile PATH`` from a transition step,
+Run as ``python <this file> PATH`` (or ``-m ubertooth_harness.capturefile``)
+from a transition step; it imports only the standard library, so it runs from
+any working directory,
 so the check is an ordinary logged command. It prints one line:
 
     Capture format: pcap, link type: 256
@@ -57,8 +59,8 @@ def read_header(path: Path | str) -> tuple[str, int]:
     raise CaptureFileError(f"{path}: not a pcap or pcapng file")
 
 
-# Blocks are walked by their length fields, never read whole: libbtbb pads
-# its section header block to 32 KiB, and packet blocks can be larger.
+# Blocks are walked by their length fields, never read whole: libbtbb sizes
+# its section header block in pages (32 KiB on the tested macOS host).
 _MAX_BLOCKS = 1024
 
 
@@ -73,16 +75,21 @@ def _pcapng_link_type(path, stream, head: bytes) -> int:
     offset = 0
     for _ in range(_MAX_BLOCKS):
         stream.seek(offset)
-        header = stream.read(10)
+        header = stream.read(8)
         if len(header) < 8:
             break
-        block_type, length = struct.unpack(endian + "II", header[:8])
+        block_type, length = struct.unpack(endian + "II", header)
         if length < 12 or length % 4:
             raise CaptureFileError(f"{path}: bad pcapng block length {length}")
         if block_type == _PCAPNG_IDB:
-            if len(header) < 10:
-                break
-            return struct.unpack(endian + "H", header[8:10])[0]
+            # The whole block must be present and end with its own length.
+            stream.seek(offset)
+            block = stream.read(length)
+            if length < 20 or len(block) < length:
+                raise CaptureFileError(f"{path}: truncated pcapng interface block")
+            if struct.unpack(endian + "I", block[-4:])[0] != length:
+                raise CaptureFileError(f"{path}: pcapng interface block trailer mismatch")
+            return struct.unpack(endian + "H", block[8:10])[0]
         offset += length
     raise CaptureFileError(f"{path}: no pcapng interface description block")
 
