@@ -273,7 +273,7 @@ python -m ubertooth_harness run-suite \
 | `Multi-board selection` | needs two or more registered boards on the host (a one-board host skips it): `-U all -s` and `-s` without `-U` list every registered board and only those; `-N` counts them; each `-U<index>` opens the board the listing names at that index | adds `-U all -vVspb` and `-vVspb` without `-U` (five lines per board), `-C` without `-U` refused; `-U<n>` past the last board is refused with `no Ubertooth at index` (fork #188, fixed in 0c7e9c0) |
 | `DFU images` | writes the selected board's firmware; slow plan (not fast): `-d <test image> -r`, then `-u -r` reads back the image padded with 0xff; `-s` on the image without its suffix gives the build's `.dfu` | `firmware` plan (not release): adds `-s` refusing a `.dfu`; seven bad images (wrong CRC, truncated, no suffix, text, no `UFD`, wrong vendor, wrong product) refused before any write, the board still in its application with the same flash (read back); strict: `-s` refuses a suffixed `.bin` and accepts a read-only one (fork #200, open), rejections leave the board in its application (fork #198) and wrong vendor/product is refused (fork #199); both are fixed on fork main after 3b22c95 |
 | `BLE mode conflicts` | no `coverage` argument; release plan | every combination of `ubertooth-btle -f -n -p` must be rejected before sniffing |
-| `Ubertooth util conflicts` | no `coverage` argument; requires `allow RF transmission: true`; in no plan yet | every pair of `-q -n -e -t -x -I` must be rejected with the fork's `error: options ... cannot be combined` before a mode starts |
+| `Ubertooth util conflicts` | no `coverage` argument; requires `allow RF transmission: true`; release plan | every pair of `-q -n -e -t -x -I` must be rejected with the fork's `error: options ... cannot be combined` before a mode starts |
 
 Every test case is built before the manifest is written or any command runs,
 so an implementation error fails the run before it touches hardware. Every
@@ -360,8 +360,8 @@ case's full reason is in its own `check_finished` event.
 fork main refuses every pair before a mode starts
 ([SqueakyFloors/ubertooth#82](https://github.com/SqueakyFloors/ubertooth/issues/82),
 fixed by #134), but a regression that accepted a pair would start range test,
-repeater, or TX test and transmit. It joins [`testplans/release.yaml`](testplans/release.yaml)
-after a passing hardware run on fork main.
+repeater, or TX test and transmit. It is in [`testplans/release.yaml`](testplans/release.yaml)
+since a passing hardware run at fork 3b22c95.
 The full-reset case can fail on macOS when re-enumeration takes longer than
 the fixed 2 s wait inside `ubertooth-util -r`
 ([SqueakyFloors/ubertooth#94](https://github.com/SqueakyFloors/ubertooth/issues/94)).
