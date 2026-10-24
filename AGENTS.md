@@ -15,6 +15,11 @@
 - Do not rewrite a published branch without explicit user direction.
 - Keep hardware operations sequential by serial unless a test explicitly
   targets concurrency. Apply hard command and whole-run deadlines.
+- Boards are shared between agents through leases: hardware runs go through
+  `run-suite` (it leases its boards), and every manual Ubertooth command goes
+  through `ubertooth-harness lease ... -- <command>`. Check
+  `ubertooth-harness boards` first; never use or reflash a board someone else
+  holds.
 - A power cycle or manual recovery may gather diagnostics but never converts a
   failed reliability run into a pass.
 - Local development servers must bind to `127.0.0.1`. Do not add a remotely
