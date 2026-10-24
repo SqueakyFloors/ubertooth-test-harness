@@ -719,8 +719,19 @@ replaced connection was still online.
 
 ```sh
 python -m ubertooth_harness controller --port 8765 \
-  [--results-dir ~/.local/share/ubertooth-harness/controller/runs]
+  [--results-dir ~/.local/share/ubertooth-harness/controller/runs] \
+  [--ubertooth-repo https://github.com/SqueakyFloors/ubertooth.git] \
+  [--plans-dir testplans]
 ```
+
+`--ubertooth-repo` is the repository whose branches and tags the GUI offers
+(listed with `git ls-remote`, cached for 60 s; no token is needed for a public
+repository). It defaults to the public fork, the same repository CI builds. A
+run may only name a ref from that list (or `HEAD`); anything else is refused
+with 422 before the runner is asked, and if the list cannot be fetched no run
+is started (503). The ref is still resolved in the runner's
+`--ubertooth-source` checkout, so keep that checkout fetched. `--plans-dir`
+is the directory of plans the GUI lists (default `testplans/`).
 
 Start a runner on the same machine against it:
 
@@ -738,6 +749,7 @@ on both ends):
 # Browser or curl on a laptop -> controller on the lab server.
 ssh -N -L 8765:127.0.0.1:8765 lab-server
 curl http://127.0.0.1:8765/api/targets
+# Then open http://127.0.0.1:8765/ui/ in the laptop's browser.
 
 # Runner on another target -> controller on the lab server. Run this on the
 # lab server; the forwarded port binds only the target's loopback (sshd's
@@ -746,14 +758,55 @@ curl http://127.0.0.1:8765/api/targets
 ssh -N -R 8765:127.0.0.1:8765 target-host
 ```
 
+### Web GUI
+
+Open `http://127.0.0.1:8765/ui/` (through the tunnel above when the
+controller is on another machine; a browser that asks `GET /` for HTML is
+sent there). It is three static files in `ubertooth_harness/web/` (vanilla
+JavaScript, no build step, nothing loaded from another site) and uses only the
+REST and `/ws/live` endpoints below.
+
+![The web GUI with one target, a live run and its history](docs/gui.png)
+
+- **Targets:** one card per registered target: host, host name, OS, Python,
+  Ubertooth serials (or why they are unknown), online/offline, last seen, and
+  the active run with a Watch button.
+- **Run setup:** git ref (default branch, branches and tags from
+  `/api/refs`), plan and suite (from `/api/plans`, with the suite's tests),
+  target, and whether to build the ref first; Run starts the whole suite.
+- **Live run:** the suite's tests as a checklist that ticks from the run's
+  events (✓ passed, ✗ failed, … running, ○ pending or not run; always text
+  plus symbol), the current stage (building, preflight, tests), elapsed time,
+  a Cancel button, and the last 200 log lines. A countdown is shown only when
+  every test in the suite has an estimate. The catalog has no duration
+  estimates of its own, so a test's estimate is its `duration` argument (for
+  example `BLE monitor` with `duration: 10s`), and build and preflight time
+  are not included. Otherwise the view shows elapsed time and says why. The
+  view is linkable as `/ui/#run=<run_id>`.
+- **History:** every run, newest first, with started/finished times, ref,
+  plan/suite, target and status, a link to its `report.md`, and for a run
+  that did not pass a failure summary (each failed phase or test with its
+  reason and last output lines, then the run's own reason).
+
+Every HTTP response carries `Content-Security-Policy: default-src 'self';
+script-src 'self'; style-src 'self'; connect-src 'self' ws://<host>;
+frame-ancestors 'none'; ...` (no inline script or style),
+`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+`Referrer-Policy: no-referrer` and `Cache-Control: no-store`. The page inserts
+controller and runner text only as text, never as HTML. Static files are
+served from memory by exact name, so no request path reaches the filesystem.
+
 Endpoints (JSON unless noted; `GET /` lists them):
 
 | Endpoint | |
 |---|---|
+| `GET /ui/` | the web GUI (HTML, `app.js`, `app.css`) |
+| `GET /api/refs` | `{"repository", "refs": [{"name", "kind", "commit"}], "fetched_at"}` from `git ls-remote` (`kind` is `default`, `branch` or `tag`); 503 if it cannot be listed |
+| `GET /api/plans` | every `<plan>.yaml` in `--plans-dir` with its suites, test names, per-test `estimated_s` (from the `duration` argument, else null) and the suite total when every test has one; a plan that does not load is listed with its `error` |
 | `GET /api/targets`, `GET /api/targets/{host}` | registry: host, hostname, OS, Python, Ubertooth serials, last heartbeat, `online`/`offline`, connected, active run |
-| `POST /api/targets/{host}/runs` | start a run with the protocol `run` fields: `{"ref", "plan", "suite", "tests": [], "build": false}`; 201 with the run, 409 busy, offline, or rejected by the runner, 422 invalid, 504 no answer |
+| `POST /api/targets/{host}/runs` | start a run with the protocol `run` fields: `{"ref", "plan", "suite", "tests": [], "build": false}`; 201 with the run, 409 busy, offline, or rejected by the runner, 422 invalid or a ref not in `/api/refs`, 503 refs unavailable, 504 no answer |
 | `GET /api/runs[?target=HOST]` | runs, newest first |
-| `GET /api/runs/{run_id}` | status and every event |
+| `GET /api/runs/{run_id}` | status, every event, and the failure summary (`failures`) |
 | `GET /api/runs/{run_id}/report.md` | the run's report (Markdown) |
 | `POST /api/runs/{run_id}/cancel` | `{"reason": ""}`; 202 once the runner accepts |
 | `WS /ws/live[?run_id=ID]` | browser stream: a `snapshot`, then `target` and `run` updates, plus that run's `event` records |
@@ -809,8 +862,13 @@ scripts/local-ci.sh -r <sha> -s "ssh lab-host"
 
 The target-runner tests run against an in-process stub controller, and the
 controller tests against scripted runners and the real runner, all on
-`127.0.0.1` ephemeral ports with no hardware. GUI, provisioning, soak
-execution, and radio fixtures remain later slices.
+`127.0.0.1` ephemeral ports with no hardware. The GUI tests check the served
+page, assets and security headers, path traversal, the refs and plans
+endpoints (with a scripted `git ls-remote`, plus the real git against a local
+repository), ref validation, and statically that the page wires to the
+expected endpoints and has no HTML injection sinks; there is no browser
+automation. Provisioning, soak execution, and radio fixtures remain later
+slices.
 
 ## Repository boundary
 

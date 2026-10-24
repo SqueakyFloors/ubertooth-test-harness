@@ -13,7 +13,13 @@ Host header must be ``127.0.0.1:PORT`` or ``localhost:PORT`` and a browser
 Origin, when present, must be that same origin. A page on another site, or a
 DNS-rebound name, therefore cannot drive the controller through a local
 browser. State-changing requests must also be JSON (a cross-site form cannot
-send that without a CORS preflight, which is never granted).
+send that without a CORS preflight, which is never granted). Every HTTP
+response, refusals included, carries the GUI security headers
+(``gui.security_headers``: strict CSP, nosniff, no framing, no referrer).
+
+The web GUI (``/ui/``) is static files served from memory by exact name. A
+run may only name a ref that ``git ls-remote`` lists for the configured
+Ubertooth repository; without a repository no run is dispatched.
 
 Target runners connect to ``/ws/runner`` and speak protocol v1
 (``ubertooth_harness/protocol.py``), decoded strictly. Each run is stored as a
@@ -38,6 +44,15 @@ from typing import Callable, Mapping
 import uuid
 
 from ubertooth_harness.events import REPORT, RUN_LOG
+from ubertooth_harness.gui import (
+    DEFAULT_PLANS_DIR,
+    GitRefSource,
+    RefListError,
+    failure_summary,
+    list_plans,
+    load_assets,
+    security_headers,
+)
 from ubertooth_harness.report import write_report
 from ubertooth_harness.protocol import (
     MAX_RUNNER_MESSAGE_BYTES,
@@ -303,6 +318,8 @@ class Controller:
         monitor_interval_s: float = DEFAULT_MONITOR_INTERVAL_S,
         log: Callable[[str], None] = _log,
         clock: Callable[[], float] = time.monotonic,
+        ref_source: GitRefSource | None = None,
+        plans_dir: Path | str = DEFAULT_PLANS_DIR,
     ):
         self.results_dir = Path(results_dir).expanduser().resolve()
         self.results_dir.mkdir(parents=True, exist_ok=True)
@@ -311,6 +328,9 @@ class Controller:
         self.monitor_interval_s = monitor_interval_s
         self.log = log
         self.clock = clock
+        # Lists the refs a run may name; None refuses every run.
+        self.ref_source = ref_source
+        self.plans_dir = Path(plans_dir).expanduser()
         # The listening port; the request guard rejects everything until set.
         self.port: int | None = None
         self.targets: dict[str, Target] = {}
@@ -774,10 +794,29 @@ class Controller:
             if pending.waiters == 0 and not pending.future.done():
                 pending.expires_at = self.clock() + self.late_reply_grace_s
 
+    async def list_refs(self) -> dict:
+        if self.ref_source is None:
+            raise ControllerError("no Ubertooth repository is configured", 503)
+        try:
+            return await self.ref_source.refs()
+        except RefListError as error:
+            raise ControllerError(f"cannot list refs: {error}", 503) from None
+
+    async def check_ref(self, ref: str) -> None:
+        """Refuse a ref that is not a branch or tag of the repository."""
+        data = await self.list_refs()
+        if not any(item["name"] == ref for item in data["refs"]):
+            raise ControllerError(
+                f"ref {ref[:200]!r} is not a branch or tag of {data['repository']}", 422
+            )
+
     async def start_run(
         self, host: str, *, ref: str, plan: str, suite: str,
         tests: list[str], build: bool,
     ) -> Run:
+        # Checked first: everything after it runs without yielding until the
+        # request is recorded as pending.
+        await self.check_ref(ref)
         target, link = self._target_link(host)
         if target.active_run_id is not None:
             raise ControllerError(
@@ -905,6 +944,8 @@ class LocalRequestGuard:
             await self.app(scope, receive, send)
             return
         reason = check_request(scope, self.controller.port)
+        if scope["type"] == "http":
+            send = _with_security_headers(scope, send, self.controller.port)
         if reason is None:
             await self.app(scope, receive, send)
             return
@@ -923,6 +964,28 @@ class LocalRequestGuard:
             ],
         })
         await send({"type": "http.response.body", "body": body})
+
+
+def _with_security_headers(scope, send, port):
+    """Wrap ``send`` so the response start carries the security headers."""
+    host = f"127.0.0.1:{port}"
+    for name, value in scope.get("headers", ()):
+        # Only a Host the guard accepts is echoed into the CSP.
+        if name.lower() == b"host" and value.decode("latin-1").lower() == f"localhost:{port}":
+            host = f"localhost:{port}"
+    added = security_headers(host)
+    names = {name for name, _ in added}
+
+    async def wrapped(message):
+        if message["type"] == "http.response.start":
+            headers = [
+                (name, value) for name, value in message.get("headers", ())
+                if name.lower() not in names
+            ]
+            message = {**message, "headers": headers + added}
+        await send(message)
+
+    return wrapped
 
 
 class _StarletteLink(Link):
@@ -961,12 +1024,15 @@ class _StarletteLink(Link):
 
 
 ENDPOINTS = {
-    "GET /": "this summary",
+    "GET /": "this summary (a browser asking for HTML is sent to /ui/)",
+    "GET /ui/": "web GUI",
+    "GET /api/refs": "branches and tags of the Ubertooth repository (git ls-remote)",
+    "GET /api/plans": "test plans with suites, tests and duration estimates",
     "GET /api/targets": "registered targets",
     "GET /api/targets/{host}": "one target",
     "POST /api/targets/{host}/runs": "start a run: {ref, plan, suite, tests, build}",
     "GET /api/runs": "runs, newest first (?target=HOST)",
-    "GET /api/runs/{run_id}": "one run with its events",
+    "GET /api/runs/{run_id}": "one run with its events and failure summary",
     "GET /api/runs/{run_id}/report.md": "the run's report",
     "POST /api/runs/{run_id}/cancel": "cancel an active run: {reason}",
     "WS /ws/live": "live target and run updates (?run_id=ID adds that run's events)",
@@ -976,7 +1042,7 @@ ENDPOINTS = {
 
 def create_app(controller: Controller):
     from fastapi import FastAPI, Request, WebSocket
-    from fastapi.responses import FileResponse, JSONResponse
+    from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
     from pydantic import BaseModel, ConfigDict, Field
 
     class RunRequest(BaseModel):
@@ -997,18 +1063,48 @@ def create_app(controller: Controller):
         openapi_url=None,
     )
 
+    assets = load_assets()
+
     @app.exception_handler(ControllerError)
     async def controller_error(request: Request, error: ControllerError):
         return JSONResponse({"detail": error.detail}, status_code=error.status)
 
     @app.get("/")
-    async def root():
+    async def root(request: Request):
+        if "text/html" in request.headers.get("accept", ""):
+            return RedirectResponse("/ui/", status_code=303)
         return {
             "service": "ubertooth-harness controller",
             "protocol_version": PROTOCOL_VERSION,
             "bind": BIND_ADDRESS,
             "endpoints": ENDPOINTS,
         }
+
+    @app.get("/ui")
+    async def gui_redirect():
+        return RedirectResponse("/ui/", status_code=308)
+
+    @app.get("/ui/")
+    async def gui_index():
+        body, media = assets["index.html"]
+        return Response(body, media_type=media)
+
+    @app.get("/ui/{name}")
+    async def gui_asset(name: str):
+        # Exact-name lookup in memory: no request path reaches the filesystem.
+        if name not in assets:
+            raise ControllerError("not found", 404)
+        body, media = assets[name]
+        return Response(body, media_type=media)
+
+    @app.get("/api/refs")
+    async def list_refs():
+        return await controller.list_refs()
+
+    @app.get("/api/plans")
+    async def get_plans():
+        plans = await asyncio.to_thread(list_plans, controller.plans_dir)
+        return {"plans": plans}
 
     @app.get("/api/targets")
     async def list_targets():
@@ -1042,7 +1138,8 @@ def create_app(controller: Controller):
     async def get_run(run_id: str):
         run = controller.get_run(run_id)
         events = await asyncio.to_thread(controller.read_events, run)
-        return {"run": run.view(), "events": events}
+        view = run.view()
+        return {"run": view, "events": events, "failures": failure_summary(view, events)}
 
     @app.get("/api/runs/{run_id}/report.md")
     async def get_report(run_id: str):
