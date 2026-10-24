@@ -1,11 +1,12 @@
 # Ubertooth Test Harness
 
-Private standalone test-harness application for
+Standalone test-harness application for
 [`SqueakyFloors/ubertooth`](https://github.com/SqueakyFloors/ubertooth) and its
 companion [libbtbb](https://github.com/SqueakyFloors/libbtbb) builds. The application is described in
 [DESIGN.md](DESIGN.md). The first implemented slice is a local, sequential
 firmware-flash reliability runner. The persistent [target runner](#target-runner-service)
-dials a loopback controller; the harness opens no listening socket.
+dials the [controller](#controller), which listens on `127.0.0.1` only; remote
+access is an SSH tunnel.
 
 ## Environment
 
@@ -649,7 +650,7 @@ heartbeats, and runs the suites the controller requests through the same
 
 ```sh
 python -m ubertooth_harness runner \
-  --controller ws://127.0.0.1:8765/runner \
+  --controller ws://127.0.0.1:8765/ws/runner \
   --hardware hardware.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth \
   [--libbtbb-source /path/to/libbtbb --libbtbb-ref master] \
@@ -695,6 +696,101 @@ extra field, a wrong value) gets `protocol_error` and is not acted on. The
 schema is in [`ubertooth_harness/protocol.py`](ubertooth_harness/protocol.py)
 and [DESIGN.md section 2](DESIGN.md#2-target-runner-protocol-controller--target-runner).
 
+## Controller
+
+`python -m ubertooth_harness controller` is the controller: it keeps the target
+registry, dispatches runs to target runners, stores their results, and streams
+live updates for the GUI. It listens on `127.0.0.1` only. There is no `--host`
+option or environment override (`--host`, `UVICORN_HOST` and similar are
+refused), and there is no authentication: remote authentication is still an
+open design item (see [Networking status](#networking-status)), so access
+from another machine is an SSH tunnel.
+
+Trust boundary: loopback-only is not access control. Every local user and
+process on the controller host can call the whole API (start and cancel runs,
+read results) and can register as a runner for any target name. With the
+`ssh -R` forward below, the same holds for every local user and process on that
+target. There is no authentication yet ([DESIGN.md section
+8](DESIGN.md#8-decisions-and-open-items)); run the controller and runners only
+on hosts whose local users you trust. A registration for a host that is
+already connected replaces the old connection (so a runner whose previous
+connection is half-open can reconnect); the controller logs a warning when the
+replaced connection was still online.
+
+```sh
+python -m ubertooth_harness controller --port 8765 \
+  [--results-dir ~/.local/share/ubertooth-harness/controller/runs]
+```
+
+Start a runner on the same machine against it:
+
+```sh
+python -m ubertooth_harness runner \
+  --controller ws://127.0.0.1:8765/ws/runner \
+  --hardware hardware.yaml --host Host_Linux \
+  --ubertooth-source /path/to/ubertooth --output runs
+```
+
+Tunnels (the controller checks the `Host` header, so keep the same port number
+on both ends):
+
+```sh
+# Browser or curl on a laptop -> controller on the lab server.
+ssh -N -L 8765:127.0.0.1:8765 lab-server
+curl http://127.0.0.1:8765/api/targets
+
+# Runner on another target -> controller on the lab server. Run this on the
+# lab server; the forwarded port binds only the target's loopback (sshd's
+# default GatewayPorts no), and the runner there dials
+# ws://127.0.0.1:8765/ws/runner.
+ssh -N -R 8765:127.0.0.1:8765 target-host
+```
+
+Endpoints (JSON unless noted; `GET /` lists them):
+
+| Endpoint | |
+|---|---|
+| `GET /api/targets`, `GET /api/targets/{host}` | registry: host, hostname, OS, Python, Ubertooth serials, last heartbeat, `online`/`offline`, connected, active run |
+| `POST /api/targets/{host}/runs` | start a run with the protocol `run` fields: `{"ref", "plan", "suite", "tests": [], "build": false}`; 201 with the run, 409 busy, offline, or rejected by the runner, 422 invalid, 504 no answer |
+| `GET /api/runs[?target=HOST]` | runs, newest first |
+| `GET /api/runs/{run_id}` | status and every event |
+| `GET /api/runs/{run_id}/report.md` | the run's report (Markdown) |
+| `POST /api/runs/{run_id}/cancel` | `{"reason": ""}`; 202 once the runner accepts |
+| `WS /ws/live[?run_id=ID]` | browser stream: a `snapshot`, then `target` and `run` updates, plus that run's `event` records |
+| `WS /ws/runner` | target runner protocol v1 |
+
+Every request and WebSocket handshake must carry `Host: 127.0.0.1:PORT` or
+`localhost:PORT` and, if it has an `Origin`, that same origin (runner
+connections must have none); `POST` bodies must be `application/json`.
+Anything else gets 403, so a web page on another site or a DNS-rebound name
+cannot drive the controller through a local browser.
+
+Runner messages are decoded strictly (up to 4 MiB, enough for a 1 MiB
+manifest record); a malformed or out-of-place message is counted on the
+target and ignored, and a first message that is not a valid `register`
+closes the connection. A target is `offline` after three heartbeat intervals
+without a valid message, and runs cannot be started on it: only a message that
+decodes as protocol v1 resets the offline timer, and malformed messages do
+not. The controller allows one
+outstanding start request per target and refuses a target whose runner reports
+an active run. Each run is a flat directory `<results dir>/<run_id>/` with
+`run.json` (the controller's record: target, request, status, exit code),
+`run.jsonl` (the runner's records, deduplicated by `(run_id, sequence)` across
+reconnects and controller restarts), and `report.md`, compiled from that
+run.jsonl when the run ends. The default results directory is
+`$XDG_DATA_HOME/ubertooth-harness/controller/runs` (else
+`~/.local/share/...`), outside the repository. A run still executing when the
+controller restarts is picked up again when its runner reconnects. A stored run
+that is still `running` becomes `lost` (with a `reason`) when its target
+registers without naming it as `active_run_id`, because the runner restarted or
+now runs something else; runs loaded at controller startup stay `running`
+until their target registers. A record that arrives after a run ended is
+stored and `report.md` is rebuilt. Malformed lines in a stored run.jsonl are
+skipped and counted (`malformed_lines`). A run or cancel request whose callers
+all timed out (504) is kept for a grace period (60 s) so a late answer still
+takes effect, then dropped. Overlapping cancels of one run share the
+outstanding request, and each caller has its own timeout.
+
 ## Tests
 
 ```sh
@@ -711,9 +807,10 @@ scripts/local-ci.sh                       # HEAD, this host
 scripts/local-ci.sh -r <sha> -s "ssh lab-host"
 ```
 
-The target-runner tests run against an in-process stub controller on
-`127.0.0.1` with no hardware. Controller, GUI, provisioning, soak execution,
-and radio fixtures remain later slices.
+The target-runner tests run against an in-process stub controller, and the
+controller tests against scripted runners and the real runner, all on
+`127.0.0.1` ephemeral ports with no hardware. GUI, provisioning, soak
+execution, and radio fixtures remain later slices.
 
 ## Repository boundary
 
@@ -723,14 +820,15 @@ code and deterministic C tests remain in the Ubertooth repository. Runs consume
 explicit Ubertooth/libbtbb repository URLs and refs plus pinned firmware
 artifacts; the harness does not import private product implementation details.
 
-The repository is private because its design backlog includes internal lab and
-eero integration details. Do not commit credentials or captured device traffic.
+This repository is public. Keep lab- and device-specific integration details
+(endpoints, credentials) in private lab configuration, and do not commit
+credentials or captured device traffic.
 
 ## Networking status
 
-No network listener is implemented; the target runner only dials a loopback
-controller. Local development remains loopback-only. Before adding the Linux-hosted GUI/controller or remote Mac/Linux target
-runners, define and approve the HTTPS, browser authentication, target-runner
+The only listener is the controller, on `127.0.0.1`; the target runner only
+dials a loopback controller, and remote use goes through SSH tunnels. Before
+binding beyond loopback or connecting remote runners directly, define and approve the HTTPS, browser authentication, target-runner
 authentication, outbound
 connection, reconnect, and authorization contract. Do not use the provisional
 shared-token text in [`DESIGN.md`](DESIGN.md#8-decisions-and-open-items) as production authorization.

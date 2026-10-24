@@ -12,7 +12,10 @@ checkoff, and a countdown/ETA in a web GUI.
 > per-run builds, and flash reliability as a plan test are implemented. Each run
 > writes one run.jsonl and one report.md. The persistent target runner
 > (protocol v1, outbound-only to a loopback controller) is implemented and
-> tested against a stub controller. Controller, GUI, GLaDOS
+> tested against a stub controller. The controller (target registry, run
+> dispatch, results store, REST and live WebSocket API; `127.0.0.1` only) is
+> implemented and tested against scripted runners and the real runner. The
+> GUI, GLaDOS
 > soak execution, and radio fixtures remain design-only. Multi-node, firmware-flash, and radio behaviour require the lab
 > rack; see the
 > [core Ubertooth lab plan](https://github.com/SqueakyFloors/ubertooth/blob/main/TEST_LAB.md).
@@ -35,6 +38,26 @@ checkoff, and a countdown/ETA in a web GUI.
   refs, dispatches runs to target runners, aggregates live status, and stores results.
   A loopback-only controller may also run on macOS for local UI development;
   Linux remains the deployed controller target.
+  Implemented (`ubertooth_harness/controller.py`, `python -m ubertooth_harness
+  controller --port N`): it binds `127.0.0.1` only, with no host option or
+  environment override, and has no authentication until remote auth is
+  designed ([Open items](#8-decisions-and-open-items)); browsers and remote
+  runners reach it through SSH tunnels (`ssh -L` / `ssh -R`). Before routing,
+  every HTTP request and WebSocket handshake must come from a loopback client
+  with `Host` `127.0.0.1:PORT` or `localhost:PORT` and an `Origin` that is
+  absent or that same origin (runner connections: absent); `Sec-Fetch-Site`
+  must be same-origin or none, and `POST` bodies must be JSON. This blocks DNS
+  rebinding and cross-site requests from a local browser. REST:
+  `/api/targets`, `/api/targets/{host}/runs` (start), `/api/runs`,
+  `/api/runs/{id}` (status and events), `/api/runs/{id}/report.md`,
+  `/api/runs/{id}/cancel`. `/ws/live` fans out target status changes, run
+  updates, and (with `?run_id=`) one run's events to browsers, best effort: a
+  browser that falls behind is disconnected, never the runner. `/ws/runner`
+  speaks protocol v1. Each run is a flat directory
+  `<results dir>/<run_id>/` (`run.json`, `run.jsonl`, `report.md`), with the
+  results directory outside the repository by default
+  (`$XDG_DATA_HOME/ubertooth-harness/controller/runs`). The GUI itself is
+  not implemented; `GET /` returns a JSON summary.
 - **Target runner** (each macOS/Linux target, Python): registers with the controller, checks out/
   builds the requested ref, flashes firmware, executes the test plan locally,
   streams step-by-step status back.
@@ -69,7 +92,9 @@ message is one JSON text frame `{"version": 1, "type": ..., ...fields}`. Each
 type has an exact field set; the receiver rejects any other version, unknown
 type, missing or extra field, or wrongly typed value, and does not act on it
 (the runner answers `protocol_error {reason}`). Inbound messages to the runner
-are limited to 64 KiB.
+are limited to 64 KiB; the controller accepts runner messages up to 4 MiB,
+since one `event` carries one run.jsonl record and the manifest record alone
+may reach 1 MiB.
 
 Controller → target runner:
 
@@ -112,6 +137,22 @@ Semantics:
   `(run_id, sequence)`. A finished run is reported (`run_finished` or
   `run_error`) once, on the first connection after it ends; until then the
   runner is busy.
+- Controller side: the first message must be a valid `register` or the
+  connection is closed (1008). Later malformed or out-of-place messages are
+  counted on the target and ignored; v1 has no controller → runner error
+  message. A target is offline after three heartbeat intervals without a
+  valid message; only a message that decodes as protocol v1 resets the timer,
+  and malformed messages do not. Events are stored once per `(run_id, sequence)`, including across
+  controller restarts; a run the controller did not start (for example one
+  that outlived a controller restart) is adopted when it is the target's
+  `active_run_id`. A stored `running` run of a host that registers without
+  naming it as `active_run_id` (the runner restarted, or reports another run)
+  becomes `lost` with a reason, is persisted, and is published live; runs
+  loaded at controller startup stay `running` until their target registers.
+  Records that arrive after a run ended rebuild its report.md. A registration
+  replaces an existing connection for the same host (half-open reconnects);
+  the controller logs a warning when the replaced connection was still online.
+  Any local process can register any host until runner authentication exists.
 
 Planned, not yet in the protocol: `deploy {ref}` (build host + firmware ahead
 of a run; today `run.build` builds inside the run directory), `flash {image,
@@ -617,6 +658,8 @@ heavy build toolchain on the lab server.
 3. **Target runner service** — register/heartbeat/run over the wire; test against a
    stub controller. Implemented (protocol v1, loopback controllers only).
 4. **Controller + web GUI** — targets, ref dropdown, live checkoff, countdown.
+   Controller implemented (registry, dispatch, results store, REST and live
+   WebSocket API, `127.0.0.1` only); the GUI remains.
 5. **Ansible** deploy (laptop→server, server→targets) + firmware-flash step.
 6. **eero beacon emitter step** — once its control interface is known.
 7. **Harden** — long-soak sampling, history/graphs, failure diagnostics.

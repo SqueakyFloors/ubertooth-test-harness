@@ -25,6 +25,9 @@ PROTOCOL_VERSION = 1
 # Bounds what the runner accepts from the controller. Outbound events may be
 # larger (the manifest record is bounded at 1 MiB).
 MAX_INBOUND_MESSAGE_BYTES = 64 * 1024
+# Bounds what the controller accepts from a runner: one event message carries
+# one run.jsonl record, and the manifest record alone may reach 1 MiB.
+MAX_RUNNER_MESSAGE_BYTES = 4 * 1024 * 1024
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -228,10 +231,12 @@ def _validate(message, schemas: Mapping[str, Mapping[str, Validator]]) -> dict:
     return message
 
 
-def _decode(text, schemas) -> dict:
+def _decode(text, schemas, max_bytes: int) -> dict:
     if isinstance(text, (bytes, bytearray)):
         raise ProtocolError("binary frames are not accepted")
-    if len(text.encode("utf-8")) > MAX_INBOUND_MESSAGE_BYTES:
+    if not isinstance(text, str):
+        raise ProtocolError("message must be a text frame")
+    if len(text.encode("utf-8")) > max_bytes:
         raise ProtocolError("message too large")
     try:
         message = json.loads(text, parse_constant=_reject_constant)
@@ -246,12 +251,12 @@ def _reject_constant(name):
 
 def decode_controller_message(text) -> dict:
     """Strictly decode one controller -> runner message."""
-    return _decode(text, CONTROLLER_MESSAGES)
+    return _decode(text, CONTROLLER_MESSAGES, MAX_INBOUND_MESSAGE_BYTES)
 
 
 def decode_runner_message(text) -> dict:
     """Strictly decode one runner -> controller message (controller side)."""
-    return _decode(text, RUNNER_MESSAGES)
+    return _decode(text, RUNNER_MESSAGES, MAX_RUNNER_MESSAGE_BYTES)
 
 
 def _encode(message_type: str, fields: Mapping, schemas) -> str:
