@@ -44,6 +44,11 @@ def _line(text: str) -> str:
     return rf"(?m)^{re.escape(text)}$"
 
 
+# The script's silent exit 1 for a missing or non-Ubertooth interface, not a
+# crash (an uncaught exception also exits 1) and no listing.
+_SILENT_REFUSAL = (r"\A(?![\s\S]*Traceback)(?![\s\S]*(?m:^(?:dlt|arg|value) \{))",)
+
+
 _INTERFACE = "--extcap-interface=ubertooth0"
 
 
@@ -94,12 +99,12 @@ def python_tool_cases(arguments, _resources, _resource_identities):
         # "every operation down here depends on having an interface": exit 1.
         _case(
             "extcap-dlts-no-interface", "btle-extcap --extcap-dlts without an interface",
-            "extcap", ("--extcap-dlts",), (), returncodes=(1,),
+            "extcap", ("--extcap-dlts",), _SILENT_REFUSAL, returncodes=(1,),
         ),
         _case(
             "extcap-config-bad-interface",
             "btle-extcap --extcap-config with a non-Ubertooth interface",
-            "extcap", ("--extcap-interface=wlan0", "--extcap-config"), (),
+            "extcap", ("--extcap-interface=wlan0", "--extcap-config"), _SILENT_REFUSAL,
             returncodes=(1,),
         ),
         _case(
