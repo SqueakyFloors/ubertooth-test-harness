@@ -14,6 +14,9 @@ from typing import Callable, Mapping, Sequence
 
 
 COVERAGE_PROFILES = ("smoke", "comprehensive")
+# Run-directory subdirectory for files cases write, and its context key.
+CAPTURE_DIR = "captures"
+CAPTURE_DIR_KEY = "capture dir"
 
 _CASE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{0,95}$")
 
@@ -194,6 +197,9 @@ class StateCase:
     steps: tuple[Step, ...]
     cleanup: tuple[Step, ...]
     expected_state: str = ""
+    # The runner creates a per-case directory in the run directory for files
+    # the case writes (capture files) and records it as context["capture dir"].
+    capture_dir: bool = False
     state_changing: bool = field(default=True, init=False)
 
     def __post_init__(self):
