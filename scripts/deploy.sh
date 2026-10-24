@@ -61,7 +61,7 @@ die() { printf 'deploy: error: %s\n' "$*" >&2; exit 1; }
 usage() { sed -n '2,/^set -euo/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; }
 
 need_value() {
-    [ "$#" -ge 2 ] && [ -n "$2" ] || die "$1 needs a value"
+    if [ "$#" -lt 2 ] || [ -z "$2" ]; then die "$1 needs a value"; fi
 }
 
 while [ "$#" -gt 0 ]; do
@@ -93,7 +93,7 @@ esac
 case $port in
     ''|*[!0-9]*) die "--port must be a number from 1 to 65535" ;;
 esac
-[ "$port" -ge 1 ] && [ "$port" -le 65535 ] || die "--port must be a number from 1 to 65535"
+if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then die "--port must be a number from 1 to 65535"; fi
 
 # Unit files hold the values unquoted, so allow only characters systemd takes
 # literally (no whitespace, quotes, %, $ or backslash).

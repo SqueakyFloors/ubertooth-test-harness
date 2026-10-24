@@ -76,7 +76,7 @@ check_port() {
     case $2 in
         ''|*[!0-9]*) die "$1 must be a number from 1 to 65535" ;;
     esac
-    [ "$2" -ge 1 ] && [ "$2" -le 65535 ] || die "$1 must be a number from 1 to 65535"
+    if [ "$2" -lt 1 ] || [ "$2" -gt 65535 ]; then die "$1 must be a number from 1 to 65535"; fi
 }
 check_port --port "$port"
 check_port --local-port "$local_port"

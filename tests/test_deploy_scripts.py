@@ -571,8 +571,10 @@ class HarnessOpenTest(unittest.TestCase):
     def test_ssh_failure_opens_no_browser(self):
         port = _free_port()
         process = self._start(port, FAKE_SSH_EXIT="255")
-        _, stderr = process.communicate(timeout=20)
-        self.assertEqual(process.returncode, 255, stderr)
+        # Reap first: the browser helper watches the tunnel's PID, which stays
+        # a zombie (still "alive" to kill -0) until it is waited for.
+        self.assertEqual(process.wait(timeout=20), 255)
+        _, stderr = process.communicate(timeout=10)
         time.sleep(1)
         self.assertFalse([c for c in self.lab.commands() if "open " in c])
 

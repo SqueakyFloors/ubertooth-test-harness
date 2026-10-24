@@ -46,7 +46,7 @@ done
 case $port in
     ''|*[!0-9]*) die "--port must be a number from 1 to 65535" ;;
 esac
-[ "$port" -ge 1 ] && [ "$port" -le 65535 ] || die "--port must be a number from 1 to 65535"
+if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then die "--port must be a number from 1 to 65535"; fi
 
 data_home=${XDG_DATA_HOME:-}
 case $data_home in /*) ;; *) data_home=$HOME/.local/share ;; esac
