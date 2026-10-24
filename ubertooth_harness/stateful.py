@@ -17,6 +17,12 @@ COVERAGE_PROFILES = ("smoke", "comprehensive")
 # Run-directory subdirectory for files cases write, and its context key.
 CAPTURE_DIR = "captures"
 CAPTURE_DIR_KEY = "capture dir"
+EXPECTED_REVISION_KEY = "expected firmware revision"
+
+
+def artifact_key(label: str) -> str:
+    """Context key of a manifest artifact's path, by image label."""
+    return f"artifact {label}"
 
 _CASE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{0,95}$")
 
@@ -217,6 +223,11 @@ class StateCase:
     # The runner creates a per-case directory in the run directory for files
     # the case writes (capture files) and records it as context["capture dir"].
     capture_dir: bool = False
+    # Image labels (for example "test_build") of run manifest artifacts the
+    # steps use. The runner records each path as context[artifact_key(label)]
+    # and the Ubertooth source's expected revision as
+    # context[EXPECTED_REVISION_KEY]; a run without them is refused.
+    artifacts: tuple[str, ...] = ()
     state_changing: bool = field(default=True, init=False)
 
     def __post_init__(self):

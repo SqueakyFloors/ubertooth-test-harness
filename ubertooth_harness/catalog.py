@@ -14,7 +14,9 @@ from ubertooth_harness.patterns import (
     serial_pattern,
 )
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
-from ubertooth_harness import receive_cases, tool_cases, transitions, util_cases
+from ubertooth_harness import (
+    dfu_cases, receive_cases, tool_cases, transitions, util_cases,
+)
 
 
 class CatalogError(ValueError):
@@ -740,6 +742,16 @@ def builtin_catalog() -> TestCatalog:
             command_builder=_flash_reliability_cases,
             establishes_firmware=True,
             check_arguments=_check_alternation,
+        ),
+        stateful_test(
+            "DFU images",
+            "ubertooth-dfu -s suffixing, -u read-back of the written image, and "
+            "refusal of bad images before any write",
+            dfu_cases.dfu_cases,
+            continue_on_case_failure=True,
+            # Every case ends with the test image written, read back, and
+            # verified, so the test must be the last on its board.
+            establishes_firmware=True,
         ),
         TestDefinition(
             "Exclusive Ubertooth topology",

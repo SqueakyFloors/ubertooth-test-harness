@@ -19,6 +19,13 @@ suites:
         duration: 15m
         sample every: 5s
 
+    # Writes and reads back the selected board's firmware, so it comes after
+    # every test that needs the resolved firmware (with Flash reliability).
+    - DFU images:
+        hosts: each
+        Ubertooth: default
+        coverage: smoke
+
     - Flash reliability:
         hosts: each
         platforms: [macos, linux]
