@@ -32,7 +32,14 @@ from ubertooth_harness.flash import (
     HarnessError,
 )
 from ubertooth_harness.plan import flash_step, image_label
-from ubertooth_harness.stateful import MissingContext, StateCase, StateCaseError, Unrestorable
+from ubertooth_harness.stateful import (
+    CAPTURE_DIR,
+    CAPTURE_DIR_KEY,
+    MissingContext,
+    StateCase,
+    StateCaseError,
+    Unrestorable,
+)
 from ubertooth_harness import transitions
 
 
@@ -88,6 +95,10 @@ class StateCaseResult:
     failure: str
     status: str
     restored: bool
+
+
+def _path_safe(name: str) -> str:
+    return "".join(c if c.isalnum() or c in "._-" else "-" for c in name)
 
 
 class NamedTestSequencer:
@@ -512,6 +523,14 @@ class NamedTestSequencer:
             },
         )
         context: dict[str, str] = {}
+        if case.capture_dir:
+            # Capture files stay in the run directory, never in the repository.
+            directory = (
+                output_dir / CAPTURE_DIR / _path_safe(invocation.invocation_id)
+                / case.case_id
+            )
+            directory.mkdir(parents=True, exist_ok=True)
+            context[CAPTURE_DIR_KEY] = str(directory)
         step_failure = ""
         failed_step = ""
         step_canceled = False
