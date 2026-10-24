@@ -341,7 +341,7 @@ class RawReceiveTests(unittest.TestCase):
         egos = ["E-GO continuous receive (-r -c 2440)", "E-GO capture length -l 1",
                 "E-GO capture length -l 48", "E-GO access code -a 630f9ffe"]
         expectations = {
-            "dump-trailing": dumps + ["Bitstream to a file (-b -d)"],
+            "dump-trailing": dumps,  # a partial last bitstream record is ignored (no fflush)
             "dump-stalls": dumps + ["Bitstream to a file (-b -d)"],
             "dump-bits-garbage": ["Bitstream to a file (-b -d)"],
             "dump-ignores-l": ["LE modulation (-l)", "-c -l: the last (-l) wins"],

@@ -41,8 +41,13 @@ def check(path: Path, fmt: str, *, min_records: int = 0, types=("br", "keep-aliv
     data = path.read_bytes()
     size = FULL_RECORD if fmt == "full" else BITS_RECORD
     records, trailing = divmod(len(data), size)
-    if trailing:
+    # cb_dump_bitstream never flushes, so a run the executor had to SIGKILL
+    # after the SIGTERM grace can end mid-record at a stdio buffer boundary;
+    # the last partial bitstream record is ignored. Full dumps flush each
+    # record, so any trailing bytes there are a real problem.
+    if trailing and fmt != "bits":
         return records, f"{trailing} trailing bytes after {records} records"
+    data = data[:records * size]
     if records < min_records:
         return records, f"{records} records, expected at least {min_records}"
     if fmt == "bits":

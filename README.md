@@ -286,8 +286,10 @@ command output.
 
 Not checked or restored, because no option the cases use can read it: the
 modulation (the firmware stop returns it to basic rate), the BR/EDR target
-address and LE advertising channel (cleared by a mode stop), and the BLE
-follow target. The BLE access address (reset to 8e89bed6 by `-r`) is read with
+address and LE advertising channel (cleared by a mode stop), the BLE
+follow target, and the E-GO capture length and access code (`Raw receive`
+sets `ubertooth-ego -l1`/`-l48`/`-a`; a later `-l`/`-a` or `-r` replaces them).
+The BLE access address (reset to 8e89bed6 by `-r`) is read with
 `ubertooth-btle -a`: `BLE settings` records and restores it; other cases leave
 it alone.
 

@@ -300,7 +300,7 @@ def classic_receive_cases(arguments, _resources, resource_identities):
                       ("-t", str(n), "-e", "2"), "accepted; initial map printed"),
             _afh_case(serial, n, "afh-map-every-second", "AFH map every second (-r)",
                       ("-r",), "one '<time> <80 bits>' line per second",
-                      check=afh_r_check(max(1, n - 1)), patterns=()),
+                      check=afh_r_check(max(1, n - 2)), patterns=()),  # start-up eats about a second
             # Fails until SqueakyFloors/ubertooth#185: exit 139 (segfault).
             _case(serial, "afh-board-not-found", "AFH with an unknown -U exits 1", (
                 Step("reject", "ubertooth-afh -U <absent serial>",
