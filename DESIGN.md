@@ -675,8 +675,9 @@ the checkout commit, changes), never runs sudo, and prints the one-time
 `sudo loginctl enable-linger <user>` when linger is off, since user services
 otherwise stop at logout. `scripts/install-desktop-shortcut.sh` adds a GUI
 launcher for the desktop user, and `scripts/harness-open` opens a
-loopback-to-loopback SSH tunnel (`-J`, or `--two-hop`) and the browser from a
-laptop. See README "Deploy on the lab host". Linux only; launchd is not done.
+loopback-to-loopback SSH tunnel (`-J`, or `--two-hop` through an
+owner-only Unix socket on the jump host, never a TCP port there) and the
+browser from a laptop. See README "Deploy on the lab host". Linux only; launchd is not done.
 
 Later (multi-node), Ansible:
 

@@ -14,8 +14,10 @@
 # --two-hop when the jump host does not allow that (ssh reports "channel 0:
 # open failed: administratively prohibited" or "stdio forwarding failed"), or
 # when HOST is a name only the jump host's own SSH configuration knows. It
-# runs ssh -t -L ... JUMP ssh -N -L ... HOST, which also chains a forward
-# through 127.0.0.1:JUMP_PORT on the jump host.
+# runs ssh -t -L ... JUMP ssh -N -L ... HOST and relays through a Unix socket
+# on the jump host that only your jump-host account can open (mode 0600), not
+# a TCP port: the controller has no authentication, so a loopback TCP port on
+# a shared jump host would let every user there drive it.
 #
 # Options:
 #   --host HOST         controller host (default sf-control-server-103)
@@ -24,8 +26,9 @@
 #   --local-port N      port on this machine (default: --port). The controller
 #                       accepts only Host: 127.0.0.1:PORT, so a different
 #                       local port gets 403 from it.
-#   --jump-port N       loopback port on the jump host for --two-hop
-#                       (default: --port)
+#   --jump-socket PATH  Unix socket on the jump host for --two-hop (default
+#                       /tmp/ubertooth-harness-JUMPUSER-PORT.sock, JUMPUSER
+#                       from ssh -G JUMP)
 #   --two-hop           forward through two ssh sessions (see above)
 #   --wait SECONDS      how long to wait for the tunnel (default 60)
 #   --no-browser        open the tunnel only, print the URL
@@ -37,7 +40,7 @@ host=sf-control-server-103
 jump=asf
 port=8765
 local_port=
-jump_port=
+jump_socket=
 two_hop=0
 wait_s=60
 browser=1
@@ -49,14 +52,14 @@ usage() { sed -n '2,/^set -euo/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; }
 
 while [ "$#" -gt 0 ]; do
     case $1 in
-        --host|--jump|--port|--local-port|--jump-port|--wait)
+        --host|--jump|--port|--local-port|--jump-socket|--wait)
             [ "$#" -ge 2 ] || die "$1 needs a value"
             case $1 in
                 --host) host=$2 ;;
                 --jump) jump=$2 ;;
                 --port) port=$2 ;;
                 --local-port) local_port=$2 ;;
-                --jump-port) jump_port=$2 ;;
+                --jump-socket) jump_socket=$2 ;;
                 --wait) wait_s=$2 ;;
             esac
             shift ;;
@@ -70,7 +73,6 @@ while [ "$#" -gt 0 ]; do
 done
 
 local_port=${local_port:-$port}
-jump_port=${jump_port:-$port}
 
 check_port() {
     case $2 in
@@ -80,7 +82,6 @@ check_port() {
 }
 check_port --port "$port"
 check_port --local-port "$local_port"
-check_port --jump-port "$jump_port"
 case $wait_s in ''|*[!0-9]*) die "--wait must be a whole number of seconds" ;; esac
 
 # Host names become ssh arguments (and, with --two-hop, part of a remote
@@ -99,8 +100,23 @@ check_name --host "$host"
 
 opts=(-o ExitOnForwardFailure=yes -o ServerAliveInterval=30)
 if [ "$two_hop" = 1 ]; then
-    cmd=(ssh -t "${opts[@]}" -L "127.0.0.1:$local_port:127.0.0.1:$jump_port" "$jump"
-         ssh -N "${opts[@]}" -L "127.0.0.1:$jump_port:127.0.0.1:$port" "$host")
+    if [ -z "$jump_socket" ]; then
+        jump_user=$(ssh -G "$jump" 2>/dev/null | awk '$1 == "user" { print $2; exit }')
+        [ -n "$jump_user" ] || die "cannot tell the user name on $jump (ssh -G); pass --jump-socket"
+        jump_socket=/tmp/ubertooth-harness-$jump_user-$port.sock
+    fi
+    case $jump_socket in
+        /*) ;;
+        *) die "--jump-socket must be an absolute path" ;;
+    esac
+    case $jump_socket in
+        *[!A-Za-z0-9._/@-]*) die "--jump-socket has characters this script does not quote: $jump_socket" ;;
+    esac
+    # The inner ssh runs on the jump host and creates the socket there, owner
+    # only (mask 0177), replacing a stale one from an earlier tunnel.
+    cmd=(ssh -t "${opts[@]}" -L "127.0.0.1:$local_port:$jump_socket" "$jump"
+         ssh -N "${opts[@]}" -o StreamLocalBindMask=0177 -o StreamLocalBindUnlink=yes
+         -L "$jump_socket:127.0.0.1:$port" "$host")
 elif [ -n "$jump" ]; then
     cmd=(ssh -N "${opts[@]}" -L "127.0.0.1:$local_port:127.0.0.1:$port" -J "$jump" "$host")
 else

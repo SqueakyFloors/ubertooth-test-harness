@@ -10,8 +10,11 @@
 # the user's systemd directory, then daemon-reload and enable --now. A unit is
 # rewritten, and its service restarted, only when its content changes (the
 # content records the checkout's commit, so pulling new code restarts both;
-# restarting the runner cancels an active run cleanly). Rerunning with the
-# same options changes nothing. It never runs sudo: if systemd linger is off
+# uncommitted edits and dependency updates alone do not, so restart by hand
+# with systemctl --user restart after those). Restarting either service
+# during a run cancels it, so deploy refuses while the controller reports an
+# active run unless --force is given. Rerunning with the same options changes
+# nothing. It never runs sudo: if systemd linger is off
 # for this user it prints the one-time command to enable it.
 #
 # The controller listens on 127.0.0.1 only (the harness has no bind option);
@@ -31,6 +34,8 @@
 #   --libbtbb-ref REF         passed to the runner
 #   --allow-power-changes     passed to the runner (lets runs switch USB power)
 #   --no-start                write the units (and daemon-reload) only
+#   --force                   restart even while a run is active (it is
+#                             cancelled); without it, deploy refuses
 #   --uninstall               stop, disable and remove the two units only; the
 #                             venv and results are left in place
 #   --dry-run                 print what would be done; change nothing
@@ -53,6 +58,7 @@ libbtbb_source=
 libbtbb_ref=
 allow_power_changes=0
 no_start=0
+force=0
 uninstall=0
 dry_run=0
 
@@ -76,6 +82,7 @@ while [ "$#" -gt 0 ]; do
         --libbtbb-ref) need_value "$@"; libbtbb_ref=$2; shift ;;
         --allow-power-changes) allow_power_changes=1 ;;
         --no-start) no_start=1 ;;
+        --force) force=1 ;;
         --uninstall) uninstall=1 ;;
         --dry-run) dry_run=1 ;;
         -h|--help) usage; exit 0 ;;
@@ -246,6 +253,10 @@ TimeoutStopSec=180
 WantedBy=default.target
 "
 
+if [ "$no_start" = 0 ] && [ "$dry_run" = 0 ] && ! systemctl --user show-environment >/dev/null 2>&1; then
+    die "no systemd user manager for $(id -un) (log in as this user over SSH or the desktop, not su/sudo -u); nothing was changed"
+fi
+
 say "checkout $ROOT (commit $commit)"
 run python3 "$ROOT/bootstrap.py"
 if [ ! -x "$python" ]; then
@@ -255,6 +266,23 @@ if [ ! -x "$python" ]; then
         die "$python is missing after bootstrap"
     fi
 fi
+
+# Prints the IDs of active runs the controller on this port reports; nothing
+# when no controller answers.
+active_runs() {
+    "$python" - "$port" <<'PY' 2>/dev/null || true
+import json, sys, urllib.request
+port = sys.argv[1]
+try:
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/targets", timeout=5) as reply:
+        targets = json.load(reply).get("targets", [])
+except Exception:
+    sys.exit(0)
+for target in targets:
+    if target.get("active_run_id"):
+        print(f"{target.get('host')}:{target['active_run_id']}")
+PY
+}
 
 changed_units=
 write_unit() {
@@ -278,6 +306,23 @@ write_unit() {
     say "wrote $path"
 }
 
+unit_changes() {
+    local path=$unit_dir/$1
+    ! { [ -f "$path" ] && printf '%s' "$2" | cmp -s - "$path"; }
+}
+if [ "$no_start" = 0 ] && { unit_changes "$CONTROLLER_UNIT" "$controller_unit" || unit_changes "$RUNNER_UNIT" "$runner_unit"; }; then
+    busy=$(active_runs)
+    if [ -n "$busy" ]; then
+        if [ "$force" = 1 ]; then
+            say "warning: restarting during active runs (--force): $busy"
+        elif [ "$dry_run" = 1 ]; then
+            say "warning: would refuse: active runs $busy (pass --force to cancel them)"
+        else
+            die "active runs $busy; restarting would cancel them. Deploy after they finish, or pass --force"
+        fi
+    fi
+fi
+
 for dir in "$results_dir" "$runner_output"; do
     if [ ! -d "$dir" ]; then
         run mkdir -p "$dir"
@@ -292,9 +337,6 @@ if [ "$no_start" = 1 ]; then
     say "units written, not started (--no-start). Start them with:"
     say "  systemctl --user enable --now $CONTROLLER_UNIT $RUNNER_UNIT"
 else
-    if [ "$dry_run" = 0 ] && ! systemctl --user show-environment >/dev/null 2>&1; then
-        die "no systemd user manager for $(id -un) (log in as this user over SSH or the desktop, not su/sudo -u)"
-    fi
     if [ -n "$changed_units" ]; then
         run systemctl --user daemon-reload
         # Changed units restart (or start) so new code and options take effect,

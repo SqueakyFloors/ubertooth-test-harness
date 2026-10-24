@@ -45,6 +45,8 @@ FAKES = {
         [ "${FAKE_LOGINCTL_EXIT:-0}" = 0 ] || exit "$FAKE_LOGINCTL_EXIT"
         echo "Linger=${FAKE_LINGER:-no}"
         """),
+    # Only `ssh -G` (config lookup) runs in dry-run tests; real tunnels use FAKE_SSH.
+    "ssh": '#!/bin/sh\n[ "$1" = -G ] || exit 99\nprintf "hostname %s\\nuser alice\\n" "$2"\n',
     "uname": '#!/bin/sh\necho "${FAKE_UNAME:-Linux}"\n',
     "git": '#!/bin/sh\n[ -n "${FAKE_COMMIT:-}" ] || exit 128\necho "$FAKE_COMMIT"\n',
 }
@@ -185,6 +187,45 @@ class DeployTest(unittest.TestCase):
         ])
         self.assertIn("GUI: http://127.0.0.1:8765/ui/", result.stdout)
 
+    def busy_controller(self):
+        """Make the venv python report an active run, as the controller would."""
+        _write_exe(self.lab.checkout / ".venv" / "bin" / "python",
+                   "#!/bin/sh\ncat >/dev/null\necho Host_Linux:run-7\n")
+
+    def test_refuses_to_restart_during_an_active_run(self):
+        self.assertOk(self.lab.deploy(FAKE_COMMIT="a" * 40))
+        before = _tree(self.lab.home)
+        self.busy_controller()
+        self.lab.clear_log()
+        result = self.lab.deploy(FAKE_COMMIT="b" * 40)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("active runs Host_Linux:run-7", result.stderr)
+        self.assertEqual(_tree(self.lab.home), before)
+        self.assertNotIn(f"systemctl --user restart {RUNNER_UNIT}", self.lab.commands())
+
+    def test_force_restarts_during_an_active_run(self):
+        self.assertOk(self.lab.deploy(FAKE_COMMIT="a" * 40))
+        self.busy_controller()
+        self.lab.clear_log()
+        result = self.lab.deploy("--force", FAKE_COMMIT="b" * 40)
+        self.assertOk(result)
+        self.assertIn("restarting during active runs (--force)", result.stdout)
+        self.assertIn(f"systemctl --user restart {RUNNER_UNIT}", self.lab.commands())
+
+    def test_active_run_does_not_block_an_unchanged_deploy(self):
+        self.assertOk(self.lab.deploy())
+        self.busy_controller()
+        self.assertOk(self.lab.deploy())
+
+    def test_no_user_manager_changes_nothing(self):
+        _write_exe(self.lab.bin / "systemctl", LOGGING_FAKE + "exit 1\n")
+        result = self.lab.deploy()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no systemd user manager", result.stderr)
+        self.assertIn("nothing was changed", result.stderr)
+        self.assertEqual(_tree(self.lab.home), {})
+        self.assertNotIn(f"python3 {self.lab.checkout}/bootstrap.py", self.lab.commands())
+
     def test_second_run_changes_nothing(self):
         self.assertOk(self.lab.deploy())
         before = _tree(self.lab.home)
@@ -313,7 +354,7 @@ class DeployTest(unittest.TestCase):
         self.assertIn("could not read systemd linger", result.stdout)
 
     def test_never_runs_sudo(self):
-        for args in ((), (), ("--no-start",), ("--dry-run",), ("--uninstall",)):
+        for args in ((), ("--no-start",), ("--dry-run",), ("--uninstall",)):
             self.lab.deploy(*args, FAKE_LINGER="no")
         self.assertFalse([c for c in self.lab.commands() if c.startswith("sudo")])
         # The only sudo in the script is text it prints.
@@ -476,13 +517,24 @@ class HarnessOpenTest(unittest.TestCase):
         self.assertEqual(self.lab.commands(), [])
 
     def test_two_hop(self):
-        argv, _ = self.dry_run("--two-hop", "--host", "lab1", "--jump", "bastion", "--port", "9001", "--jump-port", "19001")
+        argv, _ = self.dry_run("--two-hop", "--host", "lab1", "--jump", "bastion",
+                               "--port", "9001", "--jump-socket", "/tmp/h.sock")
         self.assertEqual(argv, (
             "ssh -t -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 "
-            "-L 127.0.0.1:9001:127.0.0.1:19001 bastion "
+            "-L 127.0.0.1:9001:/tmp/h.sock bastion "
             "ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 "
-            "-L 127.0.0.1:19001:127.0.0.1:9001 lab1"
+            "-o StreamLocalBindMask=0177 -o StreamLocalBindUnlink=yes "
+            "-L /tmp/h.sock:127.0.0.1:9001 lab1"
         ))
+
+    def test_two_hop_default_socket_is_per_jump_user(self):
+        argv, _ = self.dry_run("--two-hop", "--jump", "bastion")
+        self.assertIn("-L 127.0.0.1:8765:/tmp/ubertooth-harness-alice-8765.sock bastion", argv)
+        self.assertNotRegex(argv, r"127\.0\.0\.1:\d+:127\.0\.0\.1:\d+ bastion")
+        for bad in ("relative.sock", "/tmp/a b.sock"):
+            result = self.lab.run("harness-open", "--dry-run", "--two-hop",
+                                  "--jump-socket", bad)
+            self.assertNotEqual(result.returncode, 0, bad)
 
     def test_no_jump_and_local_port(self):
         result = self.lab.run("harness-open", "--dry-run", "--jump", "", "--local-port", "9999")
@@ -508,7 +560,13 @@ class HarnessOpenTest(unittest.TestCase):
             forwards = [argv[i + 1] for i, item in enumerate(argv) if item == "-L"]
             self.assertTrue(forwards)
             for forward in forwards:
-                self.assertRegex(forward, r"^127\.0\.0\.1:\d+:127\.0\.0\.1:\d+$")
+                # Loopback TCP to loopback TCP, or to/from an owner-only
+                # Unix socket on the jump host; never a TCP port there.
+                self.assertRegex(
+                    forward,
+                    r"^(127\.0\.0\.1:\d+:(127\.0\.0\.1:\d+|/tmp/[^:]+\.sock)"
+                    r"|/tmp/[^:]+\.sock:127\.0\.0\.1:\d+)$",
+                )
 
     def test_rejects_option_like_or_odd_hosts(self):
         for args in (

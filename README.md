@@ -891,13 +891,18 @@ runner (`After=`/`Wants=` the controller) dials
 | `--port N` | controller port on `127.0.0.1` (default 8765) |
 | `--no-start` | write the units (and daemon-reload) only |
 | `--uninstall` | stop, disable and remove the two units only; the venv and results stay |
+| `--force` | restart even while a run is active (cancels it) |
 | `--dry-run` | print what it would do, change nothing |
 
 Rerunning with the same options changes nothing. A unit is rewritten, and its
 service restarted, only when its content changes; the units record the
-checkout's commit, so a deploy after `git pull` restarts both. Restarting the
-runner cancels an active run (cleanly, restoring its boards), so deploy
-between runs.
+checkout's commit, so a deploy after `git pull` restarts both. Uncommitted
+edits and dependency updates alone do not change the units; restart by hand
+after those (`systemctl --user restart ubertooth-harness-controller.service
+ubertooth-harness-runner.service`). Restarting either service cancels an
+active run (cleanly, restoring its boards), so a deploy that would restart
+them refuses while the controller reports an active run; `--force` restarts
+anyway.
 
 User services stop when the user's last session ends unless systemd linger
 is on. `deploy.sh` checks `loginctl show-user $USER -p Linger` and, when it is
@@ -937,8 +942,11 @@ only the laptop's loopback and reaches only the controller's loopback listener
 (no `-g`, no `GatewayPorts`). By default the jump host relays the connection
 (`-J`). Use `--two-hop` when the jump host refuses that ("administratively
 prohibited" or "stdio forwarding failed") or when the lab host's name is known
-only to the jump host's SSH configuration; it chains a second forward through
-`127.0.0.1:PORT` on the jump host (`--jump-port` to pick another). Keep
+only to the jump host's SSH configuration. It relays through a Unix socket on
+the jump host that only your account there can open (mode 0600, default
+`/tmp/ubertooth-harness-USER-PORT.sock`, `--jump-socket` to pick another),
+not a TCP port: the controller has no authentication, so a loopback port on
+a shared jump host would let every user there drive it. Keep
 `--local-port` equal to `--port`: the controller accepts only
 `Host: 127.0.0.1:PORT`.
 
