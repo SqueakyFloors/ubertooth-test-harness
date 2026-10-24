@@ -254,6 +254,7 @@ python -m ubertooth_harness run-suite \
 | `Raw receive` | `ubertooth-dump -d` (68-byte records) and `-b -d` (401-byte bitstream records), checked by `rxdump.py` with at least 50 records per second; `ubertooth-ego -r -c 2440` runs until stopped | adds `dump -l`, `-l -c`, `-c -l` (the last modulation wins, read back from CC2400 MDMCTRL with `ubertooth-debug`); `ego -l 1`, `-l 48`, `-a 630f9ffe`; `ego -a zz` rejected |
 | `Ubertooth util modes` | `-I` blinks every LED, `-q182` lights every LED; each returns at once, keeps channel and PA, ends on `-S`, and originals are restored; `-m` after `-r` exits 0 with no result values | adds `-q1`, `-I` ending `-q` and `-q` ending `-I`, `-s -I`; strict: `-q225` and bare `-q` light every LED (fork #189), `-S` after `-q` runs the idle reset (fork #191), `-m` says there is no result (fork #190) |
 | `Multi-board selection` | needs two or more registered boards on the host (a one-board host skips it): `-U all -s` and `-s` without `-U` list every registered board and only those; `-N` counts them; each `-U<index>` opens the board the listing names at that index | adds `-U all -vVspb` and `-vVspb` without `-U` (five lines per board), `-C` without `-U` refused; strict: `-U<n>` past the last board is refused (fork #188) |
+| `DFU images` | writes the selected board's firmware; slow plan (not fast): `-d <test image> -r`, then `-u -r` reads back the image padded with 0xff; `-s` on the image without its suffix gives the build's `.dfu` | `firmware` plan (not release): adds `-s` refusing a `.dfu`; seven bad images (wrong CRC, truncated, no suffix, text, no `UFD`, wrong vendor, wrong product) refused before any write, the board still in its application with the same flash (read back); strict: `-s` refuses a suffixed `.bin` and accepts a read-only one (fork #200), rejections leave the board in its application (fork #198), wrong vendor/product refused (fork #199) |
 | `BLE mode conflicts` | no `coverage` argument; release plan | every combination of `ubertooth-btle -f -n -p` must be rejected before sniffing |
 | `Ubertooth util conflicts` | no `coverage` argument; requires `allow RF transmission: true`; in no plan yet | every pair of `-q -n -e -t -x -I` must be rejected before a mode starts |
 
@@ -683,6 +684,39 @@ ending of another. Register full 32-hex-digit serials.
 Because the test writes the firmware it verifies, preflight checks only its
 Ubertooth's serial, not its firmware revision. It must be the last test on that
 Ubertooth in the suite, so no later test runs on firmware the run did not verify.
+
+## DFU images
+
+`DFU images` covers `ubertooth-dfu` beyond the write path: `-s` suffixing,
+`-u` read-back, and refusal of bad images. It writes the selected board's
+firmware, so, like `Flash reliability`, preflight checks only that board's
+serial and the test must be the last on its board. Smoke runs in
+[`testplans/slow.yaml`](testplans/slow.yaml); comprehensive is the whole
+[`testplans/firmware.yaml`](testplans/firmware.yaml). It needs the test image,
+`--artifact "test build=/path/to/bluetooth_rxtx.dfu"` or `--build
+--with-firmware`, which must report the resolved Ubertooth revision:
+
+```sh
+python -m ubertooth_harness run-suite --plan testplans/firmware.yaml --suite firmware \
+  --hardware hardware.yaml --host Host_Mac \
+  --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
+  --artifact "test build=/path/to/bluetooth_rxtx.dfu" --build --output runs
+```
+
+The first case writes the test image with `-d -r` and reads it back; every
+later case starts from it. Files the cases make (a binary, bad images,
+read-backs) go in the run's `captures/` directory; `dfuimage.py` checks them
+and prints summaries only. Every bad image is followed by a read-back: the
+flash must still hold the test image. After each case the cleanup reads the
+flash back, rewrites the test image only if it differs, and checks the
+revision, so a failed case leaves the board on the test image and the run goes
+on. A board left in the DFU bootloader (fork #198) has no serial; the cleanup
+returns it only when exactly one DFU device is attached and every other
+registered board answers in its application, using `ubertooth-dfu -u <file> -r`
+without `-U`, which writes nothing. Otherwise the run stops for recovery by
+hand. A read-back can fail and leave the board in DFU (fork #208): in a case
+step that fails the case and the cleanup returns the board; in the cleanup it
+returns the board but fails the cleanup, so the run stops. Other registered boards are guards, read before and after every case.
 
 ## Target runner service
 

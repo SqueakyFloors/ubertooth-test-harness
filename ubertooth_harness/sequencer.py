@@ -35,10 +35,12 @@ from ubertooth_harness.plan import flash_step, image_label
 from ubertooth_harness.stateful import (
     CAPTURE_DIR,
     CAPTURE_DIR_KEY,
+    EXPECTED_REVISION_KEY,
     MissingContext,
     StateCase,
     StateCaseError,
     Unrestorable,
+    artifact_key,
 )
 from ubertooth_harness import transitions
 
@@ -187,6 +189,32 @@ class NamedTestSequencer:
             guard_serials=guards,
             rotate_serials=rotate,
         )
+
+    @staticmethod
+    def _case_artifacts(case: StateCase, manifest: RunManifest) -> dict[str, str]:
+        """Context entries for a case's manifest artifacts and expected revision.
+
+        Each file is hashed again, so a case never runs an image that changed
+        after the manifest recorded it.
+        """
+        by_label = {image_label(item.name): item for item in manifest.artifacts}
+        context = {}
+        for label in case.artifacts:
+            identity = by_label.get(label)
+            if identity is None:
+                raise HarnessError(
+                    f"{case.name}: no firmware image for '{label}'; pass --artifact "
+                    f"\"{label.replace('_', ' ')}=PATH\" (or --build --with-firmware)"
+                )
+            path = Path(identity.path)
+            if not path.is_file() or RunManifest.hash_file(path) != identity.sha256:
+                raise HarnessError(f"{case.name}: {label} image changed or is missing: {path}")
+            context[artifact_key(label)] = str(path)
+        try:
+            context[EXPECTED_REVISION_KEY] = manifest.source("Ubertooth").expected_revision
+        except ManifestError as error:
+            raise HarnessError(f"{case.name}: {error}") from error
+        return context
 
     def _run_flash_case(
         self,
@@ -499,6 +527,7 @@ class NamedTestSequencer:
         invocation: TestInvocation,
         case: StateCase,
         case_id: str,
+        manifest: RunManifest | None = None,
     ) -> "StateCaseResult":
         """Run steps until the first failure, then always run every cleanup.
 
@@ -527,6 +556,20 @@ class NamedTestSequencer:
             },
         )
         context: dict[str, str] = {}
+        if case.artifacts:
+            # Checked when the run was planned; hashed again here. Nothing
+            # has run yet, so a refusal leaves the device as it was.
+            try:
+                if manifest is None:
+                    raise HarnessError(f"{case.name}: needs the run manifest's artifacts")
+                context.update(self._case_artifacts(case, manifest))
+            except HarnessError as error:
+                publisher.emit(
+                    "check_finished", "failed",
+                    {**owner, "case_name": case.name, "reason": str(error),
+                     "failed_step": "", "cleanup_status": "passed"},
+                )
+                return StateCaseResult(str(error), "failed", True, verified=True)
         if case.capture_dir:
             # Capture files stay in the run directory, never in the repository.
             directory = (
@@ -835,6 +878,13 @@ class NamedTestSequencer:
                     for board in planned_guards[invocation.invocation_id]
                 )
             for case in planned_cases[invocation.invocation_id]:
+                if isinstance(case, StateCase) and case.artifacts:
+                    try:
+                        self._case_artifacts(case, manifest)
+                    except HarnessError as error:
+                        raise ValueError(
+                            f"{invocation.invocation_id}: {error}"
+                        ) from error
                 if isinstance(case, FlashCase):
                     try:
                         FlashReliabilityRunner(self.executor).validate(
@@ -1058,6 +1108,7 @@ class NamedTestSequencer:
                                     invocation,
                                     case,
                                     case_id,
+                                    manifest,
                                 )
                                 guard_failure = ""
                                 if guards:
