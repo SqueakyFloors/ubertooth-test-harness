@@ -442,6 +442,33 @@ artifacts that are already installed. Building and installing the resolved ref
 on local/remote targets remains a later preparation phase; preflight cannot be
 skipped to compensate for a missing installation.
 
+## Sharing boards: leases
+
+Several agents or people can share one host's Ubertooths. `run-suite` leases
+every board it touches before preflight and holds the leases until the run
+ends: the selected board, guard and alternated boards, power-isolated boards,
+and, for `Flash reliability` and exclusive tests, every Ubertooth on the host
+(they read or enumerate all of them). A lease is an exclusive `flock` on
+`~/.ubertooth-harness/leases/<serial>.lock` (override with
+`UBERTOOTH_HARNESS_LEASE_DIR`); the kernel drops it when the process exits, so
+leases never go stale. Boards are taken all or nothing, so two runs cannot
+deadlock.
+
+If a board is held, the run fails before any build or device command and names
+the holder. `--wait-for-boards MINUTES` waits instead; `--owner LABEL` (or
+`UBERTOOTH_HARNESS_OWNER`) names you in other agents' errors. The run report
+lists the leases.
+
+```sh
+ubertooth-harness boards --hardware hardware.yaml          # free / held by whom
+ubertooth-harness lease --hardware hardware.yaml --owner "agent #14" UT_Mac0 -- \
+    ubertooth-util -U <serial> -v                          # manual use, leased
+```
+
+`lease` holds the named boards for exactly as long as the command runs; the
+command inherits the locks, so they stay held even if the harness process is
+killed first. Use it for every manual Ubertooth command on a shared host.
+
 ## MAC polling workload soak
 
 [`testplans/mac-polling.yaml`](testplans/mac-polling.yaml) contains one dedicated `MAC polling soak` item.

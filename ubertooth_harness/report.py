@@ -243,6 +243,14 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
             ),
         ))
     artifacts = manifest.get("artifacts", [])
+    held = manifest.get("leases") or []
+    if held:
+        rows.append((
+            "Board leases",
+            "; ".join(
+                f"{item.get('resource')} since {item.get('acquired_at')}" for item in held
+            ) + " (held for the whole run)",
+        ))
     if artifacts:
         rows.append((
             "Artifacts",
