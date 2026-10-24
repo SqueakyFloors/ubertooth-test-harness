@@ -275,6 +275,8 @@ class RunManifest:
     invocations: tuple[InvocationIdentity, ...]
     environment: Mapping = MappingProxyType({})
     build: Mapping = MappingProxyType({})
+    # Board leases this run held (see leases.py); empty for older records.
+    leases: tuple = ()
 
     @staticmethod
     def hash_file(path: Path | str) -> str:
@@ -332,6 +334,7 @@ class RunManifest:
             "invocations": [item.to_dict() for item in self.invocations],
             "environment": _plain(self.environment),
             "build": _plain(self.build),
+            **({"leases": [_plain(item) for item in self.leases]} if self.leases else {}),
         }
 
     def write_atomic(self, path: Path | str) -> None:
@@ -359,6 +362,7 @@ def build_run_manifest(
     created_at: str | None = None,
     environment: Mapping | None = None,
     build: Mapping | None = None,
+    leases: Sequence[Mapping] = (),
 ) -> RunManifest:
     if not sources:
         raise ManifestError("at least one resolved source is required")
@@ -390,4 +394,5 @@ def build_run_manifest(
             environment if environment is not None else harness_environment.capture()
         ),
         build=_frozen(build or {}),
+        leases=tuple(_frozen(item) for item in leases),
     )

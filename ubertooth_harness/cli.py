@@ -4,8 +4,10 @@ import argparse
 import contextlib
 from dataclasses import asdict
 import json
+import os
 from pathlib import Path
 import signal
+import subprocess
 import sys
 
 from ubertooth_harness.build import (
@@ -31,6 +33,7 @@ from ubertooth_harness.events import (
 from ubertooth_harness.executor import SubprocessCommandExecutor
 from ubertooth_harness.isolation import IsolationRuntime, IsolationSetupError
 from ubertooth_harness.flash import HarnessError
+from ubertooth_harness import leases as board_leases
 from ubertooth_harness.manifest import (
     FileIdentity,
     GitRevisionResolver,
@@ -73,6 +76,20 @@ def _add_build_options(parser: argparse.ArgumentParser, *, optional: bool) -> No
         help="also build bluetooth_rxtx firmware (needs arm-none-eabi-gcc); "
         "the image is recorded, not flashed",
     )
+
+
+def _add_lease_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--owner",
+        help="who holds the boards (agent, issue); default "
+        f"${board_leases.OWNER_ENV} or the user name",
+    )
+    parser.add_argument(
+        "--wait-for-boards", type=float, default=0.0, metavar="MINUTES",
+        help="wait up to MINUTES for leased boards instead of failing at once",
+    )
+    # Tests and unusual hosts only; the default is shared by every agent.
+    parser.add_argument("--lease-dir", type=Path, help=argparse.SUPPRESS)
 
 
 @contextlib.contextmanager
@@ -203,6 +220,24 @@ def _parser() -> argparse.ArgumentParser:
     )
     run_suite.add_argument("--output", type=Path, required=True)
     _add_build_options(run_suite, optional=True)
+    _add_lease_options(run_suite)
+
+    boards = subparsers.add_parser(
+        "boards", help="show which registered Ubertooths are free or leased, and by whom"
+    )
+    boards.add_argument("--hardware", type=Path, required=True)
+    boards.add_argument("--host", help="only boards attached to this host")
+    boards.add_argument("--lease-dir", type=Path, help=argparse.SUPPRESS)
+    boards.add_argument("--json", action="store_true", help="machine-readable output")
+
+    lease = subparsers.add_parser(
+        "lease",
+        help="hold boards' leases while running one command, e.g. manual ubertooth-util use",
+    )
+    lease.add_argument("--hardware", type=Path, required=True)
+    lease.add_argument("boards", nargs="+", metavar="ALIAS", help="registered Ubertooth aliases")
+    _add_lease_options(lease)
+    lease.epilog = "usage: ubertooth-harness lease --hardware H ALIAS... -- COMMAND [ARG...]"
 
     build = subparsers.add_parser(
         "build",
@@ -338,7 +373,7 @@ def _validate(
 
 def _prepare_run(
     args, plan, invocations, sources, artifacts, run_id, preflight_policy,
-    publisher, run_dir,
+    publisher, run_dir, leases=None,
 ):
     """Build (when requested), then the manifest and preflight checks."""
     built = None
@@ -363,6 +398,7 @@ def _prepare_run(
         invocations=invocations,
         artifacts=artifacts,
         build=built.to_manifest() if built else None,
+        leases=leases.to_manifest() if leases is not None else (),
     )
     preflight_checks = preflight_policy.compile(invocations, manifest)
     return manifest, preflight_checks, executor, built
@@ -429,6 +465,28 @@ def _run_suite(args: argparse.Namespace) -> int:
         raise HarnessError("--build requires --libbtbb-source and --libbtbb-ref")
     artifacts = _parse_artifacts(args.artifact)
     run_id = validate_run_id(args.run_id) if args.run_id else generate_run_id()
+    leases = board_leases.acquire(
+        board_leases.boards_for_invocations(invocations, registry),
+        board_leases.holder_info(
+            run_id=run_id, owner=args.owner,
+            purpose=f"run-suite {plan.name} / {args.suite}",
+        ),
+        directory=args.lease_dir,
+        wait_s=args.wait_for_boards * 60,
+    )
+    try:
+        return _run_leased(
+            args, catalog, plan, registry, invocations, sources, artifacts,
+            run_id, leases,
+        )
+    finally:
+        leases.release()
+
+
+def _run_leased(
+    args, catalog, plan, registry, invocations, sources, artifacts, run_id, leases,
+) -> int:
+    """run-suite once every board the run touches is leased to this process."""
     preflight_policy = PreflightPolicy(registry, catalog)
     # Checks that need no build run first, so a long build cannot end in a
     # plan-order or power-isolation error.
@@ -463,7 +521,7 @@ def _run_suite(args: argparse.Namespace) -> int:
     try:
         manifest, preflight_checks, executor, built = _prepare_run(
             args, plan, invocations, sources, artifacts, run_id, preflight_policy,
-            publisher, run_dir if args.build else None,
+            publisher, run_dir if args.build else None, leases,
         )
     except BaseException as error:
         if publisher is not None:
@@ -511,9 +569,75 @@ def _run_suite(args: argparse.Namespace) -> int:
     return 0 if summary.passed else 1
 
 
+def _registered_boards(registry, host: str | None = None):
+    boards = []
+    for resource in sorted(registry.resources.values(), key=lambda r: r.alias):
+        if resource.type != "Ubertooth":
+            continue
+        if host and resource.attached_to != host:
+            continue
+        boards.append(board_leases.Board(
+            resource.alias, board_leases.board_key(resource.alias, resource.identity)
+        ))
+    return boards
+
+
+def _boards_command(args: argparse.Namespace) -> int:
+    registry = FileResourceRegistry.load(args.hardware)
+    if args.host:
+        registry.get(args.host)
+    states = board_leases.board_states(
+        _registered_boards(registry, args.host), directory=args.lease_dir
+    )
+    if args.json:
+        print(json.dumps(states, indent=2, sort_keys=True))
+        return 0
+    for state in states:
+        if state["held"]:
+            holder = state["holder"]
+            since = board_leases.held_for(holder)
+            detail = board_leases.describe_holder(holder)
+            print(f"{state['resource']:<12} held  {detail}" + (f" (for {since})" if since else ""))
+        else:
+            print(f"{state['resource']:<12} free")
+    return 0
+
+
+def _lease_command(args: argparse.Namespace) -> int:
+    command = list(args.command_line)
+    if not command:
+        raise HarnessError("lease needs a command after --")
+    registry = FileResourceRegistry.load(args.hardware)
+    boards = []
+    for alias in args.boards:
+        resource = registry.get(alias)
+        if resource.type != "Ubertooth":
+            raise HarnessError(f"resource {alias} is not an Ubertooth")
+        boards.append(board_leases.Board(alias, board_leases.board_key(alias, resource.identity)))
+    with board_leases.acquire(
+        boards,
+        board_leases.holder_info(run_id=None, owner=args.owner, purpose="lease: " + " ".join(command)),
+        directory=args.lease_dir,
+        wait_s=args.wait_for_boards * 60,
+    ) as held:
+        # The command inherits the locks, so the boards stay leased until it
+        # exits even if this process is killed first.
+        fds = [lease.fd for lease in held.leases]
+        for fd in fds:
+            os.set_inheritable(fd, True)
+        return subprocess.call(command, pass_fds=fds)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    command_line = []
+    if argv[:1] == ["lease"] and "--" in argv:
+        # Everything after the first -- is the command to run, untouched.
+        split = argv.index("--")
+        argv, command_line = argv[:split], argv[split + 1:]
     args = parser.parse_args(argv)
+    args.command_line = command_line
     try:
         if args.command == "validate-plan":
             return _validate(args.plan, args.hardware, args.suite)
@@ -528,6 +652,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "runner":
             require_harness_environment()
             return _runner(args)
+        if args.command == "boards":
+            return _boards_command(args)
+        if args.command == "lease":
+            return _lease_command(args)
         if args.command == "report":
             text = render_runs(args.runs, redact_serials=args.redact_serials, title=args.title)
             if args.output:
@@ -546,6 +674,7 @@ def main(argv: list[str] | None = None) -> int:
         PreflightError,
         RegistryError,
         IsolationSetupError,
+        board_leases.LeaseError,
         ValueError,
         OSError,
     ) as error:
