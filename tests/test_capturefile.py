@@ -1,5 +1,7 @@
 import io
 import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -70,8 +72,6 @@ class CaptureFileTests(unittest.TestCase):
             capturefile.read_header(self.write("trailer", bad_trailer))
 
     def test_runs_by_path_from_any_directory(self):
-        import subprocess
-        import sys
         path = self.write("x.pcap", pcap(256))
         result = subprocess.run(
             [sys.executable, capturefile.__file__, str(path)],

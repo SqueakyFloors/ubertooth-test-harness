@@ -238,7 +238,7 @@ python -m ubertooth_harness run-suite \
 |------|---------------------|--------------------------------|
 | `Ubertooth util compositions` | `-v -V` and every read-only report in one command | adds every other compatible read-only pair and repeated `-U` (last wins) |
 | `Radio setting transitions` | channel, PA level, squelch across an idle stop and an active-mode stop | adds USR LED; repeated `-c`, `-C`, `-a`, `-z`, `-l`, `-d` (last wins); mixed `-c`/`-C` in both orders; rejected `-a9` with a later `-v` must still exit nonzero; full reset `-r` returns boot defaults |
-| `BLE CRC transitions` | CRC enabled during `-n` and `-f` on channel 37; one `-n` capture per format (`-r` PCAPNG, `-q` PCAP, `-c` PPI) | both CRC values x both modes x channels 37/38/39; both CRC values x both modes x each capture format; repeated `-v` (last wins); repeated capture files `-r -r`, `-q -c`, `-c -q` (first wins, extra file never created) |
+| `BLE CRC transitions` | CRC enabled during `-n` and `-f` on channel 37; one `-n` capture per format (`-r` PCAPNG, `-q` PCAP, `-c` PPI) | both CRC values x both modes x channels 37/38/39; both CRC values x both modes x each capture format; repeated `-v` (last wins); repeated capture files `-r -r`, `-q -c`, `-c -q` (first wins, extra file never created); `-r` with `-q` (separate handles, both written) |
 | `BLE mode conflicts` | no `coverage` argument; release plan | every combination of `ubertooth-btle -f -n -p` must be rejected before sniffing |
 | `Ubertooth util conflicts` | no `coverage` argument; requires `allow RF transmission: true`; in no plan yet | every pair of `-q -n -e -t -x -I` must be rejected before a mode starts |
 
@@ -258,7 +258,7 @@ the opposite value first, so a mode that loses its CRC setting cannot pass by
 matching a leftover value; the CRC re-read after the mode is the check.
 
 Capture cases write to `captures/<invocation>/<case>/` in the run directory
-and check the file header with `python -m ubertooth_harness.capturefile`:
+and check the file header with `ubertooth_harness/capturefile.py`, run by path:
 PCAPNG and `-q` PCAP must have link type 256
 (`LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR`), `-c` PCAP link type 192
 (`LINKTYPE_PPI`). Only the header is read; nothing from the packets is logged.

@@ -1,9 +1,8 @@
 """Read the format and link type of a capture file written by ubertooth-btle.
 
-Run as ``python <this file> PATH`` (or ``-m ubertooth_harness.capturefile``)
-from a transition step; it imports only the standard library, so it runs from
-any working directory,
-so the check is an ordinary logged command. It prints one line:
+A transition step runs ``python <this file> PATH`` as an ordinary logged
+command. It imports only the standard library, so it runs from any working
+directory. It prints one line:
 
     Capture format: pcap, link type: 256
     Capture format: pcapng, link type: 256
@@ -95,7 +94,7 @@ def _pcapng_link_type(path, stream, head: bytes) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m ubertooth_harness.capturefile")
+    parser = argparse.ArgumentParser(prog="capturefile.py")
     parser.add_argument("path", type=Path)
     parser.add_argument(
         "--absent", action="store_true", help="succeed only if the file does not exist"
