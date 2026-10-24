@@ -27,5 +27,8 @@
   and implemented fail-closed.
 - Never commit credentials, authentication tokens, employee data, or captured
   device traffic.
+- This repository is public: never name lab machines (host names, SSH aliases,
+  IP addresses, `user@host` strings, lab home paths) or other systems running
+  in the lab. See "Public text" in `.kiro/steering/branch-and-review.md`.
 - Keep `COVERAGE.md` current: a PR that adds or changes test coverage of a
   CLI option updates its rows in the same PR.

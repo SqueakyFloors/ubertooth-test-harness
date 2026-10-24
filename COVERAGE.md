@@ -42,8 +42,9 @@ Harness-wide checks that use the CLIs:
 - **Exclusive Ubertooth topology** (`exclusive` plan, Linux, power control):
   runs `ubertooth-util -s`, `ubertooth-util -v`, and `ubertooth-btle -f` with no
   `-U` while only one board is powered.
-- **BTLE follow polling soak** (planned; catalog-only): long `ubertooth-btle -f`
-  without `-U` on a single board, with a known advertiser. Not implemented yet.
+- **MAC polling soak** (`mac-polling` plan; planned, catalog-only): long
+  `ubertooth-btle -f` without `-U` on a single board, with a known advertiser.
+  Not implemented yet.
 
 ## ubertooth-util
 

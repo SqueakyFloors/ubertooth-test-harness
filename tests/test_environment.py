@@ -79,7 +79,7 @@ class EnvironmentIdentityTests(unittest.TestCase):
             require_harness_environment(missing)
 
     def test_hardware_commands_refuse_a_foreign_interpreter(self):
-        foreign = identity(harness_environment=False, executable="/opt/mac-polling/bin/python")
+        foreign = identity(harness_environment=False, executable="/opt/other-app/bin/python")
         with mock.patch.object(environment, "capture", return_value=foreign):
             for argv in (
                 ["run-suite", "--plan", "p", "--suite", "s", "--hardware", "h",
@@ -167,7 +167,7 @@ class BootstrapTests(unittest.TestCase):
 
     def test_refuses_to_adopt_or_delete_a_foreign_environment(self):
         with tempfile.TemporaryDirectory() as directory:
-            foreign = Path(directory) / "other-venv"
+            foreign = Path(directory) / "other-app-venv"
             foreign.mkdir()
             (foreign / "pyvenv.cfg").write_text("home = /usr/bin\n")
             with mock.patch.object(bootstrap, "_run") as run:

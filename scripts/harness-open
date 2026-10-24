@@ -6,11 +6,25 @@
 #
 #   scripts/harness-open [--host HOST] [--jump JUMP] [--port N] [--two-hop]
 #
+# No host is built in. Name the lab host with --host, with HARNESS_HOST in the
+# environment, or in a private config file of shell assignments (HARNESS_HOST,
+# HARNESS_JUMP, HARNESS_PORT) at $HARNESS_OPEN_CONFIG, by default
+# $XDG_CONFIG_HOME/ubertooth-harness/harness-open.conf (so
+# ~/.config/ubertooth-harness/harness-open.conf unless XDG_CONFIG_HOME is set).
+# The script refuses to run without one. The jump host comes the same way;
+# unset or empty means a direct connection.
+#
+# An option wins over the environment, which wins over the file. An empty
+# HARNESS_JUMP is a choice (no jump host) and wins; an empty HARNESS_HOST or
+# HARNESS_PORT is nothing to go on and falls through to the file. The file is
+# sourced as shell, so it must be owned by you and not writable by anyone
+# else; the script refuses it otherwise.
+#
 # Both ends are loopback only: the forward is
 # -L 127.0.0.1:LOCAL:127.0.0.1:PORT, so nothing else on the laptop's network
 # can use it, and it reaches only the controller's loopback listener.
 #
-# By default the jump host relays the connection (ssh -J JUMP HOST). Use
+# When a jump host is set, it relays the connection (ssh -J JUMP HOST). Use
 # --two-hop when the jump host does not allow that (ssh reports "channel 0:
 # open failed: administratively prohibited" or "stdio forwarding failed"), or
 # when HOST is a name only the jump host's own SSH configuration knows. It
@@ -20,9 +34,11 @@
 # a shared jump host would let every user there drive it.
 #
 # Options:
-#   --host HOST         controller host (default sf-control-server-103)
-#   --jump JUMP         SSH jump host or alias (default asf; "" for none)
-#   --port N            controller port on HOST (default 8765)
+#   --host HOST         controller host (default $HARNESS_HOST; required)
+#   --jump JUMP         SSH jump host or alias (default $HARNESS_JUMP;
+#                       "" for none)
+#   --port N            controller port on HOST (default $HARNESS_PORT, or
+#                       8765)
 #   --local-port N      port on this machine (default: --port). The controller
 #                       accepts only Host: 127.0.0.1:PORT, so a different
 #                       local port gets 403 from it.
@@ -36,9 +52,49 @@
 #   -h, --help          this help
 set -euo pipefail
 
-host=sf-control-server-103
-jump=asf
-port=8765
+say() { printf 'harness-open: %s\n' "$*" >&2; }
+die() { printf 'harness-open: error: %s\n' "$*" >&2; exit 1; }
+usage() { sed -n '2,/^set -euo/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; }
+
+# Before anything that can fail, so --help works even with a bad config file.
+for arg in "$@"; do
+    case $arg in -h|--help) usage; exit 0 ;; esac
+done
+
+config=${HARNESS_OPEN_CONFIG:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/ubertooth-harness/harness-open.conf}
+# The environment wins over the config file, so remember it before sourcing.
+env_host=${HARNESS_HOST-}
+env_jump=${HARNESS_JUMP-}
+env_jump_set=${HARNESS_JUMP+yes}
+env_port=${HARNESS_PORT-}
+if [ -f "$config" ]; then
+    # Sourcing runs whatever the file contains, so accept only a file that is
+    # yours and that no one else can write; $HARNESS_OPEN_CONFIG could
+    # otherwise point at a file another local user controls.
+    [ -O "$config" ] || die "$config is not owned by you; refusing to source it"
+    mode=$(stat -f '%Lp' "$config" 2>/dev/null) || mode=$(stat -c '%a' "$config" 2>/dev/null) || mode=
+    if [ -n "$mode" ] && [ "$(( 0$mode & 0022 ))" -ne 0 ]; then
+        die "$config is writable by others (mode $mode); chmod go-w it"
+    fi
+    # Read it like a shell profile: a failing line inside must not kill this
+    # script without a word, so drop errexit and check the status instead.
+    set +e
+    # The file is the user's own and lives outside the repository, so there
+    # is nothing for a linter to follow.
+    # shellcheck source=/dev/null
+    . "$config"
+    status=$?
+    set -e
+    [ "$status" -eq 0 ] || die "$config failed (status $status); fix it or unset HARNESS_OPEN_CONFIG"
+fi
+[ -z "$env_host" ] || HARNESS_HOST=$env_host
+[ -z "$env_jump_set" ] || HARNESS_JUMP=$env_jump
+[ -z "$env_port" ] || HARNESS_PORT=$env_port
+
+host=${HARNESS_HOST-}
+jump=${HARNESS_JUMP-}
+port=${HARNESS_PORT:-8765}
+host_option=0
 local_port=
 jump_socket=
 two_hop=0
@@ -46,16 +102,12 @@ wait_s=60
 browser=1
 dry_run=0
 
-say() { printf 'harness-open: %s\n' "$*" >&2; }
-die() { printf 'harness-open: error: %s\n' "$*" >&2; exit 1; }
-usage() { sed -n '2,/^set -euo/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; }
-
 while [ "$#" -gt 0 ]; do
     case $1 in
         --host|--jump|--port|--local-port|--jump-socket|--wait)
             [ "$#" -ge 2 ] || die "$1 needs a value"
             case $1 in
-                --host) host=$2 ;;
+                --host) host=$2; host_option=1 ;;
                 --jump) jump=$2 ;;
                 --port) port=$2 ;;
                 --local-port) local_port=$2 ;;
@@ -91,7 +143,10 @@ check_name() {
         -*|*[!A-Za-z0-9._@-]*) die "$1 must be a host name or SSH alias: $2" ;;
     esac
 }
-[ -n "$host" ] || die "--host must not be empty"
+if [ -z "$host" ]; then
+    [ "$host_option" = 0 ] || die "--host must not be empty"
+    die "no lab host: pass --host HOST, set HARNESS_HOST, or name one in $config"
+fi
 check_name --host "$host"
 [ -z "$jump" ] || check_name --jump "$jump"
 [ "$two_hop" = 0 ] || [ -n "$jump" ] || die "--two-hop needs --jump"
