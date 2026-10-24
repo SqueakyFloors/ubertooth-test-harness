@@ -38,3 +38,21 @@ suites:
 
     # Add "Ubertooth util conflicts" once SqueakyFloors/ubertooth#82 is fixed;
     # until then it fails against main by design.
+
+    # Last: their strict cases fail until fork #164, #171, and #173 are fixed,
+    # and a failed test ends the run.
+    - Debug registers:
+        hosts: each
+        Ubertooth: default
+        coverage: comprehensive
+
+    - BLE settings:
+        hosts: each
+        Ubertooth: default
+        coverage: comprehensive
+
+    - Spectrum analyzer:
+        hosts: each
+        Ubertooth: default
+        coverage: comprehensive
+        duration: 3s

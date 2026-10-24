@@ -27,6 +27,16 @@ suites:
         Ubertooth: default
         coverage: smoke
 
+    - Debug registers:
+        hosts: each
+        Ubertooth: default
+        coverage: smoke
+
+    - BLE settings:
+        hosts: each
+        Ubertooth: default
+        coverage: smoke
+
     - Radio setting transitions:
         hosts: each
         Ubertooth: default
@@ -45,7 +55,8 @@ suites:
     - Spectrum analyzer:
         hosts: each
         Ubertooth: default
-        duration: 8s
+        coverage: smoke
+        duration: 3s
 
     - Spectrum RSSI sanity:
         hosts: each

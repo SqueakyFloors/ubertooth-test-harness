@@ -926,21 +926,22 @@ def _repeated_capture_case(first, second):
     return case
 
 
-def _two_handle_capture_case(serial):
-    """-r (PCAPNG) and -q (PCAP) use separate handles: both files are written."""
+def _two_handle_capture_case(serial, second="-q"):
+    """-r (PCAPNG) and -q or -c (PCAP) use separate handles: both files are written."""
     _, _, file_ng, format_ng, link_ng = _FORMATS["-r"]
-    _, _, file_q, format_q, link_q = _FORMATS["-q"]
+    _, label_q, file_q, format_q, link_q = _FORMATS[second]
+    suffix = "" if second == "-q" else f"-{label_q}"
     return StateCase(
-        "capture-pcapng-and-pcap-both-written",
-        "Capture -r and -q together writes both files",
+        f"capture-pcapng-and-pcap{suffix}-both-written",
+        f"Capture -r and {second} together writes both files",
         _capture_reads(serial) + (
             Step(
                 "mode",
-                "Sniff with capture -r and -q",
+                f"Sniff with capture -r and {second}",
                 lambda context: _btle(
                     serial, "-n", "-A37",
                     "-r", _capture_path(file_ng)(context),
-                    "-q", _capture_path(file_q)(context),
+                    second, _capture_path(file_q)(context),
                 ),
                 timeout_s=MODE_TIMEOUT_S,
                 forbidden_patterns=(r"Ignoring extra capture file",),
@@ -950,7 +951,7 @@ def _two_handle_capture_case(serial):
             _stop(serial),
             _capture_check("verify-pcapng", "Verify the -r file was written",
                            file_ng, "pcapng header", format_ng, link_ng),
-            _capture_check("verify-pcap", "Verify the -q file was written",
+            _capture_check("verify-pcap", f"Verify the {second} file was written",
                            file_q, "pcap header", format_q, link_q),
         ),
         _cleanup(serial, MODE_RESET_SETTINGS, crc=True),
@@ -986,6 +987,7 @@ def ble_crc_cases(arguments, _resources, resource_identities):
         )
         cases.extend(build(serial) for build in _REPEATED_CAPTURES)
         cases.append(_two_handle_capture_case(serial))
+        cases.append(_two_handle_capture_case(serial, "-c"))
     else:
         # One capture case per format keeps every output format in smoke.
         cases.extend(

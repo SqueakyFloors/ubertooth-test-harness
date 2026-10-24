@@ -18,7 +18,7 @@ test is in no plan. The notes say what is missing.
 **Hard**: needs an RF peer, a GUI, RF transmission, firmware other than
 `bluetooth_rxtx`, a second device, or is destructive. The notes say which.
 **N/A**: nothing to test (for example a no-op).
-Tests that are only catalog entries (`BLE monitor`, `Spectrum analyzer`,
+Tests that are only catalog entries (`BLE monitor`, `Spectrum RSSI sanity`,
 `Classic Bluetooth receive`, the soaks, and every `backlog.yaml` item) have no
 implementation yet. They count as Not covered.
 
@@ -94,9 +94,9 @@ Combinations to test:
 | `-f` | follow connections | Covered | BLE CRC transitions (smoke: CRC on, channel 37; comprehensive: every CRC value × channel and capture format). Exclusive topology runs it without `-U`. Following a real connection is not checked (needs a peer) |
 | `-n` | advertisements only | Covered | BLE CRC transitions and capture cases (smoke, comprehensive). Packet content is not checked |
 | `-p` | promiscuous | Partial | Only BLE mode conflicts (release). Never run alone; a useful test needs an active connection |
-| `-a[addr]` | get/set access address | Not covered | Get/set needs no peer; `-r` clears it |
+| `-a[addr]` | get/set access address | Covered | BLE settings (smoke: set/read back; comprehensive: reset by `util -r`). Bad value and `-a -v` fail until [ubertooth#171](https://github.com/SqueakyFloors/ubertooth/issues/171) |
 | `-s<mac>` | faux peripheral mode | Hard | Transmits RF; needs a central peer |
-| `-t<mac[/mask]>`, `-tnone` | set/unset follow target | Partial | A malformed MAC is rejected (Argument validation, comprehensive). The set path is not tested; a useful filter test needs a peer |
+| `-t<mac[/mask]>`, `-tnone` | set/unset follow target | Partial | Set, masked, and cleared: BLE settings (smoke); malformed MAC rejected: Argument validation. The filter itself needs a peer |
 | `-i` / `-j` | interfere once (`-j` alias) | Hard | Jams a live connection (transmits RF) |
 | `-I` / `-J` | interfere continuously (`-J` alias) | Hard | Same as `-i` |
 | `-U<index\|serial>` | select device | Covered | Every btle case uses a serial |
@@ -105,7 +105,7 @@ Combinations to test:
 | `-c<file>` | PCAP (PPI) | Covered | As `-r`: pcap with link type 192 |
 | `-A<37-39>` | advertising channel | Covered | 37 in smoke; 37, 38, and 39 in comprehensive. `-A36`/`-A40` rejected: Argument validation (comprehensive) |
 | `-v[01]` | get/set CRC check | Covered | Get, set, and applied by a mode (smoke); `-v0` and repeated `-v` (comprehensive) |
-| `-x<0-32>` | allowed access-address errors | Partial | `-x33` rejected: Argument validation (smoke). Accepted values 0-32 are not tested |
+| `-x<0-32>` | allowed access-address errors | Partial | `-x33` rejected (Argument validation); `-x0`/`-x32` accepted (BLE settings, comprehensive). The effect on capture needs traffic |
 
 Combinations to test:
 
@@ -113,10 +113,10 @@ Combinations to test:
 - `-v[01]` applied after the mode starts, overriding an opposite preset: Covered (smoke, comprehensive).
 - Repeated `-v` is last-wins: Covered (comprehensive).
 - Repeated capture options are first-wins and the extra file is never created (`-r -r`, `-q -c`, `-c -q`): Covered (comprehensive).
-- `-r` together with `-q` (separate handles): both files written: Covered (comprehensive). `-r` with `-c`: Not covered.
+- `-r` together with `-q` (separate handles): both files written: Covered (comprehensive). `-r` with `-c`: Covered (comprehensive).
 - Capture with each CRC value and mode: Covered (comprehensive).
 - `-i`/`-I` without `-f`/`-p`: Not covered (should be rejected or ignored; check source).
-- `-a`/`-v` get and set without a mode do not start sniffing: Partial (covered for `-v` only).
+- `-a`/`-v` get and set without a mode do not start sniffing: Covered (BLE settings); `-a -v` reports both fails until ubertooth#171.
 - `-A` with `-p` or `-f` after a follow hop: Not covered (needs a peer).
 
 ## ubertooth-debug
@@ -125,10 +125,10 @@ Combinations to test:
 |---|---|---|---|
 | `-h` | help | Covered | Host CLI surface |
 | `-U<index\|serial>` | select device | Covered | Debug register read (fast) |
-| `-r <reg>[,<reg>...]` / `-r <start>-<end>` | read CC2400 registers | Partial | One register (`0x00`, fast only). Lists and ranges are not tested |
-| `-v<0-2>` | verbosity | Not covered | |
+| `-r <reg>[,<reg>...]` / `-r <start>-<end>` | read CC2400 registers | Covered | Debug registers: list (smoke), range and reversed range (comprehensive), order checked, nothing changed. Exit status fails until [ubertooth#164](https://github.com/SqueakyFloors/ubertooth/issues/164) |
+| `-v<0-2>` | verbosity | Covered | Debug registers (comprehensive): `-v0` header only, `-v1` fields, `-v2` reserved fields; `-v3` rejected |
 
-Combinations: register list and range output: Not covered. `-v0`/`-v2` output format: Not covered. Debug register read is not in the release plan: Not covered.
+Combinations: list and range output: Covered. `-v0`/`-v2` output: Covered. `Debug registers` is in the release plan (comprehensive).
 
 ## ubertooth-dfu
 
@@ -148,15 +148,15 @@ Combinations: `-d` without `-r` (board stays in DFU): Not covered (Hard: leaves 
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
 | `-h` | help | Covered | Host CLI surface (exit 0) |
-| `-v` | verbose to stderr | Not covered | |
-| `-g` | feedgnuplot output | Not covered | |
-| `-G` | 3D feedgnuplot output | Not covered | |
-| `-d <file>` | write output to a file | Not covered | |
-| `-l <2402-2480>` | lower frequency | Partial | `-l 2401` rejected: Argument validation (smoke). A real range run is not tested |
-| `-u <2402-2480>` | upper frequency | Partial | `-u 2481` rejected: Argument validation (comprehensive). A real range run is not tested |
-| `-U <index\|serial>` | select device | Not covered | Spectrum analyzer and Spectrum RSSI sanity are catalog-only |
+| `-v` | verbose to stderr | Covered | Spectrum analyzer (comprehensive): line format and range |
+| `-g` | feedgnuplot output | Covered | Spectrum analyzer (comprehensive): line format and range |
+| `-G` | 3D feedgnuplot output | Covered | Spectrum analyzer (comprehensive): line format and range |
+| `-d <file>` | write output to a file | Covered | Spectrum analyzer (comprehensive): binary 3-byte records checked by `specandump.py` |
+| `-l <2402-2480>` | lower frequency | Covered | Spectrum analyzer (comprehensive) ranges; `-l 2401` rejected (Argument validation). Range changes fail until [ubertooth#173](https://github.com/SqueakyFloors/ubertooth/issues/173) |
+| `-u <2402-2480>` | upper frequency | Covered | As `-l` |
+| `-U <index\|serial>` | select device | Covered | Spectrum analyzer by serial, guard board unchanged |
 
-Combinations: `-l` > `-u` rejected: Covered (Argument validation, comprehensive). `-g` vs `-G` output shape: Not covered. Every reported frequency falls between `-l` and `-u`: Not covered.
+Combinations: `-l` > `-u` rejected: Covered (Argument validation). `-g` vs `-G` output shape: Covered. Every reported frequency falls between `-l` and `-u`: Covered (fails after a range change until ubertooth#173).
 
 ## ubertooth-specan-ui (Python, GUI)
 
@@ -333,17 +333,15 @@ Ordered by value/effort:
 2. Done (#28): `--host-version`, `-N`, `-V` on rx/tx/afh, BlueZ tool help.
 3. `ubertooth-dfu -s` (suffix a binary; host-only) and `-u` read-back compared with the last
    flashed image.
-4. Implement Spectrum analyzer: `ubertooth-specan -l/-u` (bounded by `timeout`),
-   with every frequency in range, plus `-d`, `-g`, `-G` output shape.
-5. `ubertooth-btle -a` get/set/reset, `-tnone`/`-t<mac>` set path, `-r -` to stdout,
-   and `-r` combined with `-q`.
-6. `ubertooth-debug -r` list and range, `-v0`/`-v2`; add Debug register read to the release plan.
+4. Done (#30): `Spectrum analyzer` ranges, `-g`, `-G`, `-v`, `-d`.
+5. Done (#29): `BLE settings` (`-a`, `-t`, `-x`) and `-r` with `-q`/`-c`. Still open: `-r -` to stdout (would log raw capture bytes; needs a header-only check).
+6. Done (#32): `Debug registers` lists, ranges, verbosity, exit status.
 7. Raw receive replay: `ubertooth-rx -i <fixture>` with `-r`/`-q`/`-d`. Needs a public, synthetic fixture.
 8. Implement BLE monitor / Classic Bluetooth receive (`ubertooth-rx -z -t N`,
    `ubertooth-dump -c/-l -d`, `ubertooth-ego -r -c`), checking exit and output shape, not content.
 9. Add Ubertooth util conflicts to the release plan (fork #82 is fixed; [#25](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/25));
    add `-f`/`-i` rejection cases only if no accepted pair can reach those modes.
 10. Headless `ubertooth-specan-ui -h` and argument checks; `btle-extcap --extcap-interfaces/--extcap-dlts/--extcap-config`.
-11. Add `ubertooth-scan -h` and `ubertooth-follow -h` to Host CLI surface on BlueZ builds.
+11. Done (#28): `ubertooth-scan -h` and `ubertooth-follow -h` (skipped where not built).
 12. Peer-based tests from the backlog (known BLE advertiser, AFH map,
     piconet follow, two-board range test), once fixtures are registered.
