@@ -1,0 +1,624 @@
+// Ubertooth harness GUI. Vanilla JavaScript, no build step, no other origin.
+//
+// Every string from the controller or a runner reaches the page through
+// textContent or a fixed-prefix attribute; nothing is parsed as HTML.
+"use strict";
+
+(function () {
+  const LOG_LINES = 200;
+  const LOG_LINE_CHARS = 500;
+  const STATUS_TEXT = {
+    pending: ["○", "pending"],
+    running: ["…", "running"],
+    passed: ["✓", "passed"],
+    failed: ["✗", "failed"],
+    canceled: ["■", "canceled"],
+    skipped: ["–", "skipped"],
+    error: ["✗", "error"],
+    lost: ["?", "lost"],
+    "not run": ["○", "not run"],
+    "did not finish": ["✗", "did not finish"],
+    online: ["●", "online"],
+    offline: ["○", "offline"],
+  };
+
+  const state = {
+    targets: new Map(),
+    runs: new Map(),
+    plans: [],
+    selected: null, // run_id shown in the live view
+    live: null, // {run_id, seen:Set, events:[], items:[], byInvocation:Map, log:[], partial, stage}
+    socket: null,
+    retry: 1000,
+  };
+
+  const $ = (id) => document.getElementById(id);
+
+  // Build an element; children are nodes or strings (as text).
+  function el(tag, attributes, ...children) {
+    const node = document.createElement(tag);
+    for (const [name, value] of Object.entries(attributes || {})) {
+      if (value === null || value === undefined || value === false) continue;
+      if (name === "text") node.textContent = String(value);
+      else if (name === "className") node.className = value;
+      else if (name.startsWith("on")) node.addEventListener(name.slice(2), value);
+      else node.setAttribute(name, value === true ? "" : String(value));
+    }
+    for (const child of children) {
+      if (child === null || child === undefined) continue;
+      node.append(typeof child === "string" ? document.createTextNode(child) : child);
+    }
+    return node;
+  }
+
+  function statusBadge(status) {
+    const known = STATUS_TEXT[status];
+    const [icon, label] = known || ["•", String(status || "unknown")];
+    const key = known ? status.replace(/ /g, "-") : "unknown";
+    return el("span", { className: `status status-${key}` },
+      el("span", { "aria-hidden": "true", text: icon + " " }), label);
+  }
+
+  function timeElement(iso) {
+    if (!iso) return el("span", { text: "–" });
+    const date = new Date(iso);
+    const shown = Number.isNaN(date.getTime()) ? String(iso) : date.toLocaleString();
+    return el("time", { datetime: String(iso), text: shown });
+  }
+
+  function formatSeconds(total) {
+    const seconds = Math.max(0, Math.round(total));
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    const pad = (n) => String(n).padStart(2, "0");
+    return h ? `${h}h ${pad(m)}m ${pad(s)}s` : `${m}m ${pad(s)}s`;
+  }
+
+  async function api(method, path, body) {
+    const options = { method, headers: { Accept: "application/json" } };
+    if (body !== undefined) {
+      options.headers["Content-Type"] = "application/json";
+      options.body = JSON.stringify(body);
+    }
+    const response = await fetch(path, options);
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch (error) {
+      payload = null;
+    }
+    if (!response.ok) {
+      const detail = payload && typeof payload.detail === "string"
+        ? payload.detail : `HTTP ${response.status}`;
+      throw new Error(detail);
+    }
+    return payload;
+  }
+
+  const runPath = (runId) => `/api/runs/${encodeURIComponent(runId)}`;
+
+  // ----- targets -----------------------------------------------------------
+
+  function renderTargets() {
+    const list = $("targets");
+    const targets = [...state.targets.values()].sort((a, b) => a.host.localeCompare(b.host));
+    $("targets-empty").hidden = targets.length > 0;
+    list.replaceChildren(...targets.map((target) => {
+      const os = target.os || {};
+      const osText = [os.system, os.macos_version || os.distribution, os.release, os.architecture]
+        .filter(Boolean).join(" ");
+      const serials = Array.isArray(target.ubertooth_serials)
+        ? (target.ubertooth_serials.length ? target.ubertooth_serials.join(", ") : "none attached")
+        : `unknown (${target.enumeration_error || "enumeration unavailable"})`;
+      const active = target.active_run_id
+        ? el("span", {}, el("code", { text: target.active_run_id }), " ",
+          el("button", {
+            type: "button", text: "Watch",
+            "aria-label": `Watch run ${target.active_run_id}`,
+            onclick: () => selectRun(target.active_run_id),
+          }))
+        : "none";
+      return el("li", {},
+        el("article", { className: "card", "aria-labelledby": `target-${target.host}` },
+          el("h3", { id: `target-${target.host}`, text: target.host }),
+          el("dl", { className: "summary" },
+            el("dt", { text: "Status" }), el("dd", {}, statusBadge(target.status)),
+            el("dt", { text: "Host name" }), el("dd", { text: target.hostname }),
+            el("dt", { text: "OS" }), el("dd", { text: osText || "unknown" }),
+            el("dt", { text: "Python" }), el("dd", { text: target.python }),
+            el("dt", { text: "Ubertooth serials" }), el("dd", { text: serials }),
+            el("dt", { text: "Last seen" }), el("dd", {}, timeElement(target.last_seen_at)),
+            el("dt", { text: "Active run" }), el("dd", {}, active))));
+    }));
+    renderTargetSelect();
+  }
+
+  function renderTargetSelect() {
+    const select = $("target");
+    const current = select.value;
+    const targets = [...state.targets.values()].sort((a, b) => a.host.localeCompare(b.host));
+    if (!targets.length) {
+      select.replaceChildren(el("option", { value: "", text: "(no targets registered)" }));
+      return;
+    }
+    select.replaceChildren(...targets.map((target) => {
+      const notes = [target.status];
+      if (target.active_run_id) notes.push("busy");
+      return el("option", { value: target.host, text: `${target.host} (${notes.join(", ")})` });
+    }));
+    if (targets.some((target) => target.host === current)) select.value = current;
+  }
+
+  // ----- run setup ---------------------------------------------------------
+
+  async function loadRefs() {
+    const select = $("ref");
+    const status = $("refs-status");
+    status.textContent = "Loading refs…";
+    try {
+      const data = await api("GET", "/api/refs");
+      const groups = { default: "Default branch", branch: "Branches", tag: "Tags" };
+      const current = select.value;
+      select.replaceChildren(...Object.entries(groups).map(([kind, label]) => {
+        const refs = data.refs.filter((ref) => ref.kind === kind);
+        if (!refs.length) return null;
+        return el("optgroup", { label },
+          ...refs.map((ref) => el("option", {
+            value: ref.name, text: `${ref.name} (${String(ref.commit).slice(0, 12)})`,
+          })));
+      }).filter(Boolean));
+      const preferred = [current, "main", "master", "HEAD"]
+        .find((name) => name && data.refs.some((ref) => ref.name === name));
+      if (preferred) select.value = preferred;
+      status.textContent = `${data.refs.length} refs from ${data.repository}, listed ${data.fetched_at}.`;
+    } catch (error) {
+      select.replaceChildren(el("option", { value: "", text: "(refs unavailable)" }));
+      status.textContent = `Cannot list refs: ${error.message}`;
+    }
+  }
+
+  async function loadPlans() {
+    try {
+      const data = await api("GET", "/api/plans");
+      state.plans = data.plans;
+    } catch (error) {
+      state.plans = [];
+      $("plan-status").textContent = `Cannot list plans: ${error.message}`;
+    }
+    const select = $("plan");
+    const usable = state.plans.filter((plan) => !plan.error);
+    select.replaceChildren(...usable.map((plan) =>
+      el("option", { value: plan.name, text: `${plan.name} — ${plan.title}` })));
+    const broken = state.plans.filter((plan) => plan.error);
+    if (broken.length) {
+      $("plan-status").textContent = `Not loadable: ${broken.map((plan) => `${plan.name} (${plan.error})`).join("; ")}`;
+    }
+    if (usable.some((plan) => plan.name === "fast")) select.value = "fast";
+    renderSuites();
+    if (state.live) rebuildChecklist();
+  }
+
+  function findSuite(planName, suiteName) {
+    const plan = state.plans.find((item) => item.name === planName && !item.error);
+    return plan ? plan.suites.find((suite) => suite.name === suiteName) || null : null;
+  }
+
+  function renderSuites() {
+    const plan = state.plans.find((item) => item.name === $("plan").value);
+    const select = $("suite");
+    const suites = plan ? plan.suites : [];
+    select.replaceChildren(...suites.map((suite) =>
+      el("option", { value: suite.name, text: `${suite.name} (${suite.tests.length} tests)` })));
+    const same = suites.find((suite) => suite.name === plan?.name);
+    if (same) select.value = same.name;
+    renderSuiteTests();
+  }
+
+  function renderSuiteTests() {
+    const suite = findSuite($("plan").value, $("suite").value);
+    $("suite-tests").textContent = suite
+      ? `${suite.tests.map((test) => test.name).join(", ")}. ${estimateText(suite)}`
+      : "";
+  }
+
+  function estimateText(suite) {
+    if (suite.estimated_s !== null && suite.estimated_s !== undefined) {
+      return `Estimated test time ${formatSeconds(suite.estimated_s)} (from the tests' duration arguments; build and preflight not included).`;
+    }
+    return `No time estimate: ${suite.unestimated_tests} of ${suite.tests.length} tests have no estimated duration, so the live view shows elapsed time only.`;
+  }
+
+  async function submitRun(event) {
+    event.preventDefault();
+    const status = $("run-status");
+    const host = $("target").value;
+    const body = {
+      ref: $("ref").value,
+      plan: $("plan").value,
+      suite: $("suite").value,
+      tests: [],
+      build: $("build").checked,
+    };
+    if (!host || !body.ref || !body.plan || !body.suite) {
+      status.textContent = "Choose a ref, plan, suite and target first.";
+      return;
+    }
+    const button = $("run-button");
+    button.disabled = true;
+    status.textContent = `Starting ${body.plan}/${body.suite} at ${body.ref} on ${host}…`;
+    try {
+      const data = await api("POST", `/api/targets/${encodeURIComponent(host)}/runs`, body);
+      upsertRun(data.run);
+      status.textContent = `Started run ${data.run.run_id}.`;
+      selectRun(data.run.run_id);
+    } catch (error) {
+      status.textContent = `Not started: ${error.message}`;
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  // ----- live run ----------------------------------------------------------
+
+  function newLive(runId) {
+    return {
+      run_id: runId, seen: new Set(), events: [], items: [],
+      byInvocation: new Map(), log: [], partial: "", stage: "waiting",
+    };
+  }
+
+  const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+  async function selectRun(runId, scroll = true) {
+    if (!RUN_ID.test(String(runId))) return;
+    state.selected = runId;
+    // A link to this view: /ui/#run=<run_id>.
+    window.history.replaceState(null, "", `#run=${runId}`);
+    state.live = newLive(runId);
+    $("live-empty").hidden = true;
+    $("live").hidden = false;
+    $("cancel-status").textContent = "";
+    rebuildChecklist();
+    renderLive();
+    try {
+      const data = await api("GET", runPath(runId));
+      if (state.selected !== runId) return;
+      upsertRun(data.run);
+      for (const record of data.events) addEvent(runId, record, false);
+      // Now that the run's plan is known, lay out its checklist and replay.
+      rebuildChecklist();
+    } catch (error) {
+      $("cancel-status").textContent = `Cannot load run: ${error.message}`;
+    }
+    if (scroll) $("live-heading").scrollIntoView({ block: "start" });
+  }
+
+  function rebuildChecklist() {
+    const live = state.live;
+    if (!live) return;
+    const run = state.runs.get(live.run_id);
+    const suite = run ? findSuite(run.plan, run.suite) : null;
+    let tests = suite ? suite.tests : [];
+    if (run && Array.isArray(run.tests) && run.tests.length) {
+      tests = tests.filter((test) => run.tests.includes(test.name));
+    }
+    live.items = tests.map((test) => ({
+      name: test.name, estimated_s: test.estimated_s, status: "pending", reason: "",
+    }));
+    live.planned = Boolean(suite);
+    live.byInvocation = new Map();
+    // Records from the socket and from REST may interleave; replay in order.
+    const events = [...live.events].sort((a, b) => a.sequence - b.sequence);
+    live.events = [];
+    live.seen = new Set();
+    live.log = [];
+    live.partial = "";
+    live.stage = "waiting";
+    // The estimate covers tests only, so the countdown starts with the first test.
+    live.testsStarted = null;
+    for (const record of events) addEvent(live.run_id, record, false);
+    renderLive();
+  }
+
+  function pushLog(line) {
+    const live = state.live;
+    live.log.push(String(line).slice(0, LOG_LINE_CHARS));
+    if (live.log.length > LOG_LINES) live.log.splice(0, live.log.length - LOG_LINES);
+  }
+
+  function flushPartial() {
+    if (state.live.partial) {
+      pushLog(state.live.partial);
+      state.live.partial = "";
+    }
+  }
+
+  function addEvent(runId, record, render = true) {
+    const live = state.live;
+    if (!live || live.run_id !== runId || !record || typeof record !== "object") return;
+    if (live.seen.has(record.sequence)) return;
+    live.seen.add(record.sequence);
+    live.events.push(record);
+    const details = record.details && typeof record.details === "object" ? record.details : {};
+    const kind = String(record.event_type);
+    const status = String(record.status || "");
+    if (kind === "command_output") {
+      const text = live.partial + String(details.text ?? "");
+      const lines = text.split("\n");
+      live.partial = lines.pop();
+      for (const line of lines) pushLog(line);
+    } else {
+      flushPartial();
+    }
+    if (kind === "build_started") live.stage = "building";
+    else if (kind === "preflight_started") live.stage = "preflight";
+    else if (kind === "test_started") live.stage = "tests";
+    else if (kind === "run_finished") live.stage = "finished";
+
+    if (kind === "test_started") {
+      const name = String(details.test_name ?? "");
+      let item = live.items.find((entry) => entry.name === name && entry.status === "pending");
+      if (!item) {
+        item = { name, estimated_s: null, status: "pending", reason: "" };
+        live.items.push(item);
+      }
+      item.status = "running";
+      item.started = record.timestamp;
+      if (!live.testsStarted && record.timestamp) live.testsStarted = record.timestamp;
+      live.byInvocation.set(String(details.invocation_id), item);
+      pushLog(`=== TEST ${name} on ${details.host ?? ""} ===`);
+    } else if (kind === "test_finished") {
+      const item = live.byInvocation.get(String(details.invocation_id));
+      if (item) {
+        item.status = status;
+        item.reason = String(details.reason || "");
+      }
+      pushLog(`=== TEST ${details.test_name ?? ""}: ${status}${details.reason ? ": " + details.reason : ""} ===`);
+    } else if (kind === "build_step_started") {
+      pushLog(`+++ ${details.step_name ?? details.step_id ?? ""} +++`);
+    } else if (kind === "build_finished" || kind === "preflight_finished") {
+      pushLog(`=== ${kind.replace("_finished", "").toUpperCase()}: ${status}${details.reason ? ": " + details.reason : ""} ===`);
+    } else if (kind === "run_started") {
+      pushLog(`=== RUN ${record.run_id}: ${details.plan_name ?? ""} / ${details.suite ?? ""} on ${details.host ?? ""} ===`);
+    } else if (kind === "run_finished") {
+      pushLog(`=== RUN ${status}${details.failure_reason ? ": " + details.failure_reason : ""} ===`);
+    }
+    if (render) renderLive();
+  }
+
+  function itemStatus(item, run) {
+    if (!run || run.status === "running") return item.status;
+    if (item.status === "pending") return "not run";
+    if (item.status === "running") return "did not finish";
+    return item.status;
+  }
+
+  function renderLive() {
+    const live = state.live;
+    if (!live) return;
+    const run = state.runs.get(live.run_id) || { run_id: live.run_id, status: "running" };
+    const fields = [
+      ["Run", el("code", { text: run.run_id })],
+      ["Status", statusBadge(run.status)],
+      ["Stage", live.stage],
+      ["Ref", run.ref ?? "–"],
+      ["Plan / suite", `${run.plan ?? "–"} / ${run.suite ?? "–"}`],
+      ["Target", run.target ?? "–"],
+      ["Started", timeElement(run.created_at)],
+      ["Finished", timeElement(run.finished_at)],
+    ];
+    if (run.reason) fields.push(["Reason", run.reason]);
+    $("live-summary").replaceChildren(...fields.flatMap(([term, value]) =>
+      [el("dt", { text: term }), el("dd", {}, value)]));
+    $("cancel-button").hidden = run.status !== "running";
+
+    $("checklist").replaceChildren(...live.items.map((item) => {
+      const shown = itemStatus(item, run);
+      return el("li", { className: `check check-${shown.replace(/ /g, "-")}` },
+        statusBadge(shown), " ", el("span", { className: "check-name", text: item.name }),
+        item.estimated_s !== null && item.estimated_s !== undefined
+          ? el("span", { className: "hint", text: ` (about ${formatSeconds(item.estimated_s)})` }) : null,
+        item.reason ? el("span", { className: "reason", text: ` — ${item.reason}` }) : null);
+    }));
+    if (!live.items.length) {
+      $("checklist").replaceChildren(el("li", {
+        text: "Tests appear here as they start (this run's plan is not in the controller's plans directory).",
+      }));
+    }
+    const logNode = $("log");
+    const lines = live.partial ? [...live.log, live.partial] : live.log;
+    logNode.textContent = lines.join("\n");
+    logNode.scrollTop = logNode.scrollHeight;
+    renderClock();
+  }
+
+  function renderClock() {
+    const live = state.live;
+    if (!live) return;
+    const run = state.runs.get(live.run_id);
+    if (!run || !run.created_at) {
+      $("live-clock").textContent = "";
+      return;
+    }
+    const start = Date.parse(run.created_at);
+    const end = run.finished_at ? Date.parse(run.finished_at) : Date.now();
+    const elapsed = Math.max(0, (end - start) / 1000);
+    const estimates = live.items.map((item) => item.estimated_s);
+    const known = live.planned && estimates.length > 0 &&
+      estimates.every((value) => value !== null && value !== undefined);
+    if (!known) {
+      $("live-clock").textContent = `Elapsed ${formatSeconds(elapsed)}`;
+      const missing = estimates.filter((value) => value === null || value === undefined).length;
+      $("live-estimate").textContent = live.planned
+        ? `No countdown: ${missing} of ${estimates.length} tests have no estimated duration, so only elapsed time is shown.`
+        : "No countdown: this run's plan is unknown here, so only elapsed time is shown.";
+      return;
+    }
+    const total = estimates.reduce((sum, value) => sum + value, 0);
+    $("live-estimate").textContent = `Estimate ${formatSeconds(total)} from the tests' duration arguments; build and preflight are not included.`;
+    const testsStart = live.testsStarted ? Date.parse(live.testsStarted) : NaN;
+    const testsElapsed = Number.isNaN(testsStart) ? null : Math.max(0, (end - testsStart) / 1000);
+    if (run.status !== "running") {
+      $("live-clock").textContent = `Finished after ${formatSeconds(elapsed)}`;
+    } else if (testsElapsed === null) {
+      $("live-clock").textContent = `Countdown starts with the first test (elapsed ${formatSeconds(elapsed)})`;
+    } else if (testsElapsed <= total) {
+      $("live-clock").textContent = `About ${formatSeconds(total - testsElapsed)} remaining (elapsed ${formatSeconds(elapsed)})`;
+    } else {
+      $("live-clock").textContent = `Over the estimate by ${formatSeconds(testsElapsed - total)} (elapsed ${formatSeconds(elapsed)})`;
+    }
+  }
+
+  async function cancelRun() {
+    const live = state.live;
+    if (!live) return;
+    const status = $("cancel-status");
+    status.textContent = "Asking the runner to cancel…";
+    try {
+      await api("POST", `${runPath(live.run_id)}/cancel`, { reason: "canceled from the web GUI" });
+      status.textContent = "Cancel accepted; the run stops at its next safe point.";
+    } catch (error) {
+      status.textContent = `Cancel refused: ${error.message}`;
+    }
+  }
+
+  // ----- history -----------------------------------------------------------
+
+  function upsertRun(run) {
+    if (!run || typeof run.run_id !== "string") return;
+    state.runs.set(run.run_id, run);
+    renderHistory();
+    if (state.live && state.live.run_id === run.run_id) renderLive();
+  }
+
+  function renderHistory() {
+    const runs = [...state.runs.values()].sort((a, b) =>
+      String(b.created_at).localeCompare(String(a.created_at)) || b.run_id.localeCompare(a.run_id));
+    $("history-empty").hidden = runs.length > 0;
+    $("history").replaceChildren(...runs.map((run) => {
+      const actions = el("td", { className: "actions" },
+        el("button", {
+          type: "button", text: "Watch", "aria-label": `Watch run ${run.run_id}`,
+          onclick: () => selectRun(run.run_id),
+        }));
+      if (run.report) {
+        actions.append(" ", el("a", {
+          href: `${runPath(run.run_id)}/report.md`, text: "report.md",
+          "aria-label": `report.md of run ${run.run_id}`,
+        }));
+      }
+      if (run.status !== "running" && run.status !== "passed") {
+        actions.append(" ", el("button", {
+          type: "button", text: "Failures", "aria-label": `Failure summary of run ${run.run_id}`,
+          onclick: () => showFailures(run.run_id),
+        }));
+      }
+      return el("tr", {},
+        el("td", {}, timeElement(run.created_at)),
+        el("td", {}, timeElement(run.finished_at)),
+        el("td", {}, el("code", { text: run.run_id })),
+        el("td", { text: run.ref ?? "–" }),
+        el("td", { text: `${run.plan ?? "–"} / ${run.suite ?? "–"}` }),
+        el("td", { text: run.target }),
+        el("td", {}, statusBadge(run.status)),
+        actions);
+    }));
+  }
+
+  async function loadRuns() {
+    try {
+      const data = await api("GET", "/api/runs");
+      state.runs = new Map(data.runs.map((run) => [run.run_id, run]));
+      renderHistory();
+      if (state.live) rebuildChecklist();
+    } catch (error) {
+      $("history-empty").textContent = `Cannot list runs: ${error.message}`;
+    }
+  }
+
+  async function showFailures(runId) {
+    const box = $("failures");
+    const list = $("failures-list");
+    box.hidden = false;
+    $("failures-heading").textContent = `Failure summary: ${runId}`;
+    list.replaceChildren(el("li", { text: "Loading…" }));
+    try {
+      const data = await api("GET", runPath(runId));
+      const run = data.run;
+      $("failures-run").replaceChildren(
+        el("dt", { text: "Target" }), el("dd", { text: run.target }),
+        el("dt", { text: "Ref" }), el("dd", { text: run.ref ?? "–" }),
+        el("dt", { text: "Plan / suite" }), el("dd", { text: `${run.plan ?? "–"} / ${run.suite ?? "–"}` }),
+        el("dt", { text: "Status" }), el("dd", {}, statusBadge(run.status)));
+      if (!data.failures.length) {
+        list.replaceChildren(el("li", { text: "No failed step recorded." }));
+      } else {
+        list.replaceChildren(...data.failures.map((failure) => el("li", {},
+          statusBadge(failure.status), " ", el("strong", { text: failure.step }),
+          failure.reason ? el("span", { text: `: ${failure.reason}` }) : null,
+          failure.log && failure.log.length
+            ? el("pre", { className: "log", text: failure.log.join("\n") }) : null)));
+      }
+    } catch (error) {
+      list.replaceChildren(el("li", { text: `Cannot load the run: ${error.message}` }));
+    }
+    $("failures-heading").focus();
+  }
+
+  // ----- live socket -------------------------------------------------------
+
+  function connect() {
+    const scheme = window.location.protocol === "https:" ? "wss://" : "ws://";
+    const socket = new WebSocket(`${scheme}${window.location.host}/ws/live`);
+    state.socket = socket;
+    socket.addEventListener("open", () => {
+      state.retry = 1000;
+      $("connection").textContent = "Connected to the controller (live updates on).";
+      loadRuns();
+      if (state.selected) selectRun(state.selected, false);
+    });
+    socket.addEventListener("message", (message) => {
+      let data;
+      try {
+        data = JSON.parse(message.data);
+      } catch (error) {
+        return;
+      }
+      if (data.type === "snapshot") {
+        state.targets = new Map((data.targets || []).map((target) => [target.host, target]));
+        renderTargets();
+      } else if (data.type === "target" && data.target) {
+        state.targets.set(data.target.host, data.target);
+        renderTargets();
+      } else if (data.type === "run") {
+        upsertRun(data.run);
+      } else if (data.type === "event") {
+        addEvent(data.run_id, data.event);
+      }
+    });
+    socket.addEventListener("close", () => {
+      const wait = state.retry;
+      state.retry = Math.min(state.retry * 2, 30000);
+      $("connection").textContent = `Disconnected from the controller; retrying in ${Math.round(wait / 1000)} s.`;
+      window.setTimeout(connect, wait);
+    });
+  }
+
+  function start() {
+    $("run-form").addEventListener("submit", submitRun);
+    $("refs-reload").addEventListener("click", loadRefs);
+    $("plan").addEventListener("change", renderSuites);
+    $("suite").addEventListener("change", renderSuiteTests);
+    $("cancel-button").addEventListener("click", cancelRun);
+    renderTargetSelect();
+    loadRefs();
+    loadPlans();
+    const linked = /^#run=(.+)$/.exec(window.location.hash);
+    if (linked && RUN_ID.test(linked[1])) state.selected = linked[1];
+    connect();
+    window.setInterval(renderClock, 1000);
+  }
+
+  document.addEventListener("DOMContentLoaded", start);
+})();
