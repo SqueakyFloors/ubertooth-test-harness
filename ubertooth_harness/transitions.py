@@ -40,8 +40,10 @@ Command contracts below come from the Ubertooth fork sources:
 
 from dataclasses import dataclass, replace
 from itertools import combinations, product
+from pathlib import Path
 import re
 import subprocess
+import sys
 from typing import Callable, Mapping
 
 from ubertooth_harness.cases import CommandCase, guard_roles
@@ -53,6 +55,7 @@ from ubertooth_harness.patterns import (
     serial_pattern,
 )
 from ubertooth_harness.stateful import (
+    CAPTURE_DIR_KEY,
     Observation,
     StateCase,
     StateCaseError,
@@ -787,6 +790,147 @@ def _repeated_crc_case(serial):
     )
 
 
+_CAPTURE_FORMATS = (
+    # (option, label, file name, header format, link type)
+    ("-r", "pcapng", "capture.pcapng", "pcapng", "256"),
+    ("-q", "pcap-le-phdr", "capture.pcap", "pcap", "256"),
+    ("-c", "pcap-ppi", "capture-ppi.pcap", "pcap", "192"),
+)
+_CAPTURE_PATTERN = r"Capture format: (?P<value>\w+, link type: \d+)"
+
+
+def _capture_path(name):
+    def path(context):
+        return str(Path(require(context, CAPTURE_DIR_KEY)) / name)
+    return path
+
+
+def _capture_check(step_id, name, file_name, key, header_format, link_type):
+    return Step(
+        step_id,
+        name,
+        lambda context: (
+            sys.executable, "-m", "ubertooth_harness.capturefile",
+            _capture_path(file_name)(context),
+        ),
+        observe=Observation(
+            key, _CAPTURE_PATTERN, f"{header_format}, link type: {link_type}"
+        ),
+    )
+
+
+def _capture_absent(step_id, name, file_name):
+    return Step(
+        step_id,
+        name,
+        lambda context: (
+            sys.executable, "-m", "ubertooth_harness.capturefile", "--absent",
+            _capture_path(file_name)(context),
+        ),
+        output_patterns=(r"Capture file absent: ",),
+    )
+
+
+def _capture_reads(serial):
+    return (
+        _stop(serial, "establish-idle", "Establish idle before reading"),
+        _crc_read(serial, "read-original-crc", "Read original CRC", "original crc"),
+    ) + _read_originals(serial, MODE_RESET_SETTINGS)
+
+
+def _capture_case(serial, mode, mode_label, target, capture):
+    option, label, file_name, header_format, link_type = capture
+    opposite = "0" if target == "1" else "1"
+    state = "enabled" if target == "1" else "disabled"
+    return StateCase(
+        f"crc-{state}-during-{mode_label}-capture-{label}",
+        f"CRC {state} during {mode_label} mode capturing {option} ({label})",
+        _capture_reads(serial) + (
+            Step(
+                "preset-opposite",
+                "Preset opposite CRC before mode",
+                _btle(serial, f"-v{opposite}"),
+                mutates=True,
+            ),
+            _crc_read(serial, "verify-preset", "Verify opposite CRC before mode",
+                      "crc before mode", opposite),
+            Step(
+                "mode",
+                f"Sniff in {mode_label} mode with CRC {state}, capturing {option}",
+                lambda context: _btle(
+                    serial, mode, "-A37", f"-v{target}",
+                    option, _capture_path(file_name)(context),
+                ),
+                timeout_s=MODE_TIMEOUT_S,
+                mutates=True,
+                continuous=True,
+            ),
+            _stop(serial),
+            _crc_read(serial, "verify-effective", "Verify CRC applied by the mode",
+                      "crc after mode", target),
+            _capture_check("verify-capture", f"Verify {option} capture file header",
+                           file_name, "capture header", header_format, link_type),
+        ),
+        _cleanup(serial, MODE_RESET_SETTINGS, crc=True),
+        expected_state=(
+            f"CRC {state} after {mode_label} mode; {option} wrote a {header_format} "
+            f"file with link type {link_type}; original CRC, channel, squelch, and "
+            "LEDs restored"
+        ),
+        capture_dir=True,
+    )
+
+
+def _repeated_capture_case(first, second):
+    """Capture files are first-option-wins; the extra one is never created.
+
+    -q and -c share one PCAP handle, so either after the other is "extra".
+    """
+    def case(serial):
+        option_a, label_a, file_a, format_a, link_a = first
+        option_b, label_b, file_b, _format_b, _link_b = second
+        if file_a == file_b:
+            file_b = "second-" + file_b
+        return StateCase(
+            f"capture-repeated-{label_a}-then-{label_b}-first-wins",
+            f"Repeated capture {option_a} then {option_b} is first-option-wins",
+            _capture_reads(serial) + (
+                Step(
+                    "mode",
+                    f"Sniff with capture {option_a} then {option_b}",
+                    lambda context: _btle(
+                        serial, "-n", "-A37",
+                        option_a, _capture_path(file_a)(context),
+                        option_b, _capture_path(file_b)(context),
+                    ),
+                    timeout_s=MODE_TIMEOUT_S,
+                    output_patterns=(r"Ignoring extra capture file: ",),
+                    mutates=True,
+                    continuous=True,
+                ),
+                _stop(serial),
+                _capture_check("verify-first", f"Verify the {option_a} file was written",
+                               file_a, "first capture header", format_a, link_a),
+                _capture_absent("verify-second-absent",
+                                f"Verify the extra {option_b} file was not created", file_b),
+            ),
+            _cleanup(serial, MODE_RESET_SETTINGS, crc=True),
+            expected_state=(
+                f"only the first capture file ({option_a}) written, the extra "
+                f"{option_b} ignored; every setting restored"
+            ),
+            capture_dir=True,
+        )
+    return case
+
+
+_FORMATS = {item[0]: item for item in _CAPTURE_FORMATS}
+_REPEATED_CAPTURES = tuple(
+    _repeated_capture_case(_FORMATS[a], _FORMATS[b])
+    for a, b in (("-r", "-r"), ("-q", "-c"), ("-c", "-q"))
+)
+
+
 def ble_crc_cases(arguments, _resources, resource_identities):
     serial = _serial(resource_identities, "BLE CRC transitions")
     if arguments["coverage"] == "comprehensive":
@@ -799,6 +943,19 @@ def ble_crc_cases(arguments, _resources, resource_identities):
     ]
     if arguments["coverage"] == "comprehensive":
         cases.append(_repeated_crc_case(serial))
+        cases.extend(
+            _capture_case(serial, mode, label, target, capture)
+            for (mode, label), target, capture in product(
+                _CRC_MODES, ("1", "0"), _CAPTURE_FORMATS
+            )
+        )
+        cases.extend(build(serial) for build in _REPEATED_CAPTURES)
+    else:
+        # One capture case per format keeps every output format in smoke.
+        cases.extend(
+            _capture_case(serial, "-n", "no-follow", "1", capture)
+            for capture in _CAPTURE_FORMATS
+        )
     return tuple(cases)
 
 

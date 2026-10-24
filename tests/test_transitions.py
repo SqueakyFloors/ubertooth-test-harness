@@ -1,9 +1,13 @@
+import io
+import struct
+import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from ubertooth_harness import transitions
+from ubertooth_harness import capturefile, transitions
 from ubertooth_harness.cancellation import CancellationToken
 from ubertooth_harness.catalog import CatalogError, builtin_catalog
 from ubertooth_harness.executor import CommandResult
@@ -95,6 +99,12 @@ class FakeUbertooth:
             return CommandResult(command, 130, "", "canceled\n", 0.0, False, True)
         if self.fail(command):
             return self._result(command, 1, "", "injected failure\n", on_output)
+        if command[:3] == (sys.executable, "-m", "ubertooth_harness.capturefile"):
+            # The real header check, on the files this fake wrote.
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = capturefile.main(list(command[3:]))
+            return self._result(command, code, out.getvalue(), "", on_output)
         selections = [command[i + 1] for i, item in enumerate(command) if item == "-U"]
         assert selections and selections[-1] == self.serial, command
         options = command[3:]
@@ -145,8 +155,9 @@ class FakeUbertooth:
             options = tuple(item for item in options if item != "-p")
         crcs = [item[2:] for item in options if item.startswith("-v") and len(item) > 2]
         crc = crcs[-1] if crcs else crc
+        capture_lines = self._open_captures(options)
         if "-n" in options or "-f" in options:
-            output = ""
+            output = capture_lines
             adv = next((item[2:] for item in options if item.startswith("-A")), "37")
             self.state["channel"] = {"37": "2402", "38": "2426", "39": "2480"}[adv]
             self.mode = "ble"
@@ -163,6 +174,39 @@ class FakeUbertooth:
         return self._result(
             command, 0, self._crc_line(self.state["crc"]), "", on_output
         )
+
+    # Headers libubertooth/libbtbb write when the capture file is created.
+    PCAP_HEADER = staticmethod(lambda link: struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, link))
+
+    @staticmethod
+    def _pcapng_header(link):
+        # libbtbb pads the section header block to 32 KiB (seen on hardware).
+        size = 0x8000
+        shb = (struct.pack("<IIIHHq", 0x0A0D0D0A, size, 0x1A2B3C4D, 1, 0, -1)
+               + bytes(size - 28) + struct.pack("<I", size))
+        idb = struct.pack("<IIHHI", 1, 20, link, 0, 0) + struct.pack("<I", 20)
+        return shb + idb
+
+    def _open_captures(self, options):
+        """ubertooth-btle getopt: -r has its own handle, -q and -c share one;
+        the first option for a handle wins and extras are ignored."""
+        handles = {}
+        lines = ""
+        for index, item in enumerate(options):
+            if item not in ("-r", "-q", "-c"):
+                continue
+            path = options[index + 1]
+            handle = "pcapng" if item == "-r" else "pcap"
+            if handle in handles:
+                lines += f"Ignoring extra capture file: {path}\n"
+                continue
+            handles[handle] = path
+            data = (
+                self._pcapng_header(256) if item == "-r"
+                else self.PCAP_HEADER(256 if item == "-q" else 192)
+            )
+            Path(path).write_bytes(data)
+        return lines
 
     BOOT_STATE = {
         "channel": "2441", "pa": "7", "squelch": "-120",
@@ -454,6 +498,7 @@ class CoverageGenerationTests(unittest.TestCase):
                 "original usr-led": "1",
                 "original leds": "1/0/0",
                 "original channel-index": "2441",
+                "capture dir": "/tmp/captures",
             }
             for case in cases:
                 if isinstance(case, StateCase):
@@ -463,6 +508,8 @@ class CoverageGenerationTests(unittest.TestCase):
                     ]
                 else:
                     commands = [case.argv]
+                # Host-side capture header checks select no device.
+                commands = [c for c in commands if c[0] != sys.executable]
                 for command in commands:
                     with self.subTest(test_name, case=case.case_id, argv=command):
                         selections = [
@@ -476,6 +523,66 @@ class CoverageGenerationTests(unittest.TestCase):
 
 class TransitionExecutionTests(unittest.TestCase):
 
+    def test_capture_cases_cover_each_format_mode_and_crc(self):
+        _args, smoke = cases_for("BLE CRC transitions", "smoke")
+        _args, full = cases_for("BLE CRC transitions", "comprehensive")
+        smoke_ids = {case.case_id for case in smoke}
+        full_ids = {case.case_id for case in full}
+        for label in ("pcapng", "pcap-le-phdr", "pcap-ppi"):
+            self.assertIn(f"crc-enabled-during-no-follow-capture-{label}", smoke_ids)
+            for mode in ("no-follow", "follow"):
+                for state in ("enabled", "disabled"):
+                    self.assertIn(f"crc-{state}-during-{mode}-capture-{label}", full_ids)
+        for pair in ("pcapng-then-pcapng", "pcap-le-phdr-then-pcap-ppi", "pcap-ppi-then-pcap-le-phdr"):
+            self.assertIn(f"capture-repeated-{pair}-first-wins", full_ids)
+        self.assertTrue(all(c.capture_dir for c in full if "capture" in c.case_id))
+
+    def test_capture_cases_verify_link_types_and_first_option_wins(self):
+        device = FakeUbertooth(crc="1")
+
+        summary, events = run_test("BLE CRC transitions", device, coverage="comprehensive")
+
+        self.assertTrue(summary.passed, summary.failure_reason)
+        self.assertEqual(12, len(steps(events, step_id="verify-capture")))
+        observed = {
+            e.details["case_id"]: e.details["observed"]
+            for e in steps(events, step_id="verify-capture")
+        }
+        for case_id, value in observed.items():
+            expected = "pcap, link type: 192" if case_id.endswith("pcap-ppi") else (
+                "pcapng, link type: 256" if case_id.endswith("pcapng") else "pcap, link type: 256"
+            )
+            self.assertEqual(expected, value, case_id)
+        self.assertEqual(3, len([e for e in steps(events, step_id="verify-second-absent")
+                                 if e.status == "passed"]))
+        first = {
+            e.details["case_id"]: e.details["observed"]
+            for e in steps(events, step_id="verify-first")
+        }
+        self.assertEqual(
+            ["pcap, link type: 192", "pcap, link type: 256", "pcapng, link type: 256"],
+            sorted(first.values()),
+        )
+        mode_argv = [
+            e.details["argv"] for e in steps(events, step_id="mode")
+            if "-q" in e.details["argv"] or "-r" in e.details["argv"] or "-c" in e.details["argv"]
+        ]
+        for argv in mode_argv:
+            for path in (argv[i + 1] for i, a in enumerate(argv) if a in ("-r", "-q", "-c")):
+                self.assertIn("/captures/001-BLE-CRC-transitions/", path)
+
+    def test_a_wrong_capture_link_type_fails_the_case(self):
+        device = FakeUbertooth(crc="1")
+        device.PCAP_HEADER = staticmethod(
+            lambda link: struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1)
+        )
+
+        summary, events = run_test("BLE CRC transitions", device)
+
+        self.assertFalse(summary.passed)
+        failed = [e for e in steps(events, step_id="verify-capture") if e.status == "failed"]
+        self.assertEqual(2, len(failed))  # -q and -c in smoke; -r is pcapng
+        self.assertIn("link type: 1", failed[0].details["observed"])
     def test_crc_transitions_pass_and_restore_original(self):
         device = FakeUbertooth(crc="1")
 
