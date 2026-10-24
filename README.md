@@ -802,6 +802,10 @@ outstanding request, and each caller has its own timeout.
 
 ## Tests
 
+[`COVERAGE.md`](COVERAGE.md) lists every Ubertooth host CLI option, which
+named test covers it, the option combinations still to test, and what is hard
+to test. Use it to pick the next test.
+
 ```sh
 python -m unittest discover -s tests -v
 ```
