@@ -702,9 +702,9 @@ python -m unittest discover -s tests -v
 ```
 
 CI runs the suite and validates the long plan with Python 3.12 on Ubuntu 24.04
-and macOS 26 (see `.github/workflows/test.yml`). The checks themselves are in
-`scripts/ci.sh`. To run them on an exact commit without GitHub Actions, locally
-or on another host over SSH:
+and the current macOS (`macos-latest`; see `.github/workflows/test.yml`). The
+checks themselves are in `scripts/ci.sh`. To run them on an exact commit
+without GitHub Actions, locally or on another host over SSH:
 
 ```sh
 scripts/local-ci.sh                       # HEAD, this host
