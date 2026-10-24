@@ -160,9 +160,25 @@ class LeaseTests(unittest.TestCase):
         both = leases.boards_for_invocations([cases["guard role"], invocation()], registry)
         self.assertEqual([A, B], list(both))
 
-    def test_board_key_uses_the_serial_else_a_safe_alias(self):
-        self.assertEqual("abcd", leases.board_key("UT", {"serial": "ABCD"}))
-        self.assertEqual("alias-UT_a_b", leases.board_key("UT/a b", {}))
+    def test_board_key_needs_a_full_serial(self):
+        self.assertEqual(A.key, leases.board_key("UT", {"serial": A.key.upper()}))
+        # A short serial selects the same board as the full one (libubertooth
+        # matches the end), so it would take a different lock: refuse it.
+        for serial in ("abcd", "", "1" * 32, "g" * 32):
+            with self.subTest(serial=serial), self.assertRaises(leases.LeaseError):
+                leases.board_key("UT", {"serial": serial})
+
+    def test_a_repeated_board_is_leased_once(self):
+        with leases.acquire([A, A], holder("agent-1"), directory=self.dir) as held:
+            self.assertEqual(1, len(held.leases))
+
+    def test_release_clears_the_holder_record(self):
+        leases.acquire([A], holder("agent-1"), directory=self.dir).release()
+        self.assertEqual({}, leases.read_holder(self.dir / f"{A.key}.lock"))
+
+    def test_signal_exit_is_reported_shell_style(self):
+        self.assertEqual(143, leases.exit_status(-15))
+        self.assertEqual(3, leases.exit_status(3))
 
     def _hardware(self):
         path = self.dir / "hardware.yaml"
@@ -255,6 +271,42 @@ class LeaseCliTests(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual('"manual"', result.stdout.strip())
         self.assertFalse(leases.board_states([A], directory=self.lease_dir)[0]["held"])
+
+    def test_boards_needs_a_real_host_when_the_registry_has_several(self):
+        two_hosts = self.root / "two.yaml"
+        two_hosts.write_text(
+            HARDWARE
+            + f"  Host_Other:\n    type: Host\n    platform: {PLATFORM}\n    roles: [test target]\n"
+        )
+        code, _out, err = self._main(
+            "boards", "--hardware", str(two_hosts), "--lease-dir", str(self.lease_dir),
+        )
+        self.assertEqual(2, code)
+        self.assertIn("boards needs --host", err)
+        code, _out, err = self._main(
+            "boards", "--hardware", str(two_hosts), "--lease-dir", str(self.lease_dir),
+            "--host", "UT_0",
+        )
+        self.assertEqual(2, code)
+        self.assertIn("UT_0 is not a Host", err)
+
+    def test_boards_lists_a_short_serial_board_as_not_leasable(self):
+        short = self.root / "short.yaml"
+        short.write_text(HARDWARE + "  UT_2:\n    type: Ubertooth\n    attached to: Host_Local\n"
+                         "    identity: {serial: abcd}\n")
+        code, out, _err = self._main(
+            "boards", "--hardware", str(short), "--lease-dir", str(self.lease_dir),
+        )
+        self.assertEqual(0, code)
+        lines = out.splitlines()
+        self.assertRegex(lines[0], r"^UT_0 +free$")
+        self.assertRegex(lines[1], r"^UT_1 +free$")
+        self.assertRegex(lines[2], r"^UT_2 +not leasable: UT_2 needs a full 32-hex-digit serial")
+
+    def test_wait_for_boards_rejects_negative_minutes(self):
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            main(["lease", "--hardware", str(self.hardware), "--wait-for-boards", "-5",
+                  "UT_0", "--", "true"])
 
     def test_lease_returns_the_command_exit_code(self):
         code, _out, _err = self._main(
