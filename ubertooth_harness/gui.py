@@ -235,10 +235,6 @@ class GitRefSource:
             ),
         }
 
-    async def contains(self, ref: str) -> bool:
-        data = await self.refs()
-        return any(item["name"] == ref for item in data["refs"])
-
 
 # ----- plans ---------------------------------------------------------------
 
@@ -312,6 +308,7 @@ def failure_summary(run: Mapping, events: Sequence[Mapping]) -> list[dict]:
     """
     failures: list[dict] = []
     tails: dict[str, collections.deque] = {}
+    partials: dict[str, str] = {}
     finished = None
     for event in events:
         details = event.get("details")
@@ -324,7 +321,10 @@ def failure_summary(run: Mapping, events: Sequence[Mapping]) -> list[dict]:
             invocation = _text(details.get("invocation_id"))
             if isinstance(text, str) and invocation:
                 tail = tails.setdefault(invocation, collections.deque(maxlen=FAILURE_LOG_LINES))
-                tail.extend(line[:500] for line in text.splitlines() if line.strip())
+                # Output chunks need not end at a line break: join them first.
+                lines = (partials.get(invocation, "") + text).split("\n")
+                partials[invocation] = lines.pop()[-_MAX_FIELD:]
+                tail.extend(line[:500] for line in lines if line.strip())
         elif kind in ("build_finished", "preflight_finished") and status not in (
             "passed", "skipped"
         ):
@@ -332,8 +332,13 @@ def failure_summary(run: Mapping, events: Sequence[Mapping]) -> list[dict]:
                 "step": kind.removesuffix("_finished"), "status": _text(status),
                 "reason": _text(details.get("reason")), "log": [],
             })
-        elif kind == "test_finished" and status != "passed":
+        elif kind == "test_finished" and status not in ("passed", "skipped"):
             invocation = _text(details.get("invocation_id"))
+            rest = partials.pop(invocation, "")
+            if rest.strip():
+                tails.setdefault(
+                    invocation, collections.deque(maxlen=FAILURE_LOG_LINES)
+                ).append(rest[:500])
             failures.append({
                 "step": _text(details.get("test_name") or invocation),
                 "status": _text(status), "reason": _text(details.get("reason")),

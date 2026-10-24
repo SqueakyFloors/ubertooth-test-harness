@@ -727,9 +727,10 @@ python -m ubertooth_harness controller --port 8765 \
 `--ubertooth-repo` is the repository whose branches and tags the GUI offers
 (listed with `git ls-remote`, cached for 60 s; no token is needed for a public
 repository). It defaults to the public fork, the same repository CI builds. A
-run may only name a ref from that list (or `HEAD`); anything else is refused
-with 422 before the runner is asked, and if the list cannot be fetched no run
-is started (503). The ref is still resolved in the runner's
+run may only name a ref from that list (or `HEAD`) or a full commit ID;
+anything else is refused with 422 before the runner is asked. If the list
+cannot be fetched (for example an offline lab), the ref is passed to the
+runner unchecked and the controller logs a warning. The ref is still resolved in the runner's
 `--ubertooth-source` checkout, so keep that checkout fetched. `--plans-dir`
 is the directory of plans the GUI lists (default `testplans/`).
 
@@ -781,7 +782,7 @@ REST and `/ws/live` endpoints below.
   every test in the suite has an estimate. The catalog has no duration
   estimates of its own, so a test's estimate is its `duration` argument (for
   example `BLE monitor` with `duration: 10s`), and build and preflight time
-  are not included. Otherwise the view shows elapsed time and says why. The
+  are not included: the countdown starts with the first test. Otherwise the view shows elapsed time and says why. The
   view is linkable as `/ui/#run=<run_id>`.
 - **History:** every run, newest first, with started/finished times, ref,
   plan/suite, target and status, a link to its `report.md`, and for a run
@@ -804,7 +805,7 @@ Endpoints (JSON unless noted; `GET /` lists them):
 | `GET /api/refs` | `{"repository", "refs": [{"name", "kind", "commit"}], "fetched_at"}` from `git ls-remote` (`kind` is `default`, `branch` or `tag`); 503 if it cannot be listed |
 | `GET /api/plans` | every `<plan>.yaml` in `--plans-dir` with its suites, test names, per-test `estimated_s` (from the `duration` argument, else null) and the suite total when every test has one; a plan that does not load is listed with its `error` |
 | `GET /api/targets`, `GET /api/targets/{host}` | registry: host, hostname, OS, Python, Ubertooth serials, last heartbeat, `online`/`offline`, connected, active run |
-| `POST /api/targets/{host}/runs` | start a run with the protocol `run` fields: `{"ref", "plan", "suite", "tests": [], "build": false}`; 201 with the run, 409 busy, offline, or rejected by the runner, 422 invalid or a ref not in `/api/refs`, 503 refs unavailable, 504 no answer |
+| `POST /api/targets/{host}/runs` | start a run with the protocol `run` fields: `{"ref", "plan", "suite", "tests": [], "build": false}`; 201 with the run, 409 busy, offline, or rejected by the runner, 422 invalid or a ref not in `/api/refs` (full commit IDs are accepted), 504 no answer |
 | `GET /api/runs[?target=HOST]` | runs, newest first |
 | `GET /api/runs/{run_id}` | status, every event, and the failure summary (`failures`) |
 | `GET /api/runs/{run_id}/report.md` | the run's report (Markdown) |

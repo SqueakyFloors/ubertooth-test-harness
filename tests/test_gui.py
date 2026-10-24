@@ -6,6 +6,8 @@ a local repository), and the page is checked statically for the endpoints it
 wires to and for HTML injection sinks.
 """
 
+import contextlib
+import io
 from pathlib import Path
 import re
 import subprocess
@@ -217,7 +219,7 @@ class RefTests(ControllerTestCase):
     async def test_unlisted_refs_are_refused_before_dispatch(self):
         async with FakeRunner(self.port) as runner:
             await self.registered(runner)
-            for ref in ("feature-x", "refs/heads/main", "main~1", COMMIT, "MAIN"):
+            for ref in ("feature-x", "refs/heads/main", "main~1", COMMIT[:12], "MAIN"):
                 with self.subTest(ref):
                     status, payload, _ = await self.http(
                         "POST", "/api/targets/Host_A/runs",
@@ -229,26 +231,37 @@ class RefTests(ControllerTestCase):
             message = await self.accepted_run(runner)
             self.assertEqual("main", message["ref"])
 
-    async def test_ref_listing_failure_refuses_runs(self):
+    async def test_full_commit_ids_are_accepted_without_listing(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            post, message = await self.start_run(runner, ref=COMMIT)
+            self.assertEqual(COMMIT, message["ref"])
+            await runner.send("run_accepted", request_id=message["request_id"],
+                              run_id="run-1")
+            status, payload, _ = await post
+            self.assertEqual(201, status, payload)
+
+    async def test_ref_listing_failure_does_not_block_runs(self):
         self.controller.ref_source = fake_ref_source(output=b"", code=128)
         status, payload, _ = await self.http("GET", "/api/refs")
         self.assertEqual(503, status)
         self.assertIn("repository not found", payload["detail"])
         async with FakeRunner(self.port) as runner:
             await self.registered(runner)
-            status, payload, _ = await self.http(
-                "POST", "/api/targets/Host_A/runs",
-                {"ref": "main", "plan": "fast", "suite": "fast"},
-            )
-            self.assertEqual(503, status)
-            self.controller.ref_source = None
-            status, payload, _ = await self.http(
-                "POST", "/api/targets/Host_A/runs",
-                {"ref": "main", "plan": "fast", "suite": "fast"},
-            )
-            self.assertEqual(503, status)
-            self.assertIn("no Ubertooth repository", payload["detail"])
-        self.assertEqual({}, self.controller.runs)
+            # Unlisted but well-formed: passed to the runner with a warning.
+            with contextlib.redirect_stderr(io.StringIO()) as stderr:
+                message = await self.accepted_run(runner)
+            self.assertEqual("main", message["ref"])
+            self.assertIn("not checked", stderr.getvalue())
+            await runner.send("run_finished", request_id=message["request_id"],
+                              run_id="run-1", status="passed", exit_code=0,
+                              run_directory="/x/run-1")
+        self.controller.ref_source = None
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            with contextlib.redirect_stderr(io.StringIO()) as stderr:
+                await self.accepted_run(runner, run_id="run-2")
+            self.assertIn("no Ubertooth repository", stderr.getvalue())
 
     async def test_real_git_ls_remote_of_a_local_repository(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -350,6 +363,23 @@ class FailureSummaryTests(ControllerTestCase):
                  "reason": "Ubertooth identity: expected pattern missing", "log": []},
             ],
             payload["failures"],
+        )
+
+    def test_skipped_tests_are_not_failures_and_split_lines_are_joined(self):
+        def record(kind, status=None, **details):
+            return {"event_type": kind, "status": status, "details": details}
+
+        events = [
+            record("test_finished", "skipped", invocation_id="a", test_name="Skipped"),
+            record("command_output", invocation_id="b", text="first par"),
+            record("command_output", invocation_id="b", text="t\nsecond"),
+            record("test_finished", "failed", invocation_id="b", test_name="Split",
+                   reason="boom"),
+        ]
+        self.assertEqual(
+            [{"step": "Split", "status": "failed", "reason": "boom",
+              "log": ["first part", "second"]}],
+            failure_summary({"status": "running"}, events),
         )
 
     def test_runs_without_a_finish_record(self):

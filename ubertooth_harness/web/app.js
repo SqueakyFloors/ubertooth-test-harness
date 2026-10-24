@@ -315,6 +315,8 @@
     live.log = [];
     live.partial = "";
     live.stage = "waiting";
+    // The estimate covers tests only, so the countdown starts with the first test.
+    live.testsStarted = null;
     for (const record of events) addEvent(live.run_id, record, false);
     renderLive();
   }
@@ -363,6 +365,7 @@
       }
       item.status = "running";
       item.started = record.timestamp;
+      if (!live.testsStarted && record.timestamp) live.testsStarted = record.timestamp;
       live.byInvocation.set(String(details.invocation_id), item);
       pushLog(`=== TEST ${name} on ${details.host ?? ""} ===`);
     } else if (kind === "test_finished") {
@@ -454,12 +457,16 @@
     }
     const total = estimates.reduce((sum, value) => sum + value, 0);
     $("live-estimate").textContent = `Estimate ${formatSeconds(total)} from the tests' duration arguments; build and preflight are not included.`;
+    const testsStart = live.testsStarted ? Date.parse(live.testsStarted) : NaN;
+    const testsElapsed = Number.isNaN(testsStart) ? null : Math.max(0, (end - testsStart) / 1000);
     if (run.status !== "running") {
       $("live-clock").textContent = `Finished after ${formatSeconds(elapsed)}`;
-    } else if (elapsed <= total) {
-      $("live-clock").textContent = `About ${formatSeconds(total - elapsed)} remaining (elapsed ${formatSeconds(elapsed)})`;
+    } else if (testsElapsed === null) {
+      $("live-clock").textContent = `Countdown starts with the first test (elapsed ${formatSeconds(elapsed)})`;
+    } else if (testsElapsed <= total) {
+      $("live-clock").textContent = `About ${formatSeconds(total - testsElapsed)} remaining (elapsed ${formatSeconds(elapsed)})`;
     } else {
-      $("live-clock").textContent = `Over the estimate by ${formatSeconds(elapsed - total)} (elapsed ${formatSeconds(elapsed)})`;
+      $("live-clock").textContent = `Over the estimate by ${formatSeconds(testsElapsed - total)} (elapsed ${formatSeconds(elapsed)})`;
     }
   }
 

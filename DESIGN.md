@@ -634,8 +634,8 @@ by the REST API and `/ws/live`.
   `GET /api/refs`, which runs `git ls-remote` against the configured
   repository and caches for 60 s) + plan and suite selectors
   (`GET /api/plans`) + one target + build toggle → "Run". The controller
-  refuses a ref that is not in the list (422) and starts nothing when the list
-  cannot be fetched (503). One target per run; a multiselect is a later step.
+  refuses a ref that is not in the list or a full commit ID (422); when the
+  list cannot be fetched it passes the ref on unchecked and logs a warning. One target per run; a multiselect is a later step.
 - **Live run:** the suite rendered as a checklist that ticks in real time
   from the run's events (✓ passed / ✗ failed / … running / ○ pending, always
   with text, in an `aria-live` region), the stage, elapsed time, Cancel, and a

@@ -92,6 +92,8 @@ UNKNOWN_RUN = 4404
 LOST = "lost"
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+# A full SHA-1 or SHA-256 commit ID, accepted as a run ref without listing.
+_COMMIT_ID_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 
 
 class ControllerConfigError(ValueError):
@@ -803,8 +805,22 @@ class Controller:
             raise ControllerError(f"cannot list refs: {error}", 503) from None
 
     async def check_ref(self, ref: str) -> None:
-        """Refuse a ref that is not a branch or tag of the repository."""
-        data = await self.list_refs()
+        """Refuse a ref that is not a branch, tag, or full commit of the repository.
+
+        A full commit ID is accepted as is (for example a pull request head).
+        If the ref list cannot be fetched (offline lab, no repository
+        configured), the ref is not refused here: the protocol has already
+        validated its form, and the runner resolves it in its own checkout;
+        a warning is logged instead.
+        """
+        if _COMMIT_ID_RE.fullmatch(ref):
+            return
+        try:
+            data = await self.list_refs()
+        except ControllerError as error:
+            print(f"warning: ref {ref[:200]!r} not checked: {error}",
+                  file=sys.stderr, flush=True)
+            return
         if not any(item["name"] == ref for item in data["refs"]):
             raise ControllerError(
                 f"ref {ref[:200]!r} is not a branch or tag of {data['repository']}", 422
