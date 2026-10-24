@@ -4,7 +4,7 @@ import re
 import unittest
 
 from ubertooth_harness import util_cases
-from ubertooth_harness.catalog import CatalogError, builtin_catalog
+from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.stateful import StateCase
 from tests.test_guards import A, B, C, guard_checks, guarded_invocation, run_guarded
@@ -400,14 +400,17 @@ def multi_run(bench, coverage="smoke", guards=(B,)):
 
 class MultiBoardCaseTests(unittest.TestCase):
 
-    def test_needs_a_second_registered_board(self):
+    def test_a_single_board_host_skips_instead_of_failing_the_run(self):
         definition = builtin_catalog().get("Multi-board selection")
         arguments = definition.normalize_arguments(
             {"hosts": ["Host_Linux"], "Ubertooth": "default", "coverage": "smoke"}
         )
-        with self.assertRaisesRegex(CatalogError, "two or more registered"):
-            definition.command_cases(arguments, {"Ubertooth": "UT_0"},
-                                     {"Ubertooth": {"serial": A}})
+        cases = definition.command_cases(arguments, {"Ubertooth": "UT_0"},
+                                         {"Ubertooth": {"serial": A}})
+        self.assertEqual(["needs-two-boards"], [c.case_id for c in cases])
+        summary, _events, _commands = multi_run(MultiBench([A]), guards=())
+        self.assertTrue(summary.passed, summary.failure_reason)
+        self.assertEqual(1, summary.skipped_cases)
 
     def test_case_sets_and_index_steps(self):
         invocation = guarded_invocation("Multi-board selection", "smoke", (B, C))

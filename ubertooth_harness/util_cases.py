@@ -44,7 +44,7 @@ from ubertooth_harness.patterns import (
     FIRMWARE_PATTERN,
     PART_ID_PATTERN,
 )
-from ubertooth_harness.stateful import Observation, StateCase, StateCaseError, Step, require
+from ubertooth_harness.stateful import Observation, StateCase, Step, require
 from ubertooth_harness.transitions import (
     BOOT_DEFAULT_CHANNEL,
     CHANNEL,
@@ -444,14 +444,27 @@ def _listing_step(step_id, name, argv, check):
     return Step(step_id, name, argv, output_check=check)
 
 
+def _single_board_skip(serial):
+    reason = ("skipped: Multi-board selection needs two or more registered "
+              "Ubertooths on the host")
+    return StateCase(
+        "needs-two-boards",
+        "Multi-board selection needs two registered boards",
+        (Step("count", "Count attached boards", ("ubertooth-util", "-N"),
+              observe=Observation("attached boards", r"(?m)^(?P<value>\d+)$",
+                                  reject=lambda _value: reason)),),
+        (_identity(serial),),
+        expected_state="skipped on a host with one registered Ubertooth",
+    )
+
+
 def multi_board_cases(arguments, _resources, resource_identities):
     serial = _serial(resource_identities, "Multi-board selection")
     guards = guard_boards(resource_identities)
     if not guards:
-        raise StateCaseError(
-            "Multi-board selection needs two or more registered Ubertooths on "
-            "the host"
-        )
+        # A host with one registered board (plans use hosts: each) skips the
+        # test instead of failing the whole run at planning time.
+        return (_single_board_skip(serial),)
     registered = (serial,) + tuple(board.serial for board in guards)
     count = len(registered)
     serials = serial_listing_check(registered)
