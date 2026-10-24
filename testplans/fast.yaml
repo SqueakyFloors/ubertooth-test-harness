@@ -52,7 +52,7 @@ suites:
         Ubertooth: default
         coverage: smoke
 
-    # Needs two or more registered Ubertooths on every selected host.
+    # Skipped on a host with fewer than two registered Ubertooths.
     - Multi-board selection:
         hosts: each
         Ubertooth: default
@@ -77,4 +77,11 @@ suites:
     - Classic Bluetooth receive:
         hosts: each
         Ubertooth: default
-        duration: 8s
+        coverage: smoke
+        duration: 3s
+
+    - Raw receive:
+        hosts: each
+        Ubertooth: default
+        coverage: smoke
+        duration: 3s
