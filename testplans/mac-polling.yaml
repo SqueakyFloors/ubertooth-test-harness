@@ -1,7 +1,7 @@
-plan: GLaDOS Ubertooth stability
+plan: MAC polling Ubertooth stability
 suites:
-  glados:
-    - GLaDOS MAC polling soak:
+  mac-polling:
+    - MAC polling soak:
         hosts: [Host_Linux]
         platforms: [linux]
         Ubertooth: default

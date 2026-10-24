@@ -7,8 +7,8 @@ Usage (any Python 3 can launch it; the environment itself is always 3.12):
 
 Idempotent: an existing harness environment is reused and its pinned
 requirements are reinstalled only when they are not already satisfied. It
-never installs into a system, user, or application (for example GLaDOS)
-interpreter: packages are installed only by the new environment's own
+never installs into a system, user, or another application's interpreter:
+packages are installed only by the new environment's own
 interpreter, with pip's virtualenv guard on and the user site disabled, and an
 existing directory without the harness marker is refused rather than adopted.
 

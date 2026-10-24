@@ -27,7 +27,7 @@ SIMULATED_DRIVER = "simulated USB power controller"
 # the controller at all; it is refused as a precaution so a test can never cut
 # the control link. Only ports 1-3 are switchable DUT ports.
 STARTECH_CONTROL_PORT = 4
-# Management-controller firmware validated on lab hardware (sf-control-server-103).
+# Management-controller firmware validated on the lab host's hub.
 STARTECH_FIRMWARE_VERSIONS = ("CENTOS000104v02",)
 # Only the factory-default password is supported; a hub with a changed
 # password fails closed with "rejected by controller".

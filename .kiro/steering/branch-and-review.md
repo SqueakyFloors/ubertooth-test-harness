@@ -20,6 +20,30 @@ when rules differ, follow the stricter requirement.
   unavailable issue tracking, and emergency recovery are exceptions; record
   why the issue-first prefix was impractical.
 
+## Public text
+
+This repository is public. Everything published from it — code, tests,
+fixtures, plan files, file names, docs, comments, commit messages, branch
+names, issues, pull requests and their comments, and CI output — is covered.
+So is anything a text search cannot read: committed screenshots and other
+images, and committed run output (`run.jsonl`, `report.md`, captures). Those
+must be synthetic or scrubbed, because a real one leaks past every scan.
+
+- MUST NOT name lab machines: no host names, SSH aliases, IP addresses,
+  `user@host` strings, or lab home-directory paths. Write "the lab", "the lab
+  host", "the Linux lab host", or "the jump host" instead. Scripts take the
+  host from configuration, an environment variable, or an argument, never a
+  built-in host name, and fail with a clear message when none is set.
+- MUST NOT name other systems or services that run in the lab, or the
+  maintainer's employer's internal tools, repositories, or services. Describe
+  such workloads generically, for example "a production-style MAC polling
+  workload" or "other software on the lab host".
+- Board serial numbers of lab Ubertooths are fine.
+- Keep the real host names, aliases, and credentials in private, uncommitted
+  configuration outside the repository.
+- Check what you are about to publish against these rules before committing,
+  pushing, or posting. If unsure whether something is internal, ask.
+
 ## Independent agent review
 
 Every merge candidate containing code, configuration, workflow, or policy
@@ -78,8 +102,9 @@ Only when Actions jobs cannot run at all (runner, billing, or capacity errors
 with no step executed), use local CI instead, after telling the maintainer:
 
 - Run `scripts/local-ci.sh` on the exact PR head on a macOS host and on a
-  Linux (Ubuntu 24.04) host. For the lab Linux host, through the jump:
-  `scripts/local-ci.sh -s "ssh -o BatchMode=yes -o RequestTTY=no -o RemoteCommand=none asf ssh -o BatchMode=yes sf-control-server-103"`.
+  Linux (Ubuntu 24.04) host. For the Linux lab host, through the jump host
+  (substitute the real names, which are not recorded here):
+  `scripts/local-ci.sh -s "ssh -o BatchMode=yes -o RequestTTY=no -o RemoteCommand=none jump-host.example ssh -o BatchMode=yes lab-host.example"`.
   Run both in the background, in parallel.
 - Both must print `LOCAL CI PASSED <sha>` for the same SHA that will be
   squashed. Post both lines in a PR comment before merging.

@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import pwd
+import re
 import shutil
 import signal
 import socket
@@ -31,6 +32,9 @@ ALL_SCRIPTS = (DEPLOY, SHORTCUT, HARNESS_OPEN)
 CONTROLLER_UNIT = "ubertooth-harness-controller.service"
 RUNNER_UNIT = "ubertooth-harness-runner.service"
 USER = pwd.getpwuid(os.getuid()).pw_name
+# Placeholders: no real lab host or SSH alias belongs in this repository.
+LAB_HOST = "lab-host.example"
+JUMP_HOST = "jump-host.example"
 
 # Each fake logs "<name> <args>" to $FAKE_LOG.
 LOGGING_FAKE = '#!/bin/sh\nprintf "%s\\n" "$(basename "$0") $*" >> "$FAKE_LOG"\n'
@@ -99,6 +103,9 @@ class FakeLab:
             "PATH": f"{self.bin}:/usr/bin:/bin",
             "FAKE_LOG": str(self.log),
             "LANG": "C",
+            # harness-open has no built-in host; these stand in for the lab.
+            "HARNESS_HOST": LAB_HOST,
+            "HARNESS_JUMP": JUMP_HOST,
         }
 
     @property
@@ -112,17 +119,19 @@ class FakeLab:
     def script(self, name: str) -> Path:
         return self.checkout / "scripts" / name
 
-    def run(self, name: str, *args: str, **env: str) -> subprocess.CompletedProcess:
+    def run(self, name: str, *args: str, **env: str | None) -> subprocess.CompletedProcess:
+        """Run a script. An env value of None removes that variable."""
+        merged = {**self.env, **env}
         return subprocess.run(
             ["bash", str(self.script(name)), *args],
-            env={**self.env, **env},
+            env={key: value for key, value in merged.items() if value is not None},
             capture_output=True,
             text=True,
             timeout=60,
             check=False,
         )
 
-    def deploy(self, *args: str, **env: str) -> subprocess.CompletedProcess:
+    def deploy(self, *args: str, **env: str | None) -> subprocess.CompletedProcess:
         base = ("--runner-host", "Host_Linux", "--ubertooth-source", str(self.ubertooth))
         if "--uninstall" in args:
             base = ()
@@ -511,10 +520,113 @@ class HarnessOpenTest(unittest.TestCase):
         argv, url = self.dry_run()
         self.assertEqual(argv, (
             "ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 "
-            "-L 127.0.0.1:8765:127.0.0.1:8765 -J asf sf-control-server-103"
+            f"-L 127.0.0.1:8765:127.0.0.1:8765 -J {JUMP_HOST} {LAB_HOST}"
         ))
         self.assertEqual(url, "http://127.0.0.1:8765/ui/")
         self.assertEqual(self.lab.commands(), [])
+
+    def _dry_run_env(self, *args, **env):
+        result = self.lab.run("harness-open", "--dry-run", *args, **env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.splitlines()[0]
+
+    def test_no_host_or_jump_name_is_built_into_the_script(self):
+        for line in HARNESS_OPEN.read_text(encoding="utf-8").splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            # Any assignment that can decide the host or jump host may only
+            # take its value from HARNESS_* or an option value, never from a
+            # literal or a literal fallback. Covers env_host=, HARNESS_HOST=
+            # and := defaults as well as host= itself. The expansion fallback
+            # must be empty, so ${HARNESS_HOST:-a-real-host} fails too, and a
+            # quoted literal reads as an empty value, which also fails.
+            for name, value in re.findall(
+                r"(?i)\b(?:env_|harness_)?(host|jump)[:]?=([^\s;\"]*)", line
+            ):
+                self.assertRegex(
+                    value,
+                    r"^(\$\{HARNESS_[A-Z_]+:?[-+]\}|\$2|\$env_\w+)$",
+                    f"{name}: {line}",
+                )
+
+    @unittest.skipIf(os.geteuid() == 0, "running as root owns every file")
+    def test_refuses_a_config_file_it_does_not_own(self):
+        result = self.lab.run(
+            "harness-open", "--dry-run", HARNESS_OPEN_CONFIG="/etc/hosts",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not owned by you", result.stderr)
+
+    def test_refuses_a_config_file_others_can_write(self):
+        config = self.lab.root / "writable.conf"
+        config.write_text("HARNESS_HOST=conf-host.example\n", encoding="utf-8")
+        config.chmod(0o666)
+        result = self.lab.run(
+            "harness-open", "--dry-run", HARNESS_OPEN_CONFIG=str(config),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("writable by others", result.stderr)
+
+    def test_a_failing_config_file_is_reported(self):
+        # Read like a shell profile: an earlier failure does not stop it, but
+        # the file's own exit status is reported rather than killing us mute.
+        broken = self.lab.root / "broken.conf"
+        broken.write_text("HARNESS_HOST=conf-host.example\nfalse\n", encoding="utf-8")
+        result = self.lab.run(
+            "harness-open", "--dry-run", HARNESS_OPEN_CONFIG=str(broken),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("failed (status 1)", result.stderr)
+
+        survives = self.lab.root / "noisy.conf"
+        survives.write_text("false\nHARNESS_HOST=conf-host.example\n", encoding="utf-8")
+        argv = self._dry_run_env(
+            HARNESS_HOST=None, HARNESS_JUMP=None,
+            HARNESS_OPEN_CONFIG=str(survives),
+        )
+        self.assertTrue(argv.endswith("conf-host.example"), argv)
+
+    def test_help_works_without_a_usable_config_or_host(self):
+        for env in (
+            {"HARNESS_OPEN_CONFIG": "/etc/hosts"},
+            {"HARNESS_HOST": None, "HARNESS_JUMP": None},
+        ):
+            with self.subTest(env=sorted(env)):
+                result = self.lab.run("harness-open", "--help", **env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("--two-hop", result.stdout)
+
+    def test_refuses_to_run_without_a_host(self):
+        result = self.lab.run("harness-open", "--dry-run", HARNESS_HOST=None)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no lab host", result.stderr)
+        self.assertIn("HARNESS_HOST", result.stderr)
+
+    def test_a_private_config_file_supplies_the_host_and_jump(self):
+        config = self.lab.root / "harness-open.conf"
+        config.write_text(
+            "HARNESS_HOST=conf-host.example\nHARNESS_JUMP=conf-jump.example\n",
+            encoding="utf-8",
+        )
+        argv = self._dry_run_env(
+            HARNESS_HOST=None, HARNESS_JUMP=None, HARNESS_OPEN_CONFIG=str(config),
+        )
+        self.assertTrue(argv.endswith("-J conf-jump.example conf-host.example"), argv)
+
+        # The environment wins over the file, and an option over both.
+        argv = self._dry_run_env(HARNESS_OPEN_CONFIG=str(config))
+        self.assertTrue(argv.endswith(f"-J {JUMP_HOST} {LAB_HOST}"), argv)
+        argv = self._dry_run_env(
+            "--host", "opt-host.example", HARNESS_OPEN_CONFIG=str(config),
+        )
+        self.assertTrue(argv.endswith(f"-J {JUMP_HOST} opt-host.example"), argv)
+
+    def test_an_empty_jump_in_the_environment_beats_the_config_file(self):
+        config = self.lab.root / "harness-open.conf"
+        config.write_text("HARNESS_JUMP=conf-jump.example\n", encoding="utf-8")
+        argv = self._dry_run_env(HARNESS_JUMP="", HARNESS_OPEN_CONFIG=str(config))
+        self.assertNotIn("-J", argv)
+        self.assertTrue(argv.endswith(LAB_HOST), argv)
 
     def test_two_hop(self):
         argv, _ = self.dry_run("--two-hop", "--host", "lab1", "--jump", "bastion",
@@ -542,7 +654,7 @@ class HarnessOpenTest(unittest.TestCase):
         argv, url = result.stdout.splitlines()
         self.assertEqual(argv, (
             "ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 "
-            "-L 127.0.0.1:9999:127.0.0.1:8765 sf-control-server-103"
+            f"-L 127.0.0.1:9999:127.0.0.1:8765 {LAB_HOST}"
         ))
         self.assertEqual(url, "http://127.0.0.1:9999/ui/")
         self.assertIn("refuses Host: 127.0.0.1:9999", result.stderr)
@@ -620,7 +732,7 @@ class HarnessOpenTest(unittest.TestCase):
         commands = self.lab.commands()
         self.assertIn(
             f"ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 "
-            f"-L 127.0.0.1:{port}:127.0.0.1:{port} -J asf sf-control-server-103",
+            f"-L 127.0.0.1:{port}:127.0.0.1:{port} -J {JUMP_HOST} {LAB_HOST}",
             commands,
         )
         self.assertIn(f"{opener} {url}", commands)
