@@ -51,6 +51,9 @@ env_jump=${HARNESS_JUMP-}
 env_jump_set=${HARNESS_JUMP+yes}
 env_port=${HARNESS_PORT-}
 if [ -f "$config" ]; then
+    # The file is the user's own and lives outside the repository, so there
+    # is nothing for a linter to follow.
+    # shellcheck source=/dev/null
     . "$config"
 fi
 [ -z "$env_host" ] || HARNESS_HOST=$env_host
