@@ -297,7 +297,67 @@ def _parser() -> argparse.ArgumentParser:
         "--heartbeat-interval", type=float, default=10.0, metavar="SECONDS",
     )
 
+    controller = subparsers.add_parser(
+        "controller",
+        help="controller service on 127.0.0.1: target registry, run dispatch, "
+        "results store (remote access: SSH tunnel)",
+    )
+    controller.add_argument(
+        "--port", type=int, default=8765,
+        help="TCP port on 127.0.0.1 (0 picks a free port); the address is fixed",
+    )
+    controller.add_argument(
+        "--results-dir", type=Path, metavar="DIR",
+        help="run directories (default: $XDG_DATA_HOME/ubertooth-harness/"
+        "controller/runs, else ~/.local/share/...)",
+    )
+    controller.add_argument(
+        "--host", "--bind", "--address", dest="refused_bind",
+        action=_RefuseBind, help=argparse.SUPPRESS,
+    )
+
     return parser
+
+
+class _RefuseBind(argparse.Action):
+    """There is no bind option; say why instead of 'unrecognized argument'."""
+
+    def __init__(self, option_strings, dest, **kwargs):
+        kwargs.setdefault("nargs", "?")
+        super().__init__(option_strings, dest, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        parser.error(
+            f"{option_string} is not supported: the controller binds 127.0.0.1 "
+            "only; use an SSH tunnel for remote access (DESIGN.md section 8)"
+        )
+
+
+def _controller(args: argparse.Namespace) -> int:
+    import asyncio
+
+    from ubertooth_harness.controller import (
+        Controller,
+        default_results_dir,
+        refuse_bind_overrides,
+        serve,
+    )
+
+    refuse_bind_overrides()
+    controller = Controller(args.results_dir or default_results_dir())
+    controller.log(f"results in {controller.results_dir}")
+
+    def stop(signum, frame):
+        raise KeyboardInterrupt
+
+    # The server shuts down gracefully on SIGINT/SIGTERM, then re-raises the
+    # signal; end with a clean exit rather than a traceback.
+    signal.signal(signal.SIGTERM, stop)
+    try:
+        asyncio.run(serve(controller, args.port))
+    except KeyboardInterrupt:
+        controller.log("stopped")
+    return 0
 
 
 def _runner(args: argparse.Namespace) -> int:
@@ -680,6 +740,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "runner":
             require_harness_environment()
             return _runner(args)
+        if args.command == "controller":
+            require_harness_environment()
+            return _controller(args)
         if args.command == "boards":
             return _boards_command(args)
         if args.command == "lease":

@@ -2,7 +2,7 @@
 
 - Keep the working tree clean at every handoff. Commit intended source changes;
   remove or ignore generated artifacts.
-- Private harness changes may merge to `main` without maintainer review unless
+- Harness changes may merge to `main` without maintainer review unless
   the maintainer explicitly requests one, but all repository review, test,
   history, and clean-tree gates still apply.
 - Before merge, determine the authoritative main remote from
