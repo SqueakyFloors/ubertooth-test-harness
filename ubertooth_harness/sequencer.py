@@ -867,6 +867,7 @@ class NamedTestSequencer:
         completed_preflight = 0
         completed = 0
         run_skipped_cases = 0
+        failed_tests: list[str] = []
         status = "running"
         failure = ""
 
@@ -994,6 +995,10 @@ class NamedTestSequencer:
                 guard_pending = False
                 # Guard-check failures are counted apart from failed cases.
                 failed_guard_checks = 0
+                # A failed test ends the run only when the device state is not
+                # known: a guard changed or could not be read, a case was not
+                # verified restored, a flash failed, or isolation failed.
+                unsafe = False
                 try:
                     if isolated and token.is_cancelled():
                         # Cancelled: switch nothing and skip the read-only wait.
@@ -1011,6 +1016,7 @@ class NamedTestSequencer:
                             if guard_failure:
                                 # Without a baseline nothing can be compared;
                                 # no case runs, so nothing has changed.
+                                unsafe = True
                                 case_failures.append(guard_failure)
                                 if guard_status != "canceled":
                                     failed_guard_checks += 1
@@ -1029,6 +1035,7 @@ class NamedTestSequencer:
                                     publisher, token, invocation, case, case_id, manifest
                                 )
                                 if failure_text:
+                                    unsafe = True
                                     case_failures.append(failure_text)
                                     case_statuses.append(flash_status)
                                     break
@@ -1060,17 +1067,16 @@ class NamedTestSequencer:
                                     case_statuses.append(outcome.status)
                                 if guard_failure:
                                     # Another board changed: stop the test.
+                                    unsafe = True
                                     case_failures.append(guard_failure)
                                     failed_guard_checks += 1
                                     case_statuses.append(guard_status)
                                     break
                                 if outcome.failure:
+                                    if outcome.status == "canceled" or not outcome.restored:
+                                        unsafe = True
                                     # Continue only from a verified-restored device.
-                                    if (
-                                        outcome.status == "canceled"
-                                        or not outcome.restored
-                                        or not definition.continue_on_case_failure
-                                    ):
+                                    if unsafe or not definition.continue_on_case_failure:
                                         break
                                 continue
                             publisher.emit(
@@ -1128,6 +1134,7 @@ class NamedTestSequencer:
                                 invocation, guards, guard_context, after=transitions.AFTER_TEST,
                             )
                             if guard_failure:
+                                unsafe = True
                                 case_failures.append(guard_failure)
                                 failed_guard_checks += 1
                                 case_statuses.append(guard_status)
@@ -1140,6 +1147,7 @@ class NamedTestSequencer:
                     IsolationSetupError,
                     PowerControllerError,
                 ) as error:
+                    unsafe = True
                     case_failures.append(f"power isolation: {_full_reason(error)}")
                     case_statuses.append("failed")
                 except Exception as error:  # noqa: BLE001 - keep the run record complete
@@ -1148,6 +1156,7 @@ class NamedTestSequencer:
                     # Any switched ports are already restored (a read-only check
                     # switched none); record the failure instead of leaving the
                     # run without test_finished/run_finished/summary.
+                    unsafe = True
                     case_failures.append(f"unexpected {type(error).__name__}: {error}")
                     case_statuses.append("failed")
                 if case_failures:
@@ -1157,23 +1166,31 @@ class NamedTestSequencer:
                         and all(item == "canceled" for item in case_statuses)
                         else "failed"
                     )
-                    failure = _bounded_reason(
+                    test_failure = _bounded_reason(
                         f"{invocation.test_name}: " + "; ".join(case_failures),
                         "each case reason is in its check_finished event",
                     )
+                    stop_run = unsafe or status == "canceled" or token.is_cancelled()
                     publisher.emit(
                         "test_finished",
                         status,
                         {
                             "invocation_id": invocation.invocation_id,
                             "test_name": invocation.test_name,
-                            "reason": failure,
+                            "reason": test_failure,
                             "failed_cases": len(case_failures) - failed_guard_checks,
                             "failed_guard_checks": failed_guard_checks,
                             "skipped_cases": skipped_cases,
+                            # False: the device was verified back in its known
+                            # state, so later tests still run.
+                            "stops_run": stop_run,
                         },
                     )
-                    break
+                    failed_tests.append(test_failure)
+                    if stop_run:
+                        break
+                    status = "running"
+                    continue
                 completed += 1
                 publisher.emit(
                     "test_finished",
@@ -1190,6 +1207,13 @@ class NamedTestSequencer:
 
         if status == "running":
             status = "passed" if completed == len(invocations) else "failed"
+        if failed_tests and status == "canceled" and not failure:
+            failure = failed_tests[-1]
+        elif failed_tests and status != "canceled":
+            more = len(failed_tests) - 1
+            failure = failed_tests[0] + (
+                f" (and {more} more failed test{'s' if more > 1 else ''})" if more else ""
+            )
         summary = SequencerSummary(
             run_id=run_id,
             status=status,

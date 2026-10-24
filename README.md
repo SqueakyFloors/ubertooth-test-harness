@@ -528,6 +528,14 @@ python -m ubertooth_harness validate-plan testplans/glados.yaml \
 
 ## Run output: run.jsonl and report.md
 
+A test that fails does not end the run when the device is back in a known
+state: every failed case was verified restored and every guard read matched.
+Later tests still run, the run fails, and its summary names the first failed
+test and how many others failed. The run stops after a failed test only when
+that state is not known: a case was not verified restored, a guard changed or
+could not be read, a flash failed, power isolation failed, or the run was
+canceled. `test_finished` records which with `stops_run`.
+
 A test run is one `run-suite` run of a plan suite. It writes exactly two files
 into `<output>/<run-id>/` (plus `build/` with `--build`, and `captures/` when
 a BLE capture case ran):
