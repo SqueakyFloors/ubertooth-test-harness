@@ -1,0 +1,483 @@
+"""Build and install resolved Ubertooth and libbtbb commits into a run prefix.
+
+The source checkouts named by the run are never modified: each resolved commit
+is cloned into the run directory, built out of tree, and installed into a
+per-run prefix. Nothing is installed system-wide, and machine setup (system
+packages, udev rules) stays a separate one-time step (the fork's install.sh).
+"""
+
+from dataclasses import dataclass, field
+import os
+from pathlib import Path
+import re
+import shutil
+from typing import Callable, Mapping, Sequence
+
+from ubertooth_harness.cancellation import CancellationToken
+from ubertooth_harness.executor import CommandExecutor, CommandResult
+from ubertooth_harness.manifest import FileIdentity, SourceRevision
+from ubertooth_harness.preflight import host_version_patterns
+from ubertooth_harness.events import EventPublisher
+
+
+class BuildError(RuntimeError):
+    """The resolved revision could not be built or installed."""
+
+
+_INSTALL_HINTS = {
+    "macos": "brew install cmake pkg-config libusb fftw",
+    "linux": (
+        "sudo apt install cmake build-essential pkg-config libusb-1.0-0-dev "
+        "libbluetooth-dev libfftw3-dev"
+    ),
+}
+_FIRMWARE_HINTS = {
+    "macos": "brew install --cask gcc-arm-embedded",
+    "linux": "sudo apt install gcc-arm-none-eabi make",
+}
+
+
+@dataclass(frozen=True)
+class BuildCommand:
+    step_id: str
+    name: str
+    argv: tuple[str, ...]
+    timeout_s: float = 900.0
+    # Directory the command runs in. CMake configure runs inside the checkout
+    # because the projects' version stamps run `git status` in the current
+    # directory, not the source directory.
+    cwd: Path | None = None
+
+
+@dataclass(frozen=True)
+class BuildPlan:
+    work_dir: Path
+    prefix: Path
+    platform: str
+    ubertooth: SourceRevision
+    libbtbb: SourceRevision
+    with_firmware: bool
+    host_cmake_flags: tuple[str, ...]
+    commands: tuple[BuildCommand, ...]
+
+    @property
+    def bin_dir(self) -> Path:
+        return self.prefix / "bin"
+
+    @property
+    def firmware_image(self) -> Path:
+        return (
+            self.work_dir / "src" / "ubertooth" / "firmware" / "bluetooth_rxtx"
+            / "bluetooth_rxtx.dfu"
+        )
+
+    def environment(self, base: Mapping[str, str] | None = None) -> dict:
+        """Process environment for build commands and for testing the build."""
+        env = dict(os.environ if base is None else base)
+        pkg = str(self.prefix / "lib" / "pkgconfig")
+        env["PKG_CONFIG_PATH"] = os.pathsep.join(
+            item for item in (pkg, env.get("PKG_CONFIG_PATH", "")) if item
+        )
+        env["LIBBTBB_DIR"] = str(self.prefix)
+        env["PATH"] = os.pathsep.join(
+            item for item in (str(self.bin_dir), env.get("PATH", "")) if item
+        )
+        return env
+
+
+@dataclass(frozen=True)
+class BuildResult:
+    plan: BuildPlan
+    toolchain: Mapping[str, str]
+    host_version: str
+    artifacts: tuple[FileIdentity, ...]
+    commands: tuple[Mapping, ...] = field(default=())
+
+    def to_manifest(self) -> dict:
+        return {
+            "prefix": str(self.plan.prefix),
+            "platform": self.plan.platform,
+            "with_firmware": self.plan.with_firmware,
+            "host_cmake_flags": list(self.plan.host_cmake_flags),
+            "toolchain": dict(self.toolchain),
+            "host_version": self.host_version,
+            "commands": [dict(item) for item in self.commands],
+        }
+
+
+# Host tools the catalog runs; each must come from the run prefix.
+BUILT_TOOLS = (
+    "ubertooth-util", "ubertooth-debug", "ubertooth-specan", "ubertooth-rx",
+    "ubertooth-tx", "ubertooth-dump", "ubertooth-btle", "ubertooth-dfu",
+    "ubertooth-ego", "ubertooth-afh", "ubertooth-ducky",
+)
+BUILD_DEADLINE_S = 3600.0
+
+
+def missing_tools(
+    platform: str,
+    with_firmware: bool,
+    which: Callable[[str], str | None] = shutil.which,
+) -> list[str]:
+    # make: CMake's default generator on macOS and Linux drives every build.
+    tools = ["git", "cmake", "make", "pkg-config", "cc"]
+    if with_firmware:
+        tools += ["arm-none-eabi-gcc"]
+    return [tool for tool in tools if which(tool) is None]
+
+
+def require_tools(platform: str, with_firmware: bool, which=shutil.which) -> None:
+    missing = missing_tools(platform, with_firmware, which)
+    if not missing:
+        return
+    hints = [_INSTALL_HINTS.get(platform, "")]
+    if with_firmware and "arm-none-eabi-gcc" in missing:
+        hints.append(_FIRMWARE_HINTS.get(platform, ""))
+    raise BuildError(
+        "missing build tool(s): " + ", ".join(missing)
+        + "; install with: " + " && ".join(hint for hint in hints if hint)
+    )
+
+
+def plan_build(
+    *,
+    ubertooth: SourceRevision,
+    libbtbb: SourceRevision,
+    work_dir: Path,
+    platform: str,
+    with_firmware: bool = False,
+    extra_include_dir: str | None = None,
+    jobs: int | None = None,
+) -> BuildPlan:
+    if platform not in ("macos", "linux"):
+        raise BuildError(f"unsupported build platform: {platform}")
+    work = Path(work_dir).resolve()
+    prefix = work / "prefix"
+    jobs = jobs or os.cpu_count() or 2
+    common = (
+        "-DCMAKE_BUILD_TYPE=Release",
+        f"-DCMAKE_INSTALL_PREFIX={prefix}",
+        f"-DCMAKE_PREFIX_PATH={prefix}",
+        f"-DCMAKE_INSTALL_RPATH={prefix / 'lib'}",
+        "-DCMAKE_INSTALL_RPATH_USE_LINK_PATH=ON",
+    )
+    host_flags = common + (
+        "-DENABLE_PYTHON=OFF",
+        "-DINSTALL_UDEV_RULES=OFF",
+    )
+    if platform == "linux":
+        # BlueZ (libbluetooth) exists only on Linux; elsewhere REQUIRE_ALL fails.
+        host_flags += ("-DREQUIRE_ALL=ON",)
+    if extra_include_dir:
+        # Homebrew's libusb headers are not on the default include path. The
+        # run prefix still wins: CMake places target includes before C_FLAGS,
+        # and CMAKE_PREFIX_PATH makes FindBTBB prefer the prefix's libbtbb.
+        host_flags += (f"-DCMAKE_C_FLAGS=-I{extra_include_dir}",)
+
+    commands: list[BuildCommand] = []
+    for source in (libbtbb, ubertooth):
+        name = source.name.lower()
+        checkout = work / "src" / name
+        commands += [
+            BuildCommand(
+                f"{name}-clone",
+                f"Clone {source.name} source",
+                ("git", "clone", "--quiet", "--no-checkout", "--no-hardlinks",
+                 source.source_path, str(checkout)),
+                timeout_s=300.0,
+            ),
+            BuildCommand(
+                f"{name}-checkout",
+                f"Check out {source.name} {source.short_commit}",
+                ("git", "-C", str(checkout), "checkout", "--quiet", "--detach",
+                 source.commit),
+                timeout_s=120.0,
+            ),
+            # The fork's version stamp uses `git diff-index`, which does not
+            # refresh file stat data; a fresh checkout can then look modified
+            # and stamp the build "git-<sha>*".
+            BuildCommand(
+                f"{name}-refresh-index",
+                f"Refresh {source.name} file index",
+                ("git", "-C", str(checkout), "update-index", "-q", "--refresh"),
+                timeout_s=120.0,
+            ),
+            BuildCommand(
+                f"{name}-verify-clean",
+                f"{source.name} checkout is unmodified",
+                ("git", "-C", str(checkout), "diff-index", "--quiet", "HEAD", "--"),
+                timeout_s=120.0,
+            ),
+        ]
+    btbb_src = work / "src" / "libbtbb"
+    btbb_build = work / "build" / "libbtbb"
+    commands += [
+        BuildCommand(
+            "libbtbb-configure",
+            "Configure libbtbb",
+            ("cmake", "-S", str(btbb_src), "-B", str(btbb_build)) + common + (
+                "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+                "-DENABLE_PYTHON=OFF",
+            ),
+            cwd=btbb_src,
+        ),
+        BuildCommand(
+            "libbtbb-build", "Build libbtbb",
+            ("cmake", "--build", str(btbb_build), "-j", str(jobs)),
+        ),
+        BuildCommand(
+            "libbtbb-install", "Install libbtbb into the run prefix",
+            ("cmake", "--install", str(btbb_build)),
+        ),
+    ]
+    host_src = work / "src" / "ubertooth" / "host"
+    host_build = work / "build" / "ubertooth-host"
+    commands += [
+        BuildCommand(
+            "host-configure",
+            "Configure Ubertooth host tools",
+            ("cmake", "-S", str(host_src), "-B", str(host_build)) + host_flags,
+            cwd=host_src,
+        ),
+        BuildCommand(
+            "host-build", "Build Ubertooth host tools",
+            ("cmake", "--build", str(host_build), "-j", str(jobs)),
+        ),
+        BuildCommand(
+            "host-install", "Install host tools into the run prefix",
+            ("cmake", "--install", str(host_build)),
+        ),
+    ]
+    if with_firmware:
+        commands.append(
+            BuildCommand(
+                "firmware-build",
+                "Build bluetooth_rxtx firmware",
+                ("make", "-C",
+                 str(work / "src" / "ubertooth" / "firmware" / "bluetooth_rxtx"),
+                 f"DFU_TOOL={prefix / 'bin' / 'ubertooth-dfu'}"),
+            )
+        )
+    commands.append(
+        BuildCommand(
+            "verify-host-version",
+            "Built host tools report the resolved revision",
+            (str(prefix / "bin" / "ubertooth-util"), "-H"),
+            timeout_s=30.0,
+        )
+    )
+    return BuildPlan(
+        work, prefix, platform, ubertooth, libbtbb, with_firmware,
+        host_flags, tuple(commands),
+    )
+
+
+_VERSION_COMMANDS = (
+    ("cmake", ("cmake", "--version")),
+    ("cc", ("cc", "--version")),
+    ("pkg-config", ("pkg-config", "--version")),
+    ("libusb-1.0", ("pkg-config", "--modversion", "libusb-1.0")),
+)
+
+
+def _first_line(result: CommandResult) -> str:
+    text = (result.stdout or result.stderr).strip()
+    return text.splitlines()[0] if text else ""
+
+
+class Builder:
+    """Run a build plan with hard timeouts, recording every command in the run."""
+
+    def __init__(
+        self,
+        executor: CommandExecutor,
+        publisher: EventPublisher,
+        *,
+        cancellation: CancellationToken | None = None,
+        deadline_s: float = BUILD_DEADLINE_S,
+        clock: Callable[[], float] | None = None,
+    ):
+        import time
+
+        self.executor = executor
+        self.publisher = publisher
+        self.cancellation = cancellation or CancellationToken()
+        self.deadline_s = deadline_s
+        self.clock = clock or time.monotonic
+        self._deadline = None
+
+    def _run(self, argv: Sequence[str], timeout_s: float, label: str, cwd=None):
+        owner = {"phase": "build", "step_id": label}
+        command_id = f"build-{label}"
+        self.publisher.emit(
+            "command_started", "running",
+            {**owner, "command_id": command_id, "argv": list(argv),
+             "cwd": str(cwd) if cwd else None},
+        )
+        streamed = []
+
+        def output(stream: str, text: str) -> None:
+            streamed.append(stream)
+            self.publisher.emit(
+                "command_output", "running",
+                {**owner, "command_id": command_id, "stream": stream, "text": text},
+            )
+
+        if self.cancellation.is_cancelled():
+            raise BuildError(f"build canceled: {self.cancellation.reason}")
+        if self._deadline is not None:
+            remaining = self._deadline - self.clock()
+            if remaining <= 0:
+                raise BuildError(f"build exceeded {self.deadline_s:.0f}s")
+            timeout_s = min(timeout_s, remaining)
+        options = {
+            "timeout_s": timeout_s,
+            "on_output": output,
+            "cancellation": self.cancellation,
+        }
+        if cwd is not None:
+            options["cwd"] = str(cwd)
+        result = self.executor.run(argv, **options)
+        if not streamed:
+            for stream, text in (("stdout", result.stdout), ("stderr", result.stderr)):
+                for start in range(0, len(text), 4096):
+                    output(stream, text[start:start + 4096])
+        status = (
+            "canceled" if result.cancelled
+            else "passed" if result.returncode == 0 and not result.timed_out
+            else "failed"
+        )
+        self.publisher.emit(
+            "command_finished", status,
+            {**owner, "command_id": command_id, "returncode": result.returncode,
+             "duration_s": result.duration_s, "timed_out": result.timed_out,
+             "cancelled": result.cancelled},
+        )
+        return result
+
+    def toolchain(self, plan: BuildPlan) -> dict:
+        versions = {}
+        commands = list(_VERSION_COMMANDS)
+        if plan.platform == "linux":
+            commands.append(("bluez", ("pkg-config", "--modversion", "bluez")))
+        if plan.with_firmware:
+            commands.append(("arm-none-eabi-gcc", ("arm-none-eabi-gcc", "--version")))
+        missing_libraries = []
+        self.publisher.emit(
+            "build_step_started", "running",
+            {"step_id": "toolchain", "step_name": "Read toolchain versions"},
+        )
+        for name, argv in commands:
+            result = self._run(argv, 30.0, f"toolchain-{name}")
+            if result.returncode != 0 or result.timed_out:
+                if argv[0] == "pkg-config" and len(argv) > 2:
+                    missing_libraries.append(argv[-1])
+                    continue
+                raise BuildError(f"cannot read the {name} version: {_first_line(result)}")
+            versions[name] = _first_line(result)
+        if missing_libraries:
+            hint = _INSTALL_HINTS.get(plan.platform, "")
+            raise BuildError(
+                "missing library: " + ", ".join(missing_libraries)
+                + (f"; install with: {hint}" if hint else "")
+            )
+        return versions
+
+    def run(self, plan: BuildPlan) -> BuildResult:
+        """Build the plan; build_started/build_finished bracket its commands."""
+        self.publisher.emit(
+            "build_started", "running",
+            {"prefix": str(plan.prefix), "platform": plan.platform,
+             "with_firmware": plan.with_firmware},
+        )
+        try:
+            result = self._run_plan(plan)
+        except BuildError as error:
+            self.publisher.emit("build_finished", "failed", {"reason": str(error)})
+            raise
+        self.publisher.emit(
+            "build_finished", "passed",
+            {"reason": "", "host_version": result.host_version},
+        )
+        return result
+
+    def _run_plan(self, plan: BuildPlan) -> BuildResult:
+        self._deadline = self.clock() + self.deadline_s
+        plan.work_dir.mkdir(parents=True, exist_ok=True)
+        records = []
+        toolchain = self.toolchain(plan)
+        host_version = ""
+        for command in plan.commands:
+            self.publisher.emit(
+                "build_step_started", "running",
+                {"step_id": command.step_id, "step_name": command.name},
+            )
+            result = self._run(
+                command.argv, command.timeout_s, command.step_id, command.cwd
+            )
+            records.append({
+                "step_id": command.step_id,
+                "argv": list(command.argv),
+                "cwd": str(command.cwd) if command.cwd else None,
+                "returncode": result.returncode,
+                "duration_s": round(result.duration_s, 3),
+            })
+            if result.cancelled:
+                raise BuildError(f"build canceled: {self.cancellation.reason}")
+            if result.timed_out or result.returncode != 0:
+                reason = "timed out" if result.timed_out else f"exited {result.returncode}"
+                raise BuildError(f"{command.name} {reason}")
+            if command.step_id == "verify-host-version":
+                host_version = (result.stdout + result.stderr).strip()
+        for pattern in host_version_patterns(plan.ubertooth, plan.libbtbb):
+            if not re.search(pattern, host_version):
+                raise BuildError(
+                    f"built ubertooth-util reports {host_version!r}, expected "
+                    f"{plan.ubertooth.expected_revision} and "
+                    f"{plan.libbtbb.expected_revision}"
+                )
+        missing = [tool for tool in BUILT_TOOLS if not (plan.bin_dir / tool).is_file()]
+        if missing:
+            # Without this a missing tool would fall through to an installed one.
+            raise BuildError(
+                "build did not install: " + ", ".join(missing)
+                + f" into {plan.bin_dir}"
+            )
+        return BuildResult(
+            plan,
+            toolchain,
+            host_version,
+            self._artifacts(plan),
+            tuple(records),
+        )
+
+    @staticmethod
+    def _artifacts(plan: BuildPlan) -> tuple[FileIdentity, ...]:
+        artifacts = [
+            FileIdentity.from_path(f"built {path.name}", path)
+            for path in sorted(plan.bin_dir.iterdir())
+            if path.is_file()
+        ]
+        libraries = sorted(
+            path for path in (plan.prefix / "lib").glob("lib*")
+            if path.is_file() and not path.is_symlink()
+            and re.search(r"\.(so|dylib)(\.|$)", path.name)
+        )
+        artifacts += [
+            FileIdentity.from_path(f"built {path.name}", path) for path in libraries
+        ]
+        if plan.with_firmware:
+            artifacts.append(
+                FileIdentity.from_path("built bluetooth_rxtx.dfu", plan.firmware_image)
+            )
+        return tuple(artifacts)
+
+
+def homebrew_include_dir(executor: CommandExecutor, which=shutil.which) -> str | None:
+    """Homebrew's include directory, needed for libusb headers on macOS."""
+    if which("brew") is None:
+        return None
+    result = executor.run(("brew", "--prefix"), timeout_s=30.0)
+    if result.returncode != 0:
+        return None
+    return str(Path(result.stdout.strip()) / "include")

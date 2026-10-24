@@ -1,0 +1,557 @@
+"""Command-line interface for the local harness slice."""
+
+import argparse
+import contextlib
+from dataclasses import asdict
+import json
+from pathlib import Path
+import signal
+import sys
+
+from ubertooth_harness.build import (
+    BuildError,
+    Builder,
+    homebrew_include_dir,
+    plan_build,
+    require_tools,
+)
+from ubertooth_harness.cancellation import CancellationToken
+
+from ubertooth_harness.environment import (
+    HarnessEnvironmentError,
+    require_harness_environment,
+)
+from ubertooth_harness.events import (
+    TerminalEventSink,
+    open_run_publisher,
+    create_run_directory,
+    generate_run_id,
+    validate_run_id,
+)
+from ubertooth_harness.executor import SubprocessCommandExecutor
+from ubertooth_harness.isolation import IsolationRuntime, IsolationSetupError
+from ubertooth_harness.flash import HarnessError
+from ubertooth_harness.manifest import (
+    FileIdentity,
+    GitRevisionResolver,
+    ManifestError,
+    build_run_manifest,
+)
+from ubertooth_harness.plan import PlanError, load_plan
+from ubertooth_harness.catalog import builtin_catalog
+from ubertooth_harness.planner import PlanCompiler, PlanningError
+from ubertooth_harness.preflight import PreflightError, PreflightPolicy
+from ubertooth_harness.resources import FileResourceRegistry, RegistryError
+from ubertooth_harness.report import render_runs, write_report
+from ubertooth_harness.sequencer import NamedTestSequencer, run_started_details
+from ubertooth_harness.stateful import StateCaseError
+from ubertooth_harness.transitions import guard_boards
+
+
+_DEFAULT_PLAN = Path(__file__).resolve().parents[1] / "testplans" / "slow.yaml"
+
+
+def _detected_platform() -> str:
+    if sys.platform == "darwin":
+        return "macos"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    raise HarnessError(f"unsupported host platform: {sys.platform}")
+
+
+def _add_build_options(parser: argparse.ArgumentParser, *, optional: bool) -> None:
+    if optional:
+        parser.add_argument(
+            "--build",
+            action="store_true",
+            help="build the resolved commits into the run directory and test "
+            "those tools (requires --libbtbb-source/--libbtbb-ref)",
+        )
+    parser.add_argument(
+        "--with-firmware",
+        action="store_true",
+        help="also build bluetooth_rxtx firmware (needs arm-none-eabi-gcc); "
+        "the image is recorded, not flashed",
+    )
+
+
+@contextlib.contextmanager
+def _signals_cancel(token: CancellationToken):
+    """SIGINT/SIGTERM cancel the token instead of interrupting the process."""
+    previous = {}
+
+    def request(signum, _frame):
+        token.cancel(f"received {signal.Signals(signum).name}")
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        previous[signum] = signal.getsignal(signum)
+        signal.signal(signum, request)
+    try:
+        yield token
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+def _build(sources, work_dir: Path, with_firmware: bool, publisher):
+    """Build resolved sources into work_dir, recording into the run's publisher."""
+    platform = _detected_platform()
+    require_tools(platform, with_firmware)
+    by_name = {source.name: source for source in sources}
+    probe = SubprocessCommandExecutor()
+    plan = plan_build(
+        ubertooth=by_name["Ubertooth"],
+        libbtbb=by_name["libbtbb"],
+        work_dir=work_dir,
+        platform=platform,
+        with_firmware=with_firmware,
+        extra_include_dir=homebrew_include_dir(probe) if platform == "macos" else None,
+    )
+    work_dir.mkdir(parents=True, exist_ok=True)
+    with _signals_cancel(CancellationToken()) as token:
+        return Builder(
+            SubprocessCommandExecutor(plan.environment()),
+            publisher,
+            cancellation=token,
+        ).run(plan)
+
+
+def _finish_failed_run(publisher, output_dir: Path, reason: str) -> None:
+    """Close a run that failed before its tests started, then write report.md."""
+    try:
+        publisher.emit(
+            "run_finished", "failed", {"status": "failed", "failure_reason": reason}
+        )
+    finally:
+        write_report(output_dir)
+
+
+def _resolve_sources(args: argparse.Namespace):
+    if bool(args.libbtbb_source) != bool(args.libbtbb_ref):
+        raise ManifestError(
+            "--libbtbb-source and --libbtbb-ref must be supplied together"
+        )
+    resolver = GitRevisionResolver()
+    sources = [
+        resolver.resolve("Ubertooth", args.ubertooth_source, args.ubertooth_ref)
+    ]
+    if args.libbtbb_source:
+        sources.append(
+            resolver.resolve("libbtbb", args.libbtbb_source, args.libbtbb_ref)
+        )
+    return tuple(sources)
+
+
+def _build_command(args: argparse.Namespace) -> int:
+    sources = _resolve_sources(args)
+    if Path(args.output).exists():
+        raise HarnessError(f"build output already exists: {args.output}")
+    output = Path(args.output)
+    output.mkdir(parents=True)
+    publisher = open_run_publisher(output, generate_run_id(), TerminalEventSink(sys.stderr))
+    publisher.emit("run_started", "running", run_started_details("build", "build", "", sources))
+    try:
+        result = _build(sources, output, args.with_firmware, publisher)
+    except BuildError as error:
+        _finish_failed_run(publisher, output, str(error))
+        raise
+    publisher.emit("run_finished", "passed", {"status": "passed", "failure_reason": ""})
+    write_report(output)
+    print(json.dumps({
+        "sources": [source.to_dict() for source in sources],
+        "build": result.to_manifest(),
+        "artifacts": [item.to_dict() for item in result.artifacts],
+    }, indent=2, sort_keys=True))
+    return 0
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="ubertooth-harness")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    validate = subparsers.add_parser("validate-plan", help="validate named tests")
+    validate.add_argument("plan", type=Path, nargs="?", default=_DEFAULT_PLAN)
+    validate.add_argument("--hardware", type=Path)
+    validate.add_argument("--suite")
+
+    run_suite = subparsers.add_parser(
+        "run-suite", help="compile and run named tests for one local host"
+    )
+    run_suite.add_argument("--plan", type=Path, required=True)
+    run_suite.add_argument("--suite", required=True)
+    run_suite.add_argument("--hardware", type=Path, required=True)
+    run_suite.add_argument("--host", required=True)
+    run_suite.add_argument("--ubertooth-source", type=Path, required=True)
+    run_suite.add_argument("--ubertooth-ref", required=True)
+    run_suite.add_argument("--libbtbb-source", type=Path)
+    run_suite.add_argument("--libbtbb-ref")
+    run_suite.add_argument(
+        "--artifact",
+        action="append",
+        default=[],
+        metavar="NAME=PATH",
+        help="immutable build artifact to hash into the run manifest; repeatable",
+    )
+    run_suite.add_argument(
+        "--test", action="append", help="exact test name; repeat to select"
+    )
+    run_suite.add_argument("--run-id")
+    run_suite.add_argument(
+        "--allow-power-changes",
+        action="store_true",
+        help="allow real USB power switching for exclusive-Ubertooth tests",
+    )
+    run_suite.add_argument("--output", type=Path, required=True)
+    _add_build_options(run_suite, optional=True)
+
+    build = subparsers.add_parser(
+        "build",
+        help="build and install resolved Ubertooth and libbtbb commits into a prefix",
+    )
+    build.add_argument("--ubertooth-source", type=Path, required=True)
+    build.add_argument("--ubertooth-ref", required=True)
+    build.add_argument("--libbtbb-source", type=Path, required=True)
+    build.add_argument("--libbtbb-ref", required=True)
+    build.add_argument("--output", type=Path, required=True,
+                       help="new directory for sources, build trees, and the prefix")
+    _add_build_options(build, optional=False)
+
+    report = subparsers.add_parser(
+        "report", help="render one Markdown report from one or more run directories"
+    )
+    report.add_argument("runs", type=Path, nargs="+", help="run directories (or run.jsonl files)")
+    report.add_argument("--output", type=Path, help="write here instead of stdout")
+    report.add_argument("--title", help="report title")
+    report.add_argument(
+        "--redact-serials", action="store_true",
+        help="replace device serial numbers with <serial>",
+    )
+
+    runner = subparsers.add_parser(
+        "runner",
+        help="persistent target runner: dial a loopback controller and run "
+        "suites it requests",
+    )
+    runner.add_argument(
+        "--controller", required=True, metavar="URL",
+        help="ws:// or wss:// controller URL; the host must be loopback",
+    )
+    runner.add_argument("--hardware", type=Path, required=True)
+    runner.add_argument("--host", required=True)
+    runner.add_argument("--ubertooth-source", type=Path, required=True)
+    runner.add_argument("--libbtbb-source", type=Path)
+    runner.add_argument("--libbtbb-ref")
+    runner.add_argument(
+        "--plans-dir", type=Path, default=_DEFAULT_PLAN.parent,
+        help="directory of <plan>.yaml files a run request may name",
+    )
+    runner.add_argument("--output", type=Path, required=True)
+    runner.add_argument(
+        "--allow-power-changes", action="store_true",
+        help="pass --allow-power-changes to every run (set here, never by "
+        "the controller)",
+    )
+    runner.add_argument(
+        "--heartbeat-interval", type=float, default=10.0, metavar="SECONDS",
+    )
+
+    return parser
+
+
+def _runner(args: argparse.Namespace) -> int:
+    import asyncio
+
+    from ubertooth_harness.runner_service import RunnerConfig, RunnerService
+
+    service = RunnerService(RunnerConfig(
+        controller_url=args.controller,
+        hardware=args.hardware,
+        host=args.host,
+        ubertooth_source=args.ubertooth_source,
+        output=args.output,
+        plans_dir=args.plans_dir,
+        libbtbb_source=args.libbtbb_source,
+        libbtbb_ref=args.libbtbb_ref,
+        allow_power_changes=args.allow_power_changes,
+        heartbeat_interval_s=args.heartbeat_interval,
+    ))
+    host = FileResourceRegistry.load(service.config.hardware).get(args.host)
+    if host.type != "Host":
+        raise HarnessError(f"resource {args.host} is not a Host")
+
+    async def run_service():
+        loop = asyncio.get_running_loop()
+        # SIGHUP too: a dropped SSH session cancels the run and restores boards.
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            loop.add_signal_handler(signum, service.request_stop)
+        await service.run_forever()
+
+    asyncio.run(run_service())
+    return 0
+
+
+def _validate(
+    plan_path: Path,
+    hardware_path: Path | None = None,
+    suite: str | None = None,
+) -> int:
+    catalog = builtin_catalog()
+    plan = load_plan(plan_path, catalog)
+    print(f"plan: {plan.name}")
+    for suite_name, steps in plan.suites.items():
+        print(f"{suite_name}: {len(steps)} named test(s)")
+        for step in steps:
+            print(f"  - {step.test_name}")
+    if hardware_path is not None:
+        registry = FileResourceRegistry.load(hardware_path)
+        compiler = PlanCompiler(catalog, registry)
+        selected_suites = (suite,) if suite else tuple(plan.suites)
+        for suite_name in selected_suites:
+            invocations = compiler.compile(plan, suite_name)
+            print(f"compiled {suite_name}: {len(invocations)} invocation(s)")
+            for invocation in invocations:
+                resources = ", ".join(
+                    f"{role}={alias}" for role, alias in invocation.resources.items()
+                )
+                suffix = f" [{resources}]" if resources else ""
+                print(
+                    f"  {invocation.invocation_id}: {invocation.host}{suffix}"
+                )
+                for action in invocation.power_isolation:
+                    print(
+                        "    power: "
+                        f"{action.resource_alias}=off via "
+                        f"{action.controller_alias} port {action.port}"
+                    )
+                try:
+                    guard_boards(invocation.resource_identities)
+                except StateCaseError as error:
+                    # Planning stays permissive; run-suite refuses this host.
+                    print(f"    warning: {error}; run-suite refuses this invocation")
+                if invocation.exclusive_ubertooth and not invocation.power_isolation:
+                    print(
+                        "    exclusive: no other registered Ubertooth; "
+                        "read-only enumeration check"
+                    )
+    return 0
+
+
+def _prepare_run(
+    args, plan, invocations, sources, artifacts, run_id, preflight_policy,
+    publisher, run_dir,
+):
+    """Build (when requested), then the manifest and preflight checks."""
+    built = None
+    executor = SubprocessCommandExecutor()
+    if publisher is not None:
+        built = _build(sources, run_dir / "build", args.with_firmware, publisher)
+        artifacts = artifacts + built.artifacts
+        names = {item.name for item in artifacts}
+        if built.plan.with_firmware and "test build" not in names:
+            # The firmware just built is the plan's test image.
+            artifacts += (FileIdentity.from_path("test build", built.plan.firmware_image),)
+        # Every test command runs the tools just built, not installed ones.
+        executor = SubprocessCommandExecutor(built.plan.environment())
+    manifest = build_run_manifest(
+        run_id=run_id,
+        plan_name=plan.name,
+        suite=args.suite,
+        host=args.host,
+        plan_path=args.plan,
+        hardware_path=args.hardware,
+        sources=tuple(sources),
+        invocations=invocations,
+        artifacts=artifacts,
+        build=built.to_manifest() if built else None,
+    )
+    preflight_checks = preflight_policy.compile(invocations, manifest)
+    return manifest, preflight_checks, executor, built
+
+
+def _parse_artifacts(values: list[str]) -> tuple[FileIdentity, ...]:
+    artifacts = []
+    names = set()
+    for value in values:
+        if "=" not in value:
+            raise ManifestError("artifact must use NAME=PATH")
+        name, raw_path = value.split("=", 1)
+        if not name or not raw_path:
+            raise ManifestError("artifact must use non-empty NAME=PATH")
+        if name in names:
+            raise ManifestError(f"duplicate artifact name '{name}'")
+        names.add(name)
+        artifacts.append(FileIdentity.from_path(name, raw_path))
+    return tuple(artifacts)
+
+
+def _run_suite(args: argparse.Namespace) -> int:
+    catalog = builtin_catalog()
+    plan = load_plan(args.plan, catalog)
+    registry = FileResourceRegistry.load(args.hardware)
+    host = registry.get(args.host)
+    if host.type != "Host":
+        raise HarnessError(f"resource {args.host} is not a Host")
+    if host.platform != _detected_platform():
+        raise HarnessError(
+            f"host {args.host} platform {host.platform} does not match local platform"
+        )
+    compiled = PlanCompiler(catalog, registry).compile(plan, args.suite)
+    selected_names = set(args.test or ())
+    for name in selected_names:
+        catalog.get(name)
+    invocations = tuple(
+        invocation
+        for invocation in compiled
+        if invocation.host == args.host
+        and (not selected_names or invocation.test_name in selected_names)
+    )
+    if not invocations:
+        raise HarnessError(f"suite {args.suite} has no selected invocation for {args.host}")
+    for invocation in invocations:
+        # Guards need unambiguous -U selectors; fail before any build or device access.
+        try:
+            guard_boards(invocation.resource_identities)
+        except StateCaseError as error:
+            raise HarnessError(f"{invocation.invocation_id}: {error}") from error
+    unavailable = sorted({
+        invocation.test_name
+        for invocation in invocations
+        if not catalog.get(invocation.test_name).implemented
+    })
+    if unavailable:
+        raise HarnessError(
+            "test implementation not available: " + ", ".join(unavailable)
+        )
+    sources = _resolve_sources(args)
+    if args.with_firmware and not args.build:
+        raise HarnessError("--with-firmware requires --build")
+    if args.build and not args.libbtbb_source:
+        raise HarnessError("--build requires --libbtbb-source and --libbtbb-ref")
+    artifacts = _parse_artifacts(args.artifact)
+    run_id = validate_run_id(args.run_id) if args.run_id else generate_run_id()
+    preflight_policy = PreflightPolicy(registry, catalog)
+    # Checks that need no build run first, so a long build cannot end in a
+    # plan-order or power-isolation error.
+    preflight_policy.check_order(invocations)
+    isolation = None
+    isolated_invocations = [
+        i for i in invocations if i.power_isolation or i.exclusive_ubertooth
+    ]
+    if isolated_invocations:
+        # Controllers are chosen per resource from its hardware `driver`, so
+        # one run can mix StarTech and Acroname switches. Readiness connects
+        # to each controller and scans USB once, without changing any port.
+        # An exclusive invocation with no power actions only scans USB, so it
+        # needs no --allow-power-changes and builds no controller.
+        isolation = IsolationRuntime(
+            registry, args.host, allow_changes=args.allow_power_changes
+        )
+        for invocation in isolated_invocations:
+            isolation.check_ready(
+                invocation.power_isolation, invocation.resources.get("Ubertooth")
+            )
+    built = None
+    publisher = None
+    executor = SubprocessCommandExecutor()
+    if args.build:
+        run_dir = create_run_directory(args.output, run_id)
+        publisher = open_run_publisher(run_dir, run_id, TerminalEventSink(sys.stderr))
+        publisher.emit(
+            "run_started", "running",
+            run_started_details(plan.name, args.suite, args.host, sources),
+        )
+    try:
+        manifest, preflight_checks, executor, built = _prepare_run(
+            args, plan, invocations, sources, artifacts, run_id, preflight_policy,
+            publisher, run_dir if args.build else None,
+        )
+    except BaseException as error:
+        if publisher is not None:
+            _finish_failed_run(publisher, run_dir, str(error) or type(error).__name__)
+        if isolation is not None:
+            isolation.close()
+        raise
+    if built is None:
+        run_dir = create_run_directory(args.output, run_id)
+    cancellation = CancellationToken()
+    previous_handlers = {}
+
+    def request_cancellation(signum, _frame):
+        cancellation.cancel(f"received {signal.Signals(signum).name}")
+
+    # SIGHUP too: a dropped SSH session must still restore isolated boards.
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        previous_handlers[signum] = signal.getsignal(signum)
+        signal.signal(signum, request_cancellation)
+    try:
+        summary = NamedTestSequencer(
+            executor,
+            catalog=catalog,
+            event_sink=TerminalEventSink(sys.stderr),
+            isolation=isolation,
+            registry=registry,
+        ).run(
+            invocations,
+            run_dir,
+            run_id=run_id,
+            manifest=manifest,
+            preflight_checks=preflight_checks,
+            cancellation=cancellation,
+            publisher=publisher,
+        )
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+        if isolation is not None:
+            isolation.close()
+    try:
+        print(json.dumps(asdict(summary), indent=2, sort_keys=True))
+    except OSError:
+        pass  # terminal gone (e.g. SSH dropped); run.jsonl has the result
+    return 0 if summary.passed else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _parser()
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "validate-plan":
+            return _validate(args.plan, args.hardware, args.suite)
+        # Commands that touch hardware must run in the bootstrapped harness
+        # environment, never a system or application interpreter.
+        if args.command == "run-suite":
+            require_harness_environment()
+            return _run_suite(args)
+        if args.command == "build":
+            require_harness_environment()
+            return _build_command(args)
+        if args.command == "runner":
+            require_harness_environment()
+            return _runner(args)
+        if args.command == "report":
+            text = render_runs(args.runs, redact_serials=args.redact_serials, title=args.title)
+            if args.output:
+                args.output.write_text(text, encoding="utf-8")
+            else:
+                sys.stdout.write(text)
+            return 0
+        raise HarnessError(f"unknown command {args.command}")
+    except (
+        BuildError,
+        HarnessError,
+        HarnessEnvironmentError,
+        ManifestError,
+        PlanError,
+        PlanningError,
+        PreflightError,
+        RegistryError,
+        IsolationSetupError,
+        ValueError,
+        OSError,
+    ) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

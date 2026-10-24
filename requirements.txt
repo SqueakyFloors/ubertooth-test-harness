@@ -1,0 +1,3 @@
+PyYAML==6.0.3
+pyserial==3.5  # StarTech managed hub driver
+websockets==17.3  # target runner <-> controller WebSocket transport

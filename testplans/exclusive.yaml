@@ -1,0 +1,16 @@
+plan: Exclusive Ubertooth topology
+suites:
+  exclusive:
+    # Powers off every other registered Ubertooth on the host through its
+    # registered USB power controller (any supported driver), confirms by USB
+    # enumeration that only the selected board remains, runs no-selector
+    # commands against it, then restores power and confirms the others return.
+    # Requires: run-suite --allow-power-changes on a Linux host. With only one
+    # registered board on the host nothing is switched: a read-only check
+    # confirms it is the only Ubertooth enumerated (no opt-in needed).
+    - Exclusive Ubertooth topology:
+        hosts: [Host_Linux]
+        platforms: [linux]
+        Ubertooth: each
+        exclusive Ubertooth: true
+        capture duration: 5s

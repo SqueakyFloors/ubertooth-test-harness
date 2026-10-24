@@ -1,0 +1,82 @@
+resources:
+  Host_Linux:
+    type: Host
+    platform: linux
+    roles: [controller, test target]
+    defaults:
+      Ubertooth: UT_Linux0
+
+  Host_Mac:
+    type: Host
+    platform: macos
+    roles: [test target]
+    defaults:
+      Ubertooth: UT_Mac0
+
+  UT_Linux0:
+    type: Ubertooth
+    attached to: Host_Linux
+    identity:
+      serial: REPLACE_WITH_UBERTOOTH_SERIAL
+    power:
+      controller: Hub_Linux0
+      port: 1
+
+  UT_Linux1:
+    type: Ubertooth
+    attached to: Host_Linux
+    identity:
+      serial: REPLACE_WITH_SECOND_UBERTOOTH_SERIAL
+    power:
+      controller: Hub_Linux0
+      port: 3
+
+  UT_Mac0:
+    type: Ubertooth
+    attached to: Host_Mac
+    identity:
+      serial: REPLACE_WITH_MAC_UBERTOOTH_SERIAL
+
+  DK_Linux0:
+    type: nRF52840 DK
+    attached to: Host_Linux
+    identity:
+      probe serial: REPLACE_WITH_PROBE_SERIAL
+      BLE address: REPLACE_WITH_ADVERTISING_MAC
+    capabilities: [BLE advertiser, BLE central, DLE]
+
+  DK_Linux1:
+    type: nRF52840 DK
+    attached to: Host_Linux
+    identity:
+      probe serial: REPLACE_WITH_SECOND_PROBE_SERIAL
+    capabilities: [BLE peripheral, DLE]
+
+  # StarTech managed hub: switched through its built-in FTDI management
+  # controller, which sits on downstream port 4; only ports 1-3 are DUT ports.
+  # Use the stable /dev/serial/by-id path (required). Needs pyserial, see
+  # requirements.txt. Only the factory password is supported. uhubctl cannot
+  # cut power on this hub.
+  Hub_Linux0:
+    type: USB power controller
+    attached to: Host_Linux
+    identity:
+      serial device: /dev/serial/by-id/usb-FTDI_FT232R_USB_UART_REPLACE-if00-port0
+    driver: startech managed USB hub
+    capabilities:
+      - per-port VBUS switching
+
+  # Alternative: Acroname USBHub3+ (ports 0-7, with power/VBUS readback).
+  # To use it, point the Ubertooth power mappings at Hub_Linux1.
+  Hub_Linux1:
+    type: USB power controller
+    attached to: Host_Linux
+    identity:
+      serial: "0xREPLACE_WITH_ACRONAME_SERIAL"
+    driver: acroname BrainStem USBHub3+
+    capabilities:
+      - per-port VBUS switching
+      - per-port data switching
+      - power readback
+      - VBUS voltage measurement
+      - VBUS current measurement

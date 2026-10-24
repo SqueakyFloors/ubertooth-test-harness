@@ -1,0 +1,49 @@
+plan: Ubertooth fast
+suites:
+  fast:
+    - Host CLI surface:
+        hosts: each
+
+    - Ubertooth identity:
+        hosts: each
+        Ubertooth: default
+
+    - Debug register read:
+        hosts: each
+        Ubertooth: default
+        register: 0x00
+
+    - Ubertooth util compositions:
+        hosts: each
+        Ubertooth: default
+        coverage: smoke
+
+    - Radio setting transitions:
+        hosts: each
+        Ubertooth: default
+        coverage: smoke
+
+    - BLE CRC transitions:
+        hosts: each
+        Ubertooth: default
+        coverage: smoke
+
+    - BLE monitor:
+        hosts: each
+        Ubertooth: default
+        duration: 10s
+
+    - Spectrum analyzer:
+        hosts: each
+        Ubertooth: default
+        duration: 8s
+
+    - Spectrum RSSI sanity:
+        hosts: each
+        Ubertooth: default
+        duration: 5s
+
+    - Classic Bluetooth receive:
+        hosts: each
+        Ubertooth: default
+        duration: 8s

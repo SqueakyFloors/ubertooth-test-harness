@@ -1,0 +1,29 @@
+plan: Ubertooth reliability
+suites:
+  slow:
+    - BLE soak:
+        hosts: each
+        Ubertooth: default
+        duration: 30m
+        sample every: 5s
+
+    - Spectrum soak:
+        hosts: each
+        Ubertooth: default
+        duration: 15m
+        sample every: 5s
+
+    - Classic Bluetooth receive soak:
+        hosts: each
+        Ubertooth: default
+        duration: 15m
+        sample every: 5s
+
+    - Flash reliability:
+        hosts: each
+        platforms: [macos, linux]
+        Ubertooth: default
+        flashes: 100
+        image sequence: [test build, KGV]
+        KGV sha256: e3fcb486c6e0ce7cc991bf6439f6dbc0156ed1229c2b95ebfd02198f9675bb11
+        KGV revision: 2020-12-R1
