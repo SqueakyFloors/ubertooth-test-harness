@@ -335,16 +335,16 @@ and fail until the fix is on the commit under test.
 | Fork issue | Tool | Problem | Status | Harness case |
 |---|---|---|---|---|
 | [#149](https://github.com/SqueakyFloors/ubertooth/issues/149) | firmware | GET_CHANNEL control requests stall in follow mode | Open | Not yet |
-| [#158](https://github.com/SqueakyFloors/ubertooth/issues/158) | firmware | Board stops answering after a sniffing or specan stream ends, until re-plugged | Open (fix in testing) | Any BLE or specan run |
+| [#158](https://github.com/SqueakyFloors/ubertooth/issues/158) | firmware | Board stops answering after a sniffing or specan stream ends, until re-plugged | Fixed on main (`b7437da`); boards still wedge, see [#239](https://github.com/SqueakyFloors/ubertooth/issues/239) | Any BLE or specan run |
 | [#159](https://github.com/SqueakyFloors/ubertooth/issues/159) | ubertooth-util | `-z` dropped with a mode | Fixed on main (`4ed4a1d`) | Argument validation (comprehensive) |
-| [#160](https://github.com/SqueakyFloors/ubertooth/issues/160) | docs | PA boot/reset default (7) undocumented | Open | Radio setting transitions checks 7 |
+| [#160](https://github.com/SqueakyFloors/ubertooth/issues/160) | docs | PA boot/reset default (7) undocumented | Fixed on main (`4ed4a1d`) | Radio setting transitions checks 7 |
 | [#161](https://github.com/SqueakyFloors/ubertooth/issues/161) | ubertooth-util | `-a0` queried instead of setting level 0 | Fixed on main (`4ed4a1d`) | Radio setting transitions: `-a0` (smoke), `-a 0`, reset from PA 0 (comprehensive) |
 | [#164](https://github.com/SqueakyFloors/ubertooth/issues/164) | ubertooth-debug | Exit status was the register's low byte | Fixed (`89afc1c`, #170) | Debug registers (comprehensive) |
 | [#171](https://github.com/SqueakyFloors/ubertooth/issues/171) | ubertooth-btle | Bad `-a` value sets garbage; `-a` skips `-v` and a later set | Fixed (`09e9a46`, #178) | BLE settings (comprehensive) |
 | [#172](https://github.com/SqueakyFloors/ubertooth/issues/172) | ubertooth-util | Non-numeric and out-of-range values accepted (`-z`, `-l`, `-d`, `-C`, `-q`) | Fixed (`658730c`, #177) | Argument validation (comprehensive) |
 | [#173](https://github.com/SqueakyFloors/ubertooth/issues/173) | ubertooth-specan | A run first reports one stale packet from the previous range | Fixed (`20bcf11`, #180) | Spectrum analyzer (comprehensive) |
 | [#185](https://github.com/SqueakyFloors/ubertooth/issues/185) | ubertooth-afh | Segmentation fault when the selected board is not found | Fixed (`219a5b0`, #196) | Classic Bluetooth receive (comprehensive) |
-| [#186](https://github.com/SqueakyFloors/ubertooth/issues/186) | ubertooth-rx | Usage says `-c` defaults to channel 39; the default sweeps | Open | None (usage text) |
+| [#186](https://github.com/SqueakyFloors/ubertooth/issues/186) | ubertooth-rx | Usage says `-c` defaults to channel 39; the default sweeps | Fixed on main (`0b63b01`) | None (usage text) |
 | [#187](https://github.com/SqueakyFloors/ubertooth/issues/187) | ubertooth-afh | `-t` with no packets prints an all-zero map and keeps running, undocumented | Fixed (`3b22c95`, #207): exits 2 with a message | Classic Bluetooth receive (smoke: `-t`; comprehensive: `-t -e 2`) |
 | [#188](https://github.com/SqueakyFloors/ubertooth/issues/188) | libubertooth | With several boards, `-U<index>` past the end opens another USB device and exits 0 | Fixed (`0c7e9c0`, #201) | Multi-board selection (comprehensive) |
 | [#189](https://github.com/SqueakyFloors/ubertooth/issues/189) | firmware | LED specan threshold wraps in int8: `-q183`..`-q225` and bare `-q` light nothing | Fixed (`aa4f620`, #204): 16-bit threshold, `-q` now 20-120, default -85 dBm | Ubertooth util modes (`-q120` lights every LED, smoke); Argument validation (`-q183` refused) |
@@ -353,15 +353,16 @@ and fail until the fix is on the commit under test.
 | [#193](https://github.com/SqueakyFloors/ubertooth/issues/193) | btle, rx, follow, specan, dump, dfu | A refused command line still creates or truncates its output file (`-q`, `-r`, `-d`, `-u`) | Open | None yet |
 | [#198](https://github.com/SqueakyFloors/ubertooth/issues/198) | ubertooth-dfu | `-d` with a rejected image leaves the board in the DFU bootloader | Fixed on main after 3b22c95 (`e8edd15`, #217); fails at 3b22c95 | DFU images (comprehensive, every reject case) |
 | [#199](https://github.com/SqueakyFloors/ubertooth/issues/199) | ubertooth-dfu | `-d` writes an image whose suffix names another vendor or product | Fixed on main after 3b22c95 (#217); fails at 3b22c95 | DFU images (comprehensive) |
-| [#200](https://github.com/SqueakyFloors/ubertooth/issues/200) | ubertooth-dfu | `-s` adds a second suffix and needs a writable input; `-u` truncates on failure | Open | DFU images (comprehensive, strict `-s` cases) |
+| [#200](https://github.com/SqueakyFloors/ubertooth/issues/200) | ubertooth-dfu | `-s` adds a second suffix and needs a writable input; `-u` truncates on failure | Fixed on main (`9d710fe`) | DFU images (comprehensive, strict `-s` cases) |
 | [#202](https://github.com/SqueakyFloors/ubertooth/issues/202) | ubertooth-rx | `-i` lines and captures carry the replay time, not the recorded systime | Fixed on main after 3b22c95 (`a55ac89`, #212); fails at 3b22c95 | Raw receive replay (comprehensive) |
 | [#203](https://github.com/SqueakyFloors/ubertooth/issues/203) | ubertooth-rx | `-i` read errors (a directory) and a cut last record are not reported; exit 0 | Fixed on main after 3b22c95 (`a55ac89`, #212); fails at 3b22c95 | Raw receive replay (comprehensive): the directory case is strict; the cut-record case checks today's silent skip and must change with the fix |
-| [#208](https://github.com/SqueakyFloors/ubertooth/issues/208) | ubertooth-dfu | An intermittent `-u` read-back failure leaves the board in DFU despite `-r` | Open | DFU images (cleanup returns the board) |
-| [#213](https://github.com/SqueakyFloors/ubertooth/issues/213) | firmware | Control requests occasionally stall while LED specan runs | Open | Ubertooth util modes: the LED sampler retries a failed read once and records it |
-| [#228](https://github.com/SqueakyFloors/ubertooth/issues/228) | ubertooth-util | A set and a read of the same value in one command (`-c2426 -c`) drop the set, exit 0 | Open | None: the expected behavior is not decided |
-| [#231](https://github.com/SqueakyFloors/ubertooth/issues/231) | ubertooth-specan | `-d` writes to stdout for any value starting with `-`, not only `-` | Open | None yet |
+| [#208](https://github.com/SqueakyFloors/ubertooth/issues/208) | ubertooth-dfu | An intermittent `-u` read-back failure leaves the board in DFU despite `-r` | Fixed on main (`3c92a19`) | DFU images (cleanup returns the board) |
+| [#213](https://github.com/SqueakyFloors/ubertooth/issues/213) | firmware | Control requests occasionally stall while LED specan runs | Fixed on main (`234ebb3`) | Ubertooth util modes: the LED sampler retries a failed read once and records it |
+| [#228](https://github.com/SqueakyFloors/ubertooth/issues/228) | ubertooth-util | A set and a read of the same value in one command (`-c2426 -c`) drop the set, exit 0 | Fixed on main (`5b45b3e`) | None: the expected behavior is not decided |
+| [#231](https://github.com/SqueakyFloors/ubertooth/issues/231) | ubertooth-specan | `-d` writes to stdout for any value starting with `-`, not only `-` | Fixed on main (`053363a`) | None yet |
 | [#235](https://github.com/SqueakyFloors/ubertooth/issues/235) | ubertooth-debug | `-r` error says `> 0x00 and < 0xff`; 0x00-0xff are accepted | Open | None (message text; `Reject -r 0x100` checks only its start) |
-| [#236](https://github.com/SqueakyFloors/ubertooth/issues/236) | ubertooth-rx | `-u` without `-l` is refused only after the board is opened | Open | None (Argument validation runs it against an attached board) |
+| [#236](https://github.com/SqueakyFloors/ubertooth/issues/236) | ubertooth-rx | `-u` without `-l` is refused only after the board is opened | Fixed on main (`57469f2`) | None (Argument validation runs it against an attached board) |
+| [#239](https://github.com/SqueakyFloors/ubertooth/issues/239) | firmware | Boards still stop answering control requests (-7) after a stream ends, until re-plugged | Open | Any streaming test |
 
 A test that fails cleanly (device verified restored, guards unchanged) no longer ends the run ([#41](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/41)), so strict cases do not hide later tests.
 
