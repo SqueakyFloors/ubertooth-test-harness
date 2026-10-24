@@ -1,6 +1,7 @@
 """Case builders for receive runs that need no peer: ubertooth-rx,
 ubertooth-afh (Classic Bluetooth receive), ubertooth-dump, and ubertooth-ego
--r (Raw receive).
+-r (Raw receive), plus ubertooth-rx -i, which needs no Ubertooth at all (Raw
+receive replay, a synthetic fixture from rxreplay.py).
 
 The cases check exit status, timeouts, output shape, and the structure of
 the files the tools write, never decoded packet content. Checkers print
@@ -15,6 +16,10 @@ deliver yet; they fail until the linked fork issue is fixed:
 
 - SqueakyFloors/ubertooth#185: ubertooth-afh crashes (exit 139) when the
   selected board is not found.
+- SqueakyFloors/ubertooth#202: ubertooth-rx -i prints the replay time, not
+  the recorded systime.
+- SqueakyFloors/ubertooth#203: ubertooth-rx -i of an unreadable file (a
+  directory) exits 0 without an error.
 """
 
 from __future__ import annotations
@@ -22,9 +27,10 @@ from __future__ import annotations
 import math
 import re
 import sys
+import time
 from pathlib import Path
 
-from ubertooth_harness import capturefile, rxdump
+from ubertooth_harness import capturefile, rxdump, rxreplay
 from ubertooth_harness.stateful import (
     CAPTURE_DIR_KEY,
     Observation,
@@ -423,4 +429,213 @@ def raw_receive_cases(arguments, _resources, resource_identities):
                      mutates=True),
             ), "rejected with exit 1 before any mode starts"),
         ]
+    return tuple(cases)
+
+
+# ---------------------------------------------------------------------------
+# ubertooth-rx -i (Raw receive replay)
+#
+# -i FILE decodes a saved capture instead of opening a device (no -U, no USB):
+# stream_rx_file() feeds each whole 68-byte record (rxdump.py's "full"
+# format) to cb_rx and stops at the first short read; main() then exits 0.
+# An -i file fopen() cannot open prints "Could not open file <name>" and the
+# usage, exit 1. The other options work as live: -l/-u, -z, -e, -r/-q/-d.
+# The fixture is synthetic (rxreplay.py), never an over-the-air capture.
+#
+# Strict comprehensive cases that fail until the fork issue is fixed:
+#
+# - SqueakyFloors/ubertooth#202: packet lines print the replay time, not the
+#   record's systime.
+# - SqueakyFloors/ubertooth#203: a read error (-i <directory>) is not
+#   reported; the replay exits 0 with no output.
+
+_REPLAY = str(Path(rxreplay.__file__).resolve())
+_FIXTURE = "replay.bin"
+_A, _B = f"{rxreplay.LAP_A:06x}", f"{rxreplay.LAP_B:06x}"
+# libbtbb's UAP and CLK6 progress lines; with the fixture's clocks the
+# receiver clock is the master clock, so the CLK1-6 offset is 0.
+_CLK6_ZERO = r"CLK6 = 0x0 found after \d+ total packets"
+_ANY_FOUND = r"(?:UAP|CLK6) = 0x[0-9a-f]+ found after"
+
+
+def _fixture_step(base_time, variant="full"):
+    return Step(
+        "fixture",
+        f"Write the synthetic {variant} replay fixture",
+        lambda context: (sys.executable, _REPLAY, "fixture", _path(_FIXTURE)(context),
+                         "--variant", variant, "--base-time", str(base_time)),
+        output_patterns=(rf"Replay fixture: {variant}, ",),
+    )
+
+
+def _replay_step(name, options, *, check=None, patterns=(), forbidden=(),
+                 files=(), returncodes=(0,), source=_FIXTURE):
+    def argv(context):
+        extra = []
+        for option, file_name in files:
+            extra += [option, _path(file_name)(context)]
+        return ("ubertooth-rx", "-i", _path(source)(context)) + tuple(options) + tuple(extra)
+
+    return Step(
+        "replay", name, argv, timeout_s=20.0, expected_returncodes=returncodes,
+        output_check=check, output_patterns=patterns, forbidden_patterns=forbidden,
+    )
+
+
+def _replay_case(case_id, name, steps, expected_state):
+    return StateCase(
+        case_id,
+        name,
+        tuple(steps),
+        # Nothing on a device to restore; list what the case wrote (names and
+        # sizes only) so the record shows the files were left in the run.
+        (Step("list-files", "List the files the case wrote",
+              lambda context: (sys.executable, _REPLAY, "files",
+                               require(context, CAPTURE_DIR_KEY)),
+              output_patterns=(r"Replay files: \d+ in ",)),),
+        expected_state=expected_state,
+        capture_dir=True,
+    )
+
+
+def _capture_packets(step_id, name, file_name, header_format, packets):
+    return Step(
+        step_id,
+        name,
+        lambda context: (sys.executable, _CAPTURE_CHECKER, "--packets",
+                         _path(file_name)(context)),
+        output_patterns=(
+            rf"Capture format: {header_format}, link type: {LINKTYPE_BREDR}, "
+            rf"packets: {packets}$",
+        ),
+    )
+
+
+def replay_cases(arguments, _resources, _resource_identities, *, now=None):
+    # Record host times lie an hour before the cases are built: inside
+    # rxdump.py's window around the file time, and distinct from the replay.
+    base = int(time.time() if now is None else now) - rxreplay.FIXTURE_AGE_S
+    full = rxreplay.expected_packets()
+    lap_a = rxreplay.expected_packets(lap=rxreplay.LAP_A)
+    lap_b = rxreplay.expected_packets(lap=rxreplay.LAP_B)
+    count = len(full)
+    cases = [
+        _replay_case("replay-decode-lap", "-i decodes every LAP in the fixture", (
+            _fixture_step(base),
+            _replay_step("ubertooth-rx -i <fixture>", (),
+                         check=rxreplay.uap_check(full, None)),
+        ), f"exit 0; {count} packet lines with the fixture's LAPs, errors, and "
+           "channels in order; decoy records skipped; no UAP without -l"),
+        _replay_case("replay-lap-uap", "-i -l <LAP> derives the UAP", (
+            _fixture_step(base),
+            _replay_step(f"ubertooth-rx -i <fixture> -l {_A}", ("-l", _A),
+                         check=rxreplay.uap_check(lap_a, rxreplay.UAP_A),
+                         patterns=(_CLK6_ZERO,)),
+        ), f"only LAP {_A} lines; UAP {rxreplay.UAP_A:02x} found; CLK6 offset 0"),
+        _replay_case("replay-pcapng", "-i -r replays into PCAPNG", (
+            _fixture_step(base),
+            _replay_step("ubertooth-rx -i <fixture> -r", (),
+                         check=rxreplay.packets_check(full),
+                         files=(("-r", "replay.pcapng"),)),
+            _capture_packets("verify-capture", "Verify the -r file", "replay.pcapng",
+                             "pcapng", count),
+        ), f"pcapng, link type 255, {count} packets"),
+        _replay_case("replay-pcap", "-i -q replays into PCAP", (
+            _fixture_step(base),
+            _replay_step("ubertooth-rx -i <fixture> -q", (),
+                         check=rxreplay.packets_check(full),
+                         files=(("-q", "replay.pcap"),)),
+            _capture_packets("verify-capture", "Verify the -q file", "replay.pcap",
+                             "pcap", count),
+        ), f"pcap, link type 255, {count} packets"),
+    ]
+    if arguments["coverage"] != "comprehensive":
+        return tuple(cases)
+    survey = {
+        f"??:??:{rxreplay.UAP_A:02X}:" + ":".join(f"{_A.upper()}"[i:i + 2] for i in (0, 2, 4)),
+        "??:??:??:" + ":".join(f"{_B.upper()}"[i:i + 2] for i in (0, 2, 4)),
+    }
+    truncated = rxreplay.expected_packets("truncated")
+    cases += [
+        _replay_case("replay-survey", "-i -z lists both piconets", (
+            _fixture_step(base),
+            _replay_step("ubertooth-rx -i <fixture> -z", ("-z",),
+                         check=rxreplay.survey_check(survey)),
+        ), "Survey Results: LAP A with its UAP, LAP B without one"),
+        _replay_case("replay-lap-filter", f"-i -l {_B}: only that LAP", (
+            _fixture_step(base),
+            _replay_step(f"ubertooth-rx -i <fixture> -l {_B}", ("-l", _B),
+                         check=rxreplay.uap_check(lap_b, None)),
+        ), f"only LAP {_B} lines (ID packets: no UAP)"),
+        _replay_case("replay-uap-given", "-i -l -u with the right UAP", (
+            _fixture_step(base),
+            _replay_step(f"ubertooth-rx -i <fixture> -l {_A} -u {rxreplay.UAP_A:02x}",
+                         ("-l", _A, "-u", f"{rxreplay.UAP_A:02x}"),
+                         check=rxreplay.packets_check(lap_a),
+                         patterns=(_CLK6_ZERO, r"\d+ initial CLK1-27 candidates"),
+                         forbidden=(r"failed to confirm UAP",)),
+        ), "UAP confirmed, CLK6 offset 0, hop reversal started"),
+        _replay_case("replay-uap-wrong", "-i -l -u with a wrong UAP confirms nothing", (
+            _fixture_step(base),
+            _replay_step(f"ubertooth-rx -i <fixture> -l {_A} -u 11",
+                         ("-l", _A, "-u", "11"),
+                         check=rxreplay.packets_check(lap_a),
+                         forbidden=(_ANY_FOUND, r"initial CLK1-27 candidates")),
+        ), "packet lines only; no UAP or clock reported"),
+        _replay_case("replay-ac-errors-0", "-i -e 0 drops the packet with an error", (
+            _fixture_step(base),
+            _replay_step("ubertooth-rx -i <fixture> -e 0", ("-e", "0"),
+                         check=rxreplay.packets_check(rxreplay.expected_packets(max_errors=0))),
+        ), "the access code with one bit error is not reported"),
+        _replay_case("replay-dump", "-i -d writes the packet records back", (
+            _fixture_step(base),
+            _replay_step("ubertooth-rx -i <fixture> -d", (),
+                         check=rxreplay.packets_check(full),
+                         files=(("-d", "replay.dump"),)),
+            _dump_check("verify-dump", "Verify the -d file records", "replay.dump",
+                        "full", min_records=count, types="br"),
+            Step("verify-records", "Compare the -d records with the fixture",
+                 lambda context: (sys.executable, _REPLAY, "dump-check",
+                                  _path("replay.dump")(context), _path(_FIXTURE)(context)),
+                 output_patterns=(rf"Replay dump: {count} records match the fixture",)),
+        ), f"{count} records, byte-identical to the fixture records with packets"),
+        _replay_case("replay-lap-pcap", f"-i -l {_A} -q: only that LAP captured", (
+            _fixture_step(base),
+            _replay_step(f"ubertooth-rx -i <fixture> -l {_A} -q", ("-l", _A),
+                         check=rxreplay.packets_check(lap_a),
+                         files=(("-q", "replay.pcap"),)),
+            _capture_packets("verify-capture", "Verify the -q file", "replay.pcap",
+                             "pcap", len(lap_a)),
+        ), f"pcap, link type 255, {len(lap_a)} packets"),
+        _replay_case("replay-empty", "-i of an empty file", (
+            _fixture_step(base, "empty"),
+            _replay_step("ubertooth-rx -i <empty>", (), check=rxreplay.packets_check([])),
+        ), "exit 0, no packet lines"),
+        _replay_case("replay-truncated", "-i of a file whose last record is cut", (
+            _fixture_step(base, "truncated"),
+            _replay_step("ubertooth-rx -i <truncated>", (),
+                         check=rxreplay.packets_check(truncated)),
+        ), f"exit 0; the {len(truncated)} packets in whole records; the partial "
+           "record ignored"),
+        _replay_case("replay-missing", "-i of a missing file", (
+            _replay_step("ubertooth-rx -i <missing>", (), returncodes=(1,),
+                         patterns=(r"Could not open file ",), source="missing.bin"),
+        ), "exit 1 with 'Could not open file' and the usage"),
+        # Fails until SqueakyFloors/ubertooth#202.
+        _replay_case("replay-systime", "-i packet lines carry the recorded systime", (
+            _fixture_step(base),
+            _replay_step("ubertooth-rx -i <fixture>", (), check=lambda output:
+                         rxreplay.systime_check(output, [
+                             base + index for index in rxreplay.packet_record_indices()])),
+        ), "each packet line's systime is its record's host time"),
+        # Fails until SqueakyFloors/ubertooth#203.
+        _replay_case("replay-unreadable", "-i of a directory reports the read error", (
+            Step("make-directory", "Create a directory to pass as -i",
+                 lambda context: (sys.executable, "-c",
+                                  "import os, sys; os.makedirs(sys.argv[1], exist_ok=True)",
+                                  _path("a-directory")(context))),
+            _replay_step("ubertooth-rx -i <directory>", (), returncodes=(1,),
+                         source="a-directory"),
+        ), "exit 1: the input could not be read"),
+    ]
     return tuple(cases)

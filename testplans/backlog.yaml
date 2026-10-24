@@ -6,9 +6,6 @@ suites:
         sender: default
         responder: explicit required
 
-    - Raw receive replay:
-        fixture: required
-
     - Capture known BLE advertiser:
         advertiser: required
         Ubertooth: default

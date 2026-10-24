@@ -4,6 +4,11 @@ suites:
     - Host CLI surface:
         hosts: each
 
+    # No Ubertooth: ubertooth-rx -i on a synthetic fixture.
+    - Raw receive replay:
+        hosts: each
+        coverage: smoke
+
     - Ubertooth count:
         hosts: each
         Ubertooth: default

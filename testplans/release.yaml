@@ -80,3 +80,8 @@ suites:
         Ubertooth: default
         coverage: comprehensive
         duration: 3s
+
+    # No Ubertooth. Strict cases fail until fork #202 and #203 are fixed.
+    - Raw receive replay:
+        hosts: each
+        coverage: comprehensive
