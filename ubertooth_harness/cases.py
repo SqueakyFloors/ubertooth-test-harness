@@ -29,6 +29,19 @@ class CommandCase:
     output_patterns: tuple[str, ...] = ()
     timeout_s: float = 5.0
     expected_returncodes: tuple[int, ...] = (0,)
+    # The tool is built only on some hosts (for example the BlueZ tools): a
+    # tool the executor cannot start skips the case instead of failing it.
+    optional_tool: bool = False
+
+    def missing_tool(self, result) -> str:
+        """The skip reason when an optional tool is not installed, else ''."""
+        if (
+            self.optional_tool
+            and result.returncode == 127
+            and "unable to start command" in result.stderr
+        ):
+            return f"{self.name}: skipped, {self.argv[0]} is not built on this host"
+        return ""
 
     def result_failure(self, result) -> str:
         if result.timed_out:

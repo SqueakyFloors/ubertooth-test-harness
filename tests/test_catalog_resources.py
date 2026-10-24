@@ -87,8 +87,12 @@ class CatalogTests(unittest.TestCase):
         definition = builtin_catalog().get("Host CLI surface")
 
         cases = definition.command_cases({"hosts": "each"}, {}, {})
+        helps = [c for c in cases if c.argv[1:] == ("-h",) and not c.optional_tool]
+        optional = [c for c in cases if c.optional_tool]
 
-        self.assertEqual(11, len(cases))
+        self.assertEqual(11, len(helps))
+        self.assertEqual({"ubertooth-scan", "ubertooth-follow"}, {c.argv[0] for c in optional})
+        cases = helps
         self.assertEqual(
             {
                 "ubertooth-rx",

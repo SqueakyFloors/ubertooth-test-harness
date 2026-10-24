@@ -4,6 +4,10 @@ suites:
     - Host CLI surface:
         hosts: each
 
+    - Ubertooth count:
+        hosts: each
+        Ubertooth: default
+
     - Ubertooth identity:
         hosts: each
         Ubertooth: default

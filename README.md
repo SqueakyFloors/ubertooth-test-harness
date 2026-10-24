@@ -206,10 +206,15 @@ python -m ubertooth_harness run-suite \
 ```
 
 The generic sequencer executes `Host version`, `Help smoke`, grouped `Host CLI
-surface`, and grouped `Ubertooth identity` command cases. The host surface runs
-help/parser checks for all eleven always-built executables and retains each
-tool's result; Linux-only BlueZ tools will be added with platform-aware catalog
-support. The identity test runs isolated firmware, compile, serial, part, and
+surface`, `Ubertooth count`, and grouped `Ubertooth identity` command cases.
+The host surface runs help/parser checks for all eleven always-built
+executables and retains each tool's result. It also runs `-h` on the BlueZ-only
+`ubertooth-scan` and `ubertooth-follow`, skipping (not failing) them where they
+are not built, and checks the host version line from `ubertooth-util
+--host-version` and from `-V` on `ubertooth-rx`, `ubertooth-tx`, and
+`ubertooth-afh`. `Ubertooth count` checks that `ubertooth-util -N` equals the
+registered Ubertooths on the host (the selected board plus its guards), so an
+unregistered or missing board fails it. The identity test runs isolated firmware, compile, serial, part, and
 board queries plus the compatible `-vVspb` composition. `Debug register read`
 constructs a serial-selected `ubertooth-debug` command from the normalized plan
 register. Each case retains its own command, output, log, and result while the
