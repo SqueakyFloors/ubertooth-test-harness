@@ -315,7 +315,7 @@ class PlanTests(ControllerTestCase):
             (root / "timed.yaml").write_text(
                 "plan: Timed\nsuites:\n  quick:\n"
                 "    - BLE monitor:\n        duration: 10s\n"
-                "    - Spectrum analyzer:\n        duration: 2m\n",
+                "    - Spectrum analyzer:\n        coverage: smoke\n        duration: 2m\n",
                 encoding="utf-8",
             )
             (root / "broken.yaml").write_text("plan: Broken\nsuites: []\n", encoding="utf-8")

@@ -14,7 +14,7 @@ from ubertooth_harness.patterns import (
     serial_pattern,
 )
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
-from ubertooth_harness import transitions
+from ubertooth_harness import tool_cases, transitions
 
 
 class CatalogError(ValueError):
@@ -604,6 +604,18 @@ def builtin_catalog() -> TestCatalog:
             continue_on_case_failure=True,
         ),
         stateful_test(
+            "BLE settings",
+            "ubertooth-btle access address, follow target, and error allowance without a peer",
+            tool_cases.btle_settings_cases,
+            continue_on_case_failure=True,
+        ),
+        stateful_test(
+            "Debug registers",
+            "ubertooth-debug register lists, ranges, verbosity, and exit status",
+            tool_cases.debug_cases,
+            continue_on_case_failure=True,
+        ),
+        stateful_test(
             "BLE mode conflicts",
             "ubertooth-btle rejects more than one major mode",
             transitions.btle_conflict_cases,
@@ -626,8 +638,17 @@ def builtin_catalog() -> TestCatalog:
             guards_other_ubertooths=True,
         ),
         _device_test("BLE monitor", "Monitor BLE traffic", extra={"duration": DURATION}),
-        _device_test(
-            "Spectrum analyzer", "Capture spectrum samples", extra={"duration": DURATION}
+        TestDefinition(
+            "Spectrum analyzer",
+            "ubertooth-specan sweeps stay in the requested range and cover it",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH, "coverage": COVERAGE,
+                "duration": DURATION,
+            }),
+            MappingProxyType({"Ubertooth": "Ubertooth"}),
+            command_builder=tool_cases.spectrum_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
         ),
         _device_test(
             "Spectrum RSSI sanity", "Validate live spectrum RSSI", extra={"duration": DURATION}
