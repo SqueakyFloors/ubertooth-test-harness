@@ -142,8 +142,8 @@ class CatalogTests(unittest.TestCase):
         )
         self.assertTrue(definition.continue_on_case_failure)
 
-    def test_glados_soak_rejects_negative_failure_limits(self):
-        definition = builtin_catalog().get("GLaDOS MAC polling soak")
+    def test_mac_polling_soak_rejects_negative_failure_limits(self):
+        definition = builtin_catalog().get("MAC polling soak")
         arguments = {
             "hosts": ["Host_Linux"],
             "platforms": ["linux"],
@@ -455,18 +455,18 @@ suites:
             with self.assertRaisesRegex(PlanningError, "distinct"):
                 PlanCompiler(builtin_catalog(), registry).compile(plan, "slow")
 
-    def test_glados_plan_compiles_to_linux_sniffer_and_advertiser(self):
+    def test_mac_polling_plan_compiles_to_linux_sniffer_and_advertiser(self):
         project = Path(__file__).resolve().parents[1]
-        plan = load_plan(project / "testplans" / "glados.yaml")
+        plan = load_plan(project / "testplans" / "mac-polling.yaml")
         registry = FileResourceRegistry.load(project / "hardware.example.yaml")
 
         invocations = PlanCompiler(builtin_catalog(), registry).compile(
-            plan, "glados"
+            plan, "mac-polling"
         )
 
         self.assertEqual(1, len(invocations))
         invocation = invocations[0]
-        self.assertEqual("GLaDOS MAC polling soak", invocation.test_name)
+        self.assertEqual("MAC polling soak", invocation.test_name)
         self.assertEqual("Host_Linux", invocation.host)
         self.assertEqual(
             {"Ubertooth": "UT_Linux0", "advertiser": "DK_Linux0"},
@@ -500,8 +500,8 @@ suites:
             plan_path.write_text(
                 """plan: exclusive
 suites:
-  glados:
-    - GLaDOS MAC polling soak:
+  mac-polling:
+    - MAC polling soak:
         hosts: [Host_Linux]
         platforms: [linux]
         Ubertooth: default
@@ -526,7 +526,7 @@ suites:
             registry = FileResourceRegistry.load(hardware_path)
 
             with self.assertRaisesRegex(PlanningError, "power mapping"):
-                PlanCompiler(builtin_catalog(), registry).compile(plan, "glados")
+                PlanCompiler(builtin_catalog(), registry).compile(plan, "mac-polling")
 
     def test_platform_requirement_fails_before_execution(self):
         with tempfile.TemporaryDirectory() as directory:
