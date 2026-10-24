@@ -1,4 +1,5 @@
 import io
+import re
 import struct
 import sys
 import tempfile
@@ -44,6 +45,95 @@ def setUpModule():
     patch_host_api()
 
 
+# ---------------------------------------------------------------------------
+# The host tools' getopt and value parsing (fork opt_parse.c), for the fakes.
+
+UTIL_OPTIONS = "U:hnmefiIprsStvbl::a::C::c::d::q::z::9VNxH"
+BTLE_OPTIONS = "a::r:hfnpU:v::A:s:t:x:c:q:jJiI"
+UTIL_VALUES = {
+    "l": ("USR LED state", 0, 1, ""),
+    "d": ("all-LED state", 0, 1, ""),
+    "C": ("channel", 0, 78, ""),
+    "c": ("frequency", 2402, 2480, " MHz"),
+    "q": ("RSSI threshold", 1, 225, ""),
+    "z": ("squelch level", -128, 127, ""),
+}
+UTIL_MODE_ORDER = ("-q", "-n", "-e", "-t", "-x", "-I", "-i", "-f")
+
+
+def decimal(text):
+    """opt_value_decimal(): digits only."""
+    return bool(re.fullmatch(r"[0-9]+", text))
+
+
+def signed_decimal(text):
+    """opt_value_signed_decimal(): digits, optionally after one '-'."""
+    return decimal(text[1:] if text.startswith("-") else text)
+
+
+def not_option(text):
+    """opt_value_not_option(): anything but an empty or '-' word."""
+    return bool(text) and not text.startswith("-")
+
+
+def parse_int(text, low, high):
+    """opt_parse_int(): a whole decimal in [low, high], else None."""
+    if not re.fullmatch(r"-?[0-9]+", text):
+        return None
+    value = int(text)
+    return value if low <= value <= high else None
+
+
+def getopt(args, optstring, next_value):
+    """POSIX getopt as macOS runs it (stops at the first non-option word, and
+    after "--"), plus opt_separate_value(): ``next_value(option)`` returns the
+    check a following word must pass to become a missing optional value.
+
+    Returns (pairs, leftover words, error or None).
+    """
+    kinds = {}
+    index = 0
+    while index < len(optstring):
+        option = optstring[index]
+        colons = len(optstring[index + 1:]) - len(optstring[index + 1:].lstrip(":"))
+        kinds[option] = colons
+        index += 1 + colons
+    pairs = []
+    position = 0
+    while position < len(args):
+        word = args[position]
+        if word == "--":
+            position += 1
+            break
+        if len(word) < 2 or not word.startswith("-"):
+            break
+        offset = 1
+        while offset < len(word):
+            option = word[offset]
+            kind = kinds.get(option)
+            if kind is None:
+                return pairs, (), f"invalid option -- {option}\nUsage:"
+            if kind == 0:
+                pairs.append((option, None))
+                offset += 1
+                continue
+            value = word[offset + 1:] or None
+            if value is None and kind == 1:
+                position += 1
+                if position >= len(args):
+                    return pairs, (), f"option requires an argument -- {option}\nUsage:"
+                value = args[position]
+            elif value is None:
+                check = next_value(option)
+                if check and position + 1 < len(args) and check(args[position + 1]):
+                    position += 1
+                    value = args[position]
+            pairs.append((option, value))
+            break
+        position += 1
+    return pairs, tuple(args[position:]), None
+
+
 SERIAL = "abc123"
 IDENTITIES = {"Ubertooth": {"serial": SERIAL}}
 TRANSITION_TESTS = (
@@ -69,8 +159,18 @@ class FakeUbertooth:
         firmware="git-test",
         api=HOST_API,
         compile_info="ubertooth git-test (builder@host) timestamp",
+        next_word=True,
+        reject_strays=True,
+        pa_zero_sets=True,
     ):
         self.serial = serial
+        # Fork behaviors the option cases check; False models older builds:
+        # next_word (8b58f75/0b63b01), reject_strays (#146/#155), and
+        # pa_zero_sets (4ed4a1d; before it -a0 was a query).
+        self.next_word = next_word
+        self.reject_strays = reject_strays
+        self.pa_zero_sets = pa_zero_sets
+        self.aa = "8e89bed6"
         self.firmware = firmware
         self.api = api
         self.compile_info = compile_info
@@ -136,6 +236,49 @@ class FakeUbertooth:
         return "CRC: verify\n" if value == "1" else "CRC: DO NOT verify\n"
 
     def _btle(self, command, options, on_output):
+        """ubertooth-btle main() at fork main 3b22c95, for the options the
+        cases use: getopt with the next-word rule for -a and -v, value checks,
+        the one argument rule, then the API check and the mode."""
+        def fail(message, stdout=""):
+            return self._result(command, 1, stdout, message + "\n" if message else "", on_output)
+
+        def next_value(option):
+            if not self.next_word:
+                return None
+            return {"a": not_option, "v": decimal}.get(option)
+
+        pairs, leftover, error = getopt(options, BTLE_OPTIONS, next_value)
+        if error:
+            return fail(error)
+        crc = None  # None: not given, "q": read, "0"/"1": set
+        get_aa = set_aa = None
+        for option, value in pairs:
+            if option == "v":
+                if value is None:
+                    crc = "q"
+                elif parse_int(value, 0, 1) is None:
+                    return fail(f"error: CRC verify mode must be 0-1 (got {value})")
+                else:
+                    crc = str(parse_int(value, 0, 1))
+            elif option == "a":
+                if value is None:
+                    get_aa = True
+                elif not re.fullmatch(r"[0-9a-fA-F]{1,8}", value):
+                    return fail(f"error: access address must be 1-8 hex digits (got {value})")
+                else:
+                    set_aa = value.lower().rjust(8, "0")
+            elif option == "A" and parse_int(value, 37, 39) is None:
+                return fail(f"error: advertising channel index must be 37-39 (got {value})")
+            elif option == "x" and parse_int(value, 0, 32) is None:
+                return fail(f"error: access address offenses must be 0-32 (got {value})")
+            elif option == "t" and value != "none" and not re.fullmatch(
+                r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}(?:/\d+)?", value
+            ):
+                return fail("", "Error: MAC address is wrong length\nUsage:\n")
+        if leftover and self.reject_strays:
+            return fail(f"error: unexpected argument '{leftover[0]}'")
+        if get_aa and set_aa:
+            return fail("error: -a cannot both read and set the access address")
         if self.api < HOST_API:
             # ubertooth_check_api(): older firmware gets ubertooth_stop().
             self.stops += 1
@@ -144,7 +287,6 @@ class FakeUbertooth:
                 command, 1, "", "Ubertooth API version found, libubertooth requires\n",
                 on_output,
             )
-        crc = next((item[2:] for item in options if item.startswith("-v")), None)
         if sum(item in ("-f", "-n", "-p") for item in options) > 1:
             if self.reject_btle_conflicts:
                 return self._result(
@@ -153,27 +295,30 @@ class FakeUbertooth:
                     on_output,
                 )
             options = tuple(item for item in options if item != "-p")
-        crcs = [item[2:] for item in options if item.startswith("-v") and len(item) > 2]
-        crc = crcs[-1] if crcs else crc
         capture_lines = self._open_captures(options)
         if "-n" in options or "-f" in options:
             output = capture_lines
-            adv = next((item[2:] for item in options if item.startswith("-A")), "37")
+            adv = next((value for option, value in pairs if option == "A"), "37")
             self.state["channel"] = {"37": "2402", "38": "2426", "39": "2480"}[adv]
             self.mode = "ble"
-            if crc:
+            if crc not in (None, "q"):
                 self.state["crc"] = "0" if self.lose_mode_crc else crc
                 output = self._crc_line(crc)
             self._stop_mode()  # ubertooth_stop() on exit sends cmd_stop
             return self._result(
                 command, 124, output, "HARD TIMEOUT\n", on_output, timed_out=True
             )
-        if crc:
+        output = ""
+        if get_aa:
+            output += f"Access address: {self.aa}\n"
+        if set_aa:
+            self.aa = set_aa
+            output += f"access address set to: {self.aa}\n"
+        if crc not in (None, "q"):
             self.state["crc"] = crc
-            return self._result(command, 0, self._crc_line(crc), "", on_output)
-        return self._result(
-            command, 0, self._crc_line(self.state["crc"]), "", on_output
-        )
+        if crc is not None or not output:
+            output += self._crc_line(self.state["crc"])
+        return self._result(command, 0, output, "", on_output)
 
     # Headers libubertooth/libbtbb write when the capture file is created.
     PCAP_HEADER = staticmethod(lambda link: struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, link))
@@ -214,71 +359,125 @@ class FakeUbertooth:
     }
 
     def _util(self, command, options, on_output):
-        modes = {option for option, _label in transitions._MODE_OPTIONS}
-        if len(modes.intersection(options)) > 1:
+        """ubertooth-util main() at fork main 3b22c95: getopt with the
+        next-word rule, value checks, the one argument rule, mode checks, then
+        reset, stop, configuration, reports, and the final mode."""
+        def fail(message):
+            return self._result(command, 1, "", message + "\n", on_output)
+
+        def next_value(option):
+            if not self.next_word:
+                return None
+            return signed_decimal if option == "z" else decimal
+
+        pairs, leftover, error = getopt(options, UTIL_OPTIONS, next_value)
+        if error:
+            return fail(error)
+        channel = pa = usr = all_leds = set_squelch = None
+        get_squelch = False
+        modes = []
+        flags = set()
+        for option, value in pairs:
+            if option in "lacCdqz" and value is not None:
+                if option == "a":
+                    if len(value) != 1 or value not in "01234567":
+                        return fail(f"error: PA level must be a single digit 0-7 (got {value})")
+                    parsed = int(value)
+                else:
+                    what, low, high, unit = UTIL_VALUES[option]
+                    parsed = parse_int(value, low, high)
+                    if parsed is None:
+                        sep = " to " if low < 0 else "-"
+                        return fail(
+                            f"error: {what} must be {low}{sep}{high}{unit} (got {value})"
+                        )
+            if option == "l":
+                usr = "q" if value is None else str(parsed)
+            elif option == "d":
+                all_leds = "q" if value is None else str(parsed)
+            elif option == "a":
+                if value is None or (parsed == 0 and not self.pa_zero_sets):
+                    pa = "q"
+                else:
+                    pa = str(parsed)
+            elif option == "c":
+                channel = "q" if value is None else str(parsed)
+            elif option == "C":
+                channel = "q" if value is None else str(2402 + parsed)
+            elif option == "z":
+                if value is None:
+                    get_squelch = True
+                else:
+                    set_squelch = str(parsed)
+            elif option in "qnetxIif":
+                if option not in modes:
+                    modes.append(option)
+            else:
+                flags.add(option)
+        if leftover and self.reject_strays:
+            return fail(f"error: unexpected argument '{leftover[0]}'")
+        if len(modes) > 1:
             if self.reject_conflicts:
-                return self._result(command, 1, "", "usage\n", on_output)
+                named = " ".join(o for o in UTIL_MODE_ORDER if o[1] in modes)
+                return fail(
+                    f"error: options {named} cannot be combined; give only one of "
+                    + " ".join(UTIL_MODE_ORDER)
+                )
             return self._result(command, 0, "Entering LED specan mode\n", "", on_output)
+        if (set_squelch is not None or get_squelch) and modes:
+            return fail(f"error: -z cannot be combined with -{modes[0]}")
         lines = []
-        returncode = 0
-        stderr = ""
-        if "-r" in options:
+        if "r" in flags:
             self.state.update(self.BOOT_STATE)
             self.mode = None
             lines.append(f"Resetting ubertooth device {self.serial}")
-        for option in options:
-            if option == "-S":
-                lines.append(f"Stopping ubertooth device {self.serial}")
-                self.stops += 1
-                self._stop_mode()
-            elif option == "-x":
-                self.mode = "xmas"
-            elif option.startswith("-c") and len(option) > 2:
-                self.state["channel"] = option[2:]
-            elif option.startswith("-C") and len(option) > 2:
-                self.state["channel"] = str(2402 + int(option[2:]))
-            elif option.startswith("-a") and len(option) > 2 and option != "-a0":
-                if int(option[2:]) < 8:
-                    self.state["pa"] = option[2:]
-                else:
-                    returncode = 1
-                    stderr = "control message unsupported\n"
-            elif option.startswith("-z") and len(option) > 2:
-                self.state["squelch"] = option[2:]
-        # ubertooth-util applies -d (all LEDs) before -l (USR LED).
-        for option in options:
-            if option.startswith("-d") and len(option) > 2:
-                self.state.update(usr=option[2:], rx=option[2:], tx=option[2:])
-        for option in options:
-            if option.startswith("-l") and len(option) > 2:
-                self.state["usr"] = option[2:]
-        reports = {
-            "-C": lambda: (
-                f"Current frequency: {self.state['channel']} MHz "
-                f"(Bluetooth channel {int(self.state['channel']) - 2402})"
-            ),
-            "-a": lambda: f"PA Level: {self.state['pa']}",
-            "-z": lambda: f"Squelch set to {self.state['squelch']}",
-            "-v": lambda: (
-                f"Firmware version: {self.firmware} "
-                f"(API:{transitions.format_api(self.api)})"
-            ),
-            "-V": lambda: self.compile_info,
-            "-s": lambda: f"Serial No: {self.serial}",
-            "-p": lambda: "Part ID: 1234ABCD",
-            "-b": lambda: "Board ID Number: 1 (Ubertooth One)",
-            "-l": lambda: f"USR LED status: {self.state['usr']}",
-            "-d": lambda: (
-                f"USR LED status: {self.state['usr']}\n"
-                f"RX LED status : {self.state['rx']}\n"
-                f"TX LED status : {self.state['tx']}"
-            ),
-        }
-        for option in options:
-            if option in reports or option == "-a0":
-                lines.append(reports[option[:2]]())
+        if "S" in flags:
+            lines.append(f"Stopping ubertooth device {self.serial}")
+            self.stops += 1
+            self._stop_mode()
+        # Configuration in ubertooth-util's order: all LEDs, channel, USR LED, PA.
+        if all_leds not in (None, "q"):
+            self.state.update(usr=all_leds, rx=all_leds, tx=all_leds)
+        if channel not in (None, "q"):
+            self.state["channel"] = channel
+        if usr not in (None, "q"):
+            self.state["usr"] = usr
+        if pa not in (None, "q"):
+            self.state["pa"] = pa
+        # Reports in ubertooth-util's order.
+        if all_leds == "q":
+            lines += [f"USR LED status: {self.state['usr']}",
+                      f"RX LED status : {self.state['rx']}",
+                      f"TX LED status : {self.state['tx']}"]
+        if "b" in flags:
+            lines.append("Board ID Number: 1 (Ubertooth One)")
+        if channel == "q":
+            mhz = self.state["channel"]
+            lines.append(f"Current frequency: {mhz} MHz (Bluetooth channel {int(mhz) - 2402})")
+        if "v" in flags:
+            lines.append(
+                f"Firmware version: {self.firmware} (API:{transitions.format_api(self.api)})"
+            )
+        if "V" in flags:
+            lines.append(self.compile_info)
+        if usr == "q":
+            lines.append(f"USR LED status: {self.state['usr']}")
+        if pa == "q":
+            lines.append(f"PA Level: {self.state['pa']}")
+        if "p" in flags:
+            lines.append("Part ID: 1234ABCD")
+        if "s" in flags:
+            lines.append(f"Serial No: {self.serial}")
+        if set_squelch is not None:
+            lines.append(f"Setting squelch to {set_squelch}")
+            self.state["squelch"] = set_squelch
+        if get_squelch:
+            lines.append(f"Squelch set to {self.state['squelch']}")
+        if "x" in modes:
+            self._stop_mode()
+            self.mode = "xmas"
         stdout = "".join(line + "\n" for line in lines)
-        return self._result(command, returncode, stdout, stderr, on_output)
+        return self._result(command, 0, stdout, "", on_output)
 
 
 def cases_for(test_name, coverage="smoke"):
@@ -771,29 +970,23 @@ class TransitionExecutionTests(unittest.TestCase):
 
         self.assertEqual(len(commands), len({frozenset(c) for c in commands}))
 
-    def test_pa_level_zero_skips_the_case_before_any_change(self):
+    def test_a_board_at_pa_zero_runs_every_case_and_gets_pa_zero_back(self):
+        # Harness #5: -a0 sets PA 0 (fork 4ed4a1d), so nothing skips and the
+        # reset case covers a board at PA 0.
         device = FakeUbertooth()
         device.state["pa"] = "0"
 
-        summary, events = run_test("Radio setting transitions", device)
+        summary, events = run_test("Radio setting transitions", device, coverage="comprehensive")
 
         self.assertTrue(summary.passed, summary.failure_reason)
+        self.assertEqual(0, summary.skipped_cases)
         self.assertEqual("0", device.state["pa"])
-        pa_case = "001-Radio setting transitions-pa-level-mode-stop-restore"
-        self.assertEqual(
-            ["establish-idle", "read-original-pa-level"],
-            [e.details["step_id"] for e in steps(events, stage="transition", case_id=pa_case)],
-        )
-        self.assertFalse(any(c[-1].startswith("-a") and c[-1] != "-a" for c in device.commands))
-        result = next(e for e in case_results(events) if e.details["case_id"] == pa_case)
-        self.assertEqual("skipped", result.status)
-        self.assertIn("PA level 0 cannot be restored", result.details["reason"])
-        restore = steps(events, step_id="restore-pa-level", case_id=pa_case)[0]
-        self.assertIn("not needed, nothing was changed", restore.details["reason"])
-        finished = next(e for e in events if e.event_type == "test_finished")
-        self.assertEqual(1, finished.details["skipped_cases"])
-        self.assertEqual(1, summary.skipped_cases)
-        self.assertTrue(steps(events, case_id="001-Radio setting transitions-squelch-mode-stop-restore"))
+        reset = "001-Radio setting transitions-full-reset-restores-boot-defaults"
+        after = steps(events, step_id="verify-pa-level-after-reset", case_id=reset)[0]
+        self.assertEqual("7", after.details["observed"])
+        restore = steps(events, step_id="restore-pa-level", case_id=reset)[0]
+        self.assertEqual(["ubertooth-util", "-U", SERIAL, "-a0"], restore.details["argv"])
+        self.assertEqual("passed", restore.status)
 
     def test_every_led_is_restored_after_repeated_all_led_set(self):
         device = FakeUbertooth()
@@ -962,43 +1155,45 @@ class TransitionExecutionTests(unittest.TestCase):
         self.assertFalse(summary.passed)
         self.assertIn("leds after mode stop=0/0/0, observed 0/0/1", summary.failure_reason)
 
-    def test_cold_board_pa_zero_skips_only_cases_that_can_change_pa(self):
-        device = FakeUbertooth()
-        device.state["pa"] = "0"
-
-        radio, radio_events = run_test(
-            "Radio setting transitions", device, coverage="comprehensive"
-        )
-        conflicts, conflict_events = run_test(
+    def test_util_conflicts_run_every_pair_on_a_board_at_pa_zero(self):
+        summary, events = run_test(
             "Ubertooth util conflicts", _cold(FakeUbertooth(reject_conflicts=True))
         )
 
-        self.assertTrue(radio.passed, radio.failure_reason)
-        statuses = {e.details["case_id"].split("-", 1)[1]: e.status for e in case_results(radio_events)}
-        # PA 0 cannot be written back, so every case that can change PA skips.
-        self.assertEqual("skipped", statuses["Radio setting transitions-full-reset-restores-boot-defaults"])
-        self.assertEqual("skipped", statuses["Radio setting transitions-pa-level-mode-stop-restore"])
-        self.assertEqual("passed", statuses["Radio setting transitions-channel-mode-stop-restore"])
-        self.assertEqual("0", device.state["pa"])
-        self.assertTrue(conflicts.passed, conflicts.failure_reason)
-        skipped = {
-            e.details["case_id"].rsplit("conflicts-", 1)[1]
-            for e in case_results(conflict_events) if e.status == "skipped"
-        }
-        self.assertTrue(skipped)
-        self.assertTrue(all("range-test" in item or "repeater" in item for item in skipped))
-        self.assertEqual(15 - 9, sum(e.status == "passed" for e in case_results(conflict_events)))
+        self.assertTrue(summary.passed, summary.failure_reason)
+        self.assertEqual(15, sum(e.status == "passed" for e in case_results(events)))
 
-    def test_reset_case_moves_pa_off_its_original_and_the_boot_default(self):
-        device = FakeUbertooth()
-        device.state["pa"] = "5"
+    def test_reset_case_sets_pa_zero_before_the_reset(self):
+        for original in ("5", "0", "7"):
+            device = FakeUbertooth()
+            device.state["pa"] = original
+
+            summary, events = run_test(
+                "Radio setting transitions", device, coverage="comprehensive"
+            )
+
+            with self.subTest(original=original):
+                self.assertTrue(summary.passed, summary.failure_reason)
+                before = steps(events, step_id="verify-pa-level-before-reset")[0]
+                self.assertEqual("0", before.details["observed"])
+                self.assertEqual(original, device.state["pa"])
+
+    def test_pa_zero_cases_fail_where_a0_is_a_query(self):
+        # Fork builds before 4ed4a1d read PA for -a0 and -a 0.
+        device = FakeUbertooth(pa_zero_sets=False)
 
         summary, events = run_test("Radio setting transitions", device, coverage="comprehensive")
 
-        self.assertTrue(summary.passed, summary.failure_reason)
-        before = steps(events, step_id="verify-pa-level-before-reset")[0]
-        self.assertNotIn(before.details["observed"], ("5", "7"))
-        self.assertEqual("5", device.state["pa"])
+        self.assertFalse(summary.passed)
+        failed = sorted(
+            e.details["case_id"].rsplit("transitions-", 1)[1]
+            for e in case_results(events) if e.status == "failed"
+        )
+        self.assertEqual(
+            ["full-reset-restores-boot-defaults", "pa-level-zero-attached",
+             "pa-level-zero-next-word"],
+            failed,
+        )
 
     def test_full_reset_must_return_pa_to_its_boot_default(self):
         kept = FakeUbertooth()
@@ -1211,6 +1406,153 @@ class TransitionExecutionTests(unittest.TestCase):
         recorded = steps(events, step_id=failed_step)
         self.assertEqual(1, len(recorded))
         self.assertEqual("canceled", recorded[0].status)
+
+
+NEXT_WORD_CASES = (
+    "channel-next-word-value", "channel-index-next-word-value",
+    "pa-level-next-word-value", "squelch-next-word-value",
+    "usr-led-next-word-value", "leds-next-word-value",
+    "pa-level-zero-next-word", "next-word-values-in-one-command",
+)
+
+
+def failed_ids(events, test_name):
+    return sorted(
+        e.details["case_id"].rsplit(f"{test_name.replace(' ', '-')}-", 1)[-1]
+        .rsplit(f"{test_name}-", 1)[-1]
+        for e in case_results(events) if e.status == "failed"
+    )
+
+
+class OptionRuleTests(unittest.TestCase):
+    """Next-word values and PA 0 against a fake of fork main 3b22c95."""
+
+    def run_util(self, device, *options):
+        return device.run(("ubertooth-util", "-U", SERIAL) + options, timeout_s=1)
+
+    def test_fake_follows_the_fork_argument_rule(self):
+        device = FakeUbertooth()
+        self.assertEqual(0, self.run_util(device, "-c", "2426").returncode)
+        self.assertEqual("2426", device.state["channel"])
+        both = self.run_util(device, "-c", "-b")  # an option is never a value
+        self.assertIn("Current frequency: 2426 MHz", both.stdout)
+        self.assertIn("Board ID Number", both.stdout)
+        self.assertEqual(0, self.run_util(device, "-z", "-70").returncode)
+        self.assertEqual("-70", device.state["squelch"])
+        self.assertEqual(0, self.run_util(device, "-a", "0").returncode)
+        self.assertEqual("0", device.state["pa"])
+        for options, word in ((("-a", "7x"), "7x"), (("-z", "-"), "-"),
+                              (("-v", "--", "-c2402"), "-c2402"), (("-c2470", "stray"), "stray")):
+            result = self.run_util(device, *options)
+            with self.subTest(options=options):
+                self.assertEqual(1, result.returncode)
+                self.assertEqual(f"error: unexpected argument '{word}'\n", result.stderr)
+        self.assertEqual("2426", device.state["channel"])
+        # SqueakyFloors/ubertooth#228: a later read of the same value drops the set.
+        self.assertIn("2426 MHz", self.run_util(device, "-c2441", "-c").stdout)
+        self.assertEqual("2426", device.state["channel"])
+
+    def test_next_word_cases_pass_and_restore_on_fork_main(self):
+        device = FakeUbertooth()
+        original = dict(device.state)
+
+        summary, events = run_test("Radio setting transitions", device, coverage="comprehensive")
+
+        self.assertTrue(summary.passed, summary.failure_reason)
+        self.assertEqual(original, device.state)
+        sets = {
+            e.details["case_id"].rsplit("transitions-", 1)[1]: tuple(e.details["argv"][3:])
+            for e in steps(events, step_id="set")
+        }
+        self.assertEqual(("-c", "2426"), sets["channel-next-word-value"])
+        self.assertEqual(("-C", "24"), sets["channel-index-next-word-value"])
+        self.assertEqual(("-a", "5"), sets["pa-level-next-word-value"])
+        self.assertEqual(("-z", "-60"), sets["squelch-next-word-value"])
+        self.assertEqual(("-l", "1"), sets["usr-led-next-word-value"])
+        self.assertEqual(("-d", "1"), sets["leds-next-word-value"])
+        self.assertEqual(("-a", "0"), sets["pa-level-zero-next-word"])
+        self.assertEqual(("-a0",), sets["pa-level-zero-attached"])
+        self.assertEqual(("-c", "2426", "-a", "5", "-z", "-60", "-d", "1", "-l", "0"),
+                         sets["next-word-values-in-one-command"])
+        for case_id in NEXT_WORD_CASES:
+            with self.subTest(case_id):
+                self.assertIn(case_id, sets)
+
+    def test_preset_makes_each_next_word_readback_a_real_change(self):
+        for original in ("0", "1"):
+            device = FakeUbertooth()
+            device.state.update(usr=original, rx=original, tx=original)
+
+            _summary, events = run_test(
+                "Radio setting transitions", device, coverage="comprehensive"
+            )
+
+            for event in steps(events, step_id="verify-preset"):
+                case = event.details["case_id"]
+                after = steps(events, step_id="verify-set", case_id=case)[0]
+                with self.subTest(original=original, case=case):
+                    self.assertNotEqual(event.details["observed"], after.details["observed"])
+
+    def test_detached_values_ignored_as_strays_fail_every_next_word_case(self):
+        # Before fork 8b58f75 a detached value was a positional argument that
+        # ubertooth-util dropped, and the option only read.
+        device = FakeUbertooth(next_word=False, reject_strays=False)
+
+        summary, events = run_test("Radio setting transitions", device, coverage="comprehensive")
+
+        self.assertFalse(summary.passed)
+        self.assertEqual(sorted(NEXT_WORD_CASES), failed_ids(events, "Radio setting transitions"))
+        self.assertTrue(all(e.details["cleanup_status"] == "passed"
+                            for e in case_results(events)))
+
+    def test_detached_values_refused_as_strays_fail_every_next_word_case(self):
+        device = FakeUbertooth(next_word=False)
+
+        summary, events = run_test("Radio setting transitions", device, coverage="comprehensive")
+
+        self.assertFalse(summary.passed)
+        self.assertEqual(sorted(NEXT_WORD_CASES), failed_ids(events, "Radio setting transitions"))
+        self.assertIn("command exited 1", summary.failure_reason)
+
+    def test_smoke_has_one_next_word_and_one_pa_zero_case(self):
+        _args, smoke = cases_for("Radio setting transitions", "smoke")
+        ids = [case.case_id for case in smoke]
+        self.assertIn("channel-next-word-value", ids)
+        self.assertIn("pa-level-zero-attached", ids)
+        self.assertEqual(5, len(ids))
+
+    def test_btle_crc_next_word_cases(self):
+        passed, events = run_test("BLE CRC transitions", FakeUbertooth(crc="1"),
+                                  coverage="comprehensive")
+        self.assertTrue(passed.passed, passed.failure_reason)
+        sets = [tuple(e.details["argv"][3:]) for e in steps(events, step_id="set")]
+        self.assertEqual([("-v", "1"), ("-v", "0")], sets)
+
+        for device in (FakeUbertooth(crc="1", next_word=False),
+                       FakeUbertooth(crc="1", next_word=False, reject_strays=False)):
+            failed, events = run_test("BLE CRC transitions", device, coverage="comprehensive")
+            with self.subTest(strays=device.reject_strays):
+                self.assertFalse(failed.passed)
+                self.assertEqual(
+                    ["crc-disabled-next-word-value", "crc-enabled-next-word-value"],
+                    failed_ids(events, "BLE CRC transitions"),
+                )
+
+    def test_util_conflicts_check_the_fork_error(self):
+        device = FakeUbertooth()
+        original = device._util
+
+        def bare_usage(command, options, on_output):
+            result = original(command, options, on_output)
+            if "cannot be combined" in result.stderr:
+                return CommandResult(result.argv, 1, "", "usage\n", 0.01, False)
+            return result
+
+        device._util = bare_usage
+        summary, _events = run_test("Ubertooth util conflicts", device)
+
+        self.assertFalse(summary.passed)
+        self.assertIn("error: options -q -n cannot be combined", summary.failure_reason)
 
 
 if __name__ == "__main__":

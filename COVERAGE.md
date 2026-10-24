@@ -44,6 +44,18 @@ Harness-wide checks that use the CLIs:
   `-U` while only one board is powered.
 - **BTLE follow polling soak** (planned; catalog-only): long `ubertooth-btle -f`
   without `-U` on a single board, with a known advertiser. Not implemented yet.
+- **One argument rule** (fork 8b58f75 for `ubertooth-util`, 0b63b01 for every
+  other tool): a stray word is refused with `error: unexpected argument` and
+  no device change on every built tool (util, btle, afh, debug, dfu, dump, ego,
+  ducky, rx, specan, tx): Argument validation (one stray per tool for afh,
+  debug, dfu, dump, tx in smoke; the rest comprehensive). `ubertooth-follow` and
+  `ubertooth-scan` are not built on every host
+  ([#40](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/40)).
+  Optional values as the next word are covered where they can be read back
+  without RF: `ubertooth-util -c -C -a -z -l -d` (Radio setting transitions),
+  `ubertooth-btle -v` (BLE CRC transitions) and `-a` (BLE settings).
+  `ubertooth-util -q <n>` and `ubertooth-ducky -q <uuid>` are not: the LED
+  specan threshold cannot be read back, and ducky `-q` transmits.
 
 ## ubertooth-util
 
@@ -59,18 +71,18 @@ Harness-wide checks that use the CLIs:
 | `-s` | MCU serial | Covered | Ubertooth identity, preflight, cleanup identity check |
 | `-p` | part ID | Covered | Ubertooth identity, util compositions (smoke) |
 | `-b` | board ID | Covered | Ubertooth identity, util compositions (smoke) |
-| `-a[0-7]` | get/set PA level | Covered | Get and set: Radio setting transitions (smoke). Repeated and invalid `-a9`: comprehensive. `-a8` and `-aa` rejected with no change: Argument validation (comprehensive). `-a0` was a query; fork main now sets level 0 ([ubertooth#161](https://github.com/SqueakyFloors/ubertooth/issues/161), `4ed4a1d`), and the harness still skips PA-0 boards ([#5](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/5)). Boot and reset default is 7 (docs: [ubertooth#160](https://github.com/SqueakyFloors/ubertooth/issues/160)) |
-| `-c[2402-2480]` | get/set channel (MHz) | Covered | Radio setting transitions (smoke). Repeated and mixed with `-C`: comprehensive. Out-of-range `-c2401`/`-c2481`, `-cabc`, and `-c2440x` rejected with no change: Argument validation (comprehensive; `-c2401` smoke) |
-| `-C[0-78]` | get/set channel (index) | Covered | Get: smoke. Set, repeated, and mixed: comprehensive. `-C79`, `-Cabc`, and `-C-1` rejected with no change: Argument validation (comprehensive; strict parsing since `658730c`, [ubertooth#172](https://github.com/SqueakyFloors/ubertooth/issues/172)) |
-| `-z[level]` | get/set squelch | Covered | Radio setting transitions (smoke); repeated: comprehensive. `-zabc`, `-z128`, `-z-129`, and `-z` with `-I`, `-q`, or `-x` rejected with no change: Argument validation (comprehensive; [ubertooth#172](https://github.com/SqueakyFloors/ubertooth/issues/172), [ubertooth#159](https://github.com/SqueakyFloors/ubertooth/issues/159)) |
-| `-l[0-1]` | get/set USR LED | Covered | Get: util compositions (smoke). Set across a mode stop and repeated: comprehensive. `-l2` and `-lx` rejected with no change: Argument validation (comprehensive; [ubertooth#172](https://github.com/SqueakyFloors/ubertooth/issues/172)) |
-| `-d[0-1]` | get/set all LEDs | Covered | `-d1` and the `-d` readback in every setting case (smoke); repeated `-d`: comprehensive. `-d2` and `-dx` rejected with no change: Argument validation (comprehensive; [ubertooth#172](https://github.com/SqueakyFloors/ubertooth/issues/172)). The LED sampler in Ubertooth util modes reads `-d` repeatedly |
+| `-a[0-7]` | get/set PA level | Covered | Get and set: Radio setting transitions (smoke). `-a0` sets level 0 and reads back (smoke; fork `4ed4a1d`, [ubertooth#161](https://github.com/SqueakyFloors/ubertooth/issues/161); the harness requires it). `-a 5` and `-a 0` as the next word, repeated, and invalid `-a9`: comprehensive. The full-reset case sets PA 0 before `-r`, and a board found at PA 0 runs every case ([#5](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/5)). `-a8`, `-a 8`, and `-aa` rejected with no change; `-a 7x` refused as a stray word: Argument validation (comprehensive). Boot and reset default is 7 (docs: [ubertooth#160](https://github.com/SqueakyFloors/ubertooth/issues/160)) |
+| `-c[2402-2480]` | get/set channel (MHz) | Covered | Radio setting transitions (smoke), including `-c 2426` as the next word. Repeated and mixed with `-C`: comprehensive. Out-of-range `-c2401`/`-c2481`/`-c 2481`, `-cabc`, and `-c2440x` rejected with no change: Argument validation (comprehensive; `-c2401` smoke). A set and a read in one command (`-c2426 -c`) drop the set ([ubertooth#228](https://github.com/SqueakyFloors/ubertooth/issues/228)); not checked |
+| `-C[0-78]` | get/set channel (index) | Covered | Get: smoke. Set, `-C 24` as the next word, repeated, and mixed: comprehensive. `-C79`, `-Cabc`, and `-C-1` rejected with no change: Argument validation (comprehensive; strict parsing since `658730c`, [ubertooth#172](https://github.com/SqueakyFloors/ubertooth/issues/172)) |
+| `-z[level]` | get/set squelch | Covered | Radio setting transitions (smoke); `-z -60` as the next word and repeated: comprehensive. `-zabc`, `-z128`, `-z-129`, `-z -129`, `-z -` (stray), and `-z` with `-I`, `-q`, or `-x` rejected with no change: Argument validation (comprehensive; [ubertooth#172](https://github.com/SqueakyFloors/ubertooth/issues/172), [ubertooth#159](https://github.com/SqueakyFloors/ubertooth/issues/159)) |
+| `-l[0-1]` | get/set USR LED | Covered | Get: util compositions (smoke). Set across a mode stop, `-l 1` as the next word, and repeated: comprehensive. `-l2` and `-lx` rejected with no change: Argument validation (comprehensive; [ubertooth#172](https://github.com/SqueakyFloors/ubertooth/issues/172)) |
+| `-d[0-1]` | get/set all LEDs | Covered | `-d1` and the `-d` readback in every setting case (smoke); `-d 1` as the next word and repeated `-d`: comprehensive. `-d2` and `-dx` rejected with no change: Argument validation (comprehensive; [ubertooth#172](https://github.com/SqueakyFloors/ubertooth/issues/172)). The LED sampler in Ubertooth util modes reads `-d` repeatedly |
 | `-S` | stop current operation | Covered | Starts and ends every stateful case (smoke) |
 | `-r` | full reset | Covered | Full reset returns the boot defaults (Radio setting transitions, comprehensive). Clears the range-test result (Ubertooth util modes, smoke) |
 | `-x` | xmas lights mode | Covered | Used to enter an active mode before a stop (Radio setting transitions, smoke) |
 | `-I` | identify (flash LEDs) | Covered | Ubertooth util modes (smoke): returns at once, all LEDs blink, channel and PA kept, `-S` ends it (LEDs off, idle reset), originals restored. Comprehensive: `-I` ends a running `-q`, `-q` ends `-I`, `-s -I` |
 | `-q[1-225]` | LED spectrum analyzer | Covered | Ubertooth util modes (smoke): `-q182` lights every LED, `-S` ends it, originals restored. Comprehensive: `-q1`; strict: `-q225` and bare `-q` light every LED ([ubertooth#189](https://github.com/SqueakyFloors/ubertooth/issues/189), int8 threshold wrap) and `-S` runs the idle reset ([ubertooth#191](https://github.com/SqueakyFloors/ubertooth/issues/191): LEDs stay on, channel and squelch kept). `-q0`, `-q226`, `-qabc` rejected: Argument validation (comprehensive) |
-| `-t` | continuous TX test | Hard | Transmits RF. Only the conflict rejections run it (in no plan) |
+| `-t` | continuous TX test | Hard | Transmits RF. Only the conflict rejections run it (in no plan until a hardware pass) |
 | `-n` | start range test | Hard | Transmits RF; a useful test needs a responder board. Conflict rejections only |
 | `-e` | repeater mode | Hard | Transmits RF; needs a sender board. Conflict rejections only |
 | `-m` | show range test result | Partial | Ubertooth util modes (smoke): after `-r`, exit 0 and no result values. Strict (comprehensive): says there is no result ([ubertooth#190](https://github.com/SqueakyFloors/ubertooth/issues/190); it prints "invalid range test result"). A real result needs a range test, which transmits |
@@ -83,14 +95,15 @@ Combinations to test:
 - Read-only queries in one command (`-v -V`, all reports, every compatible pair): Covered (smoke, comprehensive).
 - Repeated set options are last-wins (`-c -C -a -z -l -d`): Covered (comprehensive).
 - `-c`/`-C` share one value in both orders: Covered (comprehensive).
-- Rejected set followed by a successful report still exits nonzero (`-a9 -v`): Covered (comprehensive).
+- Rejected set followed by a report (`-a9 -v`): refused with exit 1 before the report runs (strict parsing, fork `658730c`): Covered (comprehensive).
 - Settings kept by a stop from idle and reset by an active-mode stop: Covered (smoke; USR LED comprehensive).
-- Two or more modes rejected before any mode starts (`-q -n -e -t -x -I`): Partial. The `Ubertooth util conflicts` test exists but is in no plan. Fork #82 is fixed (#134), so it can go into the release plan after a hardware run ([#25](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/25)).
+- Two or more modes rejected before any mode starts (`-q -n -e -t -x -I`): Partial. The `Ubertooth util conflicts` test checks the fork's `error: options ... cannot be combined` for every pair, but is in no plan: fork #82 is fixed (#134), and it joins the release plan after a passing hardware run (not done yet: the lab boards stopped answering, [#25](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/25)). It keeps `allow RF transmission: true`, since an accepted pair would transmit.
 - `-f`/`-i` combined with another mode is rejected: Not covered (risk: an accepted pair strands the board).
 - `-U all` with a setter (`-a5`) or mode (`-x`) is rejected with no change: Covered (Argument validation, comprehensive).
 - Read-only queries without `-U` while several boards are attached list every board: Covered (Multi-board selection: `-s` smoke, `-vVspb` comprehensive). Another option without `-U` (`-C`) refuses to pick a board and lists them: comprehensive. The single-board path is covered by Exclusive topology.
 - `-z` combined with a mode: was silently ignored ([ubertooth#159](https://github.com/SqueakyFloors/ubertooth/issues/159)); fork main refuses it (`4ed4a1d`). Covered with `-I`, `-q`, `-x` (Argument validation, comprehensive); `-n -e -t` are not used because they transmit if accepted.
-- A value given as the next word (`-c 2426`, `-z -70`) sets the same as an attached one, and a stray argument is rejected (fork #156): Not covered ([#25](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/25)).
+- A value given as the next word sets the same as an attached one (fork #156): Covered for `-c -C -a -z -l -d` and `-a 0`, each preset to a different value first and read back, and all of `-c -a -z -d -l` as next words in one command (Radio setting transitions; `-c 2426` smoke, the rest comprehensive). A following option is not taken as a value (`-c -b`): the read-only pairs (util compositions).
+- A stray word is refused with no device change (fork #156): after a set (`-c2470 stray`), after a mode (`-x stray`), a bare `-`, a word after `--`, and a next word that is not a value (`-a 7x`): Covered (Argument validation, comprehensive).
 
 ## ubertooth-btle
 
@@ -100,7 +113,7 @@ Combinations to test:
 | `-f` | follow connections | Covered | BLE CRC transitions (smoke: CRC on, channel 37; comprehensive: every CRC value × channel and capture format). Exclusive topology runs it without `-U`. Following a real connection is not checked (needs a peer) |
 | `-n` | advertisements only | Covered | BLE CRC transitions and capture cases (smoke, comprehensive). Packet content is not checked |
 | `-p` | promiscuous | Partial | Only BLE mode conflicts (release). Never run alone; a useful test needs an active connection |
-| `-a[addr]` | get/set access address | Covered | BLE settings (smoke: set/read back; comprehensive: reset by `util -r`). Bad value and `-a -v` fail until [ubertooth#171](https://github.com/SqueakyFloors/ubertooth/issues/171) |
+| `-a[addr]` | get/set access address | Covered | BLE settings (smoke: set/read back, attached and as the next word; comprehensive: reset by `util -r`, bad value, and `-a -v`, fixed by [ubertooth#171](https://github.com/SqueakyFloors/ubertooth/issues/171)). `-a zzzz` rejected and `-a -` refused as a stray: Argument validation (comprehensive) |
 | `-s<mac>` | faux peripheral mode | Hard | Transmits RF; needs a central peer |
 | `-t<mac[/mask]>`, `-tnone` | set/unset follow target | Partial | Set, masked, and cleared: BLE settings (smoke); malformed MAC rejected: Argument validation. The filter itself needs a peer |
 | `-i` / `-j` | interfere once (`-j` alias) | Hard | Jams a live connection (transmits RF) |
@@ -110,7 +123,7 @@ Combinations to test:
 | `-q<file>` | PCAP (LE_LL_WITH_PHDR) | Covered | As `-r`: pcap with link type 256 |
 | `-c<file>` | PCAP (PPI) | Covered | As `-r`: pcap with link type 192 |
 | `-A<37-39>` | advertising channel | Covered | 37 in smoke; 37, 38, and 39 in comprehensive. `-A36`/`-A40` rejected: Argument validation (comprehensive) |
-| `-v[01]` | get/set CRC check | Covered | Get, set, and applied by a mode (smoke); `-v0` and repeated `-v` (comprehensive) |
+| `-v[01]` | get/set CRC check | Covered | Get, set, and applied by a mode (smoke); `-v0`, `-v 1` and `-v 0` as the next word, and repeated `-v` (comprehensive). `-v 2` rejected and `-v stray` refused: Argument validation (comprehensive) |
 | `-x<0-32>` | allowed access-address errors | Partial | `-x33` rejected (Argument validation); `-x0`/`-x32` accepted (BLE settings, comprehensive). The effect on capture needs traffic |
 
 Combinations to test:
@@ -324,10 +337,13 @@ and fail until the fix is on the commit under test.
 | [#149](https://github.com/SqueakyFloors/ubertooth/issues/149) | firmware | GET_CHANNEL control requests stall in follow mode | Open | Not yet |
 | [#159](https://github.com/SqueakyFloors/ubertooth/issues/159) | ubertooth-util | `-z` dropped with a mode | Fixed on main (`4ed4a1d`) | Argument validation (comprehensive) |
 | [#160](https://github.com/SqueakyFloors/ubertooth/issues/160) | docs | PA boot/reset default (7) undocumented | Open | Radio setting transitions checks 7 |
-| [#161](https://github.com/SqueakyFloors/ubertooth/issues/161) | ubertooth-util | `-a0` queried instead of setting level 0 | Fixed on main (`4ed4a1d`) | PA-0 handling ([#5](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/5)) |
+| [#161](https://github.com/SqueakyFloors/ubertooth/issues/161) | ubertooth-util | `-a0` queried instead of setting level 0 | Fixed on main (`4ed4a1d`) | Radio setting transitions: `-a0` (smoke), `-a 0`, reset from PA 0 (comprehensive) |
 | [#164](https://github.com/SqueakyFloors/ubertooth/issues/164) | ubertooth-debug | Exit status was the register's low byte | Fixed on main (`89afc1c`) | Debug registers (comprehensive) |
-| [#171](https://github.com/SqueakyFloors/ubertooth/issues/171) | ubertooth-btle | Bad `-a` value sets garbage; `-a` skips `-v` and a later set | Open | BLE settings (comprehensive) |
+| [#171](https://github.com/SqueakyFloors/ubertooth/issues/171) | ubertooth-btle | Bad `-a` value sets garbage; `-a` skips `-v` and a later set | Fixed on main (`09e9a46`) | BLE settings (comprehensive) |
 | [#172](https://github.com/SqueakyFloors/ubertooth/issues/172) | ubertooth-util | Non-numeric and out-of-range values accepted (`-z`, `-l`, `-d`, `-C`, `-q`) | Fixed on main (`658730c`) | Argument validation (comprehensive) |
+| [#193](https://github.com/SqueakyFloors/ubertooth/issues/193) | btle, rx, follow, specan, dump, dfu | A refused command line still creates or truncates its output file (`-q`, `-r`, `-d`, `-u`) | Open | None yet |
+| [#228](https://github.com/SqueakyFloors/ubertooth/issues/228) | ubertooth-util | A set and a read of the same value in one command (`-c2426 -c`) drop the set, exit 0 | Open | None: the expected behavior is not decided |
+| [#231](https://github.com/SqueakyFloors/ubertooth/issues/231) | ubertooth-specan | `-d` writes to stdout for any value starting with `-`, not only `-` | Open | None yet |
 | [#173](https://github.com/SqueakyFloors/ubertooth/issues/173) | ubertooth-specan | A run first reports one stale packet from the previous range | Open | Spectrum analyzer (comprehensive) |
 | [#185](https://github.com/SqueakyFloors/ubertooth/issues/185) | ubertooth-afh | Segmentation fault when the selected board is not found | Open | Classic Bluetooth receive (comprehensive) |
 | [#186](https://github.com/SqueakyFloors/ubertooth/issues/186) | ubertooth-rx | Usage says `-c` defaults to channel 39; the default sweeps | Open | None (usage text) |
@@ -370,7 +386,7 @@ Ordered by value/effort:
 2. Done (#28): `--host-version`, `-N`, `-V` on rx/tx/afh, BlueZ tool help.
 Next, harness work:
 
-- Catch up with fork main: `-a0` sets PA 0 ([#5](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/5)) and next-word values ([#25](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/25)). Done (#34): `-z` with a mode and the `#172` rejections.
+- Done (#5, #25): `-a0` sets PA 0, next-word values, and stray words on every tool. Done (#34): `-z` with a mode and the `#172` rejections.
 
 3. Done (#33): `DFU images` (`ubertooth-dfu -s`, `-u` read-back, bad-image refusal).
 4. Done (#30): `Spectrum analyzer` ranges, `-g`, `-G`, `-v`, `-d`.
@@ -379,7 +395,7 @@ Next, harness work:
 7. Done (#35): `Raw receive replay` (`ubertooth-rx -i` with a synthetic fixture, no Ubertooth, in CI). No LE replay exists: no tool calls libubertooth's `rx_btle_file()`.
 8. Done (#31): `Classic Bluetooth receive` (`ubertooth-rx`, `ubertooth-afh`) and `Raw receive`
    (`ubertooth-dump`, `ubertooth-ego -r`). Still open: BLE monitor.
-9. Add Ubertooth util conflicts to the release plan (fork #82 is fixed; [#25](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/25));
+9. Add Ubertooth util conflicts to the release plan after a passing hardware run (fork #82 is fixed; [#25](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/25));
    add `-f`/`-i` rejection cases only if no accepted pair can reach those modes.
 10. Headless `ubertooth-specan-ui -h` and argument checks; `btle-extcap --extcap-interfaces/--extcap-dlts/--extcap-config`.
 11. Done (#28): `ubertooth-scan -h` and `ubertooth-follow -h` (skipped where not built).

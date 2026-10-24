@@ -643,8 +643,10 @@ def builtin_catalog() -> TestCatalog:
             MappingProxyType({
                 "hosts": HOSTS,
                 "Ubertooth": UBERTOOTH,
-                # Until SqueakyFloors/ubertooth#82 is fixed, accepted pairs
-                # start range test, repeater, or TX test and transmit.
+                # SqueakyFloors/ubertooth#82 is fixed (#134): conflicts are
+                # refused before any mode starts. The guard stays: a regression
+                # that accepted a pair would start range test, repeater, or TX
+                # test and transmit.
                 "allow RF transmission": ArgumentRule(_required_true, required=True),
             }),
             MappingProxyType({"Ubertooth": "Ubertooth"}),

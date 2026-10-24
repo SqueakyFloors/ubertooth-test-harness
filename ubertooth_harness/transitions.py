@@ -9,12 +9,25 @@ Command contracts below come from the Ubertooth fork sources:
   generated case combines them.
 - Set options store a single value, so a repeated set option is
   last-option-wins. ``-c`` (MHz) and ``-C`` (index) share one value.
-- Optional option arguments must be attached (``-c2426``); a detached value is
-  parsed as a positional argument.
-- ``-a0`` is parsed as a PA-level query, so PA level 0 cannot be set. On
-  hardware (Oct 2026, current main and 2020-12-R1 firmware) a powered-on or
-  reset board reports PA level 7, so a board only reads 0 if something set the
-  CC2400 front end that way; cases that would change PA then skip.
+- One argument rule for every host tool (fork 8b58f75 for ``ubertooth-util``,
+  0b63b01 for the others): an optional option value may be attached
+  (``-c2426``) or given as the next word (``-c 2426``, ``-z -70``). The next
+  word is taken only if it looks like a value for that option (digits for
+  ``ubertooth-util -l -a -c -C -d -q`` and ``ubertooth-btle -v``, digits with an
+  optional ``-`` for ``-z``, any word not starting with ``-`` for
+  ``ubertooth-btle -a`` and ``ubertooth-ducky -q``), so a following option is
+  never swallowed (``-c -b`` is two queries). Without a value the option reads.
+  No tool takes operands: any leftover word, including a bare ``-``, a word
+  after ``--``, or a next word that is not a value (``-a 7x``), is refused with
+  ``error: unexpected argument '<word>'`` and exit 1 before a device is opened.
+- ``-a0`` and ``-a 0`` set PA level 0 (fork 4ed4a1d); before that ``-a0`` was a
+  query. The harness requires fork >= 4ed4a1d for PA cases. A powered-on or
+  reset board reports PA level 7.
+- A set and a read of the same ``ubertooth-util`` value in one command share
+  one variable, so the later option wins: ``-c2426 -c`` only reads and drops
+  the set (SqueakyFloors/ubertooth#228). ``-z`` keeps both. No case combines
+  them except to check that.
+- ``-z`` (set or read) with a mode option is refused (fork 4ed4a1d).
 - ``-S`` requests idle mode. From idle it changes nothing, so settings persist
   between idle commands. Leaving an active mode (xmas, range test, repeater,
   TX test, BLE sniffing) runs the firmware idle reset: channel 2441 MHz,
@@ -110,19 +123,6 @@ def _identity(serial: str) -> Step:
 
 # ---------------------------------------------------------------------------
 # Settings that ubertooth-util can read and write
-
-
-def _pa_restorable(value: str) -> bool:
-    return value != "0"
-
-
-def _pa_reject(value: str) -> str:
-    if not _pa_restorable(value):
-        return (
-            "skipped: original PA level 0 cannot be restored by ubertooth-util "
-            "(-a0 is a query)"
-        )
-    return ""
 
 
 @dataclass(frozen=True)
@@ -242,7 +242,7 @@ CHANNEL = Setting(
 )
 PA_LEVEL = Setting(
     "pa-level", "-a", r"PA Level: (?P<value>\d+)", "-a",
-    ("5", "6", "3"), None, _pa_reject, _pa_restorable,
+    ("5", "6", "3"), None,
 )
 SQUELCH = Setting(
     "squelch", "-z", r"Squelch set to (?P<value>-?\d+)", "-z",
@@ -289,12 +289,9 @@ CHANNEL_INDEX = replace(
 )
 # Measured on hardware: power-on and -r both report PA level 7.
 PA_BOOT_DEFAULT = "7"
-
-
-def pa_off_default(context) -> str:
-    """A PA level differing from both the boot default and the original."""
-    original = require(context, PA_LEVEL.original)
-    return next(v for v in PA_LEVEL.candidates if v not in (original, PA_BOOT_DEFAULT))
+# -a0 sets PA level 0 (fork 4ed4a1d). The reset case sets it before -r, so a
+# board at PA 0 always gets reset coverage (harness #5).
+PA_ZERO = "0"
 SMOKE_SETTINGS = (CHANNEL, PA_LEVEL, SQUELCH)
 REPEATABLE_SETTINGS = SMOKE_SETTINGS + (CHANNEL_INDEX, USR_LED)
 RESTORED_SETTINGS = (CHANNEL, PA_LEVEL, SQUELCH, LEDS)
@@ -467,16 +464,16 @@ def _reset_case(serial: str) -> StateCase:
             _crc_read(serial, "read-original-crc", "Read original CRC", "original crc"),
             Step(
                 "set-non-defaults",
-                "Set channel, PA level, squelch, and every LED away from boot defaults",
+                "Set channel, PA level 0, squelch, and every LED away from boot defaults",
                 lambda context: _util(
                     serial, CHANNEL.set_arg(target(context)),
-                    f"-a{pa_off_default(context)}", "-z-60", "-d1",
+                    PA_LEVEL.set_arg(PA_ZERO), "-z-60", "-d1",
                 ),
                 mutates=True,
             ),
             PA_LEVEL.verify(
-                serial, "verify-pa-level-before-reset", "PA level changed before reset",
-                "pa-level before reset", pa_off_default,
+                serial, "verify-pa-level-before-reset", "PA level 0 before reset",
+                "pa-level before reset", PA_ZERO,
             ),
             CHANNEL.verify(
                 serial, "verify-channel-before-reset", "Channel changed before reset",
@@ -523,13 +520,15 @@ def _reset_case(serial: str) -> StateCase:
         ),
         _cleanup(serial, MODE_RESET_SETTINGS + (PA_LEVEL,), crc=True),
         expected_state=(
-            "channel, PA level, squelch, and LEDs at boot defaults after reset; every "
-            "recorded setting restored on the same serial"
+            "channel, PA level (from 0), squelch, and LEDs at boot defaults after "
+            "reset; every recorded setting restored on the same serial"
         ),
     )
 
 
 def _invalid_pa_case(serial: str) -> StateCase:
+    # Strict parsing (fork 658730c): -a9 is refused before any device is
+    # opened, so the later -v never reports and the exit status is 1.
     return StateCase(
         "pa-level-invalid-set-not-masked",
         "Rejected PA level is not masked by a later report",
@@ -541,7 +540,8 @@ def _invalid_pa_case(serial: str) -> StateCase:
                 "Invalid -a9 followed by -v",
                 _util(serial, "-a9", "-v"),
                 expected_returncodes=(1,),
-                output_patterns=(FIRMWARE_PATTERN,),
+                output_patterns=(r"error: PA level must be a single digit 0-7 \(got 9\)",),
+                forbidden_patterns=(FIRMWARE_PATTERN,),
                 mutates=True,
             ),
             PA_LEVEL.verify(
@@ -551,7 +551,7 @@ def _invalid_pa_case(serial: str) -> StateCase:
             ),
         ),
         _cleanup(serial, (PA_LEVEL,)),
-        expected_state="nonzero exit although the later report succeeded",
+        expected_state="refused with exit 1 before the later report ran; PA level unchanged",
     )
 
 
@@ -585,9 +585,152 @@ def _repeated_all_leds_case(serial: str) -> StateCase:
     )
 
 
+def _value(value):
+    """A context callable for a fixed value or an existing callable."""
+    if callable(value):
+        return value
+    return lambda _context: value
+
+
+def _value_form_case(serial, case_id, name, setting, target, away, argv_options):
+    """Preset ``away`` with the attached form, then set ``target`` with
+    ``argv_options(target)`` and read it back, so the readback can only match
+    if this command set the value."""
+    target, away = _value(target), _value(away)
+    return StateCase(
+        case_id,
+        name,
+        (
+            _stop(serial, "establish-idle", "Establish idle before reading"),
+            setting.read_original(serial),
+            Step(
+                "preset",
+                f"Preset a different {setting.key} (attached value)",
+                lambda context: _util(serial, *setting.set_options(away(context))),
+                mutates=True,
+            ),
+            setting.verify(
+                serial, "verify-preset", f"Verify preset {setting.key}",
+                f"{setting.key} after preset", away,
+            ),
+            Step(
+                "set",
+                name,
+                lambda context: _util(serial, *argv_options(target(context))),
+                forbidden_patterns=(r"unexpected argument",),
+                mutates=True,
+            ),
+            setting.verify(
+                serial, "verify-set", f"Verify {setting.key} after the set",
+                f"{setting.key} after set", target,
+            ),
+        ),
+        _cleanup(serial, (setting,)),
+        expected_state=f"{setting.key} set by the command under test, then restored",
+    )
+
+
+def _next_word(option, word=lambda value: value):
+    return lambda value: (option, word(value))
+
+
+def _next_word_cases(serial):
+    """A value given as the next word sets the same as an attached one (fork
+    8b58f75, SqueakyFloors/ubertooth#156)."""
+    index = _next_word("-C", lambda mhz: str(int(mhz) - 2402))
+    table = (
+        (CHANNEL, "-c", CHANNEL.pick(0), CHANNEL.pick(1), _next_word("-c")),
+        (CHANNEL_INDEX, "-C", CHANNEL_INDEX.pick(0), CHANNEL_INDEX.pick(1), index),
+        (PA_LEVEL, "-a", PA_LEVEL.pick(0), PA_LEVEL.pick(1), _next_word("-a")),
+        (SQUELCH, "-z", SQUELCH.pick(0), SQUELCH.pick(1), _next_word("-z")),
+        (USR_LED, "-l", "1", "0", _next_word("-l")),
+        (LEDS, "-d", "1/1/1", "0/0/0", _next_word("-d", lambda leds: leds[0])),
+    )
+    return tuple(
+        _value_form_case(
+            serial, f"{setting.key}-next-word-value", f"{option} <value> as the next word sets it",
+            setting, target, away, argv_options,
+        )
+        for setting, option, target, away, argv_options in table
+    )
+
+
+def _pa_zero_cases(serial):
+    """-a0 and -a 0 set PA level 0 (fork 4ed4a1d); they used to be queries."""
+    return (
+        _value_form_case(
+            serial, "pa-level-zero-attached", "-a0 sets PA level 0",
+            PA_LEVEL, PA_ZERO, PA_LEVEL.pick(0), lambda value: (PA_LEVEL.set_arg(value),),
+        ),
+        _value_form_case(
+            serial, "pa-level-zero-next-word", "-a 0 sets PA level 0",
+            PA_LEVEL, PA_ZERO, PA_LEVEL.pick(0), _next_word("-a"),
+        ),
+    )
+
+
+def _next_word_composition_case(serial):
+    """Several next-word values in one command: each option gets its own
+    value and none swallows the option after it."""
+    channel, pa, squelch = CHANNEL.pick(0), PA_LEVEL.pick(0), SQUELCH.pick(0)
+    away_channel, away_pa, away_squelch = CHANNEL.pick(1), PA_LEVEL.pick(1), SQUELCH.pick(1)
+    settings = (CHANNEL, PA_LEVEL, SQUELCH, LEDS)
+    # -d applies before -l, so "-d 1 -l 0" leaves USR off and RX/TX on.
+    leds = "0/1/1"
+    return StateCase(
+        "next-word-values-in-one-command",
+        "-c, -a, -z, -d, and -l values as next words in one command",
+        (_stop(serial, "establish-idle", "Establish idle before reading"),)
+        + _read_originals(serial, settings)
+        + (
+            Step(
+                "preset",
+                "Preset different values (attached)",
+                lambda context: _util(
+                    serial, CHANNEL.set_arg(away_channel(context)),
+                    PA_LEVEL.set_arg(away_pa(context)),
+                    SQUELCH.set_arg(away_squelch(context)), "-d0",
+                ),
+                mutates=True,
+            ),
+            CHANNEL.verify(serial, "verify-preset-channel", "Verify preset channel",
+                           "channel after preset", away_channel),
+            PA_LEVEL.verify(serial, "verify-preset-pa-level", "Verify preset PA level",
+                            "pa-level after preset", away_pa),
+            SQUELCH.verify(serial, "verify-preset-squelch", "Verify preset squelch",
+                           "squelch after preset", away_squelch),
+            LEDS.verify(serial, "verify-preset-leds", "Verify preset LEDs",
+                        "leds after preset", "0/0/0"),
+            Step(
+                "set",
+                "Set every value as a next word in one command",
+                lambda context: _util(
+                    serial, "-c", channel(context), "-a", pa(context),
+                    "-z", squelch(context), "-d", "1", "-l", "0",
+                ),
+                forbidden_patterns=(r"unexpected argument",),
+                mutates=True,
+            ),
+            CHANNEL.verify(serial, "verify-channel", "Verify channel",
+                           "channel after set", channel),
+            PA_LEVEL.verify(serial, "verify-pa-level", "Verify PA level",
+                            "pa-level after set", pa),
+            SQUELCH.verify(serial, "verify-squelch", "Verify squelch",
+                           "squelch after set", squelch),
+            LEDS.verify(serial, "verify-leds", "Verify LEDs (-d before -l)",
+                        "leds after set", leds),
+        ),
+        _cleanup(serial, settings),
+        expected_state="every next-word value applied; originals restored",
+    )
+
+
 def radio_setting_cases(arguments, _resources, resource_identities):
     serial = _serial(resource_identities, "Radio setting transitions")
+    next_word = _next_word_cases(serial)
     cases = [_setting_case(serial, setting) for setting in SMOKE_SETTINGS]
+    cases.append(next_word[0])  # -c <MHz>
+    cases.append(_pa_zero_cases(serial)[0])  # -a0
     if arguments["coverage"] == "comprehensive":
         cases.append(_setting_case(serial, USR_LED))
         cases.extend(_repeated_case(serial, setting) for setting in REPEATABLE_SETTINGS)
@@ -596,6 +739,9 @@ def radio_setting_cases(arguments, _resources, resource_identities):
         cases.append(_mixed_channel_case(serial, index_last=False))
         cases.append(_invalid_pa_case(serial))
         cases.append(_reset_case(serial))
+        cases.extend(next_word[1:])
+        cases.append(_pa_zero_cases(serial)[1])
+        cases.append(_next_word_composition_case(serial))
     return tuple(cases)
 
 
@@ -967,6 +1113,32 @@ _REPEATED_CAPTURES = tuple(
 )
 
 
+def _next_word_crc_case(serial, target):
+    """ubertooth-btle -v 0 / -v 1: the value as the next word (fork 0b63b01)."""
+    opposite = "0" if target == "1" else "1"
+    state = "enabled" if target == "1" else "disabled"
+    return StateCase(
+        f"crc-{state}-next-word-value",
+        f"ubertooth-btle -v {target} as the next word sets CRC {state}",
+        (
+            _stop(serial, "establish-idle", "Establish idle before reading"),
+            _crc_read(serial, "read-original-crc", "Read original CRC", "original crc"),
+            Step("preset-opposite", "Preset opposite CRC (attached value)",
+                 _btle(serial, f"-v{opposite}"), mutates=True),
+            _crc_read(serial, "verify-preset", "Verify opposite CRC",
+                      "crc after preset", opposite),
+            Step("set", f"Set CRC with -v {target}", _btle(serial, "-v", target),
+                 output_patterns=(CRC_PATTERN,),
+                 forbidden_patterns=(r"unexpected argument", r"systime="),
+                 mutates=True),
+            _crc_read(serial, "verify-set", "Verify CRC after the set",
+                      "crc after set", target),
+        ),
+        _cleanup(serial, (), crc=True),
+        expected_state=f"CRC {state} by -v {target}; original CRC restored",
+    )
+
+
 def ble_crc_cases(arguments, _resources, resource_identities):
     serial = _serial(resource_identities, "BLE CRC transitions")
     if arguments["coverage"] == "comprehensive":
@@ -979,6 +1151,7 @@ def ble_crc_cases(arguments, _resources, resource_identities):
     ]
     if arguments["coverage"] == "comprehensive":
         cases.append(_repeated_crc_case(serial))
+        cases.extend(_next_word_crc_case(serial, target) for target in ("1", "0"))
         cases.extend(
             _capture_case(serial, mode, label, target, capture)
             for (mode, label), target, capture in product(
@@ -1011,10 +1184,13 @@ def ble_crc_cases(arguments, _resources, resource_identities):
 # them (btle -s, -i/-I, ducky -q/-b, util -t/-n/-e) are not used.
 
 _VALIDATED = (CHANNEL, SQUELCH, LEDS)
-# PA is read without PA_LEVEL's reject, so a board at PA 0 still runs the case
-# (cleanup then reports the PA restore as skipped, since -a0 is a query).
-_PA_READ_KEY = PA_LEVEL.original
 _ANY_MODE_START = r"Entering |Starting |Flashing LEDs|systime="
+_STRAY = r"error: unexpected argument '{}'"
+
+
+def _stray(word: str) -> str:
+    # The words used here hold no regex metacharacters.
+    return _STRAY.format(word)
 
 
 @dataclass(frozen=True)
@@ -1084,24 +1260,24 @@ REJECTIONS = (
     Rejection("util-squelch-query-with-xmas", "ubertooth-util", ("-z", "-x"),
               r"error: -z cannot be combined with -x"),
     Rejection("btle-address-errors-33", "ubertooth-btle", ("-x33",),
-              r"Error: can tolerate 0-32 access address bit errors", smoke=True),
+              r"error: access address offenses must be 0-32 \(got 33\)", smoke=True),
     Rejection("btle-adv-index-36", "ubertooth-btle", ("-A36",),
-              r"Error: advertising index must be 37, 38, or 39"),
+              r"error: advertising channel index must be 37-39 \(got 36\)"),
     Rejection("btle-adv-index-40", "ubertooth-btle", ("-A40",),
-              r"Error: advertising index must be 37, 38, or 39"),
-    # btle prints only its usage text for a MAC it cannot parse.
+              r"error: advertising channel index must be 37-39 \(got 40\)"),
+    # btle prints its usage text after this message for a MAC it cannot parse.
     Rejection("btle-bad-target-mac", "ubertooth-btle", ("-tnot-a-mac",),
-              r"Usage:"),
+              r"Error: MAC address is wrong length"),
     Rejection("ego-length-0", "ubertooth-ego", ("-l0",),
-              r"Length must be in \[1,48\]", smoke=True),
+              r"error: capture length must be 1-48 \(got 0\)", smoke=True),
     Rejection("ego-length-49", "ubertooth-ego", ("-l49",),
-              r"Length must be in \[1,48\]"),
+              r"error: capture length must be 1-48 \(got 49\)"),
     Rejection("ducky-adv-index-36", "ubertooth-ducky", ("-A36",),
-              r"Error: advertising index must be 37, 38, or 39", smoke=True),
+              r"error: advertising channel index must be 37-39 \(got 36\)", smoke=True),
     Rejection("ducky-adv-index-40", "ubertooth-ducky", ("-A40",),
-              r"Error: advertising index must be 37, 38, or 39"),
+              r"error: advertising channel index must be 37-39 \(got 40\)"),
     Rejection("ducky-bad-bdaddr", "ubertooth-ducky", ("-anot-an-address",),
-              r"Error parsing BD ADDR"),
+              r"error: Bluetooth address must be xx:xx:xx:xx:xx:xx \(got not-an-address\)"),
     Rejection("rx-uap-without-lap", "ubertooth-rx", ("-u", "12"),
               r"Error: UAP but no LAP specified", smoke=True),
     Rejection("rx-survey-with-address", "ubertooth-rx", ("-z", "-l", "123456"),
@@ -1112,35 +1288,56 @@ REJECTIONS = (
               r"error: upper frequency must be 2402-2480 MHz"),
     Rejection("specan-lower-above-upper", "ubertooth-specan", ("-l", "2480", "-u", "2402"),
               r"error: lower frequency must not exceed upper frequency"),
+    # The one argument rule (fork 8b58f75 for util, 0b63b01 for every other
+    # tool): a leftover word is refused before any device is opened, and the
+    # rest of the command does not run. ubertooth-follow and ubertooth-scan
+    # are not built on every host (harness #40), so they are not listed.
+    Rejection("util-stray-after-set", "ubertooth-util", ("-c2470", "stray"),
+              _stray("stray")),
+    Rejection("util-stray-after-mode", "ubertooth-util", ("-x", "stray"),
+              _stray("stray")),
+    Rejection("util-stray-bare-dash", "ubertooth-util", ("-c2470", "-"),
+              _stray("-")),
+    Rejection("util-stray-after-double-dash", "ubertooth-util", ("-v", "--", "-c2470"),
+              _stray("-c2470")),
+    # A next word that is not a value is not taken, so it is left over.
+    Rejection("util-stray-non-value-after-optional", "ubertooth-util", ("-a", "7x"),
+              _stray("7x")),
+    Rejection("util-stray-dash-after-optional", "ubertooth-util", ("-z", "-"),
+              _stray("-")),
+    # A next-word value is parsed as strictly as an attached one.
+    Rejection("util-next-word-frequency-above-band", "ubertooth-util", ("-c", "2481"),
+              r"error: frequency must be 2402-2480 MHz \(got 2481\)"),
+    Rejection("util-next-word-pa-level-8", "ubertooth-util", ("-a", "8"),
+              r"error: PA level must be a single digit 0-7 \(got 8\)"),
+    Rejection("util-next-word-squelch-below-int8", "ubertooth-util", ("-z", "-129"),
+              r"error: squelch level must be -128 to 127 \(got -129\)"),
+    Rejection("btle-stray", "ubertooth-btle", ("stray",), _stray("stray")),
+    Rejection("btle-stray-bare-dash", "ubertooth-btle", ("-",), _stray("-")),
+    Rejection("btle-stray-after-crc-query", "ubertooth-btle", ("-v", "stray"),
+              _stray("stray")),
+    Rejection("btle-stray-dash-after-access-address", "ubertooth-btle", ("-a", "-"),
+              _stray("-")),
+    Rejection("btle-next-word-bad-access-address", "ubertooth-btle", ("-a", "zzzz"),
+              r"error: access address must be 1-8 hex digits \(got zzzz\)"),
+    Rejection("btle-next-word-crc-2", "ubertooth-btle", ("-v", "2"),
+              r"error: CRC verify mode must be 0-1 \(got 2\)"),
+    Rejection("afh-stray", "ubertooth-afh", ("stray",), _stray("stray"), smoke=True),
+    Rejection("debug-stray", "ubertooth-debug", ("-r", "0x00", "stray"), _stray("stray"),
+              smoke=True),
+    Rejection("dfu-stray", "ubertooth-dfu", ("stray",), _stray("stray"), smoke=True),
+    Rejection("dump-stray", "ubertooth-dump", ("stray",), _stray("stray"), smoke=True),
+    Rejection("ego-stray", "ubertooth-ego", ("stray",), _stray("stray")),
+    Rejection("ducky-stray", "ubertooth-ducky", ("stray",), _stray("stray")),
+    Rejection("rx-stray", "ubertooth-rx", ("stray",), _stray("stray")),
+    Rejection("specan-stray", "ubertooth-specan", ("-l", "2402", "stray"), _stray("stray")),
+    Rejection("tx-stray", "ubertooth-tx", ("stray",), _stray("stray"), smoke=True),
 )
-
-
-def _pa_restore_if_settable(serial: str) -> tuple[Step, Step]:
-    """Restore the original PA level; at PA 0 (which -a0 cannot set) only read
-    it, so the case still checks that a regression did not move it."""
-    def restore(context):
-        original = require(context, PA_LEVEL.original)
-        if PA_LEVEL.restorable(original):
-            return _util(serial, PA_LEVEL.set_arg(original))
-        return _util(serial, PA_LEVEL.query)
-
-    return (
-        Step("restore-pa-level", "Restore original PA level (read only at PA 0)",
-             restore, mutates=True),
-        PA_LEVEL.verify(serial, "verify-restored-pa-level", "Verify restored PA level",
-                        "restored pa-level",
-                        lambda context: require(context, PA_LEVEL.original)),
-    )
 
 
 def _rejection_case(serial: str, rejection: Rejection) -> StateCase:
     command = " ".join((rejection.tool,) + rejection.options)
-    pa_read = Step(
-        "read-pa-level",
-        "Read PA level",
-        _util(serial, PA_LEVEL.query),
-        observe=Observation(_PA_READ_KEY, PA_LEVEL.pattern),
-    )
+    checked = _VALIDATED + (PA_LEVEL,)
     verify_unchanged = tuple(
         setting.verify(
             serial,
@@ -1149,17 +1346,8 @@ def _rejection_case(serial: str, rejection: Rejection) -> StateCase:
             f"{setting.key} after rejection",
             lambda context, s=setting: require(context, s.original),
         )
-        for setting in _VALIDATED
+        for setting in checked
     ) + (
-        Step(
-            "verify-unchanged-pa-level",
-            "Verify PA level unchanged",
-            _util(serial, PA_LEVEL.query),
-            observe=Observation(
-                "pa-level after rejection", PA_LEVEL.pattern,
-                lambda context: require(context, _PA_READ_KEY),
-            ),
-        ),
         _crc_read(serial, "verify-unchanged-crc", "Verify CRC unchanged",
                   "crc after rejection", lambda context: require(context, "original crc")),
     )
@@ -1169,9 +1357,8 @@ def _rejection_case(serial: str, rejection: Rejection) -> StateCase:
         (
             _stop(serial, "establish-idle", "Establish idle before reading"),
             _crc_read(serial, "read-original-crc", "Read original CRC", "original crc"),
-            pa_read,
         )
-        + _read_originals(serial, _VALIDATED)
+        + _read_originals(serial, checked)
         + (
             Step(
                 "reject",
@@ -1185,9 +1372,7 @@ def _rejection_case(serial: str, rejection: Rejection) -> StateCase:
             ),
         )
         + verify_unchanged,
-        _cleanup(serial, _VALIDATED, crc=True)[:-1]
-        + _pa_restore_if_settable(serial)
-        + (_identity(serial),),
+        _cleanup(serial, checked, crc=True),
         expected_state=(
             "the tool refuses the argument with its own error and exit 1, starts "
             "no mode, and channel, squelch, LEDs, PA level, and CRC are unchanged"
@@ -1244,6 +1429,10 @@ def util_conflict_cases(_arguments, _resources, resource_identities):
                     f"Reject conflicting {first} {second}",
                     _util(serial, first, second),
                     expected_returncodes=(1,),
+                    # Named in the fork's mode order, which _MODE_OPTIONS follows.
+                    output_patterns=(
+                        rf"error: options {first} {second} cannot be combined",
+                    ),
                     forbidden_patterns=(_MODE_START,),
                     mutates=True,
                 ),

@@ -89,7 +89,8 @@ class ToolUbertooth(FakeUbertooth):
             if o.startswith("-v"):
                 verbose = int(o[2:])
                 if not 0 <= verbose <= 2:
-                    return self._result(command, 1, "", "ERROR: verbosity out of range\n", on_output)
+                    return self._result(command, 1, "", f"error: verbosity must be 0-2 (got {o[2:]})\n",
+                                        on_output)
         spec = opts[opts.index("-r") + 1]
         if "-" in spec:
             a, b = (int(x, 16) for x in spec.split("-"))
@@ -113,6 +114,17 @@ class ToolUbertooth(FakeUbertooth):
 
     # ubertooth-btle -a / -t / -x ----------------------------------------
     def _btle_settings(self, command, options, on_output):
+        if self.next_word:
+            # -a takes a following word that is not an option (fork 0b63b01).
+            joined, index = [], 0
+            while index < len(options):
+                item = options[index]
+                if (item == "-a" and index + 1 < len(options)
+                        and options[index + 1][:1] not in ("", "-")):
+                    item, index = "-a" + options[index + 1], index + 1
+                joined.append(item)
+                index += 1
+            options = tuple(joined)
         out = []
         get = "-a" in options
         sets = [o[2:] for o in options if o.startswith("-a") and len(o) > 2]
@@ -241,6 +253,14 @@ class BleSettingsTests(unittest.TestCase):
         summary, events = run_test("BLE settings", device, coverage="comprehensive")
         self.assertFalse(summary.passed)
         self.assertEqual(["-a -v reports both", "Reject -azzzz"], failed_names(events))
+
+    def test_access_address_next_word_fails_without_the_next_word_rule(self):
+        # Before fork 0b63b01, -a 12345678 read the address and dropped the word.
+        device = ToolUbertooth(crc="1", next_word=False)
+        summary, events = run_test("BLE settings", device)
+        self.assertFalse(summary.passed)
+        self.assertEqual(["-a <address> as the next word sets it"], failed_names(events))
+        self.assertEqual("8e89bed6", device.state["aa"])
 
     def test_every_command_selects_the_board(self):
         _a, full = cases_for("BLE settings", "comprehensive")

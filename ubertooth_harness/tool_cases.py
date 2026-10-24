@@ -306,7 +306,8 @@ def debug_cases(arguments, _resources, resource_identities):
                                     codes=(1,), patterns=(r"ERROR: register address",))),
             _debug_case(serial, "reject-verbosity-3", "Reject -v3",
                         _debug_step(serial, "reject", "Reject -v3", ("-r", "0x00", "-v3"),
-                                    codes=(1,), patterns=(r"ERROR: verbosity out of range",))),
+                                    codes=(1,),
+                                    patterns=(r"error: verbosity must be 0-2 \(got 3\)",))),
         ]
     return tuple(cases)
 
@@ -372,6 +373,15 @@ def btle_settings_cases(arguments, _resources, resource_identities):
             _aa_read(serial, "verify-set", "Verify access address", "access address after set",
                      other_aa),
         ), expected_state="access address set and read back, then the original restored"),
+        # The value as the next word (fork 0b63b01, SqueakyFloors/ubertooth#155).
+        _btle_case(serial, "access-address-next-word", "-a <address> as the next word sets it", (
+            Step("set", "Set access address with -a <address>",
+                 lambda c: _btle(serial, "-a", other_aa(c)),
+                 output_patterns=(r"access address set to: [0-9a-f]{8}",),
+                 forbidden_patterns=(r"unexpected argument",), mutates=True),
+            _aa_read(serial, "verify-set", "Verify access address", "access address after set",
+                     other_aa),
+        ), expected_state="access address set by the next word, then the original restored"),
         _btle_case(serial, "follow-target", "Set and clear the follow target", (
             Step("set-target", "Set follow target", _btle(serial, "-t22:44:66:88:aa:cc"),
                  output_patterns=(r"target set to: 22:44:66:88:aa:cc/48",), mutates=True),
@@ -403,13 +413,13 @@ def btle_settings_cases(arguments, _resources, resource_identities):
                 Step("x32", "-x32 with a CRC read", _btle(serial, "-x32", "-v"),
                      output_patterns=(CRC_PATTERN,)),
             ), expected_state="both bounds accepted; nothing changed"),
-            # Fails until SqueakyFloors/ubertooth#171: -a returns before -v.
+            # Failed before SqueakyFloors/ubertooth#171 was fixed (09e9a46): -a returned before -v.
             _btle_case(serial, "access-address-with-crc", "-a -v reports both", (
                 Step("read-both", "Read access address and CRC", _btle(serial, "-a", "-v"),
                      output_patterns=(_AA_PATTERN, CRC_PATTERN),
                      forbidden_patterns=(r"systime=",)),
             ), expected_state="access address and CRC both reported, no sniffing"),
-            # Fails until SqueakyFloors/ubertooth#171: a bad value sets garbage.
+            # Failed before SqueakyFloors/ubertooth#171 was fixed (09e9a46): a bad value set garbage.
             _btle_case(serial, "reject-bad-access-address", "Reject -azzzz", (
                 Step("reject", "Reject -azzzz", _btle(serial, "-azzzz"),
                      expected_returncodes=(1,), mutates=True),
