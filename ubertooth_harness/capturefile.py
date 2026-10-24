@@ -108,6 +108,12 @@ _PCAPNG_PACKET_BLOCKS = {0x00000002, 0x00000003, 0x00000006}
 _MAX_PACKETS = 1_000_000
 
 
+def _capped(path, packets: int) -> int:
+    if packets >= _MAX_PACKETS:
+        raise CaptureFileError(f"{path}: {_MAX_PACKETS} or more packets; not counted")
+    return packets
+
+
 def count_packets(path: Path | str) -> int:
     """Packet records in a pcap or pcapng file whose header read_header accepts."""
     fmt, _link_type = read_header(path)
@@ -127,7 +133,7 @@ def count_packets(path: Path | str) -> int:
                     raise CaptureFileError(f"{path}: truncated pcap record")
                 offset += 16 + incl_len
                 packets += 1
-            return packets
+            return _capped(path, packets)
         endian = "<" if struct.unpack("<I", head[8:12])[0] == _PCAPNG_BYTE_ORDER else ">"
         offset, packets = 0, 0
         while offset < size and packets < _MAX_PACKETS:
@@ -141,7 +147,7 @@ def count_packets(path: Path | str) -> int:
             if block_type in _PCAPNG_PACKET_BLOCKS:
                 packets += 1
             offset += length
-        return packets
+        return _capped(path, packets)
 
 
 def main(argv: list[str] | None = None) -> int:

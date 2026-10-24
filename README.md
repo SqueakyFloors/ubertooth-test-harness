@@ -367,8 +367,9 @@ and channel are recorded and restored. Pairs with `-I` never exit on their own
 
 ### Guard Ubertooths
 
-Every test in the [table above](#option-compositions-and-stateful-transitions),
-and `Ubertooth count`, binds each other registered Ubertooth on the host as a `guard Ubertooth 1`,
+Every test in the [table above](#option-compositions-and-stateful-transitions)
+except `Raw receive replay` (which opens no Ubertooth), and `Ubertooth count`,
+binds each other registered Ubertooth on the host as a `guard Ubertooth 1`,
 `2`, ... resource of the same invocation, so the
 [Results table, transcript](#run-output-runjsonl-and-reportmd), and manifest
 name the guards. The design is in

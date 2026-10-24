@@ -223,11 +223,11 @@ def record_bytes(record: Record, host_time: int) -> bytes:
 
 
 def fixture_bytes(base_time: int, variant: str = "full") -> bytes:
+    if variant == "empty":
+        return b""
     data = b"".join(
         record_bytes(record, base_time + index) for index, record in enumerate(RECORDS)
     )
-    if variant == "empty":
-        return b""
     if variant == "truncated":
         return data[:-10]  # the last record loses its last 10 bytes
     return data

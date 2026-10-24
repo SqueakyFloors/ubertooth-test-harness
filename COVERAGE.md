@@ -334,7 +334,7 @@ and fail until the fix is on the commit under test.
 | [#190](https://github.com/SqueakyFloors/ubertooth/issues/190) | ubertooth-util | `-m` says "invalid range test result" when there is no result | Open | Ubertooth util modes (comprehensive) |
 | [#191](https://github.com/SqueakyFloors/ubertooth/issues/191) | firmware | Stopping LED specan skips the idle reset (LEDs stay on, channel and squelch kept) | Open | Ubertooth util modes (comprehensive) |
 | [#202](https://github.com/SqueakyFloors/ubertooth/issues/202) | ubertooth-rx | `-i` lines and captures carry the replay time, not the recorded systime | Open | Raw receive replay (comprehensive) |
-| [#203](https://github.com/SqueakyFloors/ubertooth/issues/203) | ubertooth-rx | `-i` read errors (a directory) and a cut last record are not reported; exit 0 | Open | Raw receive replay (comprehensive) |
+| [#203](https://github.com/SqueakyFloors/ubertooth/issues/203) | ubertooth-rx | `-i` read errors (a directory) and a cut last record are not reported; exit 0 | Open | Raw receive replay (comprehensive): the directory case is strict; the cut-record case checks today's silent skip and must change with the fix |
 
 A test that fails cleanly (device verified restored, guards unchanged) no longer ends the run ([#41](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/41)), so strict cases do not hide later tests.
 
