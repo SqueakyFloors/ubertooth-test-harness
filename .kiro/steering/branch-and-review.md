@@ -58,7 +58,8 @@ OS versions or runners without the maintainer asking.
 - **No CI wait** for changes limited to documentation or agent rules
   (`*.md`, `.kiro/steering/`): merge once the PR is otherwise ready.
 - **Wait in the background** and keep working meanwhile; check status every
-  30 seconds.
+  30 seconds. Never block in the foreground on a sleep loop or a long
+  `--watch`.
 - **Start deadline, 5 minutes**: if no job has started 5 minutes after the
   push, stop waiting, say so, and decide with the maintainer.
 - **Run deadline, 10 minutes after jobs start**: then use a bounded watch,
@@ -68,7 +69,7 @@ OS versions or runners without the maintainer asking.
   `gh run rerun <run-id> --failed`, and note it.
 - **Good enough**: merge when every job has passed on the PR head. A job that
   fails without running any step (runner, billing, or capacity error) is not a
-  code failure; report it to the maintainer instead of retrying.
+  code failure; report it to the maintainer, then fall back to local CI below.
 - Any other failed job blocks the merge until it is explained or fixed.
 
 ### Local CI when GitHub Actions cannot run
@@ -82,5 +83,6 @@ with no step executed), use local CI instead, after telling the maintainer:
   Run both in the background, in parallel.
 - Both must print `LOCAL CI PASSED <sha>` for the same SHA that will be
   squashed. Post both lines in a PR comment before merging.
+- Any new commit on the branch needs a new pair of passes.
 - The script tests a commit exported with `git archive`, never the working
   tree, so uncommitted changes cannot leak into a pass.
