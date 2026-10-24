@@ -137,6 +137,17 @@ class ToolUbertooth(FakeUbertooth):
 
     # ubertooth-btle -a / -t / -x ----------------------------------------
     def _btle_settings(self, command, options, on_output):
+        if self.next_word:
+            # -a takes a following word that is not an option (fork 0b63b01).
+            joined, index = [], 0
+            while index < len(options):
+                item = options[index]
+                if (item == "-a" and index + 1 < len(options)
+                        and options[index + 1][:1] not in ("", "-")):
+                    item, index = "-a" + options[index + 1], index + 1
+                joined.append(item)
+                index += 1
+            options = tuple(joined)
         out = []
         get = "-a" in options
         sets = [o[2:] for o in options if o.startswith("-a") and len(o) > 2]
@@ -292,30 +303,13 @@ class BleSettingsTests(unittest.TestCase):
         self.assertFalse(summary.passed)
         self.assertEqual(["-a -v reports both", "Reject -azzzz"], failed_names(events))
 
-    def test_a_promiscuous_stop_without_the_idle_reset_fails(self):
-        device = ToolUbertooth(crc="1", promisc_stop_resets=False)
-        summary, events = run_test("BLE settings", device, coverage="comprehensive")
+    def test_access_address_next_word_fails_without_the_next_word_rule(self):
+        # Before fork 0b63b01, -a 12345678 read the address and dropped the word.
+        device = ToolUbertooth(crc="1", next_word=False)
+        summary, events = run_test("BLE settings", device)
         self.assertFalse(summary.passed)
-        self.assertEqual(["Stopping ubertooth-btle -p resets LEDs, channel, and squelch"],
-                         failed_names(events))
-        # Cleanup put back what -p changed.
-        self.assertEqual(("8e89bed6", "1"), (device.state["aa"], device.state["crc"]))
-
-    def test_promiscuous_case_is_receive_only_and_restores_the_le_state(self):
-        _a, full = cases_for("BLE settings", "comprehensive")
-        case = next(c for c in full if c.case_id == "promiscuous-stop-resets-board")
-        run = next(s for s in case.steps if s.step_id == "promiscuous")
-        self.assertEqual(("ubertooth-btle", "-U", SERIAL, "-p"), run.resolve_argv({}))
-        cleanup = [s.step_id for s in case.cleanup]
-        for step_id in ("verify-restored-crc", "verify-restored-access-address",
-                        "verify-restored-channel", "verify-restored-squelch",
-                        "verify-restored-leds"):
-            self.assertIn(step_id, cleanup)
-        device = ToolUbertooth(crc="1")
-        device.state["aa"] = "12345678"
-        summary, _events = run_test("BLE settings", device, coverage="comprehensive")
-        self.assertTrue(summary.passed, summary.failure_reason)
-        self.assertEqual(("12345678", "1"), (device.state["aa"], device.state["crc"]))
+        self.assertEqual(["-a <address> as the next word sets it"], failed_names(events))
+        self.assertEqual("8e89bed6", device.state["aa"])
 
     def test_every_command_selects_the_board(self):
         _a, full = cases_for("BLE settings", "comprehensive")

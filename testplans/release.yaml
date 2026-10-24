@@ -36,8 +36,13 @@ suites:
         hosts: each
         Ubertooth: default
 
-    # Add "Ubertooth util conflicts" once SqueakyFloors/ubertooth#82 is fixed;
-    # until then it fails against main by design.
+    # Fork main refuses every pair (SqueakyFloors/ubertooth#82); passed on
+    # hardware at fork 3b22c95. The RF guard stays: a regression that
+    # accepted a pair would transmit.
+    - Ubertooth util conflicts:
+        hosts: each
+        Ubertooth: default
+        allow RF transmission: true
 
     - Raw receive:
         hosts: each

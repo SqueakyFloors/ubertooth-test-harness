@@ -260,10 +260,10 @@ python -m ubertooth_harness run-suite \
 | Test | `smoke` (fast plan) | `comprehensive` (release plan) |
 |------|---------------------|--------------------------------|
 | `Ubertooth util compositions` | `-v -V` and every read-only report in one command | adds every other compatible read-only pair and repeated `-U` (last wins) |
-| `Argument validation` | one rejected argument per tool (`util -c2401`, `btle -x33`, `ego -l0`, `ducky -A36`, `rx -u` without `-l`, `specan -l 2401`) | every rejected argument in `REJECTIONS` (40): out-of-range, non-numeric, or partly numeric `util -c -C -a -z -l -d -q` values (`-q` takes 20-120, so `-q19`, `-q121`, and `-q183` are refused), `util -z` with `-I`, `-q`, or `-x`, `-U all` with a setter or mode, bad advertising index, bad MAC/BD address, `-x33`, `-l0`/`-l49`, survey with an address, `specan` bad or reversed range; each must exit 1 with the tool's own error, start no mode, and leave channel, squelch, LEDs, PA, and CRC unchanged |
-| `Radio setting transitions` | channel, PA level, squelch across an idle stop and an active-mode stop | adds USR LED; repeated `-c`, `-C`, `-a`, `-z`, `-l`, `-d` (last wins); mixed `-c`/`-C` in both orders; rejected `-a9` with a later `-v` must still exit nonzero; full reset `-r` returns boot defaults |
-| `BLE CRC transitions` | CRC enabled during `-n` and `-f` on channel 37; one `-n` capture per format (`-r` PCAPNG, `-q` PCAP, `-c` PPI) | both CRC values x both modes x channels 37/38/39; both CRC values x both modes x each capture format; repeated `-v` (last wins); repeated capture files `-r -r`, `-q -c`, `-c -q` (first wins, extra file never created); `-r` with `-q` and with `-c` (separate handles, both written) |
-| `BLE settings` | set and read back the access address; set, mask, and clear the follow target | adds `ubertooth-util -r` resets the access address to 8e89bed6; `-x0`/`-x32`; `-a -v` reports both and `-azzzz` is rejected (fork #171, fixed in 09e9a46); stopping a bounded receive-only `-p` run resets LEDs, channel, and squelch (PA kept) |
+| `Argument validation` | one rejected argument per tool (`util -c2401`, `btle -x33`, `ego -l0`, `ducky -A36`, `rx -u` without `-l`, `specan -l 2401`, and a stray word for `afh`, `debug`, `dfu`, `dump`, `tx`) | every rejected argument in `REJECTIONS` (64): out-of-range, non-numeric, or partly numeric `util -c -C -a -z -l -d -q` values, attached or as the next word (`-q` takes 20-120, so `-q19`, `-q121`, and `-q183` are refused), `util -z` with `-I`, `-q`, or `-x`, `-U all` with a setter or mode, bad advertising index, bad MAC/BD address, `-x33`, `-l0`/`-l49`, survey with an address, `specan` bad or reversed range, `btle -a zzzz` and `-v 2`; a stray word on every built tool (fork's one argument rule: after a set or a mode, a bare `-`, after `--`, a next word that is not a value such as `util -a 7x`) refused with `error: unexpected argument`; each must exit 1 with the tool's own error, start no mode, and leave channel, squelch, LEDs, PA, and CRC unchanged |
+| `Radio setting transitions` | channel, PA level, squelch across an idle stop and an active-mode stop; `-c 2426` (value as the next word) and `-a0` (PA level 0) read back | adds USR LED; repeated `-c`, `-C`, `-a`, `-z`, `-l`, `-d` (last wins); mixed `-c`/`-C` in both orders; `-C`, `-a`, `-z`, `-l`, `-d` values and `-a 0` as the next word, and `-c -a -z -d -l` next-word values in one command, each read back; `-a9 -v` refused with exit 1 before the report; full reset `-r` from PA 0 returns boot defaults |
+| `BLE CRC transitions` | CRC enabled during `-n` and `-f` on channel 37; one `-n` capture per format (`-r` PCAPNG, `-q` PCAP, `-c` PPI) | both CRC values x both modes x channels 37/38/39; both CRC values x both modes x each capture format; repeated `-v` (last wins); `-v 1` and `-v 0` as the next word; repeated capture files `-r -r`, `-q -c`, `-c -q` (first wins, extra file never created); `-r` with `-q` and with `-c` (separate handles, both written) |
+| `BLE settings` | set and read back the access address, attached and as the next word (`-a <address>`); set, mask, and clear the follow target | adds `ubertooth-util -r` resets the access address to 8e89bed6; `-x0`/`-x32`; `-a -v` reports both and `-azzzz` is rejected (fork #171, fixed in 09e9a46); stopping a bounded receive-only `-p` run resets LEDs, channel, and squelch (PA kept) |
 | `Debug registers` | register list `0x02,0x01,0x00` in order, nothing changed | adds a range, a reversed range, `-v0`/`-v1`/`-v2` output, rejected `-r 0x100` and `-v3`; a successful read exits 0 (`-r 0x01` and the range fail on fork builds before #164's fix, 89afc1c) |
 | `Spectrum analyzer` | one full-band sweep (`duration` long): every frequency 2402-2480 reported, none outside, int8 RSSI | adds narrow, single, and top-of-band ranges, `-g`, `-G`, `-v`, and `-d` (binary file checked by `specandump.py`); ranges after a different range report no stale samples (fork #173, fixed in 20bcf11); stopping a bounded run with `-S` turns the preset LEDs off and resets channel 2441 MHz and squelch -120, PA kept (fork #191, fixed in aa4f620) |
 | `Classic Bluetooth receive` | `ubertooth-rx -z -t N` survey (exits 0 by itself, N = `duration` in whole seconds, no earlier than N-0.5 s, survey lines are piconet addresses); `-t N -r` PCAPNG with link type 255; `ubertooth-afh -t N` with no piconet in range says no packet arrived and exits 2 after about N s, printing no map (fork #187, 3b22c95) | adds `-t N` without `-z`; `-c 39` (every packet on channel 39); `-e 0` and `-e 4` (no packet over the limit); `-s` deprecation notice; `-q` PCAP (link type 255); repeated `-r` (first wins, extra file never created); `-d` (68-byte BR records, checked by `rxdump.py`); `afh -t N -e 2` (same exit 2); `afh -r` one map line per second; `afh` with an unknown `-U` exits 1 (fork #185, fixed in 219a5b0) |
@@ -273,7 +273,7 @@ python -m ubertooth_harness run-suite \
 | `Multi-board selection` | needs two or more registered boards on the host (a one-board host skips it): `-U all -s` and `-s` without `-U` list every registered board and only those; `-N` counts them; each `-U<index>` opens the board the listing names at that index | adds `-U all -vVspb` and `-vVspb` without `-U` (five lines per board), `-C` without `-U` refused; `-U<n>` past the last board is refused with `no Ubertooth at index` (fork #188, fixed in 0c7e9c0) |
 | `DFU images` | writes the selected board's firmware; slow plan (not fast): `-d <test image> -r`, then `-u -r` reads back the image padded with 0xff; `-s` on the image without its suffix gives the build's `.dfu` | `firmware` plan (not release): adds `-s` refusing a `.dfu`; seven bad images (wrong CRC, truncated, no suffix, text, no `UFD`, wrong vendor, wrong product) refused before any write, the board still in its application with the same flash (read back); strict: `-s` refuses a suffixed `.bin` and accepts a read-only one (fork #200, open), rejections leave the board in its application (fork #198) and wrong vendor/product is refused (fork #199); both are fixed on fork main after 3b22c95 |
 | `BLE mode conflicts` | no `coverage` argument; release plan | every combination of `ubertooth-btle -f -n -p` must be rejected before sniffing |
-| `Ubertooth util conflicts` | no `coverage` argument; requires `allow RF transmission: true`; in no plan yet | every pair of `-q -n -e -t -x -I` must be rejected before a mode starts |
+| `Ubertooth util conflicts` | no `coverage` argument; requires `allow RF transmission: true`; release plan | every pair of `-q -n -e -t -x -I` must be rejected with the fork's `error: options ... cannot be combined` before a mode starts |
 
 Every test case is built before the manifest is written or any command runs,
 so an implementation error fails the run before it touches hardware. Every
@@ -316,19 +316,25 @@ it alone.
 LEDs are recorded and restored as a USR/RX/TX triple. `-l` sets USR only and
 `-d` sets all three, so a state with RX different from TX can be read but not
 written back. Any case whose original for a setting it may change cannot be
-written back (RX different from TX, or PA level 0) is reported `skipped`
+written back (RX different from TX) is reported `skipped`
 before anything changes; if a value turns out unrestorable after a change,
 cleanup fails. Failure reasons name the output pattern that did not match. A continuous mode that
 reaches its deadline reports `command_finished` status `stopped`.
 
-`ubertooth-util` cannot set PA level 0 (`-a0` is a query). On hardware a
+`ubertooth-util -a0` (or `-a 0`) sets PA level 0, so every PA level can be
+written back. That needs fork main 4ed4a1d or later; on older builds `-a0`
+was a query and the PA-0 cases and the full-reset case fail. On hardware a
 powered-on or reset board reports PA level 7 (checked on current main and the
-2020-12-R1 firmware), and the full-reset case checks that boot default. A board
-reads 0 only if something set the front end that way. Cases that can change
-PA record it (the PA setting cases, the full-reset case, and the conflict pairs
-containing range test `-n` or repeater `-e`); one that reads 0 is reported
-`skipped` before anything changes, and cleanup reports PA restoration
-as skipped rather than failed. `test_finished` reports `failed_cases`,
+2020-12-R1 firmware); the full-reset case sets PA 0 before `-r` and checks
+that boot default, so a board found at PA 0 is covered too.
+
+Option values follow the fork's one argument rule (8b58f75 for
+`ubertooth-util`, 0b63b01 for the other tools): a value is attached or the next
+word, a next word is taken only when it looks like a value (so `-c -b` is two
+queries), and any leftover word is refused before a device is opened. A set and
+a read of the same `ubertooth-util` value in one command (`-c2426 -c`) drop
+the set ([SqueakyFloors/ubertooth#228](https://github.com/SqueakyFloors/ubertooth/issues/228));
+no case relies on that. `test_finished` reports `failed_cases`,
 `failed_guard_checks` (see [Guard Ubertooths](#guard-ubertooths)), and `skipped_cases`; the run summary (`run_finished` in run.jsonl, and
 report.md) reports the run's `skipped_cases`, so a
 skip is never hidden by an overall pass. Event schema version 1 is pre-release
@@ -350,10 +356,12 @@ and argv (`null` for a step that did not run). Steps after the first failure or
 skip emit nothing. Aggregate reasons are bounded; each
 case's full reason is in its own `check_finished` event.
 
-`Ubertooth util conflicts` fails against the fork's `ubertooth-util`, which
-runs whichever mode it checks first
-([SqueakyFloors/ubertooth#82](https://github.com/SqueakyFloors/ubertooth/issues/82)).
-It stays in the catalog and joins [`testplans/release.yaml`](testplans/release.yaml) once that is fixed.
+`Ubertooth util conflicts` keeps its `allow RF transmission: true` guard:
+fork main refuses every pair before a mode starts
+([SqueakyFloors/ubertooth#82](https://github.com/SqueakyFloors/ubertooth/issues/82),
+fixed by #134), but a regression that accepted a pair would start range test,
+repeater, or TX test and transmit. It is in [`testplans/release.yaml`](testplans/release.yaml)
+since a passing hardware run at fork 3b22c95.
 The full-reset case can fail on macOS when re-enumeration takes longer than
 the fixed 2 s wait inside `ubertooth-util -r`
 ([SqueakyFloors/ubertooth#94](https://github.com/SqueakyFloors/ubertooth/issues/94)).
