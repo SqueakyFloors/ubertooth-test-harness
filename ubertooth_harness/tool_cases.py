@@ -190,10 +190,10 @@ _IN_DIRECTORY = "import os, sys; os.chdir(sys.argv[1]); os.execvp(sys.argv[2], s
 
 
 def _no_samples_on_stdout(output: str) -> str:
-    if any(_LINE_FORMATS["default"].match(line.strip()) for line in output.splitlines()):
-        return "sample lines on stdout"
-    if any(not (char.isprintable() or char.isspace()) for char in output):
-        return "binary data on stdout"
+    # The dump goes to the file, so stdout must stay empty: a binary sample
+    # can decode to printable replacement characters, so any byte counts.
+    if output.strip():
+        return f"stdout is not empty ({len(output)} characters)"
     return ""
 
 

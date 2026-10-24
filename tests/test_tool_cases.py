@@ -267,7 +267,7 @@ class SpectrumAnalyzerTests(unittest.TestCase):
         summary, events = run_spectrum(ToolUbertooth(crc="1", dash_is_stdout=True))
         self.assertFalse(summary.passed)
         self.assertEqual(["-d -x.bin writes the file -x.bin, not stdout"], failed_names(events))
-        self.assertIn("binary data on stdout", summary.failure_reason)
+        self.assertIn("stdout is not empty", summary.failure_reason)
 
     def test_a_specan_stop_without_the_idle_reset_fails(self):
         # SqueakyFloors/ubertooth#191 (fork builds before aa4f620).

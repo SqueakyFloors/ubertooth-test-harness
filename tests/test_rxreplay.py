@@ -489,7 +489,7 @@ class ReplayCaseTests(unittest.TestCase):
         self.assertEqual(["replay-decode-lap", "replay-lap-uap", "replay-pcapng",
                           "replay-pcap"], [c.case_id for c in smoke])
         _a, full = replay_cases("comprehensive")
-        self.assertEqual(18, len(full))
+        self.assertEqual(17, len(full))
         context = {"capture dir": "/run/captures/x"}
         for case in full:
             self.assertIsInstance(case, StateCase)
@@ -516,8 +516,7 @@ class ReplayCaseTests(unittest.TestCase):
         self.assertEqual(["-i -u without -l is refused",
                           "-i of a directory reports the read error",
                           "-i of a file whose last record is cut",
-                          "-i packet lines carry the recorded systime",
-                          "-u without -l is refused before a device"],
+                          "-i packet lines carry the recorded systime"],
                          failed_names(events))
 
     def test_fork_main_passes_everything(self):

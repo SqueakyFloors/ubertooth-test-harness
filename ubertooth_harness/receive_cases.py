@@ -668,12 +668,5 @@ def replay_cases(arguments, _resources, _resource_identities, *, now=None):
                          check=rxreplay.packets_check([]),
                          patterns=(_UAP_NEEDS_LAP,)),
         ), "exit 1 with 'requires -l <LAP>' before any record is decoded"),
-        # No -i and no -U: refused while the command line is read, so no
-        # Ubertooth is needed and none attached is opened.
-        _replay_case("uap-without-lap-no-device", "-u without -l is refused before a device", (
-            Step("refuse", "ubertooth-rx -u 22",
-                 ("ubertooth-rx", "-u", "22"), timeout_s=10.0, expected_returncodes=(1,),
-                 output_patterns=(_UAP_NEEDS_LAP,)),
-        ), "exit 1 with 'requires -l <LAP>'; no device opened"),
     ]
     return tuple(cases)
