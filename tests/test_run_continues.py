@@ -95,6 +95,57 @@ class RunContinuesTests(unittest.TestCase):
                              and e.details["invocation_id"].startswith("002")
                              for e in events))
 
+    def test_a_failed_original_read_ends_the_run(self):
+        # The CRC read fails, so its restore is skipped: nothing reported a
+        # cleanup failure, but the state was never verified.
+        def fail(argv):
+            return tuple(argv[3:]) == ("-v",) and argv[0] == "ubertooth-btle"
+
+        device = ToolUbertooth(crc="1", fail=fail)
+        invocations = [
+            invocation(1, "BLE CRC transitions", "smoke"),
+            invocation(2, "Debug registers", "smoke"),
+        ]
+
+        summary, events = run(device, invocations)
+
+        self.assertFalse(summary.passed)
+        self.assertEqual([("001-BLE CRC transitions", "failed", True)], finished(events))
+
+    def test_cancellation_after_a_clean_failure_keeps_the_failure(self):
+        from ubertooth_harness.cancellation import CancellationToken
+        token = CancellationToken()
+        device = ToolUbertooth(crc="1", debug_exit_is_value=True)
+        original = device.run
+
+        seen = []
+
+        def run_and_cancel(argv, **options):
+            result = original(argv, **options)
+            if tuple(argv[3:5]) == ("-r", "0x02,0x01,0x00"):
+                seen.append(argv)
+                if len(seen) == 2:  # the list read of the second test
+                    token.cancel("operator stop")
+            return result
+
+        device.run = run_and_cancel
+        invocations = [
+            invocation(1, "Debug registers", "comprehensive"),
+            invocation(2, "Debug registers", "smoke"),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest, checks = run_contract(root, tuple(invocations))
+            summary = NamedTestSequencer(HostVersionPassthrough(device), event_sink=CollectSink()).run(
+                tuple(invocations), root, run_id="named-run", manifest=manifest,
+                preflight_checks=checks, cancellation=token,
+            )
+
+        self.assertEqual("failed", summary.status)
+        self.assertTrue(summary.failure_reason.startswith("Debug registers:"))
+        self.assertIn("; then Debug registers:", summary.failure_reason)
+        self.assertIn("operator stop", summary.failure_reason)
+
 
 if __name__ == "__main__":
     unittest.main()

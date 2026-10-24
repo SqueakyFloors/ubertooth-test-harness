@@ -95,6 +95,10 @@ class StateCaseResult:
     failure: str
     status: str
     restored: bool
+    # Every cleanup step ran and passed: each recorded original was written
+    # back and read back. False when a restore was skipped (for example an
+    # original that was never read), even if nothing reported a failure.
+    verified: bool = False
 
 
 def _path_safe(name: str) -> str:
@@ -582,6 +586,7 @@ class NamedTestSequencer:
             raise error
         cleanup_token = CancellationToken()
         cleanup_failures = []
+        cleanup_unverified = False
         for index, step in enumerate(case.cleanup):
             try:
                 failure, ran, _canceled, skipped = self._run_state_step(
@@ -594,6 +599,8 @@ class NamedTestSequencer:
                 # every later one without events, then propagate.
                 self._emergency_cleanup(case.cleanup[index:], context)
                 raise error
+            if skipped or not ran:
+                cleanup_unverified = True
             if failure:
                 cleanup_failures.append(failure)
             elif skipped and mutated and not ran:
@@ -628,7 +635,10 @@ class NamedTestSequencer:
                 "cleanup_status": "failed" if cleanup_failures else "passed",
             },
         )
-        return StateCaseResult(case_failure, status, not cleanup_failures)
+        return StateCaseResult(
+            case_failure, status, not cleanup_failures,
+            verified=not cleanup_failures and not cleanup_unverified,
+        )
 
     def _run_guard_check(
         self,
@@ -1073,10 +1083,11 @@ class NamedTestSequencer:
                                     case_statuses.append(guard_status)
                                     break
                                 if outcome.failure:
-                                    if outcome.status == "canceled" or not outcome.restored:
-                                        unsafe = True
                                     # Continue only from a verified-restored device.
-                                    if unsafe or not definition.continue_on_case_failure:
+                                    unverified = outcome.status == "canceled" or not outcome.verified
+                                    if unverified:
+                                        unsafe = True
+                                    if unverified or not definition.continue_on_case_failure:
                                         break
                                 continue
                             publisher.emit(
@@ -1124,6 +1135,10 @@ class NamedTestSequencer:
                                 },
                             )
                             if case_failure:
+                                # Command cases are read-only (help, version,
+                                # identity, count, register reads), so a
+                                # failed one leaves the device as it was. A
+                                # mode-starting test must be a StateCase.
                                 case_failures.append(case_failure)
                                 case_statuses.append(case_status)
                                 if result.cancelled or not definition.continue_on_case_failure:
@@ -1186,7 +1201,10 @@ class NamedTestSequencer:
                             "stops_run": stop_run,
                         },
                     )
-                    failed_tests.append(test_failure)
+                    if status == "failed":
+                        failed_tests.append(test_failure)
+                    else:
+                        failure = test_failure
                     if stop_run:
                         break
                     status = "running"
@@ -1207,13 +1225,15 @@ class NamedTestSequencer:
 
         if status == "running":
             status = "passed" if completed == len(invocations) else "failed"
-        if failed_tests and status == "canceled" and not failure:
-            failure = failed_tests[-1]
-        elif failed_tests and status != "canceled":
+        if failed_tests:
+            # A real failure is never hidden by a later cancellation.
             more = len(failed_tests) - 1
-            failure = failed_tests[0] + (
+            reason = failed_tests[0] + (
                 f" (and {more} more failed test{'s' if more > 1 else ''})" if more else ""
             )
+            if status == "canceled":
+                reason += f"; then {failure or 'canceled'}"
+            status, failure = "failed", reason
         summary = SequencerSummary(
             run_id=run_id,
             status=status,

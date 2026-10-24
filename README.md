@@ -534,7 +534,8 @@ Later tests still run, the run fails, and its summary names the first failed
 test and how many others failed. The run stops after a failed test only when
 that state is not known: a case was not verified restored, a guard changed or
 could not be read, a flash failed, power isolation failed, or the run was
-canceled. `test_finished` records which with `stops_run`.
+canceled. A failed test's `test_finished` says which with `stops_run`. A
+later cancellation does not hide an earlier failure: the run still fails.
 
 A test run is one `run-suite` run of a plan suite. It writes exactly two files
 into `<output>/<run-id>/` (plus `build/` with `--build`, and `captures/` when
