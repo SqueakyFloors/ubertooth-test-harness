@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# Open the lab controller's web GUI from a laptop (macOS or Linux): start an
+# SSH local port forward to the controller's 127.0.0.1 port, wait until it
+# answers, open http://127.0.0.1:PORT/ui/ in the browser, and keep the tunnel
+# in the foreground until Ctrl-C.
+#
+#   scripts/harness-open [--host HOST] [--jump JUMP] [--port N] [--two-hop]
+#
+# Both ends are loopback only: the forward is
+# -L 127.0.0.1:LOCAL:127.0.0.1:PORT, so nothing else on the laptop's network
+# can use it, and it reaches only the controller's loopback listener.
+#
+# By default the jump host relays the connection (ssh -J JUMP HOST). Use
+# --two-hop when the jump host does not allow that (ssh reports "channel 0:
+# open failed: administratively prohibited" or "stdio forwarding failed"), or
+# when HOST is a name only the jump host's own SSH configuration knows. It
+# runs ssh -t -L ... JUMP ssh -N -L ... HOST, which also chains a forward
+# through 127.0.0.1:JUMP_PORT on the jump host.
+#
+# Options:
+#   --host HOST         controller host (default sf-control-server-103)
+#   --jump JUMP         SSH jump host or alias (default asf; "" for none)
+#   --port N            controller port on HOST (default 8765)
+#   --local-port N      port on this machine (default: --port). The controller
+#                       accepts only Host: 127.0.0.1:PORT, so a different
+#                       local port gets 403 from it.
+#   --jump-port N       loopback port on the jump host for --two-hop
+#                       (default: --port)
+#   --two-hop           forward through two ssh sessions (see above)
+#   --wait SECONDS      how long to wait for the tunnel (default 60)
+#   --no-browser        open the tunnel only, print the URL
+#   --dry-run           print the ssh command; run nothing
+#   -h, --help          this help
+set -euo pipefail
+
+host=sf-control-server-103
+jump=asf
+port=8765
+local_port=
+jump_port=
+two_hop=0
+wait_s=60
+browser=1
+dry_run=0
+
+say() { printf 'harness-open: %s\n' "$*" >&2; }
+die() { printf 'harness-open: error: %s\n' "$*" >&2; exit 1; }
+usage() { sed -n '2,/^set -euo/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; }
+
+while [ "$#" -gt 0 ]; do
+    case $1 in
+        --host|--jump|--port|--local-port|--jump-port|--wait)
+            [ "$#" -ge 2 ] || die "$1 needs a value"
+            case $1 in
+                --host) host=$2 ;;
+                --jump) jump=$2 ;;
+                --port) port=$2 ;;
+                --local-port) local_port=$2 ;;
+                --jump-port) jump_port=$2 ;;
+                --wait) wait_s=$2 ;;
+            esac
+            shift ;;
+        --two-hop) two_hop=1 ;;
+        --no-browser) browser=0 ;;
+        --dry-run) dry_run=1 ;;
+        -h|--help) usage; exit 0 ;;
+        *) die "unknown option $1 (see --help)" ;;
+    esac
+    shift
+done
+
+local_port=${local_port:-$port}
+jump_port=${jump_port:-$port}
+
+check_port() {
+    case $2 in
+        ''|*[!0-9]*) die "$1 must be a number from 1 to 65535" ;;
+    esac
+    [ "$2" -ge 1 ] && [ "$2" -le 65535 ] || die "$1 must be a number from 1 to 65535"
+}
+check_port --port "$port"
+check_port --local-port "$local_port"
+check_port --jump-port "$jump_port"
+case $wait_s in ''|*[!0-9]*) die "--wait must be a whole number of seconds" ;; esac
+
+# Host names become ssh arguments (and, with --two-hop, part of a remote
+# command), so allow only plain host/alias characters and no leading '-'.
+check_name() {
+    case $2 in
+        -*|*[!A-Za-z0-9._@-]*) die "$1 must be a host name or SSH alias: $2" ;;
+    esac
+}
+[ -n "$host" ] || die "--host must not be empty"
+check_name --host "$host"
+[ -z "$jump" ] || check_name --jump "$jump"
+[ "$two_hop" = 0 ] || [ -n "$jump" ] || die "--two-hop needs --jump"
+
+[ "$local_port" = "$port" ] || say "warning: --local-port $local_port differs from --port $port; the controller refuses Host: 127.0.0.1:$local_port with 403"
+
+opts=(-o ExitOnForwardFailure=yes -o ServerAliveInterval=30)
+if [ "$two_hop" = 1 ]; then
+    cmd=(ssh -t "${opts[@]}" -L "127.0.0.1:$local_port:127.0.0.1:$jump_port" "$jump"
+         ssh -N "${opts[@]}" -L "127.0.0.1:$jump_port:127.0.0.1:$port" "$host")
+elif [ -n "$jump" ]; then
+    cmd=(ssh -N "${opts[@]}" -L "127.0.0.1:$local_port:127.0.0.1:$port" -J "$jump" "$host")
+else
+    cmd=(ssh -N "${opts[@]}" -L "127.0.0.1:$local_port:127.0.0.1:$port" "$host")
+fi
+
+url=http://127.0.0.1:$local_port/ui/
+if [ "$dry_run" = 1 ]; then
+    printf '%s\n' "${cmd[*]}"
+    printf '%s\n' "$url"
+    exit 0
+fi
+
+answers() { (exec 3<>"/dev/tcp/127.0.0.1/$local_port") 2>/dev/null; }
+
+answers && die "127.0.0.1:$local_port is already in use on this machine (an old tunnel?); stop it or pass --local-port"
+
+case $(uname -s) in
+    Darwin) opener=open ;;
+    *) opener=xdg-open ;;
+esac
+
+# The tunnel runs in the foreground (exec, below) so it owns the terminal for
+# passwords and Ctrl-C; this background helper opens the browser once the
+# forwarded port answers, and gives up if ssh exits or the wait runs out.
+tunnel_pid=$$
+(
+    deadline=$((SECONDS + wait_s))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        kill -0 "$tunnel_pid" 2>/dev/null || exit 0
+        if answers; then
+            if [ "$browser" = 1 ]; then
+                say "tunnel up; opening $url (Ctrl-C closes the tunnel)"
+                "$opener" "$url" >/dev/null 2>&1 || say "could not run $opener; open $url yourself"
+            else
+                say "tunnel up: $url (Ctrl-C closes it)"
+            fi
+            exit 0
+        fi
+        sleep 0.5
+    done
+    say "127.0.0.1:$local_port did not answer within ${wait_s}s; is the controller running on $host?"
+) &
+
+say "connecting: ${cmd[*]}"
+exec "${cmd[@]}"
