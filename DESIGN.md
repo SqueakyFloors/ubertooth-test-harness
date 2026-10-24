@@ -14,9 +14,9 @@ checkoff, and a countdown/ETA in a web GUI.
 > (protocol v1, outbound-only to a loopback controller) is implemented and
 > tested against a stub controller. The controller (target registry, run
 > dispatch, results store, REST and live WebSocket API; `127.0.0.1` only) is
-> implemented and tested against scripted runners and the real runner. The
-> GUI, GLaDOS
-> soak execution, and radio fixtures remain design-only. Multi-node, firmware-flash, and radio behaviour require the lab
+> implemented and tested against scripted runners and the real runner, and it
+> serves the web GUI (targets, run setup, live checklist, history). GLaDOS
+> soak execution and radio fixtures remain design-only. Multi-node, firmware-flash, and radio behaviour require the lab
 > rack; see the
 > [core Ubertooth lab plan](https://github.com/SqueakyFloors/ubertooth/blob/main/TEST_LAB.md).
 
@@ -48,6 +48,7 @@ checkoff, and a countdown/ETA in a web GUI.
   absent or that same origin (runner connections: absent); `Sec-Fetch-Site`
   must be same-origin or none, and `POST` bodies must be JSON. This blocks DNS
   rebinding and cross-site requests from a local browser. REST:
+  `/api/refs` (git ls-remote of the Ubertooth repository), `/api/plans`,
   `/api/targets`, `/api/targets/{host}/runs` (start), `/api/runs`,
   `/api/runs/{id}` (status and events), `/api/runs/{id}/report.md`,
   `/api/runs/{id}/cancel`. `/ws/live` fans out target status changes, run
@@ -56,8 +57,8 @@ checkoff, and a countdown/ETA in a web GUI.
   speaks protocol v1. Each run is a flat directory
   `<results dir>/<run_id>/` (`run.json`, `run.jsonl`, `report.md`), with the
   results directory outside the repository by default
-  (`$XDG_DATA_HOME/ubertooth-harness/controller/runs`). The GUI itself is
-  not implemented; `GET /` returns a JSON summary.
+  (`$XDG_DATA_HOME/ubertooth-harness/controller/runs`). `GET /` returns a
+  JSON summary; the GUI is at `/ui/` ([section 4](#4-web-gui-controller)).
 - **Target runner** (each macOS/Linux target, Python): registers with the controller, checks out/
   builds the requested ref, flashes firmware, executes the test plan locally,
   streams step-by-step status back.
@@ -67,9 +68,10 @@ checkoff, and a countdown/ETA in a web GUI.
     server (→ targets).
   - **Target runner WebSocket/HTTP** for the live run phase: trigger a plan, stream
     checkoff + heartbeats + samples back to the controller.
-- **GitHub:** controller reads refs (branches, tags, releases) to populate the
-  branch dropdown; target runners check out the chosen ref. Read-only (token only if
-  the repo is private).
+- **GitHub:** controller reads refs (branches and tags, via `git ls-remote`
+  against the configured repository, default the public fork) to populate the
+  ref dropdown; target runners check out the chosen ref. Read-only, no token
+  for a public repository. Releases are their tags.
 
 Why both Ansible and an target runner: Ansible is ideal for idempotent deploy/flash
 fan-out; a persistent target runner is needed for real-time checkoff and long-running
@@ -621,17 +623,40 @@ before relying on reset-into-new-image for unattended runs.
 
 ## 4. Web GUI (controller)
 
-- **Targets view:** one card per target — hostname, OS/version, Ubertooth
-  serial(s), attached emitters, connection/heartbeat state.
-- **Run setup:** git-ref dropdown (main, branches, tags, releases) + suite
-  selector (fast / long) + target multiselect → "Run".
-- **Live run:** per target, the test plan rendered as a checklist that ticks in
-  real time (pass ✓ / fail ✗ / running …), a **countdown timer** (ETA from
-  summed `estimated_duration`), and a log/sample stream.
-- **History:** past runs with ref, suite, per-step results, soak graphs.
+Implemented: `/ui/` on the controller, vanilla JavaScript in
+`ubertooth_harness/web/` (no build step, nothing from another origin), driven
+by the REST API and `/ws/live`.
 
-Frontend: lightweight ([htmx](https://htmx.org/) or vanilla JS) + WebSocket for live updates — no
-heavy build toolchain on the lab server.
+- **Targets view:** one card per target — host, hostname, OS/version, Python,
+  Ubertooth serial(s), online/offline, last seen, active run. Attached
+  emitters are not shown yet (no emitter registry).
+- **Run setup:** git-ref dropdown (default branch, branches, tags from
+  `GET /api/refs`, which runs `git ls-remote` against the configured
+  repository and caches for 60 s) + plan and suite selectors
+  (`GET /api/plans`) + one target + build toggle → "Run". The controller
+  refuses a ref that is not in the list or a full commit ID (422); when the
+  list cannot be fetched it passes the ref on unchecked and logs a warning. One target per run; a multiselect is a later step.
+- **Live run:** the suite rendered as a checklist that ticks in real time
+  from the run's events (✓ passed / ✗ failed / … running / ○ pending, always
+  with text, in an `aria-live` region), the stage, elapsed time, Cancel, and a
+  bounded log tail (last 200 lines). The **countdown** is the sum of the
+  tests' estimates minus elapsed time, shown only when every test has one. The
+  catalog has no `estimated_duration` yet, so a test's estimate is its
+  `duration` argument and build/preflight are excluded; a suite with any
+  unestimated test (the fast suite today) shows elapsed time and says so.
+  Catalog estimates are a follow-up.
+- **History:** every run with ref, plan/suite, target, status,
+  started/finished, a `report.md` link, and the failure summary from
+  `GET /api/runs/{id}` (per failed phase or test: reason and last output
+  lines; then the run's reason). Soak graphs remain.
+
+Security: the GUI is served by the loopback-only controller behind the same
+Host/Origin/Sec-Fetch guard as the API, `POST`s stay JSON-only, every
+response carries a strict CSP (`default-src 'self'`, no inline script,
+`connect-src 'self' ws://<host>`, `frame-ancestors 'none'`) plus `nosniff`,
+`X-Frame-Options: DENY` and `Referrer-Policy: no-referrer`, controller and
+runner strings are rendered with `textContent` only, and static files are
+served from memory by exact name.
 
 ---
 
@@ -658,8 +683,10 @@ heavy build toolchain on the lab server.
 3. **Target runner service** — register/heartbeat/run over the wire; test against a
    stub controller. Implemented (protocol v1, loopback controllers only).
 4. **Controller + web GUI** — targets, ref dropdown, live checkoff, countdown.
-   Controller implemented (registry, dispatch, results store, REST and live
-   WebSocket API, `127.0.0.1` only); the GUI remains.
+   Implemented: controller (registry, dispatch, results store, REST and live
+   WebSocket API, `127.0.0.1` only) and the GUI (targets, run setup, live
+   checklist with a countdown when estimates exist, history with failure
+   summaries). Catalog duration estimates and multi-target runs remain.
 5. **Ansible** deploy (laptop→server, server→targets) + firmware-flash step.
 6. **eero beacon emitter step** — once its control interface is known.
 7. **Harden** — long-soak sampling, history/graphs, failure diagnostics.

@@ -312,6 +312,16 @@ def _parser() -> argparse.ArgumentParser:
         "controller/runs, else ~/.local/share/...)",
     )
     controller.add_argument(
+        "--ubertooth-repo", metavar="URL",
+        help="Ubertooth repository whose branches and tags (git ls-remote) the "
+        "GUI offers and a run may name (default: the public fork, "
+        "https://github.com/SqueakyFloors/ubertooth.git)",
+    )
+    controller.add_argument(
+        "--plans-dir", type=Path, default=_DEFAULT_PLAN.parent, metavar="DIR",
+        help="directory of <plan>.yaml files the GUI lists",
+    )
+    controller.add_argument(
         "--host", "--bind", "--address", dest="refused_bind",
         action=_RefuseBind, help=argparse.SUPPRESS,
     )
@@ -343,8 +353,16 @@ def _controller(args: argparse.Namespace) -> int:
         serve,
     )
 
+    from ubertooth_harness.gui import DEFAULT_UBERTOOTH_REPOSITORY, GitRefSource
+
     refuse_bind_overrides()
-    controller = Controller(args.results_dir or default_results_dir())
+    repository = args.ubertooth_repo or DEFAULT_UBERTOOTH_REPOSITORY
+    controller = Controller(
+        args.results_dir or default_results_dir(),
+        ref_source=GitRefSource(repository),
+        plans_dir=args.plans_dir,
+    )
+    controller.log(f"refs from {controller.ref_source.display}")
     controller.log(f"results in {controller.results_dir}")
 
     def stop(signum, frame):

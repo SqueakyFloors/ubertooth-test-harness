@@ -31,6 +31,7 @@ from ubertooth_harness.controller import (
     default_results_dir,
     refuse_bind_overrides,
 )
+from ubertooth_harness.gui import GitRefSource
 from ubertooth_harness.protocol import (
     decode_controller_message,
     encode_runner_message,
@@ -44,6 +45,20 @@ except ImportError:  # run as tests.test_controller
     from tests.test_runner_service import RunnerFixture, StubEnumerator
 
 TIMEOUT_S = 30
+COMMIT = "0123456789abcdef0123456789abcdef01234567"
+# What `git ls-remote` prints for the refs these tests start runs with.
+LS_REMOTE = (
+    f"{COMMIT}\tHEAD\n{COMMIT}\trefs/heads/main\n{COMMIT}\trefs/tags/v1.2\n"
+).encode()
+
+
+def fake_ref_source(output=LS_REMOTE, code=0, calls=None):
+    """A GitRefSource whose git ls-remote is scripted (no subprocess)."""
+    async def git(argv, timeout_s):
+        if calls is not None:
+            calls.append(list(argv))
+        return code, output, b"fatal: repository not found\n" if code else b""
+    return GitRefSource("https://example.invalid/ubertooth.git", git=git)
 
 
 def _http(port, method, path, body=None, headers=None):
@@ -135,7 +150,7 @@ class ControllerTestCase(unittest.IsolatedAsyncioTestCase):
     async def start_controller(self):
         self.controller = Controller(
             self.results, reply_timeout_s=5, monitor_interval_s=0.05,
-            log=self.logs.append,
+            log=self.logs.append, ref_source=fake_ref_source(),
         )
         self.server = await ControllerServer(self.controller, 0, quiet=True).start()
         self.port = self.server.port
