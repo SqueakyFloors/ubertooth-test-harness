@@ -7,7 +7,7 @@ that changes coverage. Options come from each
 tool's `getopt` string and usage text on this fork's `main`. Coverage comes
 from the harness catalog (`ubertooth_harness/catalog.py`,
 `ubertooth_harness/transitions.py`, `ubertooth_harness/util_cases.py`,
-`ubertooth_harness/receive_cases.py`), its plans (`testplans/*.yaml`) and its
+`ubertooth_harness/receive_cases.py`, `ubertooth_harness/dfu_cases.py`), its plans (`testplans/*.yaml`) and its
 preflight, flash, and guard code. Profiles: **smoke** runs in the `fast` plan,
 **comprehensive** in the `release` plan; tests without a profile name their plan.
 The `host` plan holds the tests that need no Ubertooth (Host CLI surface and
@@ -36,6 +36,9 @@ Harness-wide checks that use the CLIs:
   the board's firmware API is at least the host API.
 - **Flash reliability** (`slow` plan): repeated `ubertooth-dfu -U <serial> -d <image> -r`.
   Each flash is verified with `ubertooth-util -v`.
+- **DFU images** (smoke in the `slow` plan, comprehensive in the `firmware`
+  plan): writes the test image, reads it back, and tries bad images on the
+  selected board; every case ends with the test image read back and verified.
 - **Exclusive Ubertooth topology** (`exclusive` plan, Linux, power control):
   runs `ubertooth-util -s`, `ubertooth-util -v`, and `ubertooth-btle -f` with no
   `-U` while only one board is powered.
@@ -138,13 +141,13 @@ Combinations: list and range output: Covered. `-v0`/`-v2` output: Covered. `Debu
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
 | `-h` | help | Covered | Host CLI surface (exit 1) |
-| `-d <file>` | write DFU image | Covered | Flash reliability (slow): repeated exact-verified writes |
-| `-r` | reset after the operation | Covered | Flash reliability (slow), always with `-d` |
-| `-U <index\|serial>` | select device | Covered | Flash reliability (by serial; optionally alternating boards) |
-| `-u <file>` | read firmware from the device | Not covered | Read-back; compare with the image last written |
-| `-s <file>` | add DFU suffix to a binary | Not covered | Host-only, no device; easy |
+| `-d <file>` | write DFU image | Covered | Flash reliability (slow): repeated exact-verified writes. DFU images (smoke): write, then read back. Bad images (DFU images, comprehensive): a wrong CRC, a truncated file, a binary without a suffix, a text file, a suffix without `UFD`, and a suffix for another vendor or product must exit 1 before any block is written (no "firmware programming attempt"), and the board must stay in its application with the same revision and flash (read back). Every rejection leaves the board in the DFU bootloader ([ubertooth#198](https://github.com/SqueakyFloors/ubertooth/issues/198)); a wrong vendor or product is written ([ubertooth#199](https://github.com/SqueakyFloors/ubertooth/issues/199)) |
+| `-r` | reset after the operation | Covered | Flash reliability (slow) and DFU images, with `-d` and with `-u`; after `-u -r` the application must answer with the same revision |
+| `-U <index\|serial>` | select device | Covered | Flash reliability and DFU images (by serial; optionally alternating boards) |
+| `-u <file>` | read firmware from the device | Covered | DFU images (smoke): after `-d <test image> -r`, `-u <file> -r` must give 245760 bytes (flash 0x4000-0x3ffff) that start with the whole image, suffix included, padded with 0xff to 256 bytes. Comprehensive: every rejection is checked by a read-back. A read-back fails now and then (about 1 in 20) and leaves the board in DFU despite `-r` ([ubertooth#208](https://github.com/SqueakyFloors/ubertooth/issues/208)); `-u` truncates its file before it finds a device ([ubertooth#200](https://github.com/SqueakyFloors/ubertooth/issues/200) item 4, not tested) |
+| `-s <file>` | add DFU suffix to a binary | Covered | DFU images (smoke): the test image without its suffix, suffixed with `-s`, must equal the build's `.dfu` (VID:PID 1d50:6003, bcdDFU 0100, CRC). Comprehensive: a `.dfu` is refused (exit 1, unchanged); strict: a `.bin` that already has a suffix is refused and a read-only `.bin` is suffixed ([ubertooth#200](https://github.com/SqueakyFloors/ubertooth/issues/200)) |
 
-Combinations: `-d` without `-r` (board stays in DFU): Not covered (Hard: leaves the application firmware). `-u` then `-d` of the same image: Not covered. A bad image or wrong suffix is rejected: Not covered.
+Combinations: `-d` without `-r` and `-u` without `-r` (board stays in DFU): Not covered (Hard: leaves the application firmware). `-d` then `-u` of the same image: Covered (DFU images). A bad image or wrong suffix is rejected: Covered (DFU images, comprehensive; fails until ubertooth#198 and #199 are fixed).
 
 ## ubertooth-specan
 
@@ -346,7 +349,7 @@ A test that fails cleanly (device verified restored, guards unchanged) no longer
   `ubertooth-ego -i -j`, and `ubertooth-ducky -q -b`. These need an explicit
   RF allowance in the plan, like `allow RF transmission` on Ubertooth util conflicts.
 - **Leaves the application firmware:** `ubertooth-util -f -i` and
-  `ubertooth-dfu -d` without `-r`. They need a recovery path (USB power cycle,
+  `ubertooth-dfu -d` or `-u` without `-r`. They need a recovery path (USB power cycle,
   DFU/ISP reflash). The Reset into invalid application backlog item covers part of this.
 - **Needs an RF peer:** BR/EDR piconet (live `ubertooth-rx -l -u`; Raw
   receive replay covers the decode from a synthetic file,
@@ -369,8 +372,7 @@ Next, harness work:
 
 - Catch up with fork main: `-a0` sets PA 0 ([#5](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/5)) and next-word values ([#25](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/25)). Done (#34): `-z` with a mode and the `#172` rejections.
 
-3. `ubertooth-dfu -s` (suffix a binary; host-only) and `-u` read-back compared with the last
-   flashed image.
+3. Done (#33): `DFU images` (`ubertooth-dfu -s`, `-u` read-back, bad-image refusal).
 4. Done (#30): `Spectrum analyzer` ranges, `-g`, `-G`, `-v`, `-d`.
 5. Done (#29): `BLE settings` (`-a`, `-t`, `-x`) and `-r` with `-q`/`-c`. Still open: `-r -` to stdout (would log raw capture bytes; needs a header-only check).
 6. Done (#32): `Debug registers` lists, ranges, verbosity, exit status.
