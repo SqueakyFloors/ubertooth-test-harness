@@ -290,6 +290,19 @@ class LeaseCliTests(unittest.TestCase):
         self.assertEqual(2, code)
         self.assertIn("UT_0 is not a Host", err)
 
+    def test_boards_lists_a_short_serial_board_as_not_leasable(self):
+        short = self.root / "short.yaml"
+        short.write_text(HARDWARE + "  UT_2:\n    type: Ubertooth\n    attached to: Host_Local\n"
+                         "    identity: {serial: abcd}\n")
+        code, out, _err = self._main(
+            "boards", "--hardware", str(short), "--lease-dir", str(self.lease_dir),
+        )
+        self.assertEqual(0, code)
+        lines = out.splitlines()
+        self.assertRegex(lines[0], r"^UT_0 +free$")
+        self.assertRegex(lines[1], r"^UT_1 +free$")
+        self.assertRegex(lines[2], r"^UT_2 +not leasable: UT_2 needs a full 32-hex-digit serial")
+
     def test_wait_for_boards_rejects_negative_minutes(self):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             main(["lease", "--hardware", str(self.hardware), "--wait-for-boards", "-5",

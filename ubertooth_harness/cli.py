@@ -577,15 +577,19 @@ def _run_leased(
 
 
 def _registered_boards(registry, host: str | None = None):
+    """(board, None) for each leasable Ubertooth, or (alias, reason) if not."""
     boards = []
     for resource in sorted(registry.resources.values(), key=lambda r: r.alias):
         if resource.type != "Ubertooth":
             continue
         if host and resource.attached_to != host:
             continue
-        boards.append(board_leases.Board(
-            resource.alias, board_leases.board_key(resource.alias, resource.identity)
-        ))
+        try:
+            key = board_leases.board_key(resource.alias, resource.identity)
+        except board_leases.LeaseError as error:
+            boards.append((resource.alias, str(error)))
+            continue
+        boards.append((board_leases.Board(resource.alias, key), None))
     return boards
 
 
@@ -603,14 +607,21 @@ def _boards_command(args: argparse.Namespace) -> int:
             "boards needs --host: leases are local, so name the host this runs on "
             f"({', '.join(hosts) or 'none registered'})"
         )
+    registered = _registered_boards(registry, args.host)
     states = board_leases.board_states(
-        _registered_boards(registry, args.host), directory=args.lease_dir
+        [board for board, problem in registered if problem is None], directory=args.lease_dir
     )
+    states += [
+        {"resource": alias, "key": None, "held": False, "holder": {}, "unleasable": problem}
+        for alias, problem in registered if problem is not None
+    ]
     if args.json:
         print(json.dumps(states, indent=2, sort_keys=True))
         return 0
     for state in states:
-        if state["held"]:
+        if state.get("unleasable"):
+            print(f"{state['resource']:<12} not leasable: {state['unleasable']}")
+        elif state["held"]:
             holder = state["holder"]
             since = board_leases.held_for(holder)
             detail = board_leases.describe_holder(holder)

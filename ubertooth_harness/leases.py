@@ -221,7 +221,10 @@ def acquire(
     deadline = clock() + max(wait_s, _BUSY_GRACE_S)
     # One lock per board: flock is per open file description, so opening the
     # same file twice in one process would conflict with itself.
-    ordered = sorted({b.key: b for b in boards}.values(), key=lambda b: b.key)
+    unique: dict[str, Board] = {}
+    for board in boards:
+        unique.setdefault(board.key, board)  # first alias wins, as in boards_for_invocations
+    ordered = sorted(unique.values(), key=lambda b: b.key)
     while True:
         held: list[Lease] = []
         busy: tuple[Board, Path] | None = None
@@ -232,8 +235,8 @@ def acquire(
                 if fd is None:
                     busy = (board, path)
                     break
-                _stamp(fd, dict(holder, resource=board.alias))
                 held.append(Lease(board, path, fd, holder))
+                _stamp(fd, dict(holder, resource=board.alias))
         except OSError as error:
             LeaseSet(held).release()
             raise LeaseError(f"cannot lease boards in {root}: {error}") from error
