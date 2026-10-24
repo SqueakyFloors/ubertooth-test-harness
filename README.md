@@ -244,7 +244,7 @@ python -m ubertooth_harness run-suite \
 | Test | `smoke` (fast plan) | `comprehensive` (release plan) |
 |------|---------------------|--------------------------------|
 | `Ubertooth util compositions` | `-v -V` and every read-only report in one command | adds every other compatible read-only pair and repeated `-U` (last wins) |
-| `Argument validation` | one rejected argument per tool (`util -c2401`, `btle -x33`, `ego -l0`, `ducky -A36`, `rx -u` without `-l`, `specan -l 2401`) | every rejected argument in `REJECTIONS` (19): out-of-range channels, `-U all` with a setter or mode, bad advertising index, bad MAC/BD address, `-x33`, `-l0`/`-l49`, survey with an address, `specan` bad or reversed range; each must exit 1 with the tool's own error, start no mode, and leave channel, squelch, LEDs, PA, and CRC unchanged |
+| `Argument validation` | one rejected argument per tool (`util -c2401`, `btle -x33`, `ego -l0`, `ducky -A36`, `rx -u` without `-l`, `specan -l 2401`) | every rejected argument in `REJECTIONS` (38): out-of-range, non-numeric, or partly numeric `util -c -C -a -z -l -d -q` values, `util -z` with `-I`, `-q`, or `-x`, `-U all` with a setter or mode, bad advertising index, bad MAC/BD address, `-x33`, `-l0`/`-l49`, survey with an address, `specan` bad or reversed range; each must exit 1 with the tool's own error, start no mode, and leave channel, squelch, LEDs, PA, and CRC unchanged |
 | `Radio setting transitions` | channel, PA level, squelch across an idle stop and an active-mode stop | adds USR LED; repeated `-c`, `-C`, `-a`, `-z`, `-l`, `-d` (last wins); mixed `-c`/`-C` in both orders; rejected `-a9` with a later `-v` must still exit nonzero; full reset `-r` returns boot defaults |
 | `BLE CRC transitions` | CRC enabled during `-n` and `-f` on channel 37; one `-n` capture per format (`-r` PCAPNG, `-q` PCAP, `-c` PPI) | both CRC values x both modes x channels 37/38/39; both CRC values x both modes x each capture format; repeated `-v` (last wins); repeated capture files `-r -r`, `-q -c`, `-c -q` (first wins, extra file never created); `-r` with `-q` and with `-c` (separate handles, both written) |
 | `BLE settings` | set and read back the access address; set, mask, and clear the follow target | adds `ubertooth-util -r` resets the access address to 8e89bed6; `-x0`/`-x32`; strict: `-a -v` reports both and `-azzzz` is rejected (fail until fork #171) |
@@ -252,6 +252,8 @@ python -m ubertooth_harness run-suite \
 | `Spectrum analyzer` | one full-band sweep (`duration` long): every frequency 2402-2480 reported, none outside, int8 RSSI | adds narrow, single, and top-of-band ranges, `-g`, `-G`, `-v`, and `-d` (binary file checked by `specandump.py`); ranges after a different range fail until fork #173 |
 | `Classic Bluetooth receive` | `ubertooth-rx -z -t N` survey (exits 0 by itself, N = `duration` in whole seconds, no earlier than N-0.5 s, survey lines are piconet addresses); `-t N -r` PCAPNG with link type 255; `ubertooth-afh -t N` prints the initial map and keeps monitoring until stopped | adds `-t N` without `-z`; `-c 39` (every packet on channel 39); `-e 0` and `-e 4` (no packet over the limit); `-s` deprecation notice; `-q` PCAP (link type 255); repeated `-r` (first wins, extra file never created); `-d` (68-byte BR records, checked by `rxdump.py`); `afh -e 2`; `afh -r` one map line per second; strict: `afh` with an unknown `-U` exits 1 (fails until fork #185) |
 | `Raw receive` | `ubertooth-dump -d` (68-byte records) and `-b -d` (401-byte bitstream records), checked by `rxdump.py` with at least 50 records per second; `ubertooth-ego -r -c 2440` runs until stopped | adds `dump -l`, `-l -c`, `-c -l` (the last modulation wins, read back from CC2400 MDMCTRL with `ubertooth-debug`); `ego -l 1`, `-l 48`, `-a 630f9ffe`; `ego -a zz` rejected |
+| `Ubertooth util modes` | `-I` blinks every LED, `-q182` lights every LED; each returns at once, keeps channel and PA, ends on `-S`, and originals are restored; `-m` after `-r` exits 0 with no result values | adds `-q1`, `-I` ending `-q` and `-q` ending `-I`, `-s -I`; strict: `-q225` and bare `-q` light every LED (fork #189), `-S` after `-q` runs the idle reset (fork #191), `-m` says there is no result (fork #190) |
+| `Multi-board selection` | needs two or more registered boards on the host (a one-board host skips it): `-U all -s` and `-s` without `-U` list every registered board and only those; `-N` counts them; each `-U<index>` opens the board the listing names at that index | adds `-U all -vVspb` and `-vVspb` without `-U` (five lines per board), `-C` without `-U` refused; strict: `-U<n>` past the last board is refused (fork #188) |
 | `BLE mode conflicts` | no `coverage` argument; release plan | every combination of `ubertooth-btle -f -n -p` must be rejected before sniffing |
 | `Ubertooth util conflicts` | no `coverage` argument; requires `allow RF transmission: true`; in no plan yet | every pair of `-q -n -e -t -x -I` must be rejected before a mode starts |
 
@@ -537,6 +539,15 @@ python -m ubertooth_harness validate-plan testplans/glados.yaml \
 ```
 
 ## Run output: run.jsonl and report.md
+
+A test that fails does not end the run when the device is back in a known
+state: every failed case was verified restored and every guard read matched.
+Later tests still run, the run fails, and its summary names the first failed
+test and how many others failed. The run stops after a failed test only when
+that state is not known: a case was not verified restored, a guard changed or
+could not be read, a flash failed, power isolation failed, or the run was
+canceled. A failed test's `test_finished` says which with `stops_run`. A
+later cancellation does not hide an earlier failure: the run still fails.
 
 A test run is one `run-suite` run of a plan suite. It writes exactly two files
 into `<output>/<run-id>/` (plus `build/` with `--build`, and `captures/` when

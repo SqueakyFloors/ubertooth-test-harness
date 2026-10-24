@@ -45,8 +45,9 @@ suites:
         coverage: comprehensive
         duration: 3s
 
-    # Last: their strict cases fail until fork #171, #173, and #185 are fixed
-    # (and on builds before the #164 fix), and a failed test ends the run (#41).
+    # Their strict cases fail until fork #171, #173, #185, #188, #189, and #190
+    # are fixed (and on builds before the #164 fix). A cleanly failed test no
+    # longer ends the run (#41).
     - Debug registers:
         hosts: each
         Ubertooth: default
@@ -62,6 +63,17 @@ suites:
         Ubertooth: default
         coverage: comprehensive
         duration: 3s
+
+    - Ubertooth util modes:
+        hosts: each
+        Ubertooth: default
+        coverage: comprehensive
+
+    # Skipped on a host with fewer than two registered Ubertooths.
+    - Multi-board selection:
+        hosts: each
+        Ubertooth: default
+        coverage: comprehensive
 
     - Classic Bluetooth receive:
         hosts: each

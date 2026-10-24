@@ -128,5 +128,34 @@ class ArgumentValidationTests(unittest.TestCase):
         self.assertIn("Verify PA level unchanged", summary.failure_reason)
         self.assertEqual("7", device.state["pa"])  # cleanup restored the original
 
+    def test_tools_before_strict_parsing_and_the_z_mode_check_fail_those_cases(self):
+        # Before fork 658730c (#172) a bad value read as a query or 0, and
+        # before 4ed4a1d (#159) -z with a mode was dropped; both exit 0.
+        new = {
+            r.case_id for r in transitions.REJECTIONS
+            if r.tool == "ubertooth-util" and (
+                "(got" in r.error or "-z cannot be combined" in r.error
+            )
+        }
+        self.assertEqual(19, len(new))
+
+        class PreFix(ParsingUbertooth):
+            def _apply(self, options):
+                pass  # accepted without a change the readback could see
+
+        device = PreFix(crc="1", accept=new)
+        summary, events = run_test("Argument validation", device, coverage="comprehensive")
+
+        self.assertFalse(summary.passed)
+        failed = self.failed_cases(events)
+        self.assertEqual(len(new), len(failed))
+        self.assertEqual(
+            sorted(new),
+            sorted(n for n in new if any(c.endswith(f"reject-{n}") for c in failed)),
+        )
+        self.assertTrue(all("command exited 0" in e.details.get("reason", "")
+                            for e in events if e.event_type == "step_finished"
+                            and e.status == "failed"))
+
 if __name__ == "__main__":
     unittest.main()

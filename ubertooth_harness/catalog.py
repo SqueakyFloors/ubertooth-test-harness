@@ -14,7 +14,7 @@ from ubertooth_harness.patterns import (
     serial_pattern,
 )
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
-from ubertooth_harness import receive_cases, tool_cases, transitions
+from ubertooth_harness import receive_cases, tool_cases, transitions, util_cases
 
 
 class CatalogError(ValueError):
@@ -613,6 +613,19 @@ def builtin_catalog() -> TestCatalog:
             "Debug registers",
             "ubertooth-debug register lists, ranges, verbosity, and exit status",
             tool_cases.debug_cases,
+            continue_on_case_failure=True,
+        ),
+        stateful_test(
+            "Ubertooth util modes",
+            "ubertooth-util -I identify and -q LED spectrum run, stop on -S, and "
+            "restore; -m with no range-test result",
+            util_cases.util_mode_cases,
+            continue_on_case_failure=True,
+        ),
+        stateful_test(
+            "Multi-board selection",
+            "-U all, no-selector listing, and -U<index> with two or more boards",
+            util_cases.multi_board_cases,
             continue_on_case_failure=True,
         ),
         stateful_test(

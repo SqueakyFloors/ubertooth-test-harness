@@ -47,6 +47,17 @@ suites:
         Ubertooth: default
         coverage: smoke
 
+    - Ubertooth util modes:
+        hosts: each
+        Ubertooth: default
+        coverage: smoke
+
+    # Skipped on a host with fewer than two registered Ubertooths.
+    - Multi-board selection:
+        hosts: each
+        Ubertooth: default
+        coverage: smoke
+
     - BLE monitor:
         hosts: each
         Ubertooth: default
