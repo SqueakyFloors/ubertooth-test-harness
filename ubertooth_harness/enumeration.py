@@ -23,7 +23,7 @@ SYSFS_USB_DEVICES = "/sys/bus/usb/devices"
 # never match a registered serial, so isolation checks fail closed on it.
 UNIDENTIFIED_PREFIX = "unidentified:"
 
-# Measured on sf-control-server-103 (StarTech hub): a board leaves USB about
+# Measured on the lab host (StarTech hub): a board leaves USB about
 # 0.1-0.3 s after power-off and re-enumerates about 0.7-0.8 s after power-on
 # (about 1.2 s including restoration). Defaults leave generous headroom.
 DEFAULT_REMOVAL_DEADLINE_S = 5.0

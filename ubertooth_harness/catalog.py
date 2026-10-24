@@ -767,8 +767,8 @@ def builtin_catalog() -> TestCatalog:
             command_builder=_exclusive_topology_cases,
         ),
         TestDefinition(
-            "GLaDOS MAC polling soak",
-            "Long-running GLaDOS bucket and MAC-query workflow",
+            "MAC polling soak",
+            "Long-running MAC bucket and query workflow",
             MappingProxyType({
                 "hosts": HOSTS,
                 "platforms": ArgumentRule(_platforms, required=True),

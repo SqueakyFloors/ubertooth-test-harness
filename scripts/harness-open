@@ -6,11 +6,18 @@
 #
 #   scripts/harness-open [--host HOST] [--jump JUMP] [--port N] [--two-hop]
 #
+# No host is built in. Name the lab host with --host, with HARNESS_HOST in the
+# environment, or in a private config file of shell assignments (HARNESS_HOST,
+# HARNESS_JUMP, HARNESS_PORT) at $HARNESS_OPEN_CONFIG, by default
+# ~/.config/ubertooth-harness/harness-open.conf. The script refuses to run
+# without one. The jump host comes the same way; unset or empty means a direct
+# connection. Options win over the environment, which wins over the file.
+#
 # Both ends are loopback only: the forward is
 # -L 127.0.0.1:LOCAL:127.0.0.1:PORT, so nothing else on the laptop's network
 # can use it, and it reaches only the controller's loopback listener.
 #
-# By default the jump host relays the connection (ssh -J JUMP HOST). Use
+# When a jump host is set, it relays the connection (ssh -J JUMP HOST). Use
 # --two-hop when the jump host does not allow that (ssh reports "channel 0:
 # open failed: administratively prohibited" or "stdio forwarding failed"), or
 # when HOST is a name only the jump host's own SSH configuration knows. It
@@ -20,8 +27,9 @@
 # a shared jump host would let every user there drive it.
 #
 # Options:
-#   --host HOST         controller host (default sf-control-server-103)
-#   --jump JUMP         SSH jump host or alias (default asf; "" for none)
+#   --host HOST         controller host (default $HARNESS_HOST; required)
+#   --jump JUMP         SSH jump host or alias (default $HARNESS_JUMP;
+#                       "" for none)
 #   --port N            controller port on HOST (default 8765)
 #   --local-port N      port on this machine (default: --port). The controller
 #                       accepts only Host: 127.0.0.1:PORT, so a different
@@ -36,9 +44,22 @@
 #   -h, --help          this help
 set -euo pipefail
 
-host=sf-control-server-103
-jump=asf
-port=8765
+config=${HARNESS_OPEN_CONFIG:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/ubertooth-harness/harness-open.conf}
+# The environment wins over the config file, so remember it before sourcing.
+env_host=${HARNESS_HOST-}
+env_jump=${HARNESS_JUMP-}
+env_jump_set=${HARNESS_JUMP+yes}
+env_port=${HARNESS_PORT-}
+if [ -f "$config" ]; then
+    . "$config"
+fi
+[ -z "$env_host" ] || HARNESS_HOST=$env_host
+[ -z "$env_jump_set" ] || HARNESS_JUMP=$env_jump
+[ -z "$env_port" ] || HARNESS_PORT=$env_port
+
+host=${HARNESS_HOST-}
+jump=${HARNESS_JUMP-}
+port=${HARNESS_PORT:-8765}
 local_port=
 jump_socket=
 two_hop=0
@@ -91,7 +112,7 @@ check_name() {
         -*|*[!A-Za-z0-9._@-]*) die "$1 must be a host name or SSH alias: $2" ;;
     esac
 }
-[ -n "$host" ] || die "--host must not be empty"
+[ -n "$host" ] || die "no lab host: pass --host HOST, set HARNESS_HOST, or put HARNESS_HOST=... in $config"
 check_name --host "$host"
 [ -z "$jump" ] || check_name --jump "$jump"
 [ "$two_hop" = 0 ] || [ -n "$jump" ] || die "--two-hop needs --jump"

@@ -17,8 +17,8 @@ checkoff, and a countdown/ETA in a web GUI.
 > implemented and tested against scripted runners and the real runner, and it
 > serves the web GUI (targets, run setup, live checklist, history). A
 > single-node deploy script installs the controller and a runner as systemd
-> user services on one Linux host (Ansible multi-node deploy remains). GLaDOS
-> soak execution and radio fixtures remain design-only. Multi-node, firmware-flash, and radio behaviour require the lab
+> user services on one Linux host (Ansible multi-node deploy remains). MAC
+> polling soak execution and radio fixtures remain design-only. Multi-node, firmware-flash, and radio behaviour require the lab
 > rack; see the
 > [core Ubertooth lab plan](https://github.com/SqueakyFloors/ubertooth/blob/main/TEST_LAB.md).
 
@@ -317,7 +317,7 @@ with no settle window. Error precedence: a switching or restoration failure, or
 an interrupt such as Ctrl-C, wins and skips the return check. Otherwise an
 isolation or test-body error wins and a return failure is attached to it as a
 note. If everything else succeeded, a return failure is raised. Default
-deadlines: 5 s removal and 10 s return. Measured on sf-control-server-103: a
+deadlines: 5 s removal and 10 s return. Measured on the lab host: a
 board leaves USB about 0.1-0.3 s after power-off and re-enumerates about
 0.7-0.8 s after power-on (about 1.2 s including restoration).
 
@@ -519,11 +519,11 @@ Ubertooth on the host present, idle, and readable, and full serials for every
 selector; `run-suite` refuses short serials, and `validate-plan --hardware`
 only warns.
 
-### 3c. Dedicated GLaDOS workload
+### 3c. Dedicated MAC polling workload
 
-The GLaDOS reliability plan is intentionally one named soak rather than a
-collection of generic BLE checks. Its implementation reproduces the deployed
-control-server workflow:
+The MAC polling reliability plan is intentionally one named soak rather than a
+collection of generic BLE checks. Its implementation reproduces a
+production-style MAC polling workload that runs on the lab host:
 
 - one persistent `ubertooth-btle -f` process;
 - immediate extraction of every `AdvA` MAC, independent of log throttling;
@@ -535,7 +535,7 @@ control-server workflow:
   the production restart suppression, wait, and timeout-extension intervals.
 
 The plan records all workload timing and failure thresholds directly so a run
-manifest explains exactly which GLaDOS behavior was reproduced. It binds a
+manifest explains exactly which workload behavior was reproduced. It binds a
 Linux host, one registered Ubertooth, and a deterministic registered BLE
 advertiser. The advertiser's expected BLE address comes from its immutable
 resource identity rather than free-form plan text. `exclusive Ubertooth: true`
@@ -555,23 +555,24 @@ healthy, and restart count remains within the plan limit. Reports preserve
 query outcomes, bucket rotations, process health, exact commands, resource
 identities, and cleanup results.
 
-The harness models GLaDOS bucket and query semantics directly in the target
-runner. It MUST NOT start the GLaDOS Tornado server or introduce a network
-listener; local development remains listener-free until the networking and
-authentication design is approved.
+The harness models the workload's bucket and query semantics directly in the
+target runner. It MUST NOT start the original application's own web server or
+introduce a network listener; local development remains listener-free until the
+networking and authentication design is approved.
 
-### 3d. Firmware flash + rollback (verified on sf-control-server-103)
+### 3d. Firmware flash + rollback (verified on the lab host)
 
 Flashing is state-changing and the one step that can leave a device unusable,
 so the harness treats it carefully.
 
 **Known-good version (KGV) = a pinned artifact, not a version string.** Two
-different binaries can both report `2020-12-R1` (observed: an in-house rebuild
-`linuxfor@vm-u20-d64` vs. the authentic upstream `mikeryan@steel` release). The
-KGV must be a specific `.dfu` file pinned by sha256. Current KGV: the upstream
+different binaries can both report `2020-12-R1` (observed: a local rebuild,
+carrying its own builder and build host in the version string, vs. the
+authentic upstream `mikeryan@steel` release). The KGV must be a specific
+`.dfu` file pinned by sha256. Current KGV: the upstream
 2020-12-R1 `bluetooth_rxtx.dfu`, sha256 `e3fcb486…bb11`.
 
-**Safe remote-flash protocol (default for unattended CS flashing):**
+**Safe remote-flash protocol (default for unattended remote flashing):**
 1. Flash the new image **without `-r`** so the device **stays in DFU** after
    write (never let an unverified image boot unattended).
 2. Verify the device still enumerates as `1d50:6003` (bootloader/DFU).

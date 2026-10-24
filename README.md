@@ -11,8 +11,8 @@ access is an SSH tunnel.
 ## Environment
 
 The harness runs only in its own Python 3.12 virtual environment, never in a
-system, user, or application (for example GLaDOS) interpreter. Create or update
-it with one idempotent command, on macOS or Linux:
+system, user, or another application's interpreter. Create or update it with
+one idempotent command, on macOS or Linux:
 
 ```sh
 python3 bootstrap.py          # creates or updates .venv
@@ -526,10 +526,10 @@ ubertooth-harness lease --hardware hardware.yaml --owner "agent #14" UT_Mac0 -- 
 command inherits the locks, so they stay held even if the harness process is
 killed first. Use it for every manual Ubertooth command on a shared host.
 
-## GLaDOS workload soak
+## MAC polling workload soak
 
-[`testplans/glados.yaml`](testplans/glados.yaml) contains one dedicated `GLaDOS MAC polling soak` item.
-It reproduces the production workload shape traced from GLaDOS: a persistent
+[`testplans/mac-polling.yaml`](testplans/mac-polling.yaml) contains one dedicated `MAC polling soak` item.
+It reproduces the shape of a production-style MAC polling workload: a persistent
 `ubertooth-btle -f` capture, five in-memory MAC buckets rotated every two
 seconds, one-second lookup cadence, ten-second listener-silence detection, and
 the existing empty-bucket/restart timing. The plan selects a registered Linux
@@ -548,13 +548,13 @@ read-only that no other Ubertooth is attached), verify exactly one expected
 no-selector serial, run the soak, and restore/read back all original states on
 success, failure, or cancellation. Unknown or unpowerable extra Ubertooths
 fail closed. The harness will model bucket rotation and MAC queries directly
-in-process; it will not start GLaDOS or add a network listener.
+in-process; it will not start the original workload or add a network listener.
 
 Validate its catalog and resource bindings with:
 
 ```sh
-python -m ubertooth_harness validate-plan testplans/glados.yaml \
-  --hardware hardware.yaml --suite glados
+python -m ubertooth_harness validate-plan testplans/mac-polling.yaml \
+  --hardware hardware.yaml --suite mac-polling
 ```
 
 ## Run output: run.jsonl and report.md
@@ -1018,15 +1018,24 @@ waits until it answers, opens the GUI in the browser, and keeps the tunnel in
 the foreground until Ctrl-C:
 
 ```sh
-scripts/harness-open                     # ssh -J asf sf-control-server-103
-scripts/harness-open --two-hop           # ssh asf, then ssh sf-control-server-103
+export HARNESS_HOST=lab-host.example HARNESS_JUMP=jump-host.example
+scripts/harness-open                     # ssh -J $HARNESS_JUMP $HARNESS_HOST
+scripts/harness-open --two-hop           # ssh the jump host, then the lab host
 scripts/harness-open --host lab2 --jump bastion --port 8765 --dry-run
 ```
 
+No host is built in: `--host`, `HARNESS_HOST`, or `HARNESS_HOST=...` in a
+private config file (`$HARNESS_OPEN_CONFIG`, by default
+`~/.config/ubertooth-harness/harness-open.conf`, which is never committed)
+names the lab host, and `--jump` / `HARNESS_JUMP` / `HARNESS_JUMP=...` the
+jump host (unset or empty means a direct connection). Options win over the
+environment, which wins over the file; with no host the script stops and says
+how to set one.
+
 The forward is `-L 127.0.0.1:LOCAL:127.0.0.1:PORT` on every hop: it binds
 only the laptop's loopback and reaches only the controller's loopback listener
-(no `-g`, no `GatewayPorts`). By default the jump host relays the connection
-(`-J`). Use `--two-hop` when the jump host refuses that ("administratively
+(no `-g`, no `GatewayPorts`). When a jump host is set, it relays the
+connection (`-J`). Use `--two-hop` when the jump host refuses that ("administratively
 prohibited" or "stdio forwarding failed") or when the lab host's name is known
 only to the jump host's SSH configuration. It relays through a Unix socket on
 the jump host that only your account there can open (mode 0600, default
