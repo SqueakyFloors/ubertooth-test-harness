@@ -9,15 +9,18 @@ board) and every case ends with the test image in flash, read back and
 verified, and the board in its application. Other registered boards are
 guards: read before and after every case, never written.
 
-Some comprehensive cases assert the documented behavior that the fork does not
-deliver yet; they fail until the linked fork issue is fixed:
+Some comprehensive cases assert the documented behavior that the commit under
+test (fork 3b22c95) does not deliver yet; they fail until the linked fork fix
+is on that commit:
 
 - SqueakyFloors/ubertooth#198: ubertooth-dfu -d with a rejected image leaves
-  the board in the DFU bootloader, even with -r (every reject-* case).
+  the board in the DFU bootloader, even with -r (every reject-* case). Fixed
+  on fork main by #217 (e8edd15), after 3b22c95.
 - SqueakyFloors/ubertooth#199: -d writes an image whose suffix names another
-  vendor or product (reject-wrong-vendor, reject-wrong-product).
-- SqueakyFloors/ubertooth#200: -s adds a second suffix to an already suffixed
-  file, and needs write access to its input (suffix-already-suffixed,
+  vendor or product (reject-wrong-vendor, reject-wrong-product). Also fixed
+  by #217, after 3b22c95.
+- SqueakyFloors/ubertooth#200 (open): -s adds a second suffix to an already
+  suffixed file, and needs write access to its input (suffix-already-suffixed,
   suffix-read-only-input).
 
 SqueakyFloors/ubertooth#208: a failed -u read-back (seen once in about 20)

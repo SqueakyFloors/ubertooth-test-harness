@@ -45,9 +45,9 @@ suites:
         coverage: comprehensive
         duration: 3s
 
-    # Their strict cases fail until fork #171, #173, #185, #188, #189, and #190
-    # are fixed (and on builds before the #164 fix). A cleanly failed test no
-    # longer ends the run (#41).
+    # Their comprehensive cases also check fork fixes (#164, #171, #173,
+    # #185, #187, #188, #189, #190, #191), so they fail on fork builds before
+    # 3b22c95. A cleanly failed test no longer ends the run (#41).
     - Debug registers:
         hosts: each
         Ubertooth: default
@@ -81,7 +81,8 @@ suites:
         coverage: comprehensive
         duration: 3s
 
-    # No Ubertooth. Strict cases fail until fork #202 and #203 are fixed.
+    # No Ubertooth. Strict cases fail until the fork #202 and #203 fixes
+    # (a55ac89, after 3b22c95) are on the commit under test.
     - Raw receive replay:
         hosts: each
         coverage: comprehensive

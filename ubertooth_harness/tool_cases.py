@@ -5,16 +5,16 @@ Command contracts come from the fork sources (host/ubertooth-tools/src and
 host/libubertooth/src/ubertooth_callback.c). Every case records what it can
 change, runs with the usual cleanup, and is guarded like the transition tests.
 
-Some comprehensive cases assert the documented behavior that the fork does not
-deliver yet; they fail until the linked fork issue is fixed:
+Comprehensive cases also cover fork fixes, so they fail on builds before them:
 
-- SqueakyFloors/ubertooth#173: a specan run first reports samples from the
-  previous run's range (narrow-range cases after a wider run).
-- SqueakyFloors/ubertooth#164 (fixed on fork main by #170, 89afc1c):
-  ubertooth-debug built before it exits with the low byte of the last
-  register value (any register whose low byte is not 0).
-- SqueakyFloors/ubertooth#171: ubertooth-btle -a with a bad value, and -a
-  combined with -v.
+- SqueakyFloors/ubertooth#173 (fixed by #180, 20bcf11): a specan run first
+  reported samples from the previous run's range.
+- SqueakyFloors/ubertooth#164 (fixed by #170, 89afc1c): ubertooth-debug
+  exited with the low byte of the last register value.
+- SqueakyFloors/ubertooth#171 (fixed by #178, 09e9a46): ubertooth-btle -a
+  with a bad value set garbage, and -a skipped a following -v.
+- SqueakyFloors/ubertooth#191 (fixed by #204, aa4f620): stopping
+  ubertooth-specan skipped the idle reset (LEDs, channel, squelch kept).
 """
 
 from __future__ import annotations
@@ -32,14 +32,21 @@ from ubertooth_harness.stateful import (
     require,
 )
 from ubertooth_harness.transitions import (
+    BOOT_DEFAULT_CHANNEL,
+    CHANNEL,
     CRC_PATTERN,
+    LEDS,
     MODE_RESET_SETTINGS,
+    MODE_TIMEOUT_S,
+    PA_LEVEL,
     RESET_TIMEOUT_S,
     RESTORED_SETTINGS,
+    SQUELCH,
     _btle,
     _cleanup,
     _crc_read,
     _identity,
+    _pa_restore_if_settable,
     _read_originals,
     _serial,
     _stop,
@@ -174,6 +181,72 @@ def _specan_argv(serial, options):
     return ("ubertooth-specan", "-U", serial) + tuple(options)
 
 
+# ---------------------------------------------------------------------------
+# A mode stop resets the board (fork aa4f620, SqueakyFloors/ubertooth#191)
+#
+# Stopping any mode runs the firmware idle reset: LEDs off, channel 2441 MHz,
+# squelch -120; the PA level is kept. The case presets channel, squelch, and
+# every LED away from those values, runs the tool for a bounded time (the
+# harness ends it with SIGTERM), stops the board with -S, and reads them back.
+
+STOP_RESET_SQUELCH = "-60"
+
+
+def stop_reset_steps(serial, run_step):
+    """Steps around ``run_step`` (a continuous Step): read PA and the settings
+    the stop resets, preset them, run, -S, and check the idle reset."""
+    target = CHANNEL.pick(0)
+    return (
+        _stop(serial, "establish-idle", "Establish idle before reading"),
+        # Without PA_LEVEL's reject: no step writes PA, so a board at PA 0
+        # still runs the case (cleanup then only re-reads PA).
+        Step("read-pa-level", "Read PA level", _util(serial, PA_LEVEL.query),
+             observe=Observation(PA_LEVEL.original, PA_LEVEL.pattern)),
+        *_read_originals(serial, MODE_RESET_SETTINGS),
+        Step("set-non-defaults",
+             "Set channel, squelch, and every LED away from the stop defaults",
+             lambda context: _util(serial, CHANNEL.set_arg(target(context)),
+                                   SQUELCH.set_arg(STOP_RESET_SQUELCH), "-d1"),
+             mutates=True),
+        CHANNEL.verify(serial, "verify-channel-set", "Channel set before the run",
+                       "channel before run", target),
+        SQUELCH.verify(serial, "verify-squelch-set", "Squelch set before the run",
+                       "squelch before run", STOP_RESET_SQUELCH),
+        LEDS.verify(serial, "verify-leds-set", "Every LED on before the run",
+                    "leds before run", "1/1/1"),
+        run_step,
+        _stop(serial, "mode-stop", "Stop the board with -S"),
+        LEDS.verify(serial, "verify-leds-after-stop", "LEDs off after the stop",
+                    "leds after stop", LEDS.after_mode_stop),
+        CHANNEL.verify(serial, "verify-channel-after-stop",
+                       "Channel reset by the stop", "channel after stop",
+                       BOOT_DEFAULT_CHANNEL),
+        SQUELCH.verify(serial, "verify-squelch-after-stop",
+                       "Squelch reset by the stop", "squelch after stop",
+                       SQUELCH.after_mode_stop),
+        PA_LEVEL.verify(serial, "verify-pa-level-after-stop",
+                        "PA level kept by the stop", "pa-level after stop",
+                        lambda context: require(context, PA_LEVEL.original)),
+    )
+
+
+STOP_RESET_STATE = ("LEDs off, channel 2441 MHz, squelch -120, PA kept after -S")
+
+
+def _specan_stop_reset_case(serial, seconds):
+    run = Step("sweep", "Run ubertooth-specan (bounded, SIGTERM)",
+               _specan_argv(serial, ()), timeout_s=seconds, mutates=True,
+               continuous=True, output_check=sweep_check("default", *BAND))
+    return StateCase(
+        "stop-resets-board",
+        "Stopping ubertooth-specan resets LEDs, channel, and squelch",
+        stop_reset_steps(serial, run),
+        _cleanup(serial, MODE_RESET_SETTINGS)[:-1] + _pa_restore_if_settable(serial)
+        + (_identity(serial),),
+        expected_state=f"full-band sweep; {STOP_RESET_STATE}; originals restored",
+    )
+
+
 def spectrum_cases(arguments, _resources, resource_identities):
     serial = _serial(resource_identities, "Spectrum analyzer")
     seconds = duration_seconds(arguments["duration"])
@@ -183,9 +256,9 @@ def spectrum_cases(arguments, _resources, resource_identities):
     ]
     if arguments["coverage"] == "comprehensive":
         # Each case whose range differs from the previous case's (narrow,
-        # single, top, -g, -d) fails until SqueakyFloors/ubertooth#173 is
-        # fixed: the run first reports one stale 16-sample packet. -G and -v
-        # reuse the -g range, so they pass either way.
+        # single, top, -g, -d) reported one stale 16-sample packet before
+        # fork 20bcf11 (SqueakyFloors/ubertooth#173). -G and -v reuse the -g
+        # range.
         cases += [
             _specan_case(serial, "narrow-after-full", "2402-2410 MHz after a full-band run",
                          ("-l", "2402", "-u", "2410"), "default", 2402, 2410, seconds),
@@ -202,6 +275,7 @@ def spectrum_cases(arguments, _resources, resource_identities):
             _specan_case(serial, "dump-file", "Binary samples to a file (-d)",
                          ("-l", "2430", "-u", "2440"), "default", 2430, 2440, seconds,
                          dump_file="specan.bin"),
+            _specan_stop_reset_case(serial, seconds),
         ]
     return tuple(cases)
 
@@ -306,7 +380,7 @@ def debug_cases(arguments, _resources, resource_identities):
                                     codes=(1,), patterns=(r"ERROR: register address",))),
             _debug_case(serial, "reject-verbosity-3", "Reject -v3",
                         _debug_step(serial, "reject", "Reject -v3", ("-r", "0x00", "-v3"),
-                                    codes=(1,), patterns=(r"ERROR: verbosity out of range",))),
+                                    codes=(1,), patterns=(r"error: verbosity must be 0-2 \(got 3\)",))),
         ]
     return tuple(cases)
 
@@ -403,19 +477,47 @@ def btle_settings_cases(arguments, _resources, resource_identities):
                 Step("x32", "-x32 with a CRC read", _btle(serial, "-x32", "-v"),
                      output_patterns=(CRC_PATTERN,)),
             ), expected_state="both bounds accepted; nothing changed"),
-            # Fails until SqueakyFloors/ubertooth#171: -a returns before -v.
+            # -a used to return before -v (SqueakyFloors/ubertooth#171, fixed
+            # in 09e9a46).
             _btle_case(serial, "access-address-with-crc", "-a -v reports both", (
                 Step("read-both", "Read access address and CRC", _btle(serial, "-a", "-v"),
                      output_patterns=(_AA_PATTERN, CRC_PATTERN),
                      forbidden_patterns=(r"systime=",)),
             ), expected_state="access address and CRC both reported, no sniffing"),
-            # Fails until SqueakyFloors/ubertooth#171: a bad value sets garbage.
+            # A bad value used to set garbage (#171, fixed in 09e9a46).
             _btle_case(serial, "reject-bad-access-address", "Reject -azzzz", (
                 Step("reject", "Reject -azzzz", _btle(serial, "-azzzz"),
-                     expected_returncodes=(1,), mutates=True),
+                     expected_returncodes=(1,), mutates=True,
+                     output_patterns=(
+                         r"error: access address must be 1-8 hex digits \(got zzzz\)",),
+                     forbidden_patterns=(r"access address set to",)),
                 _aa_read(serial, "verify-unchanged", "Verify access address unchanged",
                          "access address after rejection",
                          lambda context: require(context, "original access address")),
             ), expected_state="rejected with exit 1; access address unchanged"),
+            _promisc_stop_reset_case(serial),
         ]
     return tuple(cases)
+
+
+def _promisc_stop_reset_case(serial):
+    """ubertooth-btle -p (receive only: no -i/-I, so no jamming) stopped:
+    the idle reset runs. Promiscuous mode resets the LE state (access address,
+    CRC check), so both are recorded and restored."""
+    run = Step("promiscuous", "Run ubertooth-btle -p (bounded, SIGTERM)",
+               _btle(serial, "-p"), timeout_s=MODE_TIMEOUT_S, mutates=True,
+               continuous=True)
+    steps = stop_reset_steps(serial, run)
+    return StateCase(
+        "promiscuous-stop-resets-board",
+        "Stopping ubertooth-btle -p resets LEDs, channel, and squelch",
+        (steps[0],
+         _aa_read(serial, "read-original-access-address", "Read original access address",
+                  "original access address"),
+         _crc_read(serial, "read-original-crc", "Read original CRC", "original crc"))
+        + steps[1:],
+        _cleanup(serial, MODE_RESET_SETTINGS, crc=True)[:-1]
+        + _pa_restore_if_settable(serial) + _aa_restore(serial) + (_identity(serial),),
+        expected_state=(f"-p runs until stopped; {STOP_RESET_STATE}; originals, "
+                        "access address, and CRC restored"),
+    )
