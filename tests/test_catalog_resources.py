@@ -87,8 +87,11 @@ class CatalogTests(unittest.TestCase):
         definition = builtin_catalog().get("Host CLI surface")
 
         cases = definition.command_cases({"hosts": "each"}, {}, {})
+        helps = [c for c in cases if c.argv[1:] == ("-h",) and not c.optional_tool]
+        optional = [c for c in cases if c.optional_tool]
 
-        self.assertEqual(11, len(cases))
+        self.assertEqual(11, len(helps))
+        self.assertEqual({"ubertooth-scan", "ubertooth-follow"}, {c.argv[0] for c in optional})
         self.assertEqual(
             {
                 "ubertooth-rx",
@@ -103,10 +106,10 @@ class CatalogTests(unittest.TestCase):
                 "ubertooth-ducky",
                 "ubertooth-debug",
             },
-            {case.argv[0] for case in cases},
+            {case.argv[0] for case in helps},
         )
-        util = next(case for case in cases if case.argv[0] == "ubertooth-util")
-        rx = next(case for case in cases if case.argv[0] == "ubertooth-rx")
+        util = next(case for case in helps if case.argv[0] == "ubertooth-util")
+        rx = next(case for case in helps if case.argv[0] == "ubertooth-rx")
         self.assertEqual((0,), util.expected_returncodes)
         self.assertEqual((1,), rx.expected_returncodes)
         self.assertTrue(definition.continue_on_case_failure)

@@ -1095,12 +1095,17 @@ class NamedTestSequencer:
                                     "case_id": case_id,
                                 },
                             )
-                            case_failure = case.result_failure(result)
+                            missing = case.missing_tool(result)
+                            case_failure = "" if missing else case.result_failure(result)
                             case_status = (
                                 "canceled" if result.cancelled
+                                else "skipped" if missing
                                 else "failed" if case_failure
                                 else "passed"
                             )
+                            if missing:
+                                skipped_cases += 1
+                                run_skipped_cases += 1
                             publisher.emit(
                                 "check_finished",
                                 case_status,
@@ -1109,7 +1114,7 @@ class NamedTestSequencer:
                                     "invocation_id": invocation.invocation_id,
                                     "case_id": case_id,
                                     "case_name": case.name,
-                                    "reason": case_failure,
+                                    "reason": case_failure or missing,
                                 },
                             )
                             if case_failure:

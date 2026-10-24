@@ -233,7 +233,8 @@ class BuilderTests(unittest.TestCase):
 
         cases = builtin_catalog().get("Host CLI surface").command_cases({}, {}, {})
 
-        self.assertEqual(set(BUILT_TOOLS), {case.argv[0] for case in cases})
+        required = {case.argv[0] for case in cases if not case.optional_tool}
+        self.assertEqual(set(BUILT_TOOLS), required)
 
     def test_cancellation_stops_before_the_next_command(self):
         from ubertooth_harness.cancellation import CancellationToken
