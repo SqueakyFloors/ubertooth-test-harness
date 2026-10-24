@@ -692,6 +692,15 @@ def builtin_catalog() -> TestCatalog:
             guards_other_ubertooths=True,
         ),
         TestDefinition(
+            "Raw receive replay",
+            "ubertooth-rx -i decodes a synthetic raw capture with no Ubertooth: "
+            "LAP/UAP lines, filters, PCAPNG/PCAP/dump output, bad input files",
+            MappingProxyType({"hosts": HOSTS, "coverage": COVERAGE}),
+            MappingProxyType({}),
+            command_builder=receive_cases.replay_cases,
+            continue_on_case_failure=True,
+        ),
+        TestDefinition(
             "CLI usage smoke",
             "Exercise host tool usage paths",
             MappingProxyType({"hosts": HOSTS}),
@@ -789,11 +798,6 @@ def builtin_catalog() -> TestCatalog:
                     "responder": ArgumentRule(_selector, required=True),
                 }),
                 MappingProxyType({"sender": "Ubertooth", "responder": "Ubertooth"}),
-            ),
-            TestDefinition(
-                "Raw receive replay", "Decode a known raw capture fixture",
-                MappingProxyType({"fixture": ArgumentRule(_required_text, required=True)}),
-                MappingProxyType({}),
             ),
             _device_test(
                 "Capture known BLE advertiser", "Capture a registered BLE advertiser",

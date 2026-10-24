@@ -46,7 +46,7 @@ run_test() {
         python -m ubertooth_harness validate-plan "$plan"
     done
     python -c "from ubertooth_harness.resources import FileResourceRegistry; FileResourceRegistry.load('hardware.example.yaml')"
-    for suite in fast slow mac-polling release; do
+    for suite in fast slow mac-polling release host; do
         python -m ubertooth_harness validate-plan "testplans/$suite.yaml" \
             --hardware hardware.example.yaml --suite "$suite"
     done
@@ -75,6 +75,20 @@ run_build() {
     cat "$WORK/build.json"
     "$WORK/build/prefix/bin/ubertooth-util" -H
     test -z "$(git -C "$ut" status --porcelain)"
+
+    step "host-only tests with the built tools (no Ubertooth)"
+    case "$(uname -s)" in
+        Darwin) platform=macos ;;
+        *) platform=linux ;;
+    esac
+    printf 'resources:\n  CI_Host:\n    type: Host\n    platform: %s\n    roles: [test target]\n' \
+        "$platform" > "$WORK/host-only.yaml"
+    PATH="$WORK/build/prefix/bin:$PATH" .venv/bin/python -m ubertooth_harness run-suite \
+        --plan testplans/host.yaml --suite host \
+        --hardware "$WORK/host-only.yaml" --host CI_Host \
+        --ubertooth-source "$ut" --ubertooth-ref "${UBERTOOTH_REF:-main}" \
+        --libbtbb-source "$bb" --libbtbb-ref "${LIBBTBB_REF:-master}" \
+        --run-id ci-host --output "$WORK/runs"
 }
 
 case "${1:-}" in
