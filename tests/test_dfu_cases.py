@@ -1,17 +1,21 @@
 import io
 import os
+import re
+import shlex
 import struct
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from ubertooth_harness import dfu_cases, dfuimage
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.manifest import FileIdentity, SourceRevision, build_run_manifest
 from ubertooth_harness.planner import TestInvocation
+from ubertooth_harness.report import load_events, render_run
 from ubertooth_harness.preflight import PreflightCheck, PreflightError, PreflightPolicy
 from ubertooth_harness.sequencer import NamedTestSequencer
 from tests.test_sequencer import CollectSink
@@ -60,8 +64,7 @@ class FakeDfuBoard:
 
     def _board(self, serial, guards=()):
         def run(argv, timeout_s):
-            result = self.run(argv, timeout_s=timeout_s)
-            return result.returncode, result.stdout + result.stderr
+            return self.run(argv, timeout_s=timeout_s)
 
         def sleep(seconds):
             self.now += seconds
@@ -247,6 +250,8 @@ def run_dfu(board, image_bytes, *, coverage="smoke", artifact=True, change_image
         summary = NamedTestSequencer(board, event_sink=sink).run(
             (invocation,), root / "run", run_id="named-run", manifest=manifest,
             preflight_checks=(check,))
+        # The report.md the run would get, rendered before the run dir goes.
+        board.report = render_run(load_events(root / "run" / "run.jsonl"))
         return summary, sink.events
 
 
@@ -297,7 +302,8 @@ class DfuImageFileTests(unittest.TestCase):
         board = FakeDfuBoard(firmware())
         board.mode = "dfu"
         helper = board._board(SERIAL, ("silent",))
-        self.assertIn("guard board silent does not answer", helper.leave_dfu(Path("/x")))
+        with redirect_stdout(io.StringIO()):
+            self.assertIn("guard board silent does not answer", helper.leave_dfu(Path("/x")))
         self.assertEqual("dfu", board.mode)
         self.assertFalse(any(c[0] == "ubertooth-dfu" for c in board.commands))
 
@@ -438,7 +444,7 @@ class DfuRunTests(unittest.TestCase):
         self.assertEqual(("app", REVISION), (board.mode, board.revision))
         outputs = "".join(e.details.get("text", "") for e in events
                           if e.event_type == "command_output")
-        self.assertIn("  | LIBUSB_ERROR_OTHER", outputs)  # the tool's own output is kept
+        self.assertIn("[E] LIBUSB_ERROR_OTHER", outputs)  # the tool's own output is kept
 
     def test_a_wrong_written_revision_fails(self):
         image = firmware()
@@ -463,6 +469,247 @@ class DfuRunTests(unittest.TestCase):
         self.assertIn("test_build image changed", summary.failure_reason)
         self.assertEqual([], [c for c in board.commands if c[0] != "ubertooth-util"
                               or "-H" not in c])
+        refused = [e for e in events if e.event_type == "check_finished"
+                   and e.details.get("phase") == "test"]
+        self.assertEqual("not_run", refused[0].details["cleanup_status"])
+
+    def unreadable_after(self, good_reads, **run_args):
+        """Run with the test image unreadable after ``good_reads`` hashes
+        (manifest creation, then its verify_files)."""
+        from ubertooth_harness.manifest import RunManifest
+        board = FakeDfuBoard(firmware(), **CORRECT)
+        original = RunManifest.hash_file
+        reads = []
+
+        def hash_file(path):
+            if Path(path).name == "bluetooth_rxtx.dfu":
+                reads.append(path)
+                if len(reads) > good_reads:
+                    raise PermissionError(13, "Permission denied", str(path))
+            return original(path)
+        with mock.patch.object(RunManifest, "hash_file", staticmethod(hash_file)):
+            return board, run_dfu(board, firmware(), **run_args)
+
+    def test_an_unreadable_test_image_is_a_planning_error(self):
+        with self.assertRaisesRegex(ValueError, "cannot read the test_build image: "
+                                                ".*Permission denied"):
+            self.unreadable_after(2)
+
+    def test_an_image_unreadable_at_case_start_fails_with_no_cleanup(self):
+        board, (summary, events) = self.unreadable_after(4, coverage="smoke")  # + one per smoke case
+        self.assertFalse(summary.passed)
+        self.assertIn("cannot read the test_build image", summary.failure_reason)
+        refused = [e for e in events if e.event_type == "check_finished"
+                   and e.details.get("phase") == "test"]
+        self.assertEqual("not_run", refused[0].details["cleanup_status"])
+        self.assertEqual([], [c for c in board.commands if "-H" not in c])
+
+
+class DfuHelperRecordTests(unittest.TestCase):
+    """Every device command the helper runs is printed as a command record."""
+
+    def run_helper(self, board, command, guards=()):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image = root / "test.dfu"
+            image.write_bytes(firmware())
+            argv = [command, "--serial", SERIAL, "--image", str(image),
+                    "--revision", REVISION, "--readback", str(root / "r.bin")]
+            for guard in guards:
+                argv += ["--guard", guard]
+            calls = []
+            original = board.run
+
+            def run(argv, **kwargs):
+                result = original(argv, **kwargs)
+                calls.append(result)
+                return result
+            board.run = run
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = dfuimage.main(argv, board_factory=board._board)
+            return code, out.getvalue(), calls
+
+    def assert_records(self, output, calls):
+        self.assertTrue(calls)
+        for result in calls:
+            with self.subTest(result.argv):
+                self.assertRegex(output, r"\d{4}-\d\d-\d\dT[\d:.]+ \[C\] "
+                                 + re.escape(shlex.join(result.argv)) + "\n")
+                tool = Path(result.argv[0]).name
+                self.assertIn(f"[R] {tool} exit {result.returncode} in 0.010s", output)
+                for line in (result.stdout + result.stderr).splitlines():
+                    self.assertIn(line, output)
+        self.assertEqual(len(calls), output.count(" [C] "))
+
+    def test_restore_prints_every_command_and_its_response(self):
+        # A rewrite path with a failed command: the board holds another image.
+        board = FakeDfuBoard(firmware("git-other", size=5000), **CORRECT)
+        board.revision = "git-other"
+        board.flags["failing_uploads"] = {1}
+        code, output, calls = self.run_helper(board, "restore", (GUARD,))
+        self.assertEqual(1, code)
+        self.assertIn(157, [c.returncode for c in calls])
+        self.assertIn("[E] LIBUSB_ERROR_OTHER", output)
+        self.assertIn("[E] Verified firmware revision: git-test", output)
+        self.assertIn("[O] Firmware version: git-guard (API:1.10)", output)
+        self.assert_records(output, calls)
+
+    def test_after_reject_and_answers_print_every_command(self):
+        board = FakeDfuBoard(firmware(), **FORK_MAIN)
+        board.mode = "dfu"
+        code, output, calls = self.run_helper(board, "after-reject", (GUARD,))
+        self.assertEqual(1, code)
+        self.assertIn("[E] no Ubertooth found with serial matching 'abc123'", output)
+        self.assert_records(output, calls)
+        board = FakeDfuBoard(firmware(), **CORRECT)
+        out = io.StringIO()
+        calls = []
+        original = board.run
+        board.run = lambda argv, **kw: calls.append(original(argv, **kw)) or calls[-1]
+        with redirect_stdout(out):
+            self.assertEqual(0, dfuimage.main(["answers", "--serial", SERIAL, "--revision",
+                                               REVISION], board_factory=board._board))
+        self.assert_records(out.getvalue(), calls)
+
+    def test_report_shows_the_helpers_device_commands(self):
+        board = FakeDfuBoard(firmware(), **CORRECT)
+        summary, _events = run_dfu(board, firmware(), coverage="smoke")
+        self.assertTrue(summary.passed, summary.failure_reason)
+        # The restore helper's records appear as its output lines, like the
+        # harness's own command records.
+        self.assertRegex(board.report, r"\[O\] \d{4}-\d\d-\d\dT[\d:.]+ \[C\] ubertooth-dfu "
+                                       r"-U abc123 -u \S+restore-readback\.bin -r\n")
+        self.assertRegex(board.report, r"\[O\] \d{4}-\d\d-\d\dT[\d:.]+ \[R\] ubertooth-dfu "
+                                       r"exit 0 in 0\.010s; \[E\] DFU \+0\.000s: operation started")
+        self.assertRegex(board.report, r"\[O\] \d{4}-\d\d-\d\dT[\d:.]+ \[R\] ubertooth-util "
+                                       r"exit 0 in 0\.010s; \[O\] Firmware version: git-test")
+
+    def test_a_timed_out_command_is_recorded(self):
+        lines = []
+        board = dfuimage.Board(
+            SERIAL, run=lambda argv, timeout: CommandResult(
+                tuple(argv), -1, "partial\n", "", timeout, True),
+            log=lines.append)
+        self.assertIsNone(board.revision())
+        record = "\n".join(lines)
+        self.assertIn("[C] ubertooth-util -U abc123 -v", record)
+        self.assertIn("[R] ubertooth-util exit -1 in 5.000s, TIMED OUT; [O] partial", record)
+
+    def test_ioreg_dfu_count_is_recorded_with_device_lines_only(self):
+        ioreg = (
+            "+-o Root  <class IORegistryEntry>\n"
+            "  +-o Ubertooth One@01100000  <class IOUSBHostDevice>\n"
+            '      "idProduct" = 24579\n      "idVendor" = 7504\n'
+            "  +-o Keyboard@01200000  <class IOUSBHostDevice>\n"
+            '      "idProduct" = 1\n      "idVendor" = 2\n'
+        )
+        lines = []
+        board = dfuimage.Board(
+            SERIAL, run=lambda argv, timeout: CommandResult(tuple(argv), 0, ioreg, "", 0.2, False),
+            log=lines.append)
+        with mock.patch.object(sys, "platform", "darwin"):
+            self.assertEqual(1, board.dfu_count())
+        record = "\n".join(lines)
+        self.assertIn("[C] ioreg -p IOUSB -l -w0", record)
+        self.assertIn("[O]   +-o Ubertooth One@01100000", record)
+        self.assertNotIn("idVendor", record)
+        self.assertIn("4 property lines left out", record)
+        self.assertIn("[R] ioreg exit 0 in 0.200s", record)
+
+
+class DfuTimeoutTests(unittest.TestCase):
+
+    def test_worst_cases_sum_the_helpers_own_timeouts(self):
+        wait = 10 + 5 + 0.5
+        self.assertEqual(wait, dfuimage.worst_case_s("answers"))
+        for guards in (0, 1, 3):
+            leave = 10 + 5 * guards + 30
+            with self.subTest(guards=guards):
+                self.assertEqual(5 + 30 + 5 + leave + wait + 40 + 30 + wait,
+                                 dfuimage.worst_case_s("restore", guards))
+                self.assertEqual(5 + leave + wait, dfuimage.worst_case_s("after-reject", guards))
+                for command in ("answers", "after-reject", "restore"):
+                    self.assertGreater(dfuimage.step_timeout_s(command, guards),
+                                       dfuimage.worst_case_s(command, guards) + 10)
+        # The review's examples: about 135 s with one guard, 150 s with three.
+        self.assertGreater(dfuimage.step_timeout_s("restore", 1), 135 * 1.25)
+        self.assertGreater(dfuimage.step_timeout_s("restore", 3), 150 * 1.25)
+
+    def test_the_slowest_restore_fits_its_bound(self):
+        """Every call uses its full timeout on the longest path: a failed
+        read-back that leaves DFU, then a rewrite."""
+        now = [0.0]
+        image = firmware()
+
+        def run(argv, timeout):
+            now[0] += timeout
+            if argv[0] == "ubertooth-util":
+                answers = argv[2] == GUARD or calls["util"] != 1
+                calls["util"] += argv[2] == SERIAL
+                return CommandResult(tuple(argv), 0 if answers else 1,
+                                     f"Firmware version: {REVISION} (API:1.10)\n"
+                                     if answers else "", "", timeout, False)
+            path = Path(argv[argv.index("-u") + 1]) if "-u" in argv else None
+            calls["dfu"] += 1
+            if calls["dfu"] == 1:
+                return CommandResult(tuple(argv), 157, "", "failed\n", timeout, False)
+            if path is not None:
+                flash = image if calls["dfu"] == 4 else b"\0" * 16
+                path.write_bytes(flash + b"\xff" * (dfuimage.APPLICATION_SIZE - len(flash)))
+            return CommandResult(tuple(argv), 0, "", "", timeout, False)
+
+        def dfu_count():
+            now[0] += dfuimage.DFU_COUNT_TIMEOUT_S
+            return 1
+
+        calls = {"util": 0, "dfu": 0}
+        board = dfuimage.Board(SERIAL, (GUARD,), run=run, dfu_count=dfu_count,
+                               sleep=lambda s: now.__setitem__(0, now[0] + s),
+                               clock=lambda: now[0], log=lambda line: None)
+        with tempfile.TemporaryDirectory() as d, redirect_stdout(io.StringIO()) as out:
+            path = Path(d) / "image.dfu"
+            path.write_bytes(image)
+            self.assertEqual(1, dfuimage.restore(board, path, REVISION, Path(d) / "r.bin"))
+        self.assertIn("the board was left in DFU, then returned", out.getvalue())
+        self.assertEqual(4, calls["dfu"])  # failed -u, -u from DFU, -d, -u
+        self.assertLessEqual(now[0], dfuimage.worst_case_s("restore", 1))
+        self.assertGreater(now[0], 150)
+
+    def test_case_steps_use_the_derived_timeouts(self):
+        for guard, count in ((False, 0), (True, 1)):
+            for case in cases_for("comprehensive", guard=guard):
+                for step in case.steps + case.cleanup:
+                    command = {"restore": "restore", "after": "after-reject",
+                               "returned": "answers"}.get(step.step_id)
+                    if command:
+                        with self.subTest(case.case_id, step=step.step_id, guard=guard):
+                            self.assertEqual(dfuimage.step_timeout_s(command, count),
+                                             step.timeout_s)
+
+
+class DfuNitTests(unittest.TestCase):
+
+    def test_bcd_dfu_0101_is_accepted_like_check_suffix(self):
+        body = bytearray(firmware())
+        struct.pack_into("<H", body, len(body) - 10, 0x0101)
+        body[-4:] = struct.pack("<I", dfuimage.dfu_crc(bytes(body[:-4])))
+        self.assertEqual([], dfuimage.suffix_problems(bytes(body)))
+        struct.pack_into("<H", body, len(body) - 10, 0x0200)
+        body[-4:] = struct.pack("<I", dfuimage.dfu_crc(bytes(body[:-4])))
+        self.assertEqual(["bcdDFU 0200"], dfuimage.suffix_problems(bytes(body)))
+
+    def test_after_reject_compares_the_revision_after_leaving_dfu(self):
+        board = FakeDfuBoard(firmware(), **FORK_MAIN)
+        board.mode = "dfu"
+        board.revision = "git-other"
+        with tempfile.TemporaryDirectory() as d, redirect_stdout(io.StringIO()) as out:
+            image = Path(d) / "i.dfu"
+            image.write_bytes(firmware())
+            code = dfuimage.after_reject(board._board(SERIAL), image, REVISION, Path(d) / "r.bin")
+        self.assertEqual(1, code)
+        self.assertIn("firmware revision git-other after leaving DFU, expected git-test",
+                      out.getvalue())
 
 
 if __name__ == "__main__":

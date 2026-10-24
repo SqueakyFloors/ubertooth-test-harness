@@ -50,10 +50,13 @@ _CHECKER = str(Path(dfuimage.__file__).resolve())
 _REVISION_PATTERN = r"Firmware version:\s+(?P<value>\S+)\s+\(API:"
 # ubertooth-dfu logs this stage before it sends the first block.
 _PROGRAMMING = r"firmware programming attempt"
-# A write, a read-back, and the helper's polling of the returned application.
+# A write, a read-back. Helper steps that run device commands take their
+# timeout from dfuimage.step_timeout_s (its own per-command timeouts and the
+# guard count), so a slow cleanup is never killed mid-flash.
 WRITE_TIMEOUT_S = 45.0
 READ_TIMEOUT_S = 35.0
-HELPER_TIMEOUT_S = 150.0
+# A line of a command record the helper prints (rawlog format, UTC stamp).
+_RECORD_LINE = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3} \[")
 
 
 def _image(context):
@@ -89,7 +92,10 @@ def _helper_step(step_id, name, *parts, pattern, timeout_s=10.0, mutates=False):
     def check(output):
         if re.search(pattern, output):
             return ""
-        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        # Command records stay in the transcript; the reason keeps the
+        # helper's own lines.
+        lines = [line.strip() for line in output.splitlines()
+                 if line.strip() and not _RECORD_LINE.match(line)]
         if not lines:
             return "no output"
         # The helper prints its verdict last; the earlier lines are evidence.
@@ -118,7 +124,7 @@ def _restore(serial, guards):
         _helper_step("restore", "Return to the application with the test image in flash",
                      "restore", *_board_args(serial, guards, "restore-readback.bin"),
                      pattern=r"Restored: application flash holds the test image",
-                     timeout_s=HELPER_TIMEOUT_S, mutates=True),
+                     timeout_s=dfuimage.step_timeout_s("restore", len(guards)), mutates=True),
         _revision_step(serial, "verify-restored-revision", "Verify restored firmware revision",
                        "restored revision"),
     )
@@ -206,7 +212,7 @@ def _write_read_back_case(serial, guards):
                      _file("readback.bin"), _image, pattern=r"image and 0xff padding match"),
         _helper_step("returned", "Board back in its application after -u -r", "answers",
                      "--serial", serial, "--revision", _revision, pattern=r"Board answers with the expected revision",
-                     timeout_s=20.0),
+                     timeout_s=dfuimage.step_timeout_s("answers")),
     ), "test image written, verified, read back identical; board in its application")
 
 
@@ -242,7 +248,8 @@ def _reject_case(serial, guards, kind, case_id, name, pattern):
         # Fails until SqueakyFloors/ubertooth#198: left in the DFU bootloader.
         _helper_step("after", "Board in its application, flash unchanged", "after-reject",
                      *_board_args(serial, guards, "after-readback.bin"),
-                     pattern=r"After rejection: ok", timeout_s=HELPER_TIMEOUT_S,
+                     pattern=r"After rejection: ok",
+                     timeout_s=dfuimage.step_timeout_s("after-reject", len(guards)),
                      mutates=True),
     ), "refused with exit 1 before any write; same firmware, still in the application")
 

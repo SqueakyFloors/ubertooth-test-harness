@@ -207,7 +207,11 @@ class NamedTestSequencer:
                     f"\"{label.replace('_', ' ')}=PATH\" (or --build --with-firmware)"
                 )
             path = Path(identity.path)
-            if not path.is_file() or RunManifest.hash_file(path) != identity.sha256:
+            try:
+                changed = not path.is_file() or RunManifest.hash_file(path) != identity.sha256
+            except OSError as error:
+                raise HarnessError(f"{case.name}: cannot read the {label} image: {error}") from error
+            if changed:
                 raise HarnessError(f"{case.name}: {label} image changed or is missing: {path}")
             context[artifact_key(label)] = str(path)
         try:
@@ -567,7 +571,8 @@ class NamedTestSequencer:
                 publisher.emit(
                     "check_finished", "failed",
                     {**owner, "case_name": case.name, "reason": str(error),
-                     "failed_step": "", "cleanup_status": "passed"},
+                     # Refused before any step, so no cleanup ran.
+                     "failed_step": "", "cleanup_status": "not_run"},
                 )
                 return StateCaseResult(str(error), "failed", True, verified=True)
         if case.capture_dir:

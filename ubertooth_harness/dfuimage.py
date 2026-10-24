@@ -16,13 +16,18 @@ The layout follows host/ubertooth-tools/src/ubertooth-dfu.c and dfu.h:
 - ``-u`` reads flash 0x4000-0x3ffff (245760 bytes) raw: the written file,
   its padding, then whatever the rest of the application region holds.
 
-``after-reject`` and ``restore`` also run ubertooth-util and ubertooth-dfu
-(from PATH) on the selected board; see their functions.
+``answers``, ``after-reject`` and ``restore`` also run ubertooth-util and
+ubertooth-dfu (from PATH) on the selected board; see their functions. They
+print a command record (``rawlog.format_command_record``: the exact argv, each
+stdout and stderr line, exit code, and duration) for every command they run,
+so the run transcript shows each command sent and each response received.
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import datetime
 import os
 from pathlib import Path
 import re
@@ -33,10 +38,19 @@ import time
 from typing import Callable, Sequence
 import zlib
 
+if __package__ in (None, ""):
+    # Run as a script: make the package importable for the record format.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from ubertooth_harness.executor import CommandResult  # noqa: E402
+from ubertooth_harness.rawlog import CommandCapture, format_command_record  # noqa: E402
+
 SUFFIX_LENGTH = 16
 VENDOR = 0x1D50
 PRODUCT = 0x6003
 BCD_DFU = 0x0100
+# check_suffix() in ubertooth-dfu.c accepts both; sign() writes 0x0100.
+ACCEPTED_BCD_DFU = (0x0100, 0x0101)
 SIGNATURE = b"UFD"
 BLOCK_SIZE = 256
 APPLICATION_OFFSET = 0x4000
@@ -67,7 +81,7 @@ def suffix_problems(image: bytes) -> list[str]:
         problems.append(f"bLength {length}")
     if signature != SIGNATURE:
         problems.append(f"signature {signature!r}")
-    if bcd != BCD_DFU:
+    if bcd not in ACCEPTED_BCD_DFU:
         problems.append(f"bcdDFU {bcd:04x}")
     if (vendor, product) != (VENDOR, PRODUCT):
         problems.append(f"VID:PID {vendor:04x}:{product:04x}")
@@ -132,30 +146,67 @@ def readback_problems(readback: bytes, image: bytes) -> list[str]:
 # ---------------------------------------------------------------------------
 # Device commands
 
-Runner = Callable[[Sequence[str], float], "tuple[int, str]"]
+Runner = Callable[[Sequence[str], float], CommandResult]
+
+# Per-command timeouts. The step that runs a device command gets a timeout
+# derived from these (worst_case_s), so it never kills the helper mid-flash.
+REVISION_TIMEOUT_S = 5.0
+DFU_COUNT_TIMEOUT_S = 10.0
+DFU_WRITE_TIMEOUT_S = 40.0
+DFU_READ_TIMEOUT_S = 30.0
+APP_WAIT_S = 10.0
+POLL_S = 0.5
+
+_IOREG = ("ioreg", "-p", "IOUSB", "-l", "-w0")
 
 
-def run_command(argv: Sequence[str], timeout_s: float) -> tuple[int, str]:
-    """Run a host tool; (returncode, stdout+stderr). A timeout is -1."""
+def run_command(argv: Sequence[str], timeout_s: float) -> CommandResult:
+    """Run a host tool without a shell. A timeout is exit -1, timed_out."""
+    start = time.monotonic()
     try:
         result = subprocess.run(
             list(argv), capture_output=True, text=True, errors="replace",
             timeout=timeout_s, check=False,
         )
-    except subprocess.TimeoutExpired:
-        return -1, "timed out\n"
+    except subprocess.TimeoutExpired as error:
+        def text(value):
+            if isinstance(value, bytes):
+                return value.decode(errors="replace")
+            return value or ""
+        return CommandResult(tuple(argv), -1, text(error.stdout), text(error.stderr),
+                             time.monotonic() - start, True)
     except OSError as error:
-        return 127, f"{error}\n"
-    return result.returncode, result.stdout + result.stderr
+        return CommandResult(tuple(argv), 127, "", f"{error}\n",
+                             time.monotonic() - start, False)
+    return CommandResult(tuple(argv), result.returncode, result.stdout, result.stderr,
+                         time.monotonic() - start, False)
 
 
-def dfu_device_count() -> int:
-    """Attached Ubertooth One DFU bootloaders (1d50:6003)."""
+def _utc_now() -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def _usb_device_lines(stdout: str) -> str:
+    """One ioreg line per USB device, without the property dump."""
+    return "".join(line + "\n" for line in stdout.splitlines() if "+-o " in line)
+
+
+def dfu_device_count(call: Callable[..., CommandResult] | None = None) -> int:
+    """Attached Ubertooth One DFU bootloaders (1d50:6003).
+
+    The harness runs on macOS hosts as well as Linux. macOS has no
+    /sys/bus/usb, and this helper uses only the standard library (no libusb,
+    and lsusb is not installed by default), so it counts devices in ioreg's
+    IOUSB plane instead; idVendor and idProduct are printed in decimal there.
+    """
     if sys.platform == "darwin":
-        _code, output = run_command(("ioreg", "-p", "IOUSB", "-l", "-w0"), 10.0)
+        if call is None:
+            result = run_command(_IOREG, DFU_COUNT_TIMEOUT_S)
+        else:
+            result = call(_IOREG, DFU_COUNT_TIMEOUT_S, shown=_usb_device_lines)
         count = 0
-        for block in output.split("+-o ")[1:]:
-            if '"idVendor" = 7504' in block and '"idProduct" = 24579' in block:
+        for block in result.stdout.split("+-o ")[1:]:
+            if f'"idVendor" = {VENDOR}' in block and f'"idProduct" = {PRODUCT}' in block:
                 count += 1
         return count
     count = 0
@@ -171,54 +222,98 @@ def dfu_device_count() -> int:
     return count
 
 
+def wait_worst_s() -> float:
+    """Longest wait_revision(): a last poll that starts just before the deadline."""
+    return APP_WAIT_S + REVISION_TIMEOUT_S + POLL_S
+
+
+def leave_dfu_worst_s(guards: int) -> float:
+    return DFU_COUNT_TIMEOUT_S + guards * REVISION_TIMEOUT_S + DFU_READ_TIMEOUT_S
+
+
+def worst_case_s(command: str, guards: int = 0) -> float:
+    """Longest a device command can take if every tool call uses its timeout."""
+    wait = wait_worst_s()
+    if command == "answers":
+        return wait
+    if command == "after-reject":
+        # -v, then a read-back (selected, or from DFU after the guard reads).
+        return REVISION_TIMEOUT_S + max(leave_dfu_worst_s(guards), DFU_READ_TIMEOUT_S) + wait
+    if command == "restore":
+        # -v, a failed read-back, -v, leave DFU, wait, rewrite, read-back, wait.
+        return (REVISION_TIMEOUT_S + DFU_READ_TIMEOUT_S + REVISION_TIMEOUT_S
+                + leave_dfu_worst_s(guards) + wait + DFU_WRITE_TIMEOUT_S
+                + DFU_READ_TIMEOUT_S + wait)
+    raise ValueError(f"'{command}' runs no device command")
+
+
+def step_timeout_s(command: str, guards: int = 0) -> float:
+    """Timeout for a step running ``command``: the worst case plus a quarter,
+    and 15 s for interpreter start-up and file reads."""
+    return worst_case_s(command, guards) * 1.25 + 15.0
+
+
 class Board:
     """The selected board's tool commands, with injectable seams for tests."""
 
-    DFU_WRITE_TIMEOUT_S = 40.0
-    DFU_READ_TIMEOUT_S = 30.0
-    APP_WAIT_S = 10.0
-
     def __init__(self, serial, guards=(), *, run: Runner = run_command,
-                 dfu_count: Callable[[], int] = dfu_device_count,
+                 dfu_count: Callable[[], int] | None = None,
                  sleep: Callable[[float], None] = time.sleep,
-                 clock: Callable[[], float] = time.monotonic, log=print):
+                 clock: Callable[[], float] = time.monotonic, log=print,
+                 utc_now: Callable[[], datetime.datetime] = _utc_now):
         self.serial = serial
         self.guards = tuple(guards)
         self.run = run
-        self.dfu_count = dfu_count
+        self.dfu_count = dfu_count or (lambda: dfu_device_count(self.call))
         self.sleep = sleep
         self.clock = clock
         self.log = log
+        self.utc_now = utc_now
+
+    def call(self, argv, timeout_s, *, shown: Callable[[str], str] | None = None) -> CommandResult:
+        """Run one command and print its record: argv, output, exit, duration.
+
+        ``shown`` reduces a long stdout to the lines worth keeping; the record
+        then says how many lines were left out.
+        """
+        capture = CommandCapture(self.utc_now)
+        result = self.run(tuple(argv), timeout_s)
+        capture.finish()
+        record = result
+        if shown is not None:
+            kept = shown(result.stdout)
+            omitted = len(result.stdout.splitlines()) - len(kept.splitlines())
+            record = dataclasses.replace(result, stdout=kept)
+            if omitted:
+                self.log(f"(stdout of {argv[0]}: {omitted} property lines left out, "
+                         "device lines kept)")
+        self.log(format_command_record(record, capture).rstrip("\n"))
+        return result
 
     def revision(self, serial=None) -> str | None:
-        code, output = self.run(("ubertooth-util", "-U", serial or self.serial, "-v"), 5.0)
-        match = _VERSION_RE.search(output) if code == 0 else None
+        result = self.call(("ubertooth-util", "-U", serial or self.serial, "-v"),
+                           REVISION_TIMEOUT_S)
+        output = result.stdout + result.stderr
+        match = _VERSION_RE.search(output) if result.returncode == 0 else None
         return match["revision"] if match else None
 
     def wait_revision(self) -> str | None:
         """The application's revision once it answers (it re-enumerates after -r)."""
-        deadline = self.clock() + self.APP_WAIT_S
+        deadline = self.clock() + APP_WAIT_S
         while True:
             revision = self.revision()
             if revision is not None or self.clock() >= deadline:
                 return revision
-            self.sleep(0.5)
+            self.sleep(POLL_S)
 
     def _dfu(self, argv, timeout_s) -> tuple[int, str]:
-        """Run ubertooth-dfu; on failure print its output (less the progress
-        dots) as evidence for the run record."""
-        code, output = self.run(argv, timeout_s)
-        if code != 0:
-            self.log(f"{' '.join(argv)} exited {code}:")
-            for line in output.splitlines():
-                if line.strip() and set(line.strip()) != {"."}:
-                    self.log(f"  | {line}")
-        return code, output
+        result = self.call(argv, timeout_s)
+        return result.returncode, result.stdout + result.stderr
 
     def read_back(self, path: Path) -> str:
         """``-u PATH -r`` on the selected application; "" or why it failed."""
         code, output = self._dfu(
-            ("ubertooth-dfu", "-U", self.serial, "-u", str(path), "-r"), self.DFU_READ_TIMEOUT_S
+            ("ubertooth-dfu", "-U", self.serial, "-u", str(path), "-r"), DFU_READ_TIMEOUT_S
         )
         return "" if code == 0 else f"read-back exited {code}: {_last_line(output)}"
 
@@ -238,7 +333,7 @@ class Board:
             if self.revision(guard) is None:
                 return (f"guard board {guard} does not answer, so the DFU device may be it; "
                         "recover by hand")
-        code, output = self._dfu(("ubertooth-dfu", "-u", str(path), "-r"), self.DFU_READ_TIMEOUT_S)
+        code, output = self._dfu(("ubertooth-dfu", "-u", str(path), "-r"), DFU_READ_TIMEOUT_S)
         if code != 0:
             return f"DFU read-back and reset exited {code}: {_last_line(output)}"
         self.log("Left DFU: read back the bootloader's flash and reset it")
@@ -246,7 +341,7 @@ class Board:
 
     def write(self, image: Path) -> str:
         code, output = self._dfu(
-            ("ubertooth-dfu", "-U", self.serial, "-d", str(image), "-r"), self.DFU_WRITE_TIMEOUT_S
+            ("ubertooth-dfu", "-U", self.serial, "-d", str(image), "-r"), DFU_WRITE_TIMEOUT_S
         )
         return "" if code == 0 else f"rewrite exited {code}: {_last_line(output)}"
 
@@ -264,6 +359,7 @@ def after_reject(board: Board, image: Path, revision: str, readback: Path) -> in
     read back there, and returned to its application.
     """
     problems = []
+    failure = ""
     seen = board.revision()
     if seen is None:
         problems.append("board left its application (no answer to ubertooth-util -v)")
@@ -287,6 +383,9 @@ def after_reject(board: Board, image: Path, revision: str, readback: Path) -> in
         problems.append("board did not return to its application")
     else:
         print(f"Board in its application: {returned}")
+        if seen is None and returned != revision:
+            # Left in DFU (fork #198): the revision was not read before.
+            problems.append(f"firmware revision {returned} after leaving DFU, expected {revision}")
     if problems:
         print("After rejection: " + "; ".join(problems))
         return 1
