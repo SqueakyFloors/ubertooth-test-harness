@@ -13,18 +13,24 @@ REGISTERS = {0x00: ("MAIN", 0x8000), 0x01: ("FSCTRL", 0x0010),
 
 
 class ToolUbertooth(FakeUbertooth):
-    """FakeUbertooth plus ubertooth-specan, ubertooth-debug, and btle -a/-t/-x.
+    """FakeUbertooth plus ubertooth-specan, ubertooth-debug, btle -a/-t/-x,
+    and btle -p, as on fork main 3b22c95.
 
-    Flags switch on the fork bugs the strict cases catch:
-    ``stale_specan`` (#173), ``debug_exit_is_value`` (#164), ``btle_aa_bugs`` (#171).
+    Flags switch on the fork bugs (fixed on main) the cases catch:
+    ``stale_specan`` (#173), ``debug_exit_is_value`` (#164), ``btle_aa_bugs``
+    (#171), ``specan_stop_resets=False`` (#191: stopping specan skips the idle
+    reset), and ``promisc_stop_resets=False`` (the same for btle -p).
     """
 
     def __init__(self, *args, stale_specan=False, debug_exit_is_value=False,
-                 btle_aa_bugs=False, **kwargs):
+                 btle_aa_bugs=False, specan_stop_resets=True, promisc_stop_resets=True,
+                 **kwargs):
         super().__init__(*args, **kwargs)
         self.stale_specan = stale_specan
         self.debug_exit_is_value = debug_exit_is_value
         self.btle_aa_bugs = btle_aa_bugs
+        self.specan_stop_resets = specan_stop_resets
+        self.promisc_stop_resets = promisc_stop_resets
         self.state["aa"] = "8e89bed6"
         self.last_specan = None
 
@@ -42,6 +48,9 @@ class ToolUbertooth(FakeUbertooth):
             self.commands.append(command)
             return self._debug(command, on_output)
         options = command[3:]
+        if command[0] == "ubertooth-btle" and options == ("-p",):
+            self.commands.append(command)
+            return self._promisc(command, on_output)
         if command[0] == "ubertooth-btle" and any(o[:2] in ("-a", "-t", "-x") for o in options):
             self.commands.append(command)
             return self._btle_settings(command, options, on_output)
@@ -62,7 +71,7 @@ class ToolUbertooth(FakeUbertooth):
         sweeps += [(low, high)] * 3
         self.last_specan = (low, high)
         self.mode = "specan"
-        self._stop_mode()
+        self._leave(self.specan_stop_resets)
         if "-d" in opts:
             data = bytearray()
             for lo, hi in sweeps:
@@ -81,6 +90,21 @@ class ToolUbertooth(FakeUbertooth):
         return self._result(command, 124, "\n".join(lines) + "\n", stderr + "HARD TIMEOUT\n",
                             on_output, timed_out=True)
 
+    def _leave(self, resets):
+        """The tool's ubertooth_stop() on SIGTERM, then the harness -S."""
+        if resets:
+            self._stop_mode()
+        else:
+            self.mode = None
+
+    def _promisc(self, command, on_output):
+        # bt_promisc_le() -> reset_le(): advertising access address, no CRC check.
+        self.mode = "ble"
+        self.state["aa"] = "8e89bed6"
+        self.state["crc"] = "0"
+        self._leave(self.promisc_stop_resets)
+        return self._result(command, 124, "", "HARD TIMEOUT\n", on_output, timed_out=True)
+
     # ubertooth-debug ----------------------------------------------------
     def _debug(self, command, on_output):
         opts = list(command[3:])
@@ -89,8 +113,7 @@ class ToolUbertooth(FakeUbertooth):
             if o.startswith("-v"):
                 verbose = int(o[2:])
                 if not 0 <= verbose <= 2:
-                    return self._result(command, 1, "", f"error: verbosity must be 0-2 (got {o[2:]})\n",
-                                        on_output)
+                    return self._result(command, 1, "", f"error: verbosity must be 0-2 (got {verbose})\n", on_output)
         spec = opts[opts.index("-r") + 1]
         if "-" in spec:
             a, b = (int(x, 16) for x in spec.split("-"))
@@ -139,7 +162,10 @@ class ToolUbertooth(FakeUbertooth):
         for value in sets:
             if not all(c in "0123456789abcdef" for c in value.lower()):
                 if not self.btle_aa_bugs:
-                    return self._result(command, 1, "", "Error: bad access address\n", on_output)
+                    return self._result(
+                        command, 1, "",
+                        f"error: access address must be 1-8 hex digits (got {value})\n",
+                        on_output)
                 value = "6fbd5b98"
             self.state["aa"] = value.lower().rjust(8, "0")
             out.append(f"access address set to: {self.state['aa']}")
@@ -202,7 +228,8 @@ class SpectrumAnalyzerTests(unittest.TestCase):
         _a, smoke = cases_for_duration("smoke")
         _a, full = cases_for_duration("comprehensive")
         self.assertEqual(["full-band"], [c.case_id for c in smoke])
-        self.assertEqual(8, len(full))
+        self.assertEqual(9, len(full))
+        self.assertEqual("stop-resets-board", full[-1].case_id)
         self.assertTrue(all(isinstance(c, StateCase) for c in full))
 
     def test_passes_on_a_correct_tool(self):
@@ -216,6 +243,28 @@ class SpectrumAnalyzerTests(unittest.TestCase):
         self.assertFalse(summary.passed)
         self.assertIn("2402-2410 MHz after a full-band run", failed_names(events))
         self.assertIn("samples outside 2402-2410 MHz", summary.failure_reason)
+
+    def test_a_specan_stop_without_the_idle_reset_fails(self):
+        # SqueakyFloors/ubertooth#191 (fork builds before aa4f620).
+        device = ToolUbertooth(crc="1", specan_stop_resets=False)
+        summary, events = run_spectrum(device)
+        self.assertFalse(summary.passed)
+        self.assertEqual(["Stopping ubertooth-specan resets LEDs, channel, and squelch"],
+                         failed_names(events))
+        self.assertIn("LEDs off after the stop", summary.failure_reason)
+        self.assertEqual("2441", device.state["channel"])  # cleanup restored it
+
+    def test_the_stop_reset_case_presets_every_setting(self):
+        _a, full = cases_for_duration("comprehensive")
+        case = full[-1]
+        ids = [s.step_id for s in case.steps]
+        self.assertLess(ids.index("verify-leds-set"), ids.index("sweep"))
+        self.assertLess(ids.index("sweep"), ids.index("mode-stop"))
+        self.assertLess(ids.index("mode-stop"), ids.index("verify-pa-level-after-stop"))
+        preset = case.steps[ids.index("set-non-defaults")].resolve_argv(
+            {"original channel": "2441"})
+        self.assertEqual(("-c2426", "-z-60", "-d1"), preset[3:])
+        self.assertTrue(case.steps[ids.index("sweep")].continuous)
 
 
 class DebugRegistersTests(unittest.TestCase):

@@ -42,33 +42,43 @@ def ends(case_ids, *names):
 
 
 class ModeUbertooth(FakeUbertooth):
-    """FakeUbertooth plus -I, -q, -m, and the LED sampler (fork main b7437da).
+    """FakeUbertooth plus -I, -q, -m, and the LED sampler (fork main 3b22c95).
 
-    Knobs model each fork behavior and the regressions the cases must catch:
+    -q takes 20-120 (-N dBm, bare -q is 85) and prints "Entering LED specan
+    mode (threshold -N dBm)"; any mode stop runs the idle reset, including a
+    stop by the next mode; -m with no result prints "no range test result
+    yet". Knobs model the regressions (and earlier fork builds) the cases
+    must catch:
 
-    - ``int8_threshold``: the firmware's int8 LED-specan threshold
-      (SqueakyFloors/ubertooth#189): -q183..-q225 and bare -q light nothing.
+    - ``specan_stop_resets``: stopping -q runs the idle reset; False is
+      SqueakyFloors/ubertooth#191: the LEDs stay as the mode left them,
+      channel and squelch kept.
+    - ``replace_resets``: a mode's start runs the idle reset when it ends a
+      prior mode; False skips it.
     - ``range_text``: what -m prints with no result ("invalid range test
-      result" on main, #190).
+      result" before fork 7180f74, #190).
     - ``blink``: identify toggles the LEDs; False leaves them steady.
     - ``stop_ends_mode``: -S ends identify/LED specan; False keeps it running.
     - ``mode_resets_channel``: starting a mode resets the channel at once.
     - ``range_values``: -m prints result values although no test ran.
-    - ``specan_stop_resets``: stopping -q runs the idle reset; False on main
-      (#191): the LEDs stay as the mode left them, channel and squelch kept.
+    - ``read_stalls``: a predicate on the LED read attempt number (from 0)
+      that makes that ``-d`` read fail with -9 (#213).
     """
 
-    def __init__(self, *args, int8_threshold=True, range_text="invalid range test result",
-                 blink=True, stop_ends_mode=True, mode_resets_channel=False,
-                 range_values=False, specan_stop_resets=False, **kwargs):
+    def __init__(self, *args, specan_stop_resets=True, replace_resets=True,
+                 range_text="no range test result yet", blink=True,
+                 stop_ends_mode=True, mode_resets_channel=False, range_values=False,
+                 read_stalls=lambda attempt: False, **kwargs):
         super().__init__(*args, **kwargs)
-        self.int8_threshold = int8_threshold
+        self.specan_stop_resets = specan_stop_resets
+        self.replace_resets = replace_resets
         self.range_text = range_text
         self.blink = blink
         self.stop_ends_mode = stop_ends_mode
         self.mode_resets_channel = mode_resets_channel
         self.range_values = range_values
-        self.specan_stop_resets = specan_stop_resets
+        self.read_stalls = read_stalls
+        self.read_attempts = 0
         self.threshold = None
         self.mode_options = []
 
@@ -77,23 +87,44 @@ class ModeUbertooth(FakeUbertooth):
         if command[:3] == ("sh", "-c", util_cases.LED_SAMPLER):
             self.commands.append(command)
             assert command[3:5] == ("ubertooth-util", self.serial), command
-            count = int(command[5])
-            return self._result(command, 0, self._samples(count), "", on_output)
+            code, stdout, stderr = self._sampler(int(command[5]))
+            return self._result(command, code, stdout, stderr, on_output)
         return super().run(argv, timeout_s=timeout_s, cancellation=cancellation,
                            on_output=on_output)
 
-    def _samples(self, count):
-        lines = []
+    def _read(self):
+        """One -d: (ok, report). A stalled read reports only USR and RX."""
+        attempt = self.read_attempts
+        self.read_attempts += 1
+        report = self._sample()
+        if self.read_stalls(attempt):
+            return False, "".join(report.splitlines(keepends=True)[:2])
+        return True, report
+
+    def _sampler(self, count):
+        """The LED_SAMPLER shell loop: one retry per failed read."""
+        stdout, stderr = "", ""
         for index in range(count):
-            if self.mode == "identify":
-                on = index % 2 == 0 if self.blink else True
-                usr = rx = tx = "1" if on else "0"
-            elif self.mode == "led-specan":
-                usr = rx = tx = "1" if self._lit() else "0"
-            else:
-                usr, rx, tx = self.state["usr"], self.state["rx"], self.state["tx"]
-            lines.append(f"USR LED status: {usr}\nRX LED status : {rx}\nTX LED status : {tx}\n")
-        return "".join(lines)
+            ok, report = self._read()
+            if not ok:
+                stderr += (f"TX LED read failed (-9)\n"
+                           f"LED sample {index}: -d exited 1, retrying\n")
+                ok, report = self._read()
+                if not ok:
+                    return 1, stdout, stderr + "TX LED read failed (-9)\n"
+            stdout += report
+        return 0, stdout, stderr
+
+    def _sample(self):
+        index = self.read_attempts
+        if self.mode == "identify":
+            on = index % 2 == 0 if self.blink else True
+            usr = rx = tx = "1" if on else "0"
+        elif self.mode == "led-specan":
+            usr = rx = tx = "1" if self._lit() else "0"
+        else:
+            usr, rx, tx = self.state["usr"], self.state["rx"], self.state["tx"]
+        return f"USR LED status: {usr}\nRX LED status : {rx}\nTX LED status : {tx}\n"
 
     def _stop_mode(self):
         if self.mode == "led-specan" and not self.specan_stop_resets:
@@ -105,9 +136,8 @@ class ModeUbertooth(FakeUbertooth):
 
     def _lit(self):
         raw = 54 - self.threshold
-        if self.int8_threshold:
-            raw = (raw + 128) % 256 - 128
-        # Ambient noise reads about -41 raw (-95 dBm); -128 is never read.
+        # Ambient noise reads about -41 raw (-95 dBm); nothing reads -66 raw
+        # (-120 dBm) or below.
         return raw < -41
 
     def _util(self, command, options, on_output):
@@ -129,9 +159,15 @@ class ModeUbertooth(FakeUbertooth):
         if not modes:
             return super()._util(command, options, on_output)
         mode = modes[0]
+        if mode != "-I" and len(mode) > 2 and not 20 <= int(mode[2:]) <= 120:
+            return self._result(
+                command, 1, "", f"error: RSSI threshold must be 20-120 (got {mode[2:]})\n",
+                on_output)
         rest = tuple(o for o in options if o not in modes)
         prefix = super()._util(command, rest, on_output=None).stdout if rest else ""
         self.mode_options.append(mode)
+        if self.mode is not None and not self.replace_resets:
+            self.mode = None
         self._stop_mode()  # each mode first leaves any prior mode
         if self.mode_resets_channel:
             self.state["channel"] = "2441"
@@ -141,22 +177,17 @@ class ModeUbertooth(FakeUbertooth):
                    "The board is blinking; stop it with ubertooth-util -S or any "
                    "mode option\n")
         else:
-            self.threshold = int(mode[2:]) if len(mode) > 2 else 225
+            self.threshold = int(mode[2:]) if len(mode) > 2 else 85
             self.mode = "led-specan"
-            out = f"Entering LED specan mode (RSSI {self.threshold})\n"
+            out = f"Entering LED specan mode (threshold -{self.threshold} dBm)\n"
         return self._result(command, 0, prefix + out, "", on_output)
 
 
-STRICT_MODE_CASES = (
-    "led-specan-stop-runs-idle-reset",
-    "led-specan-default-lights-leds",
-    "led-specan-225-lights-leds",
-    "range-result-none-says-no-result",
-)
-FIXED = {
-    "int8_threshold": False, "specan_stop_resets": True,
-    "range_text": "no range test result (none since start)",
-}
+SMOKE_MODE_CASES = ["identify-blinks-until-stop", "led-specan-120-lights-leds",
+                    "range-result-none-after-reset"]
+Q_CASES = ("led-specan-120-lights-leds", "led-specan-20-runs-until-stop",
+           "led-specan-default-runs-until-stop", "identify-replaces-led-specan",
+           "led-specan-replaces-identify")
 
 
 class UtilModeCaseTests(unittest.TestCase):
@@ -164,15 +195,10 @@ class UtilModeCaseTests(unittest.TestCase):
     def test_smoke_and_comprehensive_case_sets(self):
         _args, smoke = cases_for("Ubertooth util modes", "smoke")
         _args, full = cases_for("Ubertooth util modes", "comprehensive")
-        self.assertEqual(
-            ["identify-blinks-until-stop", "led-specan-182-lights-leds",
-             "range-result-none-after-reset"],
-            [case.case_id for case in smoke],
-        )
-        self.assertEqual(11, len(full))
+        self.assertEqual(SMOKE_MODE_CASES, [case.case_id for case in smoke])
+        self.assertEqual(8, len(full))
         self.assertTrue(all(isinstance(case, StateCase) for case in full))
-        ids = {case.case_id for case in full}
-        self.assertTrue(set(STRICT_MODE_CASES) <= ids)
+        self.assertTrue(set(Q_CASES) <= {case.case_id for case in full})
 
     def test_every_command_selects_the_board_and_none_transmits(self):
         _args, full = cases_for("Ubertooth util modes", "comprehensive")
@@ -190,6 +216,14 @@ class UtilModeCaseTests(unittest.TestCase):
                     self.assertEqual(["-U", SERIAL], list(argv[1:3]))
                     flags = {item[:2] for item in argv[3:]}
                     self.assertFalse(flags & {"-t", "-n", "-e", "-f", "-i"})
+
+    def test_every_q_threshold_is_in_the_accepted_range(self):
+        _args, full = cases_for("Ubertooth util modes", "comprehensive")
+        for case in full:
+            for step in case.steps:
+                for item in step.resolve_argv({"original channel": "2441"}):
+                    if re.fullmatch(r"-q\d+", item):
+                        self.assertTrue(20 <= int(item[2:]) <= 120, item)
 
     def test_led_checks(self):
         on = "USR LED status: 1\nRX LED status : 1\nTX LED status : 1\n"
@@ -209,7 +243,7 @@ class UtilModeCaseTests(unittest.TestCase):
         device = ModeUbertooth(crc="1")
         summary, events = run_test("Ubertooth util modes", device)
         self.assertTrue(summary.passed, summary.failure_reason)
-        self.assertEqual(["-I", "-q182"], device.mode_options)
+        self.assertEqual(["-I", "-q120"], device.mode_options)
         # Cleanup restored the fake's originals.
         self.assertEqual("2441", device.state["channel"])
         self.assertEqual("-90", device.state["squelch"])
@@ -217,23 +251,33 @@ class UtilModeCaseTests(unittest.TestCase):
         self.assertEqual("1", device.state["crc"])
         self.assertIsNone(device.mode)
 
-    def test_comprehensive_fails_only_the_strict_cases_on_fork_main(self):
+    def test_comprehensive_passes_on_fork_main(self):
         device = ModeUbertooth(crc="1")
         summary, events = run_test("Ubertooth util modes", device, coverage="comprehensive")
-        self.assertFalse(summary.passed)
-        self.assertEqual(sorted(STRICT_MODE_CASES), ends(failed_cases(events), *STRICT_MODE_CASES))
-        self.assertEqual(len(STRICT_MODE_CASES), len(failed_cases(events)))
-        self.assertIsNone(device.mode)
-
-    def test_comprehensive_passes_once_the_fork_issues_are_fixed(self):
-        device = ModeUbertooth(crc="1", **FIXED)
-        summary, _events = run_test("Ubertooth util modes", device, coverage="comprehensive")
         self.assertTrue(summary.passed, summary.failure_reason)
+        self.assertEqual([], failed_cases(events))
         self.assertEqual(
-            ["-I", "-q182", "-q1", "-q182", "-q", "-q225", "-q182", "-I", "-I",
-             "-q182", "-I"],
+            ["-I", "-q120", "-q20", "-q", "-q120", "-I", "-I", "-q120", "-I"],
             device.mode_options,
         )
+        self.assertIsNone(device.mode)
+
+    def test_a_q_stop_without_the_idle_reset_fails_every_q_case(self):
+        # SqueakyFloors/ubertooth#191 (fork builds before aa4f620).
+        device = ModeUbertooth(crc="1", specan_stop_resets=False)
+        summary, events = run_test("Ubertooth util modes", device, coverage="comprehensive")
+        self.assertFalse(summary.passed)
+        # -q20 lights nothing, so its stop leaves the LEDs off; the squelch
+        # and channel checks still catch it.
+        self.assertEqual(sorted(Q_CASES), ends(failed_cases(events), *Q_CASES))
+        self.assertEqual(len(Q_CASES), len(failed_cases(events)))
+
+    def test_led_specan_that_lights_nothing_fails(self):
+        # A threshold that never trips (as the #189 int8 wrap did for -q183
+        # and up on fork builds before aa4f620).
+        device = ModeUbertooth()
+        device._lit = lambda: False
+        self.assert_smoke_fails(device, "led-specan-120-lights-leds", "LEDs not all on")
 
     def assert_smoke_fails(self, device, case, reason):
         summary, events = run_test("Ubertooth util modes", device)
@@ -263,13 +307,22 @@ class UtilModeCaseTests(unittest.TestCase):
         summary, events = run_test("Ubertooth util modes", device)
         self.assertFalse(summary.passed)
         self.assertIn("Channel kept while the mode runs", summary.failure_reason)
-        self.assertEqual(2, len(failed_cases(events)))  # -I and -q182
+        self.assertEqual(2, len(failed_cases(events)))  # -I and -q120
 
-    def test_led_specan_that_lights_nothing_fails(self):
-        # A threshold that never trips (the #189 wrap applied to every value).
-        device = ModeUbertooth()
-        device._lit = lambda: False
-        self.assert_smoke_fails(device, "led-specan-182-lights-leds", "LEDs not all on")
+    def test_a_replacement_that_skips_the_reset_fails(self):
+        device = ModeUbertooth(crc="1", replace_resets=False)
+        summary, events = run_test("Ubertooth util modes", device, coverage="comprehensive")
+        self.assertFalse(summary.passed)
+        replaced = ("identify-replaces-led-specan", "led-specan-replaces-identify")
+        self.assertEqual(sorted(replaced), ends(failed_cases(events), *replaced))
+        self.assertEqual(2, len(failed_cases(events)))
+        self.assertIn("Channel reset by ending the prior mode", summary.failure_reason)
+
+    def test_old_range_wording_fails(self):
+        # "invalid range test result" (fork builds before 7180f74, #190).
+        self.assert_smoke_fails(ModeUbertooth(range_text="invalid range test result"),
+                                "range-result-none-after-reset",
+                                "Range test result with no range test run")
 
     def test_range_result_values_without_a_test_fail(self):
         self.assert_smoke_fails(ModeUbertooth(range_values=True),
@@ -286,6 +339,81 @@ class UtilModeCaseTests(unittest.TestCase):
         reset = steps(events, step_id="reset")
         self.assertEqual("passed", reset[0].status)
 
+    # LED read stalls (SqueakyFloors/ubertooth#213)
+
+    def test_a_single_stalled_read_is_retried_and_recorded(self):
+        device = ModeUbertooth(crc="1", read_stalls=lambda attempt: attempt == 15)
+        summary, events = run_test("Ubertooth util modes", device)
+        self.assertTrue(summary.passed, summary.failure_reason)
+        retried = [e for e in events
+                   if e.event_type == "command_output" and e.details["stream"] == "stderr"
+                   and re.search(util_cases.LED_RETRY_LINE, e.details["text"])]
+        self.assertEqual(1, len(retried), "the retry is not in the run record")
+
+    def test_frequent_single_stalls_still_pass(self):
+        # One read in three fails, never two in a row: every retry succeeds.
+        device = ModeUbertooth(crc="1", read_stalls=lambda attempt: attempt % 3 == 0)
+        summary, _events = run_test("Ubertooth util modes", device)
+        self.assertTrue(summary.passed, summary.failure_reason)
+
+    def test_a_read_that_keeps_failing_fails_the_case(self):
+        device = ModeUbertooth(read_stalls=lambda attempt: attempt in (3, 4))
+        self.assert_smoke_fails(device, "identify-blinks-until-stop", "command exited 1")
+
+    def test_reads_that_always_fail_fail_the_case(self):
+        device = ModeUbertooth(read_stalls=lambda attempt: True)
+        summary, events = run_test("Ubertooth util modes", device)
+        self.assertFalse(summary.passed)
+        self.assertIn("command exited 1", summary.failure_reason)
+
+
+class LedSamplerShellTests(unittest.TestCase):
+    """The real LED_SAMPLER under sh, with a stub ubertooth-util."""
+
+    def run_sampler(self, outcomes, count=3):
+        import subprocess
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as root:
+            state = Path(root) / "n"
+            state.write_text("0")
+            stub = Path(root) / "util"
+            # outcomes[i]: exit code of the i-th -d call (0 prints a report).
+            stub.write_text(
+                "#!/bin/sh\n"
+                f"n=$(cat {state}); echo $((n + 1)) > {state}\n"
+                f"set -- {' '.join(map(str, outcomes))}\n"
+                'shift "$n"; code=${1:-0}\n'
+                'echo "USR LED status: 1"; echo "RX LED status : 1"\n'
+                'if [ "$code" -ne 0 ]; then echo "TX LED read failed" >&2; exit "$code"; fi\n'
+                'echo "TX LED status : 1"\n'
+            )
+            stub.chmod(0o755)
+            result = subprocess.run(
+                ["sh", "-c", util_cases.LED_SAMPLER, str(stub), SERIAL, str(count), "0"],
+                capture_output=True, text=True, timeout=10,
+            )
+        return result
+
+    def test_clean_reads(self):
+        result = self.run_sampler([0, 0, 0])
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(["1/1/1"] * 3, util_cases.led_samples(result.stdout))
+        self.assertEqual("", result.stderr)
+
+    def test_one_failed_read_is_retried_its_partial_output_dropped(self):
+        result = self.run_sampler([0, 1, 0, 0])
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(["1/1/1"] * 3, util_cases.led_samples(result.stdout))
+        self.assertEqual(9, result.stdout.count("LED status"))
+        self.assertRegex(result.stderr, r"LED sample 1: -d exited 1, retrying")
+
+    def test_a_failed_retry_ends_the_sampler(self):
+        result = self.run_sampler([0, 1, 1, 0, 0])
+        self.assertEqual(1, result.returncode)
+        self.assertEqual(["1/1/1"], util_cases.led_samples(result.stdout))
+
 
 # ---------------------------------------------------------------------------
 # Fake: several boards on one host, with -U all, no -U, and -U<index>
@@ -299,14 +427,15 @@ IDENTITY = set(LABELS)
 class MultiBench:
     """Boards in enumeration order, routed like libubertooth (fork main).
 
-    - ``past_end``: what -U<index> past the last board opens: "first" (fork
-      main, #188: the first USB device, here board 0) or None (refused).
+    - ``past_end``: what -U<index> past the last board opens: None (refused
+      with "no Ubertooth at index", fork main since 0c7e9c0) or "first"
+      (#188, earlier builds: the first USB device, here board 0).
     - ``unregistered``: extra serials on the bus that the registry lacks.
     - ``index_map``: board opened for each -U<index> (default identity).
     - ``listing_drops_last``: the listing omits the last board.
     """
 
-    def __init__(self, serials, *, past_end="first", unregistered=(), index_map=None,
+    def __init__(self, serials, *, past_end=None, unregistered=(), index_map=None,
                  listing_drops_last=False):
         self.order = list(serials) + list(unregistered)
         self.boards = {s: FakeUbertooth(serial=s, crc="1") for s in self.order}
@@ -364,7 +493,10 @@ class MultiBench:
                 index = self.index_map[index]
             if index >= len(self.order):
                 if self.past_end is None:
-                    return self._result(command, 1, "", f"error: no Ubertooth at index {index}\n")
+                    return self._result(
+                        command, 1, "",
+                        f"error: no Ubertooth at index {index} ({len(self.order)} attached)\n"
+                        "could not open Ubertooth device\n")
                 index = 0
             serial = self.order[index]
             rest = tuple(options[1:])
@@ -389,9 +521,6 @@ class MultiBench:
             "multiple Ubertooth devices found! Use '-U' to specify device number\n"
             + devices + "could not open Ubertooth device\n",
         )
-
-
-STRICT_MULTI_CASES = ("index-past-end-refused",)
 
 
 def multi_run(bench, coverage="smoke", guards=(B,)):
@@ -457,18 +586,19 @@ class MultiBoardCaseTests(unittest.TestCase):
         summary, _events, _report = multi_run(bench, guards=(B, C))
         self.assertTrue(summary.passed, summary.failure_reason)
 
-    def test_comprehensive_fails_only_the_strict_case_on_fork_main(self):
-        summary, events, _report = multi_run(MultiBench((A, B)), "comprehensive")
+    def test_comprehensive_passes_on_fork_main(self):
+        summary, _events, _report = multi_run(MultiBench((A, B)), "comprehensive")
+        self.assertTrue(summary.passed, summary.failure_reason)
+
+    def test_an_index_past_the_end_that_opens_a_board_fails(self):
+        # SqueakyFloors/ubertooth#188 (fork builds before 0c7e9c0).
+        summary, events, _report = multi_run(MultiBench((A, B), past_end="first"),
+                                             "comprehensive")
         self.assertFalse(summary.passed)
         failed = failed_cases(events)
         self.assertEqual(1, len(failed), failed)
         self.assertTrue(failed[0].endswith("index-past-end-refused"))
         self.assertIn("command exited 0", summary.failure_reason)
-
-    def test_comprehensive_passes_once_index_past_end_is_refused(self):
-        summary, _events, _report = multi_run(MultiBench((A, B), past_end=None),
-                                              "comprehensive")
-        self.assertTrue(summary.passed, summary.failure_reason)
 
     def assert_smoke_fails(self, bench, cases, reason):
         summary, events, _report = multi_run(bench)

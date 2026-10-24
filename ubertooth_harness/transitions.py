@@ -1245,12 +1245,18 @@ REJECTIONS = (
               r"error: all-LED state must be 0-1 \(got 2\)"),
     Rejection("util-all-leds-not-a-number", "ubertooth-util", ("-dx",),
               r"error: all-LED state must be 0-1 \(got x\)"),
+    # -q takes 20-120 since fork aa4f620 (SqueakyFloors/ubertooth#189): 183,
+    # the first threshold that wrapped in the old int8 storage, is refused.
     Rejection("util-led-specan-threshold-0", "ubertooth-util", ("-q0",),
-              r"error: RSSI threshold must be 1-225 \(got 0\)"),
-    Rejection("util-led-specan-threshold-226", "ubertooth-util", ("-q226",),
-              r"error: RSSI threshold must be 1-225 \(got 226\)"),
+              r"error: RSSI threshold must be 20-120 \(got 0\)"),
+    Rejection("util-led-specan-threshold-19", "ubertooth-util", ("-q19",),
+              r"error: RSSI threshold must be 20-120 \(got 19\)"),
+    Rejection("util-led-specan-threshold-121", "ubertooth-util", ("-q121",),
+              r"error: RSSI threshold must be 20-120 \(got 121\)"),
+    Rejection("util-led-specan-threshold-183", "ubertooth-util", ("-q183",),
+              r"error: RSSI threshold must be 20-120 \(got 183\)"),
     Rejection("util-led-specan-not-a-number", "ubertooth-util", ("-qabc",),
-              r"error: RSSI threshold must be 1-225 \(got abc\)"),
+              r"error: RSSI threshold must be 20-120 \(got abc\)"),
     # -z with a mode (fork 4ed4a1d, SqueakyFloors/ubertooth#159): the mode's
     # stop would reset the squelch, so the combination is refused.
     Rejection("util-squelch-set-with-identify", "ubertooth-util", ("-z-60", "-I"),

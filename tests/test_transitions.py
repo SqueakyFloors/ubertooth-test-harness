@@ -55,7 +55,7 @@ UTIL_VALUES = {
     "d": ("all-LED state", 0, 1, ""),
     "C": ("channel", 0, 78, ""),
     "c": ("frequency", 2402, 2480, " MHz"),
-    "q": ("RSSI threshold", 1, 225, ""),
+    "q": ("RSSI threshold", 20, 120, ""),
     "z": ("squelch level", -128, 127, ""),
 }
 UTIL_MODE_ORDER = ("-q", "-n", "-e", "-t", "-x", "-I", "-i", "-f")

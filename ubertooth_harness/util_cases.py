@@ -4,34 +4,33 @@ Command contracts come from the fork sources (host/ubertooth-tools/src/
 ubertooth-util.c, host/libubertooth/src/ubertooth.c, and firmware/
 bluetooth_rxtx):
 
-- ``-I`` (identify) and ``-q[1-225]`` (LED spectrum analyzer) run on the
+- ``-I`` (identify) and ``-q[20-120]`` (LED spectrum analyzer) run on the
   board: the command stops any prior mode, starts the mode, prints its start
   line, and returns 0 at once. ``-S`` or any other mode option ends them.
   The identify blink toggles all three LEDs together every 167 ms
   (UBERTOOTH_IDENTIFY_TOGGLE_MS). ``-q<N>`` sets the threshold to -N dBm
-  (bare ``-q`` is 225), so N >= 182 is at or below the lowest int8 RSSI and
-  every reading lights its LED.
+  (bare ``-q`` is -85 dBm, UBERTOOTH_LED_SPECAN_N_DEFAULT); -120 dBm is the
+  bottom of the CC2400's RSSI range, so ``-q120`` lights every LED, and -20
+  dBm is far above ambient noise. Values outside 20-120 are refused on the
+  host (Argument validation).
 - While a mode runs, the configured channel and PA level are kept; stopping
   the mode runs the firmware idle reset (channel 2441 MHz, squelch -120, LEDs
-  off; PA kept). Smoke checks only that -S ends -q, not its reset (#191).
+  off; PA kept). The -q cases check it too since fork aa4f620
+  (SqueakyFloors/ubertooth#191).
 - ``-m`` reads the range-test result. A board that has not completed a range
-  test since it started has none; the read itself succeeds (exit 0).
+  test since it started has none: it prints "no range test result yet" and
+  exits 0 (fork 7180f74, SqueakyFloors/ubertooth#190).
 - ``-U all -<queries>`` and read-only identity queries without ``-U`` (with
   more than one board) print ``<index>: <line>`` for every attached board in
   enumeration order; ``-U<index>`` opens the board at that index of the same
-  order. Any other option without ``-U`` refuses to pick a board.
+  order, and an index with no board is refused with "no Ubertooth at index"
+  (fork 0c7e9c0, SqueakyFloors/ubertooth#188). Any other option without
+  ``-U`` refuses to pick a board.
 
-Some comprehensive cases assert the documented behavior that the fork does not
-deliver yet; they fail until the linked fork issue is fixed:
-
-- SqueakyFloors/ubertooth#191: stopping -q skips the idle reset, so the LEDs
-  stay on and channel and squelch keep their values.
-- SqueakyFloors/ubertooth#189: the firmware stores the LED-specan threshold
-  in an int8, so -q183 to -q225 and bare -q never light an LED.
-- SqueakyFloors/ubertooth#190: -m with no result says "invalid range test
-  result" instead of saying there is no result.
-- SqueakyFloors/ubertooth#188: with several boards, -U<index> past the end
-  opens another USB device and exits 0.
+LED reads (``-d``) can stall while LED specan runs
+(SqueakyFloors/ubertooth#213), so the LED sampler retries a failed read once
+and reports the retry on stderr; a read that fails twice in a row still fails
+the case.
 """
 
 from __future__ import annotations
@@ -72,12 +71,22 @@ from ubertooth_harness.transitions import (
 # whole-off samples to appear (blink) or every sample whole-on/off (steady).
 # The interval keeps the sample period (about 0.12 s with the command time)
 # away from the 0.334 s blink period, so the samples cannot alias to one phase.
+#
+# A read that fails (SqueakyFloors/ubertooth#213: a control request stalls
+# while LED specan runs) is retried once; its partial output is dropped, and a
+# "LED sample <i>: -d exited <code>, retrying" line goes to stderr so the run
+# record shows every retry. A retry that fails too ends the sampler with exit 1.
 
 LED_SAMPLES = 12
 LED_SAMPLE_INTERVAL_S = "0.05"
+LED_RETRY_LINE = r"LED sample \d+: -d exited \d+, retrying"
 LED_SAMPLER = (
     'i=0; while [ "$i" -lt "$2" ]; do sleep "$3"; '
-    '"$0" -U "$1" -d || exit 1; i=$((i + 1)); done'
+    'out=$("$0" -U "$1" -d); code=$?; '
+    'if [ "$code" -ne 0 ]; then '
+    'echo "LED sample $i: -d exited $code, retrying" >&2; '
+    'out=$("$0" -U "$1" -d) || exit 1; fi; '
+    'printf "%s\\n" "$out"; i=$((i + 1)); done'
 )
 ALL_ON, ALL_OFF = "1/1/1", "0/0/0"
 
@@ -133,7 +142,8 @@ def any_samples_check(stdout: str) -> str:
 
 
 def _sample_step(serial, step_id, name, check) -> Step:
-    return Step(step_id, name, led_sampler_argv(serial), timeout_s=10.0,
+    # Room for a retry of every sample.
+    return Step(step_id, name, led_sampler_argv(serial), timeout_s=30.0,
                 output_check=check)
 
 
@@ -148,7 +158,7 @@ IDENTIFY_START = (
 
 
 def specan_start(threshold: int) -> str:
-    return rf"Entering LED specan mode \(RSSI {threshold}\)"
+    return rf"Entering LED specan mode \(threshold -{threshold} dBm\)"
 
 
 BLINK = ("blinks", blink_check)
@@ -157,13 +167,12 @@ SAMPLED = ("reports the LEDs", any_samples_check)
 
 
 def _mode_case(serial, case_id, name, options, start, behavior, *, prior=None,
-               extra_patterns=(), stop_resets=True):
+               extra_patterns=()):
     """Start a board-side mode over non-default settings, check it runs, stop
     it with -S, and check the stop reset and that it really stopped.
 
-    ``prior`` starts another mode first, which the mode under test must end.
-    ``stop_resets=False`` checks only that the stop ended the mode, not the
-    idle reset (for -q until SqueakyFloors/ubertooth#191 is fixed).
+    ``prior`` starts another mode first, which the mode under test must end:
+    the new mode starts from idle, so the channel is 2441 MHz while it runs.
     """
     target = CHANNEL.pick(0)
     label, check = behavior
@@ -202,55 +211,41 @@ def _mode_case(serial, case_id, name, options, start, behavior, *, prior=None,
         _sample_step(serial, "sample-mode", f"{command} {label}", check),
     ]
     if prior is None:
-        # After a prior mode the channel depends on how that mode's stop
-        # reset it (#191 for -q), so it is only checked from idle.
         steps.append(CHANNEL.verify(serial, "verify-channel-during-mode",
                                     "Channel kept while the mode runs",
                                     "channel during mode", target))
+    else:
+        # Starting a mode first stops the prior one, which runs the idle reset.
+        steps.append(CHANNEL.verify(serial, "verify-channel-during-mode",
+                                    "Channel reset by ending the prior mode",
+                                    "channel during mode", BOOT_DEFAULT_CHANNEL))
     steps += [
         PA_LEVEL.verify(serial, "verify-pa-level-during-mode",
                         "PA level kept while the mode runs", "pa-level during mode",
                         lambda context: require(context, PA_LEVEL.original)),
         _stop(serial, "mode-stop", "Stop the mode with -S"),
-    ]
-    if stop_resets:
-        steps += [
-            _sample_step(serial, "sample-after-stop", "LEDs stay off after the stop",
-                         steady_check(ALL_OFF, "off")),
-            CHANNEL.verify(serial, "verify-channel-after-stop",
-                           "Channel reset by the mode stop", "channel after stop",
-                           BOOT_DEFAULT_CHANNEL),
-            SQUELCH.verify(serial, "verify-squelch-after-stop",
-                           "Squelch reset by the mode stop", "squelch after stop",
-                           SQUELCH.after_mode_stop),
-        ]
-        stopped = "-S stops it (LEDs off, channel 2441, squelch -120, PA kept)"
-    else:
-        # SqueakyFloors/ubertooth#191: a -q stop skips the idle reset and
-        # leaves the LEDs as the mode left them. Turn them off: a mode still
-        # running would light them again.
-        steps += [
-            Step("clear-leds", "Turn every LED off after the stop",
-                 _util(serial, "-d0"), mutates=True),
-            _sample_step(serial, "sample-after-stop",
-                         "LEDs stay off: the mode no longer drives them",
-                         steady_check(ALL_OFF, "off")),
-        ]
-        stopped = "-S stops it (LEDs no longer driven, PA kept)"
-    steps.append(
+        _sample_step(serial, "sample-after-stop", "LEDs stay off after the stop",
+                     steady_check(ALL_OFF, "off")),
+        CHANNEL.verify(serial, "verify-channel-after-stop",
+                       "Channel reset by the mode stop", "channel after stop",
+                       BOOT_DEFAULT_CHANNEL),
+        SQUELCH.verify(serial, "verify-squelch-after-stop",
+                       "Squelch reset by the mode stop", "squelch after stop",
+                       SQUELCH.after_mode_stop),
         PA_LEVEL.verify(serial, "verify-pa-level-after-stop",
                         "PA level kept by the mode stop", "pa-level after stop",
                         lambda context: require(context, PA_LEVEL.original)),
-    )
+    ]
+    stopped = "-S stops it (LEDs off, channel 2441, squelch -120, PA kept)"
+    kept = "channel and PA kept" if prior is None else "channel 2441 and PA kept"
     return StateCase(
         case_id,
         name,
         tuple(steps),
         _cleanup(serial, MODE_RESET_SETTINGS + (PA_LEVEL,)),
         expected_state=(
-            f"{command} returns at once and the board {label}; channel and PA "
-            f"kept while it runs; {stopped}; original channel, squelch, LEDs, "
-            "and PA restored"
+            f"{command} returns at once and the board {label}; {kept} while it "
+            f"runs; {stopped}; original channel, squelch, LEDs, and PA restored"
         ),
     )
 
@@ -258,13 +253,11 @@ def _mode_case(serial, case_id, name, options, start, behavior, *, prior=None,
 # ---------------------------------------------------------------------------
 # -m with no range-test result
 
-RANGE_RESULT_ANY = r"(?i)range test result"
-# Expected wording once SqueakyFloors/ubertooth#190 is fixed.
-RANGE_RESULT_NONE = r"(?i)\bno range test result\b"
+RANGE_RESULT_NONE = r"(?m)^no range test result yet$"
 RANGE_RESULT_VALUES = r"request PA level|request number|reply PA level|reply number|mismatch on byte"
 
 
-def _range_result_case(serial, case_id, name, patterns):
+def _range_result_case(serial, case_id, name):
     reads = (
         _stop(serial, "establish-idle", "Establish idle before reading"),
         _crc_read(serial, "read-original-crc", "Read original CRC", "original crc"),
@@ -284,14 +277,14 @@ def _range_result_case(serial, case_id, name, patterns):
                 "range-result",
                 "Range test result with no range test run",
                 _util(serial, "-m"),
-                output_patterns=patterns,
-                forbidden_patterns=(RANGE_RESULT_VALUES, r"read failed"),
+                output_patterns=(RANGE_RESULT_NONE,),
+                forbidden_patterns=(RANGE_RESULT_VALUES, r"read failed", r"(?i)invalid"),
             ),
         ),
         _cleanup(serial, MODE_RESET_SETTINGS + (PA_LEVEL,), crc=True),
         expected_state=(
-            "-m after a reset exits 0 and reports no result values; every "
-            "setting the reset changed restored"
+            "-m after a reset exits 0 saying there is no range test result yet, "
+            "with no result values; every setting the reset changed restored"
         ),
     )
 
@@ -299,48 +292,35 @@ def _range_result_case(serial, case_id, name, patterns):
 def util_mode_cases(arguments, _resources, resource_identities):
     serial = _serial(resource_identities, "Ubertooth util modes")
     identify = (("-I",), IDENTIFY_START, BLINK)
-    specan_lit = (("-q182",), specan_start(182), LIT)
-    # Every -q case except the strict stop case checks only that -S ended the
-    # mode (SqueakyFloors/ubertooth#191), so each strict case fails for one
-    # fork issue.
-    q = {"stop_resets": False}
+    # -120 dBm, the bottom of the radio's RSSI range: every reading lights.
+    specan_lit = (("-q120",), specan_start(120), LIT)
     cases = [
         _mode_case(serial, "identify-blinks-until-stop", "-I blinks until -S",
                    *identify),
-        _mode_case(serial, "led-specan-182-lights-leds",
-                   "-q182 (threshold -182 dBm) lights every LED", *specan_lit, **q),
+        _mode_case(serial, "led-specan-120-lights-leds",
+                   "-q120 (threshold -120 dBm) lights every LED", *specan_lit),
         _range_result_case(serial, "range-result-none-after-reset",
-                           "-m with no range-test result", (RANGE_RESULT_ANY,)),
+                           "-m with no range-test result"),
     ]
     if arguments["coverage"] == "comprehensive":
         cases += [
-            _mode_case(serial, "led-specan-1-runs-until-stop",
-                       "-q1 runs until -S", ("-q1",), specan_start(1), SAMPLED, **q),
-            # Strict: fail until SqueakyFloors/ubertooth#191 is fixed.
-            _mode_case(serial, "led-specan-stop-runs-idle-reset",
-                       "-S after -q182 turns the LEDs off and resets channel and "
-                       "squelch", *specan_lit),
-            # Strict: fail until SqueakyFloors/ubertooth#189 is fixed.
-            _mode_case(serial, "led-specan-default-lights-leds",
-                       "Bare -q (threshold -225 dBm) lights every LED",
-                       ("-q",), specan_start(225), LIT, **q),
-            _mode_case(serial, "led-specan-225-lights-leds",
-                       "-q225 lights every LED", ("-q225",), specan_start(225), LIT,
-                       **q),
+            # -20 dBm is far above ambient noise, and bare -q (-85 dBm) lights
+            # only for strong enough signals: both just run until -S.
+            _mode_case(serial, "led-specan-20-runs-until-stop",
+                       "-q20 runs until -S", ("-q20",), specan_start(20), SAMPLED),
+            _mode_case(serial, "led-specan-default-runs-until-stop",
+                       "Bare -q (threshold -85 dBm) runs until -S",
+                       ("-q",), specan_start(85), SAMPLED),
             _mode_case(serial, "identify-replaces-led-specan",
-                       "-I ends a running -q182 and blinks", *identify,
+                       "-I ends a running -q120 and blinks", *identify,
                        prior=specan_lit),
             _mode_case(serial, "led-specan-replaces-identify",
-                       "-q182 ends a running -I and lights every LED", *specan_lit,
-                       prior=identify, **q),
+                       "-q120 ends a running -I and lights every LED", *specan_lit,
+                       prior=identify),
             _mode_case(serial, "identify-after-serial-query",
                        "-s -I reports the serial, then blinks",
                        ("-s", "-I"), IDENTIFY_START, BLINK,
                        extra_patterns=(rf"Serial No: {re.escape(serial)}",)),
-            # Strict: fail until SqueakyFloors/ubertooth#190 is fixed.
-            _range_result_case(serial, "range-result-none-says-no-result",
-                               "-m says there is no range-test result",
-                               (RANGE_RESULT_NONE,)),
         ]
     return tuple(cases)
 
@@ -537,9 +517,9 @@ def multi_board_cases(arguments, _resources, resource_identities):
                 ),),
                 "exit 1 listing every board; no channel read from any board",
             ),
-            # Strict: fail until SqueakyFloors/ubertooth#188 is fixed. No
-            # option is given, so the buggy open (of whatever USB device is
-            # first on the bus) only claims an interface and sends no request.
+            # No option is given, so a regression that opens whatever USB
+            # device is first on the bus only claims an interface and sends
+            # no request (SqueakyFloors/ubertooth#188, fixed in 0c7e9c0).
             _multi_case(
                 serial, "index-past-end-refused",
                 f"-U{count} (past the last board) is refused",
@@ -547,8 +527,12 @@ def multi_board_cases(arguments, _resources, resource_identities):
                     "refuse", f"-U{count} with {count} boards",
                     ("ubertooth-util", f"-U{count}"),
                     expected_returncodes=(1,),
+                    output_patterns=(
+                        rf"error: no Ubertooth at index {count} \({count} attached\)",
+                    ),
                 ),),
-                "an index with no board opens nothing and exits 1",
+                "an index with no board opens nothing and exits 1 saying how "
+                "many boards are attached",
             ),
         ]
     return tuple(cases)
