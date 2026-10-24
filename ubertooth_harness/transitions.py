@@ -996,6 +996,145 @@ def ble_crc_cases(arguments, _resources, resource_identities):
 
 
 # ---------------------------------------------------------------------------
+# Rejected arguments must leave the device unchanged
+#
+# Each case is an argument the tool's own parser refuses (checked against the
+# fork sources in host/ubertooth-tools/src). The command must exit 1 with the
+# tool's error text, start no mode, and leave every readable setting as it
+# was. Every command still selects the board by serial, so a regression that
+# accepts the argument can only reach the selected board. Commands that would
+# transmit if a regression accepted them (btle -s, -i/-I, ducky -q) are not
+# used.
+
+_VALIDATED = (CHANNEL, SQUELCH, LEDS)
+_PA_READ_KEY = "pa-level before"
+_ANY_MODE_START = r"Entering |Starting |Flashing LEDs|systime="
+
+
+@dataclass(frozen=True)
+class Rejection:
+    case_id: str
+    tool: str
+    options: tuple[str, ...]
+    error: str  # regex for the tool's own error text
+    smoke: bool = False
+
+    def argv(self, serial: str) -> tuple[str, ...]:
+        return (self.tool, "-U", serial) + self.options
+
+
+REJECTIONS = (
+    Rejection("util-frequency-below-band", "ubertooth-util", ("-c2401",),
+              r"error: frequency must be 2402-2480 MHz", smoke=True),
+    Rejection("util-frequency-above-band", "ubertooth-util", ("-c2481",),
+              r"error: frequency must be 2402-2480 MHz"),
+    Rejection("util-channel-index-79", "ubertooth-util", ("-C79",),
+              r"error: channel must be 0-78"),
+    Rejection("util-all-with-setter", "ubertooth-util", ("-U", "all", "-a5"),
+              r"error: -U all only supports the read-only queries"),
+    Rejection("util-all-with-mode", "ubertooth-util", ("-U", "all", "-x"),
+              r"error: -U all only supports the read-only queries"),
+    Rejection("btle-address-errors-33", "ubertooth-btle", ("-x33",),
+              r"Error: can tolerate 0-32 access address bit errors", smoke=True),
+    Rejection("btle-adv-index-36", "ubertooth-btle", ("-A36",),
+              r"Error: advertising index must be 37, 38, or 39"),
+    Rejection("btle-adv-index-40", "ubertooth-btle", ("-A40",),
+              r"Error: advertising index must be 37, 38, or 39"),
+    Rejection("btle-bad-target-mac", "ubertooth-btle", ("-tnot-a-mac",),
+              r"Usage:|usage:"),
+    Rejection("ego-length-0", "ubertooth-ego", ("-l0",),
+              r"Length must be in \[1,48\]", smoke=True),
+    Rejection("ego-length-49", "ubertooth-ego", ("-l49",),
+              r"Length must be in \[1,48\]"),
+    Rejection("ducky-adv-index-36", "ubertooth-ducky", ("-A36",),
+              r"Error: advertising index must be 37, 38, or 39", smoke=True),
+    Rejection("ducky-adv-index-40", "ubertooth-ducky", ("-A40",),
+              r"Error: advertising index must be 37, 38, or 39"),
+    Rejection("ducky-bad-bdaddr", "ubertooth-ducky", ("-anot-an-address",),
+              r"Error parsing BD ADDR"),
+    Rejection("rx-uap-without-lap", "ubertooth-rx", ("-u", "12"),
+              r"Error: UAP but no LAP specified", smoke=True),
+    Rejection("rx-survey-with-address", "ubertooth-rx", ("-z", "-l", "123456"),
+              r"No address should be specified for survey mode"),
+    Rejection("specan-lower-below-band", "ubertooth-specan", ("-l", "2401"),
+              r"error: lower frequency must be 2402-2480 MHz", smoke=True),
+    Rejection("specan-upper-above-band", "ubertooth-specan", ("-u", "2481"),
+              r"error: upper frequency must be 2402-2480 MHz"),
+    Rejection("specan-lower-above-upper", "ubertooth-specan", ("-l", "2480", "-u", "2402"),
+              r"error: lower frequency must not exceed upper frequency"),
+)
+
+
+def _rejection_case(serial: str, rejection: Rejection) -> StateCase:
+    command = " ".join((rejection.tool,) + rejection.options)
+    pa_read = Step(
+        "read-pa-level",
+        "Read PA level",
+        _util(serial, PA_LEVEL.query),
+        observe=Observation(_PA_READ_KEY, PA_LEVEL.pattern),
+    )
+    verify_unchanged = tuple(
+        setting.verify(
+            serial,
+            f"verify-unchanged-{setting.key}",
+            f"Verify {setting.key} unchanged",
+            f"{setting.key} after rejection",
+            lambda context, s=setting: require(context, s.original),
+        )
+        for setting in _VALIDATED
+    ) + (
+        Step(
+            "verify-unchanged-pa-level",
+            "Verify PA level unchanged",
+            _util(serial, PA_LEVEL.query),
+            observe=Observation(
+                "pa-level after rejection", PA_LEVEL.pattern,
+                lambda context: require(context, _PA_READ_KEY),
+            ),
+        ),
+        _crc_read(serial, "verify-unchanged-crc", "Verify CRC unchanged",
+                  "crc after rejection", lambda context: require(context, "original crc")),
+    )
+    return StateCase(
+        f"reject-{rejection.case_id}",
+        f"Reject {command}",
+        (
+            _stop(serial, "establish-idle", "Establish idle before reading"),
+            _crc_read(serial, "read-original-crc", "Read original CRC", "original crc"),
+            pa_read,
+        )
+        + _read_originals(serial, _VALIDATED)
+        + (
+            Step(
+                "reject",
+                f"Reject {command}",
+                rejection.argv(serial),
+                timeout_s=MODE_TIMEOUT_S,
+                expected_returncodes=(1,),
+                output_patterns=(rejection.error,),
+                forbidden_patterns=(_ANY_MODE_START,),
+                mutates=True,
+            ),
+        )
+        + verify_unchanged,
+        _cleanup(serial, _VALIDATED, crc=True),
+        expected_state=(
+            "the tool refuses the argument with its own error and exit 1, starts "
+            "no mode, and channel, squelch, LEDs, PA level, and CRC are unchanged"
+        ),
+    )
+
+
+def argument_validation_cases(arguments, _resources, resource_identities):
+    serial = _serial(resource_identities, "Argument validation")
+    selected = (
+        REJECTIONS if arguments["coverage"] == "comprehensive"
+        else tuple(item for item in REJECTIONS if item.smoke)
+    )
+    return tuple(_rejection_case(serial, item) for item in selected)
+
+
+# ---------------------------------------------------------------------------
 # Conflicting continuous modes must be rejected before any mode starts
 
 _MODE_OPTIONS = (
