@@ -1000,14 +1000,18 @@ def ble_crc_cases(arguments, _resources, resource_identities):
 #
 # Each case is an argument the tool's own parser refuses (checked against the
 # fork sources in host/ubertooth-tools/src). The command must exit 1 with the
-# tool's error text, start no mode, and leave every readable setting as it
-# was. Every command still selects the board by serial, so a regression that
-# accepts the argument can only reach the selected board. Commands that would
-# transmit if a regression accepted them (btle -s, -i/-I, ducky -q) are not
-# used.
+# tool's error text, and leave every readable setting as it was. The
+# no-mode-start patterns match ubertooth-util's mode messages; for the other
+# tools a mode start would show as exit 0 or a step timeout, so exit 1 is the
+# check. Every command selects the board by serial, except the two `-U all`
+# cases (last -U wins), whose regression could reach every attached board:
+# guards detect that. Commands that would transmit if a regression accepted
+# them (btle -s, -i/-I, ducky -q/-b, util -t/-n/-e) are not used.
 
 _VALIDATED = (CHANNEL, SQUELCH, LEDS)
-_PA_READ_KEY = "pa-level before"
+# PA is read without PA_LEVEL's reject, so a board at PA 0 still runs the case
+# (cleanup then reports the PA restore as skipped, since -a0 is a query).
+_PA_READ_KEY = PA_LEVEL.original
 _ANY_MODE_START = r"Entering |Starting |Flashing LEDs|systime="
 
 
@@ -1040,8 +1044,9 @@ REJECTIONS = (
               r"Error: advertising index must be 37, 38, or 39"),
     Rejection("btle-adv-index-40", "ubertooth-btle", ("-A40",),
               r"Error: advertising index must be 37, 38, or 39"),
+    # btle prints only its usage text for a MAC it cannot parse.
     Rejection("btle-bad-target-mac", "ubertooth-btle", ("-tnot-a-mac",),
-              r"Usage:|usage:"),
+              r"Usage:"),
     Rejection("ego-length-0", "ubertooth-ego", ("-l0",),
               r"Length must be in \[1,48\]", smoke=True),
     Rejection("ego-length-49", "ubertooth-ego", ("-l49",),
@@ -1063,6 +1068,24 @@ REJECTIONS = (
     Rejection("specan-lower-above-upper", "ubertooth-specan", ("-l", "2480", "-u", "2402"),
               r"error: lower frequency must not exceed upper frequency"),
 )
+
+
+def _pa_restore_if_settable(serial: str) -> tuple[Step, Step]:
+    """Restore the original PA level; at PA 0 (which -a0 cannot set) only read
+    it, so the case still checks that a regression did not move it."""
+    def restore(context):
+        original = require(context, PA_LEVEL.original)
+        if PA_LEVEL.restorable(original):
+            return _util(serial, PA_LEVEL.set_arg(original))
+        return _util(serial, PA_LEVEL.query)
+
+    return (
+        Step("restore-pa-level", "Restore original PA level (read only at PA 0)",
+             restore, mutates=True),
+        PA_LEVEL.verify(serial, "verify-restored-pa-level", "Verify restored PA level",
+                        "restored pa-level",
+                        lambda context: require(context, PA_LEVEL.original)),
+    )
 
 
 def _rejection_case(serial: str, rejection: Rejection) -> StateCase:
@@ -1117,7 +1140,9 @@ def _rejection_case(serial: str, rejection: Rejection) -> StateCase:
             ),
         )
         + verify_unchanged,
-        _cleanup(serial, _VALIDATED, crc=True),
+        _cleanup(serial, _VALIDATED, crc=True)[:-1]
+        + _pa_restore_if_settable(serial)
+        + (_identity(serial),),
         expected_state=(
             "the tool refuses the argument with its own error and exit 1, starts "
             "no mode, and channel, squelch, LEDs, PA level, and CRC are unchanged"

@@ -12,12 +12,6 @@ class ParsingUbertooth(FakeUbertooth):
     test can prove the case catches it.
     """
 
-    ERRORS = {
-        "-c2401": "error: frequency must be 2402-2480 MHz (got 2401)",
-        "-c2481": "error: frequency must be 2402-2480 MHz (got 2481)",
-        "-C79": "error: channel must be 0-78 (got 79)",
-    }
-
     def __init__(self, *args, accept=(), change=(), **kwargs):
         super().__init__(*args, **kwargs)
         self.accept = set(accept)  # applied and exit 0
@@ -94,6 +88,16 @@ class ArgumentValidationTests(unittest.TestCase):
         self.assertTrue(all(e.status == "passed" for e in rejected))
         self.assertEqual("1", device.state["crc"])
 
+    def test_a_board_at_pa_0_still_runs_every_case(self):
+        device = ParsingUbertooth(crc="1")
+        device.state["pa"] = "0"
+
+        summary, events = run_test("Argument validation", device)
+
+        self.assertTrue(summary.passed, summary.failure_reason)
+        self.assertEqual(0, summary.skipped_cases)
+        self.assertEqual("0", device.state["pa"])
+
     def failed_cases(self, events):
         return [
             e.details["case_id"] for e in events
@@ -122,6 +126,7 @@ class ArgumentValidationTests(unittest.TestCase):
         self.assertEqual(1, len(failed))
         self.assertTrue(failed[0].endswith("reject-util-all-with-setter"))
         self.assertIn("Verify PA level unchanged", summary.failure_reason)
+        self.assertEqual("7", device.state["pa"])  # cleanup restored the original
 
 if __name__ == "__main__":
     unittest.main()
