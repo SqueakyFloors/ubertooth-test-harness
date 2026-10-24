@@ -17,6 +17,7 @@ from ubertooth_harness.cancellation import CancellationToken
 from ubertooth_harness.executor import CommandExecutor, CommandResult
 from ubertooth_harness.manifest import FileIdentity, SourceRevision
 from ubertooth_harness.preflight import host_version_patterns
+from ubertooth_harness.pytools import PYTHON_ENV, PYTHON_TOOLS_ENV
 from ubertooth_harness.events import EventPublisher
 
 
@@ -59,6 +60,8 @@ class BuildPlan:
     with_firmware: bool
     host_cmake_flags: tuple[str, ...]
     commands: tuple[BuildCommand, ...]
+    # Interpreter the Python tools are built for (ENABLE_PYTHON=ON), or None.
+    python: str | None = None
 
     @property
     def bin_dir(self) -> Path:
@@ -82,6 +85,14 @@ class BuildPlan:
         env["PATH"] = os.pathsep.join(
             item for item in (str(self.bin_dir), env.get("PATH", "")) if item
         )
+        if self.python:
+            # The Python-tool cases (pytools.py) run this interpreter and the
+            # wrappers in the prefix; without these they skip.
+            env[PYTHON_ENV] = self.python
+            env[PYTHON_TOOLS_ENV] = str(self.bin_dir)
+        else:
+            env.pop(PYTHON_ENV, None)
+            env.pop(PYTHON_TOOLS_ENV, None)
         return env
 
 
@@ -98,6 +109,7 @@ class BuildResult:
             "prefix": str(self.plan.prefix),
             "platform": self.plan.platform,
             "with_firmware": self.plan.with_firmware,
+            "python": self.plan.python,
             "host_cmake_flags": list(self.plan.host_cmake_flags),
             "toolchain": dict(self.toolchain),
             "host_version": self.host_version,
@@ -111,7 +123,21 @@ BUILT_TOOLS = (
     "ubertooth-tx", "ubertooth-dump", "ubertooth-btle", "ubertooth-dfu",
     "ubertooth-ego", "ubertooth-afh", "ubertooth-ducky",
 )
+# Installed by ENABLE_PYTHON=ON; their first line names the interpreter.
+PYTHON_TOOLS = ("ubertooth-specan-ui", "ubertooth-btbr")
 BUILD_DEADLINE_S = 3600.0
+
+
+def resolve_python(value: str, which: Callable[[str], str | None] = shutil.which) -> str:
+    """Absolute path of the interpreter named by --with-python.
+
+    Symlinks are kept: a virtual environment's python is a symlink, and
+    resolving it would lose that environment's packages.
+    """
+    found = which(value)
+    if found is None:
+        raise BuildError(f"--with-python: no Python interpreter {value!r} found")
+    return os.path.abspath(found)
 
 
 def missing_tools(
@@ -148,6 +174,7 @@ def plan_build(
     with_firmware: bool = False,
     extra_include_dir: str | None = None,
     jobs: int | None = None,
+    python: str | None = None,
 ) -> BuildPlan:
     if platform not in ("macos", "linux"):
         raise BuildError(f"unsupported build platform: {platform}")
@@ -161,8 +188,13 @@ def plan_build(
         f"-DCMAKE_INSTALL_RPATH={prefix / 'lib'}",
         "-DCMAKE_INSTALL_RPATH_USE_LINK_PATH=ON",
     )
-    host_flags = common + (
-        "-DENABLE_PYTHON=OFF",
+    if python:
+        # Python3_EXECUTABLE makes FindPython3 use exactly this interpreter;
+        # the wrappers' first line then names it.
+        python_flags = ("-DENABLE_PYTHON=ON", f"-DPython3_EXECUTABLE={python}")
+    else:
+        python_flags = ("-DENABLE_PYTHON=OFF",)
+    host_flags = common + python_flags + (
         "-DINSTALL_UDEV_RULES=OFF",
     )
     if platform == "linux":
@@ -268,7 +300,7 @@ def plan_build(
     )
     return BuildPlan(
         work, prefix, platform, ubertooth, libbtbb, with_firmware,
-        host_flags, tuple(commands),
+        host_flags, tuple(commands), python,
     )
 
 
@@ -362,6 +394,12 @@ class Builder:
             commands.append(("bluez", ("pkg-config", "--modversion", "bluez")))
         if plan.with_firmware:
             commands.append(("arm-none-eabi-gcc", ("arm-none-eabi-gcc", "--version")))
+        if plan.python:
+            commands.append(("python", (
+                plan.python, "-c",
+                "import platform, sys; "
+                "print('Python', platform.python_version(), sys.executable)",
+            )))
         missing_libraries = []
         self.publisher.emit(
             "build_step_started", "running",
@@ -436,13 +474,23 @@ class Builder:
                     f"{plan.ubertooth.expected_revision} and "
                     f"{plan.libbtbb.expected_revision}"
                 )
-        missing = [tool for tool in BUILT_TOOLS if not (plan.bin_dir / tool).is_file()]
+        expected_tools = BUILT_TOOLS + (PYTHON_TOOLS if plan.python else ())
+        missing = [tool for tool in expected_tools if not (plan.bin_dir / tool).is_file()]
         if missing:
             # Without this a missing tool would fall through to an installed one.
             raise BuildError(
                 "build did not install: " + ", ".join(missing)
                 + f" into {plan.bin_dir}"
             )
+        if plan.python:
+            for tool in PYTHON_TOOLS:
+                with open(plan.bin_dir / tool, encoding="utf-8", errors="replace") as file:
+                    first = file.readline().strip()
+                if first != f"#!{plan.python}":
+                    raise BuildError(
+                        f"{tool} runs {first[2:] or 'nothing'!r}, not the "
+                        f"--with-python interpreter {plan.python}"
+                    )
         return BuildResult(
             plan,
             toolchain,

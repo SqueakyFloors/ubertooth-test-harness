@@ -9,9 +9,20 @@ suites:
         hosts: each
         coverage: smoke
 
+    # No Ubertooth. specan-ui needs --build --with-python and numpy/qtpy,
+    # else it is skipped.
+    - Python tools:
+        hosts: each
+        coverage: smoke
+
     - Ubertooth count:
         hosts: each
         Ubertooth: default
+
+    - BLE extcap interfaces:
+        hosts: each
+        Ubertooth: default
+        coverage: smoke
 
     - Ubertooth identity:
         hosts: each

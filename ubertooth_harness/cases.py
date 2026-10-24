@@ -32,9 +32,22 @@ class CommandCase:
     # The tool is built only on some hosts (for example the BlueZ tools): a
     # tool the executor cannot start skips the case instead of failing it.
     optional_tool: bool = False
+    # Exit status by which the command says it cannot run on this host (for
+    # example pytools.py without a Python-tool build); its "SKIP: <reason>"
+    # output line is the skip reason.
+    skip_returncode: int | None = None
 
     def missing_tool(self, result) -> str:
-        """The skip reason when an optional tool is not installed, else ''."""
+        """The skip reason when the case cannot run on this host, else ''."""
+        if (
+            self.skip_returncode is not None
+            and result.returncode == self.skip_returncode
+            and not result.timed_out
+            and not result.cancelled
+        ):
+            match = re.search(r"(?m)^SKIP: (.+)$", result.stdout)
+            if match:
+                return f"{self.name}: skipped, {match[1].strip()}"
         if (
             self.optional_tool
             and result.returncode == 127

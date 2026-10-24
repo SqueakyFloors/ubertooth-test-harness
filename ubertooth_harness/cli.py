@@ -16,6 +16,7 @@ from ubertooth_harness.build import (
     homebrew_include_dir,
     plan_build,
     require_tools,
+    resolve_python,
 )
 from ubertooth_harness.cancellation import CancellationToken
 
@@ -41,6 +42,7 @@ from ubertooth_harness.manifest import (
     build_run_manifest,
 )
 from ubertooth_harness.plan import PlanError, load_plan
+from ubertooth_harness import pytools
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.planner import PlanCompiler, PlanningError
 from ubertooth_harness.preflight import PreflightError, PreflightPolicy
@@ -75,6 +77,15 @@ def _add_build_options(parser: argparse.ArgumentParser, *, optional: bool) -> No
         action="store_true",
         help="also build bluetooth_rxtx firmware (needs arm-none-eabi-gcc); "
         "the image is recorded, not flashed",
+    )
+    parser.add_argument(
+        "--with-python",
+        nargs="?",
+        const="python3",
+        metavar="PYTHON",
+        help="also build the Python tools (ENABLE_PYTHON=ON) for PYTHON "
+        "(default python3 on PATH), recorded in the manifest; "
+        "ubertooth-specan-ui also needs numpy, qtpy and a Qt binding there",
     )
 
 
@@ -117,10 +128,11 @@ def _signals_cancel(token: CancellationToken):
             signal.signal(signum, handler)
 
 
-def _build(sources, work_dir: Path, with_firmware: bool, publisher):
+def _build(sources, work_dir: Path, with_firmware: bool, publisher, with_python=None):
     """Build resolved sources into work_dir, recording into the run's publisher."""
     platform = _detected_platform()
     require_tools(platform, with_firmware)
+    python = resolve_python(with_python) if with_python else None
     by_name = {source.name: source for source in sources}
     probe = SubprocessCommandExecutor()
     plan = plan_build(
@@ -130,6 +142,7 @@ def _build(sources, work_dir: Path, with_firmware: bool, publisher):
         platform=platform,
         with_firmware=with_firmware,
         extra_include_dir=homebrew_include_dir(probe) if platform == "macos" else None,
+        python=python,
     )
     work_dir.mkdir(parents=True, exist_ok=True)
     with _signals_cancel(CancellationToken()) as token:
@@ -175,7 +188,7 @@ def _build_command(args: argparse.Namespace) -> int:
     publisher = open_run_publisher(output, generate_run_id(), TerminalEventSink(sys.stderr))
     publisher.emit("run_started", "running", run_started_details("build", "build", "", sources))
     try:
-        result = _build(sources, output, args.with_firmware, publisher)
+        result = _build(sources, output, args.with_firmware, publisher, args.with_python)
     except BuildError as error:
         _finish_failed_run(publisher, output, str(error))
         raise
@@ -462,16 +475,18 @@ def _prepare_run(
 ):
     """Build (when requested), then the manifest and preflight checks."""
     built = None
-    executor = SubprocessCommandExecutor()
+    executor = SubprocessCommandExecutor(_test_environment(sources, None))
     if publisher is not None:
-        built = _build(sources, run_dir / "build", args.with_firmware, publisher)
+        built = _build(
+            sources, run_dir / "build", args.with_firmware, publisher, args.with_python
+        )
         artifacts = artifacts + built.artifacts
         names = {item.name for item in artifacts}
         if built.plan.with_firmware and "test build" not in names:
             # The firmware just built is the plan's test image.
             artifacts += (FileIdentity.from_path("test build", built.plan.firmware_image),)
         # Every test command runs the tools just built, not installed ones.
-        executor = SubprocessCommandExecutor(built.plan.environment())
+        executor = SubprocessCommandExecutor(_test_environment(sources, built.plan))
     manifest = build_run_manifest(
         run_id=run_id,
         plan_name=plan.name,
@@ -487,6 +502,23 @@ def _prepare_run(
     )
     preflight_checks = preflight_policy.compile(invocations, manifest)
     return manifest, preflight_checks, executor, built
+
+
+def _test_environment(sources, plan) -> dict:
+    """Environment of the test commands: the build's (prefix first) when the
+    run built, and where pytools.py finds the resolved Ubertooth commit."""
+    env = plan.environment() if plan is not None else {
+        key: value for key, value in os.environ.items()
+        if key not in (pytools.PYTHON_ENV, pytools.PYTHON_TOOLS_ENV)
+    }
+    ubertooth = next(source for source in sources if source.name == "Ubertooth")
+    # The build's clone is at the resolved commit; the given checkout holds it.
+    env[pytools.SOURCE_ENV] = (
+        str(plan.work_dir / "src" / "ubertooth") if plan is not None
+        else ubertooth.source_path
+    )
+    env[pytools.COMMIT_ENV] = ubertooth.commit
+    return env
 
 
 def _parse_artifacts(values: list[str]) -> tuple[FileIdentity, ...]:
@@ -546,6 +578,8 @@ def _run_suite(args: argparse.Namespace) -> int:
     sources = _resolve_sources(args)
     if args.with_firmware and not args.build:
         raise HarnessError("--with-firmware requires --build")
+    if args.with_python and not args.build:
+        raise HarnessError("--with-python requires --build")
     if args.build and not args.libbtbb_source:
         raise HarnessError("--build requires --libbtbb-source and --libbtbb-ref")
     artifacts = _parse_artifacts(args.artifact)
