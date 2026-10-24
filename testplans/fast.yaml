@@ -66,4 +66,11 @@ suites:
     - Classic Bluetooth receive:
         hosts: each
         Ubertooth: default
-        duration: 8s
+        coverage: smoke
+        duration: 3s
+
+    - Raw receive:
+        hosts: each
+        Ubertooth: default
+        coverage: smoke
+        duration: 3s

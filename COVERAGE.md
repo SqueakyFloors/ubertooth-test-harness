@@ -19,7 +19,7 @@ test is in no plan. The notes say what is missing.
 `bluetooth_rxtx`, a second device, or is destructive. The notes say which.
 **N/A**: nothing to test (for example a no-op).
 Tests that are only catalog entries (`BLE monitor`, `Spectrum RSSI sanity`,
-`Classic Bluetooth receive`, the soaks, and every `backlog.yaml` item) have no
+the soaks, and every `backlog.yaml` item) have no
 implementation yet. They count as Not covered.
 
 Harness-wide checks that use the CLIs:
@@ -178,32 +178,32 @@ Combinations: `--padding` without `--wifi`, `--wifi` with `-l`/`-u`: Not covered
 | `-h` | help | Covered | Host CLI surface (exit 1) |
 | `-l <LAP>` | LAP to decode | Not covered | A useful test needs a BR/EDR piconet |
 | `-u <UAP>` | UAP to decode | Not covered | Needs `-l` and a piconet |
-| `-z` | survey mode | Not covered | Classic Bluetooth receive is catalog-only |
+| `-z` | survey mode | Covered | Classic Bluetooth receive (smoke): `-z -t N` exits 0 after N s; `Survey Results` and piconet address lines |
 | `-i <file>` | input file instead of a device | Not covered | Raw receive replay is in the backlog; no hardware needed |
-| `-c <ch>` | fixed BT channel | Not covered | |
-| `-e <0-4>` | max access-code errors | Not covered | |
-| `-t <s>` | sniff timeout | Not covered | Bounds a live receive without `timeout` |
-| `-r<file>` | PCAPNG capture | Not covered | |
-| `-q<file>` | PCAP capture | Not covered | |
-| `-d<file>` | binary dump | Not covered | |
-| `-s` | deprecated sweep flag | Not covered | Prints a deprecation notice only |
+| `-c <ch>` | fixed BT channel | Covered | Classic Bluetooth receive (comprehensive): `-c 39`, every packet on channel 39. No range check: `-c 79` tunes 2481 MHz ([ubertooth#155](https://github.com/SqueakyFloors/ubertooth/issues/155)); the usage's "Default: 39" is wrong, the default sweeps ([ubertooth#186](https://github.com/SqueakyFloors/ubertooth/issues/186)) |
+| `-e <0-4>` | max access-code errors | Covered | Classic Bluetooth receive (comprehensive): `-e 0` and `-e 4`, no packet over the limit. `-e 5` is accepted ([ubertooth#155](https://github.com/SqueakyFloors/ubertooth/issues/155)) |
+| `-t <s>` | sniff timeout | Covered | Classic Bluetooth receive: every `ubertooth-rx` case must exit 0 by itself, no earlier than N-0.5 s and within N+5 s |
+| `-r<file>` | PCAPNG capture | Covered | Classic Bluetooth receive (smoke): pcapng, link type 255; repeated `-r` keeps the first (comprehensive) |
+| `-q<file>` | PCAP capture | Covered | Classic Bluetooth receive (comprehensive): pcap, link type 255 |
+| `-d<file>` | binary dump | Partial | Classic Bluetooth receive (comprehensive): whole 68-byte BR records (`rxdump.py`). Records are written only for packets found, so with no traffic the file is empty |
+| `-s` | deprecated sweep flag | Covered | Classic Bluetooth receive (comprehensive): deprecation notice on stderr |
 | `-V` | version | Covered | Host CLI surface (fast, release): host version line |
-| `-U <0-7>` | select device | Not covered | |
+| `-U <0-7>` | select device | Covered | Classic Bluetooth receive by serial, guard board unchanged |
 
-Combinations: `-u` without `-l` rejected: Covered (Argument validation, smoke). `-z` with an address rejected: Covered (Argument validation, comprehensive). `-z -t N` exits after N s: Not covered. `-i` replay into `-r`/`-q`: Not covered.
+Combinations: `-u` without `-l` rejected: Covered (Argument validation, smoke). `-z` with an address rejected: Covered (Argument validation, comprehensive). `-z -t N` exits after N s: Covered (Classic Bluetooth receive, smoke). `-i` replay into `-r`/`-q`: Not covered.
 
 ## ubertooth-dump
 
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
 | `-h` | help | Covered | Host CLI surface (exit 1) |
-| `-b` | raw bitstream only | Not covered | |
-| `-c` | classic modulation | Not covered | |
-| `-l` | LE modulation | Not covered | |
-| `-d <file>` | write to a file | Not covered | |
-| `-U<0-7>` | select device | Not covered | |
+| `-b` | raw bitstream only | Covered | Raw receive (smoke): 401-byte records of 400 `0`/`1` symbols and a newline |
+| `-c` | classic modulation | Covered | Raw receive (comprehensive): `-l -c` leaves MDMCTRL 0x0029 (read with `ubertooth-debug`) |
+| `-l` | LE modulation | Covered | Raw receive (comprehensive): `-l` and `-c -l` leave MDMCTRL 0x0040 |
+| `-d <file>` | write to a file | Covered | Raw receive (smoke): whole 68-byte records (host time, usb_pkt_rx), at least 50 per second (`rxdump.py`) |
+| `-U<0-7>` | select device | Covered | Raw receive by serial, guard board unchanged |
 
-Combinations: `-c` with `-l`: last one wins (per source). Not covered. Output size over a bounded run: Not covered.
+Combinations: `-c` with `-l`: last one wins. Covered (Raw receive, comprehensive). Output size over a bounded run: Covered (record count). Output to stdout: Not covered (it would log raw symbols).
 
 ## ubertooth-tx
 
@@ -224,12 +224,12 @@ Combinations: `-c` with `-l`: last one wins (per source). Not covered. Output si
 | `-l <LAP>` | target LAP | Hard | Needs a BR/EDR piconet using AFH (Recover AFH map is in the backlog) |
 | `-u <UAP>` | target UAP | Hard | Same |
 | `-m <n>` | channel-removal threshold | Hard | Same |
-| `-r` | print the map every second | Hard | Same |
-| `-t <s>` | initial detection timeout | Not covered | Timeout without a piconet is testable |
-| `-e <0-4>` | max access-code errors | Not covered | |
+| `-r` | print the map every second | Partial | Classic Bluetooth receive (comprehensive): one `<time> <80 bits>` line per second without a piconet. Map content needs a piconet |
+| `-t <s>` | initial detection timeout | Covered | Classic Bluetooth receive (smoke): the map is printed after N s and the tool keeps monitoring until stopped. With no packets the map is all zeros and nothing says so ([ubertooth#187](https://github.com/SqueakyFloors/ubertooth/issues/187)) |
+| `-e <0-4>` | max access-code errors | Partial | Classic Bluetooth receive (comprehensive): `-e 2` accepted. No range check ([ubertooth#155](https://github.com/SqueakyFloors/ubertooth/issues/155)) |
 | `-a <map>` | initial AFH map (undocumented) | N/A | Parsed and ignored (the code is commented out) |
 | `-V` | version | Covered | Host CLI surface (fast, release): host version line |
-| `-U <0-7>` | select device | Not covered | |
+| `-U <0-7>` | select device | Covered | Classic Bluetooth receive by serial; strict: an unknown serial must exit 1, fails until [ubertooth#185](https://github.com/SqueakyFloors/ubertooth/issues/185) (segfault) |
 
 ## ubertooth-ego
 
@@ -237,12 +237,12 @@ Combinations: `-c` with `-l`: last one wins (per source). Not covered. Output si
 |---|---|---|---|
 | `-h` | help | Covered | Host CLI surface |
 | `-f` | follow mode | Hard | Needs an E-GO skateboard (backlog) |
-| `-r` | continuous RX on one channel | Not covered | Runs without a peer (no packets expected) |
+| `-r` | continuous RX on one channel | Covered | Raw receive (smoke): `-r -c 2440` runs until stopped; any packet line must be on 2440 MHz |
 | `-i` / `-j` | interfere (`-j` alias) | Hard | Transmits RF |
-| `-c <2402-2480>` | RX channel (MHz) | Not covered | Used with `-r` |
-| `-l <1-48>` | capture length | Partial | `-l0` (smoke) and `-l49` rejected: Argument validation. Accepted lengths are not tested |
-| `-a <code>` | access code | Not covered | |
-| `-U <index\|serial>` | select device | Not covered | |
+| `-c <2402-2480>` | RX channel (MHz) | Partial | Raw receive: `-c 2440` accepted; the channel cannot be read during the mode. `-c 2500` is accepted ([ubertooth#155](https://github.com/SqueakyFloors/ubertooth/issues/155)) |
+| `-l <1-48>` | capture length | Covered | `-l1` and `-l48` accepted (Raw receive, comprehensive); `-l0` (smoke) and `-l49` rejected: Argument validation |
+| `-a <code>` | access code | Covered | Raw receive (comprehensive): `-a 630f9ffe` accepted, `-a zz` rejected with exit 1 |
+| `-U <index\|serial>` | select device | Covered | Raw receive by serial, guard board unchanged |
 
 Combinations: two or more of `-f`/`-r`/`-i`: last one wins (`do_mode` is overwritten, per source). Not covered; `-i` transmits.
 
@@ -323,6 +323,9 @@ and fail until the fix is on the commit under test.
 | [#171](https://github.com/SqueakyFloors/ubertooth/issues/171) | ubertooth-btle | Bad `-a` value sets garbage; `-a` skips `-v` and a later set | Open | BLE settings (comprehensive) |
 | [#172](https://github.com/SqueakyFloors/ubertooth/issues/172) | ubertooth-util | Non-numeric and out-of-range values accepted (`-z`, `-l`, `-d`, `-C`, `-q`) | Open | To add to Argument validation |
 | [#173](https://github.com/SqueakyFloors/ubertooth/issues/173) | ubertooth-specan | A run first reports one stale packet from the previous range | Open | Spectrum analyzer (comprehensive) |
+| [#185](https://github.com/SqueakyFloors/ubertooth/issues/185) | ubertooth-afh | Segmentation fault when the selected board is not found | Open | Classic Bluetooth receive (comprehensive) |
+| [#186](https://github.com/SqueakyFloors/ubertooth/issues/186) | ubertooth-rx | Usage says `-c` defaults to channel 39; the default sweeps | Open | None (usage text) |
+| [#187](https://github.com/SqueakyFloors/ubertooth/issues/187) | ubertooth-afh | `-t` with no packets prints an all-zero map and keeps running, undocumented | Open | None: no expected message is defined yet |
 
 A failed test ends the run ([#41](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/41)), so the release plan lists the tests with strict cases last.
 
@@ -362,8 +365,8 @@ Next, harness work:
 5. Done (#29): `BLE settings` (`-a`, `-t`, `-x`) and `-r` with `-q`/`-c`. Still open: `-r -` to stdout (would log raw capture bytes; needs a header-only check).
 6. Done (#32): `Debug registers` lists, ranges, verbosity, exit status.
 7. Raw receive replay: `ubertooth-rx -i <fixture>` with `-r`/`-q`/`-d`. Needs a public, synthetic fixture.
-8. Implement BLE monitor / Classic Bluetooth receive (`ubertooth-rx -z -t N`,
-   `ubertooth-dump -c/-l -d`, `ubertooth-ego -r -c`), checking exit and output shape, not content.
+8. Done (#31): `Classic Bluetooth receive` (`ubertooth-rx`, `ubertooth-afh`) and `Raw receive`
+   (`ubertooth-dump`, `ubertooth-ego -r`). Still open: BLE monitor.
 9. Add Ubertooth util conflicts to the release plan (fork #82 is fixed; [#25](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/25));
    add `-f`/`-i` rejection cases only if no accepted pair can reach those modes.
 10. Headless `ubertooth-specan-ui -h` and argument checks; `btle-extcap --extcap-interfaces/--extcap-dlts/--extcap-config`.
