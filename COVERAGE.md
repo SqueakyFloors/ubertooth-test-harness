@@ -182,7 +182,7 @@ Combinations: `-l` > `-u` rejected: Covered (Argument validation). `-g` vs `-G` 
 
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
-| `-h` | help (argparse) | Not covered | The harness builds with `ENABLE_PYTHON=OFF`, so specan-ui is not installed ([#37](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/37)) |
+| `-h` | help (argparse) | Covered | Python tools: usage with `-U`, `-l`, `-u`, `--wifi`, `--padding`, no display; needs `run-suite --build --with-python` and numpy, qtpy, and a Qt binding in that Python, else skipped with the reason |
 | `-U <index\|serial>` | select device | Hard | Qt GUI |
 | `-l <freq>` | lower frequency | Hard | GUI. The argument checks could run before the window opens |
 | `-u <freq>` | upper frequency | Hard | GUI; `-u` < `-l` must be rejected |
@@ -315,14 +315,17 @@ Combinations: two or more of `-f`/`-r`/`-i`: last one wins (`do_mode` is overwri
 
 ## btle-extcap (Python, Wireshark extcap; not installed by CMake)
 
+Run from the resolved Ubertooth commit (`git show`), with the `--with-python`
+interpreter or `python3`.
+
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
-| `-h`, `--help` | help | Not covered | |
-| `--extcap-interfaces` | list interfaces | Not covered | Host-side; needs the Python tools installed ([#37](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/37)) |
-| `--extcap-dlts` | list DLTs | Not covered | Host-side; needs the Python tools installed ([#37](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/37)) |
-| `--extcap-config` | config options | Not covered | Host-side; needs the Python tools installed ([#37](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/37)) |
+| `-h`, `--help` | help | Covered | Python tools: exit 0, `Usage:`. Strict (comprehensive): it names `--list-interfaces`, `--list-dlts`, `--config`, which do not exist ([ubertooth#268](https://github.com/SqueakyFloors/ubertooth/issues/268)) |
+| `--extcap-interfaces` | list interfaces | Covered | BLE extcap interfaces: one `ubertooth<N>` line per attached board, guards unchanged. Strict (comprehensive): each shows the serial; with two or more boards it shows `0:` ([ubertooth#269](https://github.com/SqueakyFloors/ubertooth/issues/269)) |
+| `--extcap-dlts` | list DLTs | Covered | Python tools: DLT 256 `DLT_BLUETOOTH_LE_LL_WITH_PHDR`; without an interface exits 1 (comprehensive) |
+| `--extcap-config` | config options | Covered | Python tools: `--channel` selector, 37 (default), 38, 39; a non-Ubertooth interface exits 1 (comprehensive) |
 | `--capture` | start a capture | Not covered | Needs a device; check the FIFO header |
-| `--extcap-interface=` | interface | Not covered | |
+| `--extcap-interface=` | interface | Covered | `ubertooth0` with `--extcap-dlts`/`--extcap-config`; `wlan0` refused (comprehensive) |
 | `--fifo=` | output FIFO | Not covered | |
 | `--channel=` | advertising channel | Not covered | |
 
@@ -364,6 +367,8 @@ and fail until the fix is on the commit under test.
 | [#236](https://github.com/SqueakyFloors/ubertooth/issues/236) | ubertooth-rx | `-u` without `-l` is refused only after the board is opened | Fixed on main (`57469f2`) | Raw receive replay (comprehensive, no Ubertooth: `-i <file> -u`); Argument validation for the bare `-u` |
 | [#239](https://github.com/SqueakyFloors/ubertooth/issues/239) | firmware | Boards still stop answering control requests (-7) after a stream ends, until re-plugged | Open | Any streaming test |
 | [#267](https://github.com/SqueakyFloors/ubertooth/issues/267) | ubertooth-dfu | `-d <image> -r` exits 1 ("Detach failed") after a good flash and skips the revision check | Open (regression in `3c92a19`) | Flash reliability and DFU images (every write fails at 6fee30c) |
+| [#268](https://github.com/SqueakyFloors/ubertooth/issues/268) | btle-extcap | `-h` names options that do not exist (`--list-interfaces`, `--list-dlts`, `--config`) | Open | Python tools (comprehensive, strict) |
+| [#269](https://github.com/SqueakyFloors/ubertooth/issues/269) | btle-extcap | With two or more boards, `--extcap-interfaces` shows `0:` instead of the serial | Open | BLE extcap interfaces (comprehensive, strict) |
 
 A test that fails cleanly (device verified restored, guards unchanged) no longer ends the run ([#41](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/41)), so strict cases do not hide later tests.
 
@@ -407,7 +412,7 @@ Next, harness work:
    (`ubertooth-dump`, `ubertooth-ego -r`). Still open: BLE monitor.
 9. Add Ubertooth util conflicts to the release plan after a passing hardware run (fork #82 is fixed; [#25](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/25));
    add `-f`/`-i` rejection cases only if no accepted pair can reach those modes.
-10. Headless `ubertooth-specan-ui -h` and argument checks; `btle-extcap --extcap-interfaces/--extcap-dlts/--extcap-config`.
+10. Done (#37): headless `ubertooth-specan-ui -h` (`--build --with-python`) and `btle-extcap --extcap-interfaces/--extcap-dlts/--extcap-config`. Still open: specan-ui argument checks, `btle-extcap --capture`.
 11. Done (#28): `ubertooth-scan -h` and `ubertooth-follow -h` (skipped where not built).
 12. Peer-based tests from the backlog (known BLE advertiser, AFH map,
     piconet follow, two-board range test), once fixtures are registered.

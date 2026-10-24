@@ -9,3 +9,8 @@ suites:
     - Raw receive replay:
         hosts: each
         coverage: smoke
+
+    # specan-ui is skipped without --build --with-python and numpy/qtpy.
+    - Python tools:
+        hosts: each
+        coverage: smoke

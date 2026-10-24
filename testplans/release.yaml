@@ -8,6 +8,18 @@ suites:
         hosts: each
         Ubertooth: default
 
+    # No Ubertooth. Strict extcap-help-options fails until fork #268 is fixed.
+    - Python tools:
+        hosts: each
+        coverage: comprehensive
+
+    # Strict extcap-interfaces-serials fails with two or more boards until
+    # fork #269 is fixed.
+    - BLE extcap interfaces:
+        hosts: each
+        Ubertooth: default
+        coverage: comprehensive
+
     - Ubertooth identity:
         hosts: each
         Ubertooth: default

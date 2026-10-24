@@ -71,7 +71,7 @@ run_build() {
     .venv/bin/python -m ubertooth_harness build \
         --ubertooth-source "$ut" --ubertooth-ref "${UBERTOOTH_REF:-main}" \
         --libbtbb-source "$bb" --libbtbb-ref "${LIBBTBB_REF:-master}" \
-        --output "$WORK/build" > "$WORK/build.json"
+        --with-python --output "$WORK/build" > "$WORK/build.json"
     cat "$WORK/build.json"
     "$WORK/build/prefix/bin/ubertooth-util" -H
     test -z "$(git -C "$ut" status --porcelain)"
