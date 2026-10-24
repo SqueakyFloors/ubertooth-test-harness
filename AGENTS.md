@@ -27,3 +27,5 @@
   and implemented fail-closed.
 - Never commit credentials, authentication tokens, employee data, or captured
   device traffic.
+- Keep `COVERAGE.md` current: a PR that adds or changes test coverage of a
+  CLI option updates its rows in the same PR.
