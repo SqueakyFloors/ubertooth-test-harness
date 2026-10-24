@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import pwd
+import re
 import shutil
 import signal
 import socket
@@ -533,8 +534,20 @@ class HarnessOpenTest(unittest.TestCase):
         for line in HARNESS_OPEN.read_text(encoding="utf-8").splitlines():
             if line.lstrip().startswith("#"):
                 continue
-            # host= and jump= may only take their value from a variable.
-            self.assertNotRegex(line, r"^(host|jump)=[^$]")
+            # host and jump may only come from HARNESS_* or an option value,
+            # never from a literal or a literal fallback.
+            for name, value in re.findall(r"\b(host|jump)=([^\s;]*)", line):
+                self.assertRegex(
+                    value, r"^(\$\{HARNESS_[A-Z_]+-\}|\$2)$", f"{name}: {line}"
+                )
+
+    @unittest.skipIf(os.geteuid() == 0, "running as root owns every file")
+    def test_refuses_a_config_file_it_does_not_own(self):
+        result = self.lab.run(
+            "harness-open", "--dry-run", HARNESS_OPEN_CONFIG="/etc/hosts",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not owned by you", result.stderr)
 
     def test_refuses_to_run_without_a_host(self):
         result = self.lab.run("harness-open", "--dry-run", HARNESS_HOST=None)

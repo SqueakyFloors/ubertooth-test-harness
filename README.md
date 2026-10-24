@@ -943,8 +943,8 @@ outstanding request, and each caller has its own timeout.
 ## Deploy on the lab host
 
 Single-node deploy: the controller and one runner run as systemd user services
-of the account that owns the checkout (on the lab host, `deploy`; no sudo
-needed), the GUI is opened from the desktop or through a tunnel. The scripts
+of the account that owns the checkout (no sudo needed), the GUI is opened from
+the desktop or through a tunnel. The scripts
 touch only the checkout's `.venv`, the harness data directory, the two user
 units, and the desktop launcher. Linux with systemd only for now; on macOS
 `deploy.sh` stops with an error (launchd is not supported yet).
@@ -996,7 +996,7 @@ is on. `deploy.sh` checks `loginctl show-user $USER -p Linger` and, when it is
 itself:
 
 ```sh
-sudo loginctl enable-linger deploy
+sudo loginctl enable-linger <user>
 ```
 
 **Desktop shortcut.** On the lab host's own desktop, run as the desktop
@@ -1025,12 +1025,17 @@ scripts/harness-open --host lab2 --jump bastion --port 8765 --dry-run
 ```
 
 No host is built in: `--host`, `HARNESS_HOST`, or `HARNESS_HOST=...` in a
-private config file (`$HARNESS_OPEN_CONFIG`, by default
-`~/.config/ubertooth-harness/harness-open.conf`, which is never committed)
-names the lab host, and `--jump` / `HARNESS_JUMP` / `HARNESS_JUMP=...` the
-jump host (unset or empty means a direct connection). Options win over the
-environment, which wins over the file; with no host the script stops and says
-how to set one.
+private config file names the lab host, and `--jump` / `HARNESS_JUMP` /
+`HARNESS_JUMP=...` the jump host (unset or empty means a direct connection).
+`HARNESS_PORT` sets the default port. An option wins over the environment,
+which wins over the file; with no host the script stops and says how to set
+one.
+
+The config file is `$HARNESS_OPEN_CONFIG`, by default
+`$XDG_CONFIG_HOME/ubertooth-harness/harness-open.conf` (so
+`~/.config/ubertooth-harness/harness-open.conf` unless `XDG_CONFIG_HOME` is
+set), outside the checkout and never committed. It is sourced as shell, so it
+must be owned by you; the script refuses it otherwise.
 
 The forward is `-L 127.0.0.1:LOCAL:127.0.0.1:PORT` on every hop: it binds
 only the laptop's loopback and reaches only the controller's loopback listener
@@ -1069,7 +1074,7 @@ without GitHub Actions, locally or on another host over SSH:
 
 ```sh
 scripts/local-ci.sh                       # HEAD, this host
-scripts/local-ci.sh -r <sha> -s "ssh lab-host"
+scripts/local-ci.sh -r <sha> -s "ssh lab-host.example"
 ```
 
 The target-runner tests run against an in-process stub controller, and the

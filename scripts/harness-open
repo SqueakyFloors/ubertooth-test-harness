@@ -9,9 +9,16 @@
 # No host is built in. Name the lab host with --host, with HARNESS_HOST in the
 # environment, or in a private config file of shell assignments (HARNESS_HOST,
 # HARNESS_JUMP, HARNESS_PORT) at $HARNESS_OPEN_CONFIG, by default
-# ~/.config/ubertooth-harness/harness-open.conf. The script refuses to run
-# without one. The jump host comes the same way; unset or empty means a direct
-# connection. Options win over the environment, which wins over the file.
+# $XDG_CONFIG_HOME/ubertooth-harness/harness-open.conf (so
+# ~/.config/ubertooth-harness/harness-open.conf unless XDG_CONFIG_HOME is set).
+# The script refuses to run without one. The jump host comes the same way;
+# unset or empty means a direct connection.
+#
+# An option wins over the environment, which wins over the file. An empty
+# HARNESS_JUMP is a choice (no jump host) and wins; an empty HARNESS_HOST or
+# HARNESS_PORT is nothing to go on and falls through to the file. The file is
+# sourced as shell, so it must be owned by you; the script refuses it
+# otherwise.
 #
 # Both ends are loopback only: the forward is
 # -L 127.0.0.1:LOCAL:127.0.0.1:PORT, so nothing else on the laptop's network
@@ -30,7 +37,8 @@
 #   --host HOST         controller host (default $HARNESS_HOST; required)
 #   --jump JUMP         SSH jump host or alias (default $HARNESS_JUMP;
 #                       "" for none)
-#   --port N            controller port on HOST (default 8765)
+#   --port N            controller port on HOST (default $HARNESS_PORT, or
+#                       8765)
 #   --local-port N      port on this machine (default: --port). The controller
 #                       accepts only Host: 127.0.0.1:PORT, so a different
 #                       local port gets 403 from it.
@@ -44,6 +52,10 @@
 #   -h, --help          this help
 set -euo pipefail
 
+say() { printf 'harness-open: %s\n' "$*" >&2; }
+die() { printf 'harness-open: error: %s\n' "$*" >&2; exit 1; }
+usage() { sed -n '2,/^set -euo/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; }
+
 config=${HARNESS_OPEN_CONFIG:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/ubertooth-harness/harness-open.conf}
 # The environment wins over the config file, so remember it before sourcing.
 env_host=${HARNESS_HOST-}
@@ -51,6 +63,9 @@ env_jump=${HARNESS_JUMP-}
 env_jump_set=${HARNESS_JUMP+yes}
 env_port=${HARNESS_PORT-}
 if [ -f "$config" ]; then
+    # Sourcing runs whatever the file contains, so only accept your own file;
+    # $HARNESS_OPEN_CONFIG could otherwise point at a shared one.
+    [ -O "$config" ] || die "$config is not owned by you; refusing to source it"
     # The file is the user's own and lives outside the repository, so there
     # is nothing for a linter to follow.
     # shellcheck source=/dev/null
@@ -63,6 +78,7 @@ fi
 host=${HARNESS_HOST-}
 jump=${HARNESS_JUMP-}
 port=${HARNESS_PORT:-8765}
+host_option=0
 local_port=
 jump_socket=
 two_hop=0
@@ -70,16 +86,12 @@ wait_s=60
 browser=1
 dry_run=0
 
-say() { printf 'harness-open: %s\n' "$*" >&2; }
-die() { printf 'harness-open: error: %s\n' "$*" >&2; exit 1; }
-usage() { sed -n '2,/^set -euo/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; }
-
 while [ "$#" -gt 0 ]; do
     case $1 in
         --host|--jump|--port|--local-port|--jump-socket|--wait)
             [ "$#" -ge 2 ] || die "$1 needs a value"
             case $1 in
-                --host) host=$2 ;;
+                --host) host=$2; host_option=1 ;;
                 --jump) jump=$2 ;;
                 --port) port=$2 ;;
                 --local-port) local_port=$2 ;;
@@ -115,7 +127,10 @@ check_name() {
         -*|*[!A-Za-z0-9._@-]*) die "$1 must be a host name or SSH alias: $2" ;;
     esac
 }
-[ -n "$host" ] || die "no lab host: pass --host HOST, set HARNESS_HOST, or put HARNESS_HOST=... in $config"
+if [ -z "$host" ]; then
+    [ "$host_option" = 0 ] || die "--host must not be empty"
+    die "no lab host: pass --host HOST, set HARNESS_HOST, or put HARNESS_HOST=... in $config"
+fi
 check_name --host "$host"
 [ -z "$jump" ] || check_name --jump "$jump"
 [ "$two_hop" = 0 ] || [ -n "$jump" ] || die "--two-hop needs --jump"
