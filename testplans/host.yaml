@@ -1,0 +1,11 @@
+plan: Ubertooth host only
+# Tests that need no Ubertooth: they run on a host with none registered or
+# attached, such as the CI build job (scripts/ci.sh build).
+suites:
+  host:
+    - Host CLI surface:
+        hosts: each
+
+    - Raw receive replay:
+        hosts: each
+        coverage: smoke
