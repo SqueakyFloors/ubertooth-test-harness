@@ -37,6 +37,8 @@ GUARDED_TESTS = (
     "BLE CRC transitions",
     "BLE mode conflicts",
     "Ubertooth util conflicts",
+    "Ubertooth util modes",
+    "Multi-board selection",
 )
 
 
@@ -177,7 +179,7 @@ class GuardPlanningTests(unittest.TestCase):
     def test_transition_tests_bind_every_other_board_as_a_guard(self):
         for name in GUARDED_TESTS:
             extra = ""
-            if name != "BLE mode conflicts" and name != "Ubertooth util conflicts":
+            if name not in ("BLE mode conflicts", "Ubertooth util conflicts"):
                 extra = "        coverage: smoke\n"
             if name == "Ubertooth util conflicts":
                 extra = "        allow RF transmission: true\n"
