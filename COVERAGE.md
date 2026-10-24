@@ -324,7 +324,7 @@ and fail until the fix is on the commit under test.
 | [#172](https://github.com/SqueakyFloors/ubertooth/issues/172) | ubertooth-util | Non-numeric and out-of-range values accepted (`-z`, `-l`, `-d`, `-C`, `-q`) | Open | To add to Argument validation |
 | [#173](https://github.com/SqueakyFloors/ubertooth/issues/173) | ubertooth-specan | A run first reports one stale packet from the previous range | Open | Spectrum analyzer (comprehensive) |
 
-A failed test ends the run ([#41](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/41)), so the release plan lists the tests with strict cases last.
+A test that fails cleanly (device verified restored, guards unchanged) no longer ends the run ([#41](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/41)), so strict cases do not hide later tests.
 
 ## Hard or impossible to test
 
@@ -353,7 +353,6 @@ Ordered by value/effort:
 2. Done (#28): `--host-version`, `-N`, `-V` on rx/tx/afh, BlueZ tool help.
 Next, harness work:
 
-- Keep running later tests after a test fails cleanly ([#41](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/41)).
 - Catch up with fork main: `-a0` sets PA 0 ([#5](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/5)), `-z` with a mode is refused and next-word values ([#25](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/25)), and `#172` rejections once fixed ([#27](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/27)).
 
 3. `ubertooth-dfu -s` (suffix a binary; host-only) and `-u` read-back compared with the last
