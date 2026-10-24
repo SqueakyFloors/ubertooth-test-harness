@@ -353,7 +353,7 @@ class RegistryTests(ControllerTestCase):
             self.assertEqual(409, status)
             self.assertIn("offline", payload["detail"])
 
-            # Any message brings it back.
+            # Any valid message brings it back.
             await runner.heartbeat()
             await wait_until(lambda: self.controller.targets["Host_A"].online)
             update = json.loads(await asyncio.wait_for(live.recv(), TIMEOUT_S))
@@ -617,6 +617,181 @@ class RunTests(ControllerTestCase):
         self.assertTrue(payload["run"]["adopted"])
         self.assertEqual("Host_A", payload["run"]["target"])
         self.assertEqual(1, len(payload["events"]))
+
+
+class ReviewFixTests(ControllerTestCase):
+
+    def run_record(self, run_id="run-1"):
+        return json.loads((self.results / run_id / "run.json").read_text())
+
+    async def test_runner_restart_marks_its_running_run_lost(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            await self.accepted_run(runner)
+            await runner.send("event", run_id="run-1", event=event("run-1", 1, "run_started"))
+            await wait_until(lambda: self.controller.runs["run-1"].seen == {1})
+        await wait_until(lambda: not self.controller.targets["Host_A"].connected)
+        async with connect(
+            f"ws://127.0.0.1:{self.port}/ws/live?run_id=run-1", proxy=None
+        ) as live, FakeRunner(self.port) as runner:
+            json.loads(await asyncio.wait_for(live.recv(), TIMEOUT_S))  # snapshot
+            # The restarted runner no longer has run-1.
+            await self.registered(runner, active=None)
+            await wait_until(lambda: self.controller.runs["run-1"].status == "lost")
+            while True:
+                update = json.loads(await asyncio.wait_for(live.recv(), TIMEOUT_S))
+                if update["type"] == "run":
+                    break
+            self.assertEqual("lost", update["run"]["status"])
+            self.assertIn("no active run", update["run"]["reason"])
+        record = self.run_record()
+        self.assertEqual("lost", record["status"])
+        self.assertIn("no longer has this run", record["reason"])
+        self.assertIsNotNone(record["finished_at"])
+        self.assertTrue(record["report"])
+        self.assertEqual(409, (await self.http("POST", "/api/runs/run-1/cancel", {}))[0])
+
+    async def test_reconnect_with_another_run_marks_the_stored_run_lost(self):
+        async with FakeRunner(self.port) as first:
+            await self.registered(first)
+            await self.accepted_run(first)
+            # Half-open reconnect: the new connection replaces a live one and
+            # names a different active run.
+            async with FakeRunner(self.port) as second:
+                await second.register(active="run-2")
+                await wait_until(lambda: self.controller.runs["run-1"].status == "lost")
+                self.assertIn("active run run-2", self.controller.runs["run-1"].reason)
+                self.assertTrue(any(
+                    line.startswith("warning:") and "still online" in line
+                    for line in self.logs
+                ), self.logs)
+                await second.send("event", run_id="run-2", event=event("run-2", 1))
+                await wait_until(lambda: "run-2" in self.controller.runs)
+                self.assertEqual("running", self.controller.runs["run-2"].status)
+        self.assertEqual("lost", self.run_record()["status"])
+
+    async def test_controller_restart_marks_a_stored_run_lost_on_register(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            await self.accepted_run(runner)
+        await self.server.stop()
+        await self.start_controller()
+        # Until the target registers the stored run stays running.
+        self.assertEqual("running", self.controller.runs["run-1"].status)
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner, active=None)
+            await wait_until(lambda: self.controller.runs["run-1"].status == "lost")
+        self.assertEqual("lost", self.run_record()["status"])
+        # The terminal status survives another restart. (A register that
+        # names the run keeps it running; see the deduplication test.)
+        await self.server.stop()
+        await self.start_controller()
+        self.assertEqual("lost", self.controller.runs["run-1"].status)
+
+    async def test_overlapping_cancels_time_out_independently(self):
+        async with FakeRunner(self.port) as runner:
+            # Long heartbeat interval: the target stays online without them.
+            await self.registered(runner, interval=10)
+            await self.accepted_run(runner)
+            self.controller.reply_timeout_s = 1.5
+            first = asyncio.create_task(self.http("POST", "/api/runs/run-1/cancel", {}))
+            self.assertEqual("cancel", (await runner.recv())["type"])
+            await wait_until(lambda: self.controller._pending_cancels["run-1"].waiters == 1)
+            second = asyncio.create_task(self.http("POST", "/api/runs/run-1/cancel", {}))
+            await wait_until(lambda: self.controller._pending_cancels["run-1"].waiters == 2)
+            # The runner never replies: each caller gets its own 504.
+            status, payload, _ = await first
+            self.assertEqual(504, status, payload)
+            status, payload, _ = await second
+            self.assertEqual(504, status, payload)
+
+            # The same overlap where the runner answers after the first
+            # caller gave up: the second still gets the answer.
+            third = asyncio.create_task(self.http("POST", "/api/runs/run-1/cancel", {}))
+            self.assertEqual("cancel", (await runner.recv())["type"])
+            await wait_until(lambda: self.controller._pending_cancels["run-1"].waiters == 1)
+            await asyncio.sleep(0.5)
+            fourth = asyncio.create_task(self.http("POST", "/api/runs/run-1/cancel", {}))
+            await wait_until(lambda: self.controller._pending_cancels["run-1"].waiters == 2)
+            self.assertEqual(504, (await third)[0])
+            await runner.send("cancel_accepted", run_id="run-1")
+            status, payload, _ = await fourth
+            self.assertEqual(202, status, payload)
+            self.assertTrue(payload["run"]["cancel_requested"])
+            # Only one cancel message per overlapping pair reached the runner.
+            with self.assertRaises(asyncio.TimeoutError):
+                await asyncio.wait_for(runner.ws.recv(), 0.2)
+
+    async def test_malformed_stored_lines_are_skipped(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            await self.accepted_run(runner)
+            await runner.send("event", run_id="run-1", event=event("run-1", 1, "run_started"))
+            await wait_until(lambda: self.controller.runs["run-1"].seen == {1})
+        with (self.results / "run-1" / "run.jsonl").open("ab") as stream:
+            stream.write(b"{corrupt\n\xff\xfe\n[1, 2]\n")
+        status, payload, _ = await self.http("GET", "/api/runs/run-1")
+        self.assertEqual(200, status, payload)
+        self.assertEqual([event("run-1", 1, "run_started")], payload["events"])
+        self.assertEqual(3, payload["run"]["malformed_lines"])
+        self.assertTrue(any("3 malformed" in line for line in self.logs), self.logs)
+        await self.server.stop()
+        await self.start_controller()
+        self.assertEqual({1}, self.controller.runs["run-1"].seen)
+        self.assertEqual(3, self.controller.runs["run-1"].malformed_lines)
+
+    async def test_timed_out_run_requests_expire_after_the_grace_period(self):
+        self.controller.reply_timeout_s = 0.1
+        self.controller.late_reply_grace_s = 0.4
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner, interval=10)
+            # Within the grace window a late acceptance still creates the run.
+            post, message = await self.start_run(runner)
+            self.assertEqual(504, (await post)[0])
+            self.assertIn(message["request_id"], self.controller._pending_runs)
+            await runner.send("run_accepted", request_id=message["request_id"], run_id="run-1")
+            await wait_until(lambda: "run-1" in self.controller.runs)
+            await runner.send(
+                "run_finished", request_id=message["request_id"], run_id="run-1",
+                status="passed", exit_code=0, run_directory="/",
+            )
+            await wait_until(
+                lambda: self.controller.targets["Host_A"].active_run_id is None
+            )
+            # After it, the entry is gone and a late acceptance is ignored.
+            post, message = await self.start_run(runner)
+            self.assertEqual(504, (await post)[0])
+            await wait_until(lambda: self.controller._pending_runs == {})
+            errors = self.controller.targets["Host_A"].protocol_errors
+            await runner.send("run_accepted", request_id=message["request_id"], run_id="run-2")
+            await wait_until(
+                lambda: self.controller.targets["Host_A"].protocol_errors == errors + 1
+            )
+            self.assertNotIn("run-2", self.controller.runs)
+
+    async def test_event_after_run_finished_rebuilds_the_report(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            message = await self.accepted_run(runner)
+            events = [
+                event("run-1", 1, "run_started"),
+                event("run-1", 2, "test_started", name="Host version"),
+            ]
+            for record in events:
+                await runner.send("event", run_id="run-1", event=record)
+            await runner.send(
+                "run_finished", request_id=message["request_id"], run_id="run-1",
+                status="failed", exit_code=1, run_directory="/",
+            )
+            await wait_until(lambda: self.controller.runs["run-1"].status == "failed")
+            report = self.results / "run-1" / "report.md"
+            self.assertEqual(render_run(events), report.read_text())
+            late = event("run-1", 3, "run_finished", "passed", completed_tests=1,
+                         requested_tests=1)
+            await runner.send("event", run_id="run-1", event=late)
+            await wait_until(lambda: 3 in self.controller.runs["run-1"].seen)
+            await wait_until(lambda: report.read_text() == render_run([*events, late]))
+        self.assertTrue(self.run_record()["report"])
 
 
 class MalformedRunnerTests(ControllerTestCase):

@@ -4,6 +4,9 @@ The controller listens on 127.0.0.1 only. There is no host option and no
 environment override; remote access is an SSH local port forward. Remote
 authentication is an open design item (DESIGN.md section 8), so no
 authentication layer exists and the listener must never be widened.
+Loopback-only is not access control: every local user and process on this
+host (and on a target that forwards the port with ``ssh -R``) can use the API
+and register a runner for any host name.
 
 Every HTTP request and WebSocket handshake is checked before routing: the
 Host header must be ``127.0.0.1:PORT`` or ``localhost:PORT`` and a browser
@@ -52,6 +55,9 @@ RUN_RECORD = "run.json"
 # message from it.
 MISSED_HEARTBEATS = 3
 DEFAULT_REPLY_TIMEOUT_S = 10.0
+# How long a request nobody waits for any more (its REST callers timed out)
+# is kept so a late answer still takes effect; afterwards it is dropped.
+DEFAULT_LATE_REPLY_GRACE_S = 60.0
 DEFAULT_MONITOR_INTERVAL_S = 1.0
 LIVE_QUEUE_LIMIT = 1000
 # Environment variables that would suggest a bind override. None is honoured;
@@ -67,6 +73,8 @@ BIND_OVERRIDE_VARIABLES = (
 POLICY_VIOLATION = 1008
 TRY_AGAIN_LATER = 1013
 UNKNOWN_RUN = 4404
+# Terminal status of a stored run whose target registered without it.
+LOST = "lost"
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
@@ -196,6 +204,8 @@ class Run:
     last_event_sequence: int | None = None
     last_event_type: str | None = None
     duplicate_events: int = 0
+    # Lines of the stored run.jsonl that are not JSON objects (skipped).
+    malformed_lines: int = 0
 
     @property
     def active(self) -> bool:
@@ -211,6 +221,7 @@ class Run:
             last_event_sequence=self.last_event_sequence,
             last_event_type=self.last_event_type,
             duplicate_events=self.duplicate_events,
+            malformed_lines=self.malformed_lines,
         )
         return data
 
@@ -229,10 +240,34 @@ class Link:
 
 
 @dataclasses.dataclass
-class _PendingRun:
+class _Pending:
+    """A run or cancel request awaiting the runner's answer.
+
+    Several REST callers may wait on one future (overlapping cancels), each
+    with its own timeout; a timeout never cancels the shared future. Once no
+    caller waits, the entry expires after the late-reply grace period.
+    """
+
     host: str
-    fields: dict
     future: asyncio.Future
+    fields: dict | None = None
+    waiters: int = 0
+    expires_at: float | None = None  # controller clock; set while unwaited
+
+    @property
+    def awaited(self) -> bool:
+        return self.waiters > 0 and not self.future.done()
+
+    def resolve(self, result) -> None:
+        if not self.future.done():
+            self.future.set_result(result)
+
+    def fail(self, error: Exception) -> None:
+        if self.future.done():
+            return
+        self.future.set_exception(error)
+        if self.waiters == 0:
+            self.future.exception()  # nobody waits any more: mark it retrieved
 
 
 class _Subscriber:
@@ -264,6 +299,7 @@ class Controller:
         results_dir: Path | str,
         *,
         reply_timeout_s: float = DEFAULT_REPLY_TIMEOUT_S,
+        late_reply_grace_s: float = DEFAULT_LATE_REPLY_GRACE_S,
         monitor_interval_s: float = DEFAULT_MONITOR_INTERVAL_S,
         log: Callable[[str], None] = _log,
         clock: Callable[[], float] = time.monotonic,
@@ -271,6 +307,7 @@ class Controller:
         self.results_dir = Path(results_dir).expanduser().resolve()
         self.results_dir.mkdir(parents=True, exist_ok=True)
         self.reply_timeout_s = reply_timeout_s
+        self.late_reply_grace_s = late_reply_grace_s
         self.monitor_interval_s = monitor_interval_s
         self.log = log
         self.clock = clock
@@ -280,8 +317,8 @@ class Controller:
         self.runs: dict[str, Run] = {}
         self._links: dict[str, Link] = {}
         self._send_locks: dict[Link, asyncio.Lock] = {}
-        self._pending_runs: dict[str, _PendingRun] = {}
-        self._pending_cancels: dict[str, tuple[str, asyncio.Future]] = {}
+        self._pending_runs: dict[str, _Pending] = {}
+        self._pending_cancels: dict[str, _Pending] = {}
         self._subscribers: set[_Subscriber] = set()
         self._load_runs()
 
@@ -317,14 +354,29 @@ class Controller:
             with path.open("r+b") as stream:
                 stream.truncate(keep)
             data = data[:keep]
-        for line in data.splitlines():
-            try:
-                event = json.loads(line)
-            except ValueError:
-                continue
+        for event in self._parse_events(run, data):
             run.seen.add(event.get("sequence"))
             run.last_event_sequence = event.get("sequence")
             run.last_event_type = event.get("event_type")
+
+    def _parse_events(self, run: Run, data: bytes) -> list[dict]:
+        """Records of a stored run.jsonl; malformed lines are skipped and counted."""
+        events, malformed = [], 0
+        for line in data.splitlines():
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:  # includes undecodable UTF-8
+                event = None
+            if isinstance(event, dict):
+                events.append(event)
+            else:
+                malformed += 1
+        if malformed:
+            self.log(f"run {run.run_id}: skipped {malformed} malformed run.jsonl line(s)")
+        run.malformed_lines = malformed
+        return events
 
     def _run_directory(self, run_id: str) -> Path:
         directory = (self.results_dir / run_id).resolve()
@@ -358,10 +410,10 @@ class Controller:
 
     def read_events(self, run: Run) -> list[dict]:
         try:
-            lines = (run.directory / RUN_LOG).read_text(encoding="utf-8").splitlines()
+            data = (run.directory / RUN_LOG).read_bytes()
         except FileNotFoundError:
             return []
-        return [json.loads(line) for line in lines if line.strip()]
+        return self._parse_events(run, data)
 
     # ----- live fan-out ----------------------------------------------------
 
@@ -436,6 +488,7 @@ class Controller:
             await link.close(POLICY_VIOLATION, str(error)[:120])
             return
         target = self._register(message, link)
+        await self._mark_lost_runs(target)
         try:
             while True:
                 text = await link.receive()
@@ -469,7 +522,15 @@ class Controller:
         host = message["host"]
         previous = self._links.get(host)
         if previous is not None and previous is not link:
-            # A reconnecting runner replaces its stale connection.
+            # A reconnecting runner replaces its stale (half-open) connection.
+            # Any loopback process can register any host, so say so when the
+            # replaced connection was still live.
+            old_target = self.targets.get(host)
+            if old_target is not None and old_target.online:
+                self.log(
+                    f"warning: registration for {host} replaces a connection that "
+                    "is still online"
+                )
             self._fail_pending(host, "runner reconnected")
             asyncio.ensure_future(previous.close(POLICY_VIOLATION, "replaced"))
         now = _now()
@@ -495,17 +556,49 @@ class Controller:
         self._publish_target(target)
         return target
 
+    async def _mark_lost_runs(self, target: Target) -> None:
+        """End stored running runs the registering runner no longer has.
+
+        The runner keeps a run as ``active_run_id`` until it has reported the
+        run's end, so a stored ``running`` run of this host that it does not
+        name (the runner restarted, or this controller restarted and missed
+        the end) can no longer finish. This includes runs loaded from disk at
+        startup: they stay ``running`` until their target registers.
+        """
+        for run in list(self.runs.values()):
+            if run.target != target.host or not run.active:
+                continue
+            if run.run_id == target.active_run_id:
+                continue
+            run.status = LOST
+            run.reason = (
+                f"target registered with active run {target.active_run_id}"
+                if target.active_run_id else "target registered with no active run"
+            ) + "; the runner no longer has this run"
+            run.finished_at = _now()
+            pending = self._pending_cancels.pop(run.run_id, None)
+            if pending is not None:
+                pending.fail(ControllerError(f"run {run.run_id} lost", 409))
+            run.report = await asyncio.to_thread(self._write_report, run)
+            self._persist(run)
+            self._publish_run(run)
+            self.log(f"run {run.run_id} on {target.host}: {LOST} ({run.reason})")
+
     def _fail_pending(self, host: str, reason: str) -> None:
-        for request_id, pending in list(self._pending_runs.items()):
-            if pending.host == host:
-                del self._pending_runs[request_id]
-                if not pending.future.done():
-                    pending.future.set_exception(ControllerError(reason, 503))
-        for run_id, (owner, future) in list(self._pending_cancels.items()):
-            if owner == host:
-                del self._pending_cancels[run_id]
-                if not future.done():
-                    future.set_exception(ControllerError(reason, 503))
+        for table in (self._pending_runs, self._pending_cancels):
+            for key, pending in list(table.items()):
+                if pending.host == host:
+                    del table[key]
+                    pending.fail(ControllerError(reason, 503))
+
+    def expire_pending(self) -> None:
+        """Drop requests nobody waits for once their grace period has passed."""
+        now = self.clock()
+        for table in (self._pending_runs, self._pending_cancels):
+            for key, pending in list(table.items()):
+                if pending.expires_at is not None and now >= pending.expires_at:
+                    del table[key]
+                    pending.future.cancel()  # no waiters remain
 
     def _run_for(self, target: Target, run_id: str) -> Run:
         run = self.runs.get(run_id)
@@ -538,6 +631,7 @@ class Controller:
         elif kind == "register":
             raise _Violation("register is only valid as the first message")
         elif kind == "run_accepted":
+            self.expire_pending()
             pending = self._pending_runs.get(message["request_id"])
             if pending is None or pending.host != target.host:
                 raise _Violation(f"run_accepted for unknown request {message['request_id']}")
@@ -556,8 +650,7 @@ class Controller:
             self.runs[run_id] = run
             self._persist(run)
             target.active_run_id = run_id
-            if not pending.future.done():
-                pending.future.set_result(run)
+            pending.resolve(run)
             self._publish_run(run)
             self._publish_target(target)
         elif kind == "run_rejected":
@@ -566,27 +659,25 @@ class Controller:
             if pending is None or pending.host != target.host:
                 raise _Violation(f"run_rejected for unknown request {request_id}")
             del self._pending_runs[request_id]
-            if not pending.future.done():
-                pending.future.set_exception(
-                    ControllerError(f"runner rejected the run: {message['reason']}", 409)
-                )
+            pending.fail(
+                ControllerError(f"runner rejected the run: {message['reason']}", 409)
+            )
         elif kind in ("cancel_accepted", "cancel_rejected"):
             run_id = message["run_id"]
+            self.expire_pending()
             entry = self._pending_cancels.get(run_id) if run_id else None
-            if entry is None or entry[0] != target.host:
+            if entry is None or entry.host != target.host:
                 raise _Violation(f"{kind} for unknown cancel {run_id}")
             del self._pending_cancels[run_id]
-            future = entry[1]
             if kind == "cancel_accepted":
                 run = self.runs.get(run_id)
                 if run is not None:
                     run.cancel_requested = True
                     self._persist(run)
                     self._publish_run(run)
-                if not future.done():
-                    future.set_result(run)
-            elif not future.done():
-                future.set_exception(
+                entry.resolve(run)
+            else:
+                entry.fail(
                     ControllerError(f"runner rejected the cancel: {message['reason']}", 409)
                 )
         elif kind == "event":
@@ -606,6 +697,12 @@ class Controller:
             self._publish(
                 {"type": "event", "run_id": run_id, "event": event}, run_id
             )
+            if run.finished_at is not None:
+                # A record that arrives after the run ended: keep report.md
+                # in step with run.jsonl.
+                run.report = await asyncio.to_thread(self._write_report, run)
+                self._persist(run)
+                self._publish_run(run)
         elif kind in ("run_finished", "run_error"):
             run = self._run_for(target, message["run_id"])
             if run.request_id not in (None, message["request_id"]):
@@ -613,6 +710,8 @@ class Controller:
                     f"{kind} request_id {message['request_id']} != {run.request_id}"
                 )
             run.request_id = message["request_id"]
+            if run.status == LOST:
+                run.reason = None  # the runner did report the end after all
             run.exit_code = message["exit_code"]
             run.finished_at = _now()
             if kind == "run_finished":
@@ -633,10 +732,11 @@ class Controller:
             self.log(f"{target.host} rejected a controller message: {message['reason']}")
 
     async def monitor(self) -> None:
-        """Mark targets offline after missed heartbeats."""
+        """Mark targets offline after missed heartbeats; expire stale requests."""
         while True:
             await asyncio.sleep(self.monitor_interval_s)
             self.check_heartbeats()
+            self.expire_pending()
 
     def check_heartbeats(self) -> None:
         now = self.clock()
@@ -658,13 +758,21 @@ class Controller:
             raise ControllerError(f"target {host} is offline", 409)
         return target, link
 
-    async def _await_reply(self, future: asyncio.Future):
+    async def _await_reply(self, pending: _Pending):
+        pending.waiters += 1
+        pending.expires_at = None
         try:
-            return await asyncio.wait_for(asyncio.shield(future), self.reply_timeout_s)
+            return await asyncio.wait_for(
+                asyncio.shield(pending.future), self.reply_timeout_s
+            )
         except asyncio.TimeoutError:
-            # Nobody waits any more; a late answer still updates state.
-            future.cancel()
             raise ControllerError("runner did not answer in time", 504) from None
+        finally:
+            # The shared future is never cancelled here: other callers may
+            # still wait on it, and a late answer still updates state.
+            pending.waiters -= 1
+            if pending.waiters == 0 and not pending.future.done():
+                pending.expires_at = self.clock() + self.late_reply_grace_s
 
     async def start_run(
         self, host: str, *, ref: str, plan: str, suite: str,
@@ -675,10 +783,12 @@ class Controller:
             raise ControllerError(
                 f"busy: run {target.active_run_id} is active on {host}", 409
             )
+        self.expire_pending()
         for pending in self._pending_runs.values():
-            # Requests that timed out stay pending (a late acceptance still
-            # creates the run) but do not block a new request.
-            if pending.host == host and not pending.future.done():
+            # Requests that timed out stay pending for the grace period (a
+            # late acceptance still creates the run) but do not block a new
+            # request.
+            if pending.host == host and pending.awaited:
                 raise ControllerError(f"a run request to {host} is already pending", 409)
         request_id = uuid.uuid4().hex
         fields = dict(ref=ref, plan=plan, suite=suite, tests=list(tests), build=build)
@@ -686,16 +796,17 @@ class Controller:
             text = encode_controller_message("run", request_id=request_id, **fields)
         except ProtocolError as error:
             raise ControllerError(str(error), 422) from None
-        future = asyncio.get_running_loop().create_future()
-        # Kept until the runner answers or disconnects, so a late
-        # run_accepted still creates the run.
-        self._pending_runs[request_id] = _PendingRun(host, fields, future)
+        pending = _Pending(host, asyncio.get_running_loop().create_future(), fields)
+        # Kept until the runner answers or disconnects, or the grace period
+        # after the last caller gave up passes, so a late run_accepted still
+        # creates the run.
+        self._pending_runs[request_id] = pending
         try:
             await self._send(link, text)
         except Exception as error:
             self._pending_runs.pop(request_id, None)
             raise ControllerError(f"cannot reach target {host}: {error}", 503) from None
-        return await self._await_reply(future)
+        return await self._await_reply(pending)
 
     async def cancel_run(self, run_id: str, reason: str) -> Run:
         run = self.runs.get(run_id)
@@ -708,21 +819,22 @@ class Controller:
             text = encode_controller_message("cancel", run_id=run_id, reason=reason)
         except ProtocolError as error:
             raise ControllerError(str(error), 422) from None
+        self.expire_pending()
         entry = self._pending_cancels.get(run_id)
-        if entry is None or entry[1].done():
-            # None pending, or an earlier request timed out: ask again.
-            future = asyncio.get_running_loop().create_future()
-            self._pending_cancels[run_id] = (run.target, future)
+        if entry is None or not entry.awaited:
+            # None pending, or every earlier caller timed out: ask again.
+            entry = _Pending(run.target, asyncio.get_running_loop().create_future())
+            self._pending_cancels[run_id] = entry
             try:
                 await self._send(link, text)
             except Exception as error:
-                self._pending_cancels.pop(run_id, None)
+                if self._pending_cancels.get(run_id) is entry:
+                    del self._pending_cancels[run_id]
                 raise ControllerError(
                     f"cannot reach target {run.target}: {error}", 503
                 ) from None
-        else:
-            future = entry[1]
-        await self._await_reply(future)
+        # Overlapping cancels share the outstanding request.
+        await self._await_reply(entry)
         return run
 
     def get_run(self, run_id: str) -> Run:

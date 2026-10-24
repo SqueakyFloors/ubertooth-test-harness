@@ -1,6 +1,6 @@
 # Ubertooth Test Harness
 
-Private standalone test-harness application for
+Standalone test-harness application for
 [`SqueakyFloors/ubertooth`](https://github.com/SqueakyFloors/ubertooth) and its
 companion [libbtbb](https://github.com/SqueakyFloors/libbtbb) builds. The application is described in
 [DESIGN.md](DESIGN.md). The first implemented slice is a local, sequential
@@ -706,6 +706,17 @@ refused), and there is no authentication: remote authentication is still an
 open design item (see [Networking status](#networking-status)), so access
 from another machine is an SSH tunnel.
 
+Trust boundary: loopback-only is not access control. Every local user and
+process on the controller host can call the whole API (start and cancel runs,
+read results) and can register as a runner for any target name. With the
+`ssh -R` forward below, the same holds for every local user and process on that
+target. There is no authentication yet ([DESIGN.md section
+8](DESIGN.md#8-decisions-and-open-items)); run the controller and runners only
+on hosts whose local users you trust. A registration for a host that is
+already connected replaces the old connection (so a runner whose previous
+connection is half-open can reconnect); the controller logs a warning when the
+replaced connection was still online.
+
 ```sh
 python -m ubertooth_harness controller --port 8765 \
   [--results-dir ~/.local/share/ubertooth-harness/controller/runs]
@@ -758,7 +769,9 @@ Runner messages are decoded strictly (up to 4 MiB, enough for a 1 MiB
 manifest record); a malformed or out-of-place message is counted on the
 target and ignored, and a first message that is not a valid `register`
 closes the connection. A target is `offline` after three heartbeat intervals
-without a message, and runs cannot be started on it. The controller allows one
+without a valid message, and runs cannot be started on it: only a message that
+decodes as protocol v1 resets the offline timer, and malformed messages do
+not. The controller allows one
 outstanding start request per target and refuses a target whose runner reports
 an active run. Each run is a flat directory `<results dir>/<run_id>/` with
 `run.json` (the controller's record: target, request, status, exit code),
@@ -767,7 +780,16 @@ reconnects and controller restarts), and `report.md`, compiled from that
 run.jsonl when the run ends. The default results directory is
 `$XDG_DATA_HOME/ubertooth-harness/controller/runs` (else
 `~/.local/share/...`), outside the repository. A run still executing when the
-controller restarts is picked up again when its runner reconnects.
+controller restarts is picked up again when its runner reconnects. A stored run
+that is still `running` becomes `lost` (with a `reason`) when its target
+registers without naming it as `active_run_id`, because the runner restarted or
+now runs something else; runs loaded at controller startup stay `running`
+until their target registers. A record that arrives after a run ended is
+stored and `report.md` is rebuilt. Malformed lines in a stored run.jsonl are
+skipped and counted (`malformed_lines`). A run or cancel request whose callers
+all timed out (504) is kept for a grace period (60 s) so a late answer still
+takes effect, then dropped. Overlapping cancels of one run share the
+outstanding request, and each caller has its own timeout.
 
 ## Tests
 
@@ -798,8 +820,9 @@ code and deterministic C tests remain in the Ubertooth repository. Runs consume
 explicit Ubertooth/libbtbb repository URLs and refs plus pinned firmware
 artifacts; the harness does not import private product implementation details.
 
-The repository is private because its design backlog includes internal lab and
-eero integration details. Do not commit credentials or captured device traffic.
+This repository is public. Keep lab- and device-specific integration details
+(endpoints, credentials) in private lab configuration, and do not commit
+credentials or captured device traffic.
 
 ## Networking status
 

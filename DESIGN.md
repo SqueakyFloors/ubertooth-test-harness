@@ -140,11 +140,19 @@ Semantics:
 - Controller side: the first message must be a valid `register` or the
   connection is closed (1008). Later malformed or out-of-place messages are
   counted on the target and ignored; v1 has no controller → runner error
-  message. A target is offline after three heartbeat intervals without any
-  message. Events are stored once per `(run_id, sequence)`, including across
+  message. A target is offline after three heartbeat intervals without a
+  valid message; only a message that decodes as protocol v1 resets the timer,
+  and malformed messages do not. Events are stored once per `(run_id, sequence)`, including across
   controller restarts; a run the controller did not start (for example one
   that outlived a controller restart) is adopted when it is the target's
-  `active_run_id`.
+  `active_run_id`. A stored `running` run of a host that registers without
+  naming it as `active_run_id` (the runner restarted, or reports another run)
+  becomes `lost` with a reason, is persisted, and is published live; runs
+  loaded at controller startup stay `running` until their target registers.
+  Records that arrive after a run ended rebuild its report.md. A registration
+  replaces an existing connection for the same host (half-open reconnects);
+  the controller logs a warning when the replaced connection was still online.
+  Any local process can register any host until runner authentication exists.
 
 Planned, not yet in the protocol: `deploy {ref}` (build host + firmware ahead
 of a run; today `run.build` builds inside the run directory), `flash {image,
