@@ -162,12 +162,15 @@ class FakeUbertooth:
         next_word=True,
         reject_strays=True,
         pa_zero_sets=True,
+        set_and_read=True,
     ):
         self.serial = serial
         # Fork behaviors the option cases check; False models older builds:
         # next_word (8b58f75/0b63b01), reject_strays (#146/#155), and
-        # pa_zero_sets (4ed4a1d; before it -a0 was a query).
+        # pa_zero_sets (4ed4a1d; before it -a0 was a query), set_and_read
+        # (5b45b3e, #228; before it a later read of a value dropped its set).
         self.next_word = next_word
+        self.set_and_read = set_and_read
         self.reject_strays = reject_strays
         self.pa_zero_sets = pa_zero_sets
         self.aa = "8e89bed6"
@@ -375,6 +378,7 @@ class FakeUbertooth:
             return fail(error)
         channel = pa = usr = all_leds = set_squelch = None
         get_squelch = False
+        gets = set()  # values read by a separate flag (fork 5b45b3e)
         modes = []
         flags = set()
         for option, value in pairs:
@@ -391,19 +395,19 @@ class FakeUbertooth:
                         return fail(
                             f"error: {what} must be {low}{sep}{high}{unit} (got {value})"
                         )
-            if option == "l":
-                usr = "q" if value is None else str(parsed)
+            read = value is None or (option == "a" and parsed == 0 and not self.pa_zero_sets)
+            if read and option in "ldacC" and self.set_and_read:
+                gets.add("c" if option == "C" else option)
+            elif option == "l":
+                usr = "q" if read else str(parsed)
             elif option == "d":
-                all_leds = "q" if value is None else str(parsed)
+                all_leds = "q" if read else str(parsed)
             elif option == "a":
-                if value is None or (parsed == 0 and not self.pa_zero_sets):
-                    pa = "q"
-                else:
-                    pa = str(parsed)
+                pa = "q" if read else str(parsed)
             elif option == "c":
-                channel = "q" if value is None else str(parsed)
+                channel = "q" if read else str(parsed)
             elif option == "C":
-                channel = "q" if value is None else str(2402 + parsed)
+                channel = "q" if read else str(2402 + parsed)
             elif option == "z":
                 if value is None:
                     get_squelch = True
@@ -445,13 +449,13 @@ class FakeUbertooth:
         if pa not in (None, "q"):
             self.state["pa"] = pa
         # Reports in ubertooth-util's order.
-        if all_leds == "q":
+        if all_leds == "q" or "d" in gets:
             lines += [f"USR LED status: {self.state['usr']}",
                       f"RX LED status : {self.state['rx']}",
                       f"TX LED status : {self.state['tx']}"]
         if "b" in flags:
             lines.append("Board ID Number: 1 (Ubertooth One)")
-        if channel == "q":
+        if channel == "q" or "c" in gets:
             mhz = self.state["channel"]
             lines.append(f"Current frequency: {mhz} MHz (Bluetooth channel {int(mhz) - 2402})")
         if "v" in flags:
@@ -460,9 +464,9 @@ class FakeUbertooth:
             )
         if "V" in flags:
             lines.append(self.compile_info)
-        if usr == "q":
+        if usr == "q" or "l" in gets:
             lines.append(f"USR LED status: {self.state['usr']}")
-        if pa == "q":
+        if pa == "q" or "a" in gets:
             lines.append(f"PA Level: {self.state['pa']}")
         if "p" in flags:
             lines.append("Part ID: 1234ABCD")
@@ -1448,9 +1452,38 @@ class OptionRuleTests(unittest.TestCase):
                 self.assertEqual(1, result.returncode)
                 self.assertEqual(f"error: unexpected argument '{word}'\n", result.stderr)
         self.assertEqual("2426", device.state["channel"])
-        # SqueakyFloors/ubertooth#228: a later read of the same value drops the set.
-        self.assertIn("2426 MHz", self.run_util(device, "-c2441", "-c").stdout)
-        self.assertEqual("2426", device.state["channel"])
+        # SqueakyFloors/ubertooth#228 (fixed in 5b45b3e): the set runs, then the read.
+        self.assertIn("2441 MHz", self.run_util(device, "-c2441", "-c").stdout)
+        self.assertEqual("2441", device.state["channel"])
+        old = FakeUbertooth(set_and_read=False)
+        self.assertIn("2441 MHz", self.run_util(old, "-c2426", "-c").stdout)
+        self.assertEqual("2441", old.state["channel"])
+
+    def test_set_and_read_cases_need_the_228_fix(self):
+        set_and_read = {"channel-set-and-read": ("-c2426", "-c"),
+                        "channel-read-and-set": ("-c", "-c2426"),
+                        "pa-level-set-and-read": ("-a5", "-a"),
+                        "usr-led-set-and-read": ("-l0", "-l"),
+                        "all-leds-set-and-read": ("-d1", "-d")}
+        device = FakeUbertooth()
+        original = dict(device.state)
+        summary, events = run_test("Radio setting transitions", device, coverage="comprehensive")
+        self.assertTrue(summary.passed, summary.failure_reason)
+        self.assertEqual(original, device.state)
+        sets = {
+            e.details["case_id"].rsplit("transitions-", 1)[1]: tuple(e.details["argv"][3:])
+            for e in steps(events, step_id="set-and-read")
+        }
+        self.assertEqual(set_and_read, sets)
+        old = FakeUbertooth(set_and_read=False)
+        summary, events = run_test("Radio setting transitions", old, coverage="comprehensive")
+        self.assertFalse(summary.passed)
+        failed = sorted(e.details["case_id"].rsplit("transitions-", 1)[1] for e in events
+                        if e.event_type == "check_finished" and e.status == "failed"
+                        and e.details.get("phase") == "test")
+        self.assertEqual(sorted(set_and_read), failed)
+        _summary, events = run_test("Radio setting transitions", FakeUbertooth())
+        self.assertEqual([], [e for e in steps(events, step_id="set-and-read")])
 
     def test_next_word_cases_pass_and_restore_on_fork_main(self):
         device = FakeUbertooth()

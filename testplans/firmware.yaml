@@ -2,9 +2,9 @@ plan: Ubertooth firmware images
 suites:
   # ubertooth-dfu beyond the write path: -s, -u read-back, and bad images.
   # Writes the selected board's firmware and ends on the verified test build;
-  # pass --artifact "test build=PATH" or --build --with-firmware. Strict cases
-  # fail until fork issue #200 is fixed, and #198 and #199 (fixed on fork main
-  # after 3b22c95) are on the commit under test.
+  # pass --artifact "test build=PATH" or --build --with-firmware. Needs fork
+  # e8edd15 (#198, #199) and 9d710fe (#200). At 6fee30c every write fails on
+  # fork #267 (-d -r exits 1 after a good flash).
   firmware:
     - DFU images:
         hosts: each

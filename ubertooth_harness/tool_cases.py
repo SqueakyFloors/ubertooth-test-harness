@@ -68,7 +68,8 @@ def duration_seconds(value: str) -> float:
 # Output modes (cb_specan): default "<seconds>, <MHz>, <dBm>"; -g "<MHz> <dBm>"
 # with a blank line after each sweep; -G "<seconds> <MHz> <dBm>" with the same
 # blank lines; -d writes 3-byte binary records (MHz big-endian, int8 dBm) to
-# the file instead of stdout. -v only adds stderr.
+# the file instead of stdout (only a bare "-d -" means stdout, fork 053363a).
+# -v only adds stderr.
 
 _LINE_FORMATS = {
     "default": re.compile(r"^(?P<t>\d+\.\d+), (?P<f>\d+), (?P<r>-?\d+)$"),
@@ -180,6 +181,54 @@ def _specan_argv(serial, options):
     return ("ubertooth-specan", "-U", serial) + tuple(options)
 
 
+# -d takes any value but a bare "-" as a file name, including one that starts
+# with "-" (fork 053363a, SqueakyFloors/ubertooth#231; before it any value
+# starting with "-" streamed the samples to stdout). The file name has to be
+# relative to show that, so the command runs in the case's capture directory.
+DASH_DUMP = "-x.bin"
+_IN_DIRECTORY = "import os, sys; os.chdir(sys.argv[1]); os.execvp(sys.argv[2], sys.argv[2:])"
+
+
+def _no_samples_on_stdout(output: str) -> str:
+    if any(_LINE_FORMATS["default"].match(line.strip()) for line in output.splitlines()):
+        return "sample lines on stdout"
+    if any(not (char.isprintable() or char.isspace()) for char in output):
+        return "binary data on stdout"
+    return ""
+
+
+def _specan_dash_file_case(serial, seconds):
+    low, high = 2430, 2440
+    steps = [_stop(serial, "establish-idle", "Establish idle before reading")]
+    steps.extend(_read_originals(serial, MODE_RESET_SETTINGS))
+    steps.append(Step(
+        "sweep",
+        f"ubertooth-specan -d {DASH_DUMP} in the capture directory",
+        lambda context: (sys.executable, "-c", _IN_DIRECTORY, require(context, CAPTURE_DIR_KEY))
+        + _specan_argv(serial, ("-l", str(low), "-u", str(high), "-d", DASH_DUMP)),
+        timeout_s=seconds, mutates=True, continuous=True,
+        output_check=_no_samples_on_stdout,
+    ))
+    steps.append(_stop(serial))
+    steps.append(Step(
+        "verify-dump",
+        f"Verify the samples in {DASH_DUMP}",
+        lambda context: (sys.executable, _SPECAN_CHECKER,
+                         str(Path(require(context, CAPTURE_DIR_KEY)) / DASH_DUMP),
+                         str(low), str(high)),
+        output_patterns=(r"Specan dump: \d+ samples",),
+    ))
+    return StateCase(
+        "dump-file-dash-name",
+        f"-d {DASH_DUMP} writes the file {DASH_DUMP}, not stdout",
+        tuple(steps),
+        _cleanup(serial, MODE_RESET_SETTINGS),
+        expected_state=(f"samples in the file {DASH_DUMP}, none on stdout; channel, "
+                        "squelch, and LEDs restored"),
+        capture_dir=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # A mode stop resets the board (fork aa4f620, SqueakyFloors/ubertooth#191)
 #
@@ -273,6 +322,7 @@ def spectrum_cases(arguments, _resources, resource_identities):
             _specan_case(serial, "dump-file", "Binary samples to a file (-d)",
                          ("-l", "2430", "-u", "2440"), "default", 2430, 2440, seconds,
                          dump_file="specan.bin"),
+            _specan_dash_file_case(serial, seconds),
             _specan_stop_reset_case(serial, seconds),
         ]
     return tuple(cases)

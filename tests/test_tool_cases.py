@@ -1,4 +1,5 @@
 import io
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -19,18 +20,20 @@ class ToolUbertooth(FakeUbertooth):
     Flags switch on the fork bugs (fixed on main) the cases catch:
     ``stale_specan`` (#173), ``debug_exit_is_value`` (#164), ``btle_aa_bugs``
     (#171), ``specan_stop_resets=False`` (#191: stopping specan skips the idle
-    reset), and ``promisc_stop_resets=False`` (the same for btle -p).
+    reset), ``promisc_stop_resets=False`` (the same for btle -p), and
+    ``dash_is_stdout`` (#231: any -d value starting with "-" means stdout).
     """
 
     def __init__(self, *args, stale_specan=False, debug_exit_is_value=False,
                  btle_aa_bugs=False, specan_stop_resets=True, promisc_stop_resets=True,
-                 **kwargs):
+                 dash_is_stdout=False, **kwargs):
         super().__init__(*args, **kwargs)
         self.stale_specan = stale_specan
         self.debug_exit_is_value = debug_exit_is_value
         self.btle_aa_bugs = btle_aa_bugs
         self.specan_stop_resets = specan_stop_resets
         self.promisc_stop_resets = promisc_stop_resets
+        self.dash_is_stdout = dash_is_stdout
         self.state["aa"] = "8e89bed6"
         self.last_specan = None
 
@@ -41,6 +44,10 @@ class ToolUbertooth(FakeUbertooth):
             with redirect_stdout(out):
                 code = specandump.main(list(command[2:]))
             return self._result(command, code, out.getvalue(), "", on_output)
+        if command[:3] == (sys.executable, "-c", tool_cases._IN_DIRECTORY):
+            # chdir to command[3], then exec the rest.
+            self.commands.append(command)
+            return self._specan(command[4:], on_output, cwd=Path(command[3]))
         if command[0] == "ubertooth-specan":
             self.commands.append(command)
             return self._specan(command, on_output)
@@ -60,7 +67,7 @@ class ToolUbertooth(FakeUbertooth):
                            on_output=on_output)
 
     # ubertooth-specan ---------------------------------------------------
-    def _specan(self, command, on_output):
+    def _specan(self, command, on_output, cwd=Path.cwd()):
         opts = list(command[3:])
         low = int(opts[opts.index("-l") + 1]) if "-l" in opts else 2402
         high = int(opts[opts.index("-u") + 1]) if "-u" in opts else 2480
@@ -77,7 +84,11 @@ class ToolUbertooth(FakeUbertooth):
             for lo, hi in sweeps:
                 for f in range(lo, hi + 1):
                     data += bytes([f >> 8, f & 0xFF, 0xD3])
-            Path(opts[opts.index("-d") + 1]).write_bytes(bytes(data))
+            name = opts[opts.index("-d") + 1]
+            if name == "-" or (self.dash_is_stdout and name.startswith("-")):
+                return self._result(command, 124, bytes(data).decode("latin-1"),
+                                    "HARD TIMEOUT\n", on_output, timed_out=True)
+            (cwd / name).write_bytes(bytes(data))
             return self._result(command, 124, "", "HARD TIMEOUT\n", on_output, timed_out=True)
         lines = []
         for lo, hi in sweeps:
@@ -228,7 +239,7 @@ class SpectrumAnalyzerTests(unittest.TestCase):
         _a, smoke = cases_for_duration("smoke")
         _a, full = cases_for_duration("comprehensive")
         self.assertEqual(["full-band"], [c.case_id for c in smoke])
-        self.assertEqual(9, len(full))
+        self.assertEqual(10, len(full))
         self.assertEqual("stop-resets-board", full[-1].case_id)
         self.assertTrue(all(isinstance(c, StateCase) for c in full))
 
@@ -236,13 +247,27 @@ class SpectrumAnalyzerTests(unittest.TestCase):
         summary, events = run_spectrum(ToolUbertooth(crc="1"))
         self.assertTrue(summary.passed, summary.failure_reason)
         dump = steps(events, step_id="verify-dump")
-        self.assertEqual(["passed"], [e.status for e in dump])
+        self.assertEqual(["passed", "passed"], [e.status for e in dump])  # -d specan.bin, -d -x.bin
 
     def test_leftover_samples_from_the_previous_run_fail(self):
         summary, events = run_spectrum(ToolUbertooth(crc="1", stale_specan=True))
         self.assertFalse(summary.passed)
         self.assertIn("2402-2410 MHz after a full-band run", failed_names(events))
         self.assertIn("samples outside 2402-2410 MHz", summary.failure_reason)
+
+    def test_dump_to_a_dash_file_name(self):
+        # SqueakyFloors/ubertooth#231 (fixed in 053363a): -d -x.bin is a file.
+        _a, full = cases_for_duration("comprehensive")
+        case = next(c for c in full if c.case_id == "dump-file-dash-name")
+        argv = case.steps[[s.step_id for s in case.steps].index("sweep")].resolve_argv(
+            {"capture dir": "/run/captures/x"})
+        self.assertEqual((sys.executable, "-c", tool_cases._IN_DIRECTORY, "/run/captures/x",
+                          "ubertooth-specan", "-U", SERIAL), argv[:7])
+        self.assertEqual(("-d", "-x.bin"), argv[-2:])
+        summary, events = run_spectrum(ToolUbertooth(crc="1", dash_is_stdout=True))
+        self.assertFalse(summary.passed)
+        self.assertEqual(["-d -x.bin writes the file -x.bin, not stdout"], failed_names(events))
+        self.assertIn("binary data on stdout", summary.failure_reason)
 
     def test_a_specan_stop_without_the_idle_reset_fails(self):
         # SqueakyFloors/ubertooth#191 (fork builds before aa4f620).

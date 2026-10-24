@@ -95,14 +95,16 @@ def _packet(symbols, clock):
 # --- a fake ubertooth-rx -i following ubertooth-rx.c and cb_rx ------------------
 
 class ReplayRx:
-    """ubertooth-rx -i on the fork: by default with #202 (replay time printed)
-    and #203 (read error exits 0); ``fixed`` models the fixed tool. ``bugs``
+    """ubertooth-rx -i on the fork: by default fork main 6fee30c; ``fixed=False``
+    models 3b22c95, with #202 (replay time printed), #203 (a read error or a
+    cut last record exits 0 silently) and #236 (-u without -l checked only
+    after a device is opened, and ignored with -i). ``bugs``
     switches on a misbehavior per case: decoys, no-uap, wrong-uap, ignores-l,
     ignores-e, link-type, no-capture, dump-mangled, survey-no-uap,
     partial-record, empty-fails, missing-exit-0, u-fails, wrong-u-confirms.
     """
 
-    def __init__(self, *, fixed=False, bugs=()):
+    def __init__(self, *, fixed=True, bugs=()):
         self.fixed = fixed
         self.bugs = set(bugs)
         self.commands = []
@@ -136,13 +138,19 @@ class ReplayRx:
 
     def _rx(self, command):
         options = list(command[1:])
+        if "-u" in options and "-l" not in options:
+            if self.fixed:
+                return self._result(command, 1, "", "error: -u <UAP> requires -l <LAP>\n")
+            if "-i" not in options:
+                return self._result(command, 1, "", "ubertooth_connect: no device found\n")
         path = Path(self._value(options, "-i"))
         if not path.exists():
             code = 0 if "missing-exit-0" in self.bugs else 1
             return self._result(command, code, f"Could not open file {path}\nusage\n")
         if path.is_dir():
-            return self._result(command, 1 if self.fixed else 0,
-                                f"{path}: Is a directory\n" if self.fixed else "")
+            return self._result(command, 1 if self.fixed else 0, "",
+                                f"error: reading {path} failed: Is a directory\n"
+                                if self.fixed else "")
         data = path.read_bytes()
         if not data and "empty-fails" in self.bugs:
             return self._result(command, 1, "")
@@ -153,8 +161,12 @@ class ReplayRx:
         if lap is not None and "ignores-l" not in self.bugs:
             laps = [int(lap, 16)]
         records = [data[i:i + RECORD] for i in range(0, len(data), RECORD)]
+        partial = ""
         if records and len(records[-1]) < RECORD:
             if "partial-record" not in self.bugs:
+                if self.fixed:
+                    partial = (f"error: {path} ends in a partial record: "
+                               f"{len(records[-1])} of {RECORD} bytes, ignored\n")
                 records.pop()
             else:
                 records[-1] = records[-1] + bytes(RECORD - len(records[-1]))
@@ -198,7 +210,8 @@ class ReplayRx:
                 else:
                     lines.append(f"??:??:??:{text}")
         self._write_outputs(options, found, dumped)
-        return self._result(command, 0, "".join(line + "\n" for line in lines))
+        return self._result(command, 1 if partial else 0,
+                            "".join(line + "\n" for line in lines), partial)
 
     def _write_outputs(self, options, found, dumped):
         link = 1 if "link-type" in self.bugs else 255
@@ -476,14 +489,14 @@ class ReplayCaseTests(unittest.TestCase):
         self.assertEqual(["replay-decode-lap", "replay-lap-uap", "replay-pcapng",
                           "replay-pcap"], [c.case_id for c in smoke])
         _a, full = replay_cases("comprehensive")
-        self.assertEqual(16, len(full))
+        self.assertEqual(18, len(full))
         context = {"capture dir": "/run/captures/x"}
         for case in full:
             self.assertIsInstance(case, StateCase)
             self.assertTrue(case.capture_dir)
             for step in case.steps + case.cleanup:
                 argv = step.resolve_argv(context)
-                self.assertNotIn("-U", argv)
+                self.assertNotIn("-U", argv)  # never a board, not even by default
                 self.assertFalse(step.mutates or step.continuous)
                 self.assertIn(argv[0], ("ubertooth-rx", sys.executable))
                 for path in (a for a in argv if a.startswith("/run")):
@@ -495,17 +508,20 @@ class ReplayCaseTests(unittest.TestCase):
         argv = cases[0].steps[0].resolve_argv({"capture dir": "/c"})
         self.assertEqual(str(1_800_000_000 - 3600), argv[argv.index("--base-time") + 1])
 
-    def test_fork_tool_passes_smoke_and_fails_only_the_strict_cases(self):
-        summary, _events = run_replay(ReplayRx(), coverage="smoke")
+    def test_old_fork_passes_smoke_and_fails_only_the_fixed_cases(self):
+        summary, _events = run_replay(ReplayRx(fixed=False), coverage="smoke")
         self.assertTrue(summary.passed, summary.failure_reason)
-        summary, events = run_replay(ReplayRx())
+        summary, events = run_replay(ReplayRx(fixed=False))
         self.assertFalse(summary.passed)
-        self.assertEqual(["-i of a directory reports the read error",
-                          "-i packet lines carry the recorded systime"],
+        self.assertEqual(["-i -u without -l is refused",
+                          "-i of a directory reports the read error",
+                          "-i of a file whose last record is cut",
+                          "-i packet lines carry the recorded systime",
+                          "-u without -l is refused before a device"],
                          failed_names(events))
 
-    def test_fixed_tool_passes_everything(self):
-        summary, _events = run_replay(ReplayRx(fixed=True))
+    def test_fork_main_passes_everything(self):
+        summary, _events = run_replay(ReplayRx())
         self.assertTrue(summary.passed, summary.failure_reason)
 
     def test_each_case_can_fail(self):
@@ -536,7 +552,7 @@ class ReplayCaseTests(unittest.TestCase):
         }
         for bug, names in expectations.items():
             with self.subTest(bug):
-                _summary, events = run_replay(ReplayRx(fixed=True, bugs={bug}))
+                _summary, events = run_replay(ReplayRx(bugs={bug}))
                 self.assertEqual(sorted(names), failed_names(events))
 
     def test_plans_place_it_without_a_board(self):

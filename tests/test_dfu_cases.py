@@ -40,9 +40,12 @@ def firmware(revision=REVISION, size=3000) -> bytes:
 class FakeDfuBoard:
     """ubertooth-util -v and ubertooth-dfu -s/-d/-u/-r, following ubertooth-dfu.c.
 
-    Flags switch on the fork bugs the strict cases catch, or other failures:
-    ``stuck_on_reject`` (#198), ``accept_wrong_id`` (#199), ``double_suffix``
-    and ``needs_write_access`` (#200), and ``bad_readback``,
+    By default it follows fork main 6fee30c without #267: a bad -d image is
+    refused before any device is opened. Flags switch on the fork bugs the
+    cases catch (the 3b22c95 behavior), or other failures: ``stuck_on_reject``
+    (#198: refused only after entering DFU, and left there), ``accept_wrong_id``
+    (#199), ``double_suffix`` and ``needs_write_access`` (#200),
+    ``detach_exit_1`` (#267: -d -r exits 1 after a good flash), and ``bad_readback``,
     ``partial_write_on_reject``, ``reject_exit_zero``, ``stays_in_dfu_after_upload``,
     ``wrong_sign_vendor``, ``dfu_count_extra`` for failures no fork has shown.
     """
@@ -114,8 +117,15 @@ class FakeDfuBoard:
             return self._result(command, 1, "", "unable to open selected application device\n")
         if "-d" in options:
             path = Path(options[options.index("-d") + 1])
-            if not os.access(path, os.R_OK | (os.W_OK if self.flags.get("needs_write_access", True) else 0)):
+            if not os.access(path, os.R_OK | (os.W_OK if self.flags.get("needs_write_access") else 0)):
                 return self._result(command, 1, "", f"{path}: Permission denied\n")
+            # A partial write needs the old path that refused only in DFU.
+            if not (self.flags.get("stuck_on_reject") or self.flags.get("partial_write_on_reject")):
+                # check_download_image() before any device is opened (e8edd15).
+                refusal = self._refusal(path.read_bytes(), "-r" in options)
+                if refusal:
+                    code = 0 if self.flags.get("reject_exit_zero") else 1
+                    return self._result(command, code, "Checking firmware signature\n", refusal)
         stderr = "DFU +0.000s: operation started\n"
         self.mode = "dfu"
         if "-u" in options:
@@ -135,8 +145,6 @@ class FakeDfuBoard:
                     # Sector 0x4000 erased and its first block written.
                     block = data[:256]
                     self.flash[:4096] = block + b"\xff" * (4096 - len(block))
-                if not self.flags.get("stuck_on_reject"):
-                    self.mode = "app"
                 code = 0 if self.flags.get("reject_exit_zero") else 1
                 return self._result(command, code, "Switching selected device to DFU mode...\n",
                                     stderr + refusal)
@@ -147,6 +155,9 @@ class FakeDfuBoard:
             if not (self.flags.get("stays_in_dfu_after_upload") and "-u" in options):
                 self.mode = "app"
             if "-d" in options:
+                if self.flags.get("detach_exit_1"):
+                    return self._result(command, 1, "", stderr + "control message unsupported\n"
+                                        "Detach failed: could not enter DFU mode\n")
                 stderr += f"Verified firmware revision: {self.revision}\n"
         return self._result(command, 0, "", stderr)
 
@@ -172,7 +183,11 @@ class FakeDfuBoard:
             else f"Unknown DFU version: {bcd:04x}\n" if bcd not in (0x0100, 0x0101)
             else "DFU Signature mismatch: not a DFU file\n" if sig != b"UFD"
             else "CRC mismatch: calculated: 0x0, found: 0x1\n" if crc != dfuimage.dfu_crc(data[:-4])
-            else "Wrong DFU suffix VID:PID\n" if (vendor, product) != (0x1D50, 0x6003)
+            else f"DFU suffix is for USB vendor 0x{vendor:04x}, not 0x1d50: "
+            "this image is for another device\n" if vendor != 0x1D50
+            and not self.flags.get("accept_wrong_id")
+            else f"DFU suffix is for USB product 0x{product:04x}, not 0x6003: "
+            "this image is for another device\n" if product != 0x6003
             and not self.flags.get("accept_wrong_id")
             else ""
         )
@@ -185,19 +200,23 @@ class FakeDfuBoard:
     def _sign(self, command, path):
         if path.suffix != ".bin":
             return self._result(command, 1, "Error: -s requires a .bin\n")
-        if self.flags.get("needs_write_access", True) and not os.access(path, os.W_OK):
+        if self.flags.get("needs_write_access") and not os.access(path, os.W_OK):
             return self._result(command, 1, "", f"{path}: Permission denied\n")
         data = path.read_bytes()
         if not self.flags.get("double_suffix") and not dfuimage.suffix_problems(data):
-            return self._result(command, 1, "", "Error: file already has a DFU suffix\n")
+            return self._result(command, 1, "", f"error: {path} already has a DFU suffix, "
+                                f"so {path.with_suffix('.dfu')} was not written\n")
         vendor = 0x1234 if self.flags.get("wrong_sign_vendor") else dfuimage.VENDOR
         path.with_suffix(".dfu").write_bytes(signed(data, vendor=vendor))
         return self._result(command, 0)
 
 
-FORK_MAIN = dict(stuck_on_reject=True, accept_wrong_id=True, double_suffix=True,
-                 needs_write_access=True)
-CORRECT = dict(needs_write_access=False)
+# Fork 3b22c95, before the #198/#199/#200 fixes.
+OLD_FORK = dict(stuck_on_reject=True, accept_wrong_id=True, double_suffix=True,
+                needs_write_access=True)
+# Fork main 6fee30c: those fixed, #267 open.
+FORK_MAIN = dict(detach_exit_1=True)
+CORRECT = dict()
 
 
 def identities(guard=False):
@@ -367,16 +386,27 @@ class DfuRunTests(unittest.TestCase):
         self.assertEqual(("app", REVISION), (board.mode, board.revision))
         self.assertEqual([], dfuimage.readback_problems(bytes(board.flash), firmware()))
 
-    def test_fork_main_fails_only_the_linked_cases_and_smoke_passes(self):
+    def test_fork_main_6fee30c_fails_only_the_write_on_267(self):
+        # SqueakyFloors/ubertooth#267: -d -r exits 1 after a good flash. Only
+        # write-read-back writes; every cleanup finds the test image in place.
         board, summary, events = self.run_with(**FORK_MAIN)
+        self.assertEqual(["write-read-back"], failed(events))
+        self.assertIn("ubertooth-dfu -d <test image> -r: command exited 1", summary.failure_reason)
+        self.assertEqual(("app", REVISION), (board.mode, board.revision))
+        _board, smoke, events = self.run_with("smoke", **FORK_MAIN)
+        self.assertEqual(["write-read-back"], failed(events))
+
+    def test_old_fork_fails_only_the_linked_cases_and_smoke_passes(self):
+        board, summary, events = self.run_with(**OLD_FORK)
         self.assertFalse(summary.passed)
         self.assertEqual(sorted(ALL_REJECTS + ["suffix-already-suffixed", "suffix-read-only-input"]),
                          failed(events))
-        # Every case was restored, so the whole test ran and the board is back.
-        self.assertIn("left its application", summary.failure_reason)
+        # Refused only after opening the device (#198); every case was
+        # restored, so the whole test ran and the board is back.
+        self.assertIn("operation started' was found", summary.failure_reason)
         self.assertEqual(("app", REVISION), (board.mode, board.revision))
         self.assertEqual([], dfuimage.readback_problems(bytes(board.flash), firmware()))
-        _board, smoke, _events = self.run_with("smoke", **FORK_MAIN)
+        _board, smoke, _events = self.run_with("smoke", **OLD_FORK)
         self.assertTrue(smoke.passed, smoke.failure_reason)
 
     def test_board_left_on_another_image_is_written_first(self):
@@ -410,14 +440,15 @@ class DfuRunTests(unittest.TestCase):
 
     def test_a_partial_write_is_reported_and_repaired(self):
         board, summary, events = self.run_with(**CORRECT, partial_write_on_reject=True)
-        self.assertIn("application flash differs from the image", summary.failure_reason)
+        # The attempt fails first (it opened the device); cleanup repairs flash.
+        self.assertIn("operation started' was found", summary.failure_reason)
         self.assertEqual([], dfuimage.readback_problems(bytes(board.flash), firmware()))
         rewrites = [c for c in board.commands if c[0] == "ubertooth-dfu" and "-d" in c
                     and c[c.index("-d") + 1].endswith("bluetooth_rxtx.dfu")]
         self.assertEqual(1 + 7, len(rewrites))  # the first write, then one per reject case
 
     def test_a_board_stuck_with_two_dfu_devices_stops_the_run(self):
-        board, summary, events = self.run_with(**FORK_MAIN, dfu_count_extra=1)
+        board, summary, events = self.run_with(**OLD_FORK, dfu_count_extra=1)
         self.assertFalse(summary.passed)
         finished = [e for e in events if e.event_type == "test_finished"][0]
         self.assertTrue(finished.details["stops_run"])

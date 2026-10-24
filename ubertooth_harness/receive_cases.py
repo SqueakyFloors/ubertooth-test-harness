@@ -11,14 +11,11 @@ with the usual cleanup. Command contracts come from the fork sources
 (host/ubertooth-tools/src, host/libubertooth/src/ubertooth.c and
 ubertooth_callback.c).
 
-Some comprehensive cases assert the documented behavior that the commit under
-test (fork 3b22c95) does not deliver yet; they fail until the linked fork fix
-is on that commit:
-
-- SqueakyFloors/ubertooth#202: ubertooth-rx -i prints the replay time, not
-  the recorded systime (fixed on fork main by #212, a55ac89, after 3b22c95).
-- SqueakyFloors/ubertooth#203: ubertooth-rx -i of an unreadable file (a
-  directory) exits 0 without an error (also fixed by #212, after 3b22c95).
+ubertooth-rx -i printed the replay time instead of the recorded systime
+(SqueakyFloors/ubertooth#202) and ended a read error or a cut last record
+silently with exit 0 (#203) before fork a55ac89; those cases are ordinary
+ones now. ubertooth-rx -u without -l is refused before a device is opened
+since fork 57469f2 (#236).
 
 ubertooth-afh with an unknown -U exited 139 (segfault) before fork 219a5b0
 (SqueakyFloors/ubertooth#185); that case is an ordinary one now.
@@ -462,17 +459,16 @@ def raw_receive_cases(arguments, _resources, resource_identities):
 #
 # -i FILE decodes a saved capture instead of opening a device (no -U, no USB):
 # stream_rx_file() feeds each whole 68-byte record (rxdump.py's "full"
-# format) to cb_rx and stops at the first short read; main() then exits 0.
-# An -i file fopen() cannot open prints "Could not open file <name>" and the
-# usage, exit 1. The other options work as live: -l/-u, -z, -e, -r/-q/-d.
+# format) to cb_rx, with systime set to the record's host time (fork a55ac89,
+# SqueakyFloors/ubertooth#202). At the end of the file main() exits 0; a read
+# error ("error: reading <file> failed: <reason>", for example a directory) or
+# a last record cut short ("error: <file> ends in a partial record: N of 68
+# bytes, ignored") is reported on stderr after whatever was decoded, exit 1
+# (#203). An -i file fopen() cannot open prints "Could not open file <name>"
+# and the usage, exit 1. -u without -l is refused before the input or any
+# device is used: "error: -u <UAP> requires -l <LAP>", exit 1 (fork 57469f2,
+# #236). The other options work as live: -l/-u, -z, -e, -r/-q/-d.
 # The fixture is synthetic (rxreplay.py), never an over-the-air capture.
-#
-# Strict comprehensive cases that fail until the fork issue is fixed:
-#
-# - SqueakyFloors/ubertooth#202: packet lines print the replay time, not the
-#   record's systime.
-# - SqueakyFloors/ubertooth#203: a read error (-i <directory>) is not
-#   reported; the replay exits 0 with no output.
 
 _REPLAY = str(Path(rxreplay.__file__).resolve())
 _FIXTURE = "replay.bin"
@@ -481,6 +477,7 @@ _A, _B = f"{rxreplay.LAP_A:06x}", f"{rxreplay.LAP_B:06x}"
 # receiver clock is the master clock, so the CLK1-6 offset is 0.
 _CLK6_ZERO = r"CLK6 = 0x0 found after \d+ total packets"
 _ANY_FOUND = r"(?:UAP|CLK6) = 0x[0-9a-f]+ found after"
+_UAP_NEEDS_LAP = r"error: -u <UAP> requires -l <LAP>"
 
 
 def _fixture_step(base_time, variant="full"):
@@ -638,29 +635,45 @@ def replay_cases(arguments, _resources, _resource_identities, *, now=None):
         ), "exit 0, no packet lines"),
         _replay_case("replay-truncated", "-i of a file whose last record is cut", (
             _fixture_step(base, "truncated"),
-            _replay_step("ubertooth-rx -i <truncated>", (),
-                         check=rxreplay.packets_check(truncated)),
-        ), f"exit 0; the {len(truncated)} packets in whole records; the partial "
-           "record ignored"),
+            _replay_step("ubertooth-rx -i <truncated>", (), returncodes=(1,),
+                         check=rxreplay.packets_check(truncated),
+                         patterns=(rf"error: .*{re.escape(_FIXTURE)} ends in a partial record: "
+                                   rf"{rxreplay.RECORD - rxreplay.TRUNCATED_BYTES} of "
+                                   rf"{rxreplay.RECORD} bytes, ignored",)),
+        ), f"exit 1; the {len(truncated)} packets in whole records, then the partial "
+           "record reported"),
         _replay_case("replay-missing", "-i of a missing file", (
             _replay_step("ubertooth-rx -i <missing>", (), returncodes=(1,),
                          patterns=(r"Could not open file ",), source="missing.bin"),
         ), "exit 1 with 'Could not open file' and the usage"),
-        # Fails until SqueakyFloors/ubertooth#202.
         _replay_case("replay-systime", "-i packet lines carry the recorded systime", (
             _fixture_step(base),
             _replay_step("ubertooth-rx -i <fixture>", (), check=lambda output:
                          rxreplay.systime_check(output, [
                              base + index for index in rxreplay.packet_record_indices()])),
         ), "each packet line's systime is its record's host time"),
-        # Fails until SqueakyFloors/ubertooth#203.
         _replay_case("replay-unreadable", "-i of a directory reports the read error", (
             Step("make-directory", "Create a directory to pass as -i",
                  lambda context: (sys.executable, "-c",
                                   "import os, sys; os.makedirs(sys.argv[1], exist_ok=True)",
                                   _path("a-directory")(context))),
             _replay_step("ubertooth-rx -i <directory>", (), returncodes=(1,),
+                         patterns=(r"error: reading .*a-directory failed: Is a directory",),
                          source="a-directory"),
-        ), "exit 1: the input could not be read"),
+        ), "exit 1: 'error: reading <directory> failed: Is a directory'"),
+        _replay_case("replay-uap-without-lap", "-i -u without -l is refused", (
+            _fixture_step(base),
+            _replay_step(f"ubertooth-rx -i <fixture> -u {rxreplay.UAP_A:02x}",
+                         ("-u", f"{rxreplay.UAP_A:02x}"), returncodes=(1,),
+                         check=rxreplay.packets_check([]),
+                         patterns=(_UAP_NEEDS_LAP,)),
+        ), "exit 1 with 'requires -l <LAP>' before any record is decoded"),
+        # No -i and no -U: refused while the command line is read, so no
+        # Ubertooth is needed and none attached is opened.
+        _replay_case("uap-without-lap-no-device", "-u without -l is refused before a device", (
+            Step("refuse", "ubertooth-rx -u 22",
+                 ("ubertooth-rx", "-u", "22"), timeout_s=10.0, expected_returncodes=(1,),
+                 output_patterns=(_UAP_NEEDS_LAP,)),
+        ), "exit 1 with 'requires -l <LAP>'; no device opened"),
     ]
     return tuple(cases)
