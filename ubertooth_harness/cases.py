@@ -39,6 +39,8 @@ class CommandCase:
             self.optional_tool
             and result.returncode == 127
             and "unable to start command" in result.stderr
+            # Only a missing file; a present but unusable tool must fail.
+            and "No such file or directory" in result.stderr
         ):
             return f"{self.name}: skipped, {self.argv[0]} is not built on this host"
         return ""

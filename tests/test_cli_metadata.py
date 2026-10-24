@@ -15,8 +15,10 @@ VERSION = "libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
 class SurfaceTools:
     """Host tools as built without BlueZ: scan and follow do not exist."""
 
-    def __init__(self, missing=("ubertooth-scan", "ubertooth-follow"), broken=()):
-        self.missing = set(missing)
+    def __init__(self, missing=("ubertooth-scan", "ubertooth-follow"), broken=(),
+                 unusable=()):
+        self.missing = set(missing) - set(unusable)
+        self.unusable = set(unusable)
         self.broken = set(broken)
         self.commands = []
 
@@ -26,8 +28,15 @@ class SurfaceTools:
         tool = command[0]
         if tool in self.missing:
             # What SubprocessCommandExecutor returns when exec fails.
-            return CommandResult(command, 127, "", f"unable to start command: {tool}\n",
-                                 0.0, False)
+            return CommandResult(
+                command, 127, "",
+                f"unable to start command: [Errno 2] No such file or directory: '{tool}'\n",
+                0.0, False)
+        if tool in self.unusable:
+            return CommandResult(
+                command, 127, "",
+                f"unable to start command: [Errno 13] Permission denied: '{tool}'\n",
+                0.0, False)
         if command[1:] in (("-H",), ("--host-version",), ("-V",)):
             text = "garbage\n" if tool in self.broken else VERSION
             return CommandResult(command, 0, text, "", 0.01, False)
@@ -90,6 +99,14 @@ class HostCliSurfaceTests(unittest.TestCase):
         results = finished(events)
         self.assertEqual("failed", results["ubertooth-rx-help"].status)
         self.assertEqual("passed", results["ubertooth-scan-help"].status)
+
+    def test_a_present_but_unusable_optional_tool_fails(self):
+        summary, events = run_surface(SurfaceTools(unusable=("ubertooth-scan",)))
+
+        self.assertFalse(summary.passed)
+        results = finished(events)
+        self.assertEqual("failed", results["ubertooth-scan-help"].status)
+        self.assertEqual("skipped", results["ubertooth-follow-help"].status)
 
     def test_a_wrong_version_line_fails(self):
         summary, events = run_surface(SurfaceTools(broken=("ubertooth-tx",)))

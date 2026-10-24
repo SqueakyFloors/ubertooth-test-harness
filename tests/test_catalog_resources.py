@@ -92,7 +92,6 @@ class CatalogTests(unittest.TestCase):
 
         self.assertEqual(11, len(helps))
         self.assertEqual({"ubertooth-scan", "ubertooth-follow"}, {c.argv[0] for c in optional})
-        cases = helps
         self.assertEqual(
             {
                 "ubertooth-rx",
@@ -107,10 +106,10 @@ class CatalogTests(unittest.TestCase):
                 "ubertooth-ducky",
                 "ubertooth-debug",
             },
-            {case.argv[0] for case in cases},
+            {case.argv[0] for case in helps},
         )
-        util = next(case for case in cases if case.argv[0] == "ubertooth-util")
-        rx = next(case for case in cases if case.argv[0] == "ubertooth-rx")
+        util = next(case for case in helps if case.argv[0] == "ubertooth-util")
+        rx = next(case for case in helps if case.argv[0] == "ubertooth-rx")
         self.assertEqual((0,), util.expected_returncodes)
         self.assertEqual((1,), rx.expected_returncodes)
         self.assertTrue(definition.continue_on_case_failure)

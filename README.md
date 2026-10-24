@@ -214,7 +214,9 @@ are not built, and checks the host version line from `ubertooth-util
 --host-version` and from `-V` on `ubertooth-rx`, `ubertooth-tx`, and
 `ubertooth-afh`. `Ubertooth count` checks that `ubertooth-util -N` equals the
 registered Ubertooths on the host (the selected board plus its guards), so an
-unregistered or missing board fails it. The identity test runs isolated firmware, compile, serial, part, and
+unregistered or missing board fails it. Because it uses guards, the fast and
+release plans need every registered board attached and readable, like the
+transition tests. The identity test runs isolated firmware, compile, serial, part, and
 board queries plus the compatible `-vVspb` composition. `Debug register read`
 constructs a serial-selected `ubertooth-debug` command from the normalized plan
 register. Each case retains its own command, output, log, and result while the
@@ -330,8 +332,8 @@ and channel are recorded and restored. Pairs with `-I` never exit on their own
 
 ### Guard Ubertooths
 
-Every test in the [table above](#option-compositions-and-stateful-transitions)
-binds each other registered Ubertooth on the host as a `guard Ubertooth 1`,
+Every test in the [table above](#option-compositions-and-stateful-transitions),
+and `Ubertooth count`, binds each other registered Ubertooth on the host as a `guard Ubertooth 1`,
 `2`, ... resource of the same invocation, so the
 [Results table, transcript](#run-output-runjsonl-and-reportmd), and manifest
 name the guards. The design is in
