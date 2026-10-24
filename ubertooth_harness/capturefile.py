@@ -9,7 +9,12 @@ directory. It prints one line:
     Capture format: pcapng, link type: 256
     Capture file absent: PATH
 
-and exits 0 when it could read a header (or, with ``--absent``, when the file
+With ``--packets`` it also walks the packet records (pcap record headers,
+pcapng enhanced/simple/obsolete packet blocks) by their length fields and
+adds ``, packets: N`` to the format line; packet bytes are still not
+printed.
+
+It exits 0 when it could read a header (or, with ``--absent``, when the file
 does not exist), 1 otherwise. Only the file header is read; packet contents
 are never printed, so no captured traffic reaches the run record.
 
@@ -99,11 +104,54 @@ def _pcapng_link_type(path, stream, head: bytes) -> int:
     raise CaptureFileError(f"{path}: no pcapng interface description block")
 
 
+_PCAPNG_PACKET_BLOCKS = {0x00000002, 0x00000003, 0x00000006}
+_MAX_PACKETS = 1_000_000
+
+
+def count_packets(path: Path | str) -> int:
+    """Packet records in a pcap or pcapng file whose header read_header accepts."""
+    fmt, _link_type = read_header(path)
+    with Path(path).open("rb") as stream:
+        head = stream.read(24)
+        size = stream.seek(0, 2)
+        if fmt == "pcap":
+            endian = _PCAP_MAGIC[head[:4]]
+            offset, packets = 24, 0
+            while offset < size and packets < _MAX_PACKETS:
+                stream.seek(offset)
+                record = stream.read(16)
+                if len(record) < 16:
+                    raise CaptureFileError(f"{path}: truncated pcap record header")
+                incl_len = struct.unpack(endian + "I", record[8:12])[0]
+                if offset + 16 + incl_len > size:
+                    raise CaptureFileError(f"{path}: truncated pcap record")
+                offset += 16 + incl_len
+                packets += 1
+            return packets
+        endian = "<" if struct.unpack("<I", head[8:12])[0] == _PCAPNG_BYTE_ORDER else ">"
+        offset, packets = 0, 0
+        while offset < size and packets < _MAX_PACKETS:
+            stream.seek(offset)
+            header = stream.read(8)
+            if len(header) < 8:
+                raise CaptureFileError(f"{path}: truncated pcapng block header")
+            block_type, length = struct.unpack(endian + "II", header)
+            if length < 12 or length % 4 or offset + length > size:
+                raise CaptureFileError(f"{path}: bad pcapng block length {length}")
+            if block_type in _PCAPNG_PACKET_BLOCKS:
+                packets += 1
+            offset += length
+        return packets
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="capturefile.py")
     parser.add_argument("path", type=Path)
     parser.add_argument(
         "--absent", action="store_true", help="succeed only if the file does not exist"
+    )
+    parser.add_argument(
+        "--packets", action="store_true", help="also count the packet records"
     )
     args = parser.parse_args(argv)
     if not args.path.exists():
@@ -114,10 +162,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     try:
         fmt, link_type = read_header(args.path)
+        packets = count_packets(args.path) if args.packets else None
     except (OSError, CaptureFileError) as error:
         print(f"Capture file unreadable: {error}")
         return 1
-    print(f"Capture format: {fmt}, link type: {link_type}")
+    suffix = "" if packets is None else f", packets: {packets}"
+    print(f"Capture format: {fmt}, link type: {link_type}{suffix}")
     return 0
 
 

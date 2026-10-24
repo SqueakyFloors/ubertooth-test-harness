@@ -224,6 +224,22 @@ parent YAML item reports one aggregate outcome. Remaining named tests are
 catalog-validated and resource-planned but gain their hardcoded implementations
 in subsequent slices.
 
+`Host CLI surface` and `Raw receive replay` need no Ubertooth, so
+`testplans/host.yaml` runs on a host with none registered or attached; a
+registry holding just the `Host` entry is enough:
+
+```sh
+python -m ubertooth_harness run-suite --plan testplans/host.yaml --suite host \
+  --hardware host-only.yaml --host Host_Mac \
+  --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
+  --libbtbb-source /path/to/libbtbb --libbtbb-ref master --build --output runs
+```
+
+`Raw receive replay` writes its own synthetic `ubertooth-rx -i` input with
+`ubertooth_harness/rxreplay.py` (spec sync words, HEC, whitening, and a DH1
+CRC, so libbtbb derives a known UAP); no over-the-air capture is used or
+stored.
+
 ## Option compositions and stateful transitions
 
 Stateful host CLIs need more than isolated option checks. Plans must select a
@@ -252,6 +268,7 @@ python -m ubertooth_harness run-suite \
 | `Spectrum analyzer` | one full-band sweep (`duration` long): every frequency 2402-2480 reported, none outside, int8 RSSI | adds narrow, single, and top-of-band ranges, `-g`, `-G`, `-v`, and `-d` (binary file checked by `specandump.py`); ranges after a different range fail until fork #173 |
 | `Classic Bluetooth receive` | `ubertooth-rx -z -t N` survey (exits 0 by itself, N = `duration` in whole seconds, no earlier than N-0.5 s, survey lines are piconet addresses); `-t N -r` PCAPNG with link type 255; `ubertooth-afh -t N` prints the initial map and keeps monitoring until stopped | adds `-t N` without `-z`; `-c 39` (every packet on channel 39); `-e 0` and `-e 4` (no packet over the limit); `-s` deprecation notice; `-q` PCAP (link type 255); repeated `-r` (first wins, extra file never created); `-d` (68-byte BR records, checked by `rxdump.py`); `afh -e 2`; `afh -r` one map line per second; strict: `afh` with an unknown `-U` exits 1 (fails until fork #185) |
 | `Raw receive` | `ubertooth-dump -d` (68-byte records) and `-b -d` (401-byte bitstream records), checked by `rxdump.py` with at least 50 records per second; `ubertooth-ego -r -c 2440` runs until stopped | adds `dump -l`, `-l -c`, `-c -l` (the last modulation wins, read back from CC2400 MDMCTRL with `ubertooth-debug`); `ego -l 1`, `-l 48`, `-a 630f9ffe`; `ego -a zz` rejected |
+| `Raw receive replay` | no Ubertooth; `host` and `fast` plans, and CI: `ubertooth-rx -i` on a synthetic fixture (`rxreplay.py`, built from the spec encoding, never a real capture) prints exactly the fixture's LAP/error/channel lines and skips the decoy records; `-l <LAP>` derives the UAP (CLK6 0); `-r` PCAPNG and `-q` PCAP with link type 255 and one packet per line | adds `-z` (both piconets, one with its UAP); `-l` of an ID-only LAP (no UAP); `-l -u` with the right UAP (confirmed, hop reversal) and a wrong one (nothing confirmed); `-e 0` drops the one-error access code; `-d` writes the packet records back byte for byte (and passes `rxdump.py`); `-l -q` captures one LAP; empty file exit 0; cut last record ignored, exit 0; missing file exit 1; strict: lines carry the recorded systime (fork #202) and `-i <directory>` exits 1 (fork #203) |
 | `Ubertooth util modes` | `-I` blinks every LED, `-q182` lights every LED; each returns at once, keeps channel and PA, ends on `-S`, and originals are restored; `-m` after `-r` exits 0 with no result values | adds `-q1`, `-I` ending `-q` and `-q` ending `-I`, `-s -I`; strict: `-q225` and bare `-q` light every LED (fork #189), `-S` after `-q` runs the idle reset (fork #191), `-m` says there is no result (fork #190) |
 | `Multi-board selection` | needs two or more registered boards on the host (a one-board host skips it): `-U all -s` and `-s` without `-U` list every registered board and only those; `-N` counts them; each `-U<index>` opens the board the listing names at that index | adds `-U all -vVspb` and `-vVspb` without `-U` (five lines per board), `-C` without `-U` refused; strict: `-U<n>` past the last board is refused (fork #188) |
 | `BLE mode conflicts` | no `coverage` argument; release plan | every combination of `ubertooth-btle -f -n -p` must be rejected before sniffing |
@@ -1000,6 +1017,9 @@ python -m unittest discover -s tests -v
 
 CI runs the suite and validates the long plan with Python 3.12 on Ubuntu 24.04
 and the current macOS (`macos-latest`; see `.github/workflows/test.yml`). The
+build job also builds the fork's host tools and runs `testplans/host.yaml`
+(Host CLI surface and Raw receive replay smoke, which need no Ubertooth) with
+them against a one-host registry. The
 checks themselves are in `scripts/ci.sh`. To run them on an exact commit
 without GitHub Actions, locally or on another host over SSH:
 

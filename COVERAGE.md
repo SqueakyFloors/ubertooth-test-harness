@@ -6,9 +6,12 @@ exercises, so we can pick the next tests to write. Update it in the same PR as a
 that changes coverage. Options come from each
 tool's `getopt` string and usage text on this fork's `main`. Coverage comes
 from the harness catalog (`ubertooth_harness/catalog.py`,
-`ubertooth_harness/transitions.py`, `ubertooth_harness/util_cases.py`), its plans (`testplans/*.yaml`) and its
+`ubertooth_harness/transitions.py`, `ubertooth_harness/util_cases.py`,
+`ubertooth_harness/receive_cases.py`), its plans (`testplans/*.yaml`) and its
 preflight, flash, and guard code. Profiles: **smoke** runs in the `fast` plan,
 **comprehensive** in the `release` plan; tests without a profile name their plan.
+The `host` plan holds the tests that need no Ubertooth (Host CLI surface and
+Raw receive replay smoke); CI runs it against the tools it builds.
 Status legend:
 **Covered**: a harness test runs the option and checks its output or effect.
 The test and profile are named.
@@ -176,21 +179,21 @@ Combinations: `--padding` without `--wifi`, `--wifi` with `-l`/`-u`: Not covered
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
 | `-h` | help | Covered | Host CLI surface (exit 1) |
-| `-l <LAP>` | LAP to decode | Not covered | A useful test needs a BR/EDR piconet |
-| `-u <UAP>` | UAP to decode | Not covered | Needs `-l` and a piconet |
-| `-z` | survey mode | Covered | Classic Bluetooth receive (smoke): `-z -t N` exits 0 after N s; `Survey Results` and piconet address lines |
-| `-i <file>` | input file instead of a device | Not covered | Raw receive replay is in the backlog; no hardware needed |
+| `-l <LAP>` | LAP to decode | Partial | Raw receive replay: `-i -l` keeps only that LAP's lines and derives the UAP from the fixture (smoke); `-l` with ID packets only gives no UAP, `-l -q` captures only that LAP (comprehensive). Live use needs a BR/EDR piconet |
+| `-u <UAP>` | UAP to decode | Partial | Raw receive replay (comprehensive): `-i -l -u` with the right UAP confirms it (CLK6 0, hop reversal starts), a wrong UAP confirms nothing. Following a live piconet needs one |
+| `-z` | survey mode | Covered | Classic Bluetooth receive (smoke): `-z -t N` exits 0 after N s; `Survey Results` and piconet address lines. Raw receive replay (comprehensive): `-i -z` lists exactly the fixture's two piconets, one with its UAP |
+| `-i <file>` | input file instead of a device | Covered | Raw receive replay, no Ubertooth (smoke, also in CI): a synthetic fixture (`rxreplay.py`) decodes to the exact LAP/error/channel lines, decoy records (LE, DISCARD, channel 79) skipped. Comprehensive: empty file exits 0 with no lines; a cut last record is ignored, exit 0; a missing file exits 1 ("Could not open file"). Strict: lines carry the recorded systime ([ubertooth#202](https://github.com/SqueakyFloors/ubertooth/issues/202)); a directory exits 1 ([ubertooth#203](https://github.com/SqueakyFloors/ubertooth/issues/203)) |
 | `-c <ch>` | fixed BT channel | Covered | Classic Bluetooth receive (comprehensive): `-c 39`, every packet on channel 39. No range check: `-c 79` tunes 2481 MHz ([ubertooth#155](https://github.com/SqueakyFloors/ubertooth/issues/155)); the usage's "Default: 39" is wrong, the default sweeps ([ubertooth#186](https://github.com/SqueakyFloors/ubertooth/issues/186)) |
-| `-e <0-4>` | max access-code errors | Covered | Classic Bluetooth receive (comprehensive): `-e 0` and `-e 4`, no packet over the limit. `-e 5` is accepted ([ubertooth#155](https://github.com/SqueakyFloors/ubertooth/issues/155)) |
+| `-e <0-4>` | max access-code errors | Covered | Classic Bluetooth receive (comprehensive): `-e 0` and `-e 4`, no packet over the limit. Raw receive replay (comprehensive): the fixture's one-bit-error access code is reported as `err=1` by default and dropped with `-e 0`. `-e 5` is accepted ([ubertooth#155](https://github.com/SqueakyFloors/ubertooth/issues/155)) |
 | `-t <s>` | sniff timeout | Covered | Classic Bluetooth receive: every `ubertooth-rx` case must exit 0 by itself, no earlier than N-0.5 s and within N+5 s |
-| `-r<file>` | PCAPNG capture | Covered | Classic Bluetooth receive (smoke): pcapng, link type 255; repeated `-r` keeps the first (comprehensive) |
-| `-q<file>` | PCAP capture | Covered | Classic Bluetooth receive (comprehensive): pcap, link type 255 |
-| `-d<file>` | binary dump | Partial | Classic Bluetooth receive (comprehensive): whole 68-byte BR records (`rxdump.py`). Records are written only for packets found, so with no traffic the file is empty |
+| `-r<file>` | PCAPNG capture | Covered | Classic Bluetooth receive (smoke): pcapng, link type 255; repeated `-r` keeps the first (comprehensive). Raw receive replay (smoke): `-i -r` writes one packet per decoded line |
+| `-q<file>` | PCAP capture | Covered | Classic Bluetooth receive (comprehensive): pcap, link type 255. Raw receive replay (smoke): `-i -q` writes one packet per decoded line |
+| `-d<file>` | binary dump | Covered | Classic Bluetooth receive (comprehensive): whole 68-byte BR records (`rxdump.py`); with no traffic the file is empty. Raw receive replay (comprehensive): `-i -d` writes exactly the fixture's packet records, byte for byte |
 | `-s` | deprecated sweep flag | Covered | Classic Bluetooth receive (comprehensive): deprecation notice on stderr |
 | `-V` | version | Covered | Host CLI surface (fast, release): host version line |
 | `-U <0-7>` | select device | Covered | Classic Bluetooth receive by serial, guard board unchanged |
 
-Combinations: `-u` without `-l` rejected: Covered (Argument validation, smoke). `-z` with an address rejected: Covered (Argument validation, comprehensive). `-z -t N` exits after N s: Covered (Classic Bluetooth receive, smoke). `-i` replay into `-r`/`-q`: Not covered.
+Combinations: `-u` without `-l` rejected: Covered (Argument validation, smoke). `-z` with an address rejected: Covered (Argument validation, comprehensive). `-z -t N` exits after N s: Covered (Classic Bluetooth receive, smoke). `-i` replay into `-r`/`-q`: Covered (Raw receive replay, smoke); into `-d`, with `-l`, `-l -u`, `-z`, `-e`: Covered (Raw receive replay, comprehensive). Replay capture timestamps are the replay time ([ubertooth#202](https://github.com/SqueakyFloors/ubertooth/issues/202)): Not checked.
 
 ## ubertooth-dump
 
@@ -330,6 +333,8 @@ and fail until the fix is on the commit under test.
 | [#189](https://github.com/SqueakyFloors/ubertooth/issues/189) | firmware | LED specan threshold wraps in int8: `-q183`..`-q225` and bare `-q` light nothing | Open | Ubertooth util modes (comprehensive) |
 | [#190](https://github.com/SqueakyFloors/ubertooth/issues/190) | ubertooth-util | `-m` says "invalid range test result" when there is no result | Open | Ubertooth util modes (comprehensive) |
 | [#191](https://github.com/SqueakyFloors/ubertooth/issues/191) | firmware | Stopping LED specan skips the idle reset (LEDs stay on, channel and squelch kept) | Open | Ubertooth util modes (comprehensive) |
+| [#202](https://github.com/SqueakyFloors/ubertooth/issues/202) | ubertooth-rx | `-i` lines and captures carry the replay time, not the recorded systime | Open | Raw receive replay (comprehensive) |
+| [#203](https://github.com/SqueakyFloors/ubertooth/issues/203) | ubertooth-rx | `-i` read errors (a directory) and a cut last record are not reported; exit 0 | Open | Raw receive replay (comprehensive) |
 
 A test that fails cleanly (device verified restored, guards unchanged) no longer ends the run ([#41](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/41)), so strict cases do not hide later tests.
 
@@ -343,7 +348,8 @@ A test that fails cleanly (device verified restored, guards unchanged) no longer
 - **Leaves the application firmware:** `ubertooth-util -f -i` and
   `ubertooth-dfu -d` without `-r`. They need a recovery path (USB power cycle,
   DFU/ISP reflash). The Reset into invalid application backlog item covers part of this.
-- **Needs an RF peer:** BR/EDR piconet (`ubertooth-rx -l -u`,
+- **Needs an RF peer:** BR/EDR piconet (live `ubertooth-rx -l -u`; Raw
+  receive replay covers the decode from a synthetic file,
   `ubertooth-afh`, `ubertooth-follow`), BLE connection (`ubertooth-btle -f/-p`
   with real traffic, `-t`), E-GO skateboard, Uberducky.
 - **Needs a host Bluetooth adapter / BlueZ:** `ubertooth-scan`, `ubertooth-follow` (Linux).
@@ -368,7 +374,7 @@ Next, harness work:
 4. Done (#30): `Spectrum analyzer` ranges, `-g`, `-G`, `-v`, `-d`.
 5. Done (#29): `BLE settings` (`-a`, `-t`, `-x`) and `-r` with `-q`/`-c`. Still open: `-r -` to stdout (would log raw capture bytes; needs a header-only check).
 6. Done (#32): `Debug registers` lists, ranges, verbosity, exit status.
-7. Raw receive replay: `ubertooth-rx -i <fixture>` with `-r`/`-q`/`-d`. Needs a public, synthetic fixture.
+7. Done (#35): `Raw receive replay` (`ubertooth-rx -i` with a synthetic fixture, no Ubertooth, in CI). No LE replay exists: no tool calls libubertooth's `rx_btle_file()`.
 8. Done (#31): `Classic Bluetooth receive` (`ubertooth-rx`, `ubertooth-afh`) and `Raw receive`
    (`ubertooth-dump`, `ubertooth-ego -r`). Still open: BLE monitor.
 9. Add Ubertooth util conflicts to the release plan (fork #82 is fixed; [#25](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/25));
