@@ -125,7 +125,7 @@ Combinations to test:
 |---|---|---|---|
 | `-h` | help | Covered | Host CLI surface |
 | `-U<index\|serial>` | select device | Covered | Debug register read (fast) |
-| `-r <reg>[,<reg>...]` / `-r <start>-<end>` | read CC2400 registers | Covered | Debug registers: list (smoke), range and reversed range (comprehensive), order checked, nothing changed. Exit status fails until [ubertooth#164](https://github.com/SqueakyFloors/ubertooth/issues/164) |
+| `-r <reg>[,<reg>...]` / `-r <start>-<end>` | read CC2400 registers | Covered | Debug registers: list (smoke), range and reversed range (comprehensive), order checked, nothing changed. Exit status checked; fails on builds before the [ubertooth#164](https://github.com/SqueakyFloors/ubertooth/issues/164) fix |
 | `-v<0-2>` | verbosity | Covered | Debug registers (comprehensive): `-v0` header only, `-v1` fields, `-v2` reserved fields; `-v3` rejected |
 
 Combinations: list and range output: Covered. `-v0`/`-v2` output: Covered. `Debug registers` is in the release plan (comprehensive).

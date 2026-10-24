@@ -159,6 +159,23 @@ class SweepCheckTests(unittest.TestCase):
         self.assertIn("no sample lines", check("Ubertooth stopped\n"))
         self.assertIn("not -g samples", check("2402 -45\n2403 -45\n2404 -45\n" + "x\n" * 6))
 
+    def test_dump_file_with_a_partial_record_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "s.bin"
+            path.write_bytes(bytes([0x09, 0x62, 0xD3, 0x09]))
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = specandump.main([str(path), "2402", "2402"])
+        self.assertEqual(1, code)
+        self.assertIn("1 trailing bytes", out.getvalue())
+
+    def test_stderr_lines_do_not_count_as_bad_samples(self):
+        from ubertooth_harness.executor import CommandResult
+        step = tool_cases._specan_case(SERIAL, "x", "x", (), "default", 2402, 2403, 1.0).steps[-2]
+        result = CommandResult(("ubertooth-specan",), 124, "0.1, 2402, -45\n0.1, 2403, -45\n",
+                               "debug line\n" * 20, 1.0, True)
+        self.assertEqual("", step.evaluate(result, {}).failure)
+
     def test_dump_file_summary(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "s.bin"

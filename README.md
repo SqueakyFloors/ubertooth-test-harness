@@ -248,7 +248,7 @@ python -m ubertooth_harness run-suite \
 | `Radio setting transitions` | channel, PA level, squelch across an idle stop and an active-mode stop | adds USR LED; repeated `-c`, `-C`, `-a`, `-z`, `-l`, `-d` (last wins); mixed `-c`/`-C` in both orders; rejected `-a9` with a later `-v` must still exit nonzero; full reset `-r` returns boot defaults |
 | `BLE CRC transitions` | CRC enabled during `-n` and `-f` on channel 37; one `-n` capture per format (`-r` PCAPNG, `-q` PCAP, `-c` PPI) | both CRC values x both modes x channels 37/38/39; both CRC values x both modes x each capture format; repeated `-v` (last wins); repeated capture files `-r -r`, `-q -c`, `-c -q` (first wins, extra file never created); `-r` with `-q` and with `-c` (separate handles, both written) |
 | `BLE settings` | set and read back the access address; set, mask, and clear the follow target | adds `ubertooth-util -r` resets the access address to 8e89bed6; `-x0`/`-x32`; strict: `-a -v` reports both and `-azzzz` is rejected (fail until fork #171) |
-| `Debug registers` | register list `0x02,0x01,0x00` in order, nothing changed | adds a range, a reversed range, `-v0`/`-v1`/`-v2` output, rejected `-r 0x100` and `-v3`; strict: a successful read exits 0 (`-r 0x01` and the range fail until fork #164) |
+| `Debug registers` | register list `0x02,0x01,0x00` in order, nothing changed | adds a range, a reversed range, `-v0`/`-v1`/`-v2` output, rejected `-r 0x100` and `-v3`; a successful read exits 0 (`-r 0x01` and the range fail on fork builds before #164's fix, 89afc1c) |
 | `Spectrum analyzer` | one full-band sweep (`duration` long): every frequency 2402-2480 reported, none outside, int8 RSSI | adds narrow, single, and top-of-band ranges, `-g`, `-G`, `-v`, and `-d` (binary file checked by `specandump.py`); ranges after a different range fail until fork #173 |
 | `BLE mode conflicts` | no `coverage` argument; release plan | every combination of `ubertooth-btle -f -n -p` must be rejected before sniffing |
 | `Ubertooth util conflicts` | no `coverage` argument; requires `allow RF transmission: true`; in no plan yet | every pair of `-q -n -e -t -x -I` must be rejected before a mode starts |
@@ -279,7 +279,9 @@ directory and must never be committed.
 Not checked or restored, because no option the cases use can read it: the
 modulation (the firmware stop returns it to basic rate), the BR/EDR target
 address and LE advertising channel (cleared by a mode stop), and the BLE
-access address (cleared by `-r`).
+follow target. The BLE access address (reset to 8e89bed6 by `-r`) is read with
+`ubertooth-btle -a`: `BLE settings` records and restores it; other cases leave
+it alone.
 
 LEDs are recorded and restored as a USR/RX/TX triple. `-l` sets USR only and
 `-d` sets all three, so a state with RX different from TX can be read but not

@@ -10,8 +10,9 @@ deliver yet; they fail until the linked fork issue is fixed:
 
 - SqueakyFloors/ubertooth#173: a specan run first reports samples from the
   previous run's range (narrow-range cases after a wider run).
-- SqueakyFloors/ubertooth#164: ubertooth-debug exits with the low byte of the
-  last register value (any register whose low byte is not 0).
+- SqueakyFloors/ubertooth#164 (fixed on fork main by #170, 89afc1c):
+  ubertooth-debug built before it exits with the low byte of the last
+  register value (any register whose low byte is not 0).
 - SqueakyFloors/ubertooth#171: ubertooth-btle -a with a bad value, and -a
   combined with -v.
 """
@@ -141,7 +142,7 @@ def _specan_case(serial, case_id, name, options, fmt, low, high, seconds, *,
         timeout_s=seconds,
         mutates=True,
         continuous=True,
-        output_check=None if dump_file else sweep_check(fmt, low, high),
+        output_check=None if dump_file is not None else sweep_check(fmt, low, high),
         output_patterns=(stderr_pattern,) if stderr_pattern else (),
     ))
     steps.append(_stop(serial))
@@ -181,9 +182,11 @@ def spectrum_cases(arguments, _resources, resource_identities):
                      (), "default", *BAND, seconds),
     ]
     if arguments["coverage"] == "comprehensive":
+        # Each case whose range differs from the previous case's (narrow,
+        # single, top, -g, -d) fails until SqueakyFloors/ubertooth#173 is
+        # fixed: the run first reports one stale 16-sample packet. -G and -v
+        # reuse the -g range, so they pass either way.
         cases += [
-            # Directly after the full band, so leftover full-band samples show
-            # (fails until SqueakyFloors/ubertooth#173).
             _specan_case(serial, "narrow-after-full", "2402-2410 MHz after a full-band run",
                          ("-l", "2402", "-u", "2410"), "default", 2402, 2410, seconds),
             _specan_case(serial, "single-frequency", "Single frequency 2440 MHz",
@@ -275,21 +278,21 @@ def debug_cases(arguments, _resources, resource_identities):
     serial = _serial(resource_identities, "Debug registers")
     cases = [
         # Ends on 0x00 (0x8000), so the exit status is 0 even with
-        # SqueakyFloors/ubertooth#164; the exit-status case checks that bug.
+        # SqueakyFloors/ubertooth#164 builds; the exit-status case checks that bug.
         _debug_case(serial, "list", "Register list 0x02,0x01,0x00 in order",
                     _debug_step(serial, "read", "Read 0x02,0x01,0x00", ("-r", "0x02,0x01,0x00"),
                                 check=_register_order_check(("FSDIV", "FSCTRL", "MAIN")))),
     ]
     if arguments["coverage"] == "comprehensive":
         cases += [
-            # Ends on 0x03 (0x0040): exit 64 until #164 as well.
+            # Ends on 0x03 (0x0040): exit 64 on builds before the #164 fix.
             _debug_case(serial, "range", "Register range 0x00-0x03",
                         _debug_step(serial, "read", "Read 0x00-0x03", ("-r", "0x00-0x03"),
                                     check=_register_order_check(("MAIN", "FSCTRL", "FSDIV", "MDMCTRL")))),
             _debug_case(serial, "reversed-range", "Reversed range 0x03-0x00 reads downwards",
                         _debug_step(serial, "read", "Read 0x03-0x00", ("-r", "0x03-0x00"),
                                     check=_register_order_check(("MDMCTRL", "FSDIV", "FSCTRL", "MAIN")))),
-            # FSCTRL (0x01) reads 0x0010: exits 16 until SqueakyFloors/ubertooth#164.
+            # FSCTRL (0x01) reads 0x0010: exits 16 on builds before the #164 fix.
             _debug_case(serial, "exit-status", "A successful read of 0x01 exits 0",
                         _debug_step(serial, "read", "Read 0x01", ("-r", "0x01"))),
         ] + [
@@ -416,4 +419,3 @@ def btle_settings_cases(arguments, _resources, resource_identities):
             ), expected_state="rejected with exit 1; access address unchanged"),
         ]
     return tuple(cases)
-

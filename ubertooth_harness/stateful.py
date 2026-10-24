@@ -120,7 +120,7 @@ class Step:
     # Returns a reason to fail the step without running its command (for
     # example a query whose tool would write to an incompatible device).
     refuse: Callable[[Context], str] | None = None
-    # Checks the whole output (stdout + stderr) and returns a failure reason,
+    # Checks stdout (stderr is diagnostics) and returns a failure reason,
     # or "" when it is acceptable; for outputs too varied for patterns, such
     # as a spectrum sweep.
     output_check: Callable[[str], str] | None = None
@@ -168,7 +168,7 @@ class Step:
                     expected,
                 )
         if self.output_check is not None:
-            reason = self.output_check(output)
+            reason = self.output_check(result.stdout)
             if reason:
                 return StepOutcome(f"{self.name}: {reason}", expected)
         if self.observe is None:

@@ -4,7 +4,7 @@
 Run as ``python <this file> PATH LOW HIGH`` from a transition step. It prints
 one line, ``Specan dump: N samples, M frequencies in LOW-HIGH, K outside``,
 and exits 0 when the file has whole records, at least one sample, every
-frequency of the range, and none outside it; 1 otherwise. Imports only the
+frequency of the range, none outside it, and no partial record; 1 otherwise. Imports only the
 standard library, so it runs from any working directory.
 """
 
@@ -45,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
         f"{outside} outside" + (f", {trailing} trailing bytes" if trailing else "")
     )
     expected = high - low + 1
-    return 0 if samples and len(seen) == expected and not outside else 1
+    return 0 if samples and len(seen) == expected and not outside and not trailing else 1
 
 
 if __name__ == "__main__":
