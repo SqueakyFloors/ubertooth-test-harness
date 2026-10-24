@@ -1,0 +1,43 @@
+plan: Ubertooth backlog
+suites:
+  backlog:
+    - Two-device range test:
+        host: Host_Linux
+        sender: default
+        responder: explicit required
+
+    - Raw receive replay:
+        fixture: required
+
+    - Capture known BLE advertiser:
+        advertiser: required
+        Ubertooth: default
+
+    - Capture eero setup beacon:
+        eero: required
+        Ubertooth: default
+
+    - Recover AFH map:
+        piconet: required
+        Ubertooth: default
+
+    - Follow Classic Bluetooth piconet:
+        piconet: required
+        Ubertooth: default
+
+    - Bluetooth inquiry scan:
+        Bluetooth adapter: required
+        Ubertooth: default
+
+    - Reset into invalid application:
+        Ubertooth: default
+        USB power controller: required
+
+    - Receive-only firmware:
+        Ubertooth: default
+
+    - Uberducky HID:
+        Uberducky: required
+
+    - E-GO skateboard capture:
+        skateboard: required

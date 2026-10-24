@@ -1,0 +1,270 @@
+"""Versioned controller <-> target runner wire protocol.
+
+Every message is one JSON object in one WebSocket text frame:
+
+    {"version": 1, "type": "<type>", ...fields}
+
+Each type has an exact field set. Decoding is strict: a message that is not a
+JSON object, has an unknown version or type, lacks a field, carries an extra
+field, or has a field of the wrong type or shape is rejected with
+ProtocolError and never acted on. Encoding applies the same schema, so the
+runner cannot emit a message the controller would reject.
+
+Run events are carried unchanged in the ``event`` message: the object is the
+run's ``RunEvent`` record exactly as written to run.jsonl, with its own
+``schema_version``. The run directory remains the source of truth.
+"""
+
+import json
+import math
+import re
+from typing import Any, Callable, Mapping
+
+
+PROTOCOL_VERSION = 1
+# Bounds what the runner accepts from the controller. Outbound events may be
+# larger (the manifest record is bounded at 1 MiB).
+MAX_INBOUND_MESSAGE_BYTES = 64 * 1024
+
+_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_MAX_TEXT = 4096
+
+
+class ProtocolError(ValueError):
+    """A message does not match the protocol schema."""
+
+
+Validator = Callable[[Any], bool]
+
+
+def _identifier(value) -> bool:
+    return isinstance(value, str) and bool(_ID_RE.fullmatch(value))
+
+
+def _name(value) -> bool:
+    return isinstance(value, str) and bool(_NAME_RE.fullmatch(value))
+
+
+def _text(value) -> bool:
+    return isinstance(value, str) and len(value) <= _MAX_TEXT
+
+
+def _line(value) -> bool:
+    """Non-empty single printable line that cannot be read as an option."""
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= 200
+        and value.isprintable()
+        and not value.startswith("-")
+        and value == value.strip()
+    )
+
+
+def _git_ref(value) -> bool:
+    return _line(value) and not any(char.isspace() for char in value)
+
+
+def _optional(check: Validator) -> Validator:
+    return lambda value: value is None or check(value)
+
+
+def _integer(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _non_negative_number(value) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value >= 0
+    )
+
+
+def _boolean(value) -> bool:
+    return isinstance(value, bool)
+
+
+def _string_map(value) -> bool:
+    return isinstance(value, dict) and all(
+        isinstance(key, str) and (item is None or _text(item))
+        for key, item in value.items()
+    )
+
+
+def _serials(value) -> bool:
+    return isinstance(value, list) and all(_text(item) for item in value)
+
+
+def _test_names(value) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) <= 100
+        and len(set(value)) == len(value)
+        and all(_line(item) for item in value)
+    )
+
+
+def _run_event(value) -> bool:
+    return (
+        isinstance(value, dict)
+        and _integer(value.get("schema_version"))
+        and _identifier(value.get("run_id"))
+        and _integer(value.get("sequence"))
+        and isinstance(value.get("event_type"), str)
+    )
+
+
+# Controller -> runner.
+CONTROLLER_MESSAGES: Mapping[str, Mapping[str, Validator]] = {
+    # Start one run. ``ref`` is resolved in the runner's configured Ubertooth
+    # checkout; ``plan`` names <plans dir>/<plan>.yaml; ``tests`` selects
+    # exact test names (empty: the whole suite); ``build`` builds the
+    # resolved commits into the run directory first.
+    "run": {
+        "request_id": _identifier,
+        "ref": _git_ref,
+        "plan": _name,
+        "suite": _name,
+        "tests": _test_names,
+        "build": _boolean,
+    },
+    # Cooperatively cancel the active run.
+    "cancel": {
+        "run_id": _identifier,
+        "reason": _text,
+    },
+}
+
+# Runner -> controller.
+RUNNER_MESSAGES: Mapping[str, Mapping[str, Validator]] = {
+    # First message on every connection.
+    "register": {
+        "host": _name,
+        "hostname": _text,
+        "os": _string_map,
+        "python": _text,
+        # Null when enumeration is unavailable (see enumeration_error).
+        "ubertooth_serials": _optional(_serials),
+        "enumeration_error": _optional(_text),
+        "heartbeat_interval_s": _non_negative_number,
+        # Run still executing or not yet reported; its events are replayed
+        # from the start on this connection.
+        "active_run_id": _optional(_identifier),
+    },
+    "heartbeat": {
+        "active_run_id": _optional(_identifier),
+        "elapsed_s": _optional(_non_negative_number),
+        "last_event_sequence": _optional(_integer),
+        "last_event_type": _optional(_text),
+    },
+    "run_accepted": {
+        "request_id": _identifier,
+        "run_id": _identifier,
+    },
+    "run_rejected": {
+        "request_id": _optional(_identifier),
+        "reason": _text,
+    },
+    "cancel_accepted": {
+        "run_id": _identifier,
+    },
+    "cancel_rejected": {
+        "run_id": _optional(_identifier),
+        "reason": _text,
+    },
+    # One run.jsonl record, unchanged, in run.jsonl order.
+    "event": {
+        "run_id": _identifier,
+        "event": _run_event,
+    },
+    # The run wrote its terminal run_finished record; status is that
+    # record's status (passed, failed, canceled, ...).
+    "run_finished": {
+        "request_id": _identifier,
+        "run_id": _identifier,
+        "status": _name,
+        "exit_code": _integer,
+        "run_directory": _text,
+    },
+    # The run ended without a run_finished record (for example, it was
+    # refused before its run directory was created).
+    "run_error": {
+        "request_id": _identifier,
+        "run_id": _identifier,
+        "exit_code": _optional(_integer),
+        "reason": _text,
+    },
+    # The controller sent a message the runner rejected; nothing was done.
+    "protocol_error": {
+        "reason": _text,
+    },
+}
+
+
+def _validate(message, schemas: Mapping[str, Mapping[str, Validator]]) -> dict:
+    if not isinstance(message, dict):
+        raise ProtocolError("message must be a JSON object")
+    version = message.get("version")
+    if not _integer(version) or version != PROTOCOL_VERSION:
+        raise ProtocolError(
+            f"unsupported protocol version {version!r}; expected {PROTOCOL_VERSION}"
+        )
+    message_type = message.get("type")
+    if not isinstance(message_type, str) or message_type not in schemas:
+        raise ProtocolError(f"unknown message type {message_type!r}")
+    schema = schemas[message_type]
+    fields = set(message) - {"version", "type"}
+    missing = sorted(set(schema) - fields)
+    if missing:
+        raise ProtocolError(f"{message_type}: missing field(s) {', '.join(missing)}")
+    extra = sorted(fields - set(schema))
+    if extra:
+        raise ProtocolError(f"{message_type}: unknown field(s) {', '.join(extra)}")
+    for field, check in schema.items():
+        if not check(message[field]):
+            raise ProtocolError(f"{message_type}: invalid {field}")
+    return message
+
+
+def _decode(text, schemas) -> dict:
+    if isinstance(text, (bytes, bytearray)):
+        raise ProtocolError("binary frames are not accepted")
+    if len(text.encode("utf-8")) > MAX_INBOUND_MESSAGE_BYTES:
+        raise ProtocolError("message too large")
+    try:
+        message = json.loads(text, parse_constant=_reject_constant)
+    except (ValueError, RecursionError) as error:
+        raise ProtocolError(f"message is not valid JSON: {error}") from error
+    return _validate(message, schemas)
+
+
+def _reject_constant(name):
+    raise ValueError(f"{name} is not valid JSON")
+
+
+def decode_controller_message(text) -> dict:
+    """Strictly decode one controller -> runner message."""
+    return _decode(text, CONTROLLER_MESSAGES)
+
+
+def decode_runner_message(text) -> dict:
+    """Strictly decode one runner -> controller message (controller side)."""
+    return _decode(text, RUNNER_MESSAGES)
+
+
+def _encode(message_type: str, fields: Mapping, schemas) -> str:
+    message = {"version": PROTOCOL_VERSION, "type": message_type, **fields}
+    _validate(message, schemas)
+    return json.dumps(message, sort_keys=True, allow_nan=False)
+
+
+def encode_runner_message(message_type: str, **fields) -> str:
+    """Encode one runner -> controller message, validated against the schema."""
+    return _encode(message_type, fields, RUNNER_MESSAGES)
+
+
+def encode_controller_message(message_type: str, **fields) -> str:
+    """Encode one controller -> runner message (controller side and tests)."""
+    return _encode(message_type, fields, CONTROLLER_MESSAGES)

@@ -1,0 +1,22 @@
+plan: MAC polling Ubertooth stability
+suites:
+  mac-polling:
+    - MAC polling soak:
+        hosts: [Host_Linux]
+        platforms: [linux]
+        Ubertooth: default
+        advertiser: DK_Linux0
+        exclusive Ubertooth: true
+        duration: 8h
+        query every: 1s
+        log every: 1s
+        bucket count: 5
+        bucket rotation: 2s
+        listener silence timeout: 10s
+        empty buckets restart after: 15s
+        restart suppression: 5s
+        restart timeout extension: 20s
+        post-restart wait: 10s
+        search timeout: 120s
+        maximum consecutive misses: 1  # after all buckets have warmed up
+        maximum restarts: 0  # fail on the first unexpected restart

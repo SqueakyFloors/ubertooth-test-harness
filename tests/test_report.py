@@ -1,0 +1,170 @@
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from ubertooth_harness.events import open_run_publisher
+from ubertooth_harness.report import load_events, render_run, render_runs, write_report
+
+
+SERIAL = "aaaa0000"
+
+
+def write_run(directory: Path, *, finish=True, host="Host_Mac"):
+    publisher = open_run_publisher(directory, directory.name)
+    publisher.emit("run_started", "running", {"plan_name": "Plan", "suite": "fast", "host": host})
+    publisher.emit("manifest", "passed", {"manifest": {
+        "host": host,
+        "plan_name": "Plan",
+        "suite": "fast",
+        "sources": [{"name": "Ubertooth", "requested_ref": "main", "commit": "a" * 40,
+                     "expected_revision": "git-aaaaaaa", "repository": "repo"}],
+        "artifacts": [],
+        "invocations": [{"resource_identities": {"Ubertooth": {"serial": SERIAL}}}],
+        "environment": {"os": {"system": "Darwin", "architecture": "arm64"}},
+    }})
+    publisher.emit("test_started", "running", {
+        "invocation_id": "001-Ubertooth identity", "test_name": "Ubertooth identity",
+        "host": host, "resources": {"Ubertooth": "UT_0"},
+    })
+    publisher.emit("command_started", "running", {"command_id": "c1", "argv": ["ubertooth-util", "-U", SERIAL, "-s"]})
+    publisher.emit("command_output", "running", {"command_id": "c1", "stream": "stdout", "text": f"Serial No: {SERIAL}\n"})
+    publisher.emit("command_finished", "passed", {"command_id": "c1", "returncode": 0, "duration_s": 0.1})
+    if finish:
+        publisher.emit("test_finished", "passed", {
+            "invocation_id": "001-Ubertooth identity", "test_name": "Ubertooth identity",
+            "reason": "", "failed_cases": 0, "skipped_cases": 0,
+        })
+        publisher.emit("run_finished", "passed", {
+            "completed_tests": 1, "requested_tests": 1, "completed_preflight_checks": 0,
+            "requested_preflight_checks": 0, "skipped_cases": 0, "failure_reason": "",
+        })
+
+
+class ReportTests(unittest.TestCase):
+
+    def test_report_has_setup_results_and_headed_transcript(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            write_run(run)
+
+            report = (write_report(run)).read_text()
+
+            self.assertIn("| Result | **passed**: 1/1 tests", report)
+            self.assertIn("| 001-Ubertooth identity | Host_Mac (Ubertooth=UT_0) | passed |", report)
+            self.assertIn("=== TEST 001-Ubertooth identity: Ubertooth identity on Host_Mac (Ubertooth=UT_0) ===", report)
+            self.assertIn(f"[C] ubertooth-util -U {SERIAL} -s", report)
+            self.assertIn(f"[O] Serial No: {SERIAL}", report)
+            self.assertIn(SERIAL, report)  # serials are shown by default
+
+    def test_serials_can_be_redacted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            write_run(run)
+
+            report = render_run(load_events(run / "run.jsonl"), redact_serials=True)
+
+            self.assertNotIn(SERIAL, report)
+            self.assertIn("<serial>", report)
+
+    def test_redaction_masks_32_hex_tokens_but_not_longer_digests(self):
+        from ubertooth_harness.report import _redact
+
+        serial = "0123456789abcdef0123456789ABCDEF"
+        git_sha = "0123456789abcdef0123456789abcdef01234567"
+        sha256 = "f" * 64
+        text = f"extra {serial}; commit {git_sha}; digest {sha256}"
+
+        redacted = _redact(text, ())
+
+        self.assertEqual(
+            f"extra <serial>; commit {git_sha}; digest {sha256}", redacted
+        )
+
+    def test_redaction_covers_guard_and_preflight_serials(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            write_run(run, finish=False)
+            publisher = open_run_publisher(run, "run-a")
+            publisher.emit("flash_run_started", "running", {
+                "serial": SERIAL, "guard_serials": ["cccc2222"], "requested_flashes": 2,
+            })
+            publisher.emit("command_started", "running", {"command_id": "g", "argv": ["ubertooth-util", "-U", "cccc2222", "-v"]})
+            publisher.emit("command_finished", "passed", {"command_id": "g", "returncode": 0, "duration_s": 0.1})
+
+            report = render_run(load_events(run / "run.jsonl"), redact_serials=True)
+
+            self.assertNotIn("cccc2222", report)
+            self.assertNotIn(SERIAL, report)
+
+    def test_long_command_output_is_capped_in_the_report(self):
+        from ubertooth_harness.report import MAX_COMMAND_OUTPUT_CHARS
+
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            publisher = open_run_publisher(run, "run-a")
+            publisher.emit("command_started", "running", {"command_id": "c", "argv": ["ubertooth-btle", "-f"]})
+            chunk = "x" * 4000 + "\n"
+            count = MAX_COMMAND_OUTPUT_CHARS // len(chunk) + 10
+            for _ in range(count):
+                publisher.emit("command_output", "running", {"command_id": "c", "stream": "stdout", "text": chunk})
+            publisher.emit("command_finished", "stopped", {"command_id": "c", "returncode": 124, "duration_s": 4.0, "timed_out": True})
+
+            report = render_run(load_events(run / "run.jsonl"))
+
+            self.assertLess(len(report), MAX_COMMAND_OUTPUT_CHARS * 2)
+            self.assertIn("[M] ", report)
+            self.assertIn("more characters of output are in run.jsonl", report)
+
+    def test_older_runs_with_offset_timestamps_render_elapsed_times(self):
+        events = [
+            {"run_id": "old", "sequence": 1, "timestamp": "2026-10-23T23:00:00.000000+00:00",
+             "event_type": "run_started", "status": "running", "details": {}},
+            {"run_id": "old", "sequence": 2, "timestamp": "2026-10-23T23:00:01.500",
+             "event_type": "run_finished", "status": "passed", "details": {}},
+        ]
+
+        report = render_run(events)
+
+        self.assertIn("00:00:00.000     === RUN old", report)
+        self.assertIn("00:00:01.500     === RUN passed ===", report)
+
+    def test_unfinished_run_still_renders(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            write_run(run, finish=False)
+            with (run / "run.jsonl").open("a") as stream:
+                stream.write('{"truncated": ')  # crash mid-write
+
+            report = render_run(load_events(run / "run.jsonl"))
+
+            self.assertIn("incomplete (no run_finished record)", report)
+            self.assertIn("did not finish", report)
+
+    def test_several_runs_in_one_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            mac = Path(directory) / "mac-run"
+            linux = Path(directory) / "linux-run"
+            write_run(mac, host="Host_Mac")
+            write_run(linux, host="Host_Linux")
+
+            report = render_runs([mac, linux], title="Release validation")
+
+            self.assertTrue(report.startswith("# Release validation"))
+            self.assertIn("| `mac-run` | Host_Mac | passed |", report)
+            self.assertIn("| `linux-run` | Host_Linux | passed |", report)
+            self.assertNotIn("## Transcript", report)
+
+    def test_records_are_valid_json_lines(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            write_run(run)
+
+            lines = (run / "run.jsonl").read_text().splitlines()
+
+            self.assertEqual("run_started", json.loads(lines[0])["event_type"])
+            self.assertEqual("run_finished", json.loads(lines[-1])["event_type"])
+
+
+if __name__ == "__main__":
+    unittest.main()

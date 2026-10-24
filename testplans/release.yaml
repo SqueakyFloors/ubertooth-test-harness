@@ -1,0 +1,31 @@
+plan: Ubertooth release preparation
+suites:
+  release:
+    - Host CLI surface:
+        hosts: each
+
+    - Ubertooth identity:
+        hosts: each
+        Ubertooth: default
+
+    - Ubertooth util compositions:
+        hosts: each
+        Ubertooth: default
+        coverage: comprehensive
+
+    - Radio setting transitions:
+        hosts: each
+        Ubertooth: default
+        coverage: comprehensive
+
+    - BLE CRC transitions:
+        hosts: each
+        Ubertooth: default
+        coverage: comprehensive
+
+    - BLE mode conflicts:
+        hosts: each
+        Ubertooth: default
+
+    # Add "Ubertooth util conflicts" once SqueakyFloors/ubertooth#82 is fixed;
+    # until then it fails against main by design.
