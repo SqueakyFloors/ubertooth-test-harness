@@ -240,7 +240,7 @@ class BuilderTests(unittest.TestCase):
 
         cases = builtin_catalog().get("Host CLI surface").command_cases({}, {}, {})
 
-        required = {case.argv[0] for case in cases if not case.optional_tool}
+        required = {case.argv[0] for case in cases if not case.needs}
         self.assertEqual(set(BUILT_TOOLS), required)
 
     def test_cancellation_stops_before_the_next_command(self):

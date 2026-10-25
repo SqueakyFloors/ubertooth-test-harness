@@ -48,7 +48,7 @@ button[disabled] { cursor: progress; }
 .status-passed, .status-online { color: var(--pass); }
 .status-failed, .status-error, .status-did-not-finish, .status-lost { color: var(--fail); }
 .status-running { color: var(--run); }
-.status-pending, .status-not-run, .status-offline, .status-skipped, .status-canceled, .status-unknown { color: var(--muted); }
+.status-pending, .status-not-run, .status-offline, .status-skipped, .status-not-applicable, .status-canceled, .status-unknown { color: var(--muted); }
 
 .clock { font-size: 1.25rem; font-variant-numeric: tabular-nums; margin: 0.5rem 0 0; }
 .checklist { padding-left: 1.5rem; }

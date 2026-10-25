@@ -87,8 +87,8 @@ class CatalogTests(unittest.TestCase):
         definition = builtin_catalog().get("Host CLI surface")
 
         cases = definition.command_cases({"hosts": "each"}, {}, {})
-        helps = [c for c in cases if c.argv[1:] == ("-h",) and not c.optional_tool]
-        optional = [c for c in cases if c.optional_tool]
+        helps = [c for c in cases if c.argv[1:] == ("-h",) and not c.needs]
+        optional = [c for c in cases if c.needs.bluez_tools]
 
         self.assertEqual(11, len(helps))
         self.assertEqual({"ubertooth-scan", "ubertooth-follow"}, {c.argv[0] for c in optional})
@@ -111,7 +111,7 @@ class CatalogTests(unittest.TestCase):
         util = next(case for case in helps if case.argv[0] == "ubertooth-util")
         rx = next(case for case in helps if case.argv[0] == "ubertooth-rx")
         self.assertEqual((0,), util.expected_returncodes)
-        self.assertEqual((1,), rx.expected_returncodes)
+        self.assertEqual((0,), rx.expected_returncodes)
         self.assertTrue(definition.continue_on_case_failure)
 
     def test_ubertooth_identity_builds_named_isolated_and_composed_cases(self):
@@ -546,7 +546,9 @@ suites:
 """,
             )
 
-            with self.assertRaisesRegex(PlanningError, "platform"):
+            with self.assertRaisesRegex(
+                PlanningError, "no selected host can run it: Host_Mac: runs only on Linux"
+            ):
                 PlanCompiler(builtin_catalog(), registry).compile(plan, "slow")
 
 

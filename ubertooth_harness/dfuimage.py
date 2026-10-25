@@ -545,8 +545,6 @@ def _parser() -> argparse.ArgumentParser:
     state = sub.add_parser("state", help="list a directory with a digest of its state")
     state.add_argument("directory")
     state.add_argument("--before", help="a 'Directory entries' value to compare with")
-    test_build = sub.add_parser("test-build", help="say whether the run has a test build")
-    test_build.add_argument("path", nargs="?", default="")
     check = sub.add_parser("check-suffix", help="OUTPUT is BINARY plus a valid suffix")
     check.add_argument("binary")
     check.add_argument("output")
@@ -642,13 +640,6 @@ def _main(args, board_factory) -> int:
             print("Directory changed: " + "; ".join(changes))
             return 1
         print(f"Directory unchanged: {len(state)} entries")
-        return 0
-    if command == "test-build":
-        if not args.path:
-            print("Test build: none: this run has no firmware build (run with --build "
-                  "--with-firmware, or --artifact \"test build=PATH\")")
-        else:
-            print(f"Test build: {args.path}")
         return 0
     if command == "check-suffix":
         binary = Path(args.binary).read_bytes()

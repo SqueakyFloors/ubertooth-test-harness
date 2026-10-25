@@ -128,6 +128,14 @@ class TerminalEventSink:
             self.stream.write(f"\n== run {event.run_id} started ==\n")
         elif event.event_type == "manifest":
             self.stream.write("\n[manifest recorded]\n")
+        elif event.event_type == "not_applicable":
+            what = str(details.get("test_name", ""))
+            if details.get("case_name"):
+                what += f" / {details['case_name']}"
+            self.stream.write(
+                f"[not applicable] {what}: not applicable on "
+                f"{details.get('host', '')}: {details.get('reason', '')}\n"
+            )
         elif event.event_type == "preflight_started":
             self.stream.write("\n== mandatory preflight ==\n")
         elif event.event_type == "check_started":

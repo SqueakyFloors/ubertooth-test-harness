@@ -103,6 +103,30 @@ run_build() {
         --ubertooth-source "$ut" --ubertooth-ref "${UBERTOOTH_REF:-main}" \
         --libbtbb-source "$bb" --libbtbb-ref "${LIBBTBB_REF:-$LIBBTBB_PIN}" \
         --run-id ci-host --output "$WORK/runs"
+
+    step "not applicable on this host: decided at planning, matches the dry run"
+    PATH="$WORK/build/prefix/bin:$PATH" .venv/bin/python -m ubertooth_harness run-suite \
+        --dry-run --plan testplans/host.yaml --suite host \
+        --hardware "$WORK/host-only.yaml" --host CI_Host \
+        --ubertooth-source "$ut" --ubertooth-ref "${UBERTOOTH_REF:-main}" \
+        --output "$WORK/dry-runs" | tee "$WORK/dry-run.txt"
+    .venv/bin/python - "$platform" "$WORK/runs/ci-host/run.jsonl" "$WORK/dry-run.txt" <<'EOF'
+import json, re, sys
+platform, record, dry_run = sys.argv[1:]
+events = [json.loads(line) for line in open(record)]
+items = [e["details"] for e in events if e["event_type"] == "not_applicable"]
+summary = next(e["details"] for e in events if e["event_type"] == "run_finished")
+bluez = [i for i in items if "BlueZ" in i["reason"]]
+planned = int(re.search(r"(\d+) case\(s\) and \d+ test\(s\) not applicable",
+                        open(dry_run).read())[1])
+print(f"{platform}: {len(items)} not applicable ({len(bluez)} BlueZ), "
+      f"{summary['skipped_cases']} skipped, dry run planned {planned}")
+assert summary["passed"], summary
+assert summary["skipped_cases"] == 0, "a case skipped at run time"
+assert summary["not_applicable_cases"] == len(items) == planned, (len(items), planned)
+# Every follow/scan case on macOS (no BlueZ); none on Linux (built with BlueZ).
+assert (len(bluez) >= 12) if platform == "macos" else not bluez, bluez
+EOF
 }
 
 case "${1:-}" in

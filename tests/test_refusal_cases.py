@@ -119,7 +119,7 @@ class FakeTools:
             return self._result(command, 1, "".join(out), "".join(err)
                                 + f"error: unexpected argument '{operands[0]}'\n")
         if ("h", None) in flags:
-            return self._result(command, 0 if tool in ("ubertooth-specan", "ubertooth-dump") else 1,
+            return self._result(command, 0 if tool in ("ubertooth-specan", "ubertooth-dump", "ubertooth-rx") else 1,
                                 "".join(out) + USAGE[tool], "".join(err))
         refused = self._after_loop(tool, flags, files)
         if refused:

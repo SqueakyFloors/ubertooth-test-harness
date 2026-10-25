@@ -209,8 +209,9 @@ The generic sequencer executes `Host version`, `Help smoke`, grouped `Host CLI
 surface`, `Ubertooth count`, and grouped `Ubertooth identity` command cases.
 The host surface runs help/parser checks for all eleven always-built
 executables and retains each tool's result. It also runs `-h` on the BlueZ-only
-`ubertooth-scan` and `ubertooth-follow`, skipping (not failing) them where they
-are not built, and checks the host version line from `ubertooth-util
+`ubertooth-scan` and `ubertooth-follow`, which are not applicable (left out
+before the run, see [Host requirements](#host-requirements)) where they are not
+built, and checks the host version line from `ubertooth-util
 --host-version` and from `-V` on `ubertooth-rx`, `ubertooth-tx`, and
 `ubertooth-afh`. `Ubertooth count` checks that `ubertooth-util -N` equals the
 registered Ubertooths on the host (the selected board plus its guards), so an
@@ -246,8 +247,9 @@ stored.
 <tool> ...`, so a command that got past its argument checks finds no board
 instead of opening one (libubertooth, fork `b6d8ede`). Its first step reads
 the bytes of the libubertooth beside the tool on `PATH` (never running a tool)
-and skips the case when that library lacks the variable's name, or when the
-tool is not built (`ubertooth-follow` needs BlueZ). Each case seeds files with
+and skips the case when that library lacks the variable's name (only the built
+library can tell). The `ubertooth-follow` cases need BlueZ, so they are not
+applicable on macOS. Each case seeds files with
 known contents in its own capture directory, refuses one command naming a new
 file and one naming a seeded file, then checks that nothing was created,
 truncated, or left behind (`ubertooth_harness/refusal.py`).
@@ -270,17 +272,19 @@ no ARM toolchain), so the cases use a synthetic image (`dfuimage.py synth`:
 filler with a `ubertooth harness-synthetic (` revision marker and the suffix
 the harness computes) and derive the bad images from it as `DFU images` does
 from the test build. `sign-test-build` signs the test build's binary and
-compares the result with the build's `.dfu` when the run has one
-(`--build --with-firmware`, or `--artifact "test build=PATH"`), and is skipped
-with that reason otherwise.
+compares the result with the build's `.dfu`; it needs a firmware build
+(`--build --with-firmware`, or `--artifact "test build=PATH"`) and is not
+applicable without one.
 
 `Python tools` runs `ubertooth-specan-ui -h` with no display (`DISPLAY`,
 `WAYLAND_DISPLAY`, and `QT_QPA_PLATFORM` removed) from a
 `--build --with-python` prefix, and `btle-extcap.py` (which CMake never
 installs) exactly as it is in the resolved Ubertooth commit, read with
 `git show`. specan-ui imports numpy, qtpy, and a Qt binding before it parses
-`-h`, so its case is skipped, with the reason, when the run has no Python-tool
-build or that interpreter lacks one of them. `BLE extcap interfaces` runs
+`-h`. Its case needs the Python tools build, so it is not applicable without
+`--build --with-python`, and is skipped at run time, with the reason, when
+that interpreter lacks one of them. The btle-extcap cases need nothing from the
+host beyond `python3` and the tools every build has. `BLE extcap interfaces` runs
 `btle-extcap.py --extcap-interfaces`, which opens every attached board through
 `ubertooth-util -U all -s`, so it leases and guards them like `Ubertooth count`.
 Both run through `ubertooth_harness/pytools.py`. `BLE extcap capture` runs
@@ -289,6 +293,38 @@ does what Wireshark does: it creates the FIFO, reads it, and stops the script
 with SIGTERM after `duration` (never SIGKILL). The script's stdout, where
 `ubertooth-btle` prints decoded packets, is discarded and only record counts
 are logged, so no captured traffic reaches the run record.
+
+### Host requirements
+
+A case or a whole test declares what it needs from the host in one place
+(`ubertooth_harness/hostneeds.py`, `Needs`): a host platform (also the plan's
+`platforms:` argument), a tool built only with BlueZ, the Python tools build,
+or a firmware build. It is resolved before anything runs, from the host's
+registry platform and the run's options and build manifest. What the host
+cannot run is left out and recorded as `not applicable on <host>: <reason>`,
+counted apart from skips and failures: a `not_applicable` event per case (or
+whole test) and a `host_capabilities` event in run.jsonl, a `Not applicable`
+section, a `Not applicable cases` column, and a `Host can run` row in report.md,
+`not_applicable_cases` and `not_applicable_tests` in the run summary, and
+`not applicable` in the web GUI. `run-suite --dry-run` prints the same decision
+for every case before any build, lease, or run. A plan entry that no host it
+names can run (no case applies on any of them) fails planning. A test whose
+every case is not applicable finishes `not_applicable` and does not fail the
+run.
+
+| Needs | Cases | Not applicable when |
+|---|---|---|
+| BlueZ (`ubertooth-scan`, `ubertooth-follow`) | `Host CLI surface` scan and follow `-h`; every `follow` case of `Refused command lines` | macOS (no BlueZ): Linux only; on Linux, a run that uses installed tools without them on `PATH` (a Linux `--build` configures with `REQUIRE_ALL=ON`, so it always has them) |
+| Python tools build | `Python tools` `ubertooth-specan-ui -h` | the run has no `--build --with-python` |
+| firmware build | `DFU image checks` `sign-test-build` | the run has no `--build --with-firmware` and no `--artifact "test build=PATH"` |
+| platform | plan entries with `platforms:` (Flash reliability, Exclusive Ubertooth topology, MAC polling soak; the `exclusive` and `mac-polling` plans list Linux only) | the host's platform is not listed |
+
+Runtime skips remain only for what running the command alone can tell: a
+built libubertooth that predates `UBERTOOTH_TEST_NO_DEVICES` (the refusal
+cases' probe), and an interpreter that cannot import numpy, qtpy, and a Qt
+binding (specan-ui). The BLE extcap cases need no declaration: btle-extcap.py
+is read from the resolved commit and runs `ubertooth-btle`, which every build
+has.
 
 ## Option compositions and stateful transitions
 
@@ -316,12 +352,12 @@ python -m ubertooth_harness run-suite \
 | `BLE settings` | set and read back the access address, attached and as the next word (`-a <address>`); set, mask, and clear the follow target | adds `ubertooth-util -r` resets the access address to 8e89bed6; `-x0`/`-x32`; `-a -v` reports both and `-azzzz` is rejected (fork #171, fixed in 09e9a46); stopping a bounded receive-only `-p` run resets LEDs, channel, and squelch (PA kept) |
 | `Debug registers` | register list `0x02,0x01,0x00` in order, nothing changed | adds a range, a reversed range, `-v0`/`-v1`/`-v2` output, rejected `-r 0x100` and `-v3`; a successful read exits 0 (`-r 0x01` and the range fail on fork builds before #164's fix, 89afc1c) |
 | `Spectrum analyzer` | one full-band sweep (`duration` long): every frequency 2402-2480 reported, none outside, int8 RSSI | adds narrow, single, and top-of-band ranges, `-g`, `-G`, `-v`, and `-d` (binary file checked by `specandump.py`); `-d -x.bin` writes the file `-x.bin`, not stdout (fork #231, fixed in 053363a); ranges after a different range report no stale samples (fork #173, fixed in 20bcf11); stopping a bounded run with `-S` turns the preset LEDs off and resets channel 2441 MHz and squelch -120, PA kept (fork #191, fixed in aa4f620) |
-| `Classic Bluetooth receive` | `ubertooth-rx -z -t N` survey (exits 0 by itself, N = `duration` in whole seconds, no earlier than N-0.5 s, survey lines are piconet addresses); `-t N -r` PCAPNG with link type 255; `ubertooth-afh -t N` with no piconet in range says no packet arrived and exits 2 after about N s, printing no map (fork #187, 3b22c95) | adds `-t N` without `-z`; `-c 39` (every packet on channel 39); `-e 0` and `-e 4` (no packet over the limit); `-s` deprecation notice; `-q` PCAP (link type 255); repeated `-r` (first wins, extra file never created); `-d` (68-byte BR records, checked by `rxdump.py`); `afh -t N -e 2` (same exit 2); `afh -r` one map line per second; `afh` with an unknown `-U` exits 1 (fork #185, fixed in 219a5b0) |
+| `Classic Bluetooth receive` | `ubertooth-rx -z -t N` survey (exits 0 by itself, N = `duration` in whole seconds, no earlier than N-0.5 s, survey lines are piconet addresses); `-t N -r` PCAPNG with link type 255; `ubertooth-afh -t N` with no piconet in range says no packet arrived and exits 2 after about N s, printing no map (fork #187, 3b22c95) | adds `-t N` without `-z`; `-c 39` (every packet on channel 39); `-e 0` and `-e 4` (no packet over the limit); `-q` PCAP (link type 255); repeated `-r` (first wins, extra file never created); `-d` (68-byte BR records, checked by `rxdump.py`); `afh -t N -e 2` (same exit 2); `afh -r` one map line per second; `afh` with an unknown `-U` exits 1 (fork #185, fixed in 219a5b0) |
 | `Raw receive` | `ubertooth-dump -d` (68-byte records) and `-b -d` (401-byte bitstream records), checked by `rxdump.py` with at least 50 records per second; `ubertooth-ego -r -c 2440` runs until stopped | adds `dump -l`, `-l -c`, `-c -l` (the last modulation wins, read back from CC2400 MDMCTRL with `ubertooth-debug`); `ego -l 1`, `-l 48`, `-a 630f9ffe`; `ego -a zz` rejected; strict: five rounds of `dump -d` after `btle -n -A37` and `btle -n -A37 -q` after that dump, every stream bounded with SIGTERM, hold no packet from the previous mode, with the per-iteration stale count recorded (`stalecheck.py`; fork #318) |
-| `Refused command lines` | no Ubertooth; `host` and `fast` plans, and CI: every file option (`btle -r -q -c`, `follow -r -q -d`, `rx -r -q -d`, `dump -d`, `specan -d`, `dfu -s -u`) refused by a stray word, `-h`, and a bad later value (`dump`: `-U` without its value) creates no file, leaves an existing one unchanged, and leaves no other file; the refusal comes before any board lookup; `Ignoring extra capture file` is on stderr (`btle -n -q - -q`, `rx -r -r`, `follow -q -q`); follow cases skip where it is not built | adds the checks after the option loop (`btle -f -n`, `-a -a<address>`, `-r -`; `rx -z -l`, `-u` without `-l`; `specan -l` above `-u`), `-d` twice with `-h`, and `dfu -u` with a missing `-s` input or a bad `-d` image (no temporary file), and `dfu -s <file.bin> -d <bad image>` (no `.dfu` created or replaced; fork #286, fixed in f2e06fa) |
+| `Refused command lines` | no Ubertooth; `host` and `fast` plans, and CI: every file option (`btle -r -q -c`, `follow -r -q -d`, `rx -r -q -d`, `dump -d`, `specan -d`, `dfu -s -u`) refused by a stray word, `-h`, and a bad later value (`dump`: `-U` without its value) creates no file, leaves an existing one unchanged, and leaves no other file; the refusal comes before any board lookup; `Ignoring extra capture file` is on stderr (`btle -n -q - -q`, `rx -r -r`, `follow -q -q`); follow cases are Linux only (BlueZ), not applicable on macOS | adds the checks after the option loop (`btle -f -n`, `-a -a<address>`, `-r -`; `rx -z -l`, `-u` without `-l`; `specan -l` above `-u`), `-d` twice with `-h`, and `dfu -u` with a missing `-s` input or a bad `-d` image (no temporary file), and `dfu -s <file.bin> -d <bad image>` (no `.dfu` created or replaced; fork #286, fixed in f2e06fa) |
 | `Util mode refusals` | no Ubertooth; `host` and `fast` plans, and CI: `ubertooth-util -f` and `-i` each with `-q -n -e -t -x -I` and with each other, in both orders (26 commands), refused with exit 1 and `error: options <modes in the fork's order> cannot be combined; give only one of -q -n -e -t -x -I -i -f`; `-z` and `-z-60` with `-f` and with `-i`, in both orders, refused with `error: -z cannot be combined with <mode>`; never the `no board is selected` note or the `-f` deprecation note | adds `-f -i -x`, `-f -f -i`, `-z -f -i` (the mode refusal first), `-f -i stray` (the stray word first); strict: `-N` with `-f` or `-i` is refused, not dropped (fork #332), and `-U all -f` gives the `-U all` refusal alone (fork #333) |
-| `DFU image checks` | no Ubertooth; `host` and `fast` plans, and CI: the seven bad images of `DFU images` (wrong CRC, truncated, no suffix, text, no `UFD`, wrong vendor, wrong product), made from a synthetic image, are refused by `-d <image> -r` with the image check's message and exit 1 before any board lookup, the directory unchanged; the synthetic image passes the check and reaches the lookup; `-s` suffixes a binary exactly as the harness computes, accepts a read-only `.bin`, and refuses a `.dfu` and a suffixed `.bin` (nothing written); `-s` of the test build's binary gives the build's `.dfu` byte for byte when the run has a firmware build, else skipped | adds `-d` of an empty file, 15 bytes, a suffix with no firmware, a suffix length (200) larger than the file, DFU version 2.0, no revision marker, a directory and a missing file (all refused before the lookup), DFU 1.1 and the `ffff:ffff` wildcard (accepted), `-s` of a missing `.bin` and of a `.bin` with a wrong-CRC suffix; how `-s` puts `<file>.dfu` in place (fork f2e06fa): an input it cannot read (a directory) leaves an existing `.dfu` alone (fork #305), only `<file>.dfu` is added (no temporary file left), an earlier `.dfu` is replaced with its mode kept, a `.dfu` symlink is replaced and its target left alone, a read-only directory refuses the signing (`Permission denied`, nothing changed; skipped as root), and `-s` with an accepted `-d ... -r` writes the `.dfu` before the board lookup fails |
-| `Python tools` | no Ubertooth; `host` and `fast` plans, and CI: `ubertooth-specan-ui -h` without a display shows its argparse usage (`-U`, `-l`, `-u`, `--wifi`, `--padding`), skipped without `--build --with-python` or numpy/qtpy/Qt; `btle-extcap.py -h` exits 0 and names the real options; `--extcap-dlts` lists DLT 256 (`DLT_BLUETOOTH_LE_LL_WITH_PHDR`); `--extcap-config` lists the `--channel` selector with 37 (default), 38, 39 | adds the older `ubertooth0` interface (accepted), `--extcap-dlts` with no interface and `--extcap-config` with a non-Ubertooth interface (`must be ubertooth<serial>`, exit 1), `--capture` without `--fifo` (exit 1), an unknown option (`error: option --extcap-bogus not recognized`, usage, exit 1); Wireshark's `--extcap-version` as `=4.2.0`, as the next word and with no value (ignored), `--extcap-reload-option`, `--extcap-control-in`, `--extcap-control-out` and `--extcap-config-option-name` refused as unknown options, a stray word refused (`error: unexpected argument 'extra'`, exit 1) also with `-h`, `--capture --channel=40` refused before `ubertooth-btle` runs (fork #342); strict: `--extcap-interfaces` with a stand-in `ubertooth-util` that fails exits 1 and passes its message on (fork #362) |
+| `DFU image checks` | no Ubertooth; `host` and `fast` plans, and CI: the seven bad images of `DFU images` (wrong CRC, truncated, no suffix, text, no `UFD`, wrong vendor, wrong product), made from a synthetic image, are refused by `-d <image> -r` with the image check's message and exit 1 before any board lookup, the directory unchanged; the synthetic image passes the check and reaches the lookup; `-s` suffixes a binary exactly as the harness computes, accepts a read-only `.bin`, and refuses a `.dfu` and a suffixed `.bin` (nothing written); `-s` of the test build's binary gives the build's `.dfu` byte for byte when the run has a firmware build, else not applicable | adds `-d` of an empty file, 15 bytes, a suffix with no firmware, a suffix length (200) larger than the file, DFU version 2.0, no revision marker, a directory and a missing file (all refused before the lookup), DFU 1.1 and the `ffff:ffff` wildcard (accepted), `-s` of a missing `.bin` and of a `.bin` with a wrong-CRC suffix; how `-s` puts `<file>.dfu` in place (fork f2e06fa): an input it cannot read (a directory) leaves an existing `.dfu` alone (fork #305), only `<file>.dfu` is added (no temporary file left), an earlier `.dfu` is replaced with its mode kept, a `.dfu` symlink is replaced and its target left alone, a read-only directory refuses the signing (`Permission denied`, nothing changed; skipped as root), and `-s` with an accepted `-d ... -r` writes the `.dfu` before the board lookup fails |
+| `Python tools` | no Ubertooth; `host` and `fast` plans, and CI: `ubertooth-specan-ui -h` without a display shows its argparse usage (`-U`, `-l`, `-u`, `--wifi`, `--padding`), not applicable without `--build --with-python`, skipped when that Python lacks numpy/qtpy/Qt; `btle-extcap.py -h` exits 0 and names the real options; `--extcap-dlts` lists DLT 256 (`DLT_BLUETOOTH_LE_LL_WITH_PHDR`); `--extcap-config` lists the `--channel` selector with 37 (default), 38, 39 | adds the older `ubertooth0` interface (accepted), `--extcap-dlts` with no interface and `--extcap-config` with a non-Ubertooth interface (`must be ubertooth<serial>`, exit 1), `--capture` without `--fifo` (exit 1), an unknown option (`error: option --extcap-bogus not recognized`, usage, exit 1); Wireshark's `--extcap-version` as `=4.2.0`, as the next word and with no value (ignored), `--extcap-reload-option`, `--extcap-control-in`, `--extcap-control-out` and `--extcap-config-option-name` refused as unknown options, a stray word refused (`error: unexpected argument 'extra'`, exit 1) also with `-h`, `--capture --channel=40` refused before `ubertooth-btle` runs (fork #342); strict: `--extcap-interfaces` with a stand-in `ubertooth-util` that fails exits 1 and passes its message on (fork #362) |
 | `BLE extcap interfaces` | `btle-extcap.py --extcap-interfaces` lists one `ubertooth<serial>` interface (display `Ubertooth One <serial>`) per attached board, each registered board's serial among them, guards unchanged; the same listing with `--extcap-version=4.2.0`, as Wireshark calls it (fork #297) | adds `--extcap-version 4.4.1` (the next-word form) and a stray word (refused, no listing) |
 | `BLE extcap capture` | `btle-extcap.py --capture --extcap-interface=ubertooth<serial> --fifo=<fifo>` for `duration`, stopped with SIGTERM: it runs `ubertooth-btle -f -U <serial> -q <fifo> -A 37`, the FIFO carries a PCAP header for link type 256 (`DLT_BLUETOOTH_LE_LL_WITH_PHDR`) and whole records (at most 32 MiB; more fails), advertising records are on RF channel 0, the script exits 0, no process is left, channel, squelch and LEDs are restored | adds `--channel=37`, `38`, `39` (`-A <channel>`, advertising records on RF channel 0, 12, 39); a serial no board has (`ubertooth0badc0de...`: `ubertooth-btle`'s `no Ubertooth found` error and its non-zero exit) and `--channel=40` (refused with exit 1 before `ubertooth-btle` runs; fork #334, fixed in d04f79e); `--extcap-capture-filter` (the capture runs, with a `warning:` that the filter is not applied); a capture ended by closing the FIFO, as Wireshark also does (the script exits 0 by itself, no process left) |
 | `Raw receive replay` | no Ubertooth; `host` and `fast` plans, and CI: `ubertooth-rx -i` on a synthetic fixture (`rxreplay.py`, built from the spec encoding, never a real capture) prints exactly the fixture's LAP/error/channel lines and skips the decoy records; `-l <LAP>` derives the UAP (CLK6 0); `-r` PCAPNG and `-q` PCAP with link type 255 and one packet per line | adds `-z` (both piconets, one with its UAP); `-l` of an ID-only LAP (no UAP); `-l -u` with the right UAP (confirmed, hop reversal) and a wrong one (nothing confirmed); `-e 0` drops the one-error access code; `-d` writes the packet records back byte for byte (and passes `rxdump.py`); `-l -q` captures one LAP; empty file exit 0; missing file exit 1; lines carry the recorded systime (fork #202); `-i <directory>` and a cut last record are reported, exit 1 (fork #203; both fixed in a55ac89); `-i -u` without `-l` refused before the input is used (fork #236, fixed in 57469f2; the bare `-u` is in Argument validation, under a lease) |
@@ -391,9 +427,11 @@ queries), and any leftover word is refused before a device is opened. A set and
 a read of the same `ubertooth-util` value in one command both run, the set
 first (`-c2426 -c` reports 2426; fork 5b45b3e,
 [SqueakyFloors/ubertooth#228](https://github.com/SqueakyFloors/ubertooth/issues/228)). `test_finished` reports `failed_cases`,
-`failed_guard_checks` (see [Guard Ubertooths](#guard-ubertooths)), and `skipped_cases`; the run summary (`run_finished` in run.jsonl, and
-report.md) reports the run's `skipped_cases`, so a
-skip is never hidden by an overall pass. Event schema version 1 is pre-release
+`failed_guard_checks` (see [Guard Ubertooths](#guard-ubertooths)), `skipped_cases`, and `not_applicable_cases`
+(see [Host requirements](#host-requirements)); the run summary (`run_finished`
+in run.jsonl, and report.md) reports the run's `skipped_cases`,
+`not_applicable_cases`, and `not_applicable_tests`, so neither is hidden by an
+overall pass. Event schema version 1 is pre-release
 and has no stable consumers yet; field changes before the controller lands do
 not bump it.
 
@@ -1163,8 +1201,11 @@ CI runs the suite and validates the long plan with Python 3.12 on Ubuntu 24.04
 and the current macOS (`macos-latest`; see `.github/workflows/test.yml`). The
 build job also builds the fork's host tools, with the Python tools, and runs
 `testplans/host.yaml` (Host CLI surface, Raw receive replay, Refused command
-lines, and Python tools smoke, which need no Ubertooth; specan-ui is skipped there) with
-them against a one-host registry. The
+lines, Util mode refusals, DFU image checks, and Python tools smoke, which need
+no Ubertooth) with them against a one-host registry, then checks that no case
+skipped at run time and that the not-applicable cases match `--dry-run`: the
+follow and scan cases on macOS, none of them on Linux; `sign-test-build` and
+specan-ui on both (no firmware build, installed tools). The
 checks themselves are in `scripts/ci.sh`. To run them on an exact commit
 without GitHub Actions, locally or on another host over SSH:
 

@@ -12,6 +12,7 @@ from itertools import combinations
 import re
 from typing import Callable, Mapping, Sequence
 
+from ubertooth_harness.hostneeds import NO_NEEDS, Needs
 
 COVERAGE_PROFILES = ("smoke", "comprehensive")
 # Run-directory subdirectory for files cases write, and its context key.
@@ -228,10 +229,10 @@ class StateCase:
     # and the Ubertooth source's expected revision as
     # context[EXPECTED_REVISION_KEY]; a run without them is refused.
     artifacts: tuple[str, ...] = ()
-    # Labels the steps use when the run has them: the path is recorded (and
-    # hashed again) as for ``artifacts``, but a run without one is not
-    # refused; the key is then absent and the steps decide (normally skip).
-    optional_artifacts: tuple[str, ...] = ()
+    # What the case needs from the host (hostneeds.py); a host without it
+    # leaves the case out before the run, as not applicable. A case that
+    # needs the firmware build lists "test_build" in artifacts too.
+    needs: Needs = NO_NEEDS
     state_changing: bool = field(default=True, init=False)
 
     def __post_init__(self):

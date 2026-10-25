@@ -25,6 +25,12 @@ from ubertooth_harness.preflight import PreflightCheck
 from ubertooth_harness.topology import IsolationCancelled, applied_power_isolation
 from ubertooth_harness.report import write_report
 from ubertooth_harness.cases import FlashCase
+from ubertooth_harness.hostneeds import (
+    HostCapabilities,
+    NotApplicable,
+    run_capabilities,
+    split_cases,
+)
 from ubertooth_harness.flash import (
     FirmwareArtifact,
     FlashReliabilityRunner,
@@ -57,6 +63,10 @@ class SequencerSummary:
     failure_reason: str
     duration_s: float
     skipped_cases: int = 0
+    # Left out before the run because the host cannot run them (hostneeds.py);
+    # neither skipped nor failed. Tests: every case, or the whole test.
+    not_applicable_cases: int = 0
+    not_applicable_tests: int = 0
 
 
 _MAX_REASON_CHARS = 4096
@@ -199,11 +209,8 @@ class NamedTestSequencer:
         """
         by_label = {image_label(item.name): item for item in manifest.artifacts}
         context = {}
-        for label in case.artifacts + case.optional_artifacts:
+        for label in case.artifacts:
             identity = by_label.get(label)
-            if identity is None and label not in case.artifacts:
-                # Optional: the steps see no key and decide for themselves.
-                continue
             if identity is None:
                 raise HarnessError(
                     f"{case.name}: no firmware image for '{label}'; pass --artifact "
@@ -217,8 +224,6 @@ class NamedTestSequencer:
             if changed:
                 raise HarnessError(f"{case.name}: {label} image changed or is missing: {path}")
             context[artifact_key(label)] = str(path)
-        if not case.artifacts:
-            return context
         try:
             context[EXPECTED_REVISION_KEY] = manifest.source("Ubertooth").expected_revision
         except ManifestError as error:
@@ -565,7 +570,7 @@ class NamedTestSequencer:
             },
         )
         context: dict[str, str] = {}
-        if case.artifacts or (case.optional_artifacts and manifest is not None):
+        if case.artifacts:
             # Checked when the run was planned; hashed again here. Nothing
             # has run yet, so a refusal leaves the device as it was.
             try:
@@ -835,17 +840,32 @@ class NamedTestSequencer:
         preflight_checks: tuple[PreflightCheck, ...],
         cancellation: CancellationToken | None = None,
         publisher: EventPublisher | None = None,
+        capabilities: HostCapabilities | None = None,
+        not_applicable: Sequence[NotApplicable] = (),
     ) -> SequencerSummary:
         """Run the suite, streaming every record to ``output_dir/run.jsonl``.
 
         Pass ``publisher`` when earlier records (``run_started`` and, for
         example, build commands) were already written to the same run.jsonl.
         ``report.md`` is rendered from run.jsonl when the run ends.
+
+        ``capabilities`` is what the host has (hostneeds.py); by default it
+        comes from the registry's platform and the manifest's build and
+        artifacts. Cases it cannot run are left out before anything runs and
+        recorded as not applicable, with ``not_applicable`` (whole tests the
+        planner left out for this host).
         """
         run_id = validate_run_id(run_id)
         manifest = self._validate_run_contract(
             invocations, manifest, preflight_checks, run_id
         )
+        if capabilities is None and self.registry is not None:
+            capabilities = run_capabilities(
+                manifest.host, self.registry.get(manifest.host).platform,
+                manifest.build, (item.name for item in manifest.artifacts),
+                path=(getattr(self.executor, "environment", None) or {}).get("PATH"),
+            )
+        left_out = list(not_applicable)
         # Build every case before anything runs, so an implementation error
         # fails the run before the manifest, preflight, or hardware access.
         planned_cases = {}
@@ -865,6 +885,18 @@ class NamedTestSequencer:
                 raise ValueError(
                     f"{invocation.invocation_id}: cannot build test cases: {error}"
                 ) from error
+            runnable, omitted = split_cases(
+                planned_cases[invocation.invocation_id], capabilities
+            )
+            planned_cases[invocation.invocation_id] = runnable
+            left_out.extend(
+                NotApplicable(
+                    invocation.host, invocation.test_name, reason,
+                    invocation.invocation_id,
+                    f"{invocation.invocation_id}-{case.case_id}", case.name,
+                )
+                for case, reason in omitted
+            )
             try:
                 planned_guards[invocation.invocation_id] = transitions.guard_boards(
                     invocation.resource_identities
@@ -888,7 +920,7 @@ class NamedTestSequencer:
                     for board in planned_guards[invocation.invocation_id]
                 )
             for case in planned_cases[invocation.invocation_id]:
-                if isinstance(case, StateCase) and (case.artifacts or case.optional_artifacts):
+                if isinstance(case, StateCase) and case.artifacts:
                     try:
                         self._case_artifacts(case, manifest)
                     except HarnessError as error:
@@ -914,7 +946,7 @@ class NamedTestSequencer:
             return self._run(
                 invocations, output_dir, manifest, preflight_checks,
                 cancellation, publisher, planned_cases, started_externally,
-                planned_guards,
+                planned_guards, capabilities, tuple(left_out),
             )
         finally:
             write_report(output_dir)
@@ -930,6 +962,8 @@ class NamedTestSequencer:
         planned_cases,
         started_externally: bool,
         planned_guards=None,
+        capabilities: HostCapabilities | None = None,
+        not_applicable: tuple[NotApplicable, ...] = (),
     ) -> SequencerSummary:
         run_id = publisher.run_id
         token = cancellation or CancellationToken()
@@ -937,6 +971,13 @@ class NamedTestSequencer:
         completed_preflight = 0
         completed = 0
         run_skipped_cases = 0
+        not_applicable_by_invocation: dict[str, list[NotApplicable]] = {}
+        for item in not_applicable:
+            if item.invocation_id:
+                not_applicable_by_invocation.setdefault(item.invocation_id, []).append(item)
+        # Whole tests left out at planning, and invocations with no runnable case.
+        planning_tests = sum(1 for item in not_applicable if not item.invocation_id)
+        not_applicable_tests = planning_tests
         failed_tests: list[str] = []
         status = "running"
         failure = ""
@@ -959,6 +1000,17 @@ class NamedTestSequencer:
             },
             max_bytes=MANIFEST_MAX_BYTES,
         )
+        publisher.emit(
+            "host_capabilities",
+            "passed",
+            {
+                "capabilities": capabilities.to_dict() if capabilities else None,
+                "not_applicable": len(not_applicable),
+            },
+        )
+        for item in not_applicable:
+            # Decided before anything runs: neither a skip nor a failure.
+            publisher.emit("not_applicable", "not_applicable", item.to_dict())
         publisher.emit(
             "preflight_started",
             "running",
@@ -1046,13 +1098,39 @@ class NamedTestSequencer:
                         "arguments": dict(invocation.arguments),
                     },
                 )
-                cases = planned_cases.get(invocation.invocation_id) or (
-                    definition.command_cases(
+                cases = (
+                    planned_cases[invocation.invocation_id]
+                    if invocation.invocation_id in planned_cases
+                    else definition.command_cases(
                         invocation.arguments,
                         invocation.resources,
                         invocation.resource_identities,
                     )
                 )
+                omitted = not_applicable_by_invocation.get(invocation.invocation_id, [])
+                if omitted and not cases:
+                    # The host can run none of its cases: the test is not
+                    # applicable, neither passed nor failed.
+                    not_applicable_tests += 1
+                    reasons = sorted({item.reason for item in omitted})
+                    publisher.emit(
+                        "test_finished",
+                        "not_applicable",
+                        {
+                            "invocation_id": invocation.invocation_id,
+                            "test_name": invocation.test_name,
+                            "reason": _bounded_reason(
+                                f"not applicable on {invocation.host}: "
+                                + "; ".join(reasons),
+                                "each case is in its not_applicable event",
+                            ),
+                            "failed_cases": 0,
+                            "failed_guard_checks": 0,
+                            "skipped_cases": 0,
+                            "not_applicable_cases": len(omitted),
+                        },
+                    )
+                    continue
                 case_failures = []
                 case_statuses = []
                 skipped_cases = 0
@@ -1257,6 +1335,7 @@ class NamedTestSequencer:
                             "failed_cases": len(case_failures) - failed_guard_checks,
                             "failed_guard_checks": failed_guard_checks,
                             "skipped_cases": skipped_cases,
+                            "not_applicable_cases": len(omitted),
                             # False: the device was verified back in its known
                             # state, so later tests still run.
                             "stops_run": stop_run,
@@ -1281,11 +1360,15 @@ class NamedTestSequencer:
                         "failed_cases": 0,
                         "failed_guard_checks": 0,
                         "skipped_cases": skipped_cases,
+                        "not_applicable_cases": len(omitted),
                     },
                 )
 
         if status == "running":
-            status = "passed" if completed == len(invocations) else "failed"
+            status = (
+                "passed" if completed + not_applicable_tests - planning_tests
+                == len(invocations) else "failed"
+            )
         if failed_tests:
             # A real failure is never hidden by a later cancellation.
             more = len(failed_tests) - 1
@@ -1306,6 +1389,8 @@ class NamedTestSequencer:
             failure_reason=failure,
             duration_s=self.clock() - started,
             skipped_cases=run_skipped_cases,
+            not_applicable_cases=sum(1 for item in not_applicable if item.case_id),
+            not_applicable_tests=not_applicable_tests,
         )
         publisher.emit("run_finished", status, asdict(summary))
         return summary
