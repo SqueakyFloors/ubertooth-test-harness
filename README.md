@@ -556,6 +556,12 @@ that fork is built and tested against, not whatever upstream `master` holds
 that day. The harness keeps its own copy of that pin (it never calls the
 fork's installer) and `tests/test_libbtbb_pin.py` keeps the copies in
 `scripts/ci.sh` and this file in step; bump both when the fork bumps its pin.
+To notice a bump, `run-suite` and `build` read `LIBBTBB_REF` from the fork's
+`install.sh` at the resolved Ubertooth commit and print a warning naming both
+commits when `--libbtbb-ref` differs (an older fork commit without the pin is
+not compared). The CI `build` job does the same against the fork's `main` and
+shows the warning on the workflow run; neither fails, since another libbtbb
+can be deliberate.
 Only libbtbb's C library is installed and linked (`-DENABLE_PYTHON=OFF` skips
 its Python tools): the Ubertooth tools need nothing else from it.
 

@@ -35,6 +35,7 @@ from ubertooth_harness.executor import SubprocessCommandExecutor
 from ubertooth_harness.isolation import IsolationRuntime, IsolationSetupError
 from ubertooth_harness.flash import HarnessError
 from ubertooth_harness import leases as board_leases
+from ubertooth_harness.libbtbbpin import warning_for_sources as libbtbb_drift_warning
 from ubertooth_harness.manifest import (
     FileIdentity,
     GitRevisionResolver,
@@ -177,6 +178,10 @@ def _resolve_sources(args: argparse.Namespace):
         sources.append(
             resolver.resolve("libbtbb", args.libbtbb_source, args.libbtbb_ref)
         )
+        # A libbtbb other than the fork's pin may be deliberate: warn, go on (#85).
+        warning = libbtbb_drift_warning(sources)
+        if warning:
+            print(f"warning: {warning}", file=sys.stderr)
     return tuple(sources)
 
 

@@ -20,9 +20,10 @@ WORK=${CI_TEMP:-${RUNNER_TEMP:-$(mktemp -d)}}
 # pins for its own builds (fork issue #320), so a harness run builds the
 # libbtbb the fork is built and tested against, not upstream master.
 # This pin is the harness's own copy, deliberately: the harness never calls
-# the fork's installer. It must match the fork's (the LIBBTBB_REF in the
-# fork's .github/workflows/build.yml); bump it here and in README.md together,
-# which tests/test_libbtbb_pin.py checks. A LIBBTBB_SOURCE clone has to hold
+# the fork's installer. It must match the fork's (LIBBTBB_REF in the fork's
+# install.sh, also in its .github/workflows/build.yml); the build step warns
+# when it does not (ubertooth_harness/libbtbbpin.py). Bump it here and in
+# README.md together, which tests/test_libbtbb_pin.py checks. A LIBBTBB_SOURCE clone has to hold
 # the pin: a clone of the fork does, but one of another libbtbb, or one made
 # before the pin landed, needs LIBBTBB_REF as well or the build stops at
 # "unable to resolve libbtbb ref".
@@ -82,6 +83,13 @@ run_build() {
         bb=$WORK/libbtbb
         git clone --quiet "$LIBBTBB_URL" "$bb"
     fi
+
+    # The fork may have moved its libbtbb pin (install.sh) since LIBBTBB_PIN
+    # was copied here: warn with both commits, do not fail (#85).
+    step "libbtbb pin against the fork's install.sh"
+    .venv/bin/python -m ubertooth_harness.libbtbbpin \
+        --ubertooth-source "$ut" --ubertooth-ref "${UBERTOOTH_REF:-main}" \
+        --libbtbb-url "$LIBBTBB_URL" --libbtbb-ref "${LIBBTBB_REF:-$LIBBTBB_PIN}"
     .venv/bin/python -m ubertooth_harness build \
         --ubertooth-source "$ut" --ubertooth-ref "${UBERTOOTH_REF:-main}" \
         --libbtbb-source "$bb" --libbtbb-ref "${LIBBTBB_REF:-$LIBBTBB_PIN}" \
