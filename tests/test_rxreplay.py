@@ -146,7 +146,7 @@ class ReplayRx:
         path = Path(self._value(options, "-i"))
         if not path.exists():
             code = 0 if "missing-exit-0" in self.bugs else 1
-            return self._result(command, code, f"Could not open file {path}\nusage\n")
+            return self._result(command, code, "", f"error: {path}: No such file or directory\n")
         if path.is_dir():
             return self._result(command, 1 if self.fixed else 0, "",
                                 f"error: reading {path} failed: Is a directory\n"
