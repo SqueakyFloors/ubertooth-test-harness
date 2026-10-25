@@ -248,7 +248,7 @@ def plan_build(
             "libbtbb-configure",
             "Configure libbtbb",
             # ENABLE_PYTHON=OFF skips libbtbb's pcaptools: the Ubertooth tools
-            # link only the C library, and building those tools would add a
+            # link only its C library, and building those tools would add a
             # pip install into the run prefix that no test uses. The pinned
             # libbtbb fork commit declares a cmake_minimum_required range, so
             # CMake 4 needs no CMAKE_POLICY_VERSION_MINIMUM here.

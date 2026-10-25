@@ -512,8 +512,8 @@ that fork is built and tested against, not whatever upstream `master` holds
 that day. The harness keeps its own copy of that pin (it never calls the
 fork's installer) and `tests/test_libbtbb_pin.py` keeps the copies in
 `scripts/ci.sh` and this file in step; bump both when the fork bumps its pin.
-Only libbtbb's C library is built (`-DENABLE_PYTHON=OFF`): the Ubertooth tools
-link nothing else from it.
+Only libbtbb's C library is installed and linked (`-DENABLE_PYTHON=OFF` skips
+its Python tools): the Ubertooth tools need nothing else from it.
 
 `--libbtbb-ref` can still name any ref, with one limit: the harness passes no
 `-DCMAKE_POLICY_VERSION_MINIMUM`, so a libbtbb declaring

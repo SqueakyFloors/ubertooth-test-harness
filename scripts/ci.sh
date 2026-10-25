@@ -22,9 +22,10 @@ WORK=${CI_TEMP:-${RUNNER_TEMP:-$(mktemp -d)}}
 # This pin is the harness's own copy, deliberately: the harness never calls
 # the fork's installer. It must match the fork's (the LIBBTBB_REF in the
 # fork's .github/workflows/build.yml); bump it here and in README.md together,
-# which tests/test_libbtbb_pin.py checks. The pin has to stay reachable from
-# the clone's default branch: the build re-clones this clone, and that copies
-# branches and tags only.
+# which tests/test_libbtbb_pin.py checks. A LIBBTBB_SOURCE clone has to hold
+# the pin: a clone of the fork does, but one of another libbtbb, or one made
+# before the pin landed, needs LIBBTBB_REF as well or the build stops at
+# "unable to resolve libbtbb ref".
 LIBBTBB_URL=https://github.com/SqueakyFloors/libbtbb.git
 LIBBTBB_PIN=84ab41fc99d172e812438bc9188f30a67216f748
 
