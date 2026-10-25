@@ -22,6 +22,12 @@ Stale packets in a -q capture are packets whose RF channel is not the one
 the capture ran on (``--channel``, default 0 for advertising index 37): a
 basic-rate record from the dump carries the dump's channel, 2441 MHz after
 a stop, which libbtbb files as RF channel 19.
+
+Limits: a stale basic-rate record is seen only when its clock is ahead of
+the new stream's first record, so leftovers from a very short previous dump
+can go unseen (LE leftovers are always seen, by type). A BLE capture that
+receives no advertising traffic has no packets to judge, so its half of the
+check passes without evidence; it needs an advertiser in range.
 """
 
 from __future__ import annotations
