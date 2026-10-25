@@ -24,13 +24,11 @@ suites:
         hosts: each
         coverage: comprehensive
 
-    # No Ubertooth. Strict extcap-help-options fails until fork #268 is fixed.
+    # No Ubertooth.
     - Python tools:
         hosts: each
         coverage: comprehensive
 
-    # Strict extcap-interfaces-serials fails with two or more boards until
-    # fork #269 is fixed.
     - BLE extcap interfaces:
         hosts: each
         Ubertooth: default

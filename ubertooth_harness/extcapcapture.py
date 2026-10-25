@@ -2,7 +2,7 @@
 
 Run as a script by the BLE extcap capture cases::
 
-    python extcapcapture.py --seconds N --fifo PATH [--board N] [--channel C]
+    python extcapcapture.py --seconds N --fifo PATH [--board SERIAL] [--channel C]
                             [--refused] -- EXTCAP-ARGS...
 
 It creates the FIFO, opens it for reading, starts the fork's
@@ -11,18 +11,19 @@ finds it) with EXTCAP-ARGS, reads the FIFO for N seconds, then stops the
 script with SIGTERM, which it forwards to the ``ubertooth-btle`` it runs.
 Nothing is ever stopped with SIGKILL (SqueakyFloors/ubertooth#239).
 
-The script runs ``ubertooth-btle -f -U<N> -q <fifo> -A <channel>`` at fork
-89d9197: ``-q`` writes PCAP with LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR (256)
+The script runs ``ubertooth-btle -f -U <serial> -q <fifo> -A <channel>`` at
+fork 71e1a8a: ``-q`` writes PCAP with LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR (256)
 through libbtbb, whose records carry a 10-byte LE pseudo-header whose first
 byte is the RF channel (0 for advertising channel 37, 12 for 38, 39 for 39).
 
 Checks (each failure is a ``FAIL:`` line and exit status 1):
 
 - the stream is a PCAP global header for link type 256 followed by whole,
-  well-formed records;
+  well-formed records, and no more than MAX_BYTES of it (a longer stream
+  fails rather than being checked only in part);
 - ``--channel C``: the ``ubertooth-btle`` command has ``-A C`` and every
   advertising record (access address 8e89bed6) is on C's RF channel;
-- ``--board N``: the ``ubertooth-btle`` command selects ``-U N``;
+- ``--board SERIAL``: the ``ubertooth-btle`` command selects ``-U SERIAL``;
 - the script is still capturing at the stop and exits 0 after SIGTERM, and no
   process it started is left running;
 - ``--refused``: instead, the script must end by itself before the stop with
@@ -216,9 +217,14 @@ def _selects(tokens, option, value) -> bool:
 
 
 class _Reader:
+    """Reads the FIFO into data, up to MAX_BYTES. Past that it keeps reading
+    (so the writer never blocks) but drops the bytes and counts them in
+    overflow, which fails the capture."""
+
     def __init__(self, fd):
         self.fd = fd
         self.data = bytearray()
+        self.overflow = 0
         self.eof = False
 
     def read(self) -> bool:
@@ -233,8 +239,9 @@ class _Reader:
         self.eof = not chunk
         if not chunk:
             return False
-        if len(self.data) < MAX_BYTES:
-            self.data += chunk
+        room = MAX_BYTES - len(self.data)
+        self.data += chunk[:room]
+        self.overflow += max(0, len(chunk) - room)
         return True
 
 
@@ -275,7 +282,15 @@ def capture(argv, fifo, seconds, *, board=None, channel=None, refused=False,
     when = "after SIGTERM" if stopped else "before the stop"
     out(f"extcap exit: {returncode} ({when})" if returncode is not None
         else "extcap exit: none, still running")
-    failures += stream.problems
+    problems = list(stream.problems)
+    if reader.overflow and problems and "truncated" in problems[-1]:
+        # The cut at MAX_BYTES, not the writer's: the overflow failure says so.
+        problems.pop()
+    failures += problems
+    if reader.overflow:
+        failures.append(
+            f"the FIFO carried {len(reader.data) + reader.overflow} bytes, more than "
+            f"the {MAX_BYTES} checked; the stream past that was not checked")
 
     if refused:
         if stopped:
@@ -370,7 +385,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="extcapcapture.py")
     parser.add_argument("--seconds", type=float, required=True)
     parser.add_argument("--fifo", required=True)
-    parser.add_argument("--board", type=int)
+    parser.add_argument("--board")
     parser.add_argument("--channel", type=int, choices=sorted(ADV_RF_CHANNEL))
     parser.add_argument("--refused", action="store_true")
     parser.add_argument("extcap_args", nargs="+", metavar="EXTCAP-ARGS")

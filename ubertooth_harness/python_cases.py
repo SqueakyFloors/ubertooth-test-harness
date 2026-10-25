@@ -2,20 +2,18 @@
 
 Contracts come from the fork sources: host/python/specan_ui/
 ubertooth-specan-ui.in (argparse after the numpy and qtpy imports) and
-host/python/extcap/btle-extcap.py (getopt; every operation but
---extcap-interfaces needs --extcap-interface=ubertooth<N>). The commands run
-through pytools.py, which finds the run's tool and interpreter and skips a
-case that cannot run on this host.
+host/python/extcap/btle-extcap.py at 71e1a8a (getopt; interfaces are
+ubertooth<serial>, as --extcap-interfaces lists them from
+"ubertooth-util -U all -s", and every operation but --extcap-interfaces needs
+one; a usage error is "error: ..." plus the usage line on stderr, exit 1).
+The commands run through pytools.py, which finds the run's tool and
+interpreter and skips a case that cannot run on this host.
 
-Comprehensive cases also check behavior the fork gets wrong at 6fee30c, so
+Comprehensive cases also check behavior the fork gets wrong at 71e1a8a, so
 they fail there:
 
-- SqueakyFloors/ubertooth#268: btle-extcap -h names options that do not
-  exist (--list-interfaces, --list-dlts, --config).
-- SqueakyFloors/ubertooth#269: with two or more boards, btle-extcap
-  --extcap-interfaces shows the listing index ("0:") instead of the serial.
 - SqueakyFloors/ubertooth#334: btle-extcap --capture exits 0 when the
-  ubertooth-btle it runs fails (no board at the index, --channel=40).
+  ubertooth-btle it runs fails (no board with the serial, --channel=40).
 
 BLE extcap capture runs --capture through extcapcapture.py, which reads the
 FIFO as Wireshark would and stops the script with SIGTERM.
@@ -32,7 +30,6 @@ from ubertooth_harness.cases import CommandCase, guard_roles
 from ubertooth_harness.receive_cases import seconds_arg
 from ubertooth_harness.stateful import (
     CAPTURE_DIR_KEY,
-    Observation,
     StateCase,
     StateCaseError,
     Step,
@@ -64,12 +61,19 @@ def _line(text: str) -> str:
     return rf"(?m)^{re.escape(text)}$"
 
 
-# The script's silent exit 1 for a missing or non-Ubertooth interface, not a
-# crash (an uncaught exception also exits 1) and no listing.
-_SILENT_REFUSAL = (r"\A(?![\s\S]*Traceback)(?![\s\S]*(?m:^(?:dlt|arg|value) \{))",)
+# The interface refusal: the message, exit 1, no listing and no crash (an
+# uncaught exception also exits 1).
+_INTERFACE_REFUSAL = (
+    r"(?m)^error: --extcap-interface must be ubertooth<serial>, as "
+    r"--extcap-interfaces lists it$",
+    r"\A(?![\s\S]*Traceback)(?![\s\S]*(?m:^(?:dlt|arg|value) \{))",
+)
+_USAGE = r"(?m)^Usage: \S*btle-extcap\S* --extcap-interfaces \| "
 
-
-_INTERFACE = "--extcap-interface=ubertooth0"
+# --extcap-dlts and --extcap-config open no board, so any serial will do.
+_INTERFACE = "--extcap-interface=ubertooth" + "0123456789abcdef" * 2
+_DLT_LINE = _line(f"dlt {{number={EXTCAP_DLT}}}"
+                  "{name=DLT_BLUETOOTH_LE_LL_WITH_PHDR}{display=Bluetooth LE}")
 
 
 def python_tool_cases(arguments, _resources, _resource_identities):
@@ -83,14 +87,15 @@ def python_tool_cases(arguments, _resources, _resource_identities):
              r"--padding PADDING"),
         ),
         _case(
-            "extcap-help", "btle-extcap -h", "extcap", ("-h",),
-            (r"(?m)^Usage: ",),
+            "extcap-help", "btle-extcap -h names its real options", "extcap", ("-h",),
+            (_USAGE, *(re.escape(option) for option in (
+                "--extcap-interface=ubertooth<serial>", "--extcap-dlts",
+                "--extcap-config", "--capture --fifo=PATH", "--channel=37|38|39",
+            ))),
         ),
         _case(
             "extcap-dlts", f"btle-extcap --extcap-dlts lists DLT {EXTCAP_DLT}",
-            "extcap", (_INTERFACE, "--extcap-dlts"),
-            (_line(f"dlt {{number={EXTCAP_DLT}}}"
-                   "{name=DLT_BLUETOOTH_LE_LL_WITH_PHDR}{display=Bluetooth LE}"),),
+            "extcap", (_INTERFACE, "--extcap-dlts"), (_DLT_LINE,),
         ),
         _case(
             "extcap-config", "btle-extcap --extcap-config: advertising channel 37-39",
@@ -107,39 +112,44 @@ def python_tool_cases(arguments, _resources, _resource_identities):
     if arguments["coverage"] != "comprehensive":
         return tuple(cases)
     cases += [
-        # Strict: fails at 6fee30c (SqueakyFloors/ubertooth#268).
+        # An older ubertooth<index> still works (ubertooth-btle -U reads an
+        # all-digit value as an index).
         _case(
-            "extcap-help-options", "btle-extcap -h names its real options",
-            "extcap", ("-h",),
-            tuple(re.escape(option) for option in (
-                "--extcap-interfaces", "--extcap-dlts", "--extcap-config",
-                "--capture",
-            )),
+            "extcap-dlts-index-interface", "btle-extcap --extcap-dlts with ubertooth0",
+            "extcap", ("--extcap-interface=ubertooth0", "--extcap-dlts"), (_DLT_LINE,),
         ),
         # "every operation down here depends on having an interface": exit 1.
         _case(
             "extcap-dlts-no-interface", "btle-extcap --extcap-dlts without an interface",
-            "extcap", ("--extcap-dlts",), _SILENT_REFUSAL, returncodes=(1,),
+            "extcap", ("--extcap-dlts",), _INTERFACE_REFUSAL, returncodes=(1,),
         ),
         _case(
             "extcap-config-bad-interface",
             "btle-extcap --extcap-config with a non-Ubertooth interface",
-            "extcap", ("--extcap-interface=wlan0", "--extcap-config"), _SILENT_REFUSAL,
+            "extcap", ("--extcap-interface=wlan0", "--extcap-config"), _INTERFACE_REFUSAL,
+            returncodes=(1,),
+        ),
+        # Refused before ubertooth-btle runs, so no board is opened.
+        _case(
+            "extcap-capture-no-fifo", "btle-extcap --capture without --fifo",
+            "extcap", (_INTERFACE, "--capture"),
+            (r"(?m)^error: --capture needs --fifo=PATH$", r"\A(?![\s\S]*Traceback)"),
             returncodes=(1,),
         ),
         _case(
             "extcap-unknown-option", "btle-extcap rejects an unknown option",
             "extcap", ("--extcap-bogus",),
-            (r"option --extcap-bogus not recognized", r"(?m)^Usage: "),
-            returncodes=(2,),
+            (r"(?m)^error: option --extcap-bogus not recognized$", _USAGE),
+            returncodes=(1,),
         ),
     ]
     return tuple(cases)
 
 
 def extcap_interface_cases(arguments, _resources, resource_identities):
-    """--extcap-interfaces lists every attached board (via ubertooth-util -s):
-    the selected one plus every other registered board, bound as guards."""
+    """--extcap-interfaces lists every attached board (via ubertooth-util
+    -U all -s) by serial: the selected one plus every other registered board,
+    bound as guards."""
     roles = ("Ubertooth",) + guard_roles(resource_identities)
     serials = []
     for role in roles:
@@ -148,64 +158,45 @@ def extcap_interface_cases(arguments, _resources, resource_identities):
             raise StateCaseError(f"BLE extcap interfaces: {role} has no registered serial")
         serials.append(serial.lower())
     count = len(serials)
-    listing = r"\A" + "".join(
-        rf"interface \{{value=ubertooth{index}\}}\{{display=Ubertooth One [^}}\n]+\}}\n"
+    # Listing order is the USB index order, which the registry does not give.
+    listing = r"(?i)\A" + "".join(
+        rf"interface \{{value=ubertooth(?P<s{index}>[0-9a-f]+)\}}"
+        rf"\{{display=Ubertooth One (?P=s{index})\}}\n"
         for index in range(count)
     ) + r"(?!interface)"
-    cases = [
+    return (
         _case(
             "extcap-interfaces", f"btle-extcap --extcap-interfaces lists {count} board(s)",
             "extcap", ("--extcap-interfaces",), (listing,),
         ),
-    ]
-    if arguments["coverage"] == "comprehensive":
-        # Strict: fails with two or more boards at 6fee30c
-        # (SqueakyFloors/ubertooth#269).
-        cases.append(
-            _case(
-                "extcap-interfaces-serials",
-                "btle-extcap --extcap-interfaces shows each board's serial",
-                "extcap", ("--extcap-interfaces",),
-                tuple(
-                    rf"(?m)^interface \{{value=ubertooth\d+\}}"
-                    rf"\{{display=Ubertooth One {serial}\}}$"
-                    for serial in serials
-                ),
-            )
-        )
-    return tuple(cases)
+        _case(
+            "extcap-interfaces-serials",
+            "btle-extcap --extcap-interfaces shows each board's serial",
+            "extcap", ("--extcap-interfaces",),
+            tuple(
+                rf"(?mi)^interface \{{value=ubertooth{serial}\}}"
+                rf"\{{display=Ubertooth One {serial}\}}$"
+                for serial in serials
+            ),
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
 # btle-extcap --capture (BLE extcap capture)
 #
-# capture() runs "ubertooth-btle -f -U<N> -q <fifo> -A <channel>" with N from
-# --extcap-interface=ubertooth<N> (an index into the ubertooth-util -s list)
-# and --channel (default 37). extcapcapture.py reads the FIFO as Wireshark
-# would, stops the script with SIGTERM, and checks the PCAP stream.
+# capture() runs "ubertooth-btle -f -U <serial> -q <fifo> -A <channel>" with
+# the serial from --extcap-interface=ubertooth<serial> and --channel (default
+# 37). extcapcapture.py reads the FIFO as Wireshark would, stops the script
+# with SIGTERM, and checks the PCAP stream.
 
 _EXTCAP_CAPTURE = str(Path(extcapcapture.__file__).resolve())
-_INDEX_KEY = "extcap index"
 _FIFO = "extcap.fifo"
-# An index no attached board has: boards that are attached but not registered
-# also take indexes, so the registered count cannot be used.
-_NO_BOARD_INDEX = 99
+# A serial no board has. It has hex letters, because ubertooth-btle -U reads
+# an all-digit value as an index.
+_NO_BOARD_SERIAL = "0badc0de" * 4
 # Fetching the script and stopping it may take this long beyond the capture.
 _CAPTURE_SLACK_S = 45.0
-
-
-def _index_step(serial):
-    """The selected board's index in the ubertooth-util -s list: "N: serial"
-    with several boards, "Serial No: serial" (index 0) with one."""
-    return Step(
-        "board-index", "Read the board's index (ubertooth-util -s)",
-        ("ubertooth-util", "-s"),
-        observe=Observation(
-            _INDEX_KEY,
-            rf"(?mi)^(?:(?P<index>\d+): |Serial No:\s+){re.escape(serial)}\s*$",
-            convert=lambda match: match["index"] or "0",
-        ),
-    )
 
 
 def _fifo(context):
@@ -213,19 +204,18 @@ def _fifo(context):
 
 
 def _capture_case(serial, seconds, case_id, name, expected_state, *, channel=None,
-                  interface=None, refused=False):
-    """interface(context) -> the --extcap-interface value; by default the
-    selected board's ubertooth<N>."""
+                  interface_serial=None, refused=False):
+    """The --extcap-interface is ubertooth<interface_serial>, by default the
+    selected board's serial."""
     def argv(context):
-        index = require(context, _INDEX_KEY)
         command = [sys.executable, _EXTCAP_CAPTURE, "--seconds", str(seconds),
                    "--fifo", _fifo(context)]
         if refused:
             command.append("--refused")
         else:
-            command += ["--board", index, "--channel", str(channel or 37)]
-        value = interface(context) if interface else f"ubertooth{index}"
-        command += ["--", "--capture", f"--extcap-interface={value}",
+            command += ["--board", serial, "--channel", str(channel or 37)]
+        command += ["--", "--capture",
+                    f"--extcap-interface=ubertooth{interface_serial or serial}",
                     f"--fifo={_fifo(context)}"]
         if channel is not None:
             command.append(f"--channel={channel}")
@@ -234,7 +224,6 @@ def _capture_case(serial, seconds, case_id, name, expected_state, *, channel=Non
     steps = (
         _stop(serial, "establish-idle", "Establish idle before reading"),
         *_read_originals(serial, MODE_RESET_SETTINGS),
-        _index_step(serial),
         Step("capture", name, argv, timeout_s=seconds + _CAPTURE_SLACK_S,
              mutates=True, output_patterns=(r"(?m)^capture checks passed$",)),
         _stop(serial),
@@ -247,9 +236,15 @@ def _capture_case(serial, seconds, case_id, name, expected_state, *, channel=Non
 
 
 def extcap_capture_cases(arguments, _resources, resource_identities):
-    """btle-extcap --capture on the selected board; the other registered
-    boards are guards (ubertooth-util -s reads every one)."""
-    serial = _serial(resource_identities, "BLE extcap capture")
+    """btle-extcap --capture on the selected board, chosen by its serial; the
+    other registered boards are guards."""
+    serial = _serial(resource_identities, "BLE extcap capture").lower()
+    registered = {serial} | {
+        str(resource_identities.get(role, {}).get("serial", "")).lower()
+        for role in guard_roles(resource_identities)
+    }
+    if _NO_BOARD_SERIAL in registered:
+        raise StateCaseError(f"BLE extcap capture: serial {_NO_BOARD_SERIAL} is registered")
     seconds = seconds_arg(arguments)
     stream = "a DLT 256 PCAP stream on the FIFO until SIGTERM, no process left"
     cases = [
@@ -265,14 +260,13 @@ def extcap_capture_cases(arguments, _resources, resource_identities):
                       stream + f", advertising channel {channel}", channel=channel)
         for channel in (37, 38, 39)
     ]
-    # Strict: btle-extcap exits 0 when ubertooth-btle fails, at fork 89d9197
+    # Strict: btle-extcap exits 0 when ubertooth-btle fails, at fork 71e1a8a
     # (SqueakyFloors/ubertooth#334).
     cases += [
         _capture_case(serial, seconds, "extcap-capture-no-board",
-                      "btle-extcap --capture with no board at the index",
+                      "btle-extcap --capture with a serial no board has",
                       "the script ends with a non-zero exit, no packet records",
-                      interface=lambda _context: f"ubertooth{_NO_BOARD_INDEX}",
-                      refused=True),
+                      interface_serial=_NO_BOARD_SERIAL, refused=True),
         _capture_case(serial, seconds, "extcap-capture-bad-channel",
                       "btle-extcap --capture --channel=40",
                       "the script ends with a non-zero exit, no packet records",
