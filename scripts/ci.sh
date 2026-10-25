@@ -4,6 +4,7 @@
 #   scripts/ci.sh test    unit tests, plan validation, compile
 #   scripts/ci.sh build   build the fork's host tools into a temporary prefix
 #   scripts/ci.sh all     both
+#   scripts/ci.sh libbtbb-pin   only the build's libbtbb pin check
 #
 # Run from the repository root. PYTHON selects the interpreter that runs
 # bootstrap.py (default python3). UBERTOOTH_SOURCE / LIBBTBB_SOURCE point the
@@ -22,11 +23,11 @@ WORK=${CI_TEMP:-${RUNNER_TEMP:-$(mktemp -d)}}
 # This pin is the harness's own copy, deliberately: the harness never calls
 # the fork's installer. It must match the fork's (LIBBTBB_REF in the fork's
 # install.sh, also in its .github/workflows/build.yml); the build step warns
-# when it does not (ubertooth_harness/libbtbbpin.py). Bump it here and in
-# README.md together, which tests/test_libbtbb_pin.py checks. A LIBBTBB_SOURCE clone has to hold
-# the pin: a clone of the fork does, but one of another libbtbb, or one made
-# before the pin landed, needs LIBBTBB_REF as well or the build stops at
-# "unable to resolve libbtbb ref".
+# when it does not (check_libbtbb_pin, ubertooth_harness/libbtbbpin.py). Bump
+# it here and in README.md together, which tests/test_libbtbb_pin.py checks.
+# A LIBBTBB_SOURCE clone has to hold the pin: a clone of the fork does, but
+# one of another libbtbb, or one made before the pin landed, needs
+# LIBBTBB_REF as well or the build stops at "unable to resolve libbtbb ref".
 LIBBTBB_URL=https://github.com/SqueakyFloors/libbtbb.git
 LIBBTBB_PIN=84ab41fc99d172e812438bc9188f30a67216f748
 
@@ -70,6 +71,19 @@ run_test() {
     python -m compileall -q ubertooth_harness tests
 }
 
+# The fork may have moved its libbtbb pin (install.sh) since LIBBTBB_PIN was
+# copied here: warn once with both commits, do not fail (#85). The build and
+# run-suite steps below still record the check in their run.jsonl, without
+# printing it again.
+check_libbtbb_pin() {
+    step "libbtbb pin against the fork's install.sh"
+    .venv/bin/python -m ubertooth_harness.libbtbbpin \
+        --ubertooth-source "$1" --ubertooth-ref "${UBERTOOTH_REF:-main}" \
+        --libbtbb-url "$LIBBTBB_URL" --libbtbb-ref "${LIBBTBB_REF:-$LIBBTBB_PIN}"
+    UBERTOOTH_HARNESS_LIBBTBB_PIN_SHOWN=1
+    export UBERTOOTH_HARNESS_LIBBTBB_PIN_SHOWN
+}
+
 run_build() {
     step "build"
     [ -x .venv/bin/python ] || "$PYTHON" bootstrap.py
@@ -84,12 +98,7 @@ run_build() {
         git clone --quiet "$LIBBTBB_URL" "$bb"
     fi
 
-    # The fork may have moved its libbtbb pin (install.sh) since LIBBTBB_PIN
-    # was copied here: warn with both commits, do not fail (#85).
-    step "libbtbb pin against the fork's install.sh"
-    .venv/bin/python -m ubertooth_harness.libbtbbpin \
-        --ubertooth-source "$ut" --ubertooth-ref "${UBERTOOTH_REF:-main}" \
-        --libbtbb-url "$LIBBTBB_URL" --libbtbb-ref "${LIBBTBB_REF:-$LIBBTBB_PIN}"
+    check_libbtbb_pin "$ut"
     .venv/bin/python -m ubertooth_harness build \
         --ubertooth-source "$ut" --ubertooth-ref "${UBERTOOTH_REF:-main}" \
         --libbtbb-source "$bb" --libbtbb-ref "${LIBBTBB_REF:-$LIBBTBB_PIN}" \
@@ -140,7 +149,9 @@ EOF
 case "${1:-}" in
     test) run_test ;;
     build) run_build ;;
+    # Only the pin check of the build, against UBERTOOTH_SOURCE (tests).
+    libbtbb-pin) check_libbtbb_pin "${UBERTOOTH_SOURCE:?UBERTOOTH_SOURCE is required}" ;;
     all) run_test; run_build ;;
-    *) echo "usage: scripts/ci.sh test|build|all" >&2; exit 2 ;;
+    *) echo "usage: scripts/ci.sh test|build|all|libbtbb-pin" >&2; exit 2 ;;
 esac
 step "${1} passed"

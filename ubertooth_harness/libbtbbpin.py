@@ -6,9 +6,12 @@ The fork's `install.sh` names the libbtbb it is built and tested against
 leaves the harness building the old commit until someone notices (#85).
 
 Nothing here fails a build: a different libbtbb can be deliberate, so a
-mismatch is a warning naming both commits. `run-suite` and `build` print it
-for the Ubertooth commit they resolve; `scripts/ci.sh build` runs this module
-against the fork's main:
+mismatch is a warning naming both commits. `run-suite` and `build` record the
+check for the Ubertooth commit they resolve as a `libbtbb_pin` record in
+run.jsonl (status passed, warning, unchecked or skipped; report.md shows it)
+and print it on stderr unless SHOWN_ENV is set. `scripts/ci.sh build` runs
+this module against the fork's main once, as a GitHub Actions warning, and
+sets SHOWN_ENV so its build and run-suite steps do not print it again:
 
     python -m ubertooth_harness.libbtbbpin --ubertooth-source DIR \
         [--ubertooth-ref REF] --libbtbb-url URL --libbtbb-ref SHA
@@ -31,6 +34,15 @@ _ASSIGNMENT = re.compile(
 )
 _HEX = re.compile(r"[0-9a-fA-F]{7,40}")
 
+# Set (to anything) when the check was already shown for this build, so
+# `build` and `run-suite` record it in run.jsonl without printing it again.
+SHOWN_ENV = "UBERTOOTH_HARNESS_LIBBTBB_PIN_SHOWN"
+EVENT = "libbtbb_pin"
+
+
+class PinUnreadable(RuntimeError):
+    """install.sh names a libbtbb pin this module cannot compare."""
+
 
 @dataclass(frozen=True)
 class ForkPin:
@@ -39,10 +51,12 @@ class ForkPin:
 
 
 def parse_install_sh(text: str) -> ForkPin | None:
-    """The first top-level LIBBTBB_URL/LIBBTBB_REF assignments, or None.
+    """The first top-level LIBBTBB_URL/LIBBTBB_REF assignments, or None
+    when install.sh has no LIBBTBB_REF.
 
     Only unindented assignments count, so the option parser's
-    `LIBBTBB_REF="${1:-}"` inside `case` is not mistaken for the pin.
+    `LIBBTBB_REF="${1:-}"` inside `case` is not mistaken for the pin. A pin
+    built from a shell expansion (`$`) raises PinUnreadable.
     """
     found: dict[str, str] = {}
     for match in _ASSIGNMENT.finditer(text):
@@ -50,8 +64,13 @@ def parse_install_sh(text: str) -> ForkPin | None:
         value = next(g for g in match.groups()[1:] if g is not None)
         found.setdefault(name, value)
     ref = found.get("LIBBTBB_REF")
-    if not ref or "$" in ref:
+    if not ref:
         return None
+    if "$" in ref:
+        raise PinUnreadable(
+            f"LIBBTBB_REF in install.sh is not a literal commit ({ref}); "
+            "it cannot be compared"
+        )
     return ForkPin(url=found.get("LIBBTBB_URL"), ref=ref)
 
 
@@ -59,7 +78,8 @@ def fork_pin_at(source: Path | str, ref: str) -> ForkPin | None:
     """The pin in install.sh at `ref` of a fork checkout, or None if absent.
 
     None covers a commit without install.sh or without the pin (fork commits
-    from before the pin landed); git errors other than a missing path raise.
+    from before the pin landed); git errors other than a missing path, and a
+    pin that is not a literal ref, raise RuntimeError.
     """
     result = subprocess.run(
         ["git", "-C", str(source), "show", f"{ref}:install.sh"],
@@ -112,22 +132,63 @@ def drift_warning(
     return "libbtbb pin differs from the fork's install.sh: " + "; ".join(problems)
 
 
-def warning_for_sources(sources) -> str | None:
-    """The drift warning for resolved run sources (manifest.SourceRevision).
+@dataclass(frozen=True)
+class PinCheck:
+    """The outcome of comparing a run's libbtbb with the fork's pin.
 
-    No libbtbb source, or a fork commit without a pin, gives None.
+    ``status``: passed (same commit), warning (differs), unchecked (the
+    check could not run; ``message`` says why), or skipped (the fork commit
+    has no pin to compare with).
+    """
+
+    status: str
+    message: str
+    ubertooth_commit: str
+    libbtbb_ref: str
+    libbtbb_commit: str
+    fork_pin: ForkPin | None = None
+
+    def details(self) -> dict:
+        return {
+            "message": self.message,
+            "ubertooth_commit": self.ubertooth_commit,
+            "libbtbb_ref": self.libbtbb_ref,
+            "libbtbb_commit": self.libbtbb_commit,
+            "fork_pin_ref": self.fork_pin.ref if self.fork_pin else None,
+            "fork_pin_url": self.fork_pin.url if self.fork_pin else None,
+        }
+
+
+def check_sources(sources) -> PinCheck | None:
+    """Compare resolved run sources (manifest.SourceRevision) with the pin.
+
+    None when the run has no Ubertooth or no libbtbb source.
     """
     by_name = {source.name: source for source in sources}
     ubertooth, libbtbb = by_name.get("Ubertooth"), by_name.get("libbtbb")
     if ubertooth is None or libbtbb is None:
         return None
+    label = f"Ubertooth {ubertooth.short_commit}"
+
+    def result(status, message, pin=None):
+        return PinCheck(status, message, ubertooth.commit, libbtbb.requested_ref,
+                        libbtbb.commit, pin)
+
     try:
         pin = fork_pin_at(ubertooth.source_path, ubertooth.commit)
-    except RuntimeError:
-        return None
-    return drift_warning(
-        pin, libbtbb.requested_ref, libbtbb_commit=libbtbb.commit,
-        fork_label=f"Ubertooth {ubertooth.short_commit}",
+    except (OSError, RuntimeError) as error:
+        return result("unchecked", f"libbtbb pin not checked: {error}")
+    if pin is None:
+        return result(
+            "skipped", f"libbtbb pin not checked: {label} has no LIBBTBB_REF in install.sh"
+        )
+    warning = drift_warning(
+        pin, libbtbb.requested_ref, libbtbb_commit=libbtbb.commit, fork_label=label,
+    )
+    if warning:
+        return result("warning", warning, pin)
+    return result(
+        "passed", f"libbtbb {libbtbb.short_commit} matches the pin in {label} install.sh", pin
     )
 
 

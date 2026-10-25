@@ -357,6 +357,10 @@
     else if (kind === "test_started") live.stage = "tests";
     else if (kind === "run_finished") live.stage = "finished";
 
+    if (kind === "libbtbb_pin" && status !== "passed") {
+      // The libbtbb differs from the fork's install.sh pin, or was not compared.
+      pushLog(`warning: ${String(details.message ?? "")}`);
+    }
     if (kind === "test_started") {
       const name = String(details.test_name ?? "");
       let item = live.items.find((entry) => entry.name === name && entry.status === "pending");

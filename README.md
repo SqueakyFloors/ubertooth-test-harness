@@ -557,10 +557,17 @@ that day. The harness keeps its own copy of that pin (it never calls the
 fork's installer) and `tests/test_libbtbb_pin.py` keeps the copies in
 `scripts/ci.sh` and this file in step; bump both when the fork bumps its pin.
 To notice a bump, `run-suite` and `build` read `LIBBTBB_REF` from the fork's
-`install.sh` at the resolved Ubertooth commit and print a warning naming both
-commits when `--libbtbb-ref` differs (an older fork commit without the pin is
-not compared). The CI `build` job does the same against the fork's `main` and
-shows the warning on the workflow run; neither fails, since another libbtbb
+`install.sh` at the resolved Ubertooth commit and record the result as a
+`libbtbb_pin` record in run.jsonl and a "libbtbb pin" row in report.md, so a
+run started from the GUI shows it too: `passed`, `warning` (naming both
+commits when `--libbtbb-ref` differs), `unchecked` (the check could not run,
+for example install.sh unreadable at that commit or a pin built from a shell
+variable; the reason is given), or `skipped` (an older fork commit without
+the pin). Anything but `passed` is also printed on stderr. The CI `build` job
+runs the check once against the fork's `main` (`scripts/ci.sh libbtbb-pin`
+runs only that step) and shows the warning on the workflow run; its `build`
+and `run-suite` steps then record it without printing it again
+(`UBERTOOTH_HARNESS_LIBBTBB_PIN_SHOWN`). Nothing fails, since another libbtbb
 can be deliberate.
 Only libbtbb's C library is installed and linked (`-DENABLE_PYTHON=OFF` skips
 its Python tools): the Ubertooth tools need nothing else from it.
