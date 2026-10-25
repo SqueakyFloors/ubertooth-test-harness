@@ -723,7 +723,9 @@ def replay_cases(arguments, _resources, _resource_identities, *, now=None):
            "record reported"),
         _replay_case("replay-missing", "-i of a missing file", (
             _replay_step("ubertooth-rx -i <missing>", (), returncodes=(1,),
-                         patterns=(r"error: \S*missing\.bin: No such file or directory",),
+                         patterns=(r"(?m)^error: .*missing\.bin: No such file or directory$",),
+                         # A runtime file failure prints no usage (5ac22a8).
+                         forbidden=(r"ubertooth-rx - passive Classic Bluetooth",),
                          source="missing.bin"),
         ), "exit 1 with 'error: <file>: No such file or directory'"),
         _replay_case("replay-systime", "-i packet lines carry the recorded systime", (
