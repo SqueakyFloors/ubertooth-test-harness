@@ -504,7 +504,7 @@ def _prepare_run(
     """Build (when requested), then the manifest and preflight checks."""
     built = None
     executor = SubprocessCommandExecutor(_test_environment(sources, None))
-    if publisher is not None:
+    if args.build:
         built = _build(
             sources, run_dir / "build", args.with_firmware, publisher, args.with_python
         )
