@@ -30,6 +30,14 @@ suites:
         Ubertooth: default
         coverage: comprehensive
 
+    # Strict extcap-capture-no-board and extcap-capture-bad-channel fail
+    # until fork #334 is fixed.
+    - BLE extcap capture:
+        hosts: each
+        Ubertooth: default
+        coverage: comprehensive
+        duration: 3s
+
     - Ubertooth identity:
         hosts: each
         Ubertooth: default

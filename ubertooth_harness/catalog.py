@@ -745,6 +745,19 @@ def builtin_catalog() -> TestCatalog:
             guards_other_ubertooths=True,
         ),
         TestDefinition(
+            "BLE extcap capture",
+            "btle-extcap --capture into a FIFO read as Wireshark would, stopped "
+            "with SIGTERM: a DLT 256 PCAP stream, --channel reaches the board",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH, "coverage": COVERAGE,
+                "duration": DURATION,
+            }),
+            MappingProxyType({"Ubertooth": "Ubertooth"}),
+            command_builder=python_cases.extcap_capture_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+        ),
+        TestDefinition(
             "CLI usage smoke",
             "Exercise host tool usage paths",
             MappingProxyType({"hosts": HOSTS}),

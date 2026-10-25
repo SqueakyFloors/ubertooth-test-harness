@@ -330,10 +330,10 @@ interpreter or `python3`.
 | `--extcap-interfaces` | list interfaces | Covered | BLE extcap interfaces: one `ubertooth<N>` line per attached board, guards unchanged. Strict (comprehensive): each shows the serial; with two or more boards it shows `0:` ([ubertooth#269](https://github.com/SqueakyFloors/ubertooth/issues/269)) |
 | `--extcap-dlts` | list DLTs | Covered | Python tools: DLT 256 `DLT_BLUETOOTH_LE_LL_WITH_PHDR`; without an interface exits 1 (comprehensive) |
 | `--extcap-config` | config options | Covered | Python tools: `--channel` selector, 37 (default), 38, 39; a non-Ubertooth interface exits 1 (comprehensive) |
-| `--capture` | start a capture | Not covered | Needs a device; check the FIFO header |
-| `--extcap-interface=` | interface | Covered | `ubertooth0` with `--extcap-dlts`/`--extcap-config`; `wlan0` refused (comprehensive) |
-| `--fifo=` | output FIFO | Not covered | |
-| `--channel=` | advertising channel | Not covered | |
+| `--capture` | start a capture | Covered | BLE extcap capture: runs `ubertooth-btle -f -U<N> -q <fifo> -A <channel>`; the harness reads the FIFO as Wireshark would and stops the script with SIGTERM: a PCAP header for link type 256, whole records, exit 0, no process left, channel, squelch and LEDs restored, guards unchanged. Strict (comprehensive): exits non-zero when `ubertooth-btle` fails, with no board at the index or `--channel=40` ([ubertooth#334](https://github.com/SqueakyFloors/ubertooth/issues/334)) |
+| `--extcap-interface=` | interface | Covered | `ubertooth0` with `--extcap-dlts`/`--extcap-config`; `wlan0` refused (comprehensive); BLE extcap capture: `ubertooth<N>` with N the board's index in `ubertooth-util -s` reaches `ubertooth-btle -U<N>`; `ubertooth99` (no board) is fork #334 |
+| `--fifo=` | output FIFO | Covered | BLE extcap capture: a FIFO the harness creates and reads |
+| `--channel=` | advertising channel | Covered | BLE extcap capture: default 37 (smoke); 37, 38, 39 (comprehensive): `ubertooth-btle` gets `-A <channel>` and every advertising record is on its RF channel (0, 12, 39); 40 is passed on and refused by `ubertooth-btle` (fork #334) |
 
 ## Fork bugs found by these tests
 
@@ -379,6 +379,7 @@ and fail until the fix is on the commit under test.
 | [#305](https://github.com/SqueakyFloors/ubertooth/issues/305) | ubertooth-dfu | `-s <file.bin>` truncates `<file>.dfu` before it reads the input, so a failed `-s` leaves it empty | Open | DFU image checks (comprehensive, strict) |
 | [#318](https://github.com/SqueakyFloors/ubertooth/issues/318) | firmware or libubertooth | A new mode's capture can start with two packets left from the previous mode (LE packets in a BR dump), intermittent | Open | Raw receive (`dump -d` record types) |
 | [#319](https://github.com/SqueakyFloors/ubertooth/issues/319) | libubertooth, streaming tools | A capture whose USB stream fails (transfer error, board gone) exits 0 | Open | None yet: the step passes on exit status; the cleanup that follows fails |
+| [#334](https://github.com/SqueakyFloors/ubertooth/issues/334) | btle-extcap | `--capture` exits 0 when the `ubertooth-btle` it runs fails (no board at the index, `--channel=40`) | Open | BLE extcap capture (comprehensive, strict) |
 
 A test that fails cleanly (device verified restored, guards unchanged) no longer ends the run ([#41](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/41)), so strict cases do not hide later tests.
 
@@ -422,7 +423,7 @@ Next, harness work:
    (`ubertooth-dump`, `ubertooth-ego -r`). Still open: BLE monitor.
 9. Add Ubertooth util conflicts to the release plan after a passing hardware run (fork #82 is fixed; [#25](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/25));
    add `-f`/`-i` rejection cases only if no accepted pair can reach those modes.
-10. Done (#37): headless `ubertooth-specan-ui -h` (`--build --with-python`) and `btle-extcap --extcap-interfaces/--extcap-dlts/--extcap-config`. Still open: specan-ui argument checks, `btle-extcap --capture`.
+10. Done (#37): headless `ubertooth-specan-ui -h` (`--build --with-python`) and `btle-extcap --extcap-interfaces/--extcap-dlts/--extcap-config`; `btle-extcap --capture` (#73). Still open: specan-ui argument checks.
 11. Done (#28): `ubertooth-scan -h` and `ubertooth-follow -h` (skipped where not built).
 12. Done (#63): `Refused command lines`: no file created, truncated, or left behind by a refused command line, for every file option, with no Ubertooth (in CI).
     Done (#65): `DFU image checks`: `ubertooth-dfu -d` bad-image refusals and `-s`, with no Ubertooth (in CI).
