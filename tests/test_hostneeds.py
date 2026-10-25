@@ -2,7 +2,6 @@
 
 import io
 import json
-import os
 import stat
 import sys
 import tempfile
@@ -346,8 +345,8 @@ class DryRunTests(unittest.TestCase):
             image.write_bytes(b"fw")
             output = root / "runs"
             out = io.StringIO()
-            # An empty PATH: no installed BlueZ tools on a Linux host either.
-            with (patch.dict(os.environ, {"PATH": str(root / "empty")}),
+            # No installed BlueZ tools on a Linux host either (git stays on PATH).
+            with (patch("ubertooth_harness.hostneeds.shutil.which", return_value=None),
                   redirect_stdout(out), redirect_stderr(io.StringIO())):
                 code = main([
                     "run-suite", "--dry-run", "--plan", str(plan), "--suite", "fast",

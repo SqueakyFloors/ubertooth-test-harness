@@ -45,7 +45,12 @@ Harness-wide checks that use the CLIs:
 - **DFU image checks** (no Ubertooth; smoke in the `host` and `fast` plans and
   CI, comprehensive in `release`): `ubertooth-dfu -d <image> -r` and `-s` with
   `UBERTOOTH_TEST_NO_DEVICES=1` on a synthetic image; the test build only for
-  `sign-test-build`, which is skipped without one.
+  `sign-test-build`, which is not applicable without one (left out before
+  the run; README "Host requirements").
+- **Linux only** (need BlueZ; not applicable on macOS, decided at planning, not
+  skipped): `ubertooth-scan -h` and `ubertooth-follow -h` (Host CLI surface),
+  and every `follow` case of Refused command lines. `ubertooth-specan-ui -h`
+  (Python tools) is not applicable without `--build --with-python`.
 - **Exclusive Ubertooth topology** (`exclusive` plan, Linux, power control):
   runs `ubertooth-util -s`, `ubertooth-util -v`, and `ubertooth-btle -f` with no
   `-U` while only one board is powered.
@@ -166,7 +171,7 @@ Combinations: list and range output: Covered. `-v0`/`-v2` output: Covered. `Debu
 | `-r` | reset after the operation | Covered | Flash reliability (slow) and DFU images, with `-d` and with `-u`; after `-u -r` the application must answer with the same revision. DFU image checks: with `-r`, `-d` names the image's expected revision (`DFU expected revision:`), and an image with no revision marker is refused before the board lookup (comprehensive) |
 | `-U <index\|serial>` | select device | Covered | Flash reliability and DFU images (by serial; optionally alternating boards) |
 | `-u <file>` | read firmware from the device | Covered | DFU images (smoke): after `-d <test image> -r`, `-u <file> -r` must give 245760 bytes (flash 0x4000-0x3ffff) that start with the whole image, suffix included, padded with 0xff to 256 bytes. Comprehensive: every rejection is checked by a read-back. A read-back fails now and then (about 1 in 20) and leaves the board in DFU despite `-r` ([ubertooth#208](https://github.com/SqueakyFloors/ubertooth/issues/208)); `-u` truncates its file before it finds a device ([ubertooth#200](https://github.com/SqueakyFloors/ubertooth/issues/200) item 4, fixed). Refused command lines (no Ubertooth, smoke): a stray word, `-h`, or a later `-s other.txt` creates no file, no temporary file, and leaves an existing one unchanged; comprehensive: `-u <file> -s <missing .bin>` and `-u <file> -d <bad image>` (exit 1, no device) leave the file and no temporary file |
-| `-s <file>` | add DFU suffix to a binary | Covered | DFU images (smoke): the test image without its suffix, suffixed with `-s`, must equal the build's `.dfu` (VID:PID 1d50:6003, bcdDFU 0100, CRC). Comprehensive: a `.dfu` is refused (exit 1, unchanged); a `.bin` that already has a suffix is refused ("already has a DFU suffix, so ... was not written", nothing written) and a read-only `.bin` is suffixed (fork `9d710fe`, [ubertooth#200](https://github.com/SqueakyFloors/ubertooth/issues/200)). Refused command lines (smoke): a stray word, `-h`, or a second `-s other.txt` writes no `.dfu` and leaves an existing one unchanged. Strict (comprehensive): `-s <file.bin> -d <bad image>` writes no `.dfu`; at 6fee30c it does ([ubertooth#286](https://github.com/SqueakyFloors/ubertooth/issues/286)). DFU image checks (no Ubertooth, smoke, in CI): `-s` of a synthetic binary gives exactly the suffix and CRC the harness computes; a read-only `.bin` is suffixed; a `.dfu` and a suffixed `.bin` are refused with nothing written; `-s` of the test build's binary gives the build's `.dfu` byte for byte when the run has a firmware build (skipped otherwise). Comprehensive: a missing `.bin` and a `.bin` whose suffix has a wrong CRC write nothing; strict: `-s` of an input it cannot read (a directory) leaves an existing `.dfu` alone; at 6fee30c it truncates it to 0 bytes ([ubertooth#305](https://github.com/SqueakyFloors/ubertooth/issues/305)). Not checked: `-s` of an empty `.bin` writes a 16-byte `.dfu` that `-d` refuses ("no firmware"); the docs do not say what it should do |
+| `-s <file>` | add DFU suffix to a binary | Covered | DFU images (smoke): the test image without its suffix, suffixed with `-s`, must equal the build's `.dfu` (VID:PID 1d50:6003, bcdDFU 0100, CRC). Comprehensive: a `.dfu` is refused (exit 1, unchanged); a `.bin` that already has a suffix is refused ("already has a DFU suffix, so ... was not written", nothing written) and a read-only `.bin` is suffixed (fork `9d710fe`, [ubertooth#200](https://github.com/SqueakyFloors/ubertooth/issues/200)). Refused command lines (smoke): a stray word, `-h`, or a second `-s other.txt` writes no `.dfu` and leaves an existing one unchanged. Strict (comprehensive): `-s <file.bin> -d <bad image>` writes no `.dfu`; at 6fee30c it does ([ubertooth#286](https://github.com/SqueakyFloors/ubertooth/issues/286)). DFU image checks (no Ubertooth, smoke, in CI): `-s` of a synthetic binary gives exactly the suffix and CRC the harness computes; a read-only `.bin` is suffixed; a `.dfu` and a suffixed `.bin` are refused with nothing written; `-s` of the test build's binary gives the build's `.dfu` byte for byte when the run has a firmware build (not applicable otherwise). Comprehensive: a missing `.bin` and a `.bin` whose suffix has a wrong CRC write nothing; strict: `-s` of an input it cannot read (a directory) leaves an existing `.dfu` alone; at 6fee30c it truncates it to 0 bytes ([ubertooth#305](https://github.com/SqueakyFloors/ubertooth/issues/305)). Not checked: `-s` of an empty `.bin` writes a 16-byte `.dfu` that `-d` refuses ("no firmware"); the docs do not say what it should do |
 
 Combinations: `-d` without `-r` and `-u` without `-r` (board stays in DFU): Not covered (Hard: leaves the application firmware). `-d` then `-u` of the same image: Covered (DFU images). A bad image or wrong suffix is rejected: Covered (DFU images, comprehensive; fails on builds without the ubertooth#198/#199 fix `e8edd15`). `-d -r` exit status after a good flash: Covered (every write; fails at 6fee30c, ubertooth#267, fixed in `89d9197`).
 
@@ -189,7 +194,7 @@ Combinations: `-l` > `-u` rejected: Covered (Argument validation). `-g` vs `-G` 
 
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
-| `-h` | help (argparse) | Covered | Python tools: usage with `-U`, `-l`, `-u`, `--wifi`, `--padding`, no display; needs `run-suite --build --with-python` and numpy, qtpy, and a Qt binding in that Python, else skipped with the reason |
+| `-h` | help (argparse) | Covered | Python tools: usage with `-U`, `-l`, `-u`, `--wifi`, `--padding`, no display; needs `run-suite --build --with-python` (not applicable without it) and numpy, qtpy, and a Qt binding in that Python (else skipped with the reason) |
 | `-U <index\|serial>` | select device | Hard | Qt GUI |
 | `-l <freq>` | lower frequency | Hard | GUI. The argument checks could run before the window opens |
 | `-u <freq>` | upper frequency | Hard | GUI; `-u` < `-l` must be rejected |
@@ -289,7 +294,7 @@ Combinations: two or more of `-f`/`-r`/`-i`: last one wins (`do_mode` is overwri
 
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
-| `-h` | help | Covered | Host CLI surface (exit 1); skipped where not built (no BlueZ) |
+| `-h` | help | Covered | Host CLI surface (exit 1); Linux only: not applicable on macOS (no BlueZ) |
 | `-s` | BlueZ HCI scan | Hard | Needs a Bluetooth adapter and discoverable peers |
 | `-x` | extended inquiry | Hard | Same |
 | `-t <s>` | scan time | Hard | Same |
@@ -301,14 +306,14 @@ Combinations: two or more of `-f`/`-r`/`-i`: last one wins (`do_mode` is overwri
 
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
-| `-h` | help | Covered | Host CLI surface (exit 1); skipped where not built (no BlueZ) |
+| `-h` | help | Covered | Host CLI surface (exit 1); Linux only: not applicable on macOS (no BlueZ) |
 | `-l<LAP>` | target LAP | Hard | Needs a BR/EDR piconet and an adapter (backlog) |
 | `-u<UAP>` | target UAP | Hard | Same |
 | `-U<0-7>` | select device | Hard | Same |
-| `-r<file>` | PCAPNG capture | Partial | Capture needs a piconet (Hard). Refused command lines (no Ubertooth, smoke, skipped where not built): a stray word, `-h`, or `-e 9` after it creates no file and leaves an existing one unchanged |
-| `-q<file>` | PCAP capture | Partial | Capture needs a piconet (Hard). Refused command lines (no Ubertooth, smoke, skipped where not built): a stray word, `-h`, or `-e 9` after it creates no file and leaves an existing one unchanged; `-q` twice with a stray word creates neither and prints `Ignoring extra capture file` on stderr |
+| `-r<file>` | PCAPNG capture | Partial | Capture needs a piconet (Hard). Refused command lines (no Ubertooth, smoke, Linux only: not applicable on macOS): a stray word, `-h`, or `-e 9` after it creates no file and leaves an existing one unchanged |
+| `-q<file>` | PCAP capture | Partial | Capture needs a piconet (Hard). Refused command lines (no Ubertooth, smoke, Linux only: not applicable on macOS): a stray word, `-h`, or `-e 9` after it creates no file and leaves an existing one unchanged; `-q` twice with a stray word creates neither and prints `Ignoring extra capture file` on stderr |
 | `-e <n>` | max access-code errors | Hard | Same |
-| `-d <file>` | binary dump | Partial | Capture needs a piconet (Hard). Refused command lines (no Ubertooth, smoke, skipped where not built): a stray word, `-h`, or `-e 9` after it creates no file and leaves an existing one unchanged; `-d` twice with `-h` (comprehensive) |
+| `-d <file>` | binary dump | Partial | Capture needs a piconet (Hard). Refused command lines (no Ubertooth, smoke, Linux only: not applicable on macOS): a stray word, `-h`, or `-e 9` after it creates no file and leaves an existing one unchanged; `-d` twice with `-h` (comprehensive) |
 | `-a` | enable AFH | Hard | Same |
 | `-b <hciN>` | HCI device | Hard | Same |
 | `-w <slots>` | USB delay | Hard | Same |
@@ -428,7 +433,7 @@ Next, harness work:
 9. Add Ubertooth util conflicts to the release plan after a passing hardware run (fork #82 is fixed; [#25](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/25));
    Done (#72): `-f`/`-i` rejection cases run with no Ubertooth (`Util mode refusals`, in CI), so no accepted pair can reach those modes.
 10. Done (#37): headless `ubertooth-specan-ui -h` (`--build --with-python`) and `btle-extcap --extcap-interfaces/--extcap-dlts/--extcap-config`; `btle-extcap --capture` (#73). Still open: specan-ui argument checks.
-11. Done (#28): `ubertooth-scan -h` and `ubertooth-follow -h` (skipped where not built).
+11. Done (#28): `ubertooth-scan -h` and `ubertooth-follow -h` (Linux only; not applicable on macOS, #71).
 12. Done (#63): `Refused command lines`: no file created, truncated, or left behind by a refused command line, for every file option, with no Ubertooth (in CI).
     Done (#65): `DFU image checks`: `ubertooth-dfu -d` bad-image refusals and `-s`, with no Ubertooth (in CI).
 13. Peer-based tests from the backlog (known BLE advertiser, AFH map,
