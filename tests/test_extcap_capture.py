@@ -288,7 +288,9 @@ class Fixture:
             code = extcapcapture.capture(
                 (sys.executable, str(self.script), "--capture", f"--fifo={self.fifo}",
                  *extcap_args),
-                self.fifo, options.pop("seconds", 0.5), out=print, **options)
+                # 1.5 s: two Python start-ups must fit before SIGTERM even on a
+                # loaded runner (0.5 s failed now and then).
+                self.fifo, options.pop("seconds", 1.5), out=print, **options)
         self.assertGone()
         return code, out.getvalue()
 
