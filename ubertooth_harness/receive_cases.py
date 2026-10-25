@@ -19,6 +19,11 @@ since fork 57469f2 (#236).
 
 ubertooth-afh with an unknown -U exited 139 (segfault) before fork 219a5b0
 (SqueakyFloors/ubertooth#185); that case is an ordinary one now.
+
+Raw receive (comprehensive) alternates bounded ubertooth-btle -n and
+ubertooth-dump -d runs and requires that no capture hold packets from the
+previous mode; it is strict until SqueakyFloors/ubertooth#318 is fixed (at
+fork 89d9197 every dump starts with two records from before it).
 """
 
 from __future__ import annotations
@@ -29,7 +34,7 @@ import sys
 import time
 from pathlib import Path
 
-from ubertooth_harness import capturefile, rxdump, rxreplay
+from ubertooth_harness import capturefile, rxdump, rxreplay, stalecheck
 from ubertooth_harness.stateful import (
     CAPTURE_DIR_KEY,
     Observation,
@@ -42,6 +47,7 @@ from ubertooth_harness.transitions import (
     MODE_RESET_SETTINGS,
     _CAPTURE_PATTERN,
     _cleanup,
+    _crc_read,
     _read_originals,
     _serial,
     _stop,
@@ -422,6 +428,78 @@ def _ego_case(serial, seconds, case_id, name, options, *, frequency=2440, length
     ), f"receives on {frequency} MHz until stopped")
 
 
+# ---------------------------------------------------------------------------
+# Stale packets across a mode change (SqueakyFloors/ubertooth#318)
+#
+# A capture holds only packets from the mode it started. ubertooth-btle -n
+# reads its packets with UBERTOOTH_POLL control requests, not the bulk IN
+# endpoint ubertooth-dump reads, so the two read paths meet only at a mode
+# change. The case starts with one bounded btle -n, then repeats
+# STALE_ITERATIONS times: a bounded dump -d (it follows a btle), stop, a
+# bounded btle -n -A37 -q (it follows that dump), stop. Every stream is
+# stopped with SIGTERM. stalecheck.py then counts, per iteration, the dump
+# records left from before the dump started (the clock restarts at mode
+# entry; LE records are never basic-rate symbols) and the -q packets on any
+# RF channel but 0 (advertising index 37), and the step requires none.
+
+STALE_ITERATIONS = 5
+_STALE_CHECKER = str(Path(stalecheck.__file__).resolve())
+
+
+def _stale_case(serial, seconds, iterations=STALE_ITERATIONS):
+    def btle(step_id, name, capture=None):
+        def argv(context):
+            extra = ("-q", _path(capture)(context)) if capture else ()
+            return ("ubertooth-btle", "-U", serial, "-n", "-A37") + extra
+        return Step(step_id, name, argv, timeout_s=float(seconds), mutates=True,
+                    continuous=True)
+
+    def dump(step_id, name, file_name):
+        return Step(step_id, name,
+                    lambda context: ("ubertooth-dump", "-U", serial, "-d",
+                                     _path(file_name)(context)),
+                    timeout_s=float(seconds), mutates=True, continuous=True,
+                    output_patterns=(r"rx block timestamp \d+",))
+
+    dumps = [f"stale-{i}.bin" for i in range(1, iterations + 1)]
+    captures = [f"stale-{i}.pcap" for i in range(1, iterations + 1)]
+    steps = [btle("ble-0", "BLE sniff (-n -A37) before the first dump"),
+             _stop(serial, "stop-ble-0")]
+    for i, (dump_file, capture) in enumerate(zip(dumps, captures), 1):
+        steps += [
+            dump(f"dump-{i}", f"Iteration {i}: dump -d after BLE", dump_file),
+            _stop(serial, f"stop-dump-{i}"),
+            btle(f"ble-{i}", f"Iteration {i}: BLE -n -A37 -q after the dump", capture),
+            _stop(serial, f"stop-ble-{i}"),
+        ]
+    steps.append(Step(
+        "verify-no-stale",
+        f"Count packets left from the previous mode in {iterations} iterations",
+        lambda context: (sys.executable, _STALE_CHECKER, "--dumps",
+                         *(_path(f)(context) for f in dumps), "--captures",
+                         *(_path(f)(context) for f in captures), "--channel", "0"),
+        observe=Observation(
+            "stale iterations", r"stale iterations: (?P<value>BR dump \d+/\d+, "
+            r"BLE capture \d+/\d+)",
+            f"BR dump 0/{iterations}, BLE capture 0/{iterations}"),
+    ))
+    # btle -n mode entry clears CRC verification (reset_le()), so the case
+    # records and restores it as the BLE CRC capture cases do.
+    return StateCase(
+        "stale-packets-across-mode-change",
+        f"No packets from the previous mode, BLE and BR alternated {iterations} times",
+        (_stop(serial, "establish-idle", "Establish idle before reading"),
+         _crc_read(serial, "read-original-crc", "Read original CRC", "original crc"))
+        + _read_originals(serial, MODE_RESET_SETTINGS) + tuple(steps),
+        _cleanup(serial, MODE_RESET_SETTINGS, crc=True),
+        expected_state=(
+            f"every dump holds only its own records and every -q capture only "
+            f"channel 37 packets, in all {iterations} iterations (per-iteration "
+            "counts recorded); CRC, channel, squelch, and LEDs restored"),
+        capture_dir=True,
+    )
+
+
 def raw_receive_cases(arguments, _resources, resource_identities):
     serial = _serial(resource_identities, "Raw receive")
     n = seconds_arg(arguments)
@@ -452,6 +530,8 @@ def raw_receive_cases(arguments, _resources, resource_identities):
                          r"error: access code must be 2, 4, 6 or 8 hex digits \(got zz\)",),
                      mutates=True),
             ), "rejected with exit 1 before any mode starts"),
+            # Strict until SqueakyFloors/ubertooth#318 is fixed.
+            _stale_case(serial, n),
         ]
     return tuple(cases)
 

@@ -66,6 +66,7 @@ suites:
         Ubertooth: default
         allow RF transmission: true
 
+    # Strict stale-packets-across-mode-change fails until fork #318 is fixed.
     - Raw receive:
         hosts: each
         Ubertooth: default

@@ -150,6 +150,28 @@ def count_packets(path: Path | str) -> int:
         return _capped(path, packets)
 
 
+def le_rf_channels(path: Path | str) -> list[int]:
+    """The RF channel (0-39, (MHz - 2402) / 2) of each packet in a pcap file
+    with LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR (ubertooth-btle -q). The
+    pseudo-header's first byte is the RF channel libbtbb's
+    lell_pcap_append_packet() writes from lell_packet channel_k."""
+    fmt, link_type = read_header(path)
+    if (fmt, link_type) != ("pcap", LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR):
+        raise CaptureFileError(f"{path}: {fmt} link type {link_type}, not an LE PHDR pcap")
+    data = Path(path).read_bytes()
+    endian = _PCAP_MAGIC[data[:4]]
+    offset, channels = 24, []
+    while offset < len(data):
+        if offset + 16 > len(data):
+            raise CaptureFileError(f"{path}: truncated pcap record header")
+        incl_len = struct.unpack(endian + "I", data[offset + 8:offset + 12])[0]
+        if incl_len < 1 or offset + 16 + incl_len > len(data):
+            raise CaptureFileError(f"{path}: truncated pcap record")
+        channels.append(data[offset + 16])
+        offset += 16 + incl_len
+    return channels
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="capturefile.py")
     parser.add_argument("path", type=Path)
