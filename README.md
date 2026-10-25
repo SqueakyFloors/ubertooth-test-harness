@@ -1004,10 +1004,22 @@ REST and `/ws/live` endpoints below.
   events (✓ passed, ✗ failed, … running, ○ pending or not run; always text
   plus symbol), the current stage (building, preflight, tests), elapsed time,
   a Cancel button, and the last 200 log lines. A countdown is shown only when
-  every test in the suite has an estimate. The catalog has no duration
-  estimates of its own, so a test's estimate is its `duration` argument (for
-  example `BLE monitor` with `duration: 10s`), and build and preflight time
-  are not included: the countdown starts with the first test. Otherwise the view shows elapsed time and says why. The
+  every test in the suite has an estimate. Every implemented test has a
+  catalog estimate (`ESTIMATES` in `ubertooth_harness/catalog.py`) for each
+  coverage profile: fixed seconds, plus a multiple of its `duration` argument
+  for tests that capture (for example comprehensive `Raw receive` is 9 s plus
+  20 times the duration), plus seconds per flash for `Flash reliability`.
+  They are calibrated from run records on a macOS host with two Ubertooths:
+  the release plan run for comprehensive, the recorded smoke runs for smoke
+  (or the comprehensive time per step scaled to the smoke steps where no
+  smoke run exists); `Exclusive Ubertooth topology` has no run record and
+  assumes about 8 s of power switching. A test with no implementation yet is
+  estimated at its `duration` argument, if any. A Linux host, one board, or a
+  failing test ends sooner or later, so the countdown is a guide, never a
+  timeout. An estimate is per invocation: `Ubertooth: each` on a host with
+  several boards runs the test once per board, which the plan listing cannot
+  count. Build and preflight time are not included: the countdown starts with
+  the first test. Otherwise the view shows elapsed time and says why. The
   view is linkable as `/ui/#run=<run_id>`.
 - **History:** every run, newest first, with started/finished times, ref,
   plan/suite, target and status, a link to its `report.md`, and for a run
@@ -1028,7 +1040,7 @@ Endpoints (JSON unless noted; `GET /` lists them):
 |---|---|
 | `GET /ui/` | the web GUI (HTML, `app.js`, `app.css`) |
 | `GET /api/refs` | `{"repository", "refs": [{"name", "kind", "commit"}], "fetched_at"}` from `git ls-remote` (`kind` is `default`, `branch` or `tag`); 503 if it cannot be listed |
-| `GET /api/plans` | every `<plan>.yaml` in `--plans-dir` with its suites, test names, per-test `estimated_s` (from the `duration` argument, else null) and the suite total when every test has one; a plan that does not load is listed with its `error` |
+| `GET /api/plans` | every `<plan>.yaml` in `--plans-dir` with its suites, test names, per-test `estimated_s` (the catalog estimate of one invocation with the step's arguments, else null) and the suite total when every test has one; a plan that does not load is listed with its `error` |
 | `GET /api/targets`, `GET /api/targets/{host}` | registry: host, hostname, OS, Python, Ubertooth serials, last heartbeat, `online`/`offline`, connected, active run |
 | `POST /api/targets/{host}/runs` | start a run with the protocol `run` fields: `{"ref", "plan", "suite", "tests": [], "build": false}`; 201 with the run, 409 busy, offline, or rejected by the runner, 422 invalid or a ref not in `/api/refs` (full commit IDs are accepted), 504 no answer |
 | `GET /api/runs[?target=HOST]` | runs, newest first |

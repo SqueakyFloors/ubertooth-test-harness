@@ -23,7 +23,7 @@ import re
 import time
 from typing import Awaitable, Callable, Mapping, Sequence
 
-from ubertooth_harness.catalog import CatalogError, _duration_seconds
+from ubertooth_harness.catalog import CatalogError, builtin_catalog
 from ubertooth_harness.manifest import ManifestError, _safe_repository
 from ubertooth_harness.plan import PlanError, TestStep, load_plan
 from ubertooth_harness.protocol import _git_ref, _name
@@ -42,8 +42,6 @@ REFS_TTL_S = 60.0
 REFS_FAILURE_TTL_S = 5.0
 LS_REMOTE_TIMEOUT_S = 20.0
 MAX_LS_REMOTE_BYTES = 8 * 1024 * 1024
-# Plan arguments whose value is how long the test runs.
-DURATION_ARGUMENTS = ("duration", "capture duration")
 # Failure summary bounds.
 FAILURE_LOG_LINES = 5
 _MAX_FIELD = 2000
@@ -239,16 +237,20 @@ class GitRefSource:
 # ----- plans ---------------------------------------------------------------
 
 
+_CATALOG = builtin_catalog()
+
+
 def step_estimate_s(step: TestStep) -> float | None:
-    """Seconds a step is expected to run, from its duration argument, if any."""
-    for name in DURATION_ARGUMENTS:
-        value = step.arguments.get(name)
-        if value is not None:
-            try:
-                return _duration_seconds(value)
-            except CatalogError:
-                return None
-    return None
+    """Seconds one invocation of a step is expected to run (catalog estimate).
+
+    None for a test the catalog does not know, arguments it refuses, or a
+    test with neither an estimate nor a duration argument.
+    """
+    try:
+        definition = _CATALOG.get(step.test_name)
+        return definition.estimated_seconds(definition.normalize_arguments(step.arguments))
+    except CatalogError:
+        return None
 
 
 def list_plans(plans_dir: Path) -> list[dict]:
@@ -282,7 +284,8 @@ def list_plans(plans_dir: Path) -> list[dict]:
                 "tests": tests,
                 # Only when every test has one; build and preflight excluded.
                 "estimated_s": (
-                    sum(estimates) if estimates and None not in estimates else None
+                    round(sum(estimates), 1)
+                    if estimates and None not in estimates else None
                 ),
                 "unestimated_tests": estimates.count(None),
             })

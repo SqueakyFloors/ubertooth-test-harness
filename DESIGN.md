@@ -645,10 +645,11 @@ by the REST API and `/ws/live`.
   with text, in an `aria-live` region), the stage, elapsed time, Cancel, and a
   bounded log tail (last 200 lines). The **countdown** is the sum of the
   tests' estimates minus elapsed time, shown only when every test has one. The
-  catalog has no `estimated_duration` yet, so a test's estimate is its
-  `duration` argument and build/preflight are excluded; a suite with any
-  unestimated test (the fast suite today) shows elapsed time and says so.
-  Catalog estimates are a follow-up.
+  catalog holds an estimate for every implemented test and coverage profile
+  (fixed seconds plus a multiple of the duration argument, calibrated from
+  run records; a test without an implementation is estimated at its
+  `duration` argument), and build/preflight are excluded; a suite with any
+  unestimated test shows elapsed time and says so.
 - **History:** every run with ref, plan/suite, target, status,
   started/finished, a `report.md` link, and the failure summary from
   `GET /api/runs/{id}` (per failed phase or test: reason and last output
@@ -707,7 +708,7 @@ Later (multi-node), Ansible:
    Implemented: controller (registry, dispatch, results store, REST and live
    WebSocket API, `127.0.0.1` only) and the GUI (targets, run setup, live
    checklist with a countdown when estimates exist, history with failure
-   summaries). Catalog duration estimates and multi-target runs remain.
+   summaries) and catalog duration estimates. Multi-target runs remain.
 5. **Deploy** — single node implemented: `scripts/deploy.sh` (systemd user
    units for controller + runner on one Linux host), desktop launcher, and
    `scripts/harness-open` for laptop access over SSH. Ansible

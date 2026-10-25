@@ -225,7 +225,7 @@
 
   function estimateText(suite) {
     if (suite.estimated_s !== null && suite.estimated_s !== undefined) {
-      return `Estimated test time ${formatSeconds(suite.estimated_s)} (from the tests' duration arguments; build and preflight not included).`;
+      return `Estimated test time ${formatSeconds(suite.estimated_s)} (from the catalog's per-test estimates; build and preflight not included).`;
     }
     return `No time estimate: ${suite.unestimated_tests} of ${suite.tests.length} tests have no estimated duration, so the live view shows elapsed time only.`;
   }
@@ -469,7 +469,7 @@
       return;
     }
     const total = estimates.reduce((sum, value) => sum + value, 0);
-    $("live-estimate").textContent = `Estimate ${formatSeconds(total)} from the tests' duration arguments; build and preflight are not included.`;
+    $("live-estimate").textContent = `Estimate ${formatSeconds(total)} from the catalog's per-test estimates; build and preflight are not included.`;
     const testsStart = live.testsStarted ? Date.parse(live.testsStarted) : NaN;
     const testsElapsed = Number.isNaN(testsStart) ? null : Math.max(0, (end - testsStart) / 1000);
     if (run.status !== "running") {
