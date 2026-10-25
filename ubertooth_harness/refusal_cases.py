@@ -40,6 +40,7 @@ from pathlib import Path
 from ubertooth_harness import refusal
 from ubertooth_harness.hostneeds import tool_needs
 from ubertooth_harness.stateful import (
+    StateCaseError,
     CAPTURE_DIR_KEY,
     Observation,
     StateCase,
@@ -167,7 +168,11 @@ def _case(case_id, name, steps, expected_state) -> StateCase:
     steps = tuple(steps)
     # Every case starts with probe_step(<tool>); a tool built only with BlueZ
     # (ubertooth-follow) makes the case not applicable where it is not built.
-    tool = steps[0].argv[-1] if steps[0].step_id == "probe" else ""
+    # Every case starts with probe_step(tool), which names the tool the case
+    # needs; refuse to build one that does not, so its needs cannot be lost.
+    if not steps or steps[0].step_id != "probe":
+        raise StateCaseError(f"{case_id}: the first step must be the probe step")
+    tool = steps[0].argv[-1]
     return StateCase(
         case_id, name, steps,
         # Nothing on a device to restore; list what the case left (names and
