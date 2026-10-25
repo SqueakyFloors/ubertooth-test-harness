@@ -1,9 +1,15 @@
 """Ubertooth util modes and Multi-board selection against fakes of the fork."""
 
+import random
 import re
+import subprocess
+import sys
+import tempfile
+import time
 import unittest
+from pathlib import Path
 
-from ubertooth_harness import util_cases
+from ubertooth_harness import ledblink, util_cases
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.stateful import StateCase
@@ -94,10 +100,11 @@ class ModeUbertooth(FakeUbertooth):
             assert command[3:5] == ("ubertooth-util", self.serial), command
             code, stdout, stderr = self._sampler(int(command[5]))
             return self._result(command, code, stdout, stderr, on_output)
-        if command[:3] == ("sh", "-c", util_cases.LED_BLINK_SAMPLER):
+        if command[:2] == util_cases.led_blink_sampler_argv(self.serial)[:2]:
             self.commands.append(command)
-            assert command[3:5] == ("ubertooth-util", self.serial), command
-            code, stdout, stderr = self._sampler(int(command[5]), until_blink=True)
+            assert command == util_cases.led_blink_sampler_argv(self.serial), command
+            code, stdout, stderr = self._sampler(util_cases.LED_BLINK_MAX_SAMPLES,
+                                                 until_blink=True)
             self.blink_samplers.append(len(util_cases.led_samples(stdout)))
             return self._result(command, code, stdout, stderr, on_output)
         return super().run(argv, timeout_s=timeout_s, cancellation=cancellation,
@@ -114,7 +121,7 @@ class ModeUbertooth(FakeUbertooth):
 
     def _sampler(self, count, until_blink=False):
         """The LED_SAMPLER shell loop: one retry per failed read. With
-        ``until_blink`` (LED_BLINK_SAMPLER) it stops once a whole-on and a
+        ``until_blink`` (ledblink.py) it stops once a whole-on and a
         whole-off sample have both appeared; the fake takes no time, so the
         deadline never ends it first."""
         stdout, stderr = "", ""
@@ -233,7 +240,7 @@ class UtilModeCaseTests(unittest.TestCase):
             for step in case.steps + case.cleanup:
                 argv = step.resolve_argv(context)
                 with self.subTest(case=case.case_id, step=step.step_id):
-                    if argv[0] == "sh":
+                    if argv[0] in ("sh", sys.executable):
                         self.assertIn(argv, (util_cases.led_sampler_argv(SERIAL),
                                              util_cases.led_blink_sampler_argv(SERIAL)))
                         continue
@@ -247,10 +254,11 @@ class UtilModeCaseTests(unittest.TestCase):
         used = {}
         for case in full:
             for step in case.steps:
-                if step.resolve_argv({"original channel": "2441"})[0] == "sh":
+                if step.resolve_argv({"original channel": "2441"})[0] in ("sh", sys.executable):
                     used[(case.case_id, step.step_id)] = (
                         step.resolve_argv({}) == blink)
-                    self.assertGreater(step.timeout_s, util_cases.LED_BLINK_DEADLINE_S + 5)
+                    self.assertGreater(step.timeout_s, util_cases.LED_BLINK_DEADLINE_S
+                                       + ledblink.GRACE_S + 5)
         self.assertEqual({
             ("identify-blinks-until-stop", "sample-mode"),
             ("identify-replaces-led-specan", "sample-mode"),
@@ -285,6 +293,7 @@ class UtilModeCaseTests(unittest.TestCase):
         # The blink check takes however many samples the sampler needed.
         self.assertEqual("", util_cases.blink_check(on + off))
         self.assertIn("did not blink in 3 samples", util_cases.blink_check(on * 3))
+        self.assertIn("did not blink in 1 sample (", util_cases.blink_check(on))
         self.assertIn("no LED samples", util_cases.blink_check(""))
         lit = util_cases.steady_check(util_cases.ALL_ON, "all on")
         self.assertEqual("", lit(on * n))
@@ -477,25 +486,97 @@ class LedSamplerShellTests(unittest.TestCase):
         self.assertEqual(["1/1/1"], util_cases.led_samples(result.stdout))
 
 
-class LedBlinkSamplerShellTests(unittest.TestCase):
-    """The real LED_BLINK_SAMPLER under sh, with a stub ubertooth-util."""
+class LedBlinkSamplerTests(unittest.TestCase):
+    """ledblink.py: in-process with a fake clock, and as a command with a
+    stub ubertooth-util."""
+
+    def board(self, half_period_s=0.167, read_s=0.284, offset_s=0.0):
+        """A fake clock and an identify board: whole on for the first half of
+        each period, whole off for the second. A read takes ``read_s`` and
+        samples the LEDs at its end."""
+        now = [0.0]
+        reads = []
+
+        def clock():
+            return now[0]
+
+        def sleep(seconds):
+            now[0] += seconds
+
+        def read(argv, timeout_s):
+            if timeout_s < read_s:
+                now[0] += max(timeout_s, 0.0)
+                return None, ""
+            now[0] += read_s
+            reads.append(now[0])
+            on = int((now[0] + offset_s) // half_period_s) % 2 == 0
+            bit = "1" if on else "0"
+            return 0, (f"USR LED status: {bit}\nRX LED status : {bit}\n"
+                       f"TX LED status : {bit}\n")
+        return clock, sleep, read, reads, now
+
+    def run_fake(self, *, jitter_s, seed=0, offset_s=0.0, deadline_s=10.0,
+                 max_samples=60, **board):
+        import io
+        clock, sleep, read, reads, now = self.board(offset_s=offset_s, **board)
+        out, err = io.StringIO(), io.StringIO()
+        code = ledblink.sample(
+            "ubertooth-util", SERIAL, max_samples=max_samples, deadline_s=deadline_s,
+            interval_s=0.05, jitter_s=jitter_s, rng=random.Random(seed),
+            clock=clock, sleep=sleep, read=read, out=out, err=err)
+        return code, out.getvalue(), err.getvalue(), now[0]
+
+    def test_a_fixed_pause_aliases_to_one_phase(self):
+        # A 0.05 s pause plus a read whose sample period is the blink period
+        # (0.334 s): every sample lands on one phase. This is the stub board
+        # the jittered sampler must handle.
+        code, out, err, _end = self.run_fake(jitter_s=0.0, read_s=0.284,
+                                             half_period_s=0.167, offset_s=0.01)
+        self.assertEqual(0, code)
+        self.assertIn("did not blink", util_cases.blink_check(out))
+        self.assertIn("stopped at the deadline", err)
+
+    def test_jitter_reaches_both_phases_on_the_aliasing_board(self):
+        for seed in range(300):
+            for offset in (0.01, 0.1, 0.2, 0.3):
+                with self.subTest(seed=seed, offset=offset):
+                    code, out, err, end = self.run_fake(
+                        jitter_s=ledblink.BLINK_PERIOD_S, seed=seed, offset_s=offset,
+                        read_s=0.284, half_period_s=0.167)
+                    self.assertEqual("", util_cases.blink_check(out), err)
+                    self.assertIn("stopped at both phases", err)
+                    self.assertLess(end, 10.0)
+
+    def test_the_deadline_covers_a_read_in_flight(self):
+        # Reads of 3 s (three 1 s control timeouts): a read that would end
+        # past the deadline is stopped at it, not waited for.
+        code, out, err, end = self.run_fake(jitter_s=0.0, read_s=3.0, deadline_s=10.0)
+        self.assertEqual(0, code)
+        self.assertLessEqual(end, 10.0)
+        self.assertIn("stopped at the deadline (a read was stopped)", err)
+
+    def test_one_sample_is_singular(self):
+        code, _out, err, _end = self.run_fake(jitter_s=0.0, max_samples=1)
+        self.assertIn("LED blink sampling: 1 sample in ", err)
+        self.assertIn("stopped at the sample bound", err)
+
+    # As a command, with a stub ubertooth-util.
 
     def run_sampler(self, reports, *, count=20, deadline=10, delay="0"):
         """reports[i]: the i-th -d call's LEDs ("1/1/1", "0/1/0"), or an
-        exit code (int) after a partial report; past the end, the last one."""
-        import subprocess
-        import tempfile
-        import time
-        from pathlib import Path
-
+        exit code (int) after a partial report; past the end, the last one.
+        The stub records each SIGTERM it gets in a file."""
         with tempfile.TemporaryDirectory() as root:
             state = Path(root) / "n"
             state.write_text("0")
+            terms = Path(root) / "terms"
             stub = Path(root) / "util"
             words = " ".join(str(r) for r in reports)
             stub.write_text(
                 "#!/bin/sh\n"
-                f"sleep {delay}\n"
+                f"sleep {delay} >/dev/null 2>&1 & s=$!\n"
+                f"trap 'echo term >> {terms}; kill $s; exit 143' TERM\n"
+                "wait $s\n"
                 f"n=$(cat {state}); echo $((n + 1)) > {state}\n"
                 f"set -- {words}\n"
                 'while [ "$n" -gt 0 ] && [ "$#" -gt 1 ]; do shift; n=$((n - 1)); done\n'
@@ -507,12 +588,14 @@ class LedBlinkSamplerShellTests(unittest.TestCase):
             stub.chmod(0o755)
             start = time.monotonic()
             result = subprocess.run(
-                ["sh", "-c", util_cases.LED_BLINK_SAMPLER, str(stub), SERIAL,
-                 str(count), "0", str(deadline)],
+                [sys.executable, ledblink.__file__, str(stub), SERIAL,
+                 "--max-samples", str(count), "--interval", "0", "--jitter", "0.01",
+                 "--deadline", str(deadline)],
                 capture_output=True, text=True, timeout=30,
             )
             result.elapsed = time.monotonic() - start
             result.calls = int(state.read_text())
+            result.terms = terms.read_text().count("term") if terms.exists() else 0
         return result
 
     def test_stops_once_both_phases_appeared(self):
@@ -521,6 +604,8 @@ class LedBlinkSamplerShellTests(unittest.TestCase):
         self.assertEqual(["1/1/1", "1/0/1", "1/1/1", "0/0/0"],
                          util_cases.led_samples(result.stdout))
         self.assertEqual("", util_cases.blink_check(result.stdout))
+        self.assertRegex(result.stderr, r"LED blink sampling: seed \d+")
+        self.assertIn("4 samples in ", result.stderr)
 
     def test_mixed_samples_are_neither_phase(self):
         result = self.run_sampler(["1/1/0", "0/0/1", "0/1/1"], count=6)
@@ -531,27 +616,30 @@ class LedBlinkSamplerShellTests(unittest.TestCase):
         result = self.run_sampler(["1/1/1"], count=7)
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual(["1/1/1"] * 7, util_cases.led_samples(result.stdout))
-        self.assertIn("did not blink", util_cases.blink_check(result.stdout))
+        self.assertIn("stopped at the sample bound", result.stderr)
 
-    def test_a_slow_read_ends_at_the_deadline(self):
-        # 0.3 s per read, about the blink half-period: a 1 s deadline stops it
-        # after a few samples instead of taking all 50.
-        result = self.run_sampler(["0/0/0"], count=50, deadline=1, delay="0.3")
+    def test_a_read_in_flight_is_stopped_at_the_deadline(self):
+        # One read that would take 20 s: SIGTERM at the 1 s deadline, so the
+        # sampler ends within the deadline plus the grace.
+        result = self.run_sampler(["0/0/0"], count=50, deadline=1, delay="20")
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertLess(result.calls, 8)
-        self.assertLess(result.elapsed, 5)
-        self.assertIn("did not blink", util_cases.blink_check(result.stdout))
+        self.assertEqual(1, result.terms)
+        self.assertLess(result.elapsed, 1 + ledblink.GRACE_S + 1)
+        self.assertIn("stopped at the deadline (a read was stopped)", result.stderr)
+        self.assertEqual([], util_cases.led_samples(result.stdout))
 
     def test_one_failed_read_is_retried(self):
         result = self.run_sampler(["1/1/1", 1, "0/0/0"])
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual(["1/1/1", "0/0/0"], util_cases.led_samples(result.stdout))
-        self.assertRegex(result.stderr, r"LED sample 1: -d exited 1, retrying")
+        self.assertRegex(result.stderr, util_cases.LED_RETRY_LINE)
+        self.assertIn("LED sample 1: -d exited 1, retrying", result.stderr)
 
     def test_a_failed_retry_ends_the_sampler(self):
         result = self.run_sampler(["1/1/1", 1, 1, "0/0/0"])
         self.assertEqual(1, result.returncode)
         self.assertEqual(["1/1/1"], util_cases.led_samples(result.stdout))
+        self.assertIn("stopped at a failed retry (exit 1)", result.stderr)
 
 
 # ---------------------------------------------------------------------------
