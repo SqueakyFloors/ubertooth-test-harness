@@ -101,7 +101,10 @@ class ReplayRx:
     after a device is opened, and ignored with -i). ``bugs``
     switches on a misbehavior per case: decoys, no-uap, wrong-uap, ignores-l,
     ignores-e, link-type, no-capture, dump-mangled, survey-no-uap,
-    partial-record, empty-fails, missing-exit-0, u-fails, wrong-u-confirms.
+    partial-record, empty-fails, missing-exit-0, u-fails, wrong-u-confirms,
+    sweep-refused (-s refused, as from 5ac22a8 until 7b46ec4), no-sweep-help
+    (-h does not list -s). ``fixed=False`` prints the -s deprecation notice
+    of the builds before 5ac22a8.
     """
 
     def __init__(self, *, fixed=True, bugs=()):
@@ -138,6 +141,18 @@ class ReplayRx:
 
     def _rx(self, command):
         options = list(command[1:])
+        if options == ["-h"]:
+            sweep = ("" if "no-sweep-help" in self.bugs else
+                     "\t-s sweep all channels - the default; a -c channel wins over it\n")
+            return self._result(command, 0, "ubertooth-rx - passive Classic Bluetooth "
+                                "discovery/decode\nConfiguration:\n" + sweep)
+        notice = ""
+        if "-s" in options:
+            if "sweep-refused" in self.bugs:
+                return self._result(command, 1, "", "error: unknown option '-s'\n")
+            if not self.fixed:
+                notice = "sweep mode is now the default and the -s argument is deprecated\n"
+            options.remove("-s")
         if "-u" in options and "-l" not in options:
             if self.fixed:
                 return self._result(command, 1, "", "error: -u <UAP> requires -l <LAP>\n")
@@ -211,7 +226,7 @@ class ReplayRx:
                     lines.append(f"??:??:??:{text}")
         self._write_outputs(options, found, dumped)
         return self._result(command, 1 if partial else 0,
-                            "".join(line + "\n" for line in lines), partial)
+                            "".join(line + "\n" for line in lines), notice + partial)
 
     def _write_outputs(self, options, found, dumped):
         link = 1 if "link-type" in self.bugs else 255
@@ -487,9 +502,10 @@ class ReplayCaseTests(unittest.TestCase):
         self.assertEqual({}, dict(definition.hardware_roles or {}))
         _a, smoke = replay_cases("smoke")
         self.assertEqual(["replay-decode-lap", "replay-lap-uap", "replay-pcapng",
-                          "replay-pcap"], [c.case_id for c in smoke])
+                          "replay-pcap", "replay-sweep-explicit"],
+                         [c.case_id for c in smoke])
         _a, full = replay_cases("comprehensive")
-        self.assertEqual(17, len(full))
+        self.assertEqual(18, len(full))
         context = {"capture dir": "/run/captures/x"}
         for case in full:
             self.assertIsInstance(case, StateCase)
@@ -508,12 +524,16 @@ class ReplayCaseTests(unittest.TestCase):
         argv = cases[0].steps[0].resolve_argv({"capture dir": "/c"})
         self.assertEqual(str(1_800_000_000 - 3600), argv[argv.index("--base-time") + 1])
 
-    def test_old_fork_passes_smoke_and_fails_only_the_fixed_cases(self):
-        summary, _events = run_replay(ReplayRx(fixed=False), coverage="smoke")
-        self.assertTrue(summary.passed, summary.failure_reason)
+    def test_old_fork_fails_only_the_fixed_cases(self):
+        # Smoke follows fork main: before 5ac22a8 -s printed a deprecation
+        # notice, so only that smoke case fails there.
+        summary, events = run_replay(ReplayRx(fixed=False), coverage="smoke")
+        self.assertFalse(summary.passed)
+        self.assertEqual(["-i -s decodes as without -s"], failed_names(events))
         summary, events = run_replay(ReplayRx(fixed=False))
         self.assertFalse(summary.passed)
-        self.assertEqual(["-i -u without -l is refused",
+        self.assertEqual(["-i -s decodes as without -s",
+                          "-i -u without -l is refused",
                           "-i of a directory reports the read error",
                           "-i of a file whose last record is cut",
                           "-i packet lines carry the recorded systime"],
@@ -529,7 +549,8 @@ class ReplayCaseTests(unittest.TestCase):
                        "-i -q replays into PCAP", "-i -e 0 drops the packet with an error",
                        "-i -d writes the packet records back",
                        "-i of a file whose last record is cut", "-i -z lists both piconets",
-                       "-i packet lines carry the recorded systime"},
+                       "-i packet lines carry the recorded systime",
+                       "-i -s decodes as without -s"},
             "no-uap": {"-i -l <LAP> derives the UAP"},
             "wrong-uap": {"-i -l <LAP> derives the UAP"},
             "ignores-l": {"-i -l <LAP> derives the UAP", "-i -l 0f1e2d: only that LAP",
@@ -546,6 +567,8 @@ class ReplayCaseTests(unittest.TestCase):
             "partial-record": {"-i of a file whose last record is cut"},
             "empty-fails": {"-i of an empty file"},
             "missing-exit-0": {"-i of a missing file"},
+            "sweep-refused": {"-i -s decodes as without -s"},
+            "no-sweep-help": {"-i -s decodes as without -s"},
             "u-fails": {"-i -l -u with the right UAP"},
             "wrong-u-confirms": {"-i -l -u with a wrong UAP confirms nothing"},
         }
