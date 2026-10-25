@@ -543,8 +543,8 @@ def raw_receive_cases(arguments, _resources, resource_identities):
 # error ("error: reading <file> failed: <reason>", for example a directory) or
 # a last record cut short ("error: <file> ends in a partial record: N of 68
 # bytes, ignored") is reported on stderr after whatever was decoded, exit 1
-# (#203). An -i file fopen() cannot open prints "Could not open file <name>"
-# and the usage, exit 1. -u without -l is refused before the input or any
+# (#203). An -i file fopen() cannot open prints "error: <name>: <strerror>",
+# exit 1 (fork 5ac22a8, #350). -u without -l is refused before the input or any
 # device is used: "error: -u <UAP> requires -l <LAP>", exit 1 (fork 57469f2,
 # #236). The other options work as live: -l/-u, -z, -e, -r/-q/-d.
 # The fixture is synthetic (rxreplay.py), never an over-the-air capture.
@@ -723,8 +723,9 @@ def replay_cases(arguments, _resources, _resource_identities, *, now=None):
            "record reported"),
         _replay_case("replay-missing", "-i of a missing file", (
             _replay_step("ubertooth-rx -i <missing>", (), returncodes=(1,),
-                         patterns=(r"Could not open file ",), source="missing.bin"),
-        ), "exit 1 with 'Could not open file' and the usage"),
+                         patterns=(r"error: \S*missing\.bin: No such file or directory",),
+                         source="missing.bin"),
+        ), "exit 1 with 'error: <file>: No such file or directory'"),
         _replay_case("replay-systime", "-i packet lines carry the recorded systime", (
             _fixture_step(base),
             _replay_step("ubertooth-rx -i <fixture>", (), check=lambda output:
