@@ -13,8 +13,7 @@ preflight, flash, and guard code. Profiles: **smoke** runs in the `fast` plan,
 **comprehensive** in the `release` plan; tests without a profile name their plan.
 The `host` plan holds the tests that need no Ubertooth (Host CLI surface, Raw
 receive replay, Refused command lines, DFU image checks, and Python tools
-smoke); CI runs it
-against the tools it builds.
+smoke); CI runs it against the tools it builds.
 Status legend:
 **Covered**: a harness test runs the option and checks its output or effect.
 The test and profile are named.
