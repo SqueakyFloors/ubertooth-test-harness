@@ -16,9 +16,9 @@ PYTHON=${PYTHON:-python3}
 WORK=${CI_TEMP:-${RUNNER_TEMP:-$(mktemp -d)}}
 
 # libbtbb comes from this project's fork at a pinned commit, so a push to
-# libbtbb cannot change a harness build. The commit is the one the Ubertooth
-# fork pins for its own builds (fork issue #320, fork PR #322), so a harness
-# run builds the libbtbb the fork is moving to rather than upstream master.
+# libbtbb cannot change a harness build. It is the commit the Ubertooth fork
+# pins for its own builds (fork issue #320), so a harness run builds the
+# libbtbb the fork is built and tested against, not upstream master.
 # This pin is the harness's own copy, deliberately: the harness never calls
 # the fork's installer. It must match the fork's (the LIBBTBB_REF in the
 # fork's .github/workflows/build.yml); bump it here and in README.md together,

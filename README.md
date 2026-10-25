@@ -499,12 +499,12 @@ python -m ubertooth_harness run-suite --plan testplans/fast.yaml --suite fast \
 The examples here and the default in `scripts/ci.sh` use one commit of the
 [`SqueakyFloors/libbtbb`](https://github.com/SqueakyFloors/libbtbb) fork: the
 commit the Ubertooth fork pins for its own builds, so a run builds the libbtbb
-that fork is moving to rather than whatever upstream `master` holds that day.
-The harness keeps its own copy of that pin (it never calls the fork's
-installer) and `tests/test_libbtbb_pin.py` keeps the copies in `scripts/ci.sh`
-and this file in step; bump both when the fork bumps its pin. Only libbtbb's C
-library is built (`-DENABLE_PYTHON=OFF`): the Ubertooth tools link nothing else
-from it.
+that fork is built and tested against, not whatever upstream `master` holds
+that day. The harness keeps its own copy of that pin (it never calls the
+fork's installer) and `tests/test_libbtbb_pin.py` keeps the copies in
+`scripts/ci.sh` and this file in step; bump both when the fork bumps its pin.
+Only libbtbb's C library is built (`-DENABLE_PYTHON=OFF`): the Ubertooth tools
+link nothing else from it.
 
 `--libbtbb-ref` can still name any ref, with one limit: the harness passes no
 `-DCMAKE_POLICY_VERSION_MINIMUM`, so a libbtbb declaring
