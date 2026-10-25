@@ -162,6 +162,12 @@ class Step:
     # A command that should stop itself after a timeout of its own (for
     # example ubertooth-rx -t N) must not exit before this many seconds.
     min_duration_s: float = 0.0
+    # Exit status by which the command reports, with a "SKIP: <reason>" line
+    # on stdout, that the case cannot be decided here, for a reason only the
+    # run itself can find (for example no traffic in range). The case is
+    # skipped even when this step or an earlier one changed the board; the
+    # cleanup still runs in full, and a cleanup failure still fails the case.
+    skip_returncode: int | None = None
 
     def resolve_argv(self, context: Context) -> tuple[str, ...]:
         value = self.argv(context) if callable(self.argv) else self.argv
@@ -188,6 +194,15 @@ class Step:
                 )
         elif result.timed_out:
             return StepOutcome(f"{self.name}: command timed out", expected)
+        elif (self.skip_returncode is not None
+              and result.returncode == self.skip_returncode):
+            match = re.search(r"(?m)^SKIP: (.+)$", result.stdout)
+            if match is None:
+                return StepOutcome(
+                    f"{self.name}: command exited {result.returncode} without a "
+                    "SKIP: line", expected)
+            return StepOutcome(
+                "", expected, skipped=f"{self.name}: skipped, {match[1].strip()}")
         elif result.returncode not in self.expected_returncodes:
             return StepOutcome(
                 f"{self.name}: command exited {result.returncode}", expected

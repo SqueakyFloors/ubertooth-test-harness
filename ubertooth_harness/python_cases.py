@@ -334,8 +334,10 @@ def _capture_case(serial, seconds, case_id, name, expected_state, *, channel=Non
     steps = (
         _stop(serial, "establish-idle", "Establish idle before reading"),
         *_read_originals(serial, MODE_RESET_SETTINGS),
+        # SKIP_EXIT: no interpreter for the script, or (--close) no record
+        # arrived to close the FIFO after; the cleanup still restores.
         Step("capture", name, argv, timeout_s=seconds + _CAPTURE_SLACK_S,
-             mutates=True,
+             mutates=True, skip_returncode=pytools.SKIP_EXIT,
              output_patterns=(r"(?m)^capture checks passed$", *patterns)),
         _stop(serial),
     )
@@ -385,6 +387,9 @@ def extcap_capture_cases(arguments, _resources, resource_identities):
                       "btle-extcap --capture --channel=40",
                       "the script ends with exit 1 before ubertooth-btle runs, no "
                       "packet records",
+                      # --no-btle: a shim ubertooth-btle records any start,
+                      # however fast it exits; the refusal text alone cannot
+                      # tell, being ubertooth-btle's own wording.
                       channel=40, refused=True, no_btle=True,
                       patterns=(r"(?m)^error: advertising channel index must be 37-39 "
                                 r"\(got 40\)$", r"(?m)^extcap exit: 1 ")),
@@ -399,7 +404,10 @@ def extcap_capture_cases(arguments, _resources, resource_identities):
                                 r"filter; filter the packets in Wireshark instead "
                                 r"\(got btle\.length > 20\)$",)),
         # Wireshark's other way of ending a capture: it closes the FIFO, the
-        # next packet gets SIGPIPE, and the script exits 0 by itself.
+        # next packet gets SIGPIPE, and the script exits 0 by itself. The
+        # FIFO is closed only after a record has arrived; with none in the
+        # capture window (no advertising traffic in range, which only the run
+        # can find) the case is skipped.
         _capture_case(serial, seconds, "extcap-capture-reader-closes",
                       "btle-extcap --capture ended by closing the FIFO",
                       "a DLT 256 PCAP stream on the FIFO, then exit 0 by itself once "

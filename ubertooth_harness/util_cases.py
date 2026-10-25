@@ -166,8 +166,10 @@ def identify_start(serial: str) -> str:
             rf"-U {re.escape(serial)} -S or any mode option$")
 
 
-# Progress lines of the modes; on stderr, and each said once.
-SAID_ONCE = r"Flashing LEDs"
+# The "Flashing LEDs on ubertooth device ..." line -I printed on stdout before
+# fork fcadf34 removed it: a forbidden pattern, so no mode start (-I or any
+# other) prints it on either stream.
+REMOVED_FLASHING_LINE = r"Flashing LEDs"
 
 
 def specan_start(threshold: int) -> str:
@@ -214,7 +216,7 @@ def _mode_case(serial, case_id, name, options, start, behavior, *, prior=None,
         steps += [
             Step("start-prior-mode", "Start " + " ".join(prior_options),
                  _util(serial, *prior_options), output_patterns=(prior_start,),
-                 forbidden_patterns=(SAID_ONCE,),
+                 forbidden_patterns=(REMOVED_FLASHING_LINE,),
                  output_check=no_diagnostics_on_stdout, mutates=True),
             _sample_step(serial, "sample-prior-mode",
                          f"{' '.join(prior_options)} {prior_behavior[0]}",
@@ -224,7 +226,7 @@ def _mode_case(serial, case_id, name, options, start, behavior, *, prior=None,
     steps += [
         Step("start-mode", f"Start {command}", _util(serial, *options),
              output_patterns=(start,) + tuple(extra_patterns),
-             forbidden_patterns=(SAID_ONCE,),
+             forbidden_patterns=(REMOVED_FLASHING_LINE,),
              output_check=no_diagnostics_on_stdout, mutates=True),
         _sample_step(serial, "sample-mode", f"{command} {label}", check),
     ]
