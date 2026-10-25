@@ -26,8 +26,8 @@ deterministic synthetic image (dfuimage.py synth: filler bytes with a
 ``ubertooth harness-synthetic (`` revision marker, and the suffix computed by
 the harness itself); the bad images derive from it as DFU images derives
 them from the test build. ``sign-test-build`` checks ``-s`` against the
-build's own ``.dfu``, byte for byte, when the run has one, and skips with
-that reason when it does not.
+build's own ``.dfu``, byte for byte; it declares that it needs the firmware
+build (hostneeds.py), so a run without one leaves it out as not applicable.
 
 Comprehensive coverage adds edge images (empty, 15 bytes, a suffix with no
 payload, a suffix length larger than the file, DFU version 2.0, no revision
@@ -46,6 +46,7 @@ from pathlib import Path
 import sys
 
 from ubertooth_harness import dfuimage
+from ubertooth_harness.hostneeds import Needs
 from ubertooth_harness.refusal_cases import NO_BOARD_NOTE, probe_step, tool_step
 from ubertooth_harness.stateful import (
     CAPTURE_DIR_KEY,
@@ -213,13 +214,6 @@ def _sign_cases():
             _check_suffix("image.bin", "image.dfu", _path(SYNTHETIC_DFU), _OWN_SUFFIX),
         ), "exit 0; image.dfu is image.bin plus the suffix and CRC the harness computes"),
         _case("sign-test-build", "-s of the test build's binary gives the build's .dfu", (
-            Step("test-build", "Does this run have a firmware build",
-                 lambda context: (sys.executable, _HELPER, "test-build",
-                                  context.get(artifact_key(TEST_IMAGE), "")),
-                 timeout_s=_HELPER_TIMEOUT_S,
-                 observe=Observation(
-                     "test build", r"Test build: (?P<value>[^\n]+)",
-                     reject=lambda value: value if value.startswith("none") else "")),
             _helper("strip", "The test build without its suffix as build.bin", "strip",
                     lambda context: require(context, artifact_key(TEST_IMAGE)),
                     _path("build.bin"), pattern=r"Stripped suffix: \d+ bytes"),
@@ -227,8 +221,9 @@ def _sign_cases():
             _check_suffix("build.bin", "build.dfu",
                           lambda context: require(context, artifact_key(TEST_IMAGE)),
                           "the build's .dfu"),
-        ), "exit 0; build.dfu identical to the build's .dfu, byte for byte; skipped "
-           "when the run has no firmware build", optional_artifacts=(TEST_IMAGE,)),
+        ), "exit 0; build.dfu identical to the build's .dfu, byte for byte; not "
+           "applicable when the run has no firmware build", artifacts=(TEST_IMAGE,),
+           needs=Needs(firmware_build=True)),
         _case("sign-refuses-dfu", "-s refuses a .dfu", (
             _synth(), _state_before(),
             _sign(SYNTHETIC_DFU, returncodes=(1,), patterns=(r"Error: -s requires a \.bin",)),

@@ -7,7 +7,13 @@ from types import MappingProxyType
 from typing import Mapping
 
 from ubertooth_harness.cases import GUARD_ROLE_PREFIX
-from ubertooth_harness.catalog import TestCatalog
+from ubertooth_harness.catalog import CatalogError, TestCatalog
+from ubertooth_harness.hostneeds import (
+    NotApplicable,
+    platform_capabilities,
+    split_cases,
+    unmet,
+)
 from ubertooth_harness.plan import Plan
 from ubertooth_harness.resources import RegistryError, ResourceRegistry
 from ubertooth_harness.topology import PowerIsolationAction, plan_exclusive_ubertooth
@@ -48,6 +54,16 @@ class TestInvocation:
     # board on the host) the run still checks, read-only, that the selected
     # board is the only Ubertooth enumerated.
     exclusive_ubertooth: bool = False
+
+
+@dataclass(frozen=True)
+class CompiledSuite:
+    invocations: tuple[TestInvocation, ...]
+    # Tests a selected host cannot run (test-wide needs); one per host.
+    not_applicable: tuple[NotApplicable, ...] = ()
+
+    def for_host(self, host: str) -> tuple[NotApplicable, ...]:
+        return tuple(item for item in self.not_applicable if item.host == host)
 
 
 class PlanCompiler:
@@ -122,8 +138,10 @@ class PlanCompiler:
             identities[role] = MappingProxyType(dict(self.registry.get(alias).identity))
         return MappingProxyType(resources), MappingProxyType(identities)
 
-    def compile(self, plan: Plan, suite: str) -> tuple[TestInvocation, ...]:
+    def compile_suite(self, plan: Plan, suite: str) -> "CompiledSuite":
+        """Invocations, and the tests each host was left out of (not applicable)."""
         invocations = []
+        not_applicable: list[NotApplicable] = []
         sequence = 0
         try:
             for step in plan.steps(suite):
@@ -134,23 +152,33 @@ class PlanCompiler:
                     "host", arguments.get("hosts", "each")
                 )
                 hosts = self.registry.resolve_hosts(host_selector)
-                requested_platforms = arguments.get("platforms")
-                if requested_platforms is not None:
-                    mismatched_hosts = [
-                        alias
-                        for alias in hosts
-                        if self.registry.get(alias).platform not in requested_platforms
-                    ]
-                    if mismatched_hosts:
-                        raise PlanningError(
-                            f"{step.test_name}: selected host platform is unsupported: "
-                            f"{', '.join(mismatched_hosts)}"
-                        )
-                eligible_hosts = list(hosts)
+                # Test-wide needs (the plan's platforms: and the definition's)
+                # leave a host out as not applicable; a test no named host can
+                # run is a plan error.
+                eligible_hosts = []
+                left_out = []
+                for alias in hosts:
+                    capabilities = platform_capabilities(
+                        alias, self.registry.get(alias).platform
+                    )
+                    reason = next(
+                        (
+                            unmet(needs, capabilities)
+                            for needs in definition.test_needs(arguments)
+                            if unmet(needs, capabilities)
+                        ),
+                        "",
+                    )
+                    if reason:
+                        left_out.append(NotApplicable(alias, step.test_name, reason))
+                    else:
+                        eligible_hosts.append(alias)
                 if not eligible_hosts:
                     raise PlanningError(
-                        f"{step.test_name}: no selected host matches platform requirement"
+                        f"{step.test_name}: no selected host can run it: "
+                        + "; ".join(f"{item.host}: {item.reason}" for item in left_out)
                     )
+                not_applicable.extend(left_out)
                 for host in eligible_hosts:
                     role_names = tuple(definition.hardware_roles or {})
                     if len(role_names) > 1 and any(
@@ -217,8 +245,39 @@ class PlanCompiler:
                     raise PlanningError(
                         f"{step.test_name}: no valid distinct resource assignment"
                     )
+                self._check_some_case_applies(
+                    definition, invocations[step_start:], left_out
+                )
         except RegistryError as error:
             raise PlanningError(str(error)) from error
         if not invocations:
             raise PlanningError(f"suite '{suite}' produced no runnable invocations")
-        return tuple(invocations)
+        return CompiledSuite(tuple(invocations), tuple(not_applicable))
+
+    def compile(self, plan: Plan, suite: str) -> tuple[TestInvocation, ...]:
+        return self.compile_suite(plan, suite).invocations
+
+    def _check_some_case_applies(self, definition, invocations, left_out):
+        """A plan error when, by platform alone, no case of the test can run
+        on any of its hosts (for example only BlueZ cases on macOS hosts)."""
+        reasons = [f"{item.host}: {item.reason}" for item in left_out]
+        for invocation in invocations:
+            try:
+                cases = definition.command_cases(
+                    invocation.arguments, invocation.resources,
+                    invocation.resource_identities,
+                )
+            except CatalogError:
+                return  # the run reports a builder error; nothing to decide
+            capabilities = platform_capabilities(
+                invocation.host, self.registry.get(invocation.host).platform
+            )
+            runnable, omitted = split_cases(cases, capabilities)
+            if runnable:
+                return
+            reasons += sorted({f"{invocation.host}: {reason}" for _case, reason in omitted})
+        if invocations:
+            raise PlanningError(
+                f"{definition.name}: no case can run on any selected host: "
+                + "; ".join(reasons)
+            )

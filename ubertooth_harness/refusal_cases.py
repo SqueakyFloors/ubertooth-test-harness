@@ -17,8 +17,10 @@ argument checks finds no board instead of opening one; a refusal must come
 before that, so the switch's "no board is selected" note is forbidden in the
 refusals. Forks before b6d8ede ignore the switch: the first step reads the
 built libubertooth's bytes (refusal.py probe, never running a tool) and the
-case skips when it lacks the variable's name, or when the tool is not built
-(ubertooth-follow needs BlueZ, so macOS has none).
+case skips when it lacks the variable's name. That is a runtime skip because
+only the built library can tell. The ubertooth-follow cases declare that they
+need BlueZ (hostneeds.py), so on a host without it (every macOS host) they
+are left out before the run as not applicable.
 
 Comprehensive coverage adds the checks that run after the option loop, a
 repeated -d, and ubertooth-dfu with an input that cannot be used. One of those
@@ -36,7 +38,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ubertooth_harness import refusal
+from ubertooth_harness.hostneeds import tool_needs
 from ubertooth_harness.stateful import (
+    StateCaseError,
     CAPTURE_DIR_KEY,
     Observation,
     StateCase,
@@ -72,7 +76,7 @@ TOOLS = (
     Tool("ubertooth-follow", r"(?m)^ubertooth-follow - active", 1,
          ("-e", "9"), r"error: maximum access code errors must be ",
          (("-r", "pcapng"), ("-q", "pcap"), ("-d", "dump"))),
-    Tool("ubertooth-rx", r"(?m)^ubertooth-rx - passive Classic Bluetooth", 1,
+    Tool("ubertooth-rx", r"(?m)^ubertooth-rx - passive Classic Bluetooth", 0,
          ("-c", "79"), r"error: channel must be ",
          (("-r", "pcapng"), ("-q", "pcap"), ("-d", "dump"))),
     # ubertooth-dump has no option value to check; -U without its value is
@@ -161,8 +165,16 @@ def tool_step(step_id, tool, words, *, returncodes=(1,), patterns=(),
 
 
 def _case(case_id, name, steps, expected_state) -> StateCase:
+    steps = tuple(steps)
+    # Every case starts with probe_step(<tool>); a tool built only with BlueZ
+    # (ubertooth-follow) makes the case not applicable where it is not built.
+    # Every case starts with probe_step(tool), which names the tool the case
+    # needs; refuse to build one that does not, so its needs cannot be lost.
+    if not steps or steps[0].step_id != "probe":
+        raise StateCaseError(f"{case_id}: the first step must be the probe step")
+    tool = steps[0].argv[-1]
     return StateCase(
-        case_id, name, tuple(steps),
+        case_id, name, steps,
         # Nothing on a device to restore; list what the case left (names and
         # sizes only) so the record shows the directory's final state.
         (Step("list-files", "List the files in the case directory",
@@ -170,6 +182,7 @@ def _case(case_id, name, steps, expected_state) -> StateCase:
               output_patterns=(r"Refusal files: \d+ in ",)),),
         expected_state=expected_state,
         capture_dir=True,
+        needs=tool_needs(tool),
     )
 
 

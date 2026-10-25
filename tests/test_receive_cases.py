@@ -44,7 +44,7 @@ class ReceiveUbertooth(ToolUbertooth):
     each case can be shown to fail:
 
     rx-ignores-timeout, rx-exits-early, rx-ignores-channel, rx-ignores-errors,
-    rx-no-deprecation, rx-link-type, rx-writes-extra, rx-dump-trailing,
+    rx-link-type, rx-writes-extra, rx-dump-trailing,
     rx-no-survey, afh-zero-map (#187), afh-no-message, afh-exits-0, afh-exits-early,
     afh-r-silent, afh-segfault (#185),
     dump-trailing, dump-bits-garbage, dump-ignores-l, dump-first-wins,
@@ -153,8 +153,6 @@ class ReceiveUbertooth(ToolUbertooth):
                         data += b"\0\0\0"
                 Path(path).write_bytes(data)
         stderr = ""
-        if "-s" in options and "rx-no-deprecation" not in self.bugs:
-            stderr = "sweep mode is now the default and the -s argument is deprecated\n"
         self._run_mode("2402" if channel is None else str(2402 + int(channel)))
         stdout = "\n".join(lines) + "\n"
         if "rx-ignores-timeout" in self.bugs or seconds == 0:
@@ -279,7 +277,7 @@ class ReceiveCaseGenerationTests(unittest.TestCase):
         self.assertEqual(["rx-survey-timeout", "rx-capture-pcapng", "afh-timeout-no-packets"],
                          [c.case_id for c in smoke])
         _a, full = cases_for(CLASSIC, "comprehensive")
-        self.assertEqual(14, len(full))
+        self.assertEqual(13, len(full))
         _a, smoke = cases_for(RAW, "smoke")
         self.assertEqual(["dump-full", "dump-bitstream", "ego-rx"], [c.case_id for c in smoke])
         _a, full = cases_for(RAW, "comprehensive")
@@ -343,7 +341,7 @@ class ClassicReceiveTests(unittest.TestCase):
         rx = ["Survey (-z -t) ends by itself", "PCAPNG capture (-r)",
               "Sniff all LAPs (-t) ends by itself", "Fixed channel (-c 39)",
               "No access-code errors (-e 0)", "Four access-code errors (-e 4)",
-              "-s prints its deprecation notice", "PCAP capture (-q)",
+              "PCAP capture (-q)",
               "Repeated -r: the first file is written, the extra ignored",
               "Packet dump (-d)"]
         expectations = {
@@ -359,7 +357,6 @@ class ClassicReceiveTests(unittest.TestCase):
             "rx-ignores-errors": ["No access-code errors (-e 0)"],
             "reject:ubertooth-rx:-e": ["No access-code errors (-e 0)",
                                        "Four access-code errors (-e 4)"],
-            "rx-no-deprecation": ["-s prints its deprecation notice"],
             # #187 (fork builds before 3b22c95) and regressions of its fix.
             "afh-zero-map": ["AFH -t with no piconet in range", "AFH with -e 2 accepted"],
             "afh-no-message": ["AFH -t with no piconet in range", "AFH with -e 2 accepted"],

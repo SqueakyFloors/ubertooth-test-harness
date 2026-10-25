@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import re
 from typing import Mapping
 
+from ubertooth_harness.hostneeds import NO_NEEDS, Needs
 
 # Role names for the other registered Ubertooths on the host that a guarded
 # test binds and must leave unchanged; the plan-selected board keeps the
@@ -29,12 +30,13 @@ class CommandCase:
     output_patterns: tuple[str, ...] = ()
     timeout_s: float = 5.0
     expected_returncodes: tuple[int, ...] = (0,)
-    # The tool is built only on some hosts (for example the BlueZ tools): a
-    # tool the executor cannot start skips the case instead of failing it.
-    optional_tool: bool = False
+    # What the case needs from the host (hostneeds.py); a host without it
+    # leaves the case out before the run, as not applicable.
+    needs: Needs = NO_NEEDS
     # Exit status by which the command says it cannot run on this host (for
-    # example pytools.py without a Python-tool build); its "SKIP: <reason>"
-    # output line is the skip reason.
+    # example pytools.py when the interpreter cannot import numpy); its
+    # "SKIP: <reason>" output line is the skip reason. Only for what cannot
+    # be known before the command runs; declare everything else in needs.
     skip_returncode: int | None = None
 
     def missing_tool(self, result) -> str:
@@ -48,14 +50,6 @@ class CommandCase:
             match = re.search(r"(?m)^SKIP: (.+)$", result.stdout)
             if match:
                 return f"{self.name}: skipped, {match[1].strip()}"
-        if (
-            self.optional_tool
-            and result.returncode == 127
-            and "unable to start command" in result.stderr
-            # Only a missing file; a present but unusable tool must fail.
-            and "No such file or directory" in result.stderr
-        ):
-            return f"{self.name}: skipped, {self.argv[0]} is not built on this host"
         return ""
 
     def result_failure(self, result) -> str:

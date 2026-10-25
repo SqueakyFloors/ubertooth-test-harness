@@ -41,7 +41,8 @@ from ubertooth_harness.manifest import (
     ManifestError,
     build_run_manifest,
 )
-from ubertooth_harness.plan import PlanError, load_plan
+from ubertooth_harness.hostneeds import planned_capabilities, split_cases
+from ubertooth_harness.plan import PlanError, image_label, load_plan
 from ubertooth_harness import pytools
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.planner import PlanCompiler, PlanningError
@@ -239,6 +240,11 @@ def _parser() -> argparse.ArgumentParser:
         help="allow real USB power switching for exclusive-Ubertooth tests",
     )
     run_suite.add_argument("--output", type=Path, required=True)
+    run_suite.add_argument(
+        "--dry-run", action="store_true",
+        help="print the planned invocations and cases, and what is not "
+        "applicable on this host and why; build, lease and run nothing",
+    )
     _add_build_options(run_suite, optional=True)
     _add_lease_options(run_suite)
 
@@ -440,8 +446,11 @@ def _validate(
         compiler = PlanCompiler(catalog, registry)
         selected_suites = (suite,) if suite else tuple(plan.suites)
         for suite_name in selected_suites:
-            invocations = compiler.compile(plan, suite_name)
+            compiled = compiler.compile_suite(plan, suite_name)
+            invocations = compiled.invocations
             print(f"compiled {suite_name}: {len(invocations)} invocation(s)")
+            for item in compiled.not_applicable:
+                print(f"  {item.describe()}")
             for invocation in invocations:
                 resources = ", ".join(
                     f"{role}={alias}" for role, alias in invocation.resources.items()
@@ -548,18 +557,26 @@ def _run_suite(args: argparse.Namespace) -> int:
         raise HarnessError(
             f"host {args.host} platform {host.platform} does not match local platform"
         )
-    compiled = PlanCompiler(catalog, registry).compile(plan, args.suite)
+    compiled = PlanCompiler(catalog, registry).compile_suite(plan, args.suite)
     selected_names = set(args.test or ())
     for name in selected_names:
         catalog.get(name)
     invocations = tuple(
         invocation
-        for invocation in compiled
+        for invocation in compiled.invocations
         if invocation.host == args.host
         and (not selected_names or invocation.test_name in selected_names)
     )
+    # Whole tests this host cannot run (hostneeds.py), recorded, not run.
+    not_applicable = tuple(
+        item for item in compiled.for_host(args.host)
+        if not selected_names or item.test_name in selected_names
+    )
     if not invocations:
-        raise HarnessError(f"suite {args.suite} has no selected invocation for {args.host}")
+        raise HarnessError(
+            f"suite {args.suite} has no selected invocation for {args.host}"
+            + "".join(f"; {item.describe()}" for item in not_applicable)
+        )
     for invocation in invocations:
         # Guards need unambiguous -U selectors; fail before any build or device access.
         try:
@@ -582,6 +599,8 @@ def _run_suite(args: argparse.Namespace) -> int:
         raise HarnessError("--with-python requires --build")
     if args.build and not args.libbtbb_source:
         raise HarnessError("--build requires --libbtbb-source and --libbtbb-ref")
+    if args.dry_run:
+        return _dry_run(args, catalog, plan, host, invocations, not_applicable)
     artifacts = _parse_artifacts(args.artifact)
     run_id = validate_run_id(args.run_id) if args.run_id else generate_run_id()
     leases = board_leases.acquire(
@@ -596,14 +615,60 @@ def _run_suite(args: argparse.Namespace) -> int:
     try:
         return _run_leased(
             args, catalog, plan, registry, invocations, sources, artifacts,
-            run_id, leases,
+            run_id, leases, not_applicable,
         )
     finally:
         leases.release()
 
 
+def _dry_run(args, catalog, plan, host, invocations, not_applicable) -> int:
+    """What run-suite would run on this host and what is not applicable.
+
+    Capabilities come from the platform and the run options (hostneeds.py
+    planned_capabilities); nothing is built, leased or run.
+    """
+    labels = []
+    for value in args.artifact:
+        name = value.split("=", 1)[0]
+        if "=" not in value or not name:
+            raise ManifestError("artifact must use NAME=PATH")
+        labels.append(image_label(name))
+    capabilities = planned_capabilities(
+        args.host, host.platform, build=args.build,
+        with_python=bool(args.with_python), with_firmware=args.with_firmware,
+        artifact_labels=labels,
+    )
+    print(f"dry run: {plan.name} / {args.suite} on {args.host}; nothing is built or run")
+    print(f"host: {capabilities.describe()}")
+    runs = omitted = 0
+    for invocation in invocations:
+        definition = catalog.get(invocation.test_name)
+        cases = definition.command_cases(
+            invocation.arguments, invocation.resources, invocation.resource_identities
+        )
+        runnable, left_out = split_cases(cases, capabilities)
+        runs += len(runnable)
+        omitted += len(left_out)
+        resources = ", ".join(f"{role}={alias}" for role, alias in invocation.resources.items())
+        state = (f"not applicable ({len(left_out)} cases)" if left_out and not runnable
+                 else f"{len(runnable)} case(s)"
+                 + (f", {len(left_out)} not applicable" if left_out else ""))
+        print(f"  {invocation.invocation_id}: {invocation.test_name}"
+              + (f" [{resources}]" if resources else "") + f": {state}")
+        for case in runnable:
+            print(f"    run: {case.name}")
+        for case, reason in left_out:
+            print(f"    not applicable on {args.host}: {case.name}: {reason}")
+    for item in not_applicable:
+        print(f"  {item.describe()}")
+    print(f"total: {len(invocations)} test(s), {runs} case(s) to run, {omitted} case(s) "
+          f"and {len(not_applicable)} test(s) not applicable on {args.host}")
+    return 0
+
+
 def _run_leased(
     args, catalog, plan, registry, invocations, sources, artifacts, run_id, leases,
+    not_applicable=(),
 ) -> int:
     """run-suite once every board the run touches is leased to this process."""
     preflight_policy = PreflightPolicy(registry, catalog)
@@ -675,6 +740,7 @@ def _run_leased(
             preflight_checks=preflight_checks,
             cancellation=cancellation,
             publisher=publisher,
+            not_applicable=not_applicable,
         )
     finally:
         for signum, handler in previous_handlers.items():
