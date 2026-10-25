@@ -191,8 +191,12 @@ class Target:
 _RUN_FIELDS = (
     "run_id", "target", "request_id", "ref", "plan", "suite", "tests", "build",
     "status", "created_at", "finished_at", "exit_code", "reason",
-    "runner_run_directory", "report", "cancel_requested", "adopted",
+    "runner_run_directory", "report", "report_error", "cancel_requested", "adopted",
 )
+
+
+def _report_cell(value) -> str:
+    return str(value).replace("|", "\\|").replace("\n", " ")
 
 
 @dataclasses.dataclass
@@ -213,6 +217,8 @@ class Run:
     reason: str | None = None
     runner_run_directory: str | None = None
     report: bool = False
+    # Why report.md is short or missing (compile or write failure), if so.
+    report_error: str | None = None
     cancel_requested: bool = False
     # Created from a runner report rather than a start request (for example,
     # the run outlived a controller restart).
@@ -420,15 +426,67 @@ class Controller:
             stream.write(json.dumps(event, sort_keys=True) + "\n")
             stream.flush()
 
-    def _write_report(self, run: Run) -> bool:
-        """Compile report.md from the controller's own copy of run.jsonl.
+    def _write_report(
+        self, run: Run, status: str, reason: str | None = None
+    ) -> tuple[bool, str | None]:
+        """Write report.md for a run that has (or is about to get) ``status``.
 
-        The runner's run directory may be on another machine, and its path is
-        only recorded: the controller never reads files a runner names.
+        Compiled from the controller's own copy of run.jsonl: the runner's
+        run directory may be on another machine, and its path is only
+        recorded, so the controller never reads files a runner names. When
+        there are no records yet (a run_error before the first event) or the
+        compile fails, a short report names the status and why there are no
+        results, so a terminal status always has a fetchable report.
+
+        Never raises. Returns ``(report written, report problem or None)``.
         """
-        if not run.seen:
-            return False
-        return write_report(run.directory) is not None
+        problem = None
+        if run.seen:
+            try:
+                if write_report(run.directory) is not None:
+                    return True, None
+                problem = f"could not compile report.md from {RUN_LOG}"
+            except Exception as error:  # noqa: BLE001 - the run result stands
+                problem = f"could not compile report.md from {RUN_LOG}: {error}"
+        rows = [("Status", status)]
+        if reason:
+            rows.append(("Reason", reason))
+        if problem:
+            rows.append(("Report problem", problem))
+        note = (
+            "The controller could not compile the full report from the run's records."
+            if problem else "The controller received no run records for this run."
+        )
+        text = "\n".join(
+            [f"# Ubertooth test run `{run.run_id}`", "", "| | |", "|---|---|"]
+            + [f"| {name} | {_report_cell(value)} |" for name, value in rows]
+            + ["", note]
+        ) + "\n"
+        destination = run.directory / REPORT
+        temporary = destination.with_suffix(".md.tmp")
+        try:
+            run.directory.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(text, encoding="utf-8")
+            os.replace(temporary, destination)
+        except Exception as error:  # noqa: BLE001 - the run result stands
+            problem = f"{problem}; " if problem else ""
+            problem += f"could not write {REPORT}: {error}"
+            self.log(f"run {run.run_id}: {problem}")
+            return False, problem
+        if problem:
+            self.log(f"run {run.run_id}: {problem}; wrote a short report")
+        return True, problem
+
+    async def _update_report(
+        self, run: Run, status: str, reason: str | None = None
+    ) -> tuple[bool, str | None]:
+        """``_write_report`` in a worker thread; never raises."""
+        try:
+            return await asyncio.to_thread(self._write_report, run, status, reason)
+        except Exception as error:  # noqa: BLE001 - the run result stands
+            problem = f"could not write {REPORT}: {error}"
+            self.log(f"run {run.run_id}: {problem}")
+            return False, problem
 
     def read_events(self, run: Run) -> list[dict]:
         try:
@@ -595,15 +653,23 @@ class Controller:
             # As for run_finished: the report first, then every state change
             # without yielding. The run may have ended while the report was
             # compiled; then it is no longer lost.
-            report = await asyncio.to_thread(self._write_report, run)
-            if not run.active:
-                continue
-            run.report = report
-            run.status = LOST
-            run.reason = (
+            reason = (
                 f"target registered with active run {target.active_run_id}"
                 if target.active_run_id else "target registered with no active run"
             ) + "; the runner no longer has this run"
+            report = await self._update_report(run, LOST, reason)
+            if not run.active:
+                # run_finished or run_error ended it meanwhile; a short report
+                # written here may have replaced the one written for that end.
+                run.report, run.report_error = await self._update_report(
+                    run, run.status, run.reason
+                )
+                self._persist(run)
+                self._publish_run(run)
+                continue
+            run.report, run.report_error = report
+            run.status = LOST
+            run.reason = reason
             run.finished_at = _now()
             pending = self._pending_cancels.pop(run.run_id, None)
             if pending is not None:
@@ -728,7 +794,9 @@ class Controller:
             if run.finished_at is not None:
                 # A record that arrives after the run ended: keep report.md
                 # in step with run.jsonl.
-                run.report = await asyncio.to_thread(self._write_report, run)
+                run.report, run.report_error = await self._update_report(
+                    run, run.status, run.reason
+                )
                 self._persist(run)
                 self._publish_run(run)
         elif kind in ("run_finished", "run_error"):
@@ -740,19 +808,18 @@ class Controller:
             # The report depends only on run.jsonl. Compile it before any
             # state changes, so nobody sees a terminal status without its
             # report; everything below runs without yielding.
-            report = await asyncio.to_thread(self._write_report, run)
-            run.report = report
+            if kind == "run_finished":
+                status, reason = message["status"], None
+            else:
+                status, reason = "error", message["reason"]
+            run.report, run.report_error = await self._update_report(run, status, reason)
             run.request_id = message["request_id"]
-            if run.status == LOST:
-                run.reason = None  # the runner did report the end after all
             run.exit_code = message["exit_code"]
             run.finished_at = _now()
+            run.status = status
+            run.reason = reason  # clears a lost reason: the runner did report the end
             if kind == "run_finished":
-                run.status = message["status"]
                 run.runner_run_directory = message["run_directory"]
-            else:
-                run.status = "error"
-                run.reason = message["reason"]
             self._persist(run)
             if target.active_run_id == run.run_id:
                 target.active_run_id = None
