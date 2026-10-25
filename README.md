@@ -698,8 +698,8 @@ canceled. A failed test's `test_finished` says which with `stops_run`. A
 later cancellation does not hide an earlier failure: the run still fails.
 
 A test run is one `run-suite` run of a plan suite. It writes exactly two files
-into `<output>/<run-id>/` (plus `build/` with `--build`, and `captures/` when
-a BLE capture case ran):
+into `<output>/<run-id>/` (plus `build/` with `--build`, `captures/` when
+a BLE capture case ran, and `output/` when a command printed a lot):
 
 - `run.jsonl`: every record, appended and fsynced as it happens. The first
   records are `run_started` and `manifest` (sources, plan and registry hashes,
@@ -738,6 +738,30 @@ line. Longer output stamps each `[O]`/`[E]` line when it arrived, in arrival
 order, before the `[R]` line. Very long output is capped in the report; the
 rest stays in run.jsonl. The live terminal stream on stderr uses the same
 `[C]`/`[O]`/`[E]`/`[R]` command tags.
+
+Every response is kept, but run.jsonl holds at most the first 200 output
+records or 64 KiB of output text of each preflight or test command. Past that,
+the command's full output, from its first line, goes to
+`output/<command id>.log` in the run directory as it arrives, one
+`<UTC time> [O]` or `[E]` line per output line in arrival order, and
+run.jsonl and the live stream get no more output records for it. Its
+`command_finished` record names the file (`output_file`) and summarizes what
+run.jsonl left out (`output_omitted`): stdout and stderr line and character
+counts and the ten most common line shapes (digit runs replaced by `N`) with
+their counts. report.md shows them as `[M]` lines after the command:
+
+```text
+00:07:02.951 [R] ubertooth-dump exit 124 in 3.012s, stopped at its planned deadline
+00:07:02.951 [M] full output in output/016-Raw-receive-dump-full-receive.log; not in run.jsonl: 7141 stderr lines (321345 characters)
+00:07:02.951 [M]   7141 x [E] rx block timestamp N * N nanoseconds
+```
+
+This keeps the per-block progress lines `ubertooth-dump` prints on stderr
+(about 2500 a second) and long packet listings out of run.jsonl: on a release
+run that cut run.jsonl from 48 MB to about 20 MB, and the dump stderr records
+from 15 MB to 1 MB. Checks still see each command's complete output. Through
+the runner service the `output/` files stay in the runner's run directory;
+only run.jsonl records reach the controller.
 
 Run IDs look like `20261022T203045Z-a1b2c3d4e5f6`; `--run-id` supplies a
 path-safe ID. Records use event schema version 1 (pre-release; no stable

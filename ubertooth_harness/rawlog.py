@@ -20,6 +20,7 @@ result line. Timestamps use the same clock and format as ``run.jsonl``.
 
 import datetime
 from pathlib import Path
+import re
 import shlex
 from typing import Callable
 
@@ -74,6 +75,99 @@ def _output_lines(
 
 
 TAGS = {"stdout": "[O]", "stderr": "[E]"}
+
+OUTPUT_DIR = "output"
+
+# Per-command limits on the output records kept in run.jsonl. Past either one
+# the command's full output goes to output/<command id>.log instead (#49).
+RECORD_OUTPUT_CHARS = 64 * 1024
+RECORD_OUTPUT_EVENTS = 200
+# Distinct line shapes listed in the summary of the output left out.
+SUMMARY_SHAPES = 10
+
+_DIGITS = re.compile(r"\d+")
+
+
+def line_shape(line: str) -> str:
+    """A line with every run of digits replaced by N, so repeated progress
+    lines ('rx block timestamp 283441 * 100 nanoseconds') count as one."""
+    return _DIGITS.sub("N", line)
+
+
+class _LineSplitter:
+    def __init__(self):
+        self.pending = {"stdout": "", "stderr": ""}
+
+    def feed(self, stream: str, text: str) -> list[str]:
+        self.pending[stream] = self.pending.get(stream, "") + text
+        *lines, self.pending[stream] = self.pending[stream].split("\n")
+        return [line.rstrip("\r") for line in lines]
+
+    def rest(self):
+        for stream, text in self.pending.items():
+            if text:
+                yield stream, text.rstrip("\r")
+        self.pending = {"stdout": "", "stderr": ""}
+
+
+class CommandOutputLog:
+    """A command's full output, one '<UTC> [O]/[E] <line>' per line.
+
+    Written as it arrives (flushed per chunk), so an interrupted run keeps
+    everything received so far.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._stream = path.open("x", encoding="utf-8")
+        self._lines = _LineSplitter()
+        self._last = None
+
+    def write(self, moment: datetime.datetime, stream: str, text: str) -> None:
+        self._last = moment
+        for line in self._lines.feed(stream, text):
+            self._stream.write(f"{_stamp(moment)} {TAGS[stream]} {line}\n")
+        self._stream.flush()
+
+    def close(self) -> None:
+        for stream, line in self._lines.rest():
+            self._stream.write(f"{_stamp(self._last)} {TAGS[stream]} {line}\n")
+        self._stream.close()
+
+
+class OmittedOutput:
+    """Counts of the output left out of run.jsonl, per stream and line shape."""
+
+    def __init__(self):
+        self.chars = {"stdout": 0, "stderr": 0}
+        self.lines = {"stdout": 0, "stderr": 0}
+        self.shapes: dict[tuple[str, str], int] = {}
+        self._lines = _LineSplitter()
+
+    def _count(self, stream: str, line: str) -> None:
+        self.lines[stream] += 1
+        key = (stream, line_shape(line))
+        self.shapes[key] = self.shapes.get(key, 0) + 1
+
+    def add(self, stream: str, text: str) -> None:
+        self.chars[stream] = self.chars.get(stream, 0) + len(text)
+        for line in self._lines.feed(stream, text):
+            self._count(stream, line)
+
+    def summary(self) -> dict:
+        for stream, line in self._lines.rest():
+            self._count(stream, line)
+        common = sorted(self.shapes.items(), key=lambda item: (-item[1], item[0]))
+        return {
+            "chars": dict(self.chars),
+            "lines": dict(self.lines),
+            "distinct_shapes": len(self.shapes),
+            "common_shapes": [
+                {"stream": stream, "shape": shape[:200], "count": count}
+                for (stream, shape), count in common[:SUMMARY_SHAPES]
+            ],
+        }
 
 
 def result_text(result: CommandResult, *, stopped: bool = False) -> str:

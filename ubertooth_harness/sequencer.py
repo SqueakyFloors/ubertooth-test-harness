@@ -22,6 +22,13 @@ from ubertooth_harness.manifest import ManifestError, RunManifest
 from ubertooth_harness.planner import TestInvocation, alternated_roles
 from ubertooth_harness.power import PowerControllerError
 from ubertooth_harness.preflight import PreflightCheck
+from ubertooth_harness.rawlog import (
+    OUTPUT_DIR,
+    RECORD_OUTPUT_CHARS,
+    RECORD_OUTPUT_EVENTS,
+    CommandOutputLog,
+    OmittedOutput,
+)
 from ubertooth_harness.topology import IsolationCancelled, applied_power_isolation
 from ubertooth_harness.report import write_report
 from ubertooth_harness.cases import FlashCase
@@ -115,6 +122,17 @@ class StateCaseResult:
 
 def _path_safe(name: str) -> str:
     return "".join(c if c.isalnum() or c in "._-" else "-" for c in name)
+
+
+def _output_log_path(output_dir: Path, command_id: str) -> Path:
+    """A new output/<command id>.log; a repeated ID gets a numbered name."""
+    base = output_dir / OUTPUT_DIR / _path_safe(command_id)
+    path = base.with_name(base.name + ".log")
+    number = 2
+    while path.exists():
+        path = base.with_name(f"{base.name}-{number}.log")
+        number += 1
+    return path
 
 
 class NamedTestSequencer:
@@ -400,14 +418,24 @@ class NamedTestSequencer:
         timeout_s: float,
         owner: Mapping,
         continuous: bool = False,
+        output_dir: Path | None = None,
     ) -> CommandResult:
+        """Run one command, recording it and every response in run.jsonl.
+
+        With ``output_dir``, a command whose output passes the per-command
+        record limits (rawlog.RECORD_OUTPUT_*) keeps the first part in
+        run.jsonl and its full output in ``output/<command id>.log``;
+        ``command_finished`` names the file and summarizes what was left out.
+        """
         details = dict(owner)
         details.update({"command_id": command_id, "argv": list(argv)})
         publisher.emit("command_started", "running", details)
         streamed = []
+        recorded = {"chars": 0, "events": 0}
+        early: list[tuple] = []  # what run.jsonl holds, until a spill opens
+        spill: dict = {}
 
-        def output(stream_name: str, text: str) -> None:
-            streamed.append(stream_name)
+        def record(stream_name: str, text: str) -> None:
             output_details = dict(owner)
             output_details.update({
                 "command_id": command_id,
@@ -416,18 +444,49 @@ class NamedTestSequencer:
             })
             publisher.emit("command_output", "running", output_details)
 
-        result = self.executor.run(
-            argv,
-            timeout_s=timeout_s,
-            cancellation=token,
-            on_output=output,
-        )
-        if not streamed:
-            # The executor did not stream; record its collected output so
-            # run.jsonl still holds every response.
-            for stream_name, text in (("stdout", result.stdout), ("stderr", result.stderr)):
-                for start in range(0, len(text), _OUTPUT_CHUNK):
-                    output(stream_name, text[start:start + _OUTPUT_CHUNK])
+        def output(stream_name: str, text: str) -> None:
+            streamed.append(stream_name)
+            moment = publisher.utc_now()
+            if not spill and (
+                output_dir is None
+                or (
+                    recorded["events"] < RECORD_OUTPUT_EVENTS
+                    and recorded["chars"] + len(text) <= RECORD_OUTPUT_CHARS
+                )
+            ):
+                recorded["events"] += 1
+                recorded["chars"] += len(text)
+                if output_dir is not None:
+                    early.append((moment, stream_name, text))
+                record(stream_name, text)
+                return
+            if not spill:
+                path = _output_log_path(output_dir, command_id)
+                spill["log"] = CommandOutputLog(path)
+                spill["file"] = path.relative_to(output_dir).as_posix()
+                spill["omitted"] = OmittedOutput()
+                for chunk in early:
+                    spill["log"].write(*chunk)
+                early.clear()
+            spill["log"].write(moment, stream_name, text)
+            spill["omitted"].add(stream_name, text)
+
+        try:
+            result = self.executor.run(
+                argv,
+                timeout_s=timeout_s,
+                cancellation=token,
+                on_output=output,
+            )
+            if not streamed:
+                # The executor did not stream; record its collected output so
+                # the run directory still holds every response.
+                for stream_name, text in (("stdout", result.stdout), ("stderr", result.stderr)):
+                    for start in range(0, len(text), _OUTPUT_CHUNK):
+                        output(stream_name, text[start:start + _OUTPUT_CHUNK])
+        finally:
+            if spill:
+                spill["log"].close()
         command_status = (
             "canceled" if result.cancelled
             # A continuous mode reaching its deadline is the expected stop.
@@ -443,6 +502,9 @@ class NamedTestSequencer:
             "timed_out": result.timed_out,
             "cancelled": result.cancelled,
         })
+        if spill:
+            finished["output_file"] = spill["file"]
+            finished["output_omitted"] = spill["omitted"].summary()
         publisher.emit("command_finished", command_status, finished)
         return result
 
@@ -501,6 +563,7 @@ class NamedTestSequencer:
             timeout_s=step.timeout_s,
             owner=details,
             continuous=step.continuous,
+            output_dir=output_dir,
         )
         outcome = step.evaluate(result, context)
         if (
@@ -1044,6 +1107,7 @@ class NamedTestSequencer:
                 argv=check.argv,
                 timeout_s=check.timeout_s,
                 owner={"phase": "preflight", "check_id": check.check_id},
+                output_dir=output_dir,
             )
             failure = check.result_failure(result)
             if failure:
@@ -1253,6 +1317,7 @@ class NamedTestSequencer:
                                     "invocation_id": invocation.invocation_id,
                                     "case_id": case_id,
                                 },
+                                output_dir=output_dir,
                             )
                             missing = case.missing_tool(result)
                             case_failure = "" if missing else case.result_failure(result)

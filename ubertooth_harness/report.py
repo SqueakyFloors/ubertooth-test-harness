@@ -17,7 +17,7 @@ from typing import Iterable, Mapping, Sequence
 
 from ubertooth_harness.events import REPORT, RUN_LOG
 from ubertooth_harness.executor import CommandResult
-from ubertooth_harness.rawlog import CommandCapture, format_command_record
+from ubertooth_harness.rawlog import TAGS, CommandCapture, format_command_record
 
 
 REDACTED = "<serial>"
@@ -356,6 +356,31 @@ def elapsed(origin: datetime.datetime):
     return stamp
 
 
+def _omitted_text(fd: Mapping, when: str) -> str:
+    """[M] lines for output kept in output/<command id>.log, not run.jsonl."""
+    summary = fd.get("output_omitted") or {}
+    lines = summary.get("lines") or {}
+    chars = summary.get("chars") or {}
+    counts = ", ".join(
+        f"{lines.get(stream, 0)} {stream} lines ({chars.get(stream, 0)} characters)"
+        for stream in ("stdout", "stderr")
+        if lines.get(stream) or chars.get(stream)
+    )
+    text = (
+        f"{when} [M] full output in {fd['output_file']}; not in run.jsonl: "
+        f"{counts or 'nothing'}\n"
+    )
+    for shape in summary.get("common_shapes") or []:
+        text += (
+            f"{when} [M]   {shape.get('count', 0)} x {TAGS.get(shape.get('stream'), '[?]')} "
+            f"{shape.get('shape', '')}\n"
+        )
+    rest = summary.get("distinct_shapes", 0) - len(summary.get("common_shapes") or [])
+    if rest > 0:
+        text += f"{when} [M]   and {rest} other line shapes\n"
+    return text
+
+
 def _command_record(
     started: Mapping, outputs: list[Mapping], finished: Mapping | None, stamp
 ) -> str:
@@ -396,6 +421,8 @@ def _command_record(
             f"{stamp(_time(finished or started))} [M] {omitted} more characters of output "
             "are in run.jsonl\n"
         )
+    if fd.get("output_file"):
+        record += _omitted_text(fd, stamp(_time(finished)))
     if finished is None:
         tool = Path(result.argv[0]).name if result.argv else "command"
         record += f"{stamp(_time(outputs[-1] if outputs else started))} [R] {tool} did not finish\n"
