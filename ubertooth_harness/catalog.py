@@ -15,7 +15,8 @@ from ubertooth_harness.patterns import (
 )
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
-    dfu_cases, python_cases, receive_cases, tool_cases, transitions, util_cases,
+    dfu_cases, python_cases, receive_cases, refusal_cases, tool_cases, transitions,
+    util_cases,
 )
 
 
@@ -702,6 +703,16 @@ def builtin_catalog() -> TestCatalog:
             MappingProxyType({"hosts": HOSTS, "coverage": COVERAGE}),
             MappingProxyType({}),
             command_builder=receive_cases.replay_cases,
+            continue_on_case_failure=True,
+        ),
+        TestDefinition(
+            "Refused command lines",
+            "A refused command line creates, truncates, and leaves behind no "
+            "file, for every file option of btle, follow, rx, dump, specan, and "
+            "dfu, with no Ubertooth (UBERTOOTH_TEST_NO_DEVICES=1)",
+            MappingProxyType({"hosts": HOSTS, "coverage": COVERAGE}),
+            MappingProxyType({}),
+            command_builder=refusal_cases.refusal_cases,
             continue_on_case_failure=True,
         ),
         TestDefinition(

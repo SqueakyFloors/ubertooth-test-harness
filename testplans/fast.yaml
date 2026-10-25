@@ -9,6 +9,11 @@ suites:
         hosts: each
         coverage: smoke
 
+    # No Ubertooth: refused command lines leave output files alone.
+    - Refused command lines:
+        hosts: each
+        coverage: smoke
+
     # No Ubertooth. specan-ui needs --build --with-python and numpy/qtpy,
     # else it is skipped.
     - Python tools:
