@@ -96,7 +96,7 @@ def usage(out=sys.stdout):
           " --capture --fifo=PATH [--channel=37|38|39])" % sys.argv[0], file=out)
 
 def list_interfaces():
-    out = Popen(['ubertooth-util', '-U', 'all', '-s'], stdout=PIPE,
+    out = Popen(['ubertooth-util', '-U', 'all', '-s'], stdout=PIPE, stderr=PIPE,
                 universal_newlines=True).communicate()[0]
     for line in out.split('\\n'):
         m = re.match(r'(\\d+): ([0-9a-fA-F]+)$', line.strip())
@@ -181,6 +181,19 @@ def list_interfaces():
 main()
 '''
 
+# Strict: fails at fork d04f79e (SqueakyFloors/ubertooth#362).
+STRICT_EXTCAP = {"extcap-interfaces-util-fails"}
+# The fix #362 asks for: ubertooth-util's stderr passed on, its failure kept.
+FIXED_UTIL_EXTCAP = EXTCAP.replace(
+    """    out = Popen(['ubertooth-util', '-U', 'all', '-s'], stdout=PIPE, stderr=PIPE,
+                universal_newlines=True).communicate()[0]
+""", """    proc = Popen(['ubertooth-util', '-U', 'all', '-s'], stdout=PIPE,
+                 universal_newlines=True)
+    out = proc.communicate()[0]
+    if proc.returncode != 0:
+        sys.exit(1)
+""")
+assert FIXED_UTIL_EXTCAP != EXTCAP
 COMPREHENSIVE_INTERFACES = (
     "extcap-interfaces", "extcap-interfaces-serials", "extcap-interfaces-version",
     "extcap-interfaces-version-word", "extcap-interfaces-stray-word",
@@ -251,9 +264,18 @@ class PythonToolCaseTests(unittest.TestCase):
             results = {case_id: run_case(case, fork.env)
                        for case_id, case in self.cases("comprehensive").items()
                        if case_id.startswith("extcap")}
-        failing = {case_id: failure for case_id, (skip, failure) in results.items() if failure}
-        self.assertEqual({}, failing)
+        failing = {case_id for case_id, (skip, failure) in results.items() if failure}
+        self.assertEqual(STRICT_EXTCAP, failing)
         self.assertTrue(all(not skip for skip, _failure in results.values()))
+
+    def test_the_strict_case_passes_once_a_failing_util_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fork = FakeFork(directory, f"0: {SERIAL_A}\n", FIXED_UTIL_EXTCAP)
+            case = self.cases("comprehensive")["extcap-interfaces-util-fails"]
+            self.assertEqual(("", ""), run_case(case, fork.env))
+            # The stand-in is used only by this case: the listing still works.
+            listing = self.cases("smoke")["extcap-dlts"]
+            self.assertEqual(("", ""), run_case(listing, fork.env))
 
     def test_the_fork_342_cases_fail_before_it(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -263,7 +285,7 @@ class PythonToolCaseTests(unittest.TestCase):
         self.assertEqual({
             "extcap-version-attached", "extcap-version-next-word", "extcap-version-bare",
             "extcap-stray-word", "extcap-help-stray-word", "extcap-capture-channel-40",
-        }, failing)
+        } | STRICT_EXTCAP, failing)
 
     def test_extcap_without_the_source_fails_rather_than_skips(self):
         case = self.cases("smoke")["extcap-dlts"]

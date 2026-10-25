@@ -17,6 +17,13 @@ non-zero (ubertooth-btle's status); one ended by SIGTERM or by the reader
 closing the FIFO exits 0. The commands run through pytools.py, which finds
 the run's tool and interpreter and skips a case that cannot run on this host.
 
+Comprehensive coverage also checks behavior the fork gets wrong at d04f79e,
+so that case fails there:
+
+- SqueakyFloors/ubertooth#362: --extcap-interfaces exits 0 with an empty
+  listing when ubertooth-util fails, and drops its stderr (README: exit 1 for
+  any other failure; ubertooth-util's stderr reaches Wireshark).
+
 BLE extcap capture runs --capture through extcapcapture.py, which reads the
 FIFO as Wireshark would and stops the script with SIGTERM (or closes the
 FIFO, as Wireshark also ends a capture).
@@ -188,6 +195,16 @@ def python_tool_cases(arguments, _resources, _resource_identities):
             "extcap-help-stray-word", "btle-extcap -h with a stray word",
             "extcap", ("-h", "extra"),
             (r"(?m)^error: unexpected argument 'extra'$",), returncodes=(1,),
+        ),
+        # Strict: fails at d04f79e (SqueakyFloors/ubertooth#362). A stand-in
+        # ubertooth-util fails as a libusb failure does; the listing must
+        # fail too and pass its message on.
+        _case(
+            "extcap-interfaces-util-fails",
+            "btle-extcap --extcap-interfaces when ubertooth-util fails",
+            "extcap-failing-util", ("--extcap-interfaces",),
+            (_line(pytools.FAILING_UTIL_MESSAGE), r"\A(?![\s\S]*Traceback)"),
+            returncodes=(1,),
         ),
         # Refused before ubertooth-btle runs, with ubertooth-btle's wording, so
         # no board is opened (and none has this serial).

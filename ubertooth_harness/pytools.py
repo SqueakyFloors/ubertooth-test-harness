@@ -11,6 +11,9 @@ instead of failing when the run has no Python-tool build:
 - ``extcap [ARGS...]`` runs ``host/python/extcap/btle-extcap.py`` exactly as it
   is in the resolved Ubertooth commit (CMake never installs it), with the
   --with-python interpreter or else ``python3``.
+- ``extcap-failing-util [ARGS...]`` runs it the same way with a stand-in
+  ``ubertooth-util`` first on PATH that fails as a libusb failure does
+  (FAILING_UTIL_MESSAGE on stderr, exit 1), touching no board.
 
 Exit status is the tool's; ``SKIP_EXIT`` with a ``SKIP: <reason>`` line means
 the case cannot run on this host. The run sets the environment variables
@@ -29,6 +32,7 @@ SOURCE_ENV = "UBERTOOTH_HARNESS_SOURCE"
 COMMIT_ENV = "UBERTOOTH_HARNESS_COMMIT"
 EXTCAP_PATH = "host/python/extcap/btle-extcap.py"
 SKIP_EXIT = 77
+FAILING_UTIL_MESSAGE = "error: libusb_init failed (harness stand-in ubertooth-util)"
 TOOL_TIMEOUT_S = 20.0
 
 # What specan-ui imports before argparse; any missing one skips the case.
@@ -124,25 +128,35 @@ def extcap_script(environ=os.environ):
     return python, script.stdout
 
 
-def extcap(args, environ=os.environ) -> int:
+def extcap(args, environ=os.environ, *, failing_util=False) -> int:
     found = extcap_script(environ)
     if isinstance(found, int):
         return found
     python, script = found
+    env = dict(environ)
     with tempfile.TemporaryDirectory(prefix="btle-extcap-") as directory:
         path = os.path.join(directory, "btle-extcap.py")
         with open(path, "wb") as file:
             file.write(script)
-        return _run((python, path, *args), dict(environ))
+        if failing_util:
+            util = os.path.join(directory, "ubertooth-util")
+            with open(util, "w") as file:
+                file.write(f"#!/bin/sh\necho '{FAILING_UTIL_MESSAGE}' >&2\nexit 1\n")
+            os.chmod(util, 0o755)
+            env["PATH"] = directory + os.pathsep + env.get("PATH", "")
+        return _run((python, path, *args), env)
 
 
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if not argv or argv[0] not in ("specan-ui", "extcap"):
-        print("usage: pytools.py {specan-ui|extcap} [ARGS...]", file=sys.stderr)
+    if not argv or argv[0] not in ("specan-ui", "extcap", "extcap-failing-util"):
+        print("usage: pytools.py {specan-ui|extcap|extcap-failing-util} [ARGS...]",
+              file=sys.stderr)
         return 2
     command, args = argv[0], argv[1:]
-    return specan_ui(args) if command == "specan-ui" else extcap(args)
+    if command == "specan-ui":
+        return specan_ui(args)
+    return extcap(args, failing_util=command == "extcap-failing-util")
 
 
 if __name__ == "__main__":

@@ -24,7 +24,8 @@ suites:
         hosts: each
         coverage: comprehensive
 
-    # No Ubertooth.
+    # No Ubertooth. Strict extcap-interfaces-util-fails fails until fork #362
+    # is fixed.
     - Python tools:
         hosts: each
         coverage: comprehensive
