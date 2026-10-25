@@ -133,7 +133,7 @@ class ToolUbertooth(FakeUbertooth):
             regs = [int(x, 16) for x in spec.split(",")]
         if any(r > 0xFF for r in regs):
             return self._result(command, 1, "",
-                                "ERROR: register address must be > 0x00 and < 0xff\n", on_output)
+                                "error: register address must be 0x00-0xff (got 0x100)\n", on_output)
         out = []
         value = 0
         for r in regs:

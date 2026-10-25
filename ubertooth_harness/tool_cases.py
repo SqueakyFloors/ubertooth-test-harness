@@ -425,7 +425,7 @@ def debug_cases(arguments, _resources, resource_identities):
         ] + [
             _debug_case(serial, "reject-register-0x100", "Reject register 0x100",
                         _debug_step(serial, "reject", "Reject -r 0x100", ("-r", "0x100"),
-                                    codes=(1,), patterns=(r"ERROR: register address",))),
+                                    codes=(1,), patterns=(r"error: register address must be 0x00-0xff \(got 0x100\)",))),
             _debug_case(serial, "reject-verbosity-3", "Reject -v3",
                         _debug_step(serial, "reject", "Reject -v3", ("-r", "0x00", "-v3"),
                                     codes=(1,), patterns=(r"error: verbosity must be 0-2 \(got 3\)",))),

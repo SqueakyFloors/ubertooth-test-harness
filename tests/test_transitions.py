@@ -294,7 +294,7 @@ class FakeUbertooth:
             if self.reject_btle_conflicts:
                 return self._result(
                     command, 1,
-                    "Error: must choose one -f, -n, or -p, pick one pal\n", "",
+                    "error: choose one of -f, -n or -p, pick one pal\n", "",
                     on_output,
                 )
             options = tuple(item for item in options if item != "-p")
@@ -1298,7 +1298,7 @@ class TransitionExecutionTests(unittest.TestCase):
 
         summary, _events = run_test("BLE mode conflicts", device)
 
-        self.assertIn("'must choose one -f, -n, or -p'", summary.failure_reason)
+        self.assertIn("'error: choose one of -f, -n or -p'", summary.failure_reason)
 
     def test_settings_reset_when_a_mode_stops_but_not_from_idle(self):
         device = FakeUbertooth()
