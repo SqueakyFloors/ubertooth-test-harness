@@ -19,6 +19,7 @@ from ubertooth_harness.manifest import FileIdentity, SourceRevision
 from ubertooth_harness.preflight import host_version_patterns
 from ubertooth_harness.pytools import PYTHON_ENV, PYTHON_TOOLS_ENV
 from ubertooth_harness.events import EventPublisher
+from ubertooth_harness.hostneeds import BLUEZ_TOOLS
 
 
 class BuildError(RuntimeError):
@@ -126,6 +127,21 @@ BUILT_TOOLS = (
 # Installed by ENABLE_PYTHON=ON; their first line names the interpreter.
 PYTHON_TOOLS = ("ubertooth-specan-ui", "ubertooth-btbr")
 BUILD_DEADLINE_S = 3600.0
+
+
+def required_tools(plan: "BuildPlan") -> tuple[str, ...]:
+    """Tools the build must install into the run prefix.
+
+    A Linux build configures with REQUIRE_ALL=ON, so the BlueZ-only tools are
+    required there too: without them a case would be left out as not
+    applicable, hiding the build problem, or a stale installed copy later on
+    PATH could run in their place (#40).
+    """
+    return (
+        BUILT_TOOLS
+        + (BLUEZ_TOOLS if plan.platform == "linux" else ())
+        + (PYTHON_TOOLS if plan.python else ())
+    )
 
 
 def resolve_python(value: str, which: Callable[[str], str | None] = shutil.which) -> str:
@@ -478,7 +494,7 @@ class Builder:
                     f"{plan.ubertooth.expected_revision} and "
                     f"{plan.libbtbb.expected_revision}"
                 )
-        expected_tools = BUILT_TOOLS + (PYTHON_TOOLS if plan.python else ())
+        expected_tools = required_tools(plan)
         missing = [tool for tool in expected_tools if not (plan.bin_dir / tool).is_file()]
         if missing:
             # Without this a missing tool would fall through to an installed one.
