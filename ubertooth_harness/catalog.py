@@ -680,8 +680,14 @@ def builtin_catalog() -> TestCatalog:
             continue_on_case_failure=True,
             guards_other_ubertooths=True,
         ),
-        _device_test(
-            "Spectrum RSSI sanity", "Validate live spectrum RSSI", extra={"duration": DURATION}
+        TestDefinition(
+            "Spectrum RSSI sanity",
+            "ubertooth-specan reports live RSSI: a noise floor at every frequency, "
+            "a negative mean, and varying readings",
+            MappingProxyType({"hosts": HOSTS, "Ubertooth": UBERTOOTH, "duration": DURATION}),
+            MappingProxyType({"Ubertooth": "Ubertooth"}),
+            command_builder=tool_cases.rssi_sanity_cases,
+            guards_other_ubertooths=True,
         ),
         TestDefinition(
             "Classic Bluetooth receive",

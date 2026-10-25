@@ -303,7 +303,7 @@ class PlanTests(ControllerTestCase):
             [test["name"] for test in suite["tests"]],
         )
         estimates = {test["name"]: test["estimated_s"] for test in suite["tests"]}
-        self.assertEqual(10, estimates["BLE monitor"])
+        self.assertEqual(5, estimates["Spectrum RSSI sanity"])
         self.assertIsNone(estimates["Ubertooth identity"])
         # Not every test has an estimate: no suite total.
         self.assertIsNone(suite["estimated_s"])

@@ -41,6 +41,13 @@ dependency versions, OS and release, and CPU architecture under
 python -m ubertooth_harness validate-plan testplans/slow.yaml
 ```
 
+A plan may name only tests that have an implementation, since `run-suite`
+refuses a suite with one that has none. `validate-plan` (and so CI) fails on
+such a plan, unless the plan says `runnable: false` at the top: that marks
+a plan of planned tests. [`testplans/backlog.yaml`](testplans/backlog.yaml)
+(peer tests, `BLE monitor`, and the soaks) and
+[`testplans/mac-polling.yaml`](testplans/mac-polling.yaml) are the two such plans.
+
 ## Named tests and registered resources
 
 Plans contain human-readable test names with direct arguments—never commands or
@@ -352,6 +359,7 @@ python -m ubertooth_harness run-suite \
 | `BLE settings` | set and read back the access address, attached and as the next word (`-a <address>`); set, mask, and clear the follow target | adds `ubertooth-util -r` resets the access address to 8e89bed6; `-x0`/`-x32`; `-a -v` reports both and `-azzzz` is rejected (fork #171, fixed in 09e9a46); stopping a bounded receive-only `-p` run resets LEDs, channel, and squelch (PA kept) |
 | `Debug registers` | register list `0x02,0x01,0x00` in order, nothing changed | adds a range, a reversed range, `-v0`/`-v1`/`-v2` output, rejected `-r 0x100` and `-v3`; a successful read exits 0 (`-r 0x01` and the range fail on fork builds before #164's fix, 89afc1c) |
 | `Spectrum analyzer` | one full-band sweep (`duration` long): every frequency 2402-2480 reported, none outside, int8 RSSI, and nothing but samples on stdout (`Ubertooth stopped` is on stderr, fork #326) | adds narrow, single, and top-of-band ranges, `-g`, `-G`, `-v`, and `-d` (binary file checked by `specandump.py`); `-d -x.bin` writes the file `-x.bin`, not stdout (fork #231, fixed in 053363a); on Linux, `-d /dev/full` says `error: writing samples failed` once and exits 1 by itself (fork #326; not applicable on macOS); ranges after a different range report no stale samples (fork #173, fixed in 20bcf11); stopping a bounded run with `-S` turns the preset LEDs off and resets channel 2441 MHz and squelch -120, PA kept (fork #191, fixed in aa4f620) |
+| `Spectrum RSSI sanity` | fast plan, one bounded full-band `ubertooth-specan` sweep (`duration` long) that must also pass the Spectrum analyzer sweep checks: every frequency's lowest reading (its noise floor) is -115 to -80 dBm, the mean reading is negative (below -54 dBm), and there are at least three distinct readings. The tool prints the CC2400 RSSI register, dBm + 54 (specan-ui adds -54). Needs no signal source | no comprehensive profile |
 | `Classic Bluetooth receive` | `ubertooth-rx -z -t N` survey (exits 0 by itself, N = `duration` in whole seconds, no earlier than N-0.5 s, survey lines are piconet addresses); `-t N -r` PCAPNG with link type 255; `ubertooth-afh -t N` with no piconet in range says no packet arrived and exits 2 after about N s, printing no map (fork #187, 3b22c95) | adds `-t N` without `-z`; `-c 39` (every packet on channel 39); `-e 0` and `-e 4` (no packet over the limit); `-q` PCAP (link type 255); repeated `-r` (first wins, extra file never created); `-d` (68-byte BR records, checked by `rxdump.py`); `afh -t N -e 2` (same exit 2); `afh -r` one map line per second; `afh` with an unknown `-U` exits 1 (fork #185, fixed in 219a5b0) |
 | `Raw receive` | `ubertooth-dump -d` (68-byte records) and `-b -d` (401-byte bitstream records), checked by `rxdump.py` with at least 50 records per second; `ubertooth-ego -r -c 2440` runs until stopped | adds `dump -l`, `-l -c`, `-c -l` (the last modulation wins, read back from CC2400 MDMCTRL with `ubertooth-debug`); `ego -l 1`, `-l 48`, `-a 630f9ffe`; `ego -a zz` rejected; strict: five rounds of `dump -d` after `btle -n -A37` and `btle -n -A37 -q` after that dump, every stream bounded with SIGTERM, hold no packet from the previous mode, with the per-iteration stale count recorded (`stalecheck.py`; fork #318) |
 | `Refused command lines` | no Ubertooth; `host` and `fast` plans, and CI: every file option (`btle -r -q -c`, `follow -r -q -d`, `rx -r -q -d`, `dump -d`, `specan -d`, `dfu -s -u`) refused by a stray word, `-h`, and a bad later value (`dump`: `-U` without its value) creates no file, leaves an existing one unchanged, and leaves no other file; the refusal comes before any board lookup; `Ignoring extra capture file` is on stderr (`btle -n -q - -q`, `rx -r -r`, `follow -q -q`); follow cases are Linux only (BlueZ), not applicable on macOS | adds the checks after the option loop (`btle -f -n`, `-a -a<address>`, `-r -`; `rx -z -l`, `-u` without `-l`; `specan -l` above `-u`), `-d` twice with `-h`, `specan -d` in a missing directory (one `error: <file>: No such file or directory` line, exit 1), and `dfu -u` with a missing `-s` input or a bad `-d` image (no temporary file), and `dfu -s <file.bin> -d <bad image>` (no `.dfu` created or replaced; fork #286, fixed in f2e06fa) |
@@ -669,7 +677,7 @@ physically power-controlled, leaving exactly one enumerated device before the
 implementation runs the production command verbatim as `ubertooth-btle -f`
 without `-U`.
 
-The committed plan currently defines and resource-compiles this future soak;
+The committed plan (`runnable: false`) currently defines and resource-compiles this future soak;
 its manifest includes every required power-off action, but its executable
 implementation remains pending. Once implemented, `run-suite` [power isolation](#usb-power-controllers)
 (above) will power down extras (or, with only one registered board, check
@@ -1006,7 +1014,7 @@ REST and `/ws/live` endpoints below.
   a Cancel button, and the last 200 log lines. A countdown is shown only when
   every test in the suite has an estimate. The catalog has no duration
   estimates of its own, so a test's estimate is its `duration` argument (for
-  example `BLE monitor` with `duration: 10s`), and build and preflight time
+  example `Spectrum RSSI sanity` with `duration: 5s`), and build and preflight time
   are not included: the countdown starts with the first test. Otherwise the view shows elapsed time and says why. The
   view is linkable as `/ui/#run=<run_id>`.
 - **History:** every run, newest first, with started/finished times, ref,

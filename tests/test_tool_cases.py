@@ -6,6 +6,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 from ubertooth_harness import specandump, tool_cases
+from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.stateful import StateCase
 from tests.test_transitions import SERIAL, FakeUbertooth, cases_for, run_test, steps
 
@@ -28,8 +29,10 @@ class ToolUbertooth(FakeUbertooth):
 
     def __init__(self, *args, stale_specan=False, debug_exit_is_value=False,
                  btle_aa_bugs=False, specan_stop_resets=True, promisc_stop_resets=True,
-                 dash_is_stdout=False, before_fcadf34=False, **kwargs):
+                 dash_is_stdout=False, before_fcadf34=False, specan_rssi=None, **kwargs):
         super().__init__(*args, **kwargs)
+        # specan_rssi(frequency, sweep) -> the reading; default a constant -45.
+        self.specan_rssi = specan_rssi or (lambda _f, _sweep: -45)
         self.before_fcadf34 = before_fcadf34
         self.stale_specan = stale_specan
         self.debug_exit_is_value = debug_exit_is_value
@@ -101,10 +104,11 @@ class ToolUbertooth(FakeUbertooth):
             (cwd / name).write_bytes(bytes(data))
             return self._result(command, 124, "", "HARD TIMEOUT\n", on_output, timed_out=True)
         lines = []
-        for lo, hi in sweeps:
+        for sweep, (lo, hi) in enumerate(sweeps):
             for f in range(lo, hi + 1):
-                lines.append({"default": f"0.100000, {f}, -45", "-g": f"{f} -45",
-                              "-G": f"0.100000 {f} -45"}[fmt])
+                r = self.specan_rssi(f, sweep)
+                lines.append({"default": f"0.100000, {f}, {r}", "-g": f"{f} {r}",
+                              "-G": f"0.100000 {f} {r}"}[fmt])
             if fmt != "default":
                 lines.append("")
         stderr = "verbose: debug\n" if "-v" in opts else ""
@@ -371,6 +375,106 @@ class BleSettingsTests(unittest.TestCase):
                                           "original leds": "0/0/0"})
                 with self.subTest(case.case_id, step=step.step_id):
                     self.assertEqual(SERIAL, argv[argv.index("-U") + 1])
+
+
+def _live(f, sweep):
+    """Noise around -46 (-100 dBm) with a strong reading now and then."""
+    return 20 if (f + sweep) % 17 == 0 else -44 - (f + sweep) % 4
+
+
+def _samples(readings):
+    return "".join(f"0.1, {f}, {r}\n" for f, r in readings) + "HARD TIMEOUT after 5s\n"
+
+
+class SpectrumRssiSanityTests(unittest.TestCase):
+    """Spectrum RSSI sanity: the values the fork prints are the CC2400 RSSI
+    register (dBm + 54), checked for a noise floor, a negative mean, and
+    variation (fork main 7bb07c9 on the Mac boards: floors -51 to -44, that
+    is -105 to -98 dBm, mean -43)."""
+
+    check = staticmethod(tool_cases.rssi_sanity_check)
+
+    def test_a_live_noise_floor_passes(self):
+        readings = [(f, _live(f, s)) for s in range(3) for f in range(2402, 2481)]
+        self.assertEqual("", self.check(_samples(readings)))
+
+    def test_constant_readings_are_not_live(self):
+        readings = [(f, -45 + s) for s in range(2) for f in range(2402, 2405)]
+        self.assertIn("only 2 distinct readings", self.check(_samples(readings)))
+
+    def test_a_frequency_with_no_quiet_reading_fails(self):
+        # 2440 never reads below -20 (-74 dBm): no noise floor there.
+        readings = [(f, -46 - s) for s in range(3) for f in range(2438, 2443) if f != 2440]
+        readings += [(2440, -20), (2440, -10)]
+        problem = self.check(_samples(readings))
+        self.assertIn("noise floor outside -115 to -80 dBm at 1 frequencies", problem)
+        self.assertIn("2440 MHz -74 dBm", problem)
+
+    def test_a_floor_below_the_receiver_floor_fails(self):
+        readings = [(2402, -62), (2402, -40), (2403, -45), (2403, -47)]
+        self.assertIn("2402 MHz -116 dBm", self.check(_samples(readings)))
+
+    def test_a_positive_mean_fails(self):
+        readings = [(2402, -50), (2402, 30), (2402, 40), (2402, 20)]
+        self.assertIn("is not negative", self.check(_samples(readings)))
+
+    def test_no_samples_is_left_to_the_sweep_check(self):
+        self.assertEqual("", self.check("Ubertooth stopped\n"))
+
+    def test_one_bounded_full_band_case(self):
+        definition = builtin_catalog().get("Spectrum RSSI sanity")
+        self.assertTrue(definition.implemented)
+        (case,) = definition.command_cases(
+            definition.normalize_arguments({"duration": "5s"}),
+            {"Ubertooth": "UT_Linux0"}, {"Ubertooth": {"serial": SERIAL}})
+        self.assertIsInstance(case, StateCase)
+        sweep = case.steps[[s.step_id for s in case.steps].index("sweep")]
+        self.assertEqual(("ubertooth-specan", "-U", SERIAL), sweep.resolve_argv({}))
+        self.assertTrue(sweep.continuous)
+        self.assertEqual(5.0, sweep.timeout_s)
+
+    def test_passes_on_a_live_board_and_fails_on_a_stuck_one(self):
+        summary, _events = run_rssi_sanity(ToolUbertooth(crc="1", specan_rssi=_live))
+        self.assertTrue(summary.passed, summary.failure_reason)
+        summary, events = run_rssi_sanity(ToolUbertooth(crc="1"))  # always -45
+        self.assertFalse(summary.passed)
+        self.assertEqual(["Live RSSI over a full-band sweep"], failed_names(events))
+        self.assertIn("RSSI is not live", summary.failure_reason)
+
+    def test_the_sweep_format_is_still_checked(self):
+        # A board that skips a frequency fails even with live readings.
+        device = ToolUbertooth(crc="1", specan_rssi=_live)
+        original = device._specan
+
+        def missing_2441(command, on_output, cwd=Path.cwd()):
+            result = original(command, on_output, cwd)
+            stdout = "".join(line for line in result.stdout.splitlines(True)
+                             if ", 2441, " not in line)
+            return type(result)(result.argv, result.returncode, stdout, result.stderr,
+                                result.duration_s, result.timed_out)
+
+        device._specan = missing_2441
+        summary, _events = run_rssi_sanity(device)
+        self.assertFalse(summary.passed)
+        self.assertIn("no samples for 1 frequencies (first 2441)", summary.failure_reason)
+
+
+def run_rssi_sanity(device):
+    from unittest import mock
+    import tests.test_transitions as tt
+    original = tt.cases_for
+
+    def with_duration(test_name, coverage="smoke"):
+        if test_name == "Spectrum RSSI sanity":
+            definition = builtin_catalog().get(test_name)
+            arguments = definition.normalize_arguments(
+                {"hosts": ["Host_Linux"], "Ubertooth": "default", "duration": "1s"})
+            return arguments, definition.command_cases(
+                arguments, {"Ubertooth": "UT_Linux0"}, {"Ubertooth": {"serial": SERIAL}})
+        return original(test_name, coverage)
+
+    with mock.patch.object(tt, "cases_for", with_duration):
+        return tt.run_test("Spectrum RSSI sanity", device)
 
 
 def cases_for_duration(coverage):

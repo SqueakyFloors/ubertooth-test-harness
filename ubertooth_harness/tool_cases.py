@@ -67,9 +67,9 @@ def duration_seconds(value: str) -> float:
 # ---------------------------------------------------------------------------
 # ubertooth-specan
 #
-# Output modes (cb_specan): default "<seconds>, <MHz>, <dBm>"; -g "<MHz> <dBm>"
-# with a blank line after each sweep; -G "<seconds> <MHz> <dBm>" with the same
-# blank lines; -d writes 3-byte binary records (MHz big-endian, int8 dBm) to
+# Output modes (cb_specan): default "<seconds>, <MHz>, <RSSI>"; -g "<MHz> <RSSI>"
+# with a blank line after each sweep; -G "<seconds> <MHz> <RSSI>" with the same
+# blank lines; -d writes 3-byte binary records (MHz big-endian, int8 RSSI) to
 # the file instead of stdout (only a bare "-d -" means stdout, fork 053363a).
 # -v only adds stderr. Stdout carries only the samples: "Ubertooth stopped",
 # errors and progress are on stderr (fork fcadf34, ubertooth-specan.md
@@ -81,7 +81,8 @@ _LINE_FORMATS = {
     "-g": re.compile(r"^(?P<f>\d+) (?P<r>-?\d+)$"),
     "-G": re.compile(r"^(?P<t>\d+\.\d+) (?P<f>\d+) (?P<r>-?\d+)$"),
 }
-# int8 dBm as the firmware reports it; anything outside is a parse problem.
+# int8 RSSI as the firmware reports it (dBm + 54, see Spectrum RSSI sanity);
+# anything outside is a parse problem.
 _RSSI_RANGE = (-128, 127)
 
 
@@ -143,7 +144,8 @@ _SPECAN_CHECKER = str(Path(specandump.__file__).resolve())
 
 
 def _specan_case(serial, case_id, name, options, fmt, low, high, seconds, *,
-                 dump_file=None, stderr_pattern=None):
+                 dump_file=None, stderr_pattern=None, extra_check=None,
+                 expected_state=None):
     steps = [
         _stop(serial, "establish-idle", "Establish idle before reading"),
     ]
@@ -161,7 +163,8 @@ def _specan_case(serial, case_id, name, options, fmt, low, high, seconds, *,
         timeout_s=seconds,
         mutates=True,
         continuous=True,
-        output_check=None if dump_file is not None else sweep_check(fmt, low, high),
+        output_check=(None if dump_file is not None
+                      else _all_checks(sweep_check(fmt, low, high), extra_check)),
         output_patterns=(stderr_pattern,) if stderr_pattern else (),
     ))
     steps.append(_stop(serial))
@@ -181,12 +184,22 @@ def _specan_case(serial, case_id, name, options, fmt, low, high, seconds, *,
         name,
         tuple(steps),
         _cleanup(serial, MODE_RESET_SETTINGS),
-        expected_state=(
+        expected_state=expected_state or (
             f"every reported frequency within {low}-{high} MHz and each one "
             "reported; channel, squelch, and LEDs restored"
         ),
         capture_dir=dump_file is not None,
     )
+
+
+def _all_checks(*checks):
+    """One output_check that runs every check given and joins their problems."""
+    present = tuple(check for check in checks if check is not None)
+
+    def check(output):
+        return "; ".join(problem for problem in (c(output) for c in present) if problem)
+
+    return check
 
 
 def _specan_argv(serial, options):
@@ -375,6 +388,79 @@ def spectrum_cases(arguments, _resources, resource_identities):
             _specan_stop_reset_case(serial, seconds),
         ]
     return tuple(cases)
+
+
+# ---------------------------------------------------------------------------
+# Spectrum RSSI sanity
+#
+# ubertooth-specan prints the CC2400 RSSI register as the firmware reads it
+# (bluetooth_rxtx.c specan(): cc2400_get(RSSI) >> 8), not dBm: the register
+# reads RSSI_OFFSET (-54) dB above the input power (the firmware's
+# rssi_threshold comment, -54 dBm - 30 = -84 dBm; specan-ui adds -54).
+# The checks need no signal source, only that the receiver measures:
+#
+# - every frequency's lowest reading, a noise floor, is between -115 and
+#   -80 dBm (the CC2400 floor is about -100 dBm; one quiet sample per
+#   frequency is enough, so busy Wi-Fi channels still have one);
+# - the mean reading is negative (below -54 dBm): most samples are noise;
+# - the readings vary (at least three values): the register is live.
+
+RSSI_OFFSET_DB = -54
+NOISE_FLOOR_DBM = (-115, -80)
+_LIVE_VALUES = 3
+
+
+def rssi_sanity_check(output: str) -> str:
+    """A Step.output_check on default-format specan samples."""
+    floor = {}
+    total = 0
+    count = 0
+    values = set()
+    for line in output.splitlines():
+        match = _LINE_FORMATS["default"].match(line.strip())
+        if match is None:
+            continue  # sweep_check reports lines that are not samples
+        frequency, rssi = int(match["f"]), int(match["r"])
+        floor[frequency] = min(rssi, floor.get(frequency, rssi))
+        total += rssi
+        count += 1
+        values.add(rssi)
+    if not count:
+        return ""  # sweep_check reports "no sample lines"
+    problems = []
+    low, high = NOISE_FLOOR_DBM
+    off = {f: r + RSSI_OFFSET_DB for f, r in floor.items()
+           if not low <= r + RSSI_OFFSET_DB <= high}
+    if off:
+        first = sorted(off)[:3]
+        problems.append(
+            f"noise floor outside {low} to {high} dBm at {len(off)} frequencies "
+            f"(for example {', '.join(f'{f} MHz {off[f]} dBm' for f in first)})"
+        )
+    mean = total / count
+    if mean >= 0:
+        problems.append(f"mean reading {mean:.1f} ({mean + RSSI_OFFSET_DB:.1f} dBm) "
+                        "is not negative")
+    if len(values) < _LIVE_VALUES:
+        problems.append(f"only {len(values)} distinct readings in {count} samples "
+                        f"({', '.join(map(str, sorted(values)))}): RSSI is not live")
+    return "; ".join(problems)
+
+
+def rssi_sanity_cases(arguments, _resources, resource_identities):
+    serial = _serial(resource_identities, "Spectrum RSSI sanity")
+    seconds = duration_seconds(arguments["duration"])
+    return (
+        _specan_case(
+            serial, "live-rssi", "Live RSSI over a full-band sweep", (), "default",
+            *BAND, seconds, extra_check=rssi_sanity_check,
+            expected_state=(
+                f"full-band sweep; every frequency's noise floor {NOISE_FLOOR_DBM[0]} to "
+                f"{NOISE_FLOOR_DBM[1]} dBm, negative mean, at least {_LIVE_VALUES} "
+                "distinct readings; channel, squelch, and LEDs restored"
+            ),
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

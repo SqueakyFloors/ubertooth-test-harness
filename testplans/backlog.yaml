@@ -1,4 +1,7 @@
 plan: Ubertooth backlog
+# Planned tests with no implementation yet; run-suite refuses them. A
+# runnable plan may name only implemented tests (validate-plan checks it).
+runnable: false
 suites:
   backlog:
     - Two-device range test:
@@ -38,3 +41,28 @@ suites:
 
     - E-GO skateboard capture:
         skateboard: required
+
+    # No known BLE advertiser to monitor yet (hardware needed: #86).
+    - BLE monitor:
+        hosts: each
+        Ubertooth: default
+        duration: 10s
+
+    # Long-run sampling is not implemented yet.
+    - BLE soak:
+        hosts: each
+        Ubertooth: default
+        duration: 30m
+        sample every: 5s
+
+    - Spectrum soak:
+        hosts: each
+        Ubertooth: default
+        duration: 15m
+        sample every: 5s
+
+    - Classic Bluetooth receive soak:
+        hosts: each
+        Ubertooth: default
+        duration: 15m
+        sample every: 5s

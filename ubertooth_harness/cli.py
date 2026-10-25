@@ -42,7 +42,7 @@ from ubertooth_harness.manifest import (
     build_run_manifest,
 )
 from ubertooth_harness.hostneeds import planned_capabilities, split_cases
-from ubertooth_harness.plan import PlanError, image_label, load_plan
+from ubertooth_harness.plan import PlanError, check_runnable, image_label, load_plan
 from ubertooth_harness import pytools
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.planner import PlanCompiler, PlanningError
@@ -436,11 +436,12 @@ def _validate(
 ) -> int:
     catalog = builtin_catalog()
     plan = load_plan(plan_path, catalog)
-    print(f"plan: {plan.name}")
+    print(f"plan: {plan.name}" + ("" if plan.runnable else " (not runnable: planned tests)"))
     for suite_name, steps in plan.suites.items():
         print(f"{suite_name}: {len(steps)} named test(s)")
         for step in steps:
             print(f"  - {step.test_name}")
+    check_runnable(plan, catalog)
     if hardware_path is not None:
         registry = FileResourceRegistry.load(hardware_path)
         compiler = PlanCompiler(catalog, registry)

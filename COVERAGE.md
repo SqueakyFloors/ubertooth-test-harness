@@ -24,9 +24,10 @@ test is in no plan. The notes say what is missing.
 **Hard**: needs an RF peer, a GUI, RF transmission, firmware other than
 `bluetooth_rxtx`, a second device, or is destructive. The notes say which.
 **N/A**: nothing to test (for example a no-op).
-Tests that are only catalog entries (`BLE monitor`, `Spectrum RSSI sanity`,
-the soaks, and every `backlog.yaml` item) have no
-implementation yet. They count as Not covered.
+Tests that are only catalog entries (every `backlog.yaml` item, including
+`BLE monitor` and the soaks, and the `mac-polling` soak) have no
+implementation yet. They count as Not covered. Only `runnable: false` plans
+may name them; `validate-plan` fails on any other plan that does.
 
 Harness-wide checks that use the CLIs:
 
@@ -187,6 +188,8 @@ Combinations: `-d` without `-r` and `-u` without `-r` (board stays in DFU): Not 
 | `-l <2402-2480>` | lower frequency | Covered | Spectrum analyzer (comprehensive) ranges; `-l 2401` rejected (Argument validation). A range change reported stale samples before `20bcf11` ([ubertooth#173](https://github.com/SqueakyFloors/ubertooth/issues/173)) |
 | `-u <2402-2480>` | upper frequency | Covered | As `-l` |
 | `-U <index\|serial>` | select device | Covered | Spectrum analyzer by serial, guard board unchanged |
+
+The RSSI value is the CC2400 RSSI register, dBm + 54 (specan-ui adds -54). Spectrum RSSI sanity (fast) checks that it is live without a signal source: in a full-band sweep every frequency's noise floor is -115 to -80 dBm, the mean is negative (below -54 dBm), and there are at least three distinct values. Fork main `7bb07c9` on two boards: floors -105 to -98 dBm.
 
 Stdout carries only the samples: `Ubertooth stopped`, errors and notes on stdout fail every sweep (fork `fcadf34`, [ubertooth#326](https://github.com/SqueakyFloors/ubertooth/issues/326)). Text output to a stream that takes no data (exit 1 after the closing flush) and `-d -` into a closed pipe (SIGPIPE, 141): Not covered.
 
@@ -439,7 +442,8 @@ Next, harness work:
 6. Done (#32): `Debug registers` lists, ranges, verbosity, exit status.
 7. Done (#35): `Raw receive replay` (`ubertooth-rx -i` with a synthetic fixture, no Ubertooth, in CI). No LE replay exists: no tool calls libubertooth's `rx_btle_file()`.
 8. Done (#31): `Classic Bluetooth receive` (`ubertooth-rx`, `ubertooth-afh`) and `Raw receive`
-   (`ubertooth-dump`, `ubertooth-ego -r`). Still open: BLE monitor.
+   (`ubertooth-dump`, `ubertooth-ego -r`). Still open: BLE monitor (in the backlog
+   plan; needs a known BLE advertiser, [#86](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/86)).
 9. Add Ubertooth util conflicts to the release plan after a passing hardware run (fork #82 is fixed; [#25](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/25));
    Done (#72): `-f`/`-i` rejection cases run with no Ubertooth (`Util mode refusals`, in CI), so no accepted pair can reach those modes.
 10. Done (#37): headless `ubertooth-specan-ui -h` (`--build --with-python`) and `btle-extcap --extcap-interfaces/--extcap-dlts/--extcap-config`; `btle-extcap --capture` (#73). Still open: specan-ui argument checks.
