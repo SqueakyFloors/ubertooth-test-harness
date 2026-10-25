@@ -9,19 +9,17 @@ board) and every case ends with the test image in flash, read back and
 verified, and the board in its application. Other registered boards are
 guards: read before and after every case, never written.
 
-Some comprehensive cases assert the documented behavior that the commit under
-test (fork 3b22c95) does not deliver yet; they fail until the linked fork fix
-is on that commit:
+Since fork 6fee30c (SqueakyFloors/ubertooth#198, #199, fixed by e8edd15;
+#200, fixed by 9d710fe) -d checks the whole image before the board leaves its
+application: a bad image, including a suffix for another vendor or product, is
+refused with exit 1 and "Signature check failed, firmware will not be
+updated" before a device is opened. -s refuses a .bin that already ends in a
+DFU suffix and writes nothing, and -s and -d only read their input.
 
-- SqueakyFloors/ubertooth#198: ubertooth-dfu -d with a rejected image leaves
-  the board in the DFU bootloader, even with -r (every reject-* case). Fixed
-  on fork main by #217 (e8edd15), after 3b22c95.
-- SqueakyFloors/ubertooth#199: -d writes an image whose suffix names another
-  vendor or product (reject-wrong-vendor, reject-wrong-product). Also fixed
-  by #217, after 3b22c95.
-- SqueakyFloors/ubertooth#200 (open): -s adds a second suffix to an already
-  suffixed file, and needs write access to its input (suffix-already-suffixed,
-  suffix-read-only-input).
+SqueakyFloors/ubertooth#267 (6fee30c, fixed in 89d9197): -d <image> -r
+writes and resets correctly but exits 1 ("Detach failed") and skips "Verified
+firmware revision", so write-read-back and every cleanup that rewrites the
+test image fail on that commit. The cases are not changed for it.
 
 SqueakyFloors/ubertooth#208: a failed -u read-back (seen once in about 20)
 leaves the board in DFU despite -r. A case step that hits it fails and the
@@ -53,6 +51,10 @@ _CHECKER = str(Path(dfuimage.__file__).resolve())
 _REVISION_PATTERN = r"Firmware version:\s+(?P<value>\S+)\s+\(API:"
 # ubertooth-dfu logs this stage before it sends the first block.
 _PROGRAMMING = r"firmware programming attempt"
+# ...and this one once the image is accepted, before it opens a device.
+_DEVICE_OPENED = r"DFU \+\d+\.\d+s: operation started"
+# check_download_image(): every refused image ends with this line.
+_REFUSED = r"Signature check failed, firmware will not be updated"
 # A write, a read-back. Helper steps that run device commands take their
 # timeout from dfuimage.step_timeout_s (its own per-command timeouts and the
 # guard count), so a slow cleanup is never killed mid-flash.
@@ -173,17 +175,19 @@ def _suffix_extra_cases(serial):
             _helper_step("unchanged", "signed.dfu unchanged", "same", _file("signed.dfu"), _image,
                          pattern=r"Unchanged"),
         ), "refused with exit 1; the file unchanged"),
-        # Fails until SqueakyFloors/ubertooth#200: a second suffix is added.
+        # Refused since 9d710fe (SqueakyFloors/ubertooth#200).
         _host_case(serial, "suffix-already-suffixed",
               "-s refuses a .bin that already has a DFU suffix", (
             _helper_step("copy", "Suffixed image as signed.bin", "copy", _image,
                          _file("signed.bin"), pattern=r"Copied"),
             Step("suffix", "ubertooth-dfu -s signed.bin",
-                 _tool("ubertooth-dfu", "-s", _file("signed.bin")), expected_returncodes=(1,)),
+                 _tool("ubertooth-dfu", "-s", _file("signed.bin")), expected_returncodes=(1,),
+                 output_patterns=(r"error: .*signed\.bin already has a DFU suffix, so "
+                                  r".*signed\.dfu was not written",)),
             _helper_step("not-created", "No signed.dfu written", "absent", _file("signed.dfu"),
                          pattern=r"Not created"),
         ), "refused with exit 1; no second suffix written"),
-        # Fails until SqueakyFloors/ubertooth#200: the input is opened r+b.
+        # -s only reads its input since 9d710fe (SqueakyFloors/ubertooth#200).
         _host_case(serial, "suffix-read-only-input", "-s suffixes a read-only binary", (
             _helper_step("strip", "Read-only binary from the test image", "strip", _image,
                          _file("readonly.bin"), "--read-only", pattern=r"Stripped suffix"),
@@ -230,9 +234,11 @@ _REJECTIONS = (
     ("text", "reject-text", "Refuse a text file", None),
     ("bad-signature", "reject-bad-signature", "Refuse a suffix without the UFD signature",
      r"DFU Signature mismatch"),
-    # Fails until SqueakyFloors/ubertooth#199: written and verified, exit 0.
-    ("wrong-vendor", "reject-wrong-vendor", "Refuse a suffix for another vendor ID", None),
-    ("wrong-product", "reject-wrong-product", "Refuse a suffix for another product ID", None),
+    # The suffix must name 1d50:6003 since e8edd15 (SqueakyFloors/ubertooth#199).
+    ("wrong-vendor", "reject-wrong-vendor", "Refuse a suffix for another vendor ID",
+     r"DFU suffix is for USB vendor 0x1234, not 0x1d50: this image is for another device"),
+    ("wrong-product", "reject-wrong-product", "Refuse a suffix for another product ID",
+     r"DFU suffix is for USB product 0x0001, not 0x6003: this image is for another device"),
 )
 
 
@@ -246,15 +252,15 @@ def _reject_case(serial, guards, kind, case_id, name, pattern):
         Step("attempt", f"ubertooth-dfu -d {bad} -r",
              _tool("ubertooth-dfu", "-U", serial, "-d", _file(bad), "-r"),
              timeout_s=WRITE_TIMEOUT_S, mutates=True, expected_returncodes=(1,),
-             output_patterns=(pattern,) if pattern else (),
-             forbidden_patterns=(_PROGRAMMING, r"Verified firmware revision")),
-        # Fails until SqueakyFloors/ubertooth#198: left in the DFU bootloader.
+             output_patterns=(_REFUSED,) + ((pattern,) if pattern else ()),
+             forbidden_patterns=(_DEVICE_OPENED, _PROGRAMMING, r"Verified firmware revision")),
+        # Still in the application since e8edd15 (SqueakyFloors/ubertooth#198).
         _helper_step("after", "Board in its application, flash unchanged", "after-reject",
                      *_board_args(serial, guards, "after-readback.bin"),
                      pattern=r"After rejection: ok",
                      timeout_s=dfuimage.step_timeout_s("after-reject", len(guards)),
                      mutates=True),
-    ), "refused with exit 1 before any write; same firmware, still in the application")
+    ), "refused with exit 1 before a device is opened; same firmware, still in the application")
 
 
 def dfu_cases(arguments, _resources, resource_identities):

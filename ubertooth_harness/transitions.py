@@ -23,10 +23,11 @@ Command contracts below come from the Ubertooth fork sources:
 - ``-a0`` and ``-a 0`` set PA level 0 (fork 4ed4a1d); before that ``-a0`` was a
   query. The harness requires fork >= 4ed4a1d for PA cases. A powered-on or
   reset board reports PA level 7.
-- A set and a read of the same ``ubertooth-util`` value in one command share
-  one variable, so the later option wins: ``-c2426 -c`` only reads and drops
-  the set (SqueakyFloors/ubertooth#228). ``-z`` keeps both. No case combines
-  them except to check that.
+- A set and a read of the same ``ubertooth-util`` value in one command both
+  run, the set first, so the read reports the new value whatever the order:
+  ``-c2426 -c``, ``-c -c2426``, ``-a5 -a``, ``-l1 -l``, ``-d1 -d`` (fork
+  5b45b3e, SqueakyFloors/ubertooth#228; before it the later option replaced
+  the earlier one and the set was dropped). ``-z`` always kept both.
 - ``-z`` (set or read) with a mode option is refused (fork 4ed4a1d).
 - ``-S`` requests idle mode. From idle it changes nothing, so settings persist
   between idle commands. Leaving an active mode (xmas, range test, repeater,
@@ -585,6 +586,57 @@ def _repeated_all_leds_case(serial: str) -> StateCase:
     )
 
 
+def _set_and_read_case(serial, case_id, label, setting, target, words):
+    """One command sets ``setting`` and reads it (fork 5b45b3e,
+    SqueakyFloors/ubertooth#228): its own report and a later read both give
+    the new value. ``words`` are options; a callable one gets the target."""
+    target = _value(target)
+    return StateCase(
+        case_id,
+        f"{label}: the set runs and the read reports it",
+        (
+            _stop(serial, "establish-idle", "Establish idle before reading"),
+            setting.read_original(serial),
+            Step(
+                "set-and-read",
+                f"Set and read {setting.key} in one command ({label})",
+                lambda context: _util(serial, *(
+                    word(target(context)) if callable(word) else word for word in words)),
+                observe=Observation(f"{setting.key} reported", setting.pattern, target,
+                                    convert=setting.convert),
+                mutates=True,
+            ),
+            setting.verify(
+                serial, "verify-set", f"Verify {setting.key} after the command",
+                f"{setting.key} after set", target,
+            ),
+        ),
+        _cleanup(serial, (setting,)),
+        expected_state=f"{setting.key} set and reported as the new value, then restored",
+    )
+
+
+def _set_and_read_cases(serial):
+    def all_leds(context):
+        return "0/0/0" if require(context, LEDS.original) == "1/1/1" else "1/1/1"
+
+    def attached(option):
+        return lambda value: f"{option}{value.split('/')[0]}"
+
+    return (
+        _set_and_read_case(serial, "channel-set-and-read", "-c<MHz> -c", CHANNEL,
+                           CHANNEL.pick(0), (attached("-c"), "-c")),
+        _set_and_read_case(serial, "channel-read-and-set", "-c -c<MHz>", CHANNEL,
+                           CHANNEL.pick(0), ("-c", attached("-c"))),
+        _set_and_read_case(serial, "pa-level-set-and-read", "-a<level> -a", PA_LEVEL,
+                           PA_LEVEL.pick(0), (attached("-a"), "-a")),
+        _set_and_read_case(serial, "usr-led-set-and-read", "-l<state> -l", USR_LED,
+                           USR_LED.inverted, (attached("-l"), "-l")),
+        _set_and_read_case(serial, "all-leds-set-and-read", "-d<state> -d", LEDS,
+                           all_leds, (attached("-d"), "-d")),
+    )
+
+
 def _value(value):
     """A context callable for a fixed value or an existing callable."""
     if callable(value):
@@ -742,6 +794,7 @@ def radio_setting_cases(arguments, _resources, resource_identities):
         cases.extend(next_word[1:])
         cases.append(_pa_zero_cases(serial)[1])
         cases.append(_next_word_composition_case(serial))
+        cases.extend(_set_and_read_cases(serial))
     return tuple(cases)
 
 

@@ -108,8 +108,7 @@ suites:
         coverage: comprehensive
         duration: 3s
 
-    # No Ubertooth. Strict cases fail until the fork #202 and #203 fixes
-    # (a55ac89, after 3b22c95) are on the commit under test.
+    # No Ubertooth.
     - Raw receive replay:
         hosts: each
         coverage: comprehensive

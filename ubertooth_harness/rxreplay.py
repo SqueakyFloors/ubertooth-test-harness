@@ -134,6 +134,8 @@ def dh1_payload_bits(body: bytes, uap: int, clock: int) -> list[int]:
 
 SYMBOLS = 400            # 50 data bytes, unpacked MSB first
 RECORD = 4 + 64          # host time + usb_pkt_rx
+# The truncated variant cuts this many bytes off its last record.
+TRUNCATED_BYTES = 10
 PREAMBLE_AT = 16         # where the access code starts in the 400 symbols
 SYNC_AT = PREAMBLE_AT + 4
 BR_PACKET, LE_PACKET = 0, 1
@@ -229,7 +231,7 @@ def fixture_bytes(base_time: int, variant: str = "full") -> bytes:
         record_bytes(record, base_time + index) for index, record in enumerate(RECORDS)
     )
     if variant == "truncated":
-        return data[:-10]  # the last record loses its last 10 bytes
+        return data[:-TRUNCATED_BYTES]  # the last record loses its last bytes
     return data
 
 
