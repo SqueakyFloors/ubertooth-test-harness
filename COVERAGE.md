@@ -189,7 +189,7 @@ Combinations: `-d` without `-r` and `-u` without `-r` (board stays in DFU): Not 
 | `-u <2402-2480>` | upper frequency | Covered | As `-l` |
 | `-U <index\|serial>` | select device | Covered | Spectrum analyzer by serial, guard board unchanged |
 
-The RSSI value is the CC2400 RSSI register, dBm + 54 (specan-ui adds -54). Spectrum RSSI sanity (fast) checks that it is live without a signal source: in a full-band sweep every frequency's noise floor is -115 to -80 dBm, the mean is negative (below -54 dBm), and there are at least three distinct values. Fork main `7bb07c9` on two boards: floors -105 to -98 dBm.
+The RSSI value is the CC2400 RSSI register, dBm + 54 (specan-ui adds -54). Spectrum RSSI sanity (fast) checks that it is live without a signal source: in a full-band sweep every frequency's noise floor is -115 to -80 dBm, the mean is negative (below -54 dBm), and there are at least three distinct values. Fork main `7bb07c9` on a Mac board (5 s, 32672 samples): floors -105 to -98 dBm, mean -97 dBm, 52 distinct values.
 
 Stdout carries only the samples: `Ubertooth stopped`, errors and notes on stdout fail every sweep (fork `fcadf34`, [ubertooth#326](https://github.com/SqueakyFloors/ubertooth/issues/326)). Text output to a stream that takes no data (exit 1 after the closing flush) and `-d -` into a closed pipe (SIGPIPE, 141): Not covered.
 

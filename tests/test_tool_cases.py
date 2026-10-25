@@ -389,7 +389,7 @@ def _samples(readings):
 class SpectrumRssiSanityTests(unittest.TestCase):
     """Spectrum RSSI sanity: the values the fork prints are the CC2400 RSSI
     register (dBm + 54), checked for a noise floor, a negative mean, and
-    variation (fork main 7bb07c9 on the Mac boards: floors -51 to -44, that
+    variation (fork main 7bb07c9 on a Mac board: floors -51 to -44, that
     is -105 to -98 dBm, mean -43)."""
 
     check = staticmethod(tool_cases.rssi_sanity_check)
