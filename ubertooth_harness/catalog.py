@@ -16,7 +16,7 @@ from ubertooth_harness.patterns import (
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
     dfu_cases, dfu_host_cases, python_cases, receive_cases, refusal_cases, tool_cases,
-    transitions, util_cases,
+    transitions, util_cases, util_refusal_cases,
 )
 
 
@@ -287,13 +287,13 @@ def _host_cli_surface_cases(_arguments, _resources, _resource_identities):
         ("ubertooth-debug", 0),
         ("ubertooth-specan", 0),
         ("ubertooth-rx", 1),
-        ("ubertooth-tx", 1),
-        ("ubertooth-dump", 1),
+        ("ubertooth-tx", 0),
+        ("ubertooth-dump", 0),
         ("ubertooth-btle", 1),
         ("ubertooth-dfu", 1),
-        ("ubertooth-ego", 1),
-        ("ubertooth-afh", 1),
-        ("ubertooth-ducky", 1),
+        ("ubertooth-ego", 0),
+        ("ubertooth-afh", 0),
+        ("ubertooth-ducky", 0),
     )
     cases = [
         CommandCase(
@@ -713,6 +713,16 @@ def builtin_catalog() -> TestCatalog:
             MappingProxyType({"hosts": HOSTS, "coverage": COVERAGE}),
             MappingProxyType({}),
             command_builder=refusal_cases.refusal_cases,
+            continue_on_case_failure=True,
+        ),
+        TestDefinition(
+            "Util mode refusals",
+            "ubertooth-util refuses -f and -i with any other mode, and -z with "
+            "either, before any board lookup, with no Ubertooth "
+            "(UBERTOOTH_TEST_NO_DEVICES=1)",
+            MappingProxyType({"hosts": HOSTS, "coverage": COVERAGE}),
+            MappingProxyType({}),
+            command_builder=util_refusal_cases.util_refusal_cases,
             continue_on_case_failure=True,
         ),
         TestDefinition(

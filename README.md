@@ -225,7 +225,7 @@ catalog-validated and resource-planned but gain their hardcoded implementations
 in subsequent slices.
 
 `Host CLI surface`, `Raw receive replay`, `Refused command lines`,
-`DFU image checks`, and `Python tools` need no Ubertooth, so `testplans/host.yaml` runs on a host with none registered or attached; a
+`Util mode refusals`, `DFU image checks`, and `Python tools` need no Ubertooth, so `testplans/host.yaml` runs on a host with none registered or attached; a
 registry holding just the `Host` entry is enough:
 
 ```sh
@@ -251,6 +251,14 @@ tool is not built (`ubertooth-follow` needs BlueZ). Each case seeds files with
 known contents in its own capture directory, refuses one command naming a new
 file and one naming a seeded file, then checks that nothing was created,
 truncated, or left behind (`ubertooth_harness/refusal.py`).
+
+`Util mode refusals` runs `ubertooth-util` the same way, with the same skip,
+for the mode options the harness never runs on a board: `-f` (DFU) and `-i`
+(ISP) leave the application firmware. Each combination must be refused, exit 1,
+with the fork's message before any board lookup (no switch note, and no `-f`
+deprecation note, which the tool prints only for an accepted command line), so a
+regression that accepted one would find no board instead of stranding it. The
+cleanup step runs `ubertooth-util -H`, which opens no device.
 
 `DFU image checks` runs `ubertooth-dfu -d <image> -r` and `-s` the same way,
 with the same skip. `-d` checks the whole image before it opens a device, so
@@ -305,7 +313,8 @@ python -m ubertooth_harness run-suite \
 | `Spectrum analyzer` | one full-band sweep (`duration` long): every frequency 2402-2480 reported, none outside, int8 RSSI | adds narrow, single, and top-of-band ranges, `-g`, `-G`, `-v`, and `-d` (binary file checked by `specandump.py`); `-d -x.bin` writes the file `-x.bin`, not stdout (fork #231, fixed in 053363a); ranges after a different range report no stale samples (fork #173, fixed in 20bcf11); stopping a bounded run with `-S` turns the preset LEDs off and resets channel 2441 MHz and squelch -120, PA kept (fork #191, fixed in aa4f620) |
 | `Classic Bluetooth receive` | `ubertooth-rx -z -t N` survey (exits 0 by itself, N = `duration` in whole seconds, no earlier than N-0.5 s, survey lines are piconet addresses); `-t N -r` PCAPNG with link type 255; `ubertooth-afh -t N` with no piconet in range says no packet arrived and exits 2 after about N s, printing no map (fork #187, 3b22c95) | adds `-t N` without `-z`; `-c 39` (every packet on channel 39); `-e 0` and `-e 4` (no packet over the limit); `-s` deprecation notice; `-q` PCAP (link type 255); repeated `-r` (first wins, extra file never created); `-d` (68-byte BR records, checked by `rxdump.py`); `afh -t N -e 2` (same exit 2); `afh -r` one map line per second; `afh` with an unknown `-U` exits 1 (fork #185, fixed in 219a5b0) |
 | `Raw receive` | `ubertooth-dump -d` (68-byte records) and `-b -d` (401-byte bitstream records), checked by `rxdump.py` with at least 50 records per second; `ubertooth-ego -r -c 2440` runs until stopped | adds `dump -l`, `-l -c`, `-c -l` (the last modulation wins, read back from CC2400 MDMCTRL with `ubertooth-debug`); `ego -l 1`, `-l 48`, `-a 630f9ffe`; `ego -a zz` rejected |
-| `Refused command lines` | no Ubertooth; `host` and `fast` plans, and CI: every file option (`btle -r -q -c`, `follow -r -q -d`, `rx -r -q -d`, `dump -d`, `specan -d`, `dfu -s -u`) refused by a stray word, `-h`, and a bad later value (`dump`: `-U` without its value) creates no file, leaves an existing one unchanged, and leaves no other file; the refusal comes before any board lookup; `Ignoring extra capture file` is on stderr (`btle -q - -q`, `rx -r -r`, `follow -q -q`); follow cases skip where it is not built | adds the checks after the option loop (`btle -f -n`, `-a -a<address>`, `-r -`; `rx -z -l`, `-u` without `-l`; `specan -l` above `-u`), `-d` twice with `-h`, and `dfu -u` with a missing `-s` input or a bad `-d` image (no temporary file); strict: `dfu -s <file.bin> -d <bad image>` writes no `.dfu` (fork #286) |
+| `Refused command lines` | no Ubertooth; `host` and `fast` plans, and CI: every file option (`btle -r -q -c`, `follow -r -q -d`, `rx -r -q -d`, `dump -d`, `specan -d`, `dfu -s -u`) refused by a stray word, `-h`, and a bad later value (`dump`: `-U` without its value) creates no file, leaves an existing one unchanged, and leaves no other file; the refusal comes before any board lookup; `Ignoring extra capture file` is on stderr (`btle -n -q - -q`, `rx -r -r`, `follow -q -q`); follow cases skip where it is not built | adds the checks after the option loop (`btle -f -n`, `-a -a<address>`, `-r -`; `rx -z -l`, `-u` without `-l`; `specan -l` above `-u`), `-d` twice with `-h`, and `dfu -u` with a missing `-s` input or a bad `-d` image (no temporary file); strict: `dfu -s <file.bin> -d <bad image>` writes no `.dfu` (fork #286) |
+| `Util mode refusals` | no Ubertooth; `host` and `fast` plans, and CI: `ubertooth-util -f` and `-i` each with `-q -n -e -t -x -I` and with each other, in both orders (26 commands), refused with exit 1 and `error: options <modes in the fork's order> cannot be combined; give only one of -q -n -e -t -x -I -i -f`; `-z` and `-z-60` with `-f` and with `-i`, in both orders, refused with `error: -z cannot be combined with <mode>`; never the `no board is selected` note or the `-f` deprecation note | adds `-f -i -x`, `-f -f -i`, `-z -f -i` (the mode refusal first), `-f -i stray` (the stray word first); strict: `-N` with `-f` or `-i` is refused, not dropped (fork #332), and `-U all -f` gives the `-U all` refusal alone (fork #333) |
 | `DFU image checks` | no Ubertooth; `host` and `fast` plans, and CI: the seven bad images of `DFU images` (wrong CRC, truncated, no suffix, text, no `UFD`, wrong vendor, wrong product), made from a synthetic image, are refused by `-d <image> -r` with the image check's message and exit 1 before any board lookup, the directory unchanged; the synthetic image passes the check and reaches the lookup; `-s` suffixes a binary exactly as the harness computes, accepts a read-only `.bin`, and refuses a `.dfu` and a suffixed `.bin` (nothing written); `-s` of the test build's binary gives the build's `.dfu` byte for byte when the run has a firmware build, else skipped | adds `-d` of an empty file, 15 bytes, a suffix with no firmware, a suffix length (200) larger than the file, DFU version 2.0, no revision marker, a directory and a missing file (all refused before the lookup), DFU 1.1 and the `ffff:ffff` wildcard (accepted), `-s` of a missing `.bin` and of a `.bin` with a wrong-CRC suffix; strict: `-s` of an input it cannot read (a directory) leaves an existing `.dfu` alone (fork #305) |
 | `Python tools` | no Ubertooth; `host` and `fast` plans, and CI: `ubertooth-specan-ui -h` without a display shows its argparse usage (`-U`, `-l`, `-u`, `--wifi`, `--padding`), skipped without `--build --with-python` or numpy/qtpy/Qt; `btle-extcap.py -h` exits 0; `--extcap-dlts` lists DLT 256 (`DLT_BLUETOOTH_LE_LL_WITH_PHDR`); `--extcap-config` lists the `--channel` selector with 37 (default), 38, 39 | adds `--extcap-dlts` with no interface and `--extcap-config` with a non-Ubertooth interface (exit 1), an unknown option (exit 2, usage); strict: `-h` names the real options (fork #268) |
 | `BLE extcap interfaces` | `btle-extcap.py --extcap-interfaces` lists one `ubertooth<N>` interface per attached board, `N` from 0, guards unchanged | strict: each line shows the board's serial; with two or more boards it shows `0:` (fork #269) |
@@ -418,8 +427,8 @@ and channel are recorded and restored. Pairs with `-I` never exit on their own
 ### Guard Ubertooths
 
 Every test in the [table above](#option-compositions-and-stateful-transitions)
-except `Raw receive replay`, `Refused command lines`, `DFU image checks`, and
-`Python tools` (which open no Ubertooth), and
+except `Raw receive replay`, `Refused command lines`, `Util mode refusals`,
+`DFU image checks`, and `Python tools` (which open no Ubertooth), and
 `Ubertooth count` and `BLE extcap interfaces`,
 binds each other registered Ubertooth on the host as a `guard Ubertooth 1`,
 `2`, ... resource of the same invocation, so the
