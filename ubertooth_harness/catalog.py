@@ -287,13 +287,13 @@ def _host_cli_surface_cases(_arguments, _resources, _resource_identities):
         ("ubertooth-debug", 0),
         ("ubertooth-specan", 0),
         ("ubertooth-rx", 1),
-        ("ubertooth-tx", 1),
-        ("ubertooth-dump", 1),
+        ("ubertooth-tx", 0),
+        ("ubertooth-dump", 0),
         ("ubertooth-btle", 1),
         ("ubertooth-dfu", 1),
-        ("ubertooth-ego", 1),
-        ("ubertooth-afh", 1),
-        ("ubertooth-ducky", 1),
+        ("ubertooth-ego", 0),
+        ("ubertooth-afh", 0),
+        ("ubertooth-ducky", 0),
     )
     cases = [
         CommandCase(

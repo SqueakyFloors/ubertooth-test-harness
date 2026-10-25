@@ -76,9 +76,9 @@ TOOLS = (
          ("-c", "79"), r"error: channel must be ",
          (("-r", "pcapng"), ("-q", "pcap"), ("-d", "dump"))),
     # ubertooth-dump has no option value to check; -U without its value is
-    # getopt's refusal.
-    Tool("ubertooth-dump", r"(?m)^ubertooth-dump - output a continuous stream", 1,
-         ("-U",), r"option requires an argument",
+    # the tool's own refusal (fork aafca8f).
+    Tool("ubertooth-dump", r"(?m)^ubertooth-dump - output a continuous stream", 0,
+         ("-U",), r"error: option '-U' requires a value",
          (("-d", "dump"),)),
     Tool("ubertooth-specan", r"(?m)^ubertooth-specan - output a continuous stream", 0,
          ("-l", "9999"), r"error: lower frequency must be ",

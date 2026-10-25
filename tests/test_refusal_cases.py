@@ -91,7 +91,9 @@ class FakeTools:
             option = word[1]
             if option in FILE_OPTIONS[tool] or option in VALUE_OPTIONS[tool]:
                 if index + 1 >= len(words):
-                    err.append(f"{tool}: option requires an argument -- {option}\n")
+                    err.append(f"error: option '-{option}' requires a value\n"
+                               if tool == "ubertooth-dump"
+                               else f"{tool}: option requires an argument -- {option}\n")
                     return self._result(command, 1, USAGE[tool], "".join(err))
                 value = words[index + 1]
                 index += 2
@@ -117,7 +119,7 @@ class FakeTools:
             return self._result(command, 1, "".join(out), "".join(err)
                                 + f"error: unexpected argument '{operands[0]}'\n")
         if ("h", None) in flags:
-            return self._result(command, 0 if tool == "ubertooth-specan" else 1,
+            return self._result(command, 0 if tool in ("ubertooth-specan", "ubertooth-dump") else 1,
                                 "".join(out) + USAGE[tool], "".join(err))
         refused = self._after_loop(tool, flags, files)
         if refused:
