@@ -91,7 +91,9 @@ def specan_ui(args, environ=os.environ) -> int:
     return _run((os.path.join(tools, "ubertooth-specan-ui"), *args), env)
 
 
-def extcap(args, environ=os.environ) -> int:
+def extcap_script(environ=os.environ):
+    """(interpreter, script bytes) of btle-extcap.py in the run's commit, or
+    the exit status to return when it cannot be had."""
     source = environ.get(SOURCE_ENV)
     commit = environ.get(COMMIT_ENV)
     if not source or not commit:
@@ -119,10 +121,18 @@ def extcap(args, environ=os.environ) -> int:
         )
         return 2
     print(f"{EXTCAP_PATH} at {commit[:7]}, run with {python}", file=sys.stderr)
+    return python, script.stdout
+
+
+def extcap(args, environ=os.environ) -> int:
+    found = extcap_script(environ)
+    if isinstance(found, int):
+        return found
+    python, script = found
     with tempfile.TemporaryDirectory(prefix="btle-extcap-") as directory:
         path = os.path.join(directory, "btle-extcap.py")
         with open(path, "wb") as file:
-            file.write(script.stdout)
+            file.write(script)
         return _run((python, path, *args), dict(environ))
 
 

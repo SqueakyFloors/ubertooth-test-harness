@@ -19,7 +19,7 @@ from tests.test_build import (
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 
-# btle-extcap.py as at fork 6fee30c, trimmed to what the cases exercise.
+# btle-extcap.py as at fork 71e1a8a, trimmed to what the cases exercise.
 EXTCAP = '''#!/usr/bin/env python3
 import getopt, re, sys
 from subprocess import Popen, PIPE
@@ -30,9 +30,10 @@ def main():
             "extcap-dlts", "extcap-config", "capture", "extcap-interface=",
             "fifo=", "channel="])
     except getopt.GetoptError as err:
-        print(str(err)); usage(); sys.exit(2)
+        print("error: %s" % err, file=sys.stderr); usage(sys.stderr); sys.exit(1)
     interface = ''
-    dlts = config = False
+    fifo = None
+    dlts = config = capture = False
     for o, a in opts:
         if o in ("-h", "--help"):
             usage(); sys.exit()
@@ -42,9 +43,15 @@ def main():
             dlts = True
         elif o == "--extcap-config":
             config = True
+        elif o == "--capture":
+            capture = True
         elif o == "--extcap-interface":
             interface = a
-    if not re.match(r'ubertooth(\\d+)', interface):
+        elif o == "--fifo":
+            fifo = a
+    if not re.match(r'ubertooth([0-9a-fA-F]+)$', interface):
+        print("error: --extcap-interface must be ubertooth<serial>, as "
+              "--extcap-interfaces lists it", file=sys.stderr)
         exit(1)
     if dlts:
         print("dlt {number=256}{name=DLT_BLUETOOTH_LE_LL_WITH_PHDR}{display=Bluetooth LE}\\n")
@@ -52,21 +59,34 @@ def main():
         print("arg {number=0}{call=--channel}{display=Advertising Channel}{type=selector}")
         for v, d in (("37", "true"), ("38", "false"), ("39", "false")):
             print("value {arg=0}{value=%s}{display=%s}{default=%s}" % (v, v, d))
+    elif capture and fifo is None:
+        print("error: --capture needs --fifo=PATH", file=sys.stderr)
+        exit(1)
 
-def usage():
-    print("Usage: %s <--list-interfaces | --list-dlts | --config | --capture>" % sys.argv[0])
+def usage(out=sys.stdout):
+    print("Usage: %s --extcap-interfaces |"
+          " --extcap-interface=ubertooth<serial>"
+          " (--extcap-dlts | --extcap-config |"
+          " --capture --fifo=PATH [--channel=37|38|39])" % sys.argv[0], file=out)
 
 def list_interfaces():
-    out = Popen(['ubertooth-util', '-s'], stdout=PIPE, universal_newlines=True).communicate()[0]
-    found = []
+    out = Popen(['ubertooth-util', '-U', 'all', '-s'], stdout=PIPE,
+                universal_newlines=True).communicate()[0]
     for line in out.split('\\n'):
-        p = line.split()
-        if len(p) == 0 or p[0] == 'ubertooth-util':
-            break
-        if p[0] == 'Serial':
-            found.append(p[2])
-        elif re.match('[0-9a-f]+', p[0]):
-            found.append(p[0])
+        m = re.match(r'(\\d+): ([0-9a-fA-F]+)$', line.strip())
+        if m:
+            print("interface {value=ubertooth%s}{display=Ubertooth One %s}"
+                  % (m.group(2), m.group(2)))
+
+main()
+'''
+# The listing as at fork 6fee30c (SqueakyFloors/ubertooth#269): the index,
+# not the serial, with two or more boards.
+OLD_LISTING = '''
+def list_interfaces():
+    out = Popen(['ubertooth-util', '-U', 'all', '-s'], stdout=PIPE,
+                universal_newlines=True).communicate()[0]
+    found = [line.split()[0] for line in out.split('\\n') if line.strip()]
     for i in range(len(found)):
         print("interface {value=ubertooth%d}{display=Ubertooth One %s}" % (i, found[i]))
 
@@ -87,11 +107,11 @@ def git(*args, cwd):
 class FakeFork:
     """A git repository holding btle-extcap.py and a fake ubertooth-util."""
 
-    def __init__(self, directory, util_output):
+    def __init__(self, directory, util_output, extcap=EXTCAP):
         self.root = Path(directory)
         script = self.root / "src" / pytools.EXTCAP_PATH
         script.parent.mkdir(parents=True)
-        script.write_text(EXTCAP)
+        script.write_text(extcap)
         git("init", "-q", cwd=self.root / "src")
         git("add", ".", cwd=self.root / "src")
         git("commit", "-q", "-m", "fixture", cwd=self.root / "src")
@@ -128,19 +148,19 @@ class PythonToolCaseTests(unittest.TestCase):
             ["specan-ui-help", "extcap-help", "extcap-dlts", "extcap-config"], list(smoke))
         comprehensive = self.cases("comprehensive")
         self.assertLess(set(smoke), set(comprehensive))
-        self.assertIn("extcap-help-options", comprehensive)
+        self.assertIn("extcap-unknown-option", comprehensive)
         for case in comprehensive.values():
             self.assertEqual(sys.executable, case.argv[0])
             self.assertEqual(pytools.SKIP_EXIT, case.skip_returncode)
 
     def test_extcap_cases_against_the_fork_script(self):
         with tempfile.TemporaryDirectory() as directory:
-            fork = FakeFork(directory, f"Serial No: {SERIAL_A}\n")
+            fork = FakeFork(directory, f"0: {SERIAL_A}\n")
             results = {case_id: run_case(case, fork.env)
                        for case_id, case in self.cases("comprehensive").items()
                        if case_id.startswith("extcap")}
-        failing = {case_id for case_id, (skip, failure) in results.items() if failure}
-        self.assertEqual({"extcap-help-options"}, failing)
+        failing = {case_id: failure for case_id, (skip, failure) in results.items() if failure}
+        self.assertEqual({}, failing)
         self.assertTrue(all(not skip for skip, _failure in results.values()))
 
     def test_extcap_without_the_source_fails_rather_than_skips(self):
@@ -199,30 +219,42 @@ class ExtcapInterfaceCaseTests(unittest.TestCase):
         return {case.case_id: case for case in definition.command_cases(
             definition.normalize_arguments({"coverage": coverage}), {}, identities)}
 
-    def run_all(self, util_output, serials):
+    def run_all(self, util_output, serials, extcap=EXTCAP, coverage="comprehensive"):
         with tempfile.TemporaryDirectory() as directory:
-            fork = FakeFork(directory, util_output)
+            fork = FakeFork(directory, util_output, extcap)
             return {case_id: run_case(case, fork.env)[1]
-                    for case_id, case in self.cases("comprehensive", serials).items()}
+                    for case_id, case in self.cases(coverage, serials).items()}
 
-    def test_one_board_passes_both_cases(self):
+    def test_one_and_two_boards_pass(self):
         self.assertEqual(
             {"extcap-interfaces": "", "extcap-interfaces-serials": ""},
-            self.run_all(f"Serial No: {SERIAL_A}\n", [SERIAL_A]))
+            self.run_all(f"0: {SERIAL_A}\n", [SERIAL_A]))
+        # Registry order need not be the USB index order.
+        self.assertEqual(
+            {"extcap-interfaces": "", "extcap-interfaces-serials": ""},
+            self.run_all(f"0: {SERIAL_B}\n1: {SERIAL_A}\n", [SERIAL_A, SERIAL_B]))
 
-    def test_two_boards_show_the_index_strict_case_fails(self):
-        failures = self.run_all(f"0: {SERIAL_A}\n1: {SERIAL_B}\n", [SERIAL_A, SERIAL_B])
-        self.assertEqual("", failures["extcap-interfaces"])
+    def test_the_old_index_listing_fails(self):
+        extcap = EXTCAP[:EXTCAP.index("def list_interfaces")] + OLD_LISTING.lstrip()
+        failures = self.run_all(f"0: {SERIAL_A}\n1: {SERIAL_B}\n", [SERIAL_A, SERIAL_B],
+                                extcap)
+        self.assertIn("expected output pattern", failures["extcap-interfaces"])
         self.assertIn("expected output pattern", failures["extcap-interfaces-serials"])
 
     def test_listing_count_must_match_the_registered_boards(self):
-        failures = self.run_all(f"Serial No: {SERIAL_A}\n", [SERIAL_A, SERIAL_B])
+        failures = self.run_all(f"0: {SERIAL_A}\n", [SERIAL_A, SERIAL_B])
         self.assertIn("expected output pattern", failures["extcap-interfaces"])
         failures = self.run_all(f"0: {SERIAL_A}\n1: {SERIAL_B}\n", [SERIAL_A])
         self.assertIn("expected output pattern", failures["extcap-interfaces"])
 
-    def test_smoke_has_only_the_listing_case(self):
-        self.assertEqual(["extcap-interfaces"], list(self.cases("smoke", [SERIAL_A])))
+    def test_an_unreadable_serial_is_left_out(self):
+        failures = self.run_all(f"0: {SERIAL_A}\n1: <unavailable>\n", [SERIAL_A])
+        self.assertEqual("", failures["extcap-interfaces"])
+
+    def test_smoke_and_comprehensive_have_both_cases(self):
+        for coverage in ("smoke", "comprehensive"):
+            self.assertEqual(["extcap-interfaces", "extcap-interfaces-serials"],
+                             list(self.cases(coverage, [SERIAL_A])))
 
 
 class SkipReturncodeTests(unittest.TestCase):
