@@ -21,12 +21,10 @@ case skips when it lacks the variable's name, or when the tool is not built
 (ubertooth-follow needs BlueZ, so macOS has none).
 
 Comprehensive coverage adds the checks that run after the option loop, a
-repeated -d, and ubertooth-dfu with an input that cannot be used. One of those
-is strict and fails at 6fee30c:
-
-- SqueakyFloors/ubertooth#286: ubertooth-dfu -s <file.bin> -d <bad image>
-  writes (or overwrites) <file>.dfu before the image check refuses the
-  command.
+repeated -d, and ubertooth-dfu with an input that cannot be used, including
+-s <file.bin> -d <bad image>: since fork f2e06fa (#286) the files that are
+only read are checked first, so the refused image neither creates nor
+replaces <file>.dfu (ubertooth-dfu.md).
 """
 
 from __future__ import annotations
@@ -326,8 +324,8 @@ def _comprehensive_cases():
            (r"Signature check failed",), (),
            "exit 1 with no device opened; kept.bin unchanged; no temporary file",
            seeded=("kept.bin", "bad.dfu"), kept=("kept.bin", "bad.dfu"))
-    # Strict: fails at 6fee30c (SqueakyFloors/ubertooth#286). The image check
-    # refuses the command, but -s has already written the .dfu.
+    # The image check refuses the command before -s writes anything (fork
+    # #286, fixed in f2e06fa): new.dfu is not created, kept.dfu not replaced.
     cases.append(_case(
         "dfu-s-bad-image", "dfu -s <file.bin> -d <bad image> writes no .dfu", (
             probe_step("ubertooth-dfu"),

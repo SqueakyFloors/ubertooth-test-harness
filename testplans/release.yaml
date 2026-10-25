@@ -8,7 +8,7 @@ suites:
         hosts: each
         Ubertooth: default
 
-    # No Ubertooth. Strict dfu-s-bad-image fails until fork #286 is fixed.
+    # No Ubertooth.
     - Refused command lines:
         hosts: each
         coverage: comprehensive
@@ -19,7 +19,7 @@ suites:
         hosts: each
         coverage: comprehensive
 
-    # No Ubertooth. Strict sign-unreadable-input fails until fork #305 is fixed.
+    # No Ubertooth. sign-read-only-directory skips when run as root.
     - DFU image checks:
         hosts: each
         coverage: comprehensive
@@ -34,8 +34,6 @@ suites:
         Ubertooth: default
         coverage: comprehensive
 
-    # Strict extcap-capture-no-board and extcap-capture-bad-channel fail
-    # until fork #334 is fixed.
     - BLE extcap capture:
         hosts: each
         Ubertooth: default

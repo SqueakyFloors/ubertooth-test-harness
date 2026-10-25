@@ -156,7 +156,7 @@ class FakeDfuBoard:
                 self.mode = "app"
             if "-d" in options:
                 if self.flags.get("detach_exit_1"):
-                    return self._result(command, 1, "", stderr + "control message unsupported\n"
+                    return self._result(command, 1, "", stderr + "error: control message unsupported\n"
                                         "Detach failed: could not enter DFU mode\n")
                 stderr += f"Verified firmware revision: {self.revision}\n"
         return self._result(command, 0, "", stderr)

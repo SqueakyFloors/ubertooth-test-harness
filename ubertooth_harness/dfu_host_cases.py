@@ -32,12 +32,13 @@ that reason when it does not.
 Comprehensive coverage adds edge images (empty, 15 bytes, a suffix with no
 payload, a suffix length larger than the file, DFU version 2.0, no revision
 marker, a directory, a missing file), the accepted DFU 1.1 and wildcard
-suffixes, and -s inputs it cannot use. One of those is strict and fails at
-6fee30c:
-
-- SqueakyFloors/ubertooth#305: ``-s <file.bin>`` truncates ``<file>.dfu``
-  before it reads the input, so an input it cannot read (a directory) leaves
-  an existing ``.dfu`` empty (sign-unreadable-input).
+suffixes, -s inputs it cannot use, and how -s puts its output in place. Since
+fork f2e06fa (#305) -s replaces ``<file>.dfu`` only once the whole signed
+image is ready, through a temporary file beside it (ubertooth-dfu.md): an
+input it cannot read leaves an existing ``.dfu`` alone, a ``.dfu`` symlink is
+replaced rather than written through, the replaced file's permissions are
+kept, a read-only directory refuses the signing, no temporary file is left,
+and ``-s`` with an accepted ``-d`` signs before the board lookup that fails.
 """
 
 from __future__ import annotations
@@ -75,6 +76,19 @@ def _path(name):
     return lambda context: str(Path(require(context, CAPTURE_DIR_KEY)) / name)
 
 
+def _run(step_id, name, *argv, **extra) -> Step:
+    """A plain command; ("file", name) words are paths in the case directory."""
+    return Step(step_id, name, lambda context: tuple(
+        _path(word[1])(context) if isinstance(word, tuple) else word for word in argv),
+        timeout_s=5.0, **extra)
+
+
+def _regular(name, mode=None) -> Step:
+    label = f"{name} is a regular file" + (f" with mode {mode}" if mode else "")
+    return _helper("regular", label, "regular", _path(name),
+                   *(("--mode", mode) if mode else ()), pattern=r"Regular file: ")
+
+
 def _helper(step_id, name, *parts, pattern, observe=None):
     """A dfuimage.py command; callable parts are resolved from the context."""
     def argv(context):
@@ -100,10 +114,11 @@ def _make(kind, output) -> Step:
 _ENTRIES = r"Directory entries: (?P<value>\{[^\n]*\})"
 
 
-def _state_before() -> Step:
-    return _helper("state-before", "Record the case directory (names, sizes, hashes)",
-                   "state", lambda context: require(context, CAPTURE_DIR_KEY),
-                   pattern=_ENTRIES, observe=Observation("directory before", _ENTRIES))
+def _state_before(sub="") -> Step:
+    where = f"<dir>/{sub}" if sub else "the case directory"
+    return _helper("state-before", f"Record {where} (names, sizes, hashes)",
+                   "state", _path(sub), pattern=_ENTRIES,
+                   observe=Observation("directory before", _ENTRIES))
 
 
 def _changes(stdout: str) -> str:
@@ -113,11 +128,17 @@ def _changes(stdout: str) -> str:
     return ""
 
 
-def _state_after() -> Step:
+def _state_after(sub="", allow=()) -> Step:
+    """The directory as _state_before recorded it, apart from the ``allow``
+    entries (a replaced output): no temporary file, nothing else touched."""
+    where = f"<dir>/{sub}" if sub else "The case directory"
+    name = (f"{where} is unchanged apart from {', '.join(allow)}: no other file added"
+            if allow else f"{where} is unchanged: image intact, no file added")
     return Step(
-        "state-after", "The case directory is unchanged: image intact, no file added",
-        lambda context: (sys.executable, _HELPER, "state", require(context, CAPTURE_DIR_KEY),
-                         "--before", require(context, "directory before")),
+        "state-after", name,
+        lambda context: (sys.executable, _HELPER, "state", _path(sub)(context),
+                         "--before", require(context, "directory before"),
+                         *(word for entry in allow for word in ("--allow", entry))),
         timeout_s=_HELPER_TIMEOUT_S, expected_returncodes=(0, 1),
         output_patterns=(r"Directory (unchanged|changed): ",), output_check=_changes)
 
@@ -316,9 +337,9 @@ def _comprehensive_cases():
             r"corrupt\.bin already has a DFU suffix, so \S*corrupt\.dfu was not written",)),
         _state_after(),
     ), "exit 1; no corrupt.dfu, corrupt.bin unchanged"))
-    # Strict: fails at 6fee30c (SqueakyFloors/ubertooth#305). -s opens the
-    # .dfu for writing before it reads the input, so the existing one is
-    # truncated to 0 bytes when the read fails.
+    # Fork #305, fixed in f2e06fa: the existing .dfu is no longer truncated
+    # when the input cannot be read.
+    cases += _sign_output_cases()
     cases.append(_case("sign-unreadable-input",
                        "-s of an input it cannot read leaves an existing .dfu alone", (
         _synth(), _mkdir("folder.bin"),
@@ -329,6 +350,80 @@ def _comprehensive_cases():
         _state_after(),
     ), "exit 1; folder.dfu unchanged"))
     return cases
+
+
+def _sign_output_cases():
+    """How -s puts <file>.dfu in place (fork f2e06fa, ubertooth-dfu.md)."""
+    def seed_bin():
+        return _helper("copy", f"Copy {SYNTHETIC_BIN} to image.bin", "copy",
+                       _path(SYNTHETIC_BIN), _path("image.bin"), pattern=r"Copied")
+
+    def stale(output):
+        # An earlier output: the binary itself, so it is not what -s writes.
+        return _helper("stale", f"An earlier {output} (the unsigned binary)", "copy",
+                       _path(SYNTHETIC_BIN), _path(output), pattern=r"Copied")
+
+    check = _check_suffix("image.bin", "image.dfu", _path(SYNTHETIC_DFU), _OWN_SUFFIX)
+    read_only = (
+        _synth(), _mkdir("ro"),
+        _helper("copy", f"Copy {SYNTHETIC_BIN} to ro/image.bin", "copy",
+                _path(SYNTHETIC_BIN), _path("ro/image.bin"), pattern=r"Copied"),
+        _helper("copy-dfu", "An earlier ro/image.dfu, writable", "copy",
+                _path(SYNTHETIC_DFU), _path("ro/image.dfu"), pattern=r"Copied"),
+        _helper("root", "Does this run as root", "not-root", pattern=r"Root: ",
+                observe=Observation("root", r"Root: (?P<value>[^\n]+)",
+                                    reject=lambda v: v if v.startswith("yes") else "")),
+        _run("chmod-ro", "chmod 555 <dir>/ro", "chmod", "555", ("file", "ro")),
+        _state_before("ro"),
+        tool_step("sign", TOOL, ("-s", ("file", "ro/image.bin")), returncodes=(1,),
+                  patterns=(r"ro/image\.dfu: Permission denied",),
+                  forbidden=REFUSED_FORBIDDEN),
+        _state_after("ro"),
+    )
+    return [
+        _case("sign-no-temporary-file", "-s leaves only <file>.dfu behind", (
+            _synth(), seed_bin(), _state_before(),
+            _sign("image.bin"),
+            _state_after(allow=("image.dfu",)),
+            check,
+        ), "exit 0; image.dfu added, nothing else in the directory changed"),
+        _case("sign-replaces-existing", "-s replaces an earlier .dfu and keeps its mode", (
+            _synth(), seed_bin(), stale("image.dfu"),
+            _run("chmod", "chmod 600 <dir>/image.dfu", "chmod", "600", ("file", "image.dfu")),
+            _state_before(),
+            _sign("image.bin"),
+            _state_after(allow=("image.dfu",)),
+            check, _regular("image.dfu", "600"),
+        ), "exit 0; image.dfu replaced by the signed image, mode 600 kept, no "
+           "temporary file"),
+        _case("sign-replaces-symlink", "-s replaces a .dfu symlink, not what it points at", (
+            _synth(), seed_bin(), stale("target.dfu"),
+            _run("symlink", "ln -s target.dfu <dir>/image.dfu", "ln", "-s", "target.dfu",
+                 ("file", "image.dfu")),
+            _sign("image.bin"),
+            _helper("target", "target.dfu is untouched", "same", _path("target.dfu"),
+                    _path(SYNTHETIC_BIN), pattern=r"Unchanged"),
+            _regular("image.dfu"), check,
+        ), "exit 0; image.dfu is now a regular file holding the signed image; "
+           "target.dfu unchanged"),
+        StateCase(
+            "sign-read-only-directory", "-s into a read-only directory writes nothing",
+            (probe_step(TOOL), *read_only),
+            (_run("cleanup-chmod", "chmod 755 <dir>/ro", "chmod", "755", ("file", "ro"),
+                  expected_returncodes=(0, 1)), *_list_files()),
+            expected_state="exit 1 naming ro/image.dfu; ro/image.dfu and the directory "
+                           "unchanged (skipped as root)",
+            capture_dir=True),
+        _case("sign-then-board-lookup", "-s with an accepted -d signs, then the board "
+              "lookup fails", (
+            _synth(), seed_bin(),
+            tool_step("sign", TOOL, ("-s", ("file", "image.bin"), "-d",
+                                     ("file", SYNTHETIC_DFU), "-r"),
+                      returncodes=(1,), patterns=(_CHECKING, NO_BOARD_NOTE),
+                      forbidden=(_CHECK_FAILED, r"firmware programming attempt")),
+            check,
+        ), "exit 1 at the board lookup, with image.dfu already written"),
+    ]
 
 
 def dfu_host_cases(arguments, _resources, _resource_identities):

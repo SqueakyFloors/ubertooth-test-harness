@@ -3,16 +3,18 @@
 Run as a script by the BLE extcap capture cases::
 
     python extcapcapture.py --seconds N --fifo PATH [--board SERIAL] [--channel C]
-                            [--refused] -- EXTCAP-ARGS...
+                            [--refused [--no-btle] | --close] -- EXTCAP-ARGS...
 
 It creates the FIFO, opens it for reading, starts the fork's
 ``host/python/extcap/btle-extcap.py`` (from the run's commit, as pytools.py
 finds it) with EXTCAP-ARGS, reads the FIFO for N seconds, then stops the
 script with SIGTERM, which it forwards to the ``ubertooth-btle`` it runs.
+With ``--close`` it ends the capture the other way Wireshark does, by closing
+its end of the FIFO: the next packet ``ubertooth-btle`` writes gets SIGPIPE.
 Nothing is ever stopped with SIGKILL (SqueakyFloors/ubertooth#239).
 
 The script runs ``ubertooth-btle -f -U <serial> -q <fifo> -A <channel>`` at
-fork 71e1a8a: ``-q`` writes PCAP with LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR (256)
+fork d04f79e: ``-q`` writes PCAP with LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR (256)
 through libbtbb, whose records carry a 10-byte LE pseudo-header whose first
 byte is the RF channel (0 for advertising channel 37, 12 for 38, 39 for 39).
 
@@ -24,10 +26,12 @@ Checks (each failure is a ``FAIL:`` line and exit status 1):
 - ``--channel C``: the ``ubertooth-btle`` command has ``-A C`` and every
   advertising record (access address 8e89bed6) is on C's RF channel;
 - ``--board SERIAL``: the ``ubertooth-btle`` command selects ``-U SERIAL``;
-- the script is still capturing at the stop and exits 0 after SIGTERM, and no
-  process it started is left running;
+- the script is still capturing at the stop and exits 0 after SIGTERM (with
+  ``--close``: exits 0 by itself within STOP_WAIT_S of the FIFO closing), and
+  no process it started is left running (btle-extcap README.md, Exit status);
 - ``--refused``: instead, the script must end by itself before the stop with
-  a non-zero status and write no packet records.
+  a non-zero status and write no packet records; ``--no-btle`` adds that no
+  ``ubertooth-btle`` was started (a command line the script refuses).
 
 The script's stdout (and so ``ubertooth-btle``'s decoded packets) is
 discarded, and only counts are printed, so no captured traffic reaches the
@@ -246,7 +250,7 @@ class _Reader:
 
 
 def capture(argv, fifo, seconds, *, board=None, channel=None, refused=False,
-            out=print) -> int:
+            no_btle=False, close=False, out=print) -> int:
     """Run argv (the extcap script) against fifo; print the checks; 0 or 1."""
     failures = []
     os.mkfifo(fifo, 0o600)
@@ -258,11 +262,12 @@ def capture(argv, fifo, seconds, *, board=None, channel=None, refused=False,
         try:
             with tempfile.TemporaryFile() as errors:
                 returncode, stopped, children = _run(
-                    argv, reader, seconds, errors, failures, refused, out)
+                    argv, reader, seconds, errors, failures, refused, out, close=close)
                 errors.seek(0)
                 diagnostics = errors.read().decode(errors="replace")
         finally:
-            os.close(fd)
+            if reader.fd is not None:
+                os.close(reader.fd)
     finally:
         if stat.S_ISFIFO(os.lstat(fifo).st_mode):
             os.unlink(fifo)
@@ -279,7 +284,8 @@ def capture(argv, fifo, seconds, *, board=None, channel=None, refused=False,
     stream = parse_stream(bytes(reader.data))
     out(f"PCAP header: {stream.header or 'none'}")
     out(stream.summary())
-    when = "after SIGTERM" if stopped else "before the stop"
+    stop = "the FIFO closed" if close else "SIGTERM"
+    when = f"after {stop}" if stopped else "before the stop"
     out(f"extcap exit: {returncode} ({when})" if returncode is not None
         else "extcap exit: none, still running")
     problems = list(stream.problems)
@@ -299,11 +305,13 @@ def capture(argv, fifo, seconds, *, board=None, channel=None, refused=False,
             failures.append("btle-extcap exited 0 although its capture failed")
         if stream.records:
             failures.append(f"{stream.records} packet records were written")
+        if no_btle and btle:
+            failures.append("ubertooth-btle was started for a refused command line")
     else:
         if not stopped:
             failures.append(f"btle-extcap exited {returncode} before the stop")
-        elif returncode != 0:
-            failures.append(f"btle-extcap exited {returncode} after SIGTERM, not 0")
+        elif returncode not in (0, None):
+            failures.append(f"btle-extcap exited {returncode} after {stop}, not 0")
         if stream.link_type is None and not stream.problems:
             failures.append("no PCAP header reached the FIFO")
         if not btle:
@@ -331,7 +339,7 @@ def capture(argv, fifo, seconds, *, board=None, channel=None, refused=False,
     if left:
         failures.append(f"{len(left)} process(es) left running")
     if returncode is None:
-        failures.append("btle-extcap did not exit after SIGTERM")
+        failures.append(f"btle-extcap did not exit after {stop}")
 
     for failure in failures:
         out(f"FAIL: {failure}")
@@ -340,7 +348,7 @@ def capture(argv, fifo, seconds, *, board=None, channel=None, refused=False,
     return 1 if failures else 0
 
 
-def _run(argv, reader, seconds, errors, failures, refused, out):
+def _run(argv, reader, seconds, errors, failures, refused, out, *, close=False):
     out("extcap command: " + " ".join(argv))
     process = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=errors)
     children = {}
@@ -353,6 +361,24 @@ def _run(argv, reader, seconds, errors, failures, refused, out):
         if not reader.read():
             time.sleep(POLL_S)
     stopped = process.poll() is None
+    if stopped and close:
+        children.update(_children(process.pid))
+        # As Wireshark does when it stops reading: the writer's next packet
+        # gets SIGPIPE, and the script exits 0 by itself.
+        os.close(reader.fd)
+        reader.fd = None
+        try:
+            process.wait(STOP_WAIT_S)
+        except subprocess.TimeoutExpired:
+            failures.append(
+                f"btle-extcap did not exit within {STOP_WAIT_S:g}s of the FIFO "
+                "closing; it was sent SIGTERM")
+            process.send_signal(signal.SIGTERM)
+            try:
+                process.wait(STOP_WAIT_S)
+            except subprocess.TimeoutExpired:
+                pass
+        return process.poll(), stopped, children
     if stopped:
         children.update(_children(process.pid))
         process.send_signal(signal.SIGTERM)
@@ -387,7 +413,10 @@ def main(argv=None) -> int:
     parser.add_argument("--fifo", required=True)
     parser.add_argument("--board")
     parser.add_argument("--channel", type=int, choices=sorted(ADV_RF_CHANNEL))
-    parser.add_argument("--refused", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--refused", action="store_true")
+    mode.add_argument("--close", action="store_true")
+    parser.add_argument("--no-btle", action="store_true")
     parser.add_argument("extcap_args", nargs="+", metavar="EXTCAP-ARGS")
     options = parser.parse_args(argv)
     if os.path.lexists(options.fifo):
@@ -404,6 +433,7 @@ def main(argv=None) -> int:
         return capture(
             (python, path, *options.extcap_args), options.fifo, options.seconds,
             board=options.board, channel=options.channel, refused=options.refused,
+            no_btle=options.no_btle, close=options.close,
         )
 
 
