@@ -10,7 +10,7 @@ from ubertooth_harness.report import load_events, render_run, render_runs, write
 SERIAL = "aaaa0000"
 
 
-def write_run(directory: Path, *, finish=True, host="Host_Mac"):
+def write_run(directory: Path, *, finish=True, host="Host_Mac", source=None):
     publisher = open_run_publisher(directory, directory.name)
     publisher.emit("run_started", "running", {"plan_name": "Plan", "suite": "fast", "host": host})
     publisher.emit("manifest", "passed", {"manifest": {
@@ -18,7 +18,8 @@ def write_run(directory: Path, *, finish=True, host="Host_Mac"):
         "plan_name": "Plan",
         "suite": "fast",
         "sources": [{"name": "Ubertooth", "requested_ref": "main", "commit": "a" * 40,
-                     "expected_revision": "git-aaaaaaa", "repository": "repo"}],
+                     "expected_revision": "git-aaaaaaa", "repository": "repo",
+                     **(source or {})}],
         "artifacts": [],
         "invocations": [{"resource_identities": {"Ubertooth": {"serial": SERIAL}}}],
         "environment": {"os": {"system": "Darwin", "architecture": "arm64"}},
@@ -56,6 +57,26 @@ class ReportTests(unittest.TestCase):
             self.assertIn(f"[C] ubertooth-util -U {SERIAL} -s", report)
             self.assertIn(f"[O] Serial No: {SERIAL}", report)
             self.assertIn(SERIAL, report)  # serials are shown by default
+
+    def test_source_shows_the_ref_and_its_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            write_run(run)
+            self.assertIn(
+                f"| Ubertooth | `main` = `{'a' * 40}` (git-aaaaaaa) from repo |",
+                write_report(run).read_text(),
+            )
+
+    def test_source_chosen_by_name_shows_the_name_and_the_commit(self):
+        # A controller run: the runner passes the listed commit as the ref
+        # and the branch name as ref_name.
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            write_run(run, source={"requested_ref": "a" * 40, "ref_name": "main"})
+            self.assertIn(
+                f"| Ubertooth | `main` at `{'a' * 40}` (git-aaaaaaa) from repo |",
+                write_report(run).read_text(),
+            )
 
     def test_serials_can_be_redacted(self):
         with tempfile.TemporaryDirectory() as directory:

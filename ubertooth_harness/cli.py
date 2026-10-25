@@ -171,7 +171,10 @@ def _resolve_sources(args: argparse.Namespace):
         )
     resolver = GitRevisionResolver()
     sources = [
-        resolver.resolve("Ubertooth", args.ubertooth_source, args.ubertooth_ref)
+        resolver.resolve(
+            "Ubertooth", args.ubertooth_source, args.ubertooth_ref,
+            getattr(args, "ubertooth_ref_name", None),
+        )
     ]
     if args.libbtbb_source:
         sources.append(
@@ -221,6 +224,11 @@ def _parser() -> argparse.ArgumentParser:
     run_suite.add_argument("--host", required=True)
     run_suite.add_argument("--ubertooth-source", type=Path, required=True)
     run_suite.add_argument("--ubertooth-ref", required=True)
+    run_suite.add_argument(
+        "--ubertooth-ref-name", metavar="NAME",
+        help="branch or tag name --ubertooth-ref (a commit) was chosen by; "
+        "recorded in the manifest and report, not resolved",
+    )
     run_suite.add_argument("--libbtbb-source", type=Path)
     run_suite.add_argument("--libbtbb-ref")
     run_suite.add_argument(

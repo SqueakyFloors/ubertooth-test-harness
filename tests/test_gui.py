@@ -286,7 +286,7 @@ class RefTests(ControllerTestCase):
                     self.assertEqual(422, status, payload)
             await self.accepted_run(runner)
 
-    async def test_a_name_listing_several_commits_is_refused(self):
+    async def test_a_branch_and_tag_of_one_name_are_told_apart_by_commit(self):
         self.controller.ref_source = fake_ref_source(
             f"{COMMIT}\trefs/heads/v1\n{OTHER}\trefs/tags/v1\n".encode()
         )
@@ -297,10 +297,24 @@ class RefTests(ControllerTestCase):
                 {"ref": "v1", "plan": "fast", "suite": "fast"},
             )
             self.assertEqual(422, status, payload)
-            self.assertIn("several commits", payload["detail"])
-            # Naming the commit itself is unambiguous.
-            post, message = await self.start_run(runner, ref=OTHER)
-            self.assertEqual((OTHER, OTHER), (message["ref"], message["commit"]))
+            # The message says how to choose, in the GUI or the API.
+            self.assertIn("both a branch and a tag", payload["detail"])
+            self.assertIn("pick the branch or the tag entry", payload["detail"])
+            self.assertIn("`commit`", payload["detail"])
+            # The GUI lists both entries; each sends its own commit, which
+            # is run, and the run keeps the name.
+            for commit in (COMMIT, OTHER):
+                with self.subTest(commit):
+                    self.assertEqual(commit, await self.controller.resolve_ref("v1", commit))
+            # A commit neither entry lists is a moved ref.
+            status, payload, _ = await self.http(
+                "POST", "/api/targets/Host_A/runs",
+                {"ref": "v1", "commit": "c" * 40, "plan": "fast", "suite": "fast"},
+            )
+            self.assertEqual(409, status, payload)
+            self.assertIn("moved", payload["detail"])
+            post, message = await self.start_run(runner, ref="v1", commit=OTHER)
+            self.assertEqual(("v1", OTHER), (message["ref"], message["commit"]))
             await self.accept(runner, post, message)
 
     async def test_a_full_commit_ref_is_its_own_commit(self):
@@ -502,7 +516,17 @@ class PageWiringTests(unittest.TestCase):
             self.assertNotIn("@import", text)
 
     def test_script_sends_the_commit_it_listed(self):
-        self.assertIn("commit: state.refCommits.get(", self.js)
+        self.assertIn("commit: chosen ? chosen.commit : null", self.js)
+
+    def test_branch_and_tag_of_one_name_are_separate_entries(self):
+        # Options are keyed by kind and name and labelled branch or tag.
+        self.assertIn("const key = (ref) => `${ref.kind}:${ref.name}`;", self.js)
+        self.assertIn('kind === "tag" ? "tag" : "branch"', self.js)
+        self.assertIn("ref: chosen ? chosen.name : \"\"", self.js)
+
+    def test_a_refused_start_reloads_the_ref_list(self):
+        self.assertIn("error.status = response.status;", self.js)
+        self.assertRegex(self.js, r"if \(error\.status === 409\) \{[^}]*await loadRefs\(\);")
 
     def test_script_wires_to_the_controller_endpoints(self):
         for endpoint in (

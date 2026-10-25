@@ -405,7 +405,13 @@ class RunnerServiceTests(unittest.IsolatedAsyncioTestCase):
             run_dir = self.fixture.output.resolve() / run_id
             started = json.loads((run_dir / "run.jsonl").read_text().splitlines()[0])
             source = started["details"]["sources"][0]
-            self.assertEqual((head, head), (source["requested_ref"], source["commit"]))
+            self.assertEqual(
+                (head, head, "listed-elsewhere"),
+                (source["requested_ref"], source["commit"], source["ref_name"]),
+            )
+            # report.md names the branch the run came from and the commit.
+            report = (run_dir / "report.md").read_text()
+            self.assertIn(f"`listed-elsewhere` at `{head}`", report)
         self.assertTrue(any(f"listed-elsewhere = {head}" in line for line in self.logs))
 
     async def test_a_commit_missing_from_the_checkout_is_a_run_error(self):

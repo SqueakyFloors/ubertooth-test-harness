@@ -383,6 +383,9 @@ class RunnerService:
             f"--run-id={run_id}",
             f"--output={self.config.output}",
         ]
+        if message["commit"] and message["commit"] != message["ref"]:
+            # Recorded next to the commit in the manifest and report.
+            argv.append(f"--ubertooth-ref-name={message['ref']}")
         if self.config.libbtbb_source:
             argv += [
                 f"--libbtbb-source={self.config.libbtbb_source}",

@@ -191,10 +191,16 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
     rows.append(("Host", f"{host} ({platform})" if platform else host))
     # A run that failed before its manifest still names its sources.
     for source in manifest.get("sources") or started.get("sources", []):
+        # "`main` at `<commit>`" when the commit was chosen by a name (a
+        # controller run); otherwise the ref as given resolved to the commit.
+        ref_name = source.get("ref_name")
+        if ref_name and ref_name != source.get("requested_ref"):
+            ref = f"`{ref_name}` at `{source.get('commit')}`"
+        else:
+            ref = f"`{source.get('requested_ref')}` = `{source.get('commit')}`"
         rows.append((
             source.get("name", "source"),
-            f"`{source.get('requested_ref')}` = `{source.get('commit')}` "
-            f"({source.get('expected_revision')}) from {source.get('repository')}",
+            f"{ref} ({source.get('expected_revision')}) from {source.get('repository')}",
         ))
     build = manifest.get("build") or {}
     if build:

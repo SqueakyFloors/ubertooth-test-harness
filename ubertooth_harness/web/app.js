@@ -27,8 +27,8 @@
     targets: new Map(),
     runs: new Map(),
     plans: [],
-    // ref name -> the commit listed for it (null when a name lists several)
-    refCommits: new Map(),
+    // ref option value ("<kind>:<name>") -> {name, kind, commit} as listed
+    refOptions: new Map(),
     selected: null, // run_id shown in the live view
     live: null, // {run_id, seen:Set, events:[], items:[], byInvocation:Map, log:[], partial, stage}
     socket: null,
@@ -94,7 +94,9 @@
     if (!response.ok) {
       const detail = payload && typeof payload.detail === "string"
         ? payload.detail : `HTTP ${response.status}`;
-      throw new Error(detail);
+      const error = new Error(detail);
+      error.status = response.status;
+      throw error;
     }
     return payload;
   }
@@ -170,26 +172,26 @@
       const data = await api("GET", "/api/refs");
       const groups = { default: "Default branch", branch: "Branches", tag: "Tags" };
       const current = select.value;
-      state.refCommits = new Map();
-      for (const ref of data.refs) {
-        const seen = state.refCommits.get(ref.name);
-        state.refCommits.set(ref.name,
-          seen === undefined || seen === ref.commit ? ref.commit : null);
-      }
+      // One entry per listed ref, keyed by kind and name, so a branch and a
+      // tag of the same name are separate choices; each sends its own
+      // commit, which the controller accepts for that name.
+      const key = (ref) => `${ref.kind}:${ref.name}`;
+      state.refOptions = new Map(data.refs.map((ref) => [key(ref), ref]));
       select.replaceChildren(...Object.entries(groups).map(([kind, label]) => {
         const refs = data.refs.filter((ref) => ref.kind === kind);
         if (!refs.length) return null;
         return el("optgroup", { label },
           ...refs.map((ref) => el("option", {
-            value: ref.name, text: `${ref.name} (${String(ref.commit).slice(0, 12)})`,
+            value: key(ref),
+            text: `${ref.name} (${kind === "tag" ? "tag" : "branch"}, ${String(ref.commit).slice(0, 12)})`,
           })));
       }).filter(Boolean));
-      const preferred = [current, "main", "master", "HEAD"]
-        .find((name) => name && data.refs.some((ref) => ref.name === name));
+      const preferred = [current, "branch:main", "branch:master", "default:HEAD"]
+        .find((value) => value && state.refOptions.has(value));
       if (preferred) select.value = preferred;
       status.textContent = `${data.refs.length} refs from ${data.repository}, listed ${data.fetched_at}.`;
     } catch (error) {
-      state.refCommits = new Map();
+      state.refOptions = new Map();
       select.replaceChildren(el("option", { value: "", text: "(refs unavailable)" }));
       status.textContent = `Cannot list refs: ${error.message}`;
     }
@@ -250,11 +252,12 @@
     event.preventDefault();
     const status = $("run-status");
     const host = $("target").value;
+    const chosen = state.refOptions.get($("ref").value);
     const body = {
-      ref: $("ref").value,
+      ref: chosen ? chosen.name : "",
       // The commit this page listed: the controller refuses the run if the
       // ref has moved since, and the runner runs exactly this commit.
-      commit: state.refCommits.get($("ref").value) ?? null,
+      commit: chosen ? chosen.commit : null,
       plan: $("plan").value,
       suite: $("suite").value,
       tests: [],
@@ -274,6 +277,12 @@
       selectRun(data.run.run_id);
     } catch (error) {
       status.textContent = `Not started: ${error.message}`;
+      if (error.status === 409) {
+        // The ref may have moved since this page listed it: list the refs
+        // again so the next Run sends the current commit.
+        await loadRefs();
+        status.textContent = `Not started: ${error.message}. The ref list has been reloaded; check the ref and press Run again.`;
+      }
     } finally {
       button.disabled = false;
     }

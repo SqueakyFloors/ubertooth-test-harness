@@ -641,8 +641,10 @@ by the REST API and `/ws/live`.
   (`GET /api/plans`) + one target + build toggle → "Run". The controller
   refuses a ref that is not in the list or a full commit ID (422). The run
   request carries the commit listed for the ref (the GUI sends the commit it
-  showed; a ref that has moved since is refused with 409), and the runner
-  runs exactly that commit. When the list cannot be fetched it passes the ref
+  showed; a ref that has moved since is refused with 409 and the page lists
+  the refs again), and the runner runs exactly that commit, recording the
+  ref name and the commit in the manifest and report. A branch and a tag of
+  one name are separate entries, labelled, each with its own commit. When the list cannot be fetched it passes the ref
   on unchecked and logs a warning. One target per run; a multiselect is a later step.
 - **Live run:** the suite rendered as a checklist that ticks in real time
   from the run's events (✓ passed / ✗ failed / … running / ○ pending, always
@@ -706,7 +708,8 @@ Later (multi-node), Ansible:
    automated build/install, armed physical power control, and generic
    command/soak execution remain.
 3. **Target runner service** — register/heartbeat/run over the wire; test against a
-   stub controller. Implemented (protocol v1, loopback controllers only).
+   stub controller. Implemented (protocol v2, loopback controllers only;
+   v2 added the listed commit to `run` and does not interoperate with v1).
 4. **Controller + web GUI** — targets, ref dropdown, live checkoff, countdown.
    Implemented: controller (registry, dispatch, results store, REST and live
    WebSocket API, `127.0.0.1` only) and the GUI (targets, run setup, live

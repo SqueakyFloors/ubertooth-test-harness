@@ -845,18 +845,23 @@ class Controller:
             raise ControllerError(
                 f"ref {ref[:200]!r} is not a branch or tag of {data['repository']}", 422
             )
+        if commit is not None:
+            if commit not in listed:
+                raise ControllerError(
+                    f"ref {ref[:200]!r} moved: listed at {commit}, now "
+                    f"{', '.join(sorted(listed))}; list the refs again", 409
+                )
+            # Also how a branch and a tag of the same name are told apart:
+            # the GUI lists both and sends the chosen entry's commit.
+            return commit
         if len(listed) > 1:
-            # A branch and a tag of the same name at different commits.
             raise ControllerError(
-                f"ref {ref[:200]!r} names several commits of {data['repository']}; "
-                "choose a commit", 422
+                f"ref {ref[:200]!r} is both a branch and a tag of "
+                f"{data['repository']} at different commits; pick the branch or "
+                "the tag entry in the GUI's ref list, or send that entry's "
+                "commit as `commit`", 422
             )
         (current,) = listed
-        if commit is not None and commit != current:
-            raise ControllerError(
-                f"ref {ref[:200]!r} moved: listed at {commit}, now {current}; "
-                "reload the refs", 409
-            )
         return current
 
     async def start_run(

@@ -605,7 +605,10 @@ ref may name a branch, tag, or commit; the CLI resolves it without switching the
 checkout and records the full immutable commit plus the repository and short
 build revision. Dirty or untracked source content is rejected. Supply
 `--libbtbb-source` and `--libbtbb-ref` together when validating an exact
-companion build. Repeat `--artifact NAME=PATH` to hash build products into the
+companion build. When `--ubertooth-ref` is a commit chosen by name elsewhere
+(the target runner passes the commit the controller listed),
+`--ubertooth-ref-name NAME` records that branch or tag name next to it in the
+manifest (`ref_name`) and report.md; it is never resolved. Repeat `--artifact NAME=PATH` to hash build products into the
 manifest.
 
 Before preflight, the `manifest` record in run.jsonl captures the source revisions,
@@ -965,10 +968,15 @@ its own checkout's idea of the ref, so a stale or differently configured
 `--ubertooth-source` cannot substitute another commit; the commit must be
 present there (keep it fetched), or the run ends with `run_error`. The GUI
 sends the commit it showed: if the ref has moved since the page listed it,
-the start is refused (409, reload the refs). A name that is both a branch and
-a tag at different commits is refused (422); name the commit instead. The
-commit is recorded as `commit` in the run's `run.json` and shown next to the
-ref in the GUI. `--plans-dir`
+the start is refused (409) and the page lists the refs again by itself, so
+the next Run sends the current commit. A name that is both a branch and a
+tag at different commits is two entries in the GUI, labelled branch and tag,
+and each sends its own commit; an API caller that names it without a
+`commit` is refused (422) and told to send the commit of the entry it means.
+The commit is recorded as `commit` in the run's `run.json` and shown next to
+the ref in the GUI; the runner passes the ref name as
+`--ubertooth-ref-name`, so the run's manifest records both (`ref_name` and
+`commit`) and report.md shows `` `main` at `<commit>` ``. `--plans-dir`
 is the directory of plans the GUI lists (default `testplans/`).
 
 Start a runner on the same machine against it:
@@ -1111,7 +1119,7 @@ runner (`After=`/`Wants=` the controller) dials
 | Option | |
 |---|---|
 | `--runner-host NAME` | registry Host resource of this machine (required) |
-| `--ubertooth-source DIR` | Ubertooth checkout the runner resolves refs in (required; keep it fetched) |
+| `--ubertooth-source DIR` | Ubertooth checkout the runner runs the listed commit from (required; keep it fetched) |
 | `--hardware FILE` | resource registry (default `hardware.yaml` in the checkout) |
 | `--plans-dir DIR` | plans for the GUI and the runner (default `testplans/`) |
 | `--ubertooth-repo URL` | repository whose refs the GUI offers (default the public fork) |
@@ -1131,6 +1139,18 @@ ubertooth-harness-runner.service`). Restarting either service cancels an
 active run (cleanly, restoring its boards), so a deploy that would restart
 them refuses while the controller reports an active run; `--force` restarts
 anyway.
+
+The runner protocol has no version negotiation: the controller and runner
+must speak the same version, and protocol v2 (which added the listed commit
+to `run`) is a hard break from v1. A v1 runner is refused at `register` (the
+controller closes the connection, code 1008), and since it did register it
+reconnects after the shortest backoff (0.5 s) and is refused again,
+indefinitely; its log shows `registered with ...` then `controller connection
+closed` over and over, and the target never comes online. A v2 runner against
+a v1 controller is refused the same way. `deploy.sh` installs both services
+from the same checkout and restarts both when its commit changes, so a
+single-node deploy is always matched; a runner started by hand (or on another
+machine) must be updated and restarted together with the controller.
 
 User services stop when the user's last session ends unless systemd linger
 is on. `deploy.sh` checks `loginctl show-user $USER -p Linger` and, when it is
