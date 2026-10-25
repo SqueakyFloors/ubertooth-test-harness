@@ -332,7 +332,7 @@ def failure_summary(run: Mapping, events: Sequence[Mapping]) -> list[dict]:
                 "step": kind.removesuffix("_finished"), "status": _text(status),
                 "reason": _text(details.get("reason")), "log": [],
             })
-        elif kind == "test_finished" and status not in ("passed", "skipped"):
+        elif kind == "test_finished" and status not in ("passed", "skipped", "not_applicable"):
             invocation = _text(details.get("invocation_id"))
             rest = partials.pop(invocation, "")
             if rest.strip():

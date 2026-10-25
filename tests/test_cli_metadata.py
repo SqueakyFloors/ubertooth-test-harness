@@ -5,6 +5,7 @@ from pathlib import Path
 
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.executor import CommandResult
+from ubertooth_harness.hostneeds import HostCapabilities
 from ubertooth_harness.planner import TestInvocation
 from ubertooth_harness.sequencer import NamedTestSequencer
 from tests.test_sequencer import CollectSink, run_contract
@@ -47,7 +48,12 @@ class SurfaceTools:
         raise AssertionError(f"unexpected command {command}")
 
 
-def run_surface(executor):
+LINUX_ALL = HostCapabilities("Host_Linux", "linux",
+                             frozenset({"ubertooth-scan", "ubertooth-follow"}), basis="build")
+MACOS = HostCapabilities("Host_Linux", "macos", frozenset(), basis="build")
+
+
+def run_surface(executor, capabilities=LINUX_ALL):
     definition = builtin_catalog().get("Host CLI surface")
     arguments = definition.normalize_arguments({"hosts": ["Host_Linux"]})
     with tempfile.TemporaryDirectory() as directory:
@@ -58,7 +64,7 @@ def run_surface(executor):
         sink = CollectSink()
         summary = NamedTestSequencer(executor, event_sink=sink).run(
             (invocation,), root, run_id="named-run", manifest=manifest,
-            preflight_checks=checks,
+            preflight_checks=checks, capabilities=capabilities,
         )
         return summary, sink.events
 
@@ -81,17 +87,51 @@ class HostCliSurfaceTests(unittest.TestCase):
             self.assertEqual((tool, "-V"), by_id[f"{tool}-version"].argv)
             self.assertTrue(re.search(by_id[f"{tool}-version"].output_patterns[0], VERSION))
         for tool in ("ubertooth-scan", "ubertooth-follow"):
-            self.assertTrue(by_id[f"{tool}-help"].optional_tool)
+            self.assertEqual((tool,), by_id[f"{tool}-help"].needs.bluez_tools)
 
-    def test_tools_not_built_are_skipped_not_failed(self):
-        summary, events = run_surface(SurfaceTools())
+    def test_bluez_tools_are_not_applicable_on_macos_not_skipped(self):
+        executor = SurfaceTools()
+        summary, events = run_surface(executor, MACOS)
 
         self.assertTrue(summary.passed, summary.failure_reason)
-        self.assertEqual(2, summary.skipped_cases)
+        self.assertEqual(0, summary.skipped_cases)
+        self.assertEqual(2, summary.not_applicable_cases)
         results = finished(events)
+        left_out = [e for e in events if e.event_type == "not_applicable"]
+        self.assertEqual(["ubertooth-scan help (BlueZ builds)",
+                          "ubertooth-follow help (BlueZ builds)"],
+                         [e.details["case_name"] for e in left_out])
+        for event in left_out:
+            self.assertEqual("not_applicable", event.status)
+            self.assertIn("BlueZ (libbluetooth), which macOS does not have",
+                          event.details["reason"])
         for tool in ("ubertooth-scan", "ubertooth-follow"):
-            self.assertEqual("skipped", results[f"{tool}-help"].status)
-            self.assertIn("not built on this host", results[f"{tool}-help"].details["reason"])
+            # Never started: no check, no command.
+            self.assertNotIn(f"{tool}-help", results)
+            self.assertFalse([c for c in executor.commands if c[0] == tool])
+        test = next(e for e in events if e.event_type == "test_finished")
+        self.assertEqual(("passed", 2, 0), (test.status, test.details["not_applicable_cases"],
+                                            test.details["skipped_cases"]))
+
+    def test_a_linux_run_without_one_bluez_tool_leaves_out_only_that_case(self):
+        capabilities = HostCapabilities("Host_Linux", "linux", frozenset({"ubertooth-scan"}),
+                                        basis="installed tools")
+        summary, events = run_surface(SurfaceTools(missing=("ubertooth-follow",)), capabilities)
+
+        self.assertTrue(summary.passed, summary.failure_reason)
+        self.assertEqual(1, summary.not_applicable_cases)
+        results = finished(events)
+        self.assertEqual("passed", results["ubertooth-scan-help"].status)
+        (left_out,) = [e for e in events if e.event_type == "not_applicable"]
+        self.assertIn("ubertooth-follow is not in this run's tools (installed tools)",
+                      left_out.details["reason"])
+
+    def test_a_declared_bluez_tool_that_is_missing_fails(self):
+        # The capabilities say the run has it; a missing file is a failure.
+        summary, events = run_surface(SurfaceTools())
+
+        self.assertFalse(summary.passed)
+        self.assertEqual("failed", finished(events)["ubertooth-follow-help"].status)
 
     def test_a_missing_required_tool_still_fails(self):
         summary, events = run_surface(SurfaceTools(missing=("ubertooth-rx",)))
@@ -101,13 +141,17 @@ class HostCliSurfaceTests(unittest.TestCase):
         self.assertEqual("failed", results["ubertooth-rx-help"].status)
         self.assertEqual("passed", results["ubertooth-scan-help"].status)
 
-    def test_a_present_but_unusable_optional_tool_fails(self):
-        summary, events = run_surface(SurfaceTools(unusable=("ubertooth-scan",)))
+    def test_a_present_but_unusable_bluez_tool_fails(self):
+        capabilities = HostCapabilities("Host_Linux", "linux", frozenset({"ubertooth-scan"}),
+                                        basis="installed tools")
+        summary, events = run_surface(
+            SurfaceTools(missing=("ubertooth-follow",), unusable=("ubertooth-scan",)),
+            capabilities)
 
         self.assertFalse(summary.passed)
         results = finished(events)
         self.assertEqual("failed", results["ubertooth-scan-help"].status)
-        self.assertEqual("skipped", results["ubertooth-follow-help"].status)
+        self.assertNotIn("ubertooth-follow-help", results)
 
     def test_a_wrong_version_line_fails(self):
         summary, events = run_surface(SurfaceTools(broken=("ubertooth-tx",)))

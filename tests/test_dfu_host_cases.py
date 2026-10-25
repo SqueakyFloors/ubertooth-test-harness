@@ -11,6 +11,7 @@ from pathlib import Path
 from ubertooth_harness import dfuimage, refusal_cases
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.executor import CommandResult
+from ubertooth_harness.hostneeds import run_capabilities
 from ubertooth_harness.manifest import FileIdentity, SourceRevision, build_run_manifest
 from ubertooth_harness.planner import TestInvocation
 from ubertooth_harness.preflight import PreflightCheck
@@ -181,15 +182,22 @@ def run(executor, coverage="comprehensive", test_build=None):
                                None, {}, ("ubertooth-util", "-H"),
                                (r"libubertooth\s+\S+\s+\(git\-test\)",), "git-test")
         sink = CollectSink()
+        # What a macOS run without --build has, from its manifest.
+        capabilities = run_capabilities(
+            "Host_Mac", "macos", manifest.build, (a.name for a in manifest.artifacts))
         summary = NamedTestSequencer(executor, event_sink=sink).run(
             (invocation,), root / "run", run_id="named-run", manifest=manifest,
-            preflight_checks=(check,))
+            preflight_checks=(check,), capabilities=capabilities)
         return summary, sink.events
 
 
 def skipped_names(events):
     return sorted(e.details["case_name"] for e in events
                   if e.event_type == "check_finished" and e.status == "skipped")
+
+
+def not_applicable_names(events):
+    return sorted(e.details["case_name"] for e in events if e.event_type == "not_applicable")
 
 
 def names(*case_ids, coverage="comprehensive"):
@@ -246,12 +254,6 @@ class HelperTests(unittest.TestCase):
             self.assertEqual("gone.bin removed", changes[1])
             self.assertTrue(changes[2].startswith("a.dfu changed (3 bytes"))
 
-    def test_test_build_line_without_a_path_says_none(self):
-        out = io.StringIO()
-        with redirect_stdout(out):
-            self.assertEqual(0, dfuimage.main(["test-build", ""]))
-        self.assertTrue(out.getvalue().startswith("Test build: none: "))
-
 
 class CaseTests(unittest.TestCase):
 
@@ -268,7 +270,12 @@ class CaseTests(unittest.TestCase):
         for case in full:
             self.assertIsInstance(case, StateCase)
             self.assertTrue(case.capture_dir)
-            self.assertEqual((), case.artifacts)
+            if case.case_id == "sign-test-build":
+                self.assertEqual(("test_build",), case.artifacts)
+                self.assertTrue(case.needs.firmware_build)
+            else:
+                self.assertEqual((), case.artifacts)
+                self.assertFalse(case.needs)
             self.assertEqual("probe", case.steps[0].step_id)
             for step in case.steps + case.cleanup:
                 if step.step_id in ("strip", "check") and case.case_id == "sign-test-build":
@@ -283,13 +290,16 @@ class CaseTests(unittest.TestCase):
                         self.assertIn("-r", argv)
                 for path in (a for a in argv if a.startswith("/run")):
                     self.assertTrue(path.startswith("/run/captures/x"), path)
-        test_build = next(case for case in smoke if case.case_id == "sign-test-build")
-        self.assertEqual(("test_build",), test_build.optional_artifacts)
 
     def test_fork_tools_pass_smoke_and_fail_only_the_strict_case(self):
         summary, events = run(FakeDfu(), coverage="smoke")
         self.assertTrue(summary.passed, summary.failure_reason)
-        self.assertEqual(names("sign-test-build"), skipped_names(events))
+        # No firmware build: left out before the run, not skipped.
+        self.assertEqual([], skipped_names(events))
+        self.assertEqual(names("sign-test-build"), not_applicable_names(events))
+        self.assertEqual(1, summary.not_applicable_cases)
+        (left_out,) = [e for e in events if e.event_type == "not_applicable"]
+        self.assertIn("needs a firmware build", left_out.details["reason"])
         summary, events = run(FakeDfu())
         self.assertFalse(summary.passed)
         self.assertEqual(STRICT, failed_names(events))
@@ -304,6 +314,7 @@ class CaseTests(unittest.TestCase):
         summary, events = run(tools, coverage="smoke", test_build=build)
         self.assertTrue(summary.passed, summary.failure_reason)
         self.assertEqual([], skipped_names(events))
+        self.assertEqual([], not_applicable_names(events))
         self.assertTrue(any(c[-1].endswith("build.bin") and c[3:4] == ("-s",)
                             for c in tools.commands))
         summary, events = run(FakeDfu(fixed=True, bugs=("other-product",)),
@@ -338,7 +349,9 @@ class CaseTests(unittest.TestCase):
         summary, events = run(tools)
         self.assertTrue(summary.passed, summary.failure_reason)
         _a, full = cases("comprehensive")
-        self.assertEqual(len(full), len(skipped_names(events)))
+        # The no-device switch can only be known by reading the built library.
+        self.assertEqual(len(full) - 1, len(skipped_names(events)))
+        self.assertEqual(names("sign-test-build"), not_applicable_names(events))
         self.assertFalse(any(c[:2] == refusal_cases.NO_DEVICES or c[0] == "mkdir"
                              for c in tools.commands))
 

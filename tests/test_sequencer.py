@@ -139,6 +139,7 @@ class SequencerTests(unittest.TestCase):
                 [
                     "run_started",
                     "manifest",
+                    "host_capabilities",
                     "preflight_started",
                     "check_started",
                     "command_started",

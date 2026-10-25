@@ -87,8 +87,8 @@ class CatalogTests(unittest.TestCase):
         definition = builtin_catalog().get("Host CLI surface")
 
         cases = definition.command_cases({"hosts": "each"}, {}, {})
-        helps = [c for c in cases if c.argv[1:] == ("-h",) and not c.optional_tool]
-        optional = [c for c in cases if c.optional_tool]
+        helps = [c for c in cases if c.argv[1:] == ("-h",) and not c.needs]
+        optional = [c for c in cases if c.needs.bluez_tools]
 
         self.assertEqual(11, len(helps))
         self.assertEqual({"ubertooth-scan", "ubertooth-follow"}, {c.argv[0] for c in optional})
@@ -546,7 +546,9 @@ suites:
 """,
             )
 
-            with self.assertRaisesRegex(PlanningError, "platform"):
+            with self.assertRaisesRegex(
+                PlanningError, "no selected host can run it: Host_Mac: runs only on Linux"
+            ):
                 PlanCompiler(builtin_catalog(), registry).compile(plan, "slow")
 
 

@@ -7,7 +7,10 @@ ubertooth<serial>, as --extcap-interfaces lists them from
 "ubertooth-util -U all -s", and every operation but --extcap-interfaces needs
 one; a usage error is "error: ..." plus the usage line on stderr, exit 1).
 The commands run through pytools.py, which finds the run's tool and
-interpreter and skips a case that cannot run on this host.
+interpreter. The ubertooth-specan-ui cases need the Python tools build
+(hostneeds.py), so a run without ``--build --with-python`` leaves them out as
+not applicable; pytools.py still skips one at run time when the interpreter
+cannot import numpy, qtpy and a Qt binding, which only running it can tell.
 
 Comprehensive cases also check behavior the fork gets wrong at 71e1a8a, so
 they fail there:
@@ -27,6 +30,7 @@ import sys
 
 from ubertooth_harness import extcapcapture, pytools
 from ubertooth_harness.cases import CommandCase, guard_roles
+from ubertooth_harness.hostneeds import NO_NEEDS, Needs
 from ubertooth_harness.receive_cases import seconds_arg
 from ubertooth_harness.stateful import (
     CAPTURE_DIR_KEY,
@@ -53,6 +57,9 @@ def _case(case_id, name, command, args, patterns, returncodes=(0,)):
     return CommandCase(
         case_id, name, (sys.executable, _PYTOOLS, command, *args),
         tuple(patterns), _TIMEOUT_S, expected_returncodes=tuple(returncodes),
+        # ubertooth-specan-ui exists only in the Python tools build; a run
+        # without one leaves the case out as not applicable.
+        needs=Needs(python_tools=True) if command == "specan-ui" else NO_NEEDS,
         skip_returncode=pytools.SKIP_EXIT,
     )
 

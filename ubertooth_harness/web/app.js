@@ -14,6 +14,7 @@
     failed: ["✗", "failed"],
     canceled: ["■", "canceled"],
     skipped: ["–", "skipped"],
+    "not applicable": ["–", "not applicable"],
     error: ["✗", "error"],
     lost: ["?", "lost"],
     "not run": ["○", "not run"],
@@ -368,10 +369,22 @@
       if (!live.testsStarted && record.timestamp) live.testsStarted = record.timestamp;
       live.byInvocation.set(String(details.invocation_id), item);
       pushLog(`=== TEST ${name} on ${details.host ?? ""} ===`);
+    } else if (kind === "not_applicable") {
+      // Left out before the run: the host cannot run it (not a skip or failure).
+      const name = String(details.test_name ?? "");
+      if (!details.invocation_id) {
+        const item = live.items.find((entry) => entry.name === name && entry.status === "pending");
+        if (item) {
+          item.status = "not applicable";
+          item.reason = String(details.reason || "");
+        }
+      }
+      const what = details.case_name ? `${name} / ${details.case_name}` : name;
+      pushLog(`[not applicable on ${details.host ?? ""}] ${what}: ${details.reason ?? ""}`);
     } else if (kind === "test_finished") {
       const item = live.byInvocation.get(String(details.invocation_id));
       if (item) {
-        item.status = status;
+        item.status = status === "not_applicable" ? "not applicable" : status;
         item.reason = String(details.reason || "");
       }
       pushLog(`=== TEST ${details.test_name ?? ""}: ${status}${details.reason ? ": " + details.reason : ""} ===`);

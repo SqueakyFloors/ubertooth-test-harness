@@ -79,6 +79,16 @@ class _Run:
                 record = open_tests.get(details.get("invocation_id"))
                 if record is not None:
                     record["finished"] = event
+        # Left out before the run because the host cannot run them
+        # (hostneeds.py): neither skipped nor failed.
+        self.not_applicable = [
+            e.get("details", {}) for e in self.events
+            if e["event_type"] == "not_applicable"
+        ]
+        self.capabilities = next(
+            (e.get("details", {}).get("capabilities") for e in self.events
+             if e["event_type"] == "host_capabilities"), None
+        )
         self.preflight = [
             e for e in self.events
             if e["event_type"] == "check_finished"
@@ -151,6 +161,11 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
             f"{summary.get('requested_preflight_checks', 0)} preflight checks, "
             f"{summary.get('skipped_cases', 0)} skipped cases"
         )
+        if summary.get("not_applicable_cases") or summary.get("not_applicable_tests"):
+            result += (
+                f", {summary.get('not_applicable_cases', 0)} cases and "
+                f"{summary.get('not_applicable_tests', 0)} tests not applicable on this host"
+            )
         if summary.get("failure_reason"):
             result += f"; {summary['failure_reason']}"
     else:
@@ -188,6 +203,16 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
         rows.append(("Built tools report", build.get("host_version", "")))
     else:
         rows.append(("Built", "no (installed tools)"))
+    capabilities = run.capabilities
+    if capabilities:
+        tools = capabilities.get("bluez_tools")
+        rows.append((
+            "Host can run",
+            f"{capabilities.get('platform')} ({capabilities.get('basis')}); BlueZ tools: "
+            + ("not known" if tools is None else ", ".join(tools) or "none")
+            + "; Python tools build: " + _known(capabilities.get("python_tools"))
+            + "; firmware build: " + _known(capabilities.get("firmware_build")),
+        ))
     python = environment.get("python", {})
     if python:
         deps = ", ".join(f"{k} {v}" for k, v in sorted(environment.get("dependencies", {}).items()))
@@ -259,10 +284,34 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
     return rows
 
 
+def _known(value) -> str:
+    return "not known" if value is None else "yes" if value else "no"
+
+
+def _not_applicable_section(run: _Run) -> list[str]:
+    """What the run left out because the host cannot run it, and why."""
+    if not run.not_applicable:
+        return []
+    lines = [
+        "", "## Not applicable", "",
+        "Left out before the run because this host cannot run them; "
+        "not skipped and not failed.", "",
+        "| Test | Case | Host | Reason |", "|---|---|---|---|",
+    ]
+    for item in run.not_applicable:
+        test = item.get("invocation_id") or item.get("test_name", "")
+        lines.append(
+            f"| {_cell(test)} | {_cell(item.get('case_name') or '(whole test)')} "
+            f"| {_cell(item.get('host', ''))} | {_cell(item.get('reason', ''))} |"
+        )
+    return lines
+
+
 def _results_table(run: _Run) -> list[str]:
     lines = [
-        "| Test | Host and resources | Result | Failed cases | Skipped cases | Duration | Reason |",
-        "|---|---|---|---|---|---|---|",
+        "| Test | Host and resources | Result | Failed cases | Skipped cases "
+        "| Not applicable cases | Duration | Reason |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for record in run.tests:
         started = record["started"]
@@ -272,6 +321,7 @@ def _results_table(run: _Run) -> list[str]:
         where = details.get("host", "") + (f" ({resources})" if resources else "")
         if finished is None:
             status, failed, skipped, reason = "did not finish", "", "", ""
+            not_applicable = ""
         else:
             fd = finished["details"]
             status = finished["status"]
@@ -281,13 +331,15 @@ def _results_table(run: _Run) -> list[str]:
                 # Guard checks are not cases; show them beside the case count.
                 failed = f"{failed} + {guards} guard check{'s' if guards != 1 else ''}"
             skipped = fd.get("skipped_cases", "")
+            not_applicable = fd.get("not_applicable_cases", "")
             reason = fd.get("reason", "")
         lines.append(
             f"| {_cell(details.get('invocation_id'))} | {_cell(where)} | {_cell(status)} "
-            f"| {failed} | {skipped} | {_duration(started, finished)} | {_cell(reason)} |"
+            f"| {failed} | {skipped} | {not_applicable} | {_duration(started, finished)} "
+            f"| {_cell(reason)} |"
         )
     if not run.tests:
-        lines.append("| (no tests started) | | | | | | |")
+        lines.append("| (no tests started) | | | | | | | |")
     return lines
 
 
@@ -395,6 +447,12 @@ def _transcript(run: _Run) -> list[str]:
             line(event, f"=== RUN {event['run_id']}: {run_title} ===")
         elif kind == "manifest":
             line(event, "[M] manifest recorded")
+        elif kind == "not_applicable":
+            what = details.get("test_name", "")
+            if details.get("case_name"):
+                what += f" / {details['case_name']}"
+            line(event, f"[M] not applicable on {details.get('host', '')}: {what}: "
+                        f"{details.get('reason', '')}")
         elif kind == "build_started":
             line(event, "=== BUILD ===")
         elif kind == "build_step_started":
@@ -506,7 +564,7 @@ def render_run(events: Sequence[Mapping], *, redact_serials: bool = False, trans
     run = _Run(events)
     lines = [f"# Ubertooth test run `{run.run_id}`", "", "| | |", "|---|---|"]
     lines += [f"| {_cell(key)} | {_cell(value)} |" for key, value in _setup_rows(run)]
-    lines += ["", "## Results", ""] + _results_table(run)
+    lines += ["", "## Results", ""] + _results_table(run) + _not_applicable_section(run)
     if transcript:
         lines += ["", "## Transcript", "", LEGEND, "", "```text"] + _transcript(run) + ["```"]
     text = "\n".join(lines) + "\n"

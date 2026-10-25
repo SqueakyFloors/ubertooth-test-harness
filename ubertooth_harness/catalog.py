@@ -6,6 +6,7 @@ from types import MappingProxyType
 from typing import Callable, Mapping
 
 from ubertooth_harness.cases import CommandCase, FlashCase, guard_roles
+from ubertooth_harness.hostneeds import BLUEZ_TOOLS, NO_NEEDS, Needs, tool_needs
 from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
     COMPILE_INFO_PATTERN,
@@ -156,6 +157,16 @@ class TestDefinition:
     # "guard Ubertooth N" resource; the sequencer reads each guard before the
     # test and fails the test if any read changes.
     guards_other_ubertooths: bool = False
+    # What every case of the test needs from the host (hostneeds.py). The
+    # plan's `platforms:` argument adds a platform need (test_needs).
+    needs: Needs = NO_NEEDS
+
+    def test_needs(self, arguments: Mapping) -> tuple[Needs, ...]:
+        """The test-wide needs: the definition's and the plan's platforms."""
+        needs = [self.needs] if self.needs else []
+        if arguments.get("platforms"):
+            needs.append(Needs(platforms=tuple(arguments["platforms"])))
+        return tuple(needs)
 
     def normalize_arguments(self, raw: Mapping | None) -> Mapping:
         values = dict(raw or {})
@@ -305,7 +316,8 @@ def _host_cli_surface_cases(_arguments, _resources, _resource_identities):
         )
         for tool, returncode in expected
     ]
-    # Built only with BlueZ (libbluetooth); skipped where they are not built.
+    # Built only with BlueZ (libbluetooth); not applicable where they are not
+    # built (every macOS host).
     cases.extend(
         CommandCase(
             f"{tool}-help",
@@ -313,9 +325,9 @@ def _host_cli_surface_cases(_arguments, _resources, _resource_identities):
             (tool, "-h"),
             (re.escape(tool),),
             expected_returncodes=(1,),
-            optional_tool=True,
+            needs=tool_needs(tool),
         )
-        for tool in ("ubertooth-scan", "ubertooth-follow")
+        for tool in BLUEZ_TOOLS
     )
     # Host-tools version, no device needed: the long -H form and -V on the
     # tools that have it.
