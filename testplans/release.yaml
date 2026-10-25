@@ -13,6 +13,12 @@ suites:
         hosts: each
         coverage: comprehensive
 
+    # No Ubertooth. Strict count-with-mode and all-with-mode fail until fork
+    # #332 and #333 are fixed.
+    - Util mode refusals:
+        hosts: each
+        coverage: comprehensive
+
     # No Ubertooth. Strict sign-unreadable-input fails until fork #305 is fixed.
     - DFU image checks:
         hosts: each

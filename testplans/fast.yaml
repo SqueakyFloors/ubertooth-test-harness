@@ -14,6 +14,11 @@ suites:
         hosts: each
         coverage: smoke
 
+    # No Ubertooth: ubertooth-util -f/-i combinations are refused.
+    - Util mode refusals:
+        hosts: each
+        coverage: smoke
+
     # No Ubertooth: ubertooth-dfu image checks and -s.
     - DFU image checks:
         hosts: each
