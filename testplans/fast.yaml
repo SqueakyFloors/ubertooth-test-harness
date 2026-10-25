@@ -14,6 +14,11 @@ suites:
         hosts: each
         coverage: smoke
 
+    # No Ubertooth: ubertooth-dfu image checks and -s.
+    - DFU image checks:
+        hosts: each
+        coverage: smoke
+
     # No Ubertooth. specan-ui needs --build --with-python and numpy/qtpy,
     # else it is skipped.
     - Python tools:

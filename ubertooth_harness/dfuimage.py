@@ -1,9 +1,12 @@
-"""DFU image files and read-backs for the DFU images test.
+"""DFU image files and read-backs for the DFU images and DFU image checks tests.
 
 Run as ``python <this file> COMMAND ...`` from a transition step. Every
 command prints short summary lines (never image bytes) and exits 0 when the
 check holds, 1 when it does not, and 2 for a usage error. File commands use
-only the standard library, so they run from any working directory.
+only the standard library, so they run from any working directory. ``synth``
+writes a synthetic binary and its .dfu for runs without a firmware build,
+``make`` the bad and edge images, and ``state`` lists a directory (and, with
+``--before``, says what changed since an earlier listing).
 
 The layout follows host/ubertooth-tools/src/ubertooth-dfu.c and dfu.h:
 
@@ -28,9 +31,12 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime
+import hashlib
+import json
 import os
 from pathlib import Path
 import re
+import stat
 import struct
 import subprocess
 import sys
@@ -61,6 +67,14 @@ BAD_KINDS = (
     "corrupt", "truncated", "no-suffix", "text", "bad-signature",
     "wrong-vendor", "wrong-product",
 )
+# More images ``make`` writes for the DFU image checks test, from a valid
+# image: the first six must be refused, the last two accepted.
+EDGE_KINDS = (
+    "empty", "short", "suffix-only", "long-suffix-length", "dfu-2.0", "no-marker",
+    "dfu-1.1", "wildcard",
+)
+# The synthetic image ``synth`` writes when a run has no firmware build.
+SYNTHETIC_REVISION = "harness-synthetic"
 
 _VERSION_RE = re.compile(r"Firmware version:\s+(?P<revision>\S+)\s+\(API:")
 
@@ -95,6 +109,71 @@ def suffix_problems(image: bytes) -> list[str]:
 def _resuffix(image: bytearray) -> bytes:
     image[-4:] = struct.pack("<I", dfu_crc(bytes(image[:-4])))
     return bytes(image)
+
+
+def with_suffix(body: bytes, *, vendor=VENDOR, product=PRODUCT, bcd=BCD_DFU,
+                signature=SIGNATURE, length=SUFFIX_LENGTH) -> bytes:
+    """``body`` and a DFU suffix as ``-s`` writes it, fields overridable."""
+    data = body + struct.pack("<HHHH3sB", 0, product, vendor, bcd, signature, length)
+    return data + struct.pack("<I", dfu_crc(data))
+
+
+def synthetic_binary(revision: str = SYNTHETIC_REVISION) -> bytes:
+    """A deterministic stand-in firmware binary for runs without a build.
+
+    It carries the ``ubertooth <revision> (`` marker ``-d ... -r`` reads the
+    expected revision from, between filler bytes, and is not a whole number
+    of 256-byte blocks. It is never written to a board.
+    """
+    filler = bytes((index * 37 + 11) % 251 for index in range(4000))
+    marker = f"ubertooth {revision} (synthetic image for host-only checks)\0".encode()
+    return filler[:2048] + marker + filler[2048:]
+
+
+def make_edge(kind: str, image: bytes) -> bytes:
+    """An EDGE_KINDS image derived from the valid ``image``."""
+    body = image[:-SUFFIX_LENGTH]
+    if kind == "empty":
+        return b""
+    if kind == "short":
+        return image[:SUFFIX_LENGTH - 1]
+    if kind == "suffix-only":
+        return with_suffix(b"")
+    if kind == "long-suffix-length":
+        # bLength 200 in an 80-byte file: longer than the file itself.
+        return with_suffix(body[:64], length=200)
+    if kind == "dfu-2.0":
+        return with_suffix(body, bcd=0x0200)
+    if kind == "no-marker":
+        return with_suffix(body.replace(b"ubertooth ", b"Ubertooth "))
+    if kind == "dfu-1.1":
+        return with_suffix(body, bcd=0x0101)
+    if kind == "wildcard":
+        return with_suffix(body, vendor=0xFFFF, product=0xFFFF)
+    raise ValueError(f"unknown image kind '{kind}'")
+
+
+def directory_state(directory: Path) -> dict[str, str]:
+    """Each entry's size or "dir", mode and SHA-256 prefix, by name."""
+    state = {}
+    for entry in sorted(directory.iterdir()):
+        if entry.is_dir() and not entry.is_symlink():
+            state[entry.name] = "dir"
+            continue
+        data = entry.read_bytes()
+        mode = stat.S_IMODE(entry.stat().st_mode)
+        state[entry.name] = (f"{len(data)} bytes, mode {mode:o}, "
+                             f"sha256 {hashlib.sha256(data).hexdigest()[:16]}")
+    return state
+
+
+def state_changes(before: dict[str, str], after: dict[str, str]) -> list[str]:
+    """What differs between two directory_state() results ([] when nothing)."""
+    changes = [f"{name} added ({after[name]})" for name in after if name not in before]
+    changes += [f"{name} removed" for name in before if name not in after]
+    changes += [f"{name} changed ({before[name]} -> {after[name]})"
+                for name in before if name in after and before[name] != after[name]]
+    return changes
 
 
 def make_bad(kind: str, image: bytes) -> bytes:
@@ -457,13 +536,22 @@ def _parser() -> argparse.ArgumentParser:
     copy.add_argument("source")
     copy.add_argument("output")
     make = sub.add_parser("make", help="write a bad image")
-    make.add_argument("kind", choices=BAD_KINDS)
+    make.add_argument("kind", choices=BAD_KINDS + EDGE_KINDS)
     make.add_argument("image")
     make.add_argument("output")
+    synth = sub.add_parser("synth", help="write a synthetic binary and its .dfu")
+    synth.add_argument("binary")
+    synth.add_argument("output")
+    state = sub.add_parser("state", help="list a directory with a digest of its state")
+    state.add_argument("directory")
+    state.add_argument("--before", help="a 'Directory entries' value to compare with")
+    test_build = sub.add_parser("test-build", help="say whether the run has a test build")
+    test_build.add_argument("path", nargs="?", default="")
     check = sub.add_parser("check-suffix", help="OUTPUT is BINARY plus a valid suffix")
     check.add_argument("binary")
     check.add_argument("output")
     check.add_argument("reference")
+    check.add_argument("--reference-name", default="the build's .dfu")
     same = sub.add_parser("same")
     same.add_argument("first")
     same.add_argument("second")
@@ -516,9 +604,42 @@ def _main(args, board_factory) -> int:
         print("Copied")
         return 0
     if command == "make":
-        data = make_bad(args.kind, Path(args.image).read_bytes())
-        Path(args.output).write_bytes(data)
-        print(f"Bad image ({args.kind}): {len(data)} bytes")
+        source = Path(args.image).read_bytes()
+        if args.kind in BAD_KINDS:
+            data = make_bad(args.kind, source)
+            Path(args.output).write_bytes(data)
+            print(f"Bad image ({args.kind}): {len(data)} bytes")
+        else:
+            data = make_edge(args.kind, source)
+            Path(args.output).write_bytes(data)
+            print(f"Edge image ({args.kind}): {len(data)} bytes")
+        return 0
+    if command == "synth":
+        binary = synthetic_binary()
+        Path(args.binary).write_bytes(binary)
+        Path(args.output).write_bytes(with_suffix(binary))
+        print(f"Synthetic image: {len(binary)} bytes, .dfu {len(binary) + SUFFIX_LENGTH} "
+              f"bytes, revision {SYNTHETIC_REVISION}")
+        return 0
+    if command == "state":
+        state = directory_state(Path(args.directory))
+        for name, value in state.items():
+            print(f"{name}: {value}")
+        print("Directory entries: " + json.dumps(state, sort_keys=True))
+        if args.before is None:
+            return 0
+        changes = state_changes(json.loads(args.before), state)
+        if changes:
+            print("Directory changed: " + "; ".join(changes))
+            return 1
+        print(f"Directory unchanged: {len(state)} entries")
+        return 0
+    if command == "test-build":
+        if not args.path:
+            print("Test build: none: this run has no firmware build (run with --build "
+                  "--with-firmware, or --artifact \"test build=PATH\")")
+        else:
+            print(f"Test build: {args.path}")
         return 0
     if command == "check-suffix":
         binary = Path(args.binary).read_bytes()
@@ -529,12 +650,12 @@ def _main(args, board_factory) -> int:
                 f"{len(output)} bytes do not start with the {len(binary)}-byte binary"
             )
         if output != Path(args.reference).read_bytes():
-            problems.append("differs from the build's .dfu")
+            problems.append(f"differs from {args.reference_name}")
         if problems:
             print("DFU suffix wrong: " + "; ".join(problems))
             return 1
         print(f"DFU suffix: VID:PID {VENDOR:04x}:{PRODUCT:04x}, bcdDFU {BCD_DFU:04x}, "
-              "CRC ok, identical to the build's .dfu")
+              f"CRC ok, identical to {args.reference_name}")
         return 0
     if command == "same":
         if Path(args.first).read_bytes() != Path(args.second).read_bytes():

@@ -228,6 +228,10 @@ class StateCase:
     # and the Ubertooth source's expected revision as
     # context[EXPECTED_REVISION_KEY]; a run without them is refused.
     artifacts: tuple[str, ...] = ()
+    # Labels the steps use when the run has them: the path is recorded (and
+    # hashed again) as for ``artifacts``, but a run without one is not
+    # refused; the key is then absent and the steps decide (normally skip).
+    optional_artifacts: tuple[str, ...] = ()
     state_changing: bool = field(default=True, init=False)
 
     def __post_init__(self):

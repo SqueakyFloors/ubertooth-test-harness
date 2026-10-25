@@ -105,7 +105,7 @@ def _dir(context):
     return require(context, CAPTURE_DIR_KEY)
 
 
-def _probe(tool: str) -> Step:
+def probe_step(tool: str) -> Step:
     return Step(
         "probe", f"Check that the built libubertooth knows UBERTOOTH_TEST_NO_DEVICES "
         f"and {tool} is installed (reads the library, runs no tool)",
@@ -139,7 +139,7 @@ def _check(absent, kept, step_id="check") -> Step:
     )
 
 
-def _tool_step(step_id, tool, words, *, returncodes=(1,), patterns=(),
+def tool_step(step_id, tool, words, *, returncodes=(1,), patterns=(),
                forbidden=(NO_BOARD_NOTE,), check=None) -> Step:
     """One tool command. ``words`` are strings, or ("file", name) for a path
     in the capture directory."""
@@ -209,11 +209,11 @@ def _refusal_case(tool: Tool, option: str, extension: str, way) -> StateCase:
         f"{short}-{option[1:]}-{slug}", f"{short} {option}: {label} creates and "
         "truncates nothing",
         (
-            _probe(tool.name),
+            probe_step(tool.name),
             _seed(seeded),
-            _tool_step("refuse-new", tool.name, (option, ("file", new)) + extra,
+            tool_step("refuse-new", tool.name, (option, ("file", new)) + extra,
                        returncodes=returncodes, patterns=patterns),
-            _tool_step("refuse-kept", tool.name, (option, ("file", kept)) + extra,
+            tool_step("refuse-kept", tool.name, (option, ("file", kept)) + extra,
                        returncodes=returncodes, patterns=patterns),
             _check(absent, unchanged),
         ),
@@ -229,10 +229,10 @@ def _extra_capture_cases():
     btle = _case(
         "btle-q-stdout-extra", "btle -q - -q <file>: the extra-file note is on stderr",
         (
-            _probe("ubertooth-btle"),
+            probe_step("ubertooth-btle"),
             # Accepted, so the PCAP header goes to stdout and the board lookup
             # finds none: the note must not be in that capture.
-            _tool_step("accepted", "ubertooth-btle",
+            tool_step("accepted", "ubertooth-btle",
                        ("-q", "-", "-q", ("file", "extra.pcap")),
                        patterns=(_EXTRA + r"\S*extra\.pcap", NO_BOARD_NOTE),
                        forbidden=(), check=_no_extra_on_stdout),
@@ -249,8 +249,8 @@ def _extra_capture_cases():
             f"{short}-{option[1:]}-repeated-stray",
             f"{short} {option} twice and a stray word: the note is on stderr",
             (
-                _probe(tool),
-                _tool_step("refuse", tool, (option, ("file", first), option,
+                probe_step(tool),
+                tool_step("refuse", tool, (option, ("file", first), option,
                                             ("file", second), STRAY),
                            patterns=(_EXTRA + rf"\S*{second}", _STRAY_PATTERN),
                            check=_no_extra_on_stdout),
@@ -266,10 +266,10 @@ def _comprehensive_cases():
 
     def simple(case_id, name, tool, words, patterns, absent, expected, *,
                seeded=(), kept=()):
-        steps = [_probe(tool)]
+        steps = [probe_step(tool)]
         if seeded:
             steps.append(_seed(seeded))
-        steps += [_tool_step("refuse", tool, words, patterns=patterns),
+        steps += [tool_step("refuse", tool, words, patterns=patterns),
                   _check(absent, kept)]
         cases.append(_case(case_id, name, steps, expected))
 
@@ -305,8 +305,8 @@ def _comprehensive_cases():
         returncodes = (spec.help_returncode,)
         cases.append(_case(
             f"{short}-d-repeated-help", f"{short} -d twice with -h", (
-                _probe(tool),
-                _tool_step("refuse", tool, ("-d", ("file", "first.dump"), "-d",
+                probe_step(tool),
+                tool_step("refuse", tool, ("-d", ("file", "first.dump"), "-d",
                                             ("file", "second.dump"), "-h"),
                            returncodes=returncodes, patterns=(spec.usage,)),
                 _check(("first.dump", "second.dump"), ()),
@@ -328,12 +328,12 @@ def _comprehensive_cases():
     # refuses the command, but -s has already written the .dfu.
     cases.append(_case(
         "dfu-s-bad-image", "dfu -s <file.bin> -d <bad image> writes no .dfu", (
-            _probe("ubertooth-dfu"),
+            probe_step("ubertooth-dfu"),
             _seed(("new.bin", "kept.bin", "kept.dfu", "bad.dfu")),
-            _tool_step("refuse-new", "ubertooth-dfu",
+            tool_step("refuse-new", "ubertooth-dfu",
                        ("-s", ("file", "new.bin"), "-d", ("file", "bad.dfu")),
                        patterns=(r"Signature check failed",)),
-            _tool_step("refuse-kept", "ubertooth-dfu",
+            tool_step("refuse-kept", "ubertooth-dfu",
                        ("-s", ("file", "kept.bin"), "-d", ("file", "bad.dfu")),
                        patterns=(r"Signature check failed",)),
             _check(("new.dfu",), ("new.bin", "kept.bin", "kept.dfu", "bad.dfu")),
