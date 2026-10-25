@@ -248,11 +248,13 @@ stored.
 instead of opening one (libubertooth, fork `b6d8ede`). Its first step reads
 the bytes of the libubertooth beside the tool on `PATH` (never running a tool)
 and skips the case when that library lacks the variable's name (only the built
-library can tell). The `ubertooth-follow` cases need BlueZ, so they are not
-applicable on macOS. Each case seeds files with
-known contents in its own capture directory, refuses one command naming a new
-file and one naming a seeded file, then checks that nothing was created,
-truncated, or left behind (`ubertooth_harness/refusal.py`).
+library can tell). The `ubertooth-follow` and `ubertooth-scan` cases need
+BlueZ, so they are not applicable on macOS. Each file-option case seeds files
+with known contents in its own capture directory, refuses one command naming a
+new file and one naming a seeded file, then checks that nothing was created,
+truncated, or left behind (`ubertooth_harness/refusal.py`). The stray-word
+cases on `ubertooth-scan` and `ubertooth-follow` name no file and seed none:
+each refuses one command and checks that its capture directory stays empty.
 
 `Util mode refusals` runs `ubertooth-util` the same way, with the same skip,
 for the mode options the harness never runs on a board: `-f` (DFU) and `-i`
@@ -314,7 +316,7 @@ run.
 
 | Needs | Cases | Not applicable when |
 |---|---|---|
-| BlueZ (`ubertooth-scan`, `ubertooth-follow`) | `Host CLI surface` scan and follow `-h`; every `follow` case of `Refused command lines` | macOS (no BlueZ): Linux only; on Linux, a run that uses installed tools without them on `PATH` (a Linux `--build` configures with `REQUIRE_ALL=ON`, so it always has them) |
+| BlueZ (`ubertooth-scan`, `ubertooth-follow`) | `Host CLI surface` scan and follow `-h`; every `follow` and `scan` case of `Refused command lines` | macOS (no BlueZ): Linux only; on Linux, a run that uses installed tools without them on `PATH` (a Linux `--build` configures with `REQUIRE_ALL=ON`, so it always has them) |
 | Python tools build | `Python tools` `ubertooth-specan-ui -h` | the run has no `--build --with-python` |
 | firmware build | `DFU image checks` `sign-test-build` | the run has no `--build --with-firmware` and no `--artifact "test build=PATH"` |
 | platform | plan entries with `platforms:` (Flash reliability, Exclusive Ubertooth topology, MAC polling soak; the `exclusive` and `mac-polling` plans list Linux only) | the host's platform is not listed |

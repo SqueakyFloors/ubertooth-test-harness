@@ -18,9 +18,9 @@ before that, so the switch's "no board is selected" note is forbidden in the
 refusals. Forks before b6d8ede ignore the switch: the first step reads the
 built libubertooth's bytes (refusal.py probe, never running a tool) and the
 case skips when it lacks the variable's name. That is a runtime skip because
-only the built library can tell. The ubertooth-follow cases declare that they
-need BlueZ (hostneeds.py), so on a host without it (every macOS host) they
-are left out before the run as not applicable.
+only the built library can tell. The ubertooth-follow and ubertooth-scan
+cases declare that they need BlueZ (hostneeds.py), so on a host without it
+(every macOS host) they are left out before the run as not applicable.
 
 The BlueZ-only ubertooth-scan and ubertooth-follow must also refuse a stray
 word (the one argument rule): smoke checks a stray word on each, and
