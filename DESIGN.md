@@ -11,7 +11,7 @@ checkoff, and a countdown/ETA in a web GUI.
 > compilation, simulated port restoration, grouped and stateful command cases,
 > per-run builds, and flash reliability as a plan test are implemented. Each run
 > writes one run.jsonl and one report.md. The persistent target runner
-> (protocol v1, outbound-only to a loopback controller) is implemented and
+> (protocol v2, outbound-only to a loopback controller) is implemented and
 > tested against a stub controller. The controller (target registry, run
 > dispatch, results store, REST and live WebSocket API; `127.0.0.1` only) is
 > implemented and tested against scripted runners and the real runner, and it
@@ -56,7 +56,7 @@ checkoff, and a countdown/ETA in a web GUI.
   `/api/runs/{id}/cancel`. `/ws/live` fans out target status changes, run
   updates, and (with `?run_id=`) one run's events to browsers, best effort: a
   browser that falls behind is disconnected, never the runner. `/ws/runner`
-  speaks protocol v1. Each run is a flat directory
+  speaks protocol v2. Each run is a flat directory
   `<results dir>/<run_id>/` (`run.json`, `run.jsonl`, `report.md`), with the
   results directory outside the repository by default
   (`$XDG_DATA_HOME/ubertooth-harness/controller/runs`). `GET /` returns a
@@ -91,8 +91,9 @@ the runner refuses any controller URL whose host is not loopback (`127.0.0.1`,
 connects to the checked address itself, ignores proxies, and follows no HTTP
 redirects.
 
-Implemented protocol, version 1 (`ubertooth_harness/protocol.py`). Every
-message is one JSON text frame `{"version": 1, "type": ..., ...fields}`. Each
+Implemented protocol, version 2 (`ubertooth_harness/protocol.py`; version 2
+added the run's `commit`). Every message is one JSON text frame
+`{"version": 2, "type": ..., ...fields}`. Each
 type has an exact field set; the receiver rejects any other version, unknown
 type, missing or extra field, or wrongly typed value, and does not act on it
 (the runner answers `protocol_error {reason}`). Inbound messages to the runner
@@ -104,7 +105,7 @@ Controller → target runner:
 
 | Type | Fields |
 |------|--------|
-| `run` | `request_id`, `ref` (git ref resolved in the runner's Ubertooth checkout; no whitespace, no leading `-`), `plan` (name of `<plans dir>/<plan>.yaml`), `suite`, `tests` (exact test names; empty = whole suite), `build` (bool) |
+| `run` | `request_id`, `ref` (git ref name, for the record; no whitespace, no leading `-`), `commit` (the full commit the controller listed for `ref`, which the runner runs; `null` only when the controller could not list refs, and then the runner resolves `ref` in its own Ubertooth checkout), `plan` (name of `<plans dir>/<plan>.yaml`), `suite`, `tests` (exact test names; empty = whole suite), `build` (bool) |
 | `cancel` | `run_id`, `reason` |
 
 Target runner → controller:
@@ -143,9 +144,9 @@ Semantics:
   runner is busy.
 - Controller side: the first message must be a valid `register` or the
   connection is closed (1008). Later malformed or out-of-place messages are
-  counted on the target and ignored; v1 has no controller → runner error
+  counted on the target and ignored; the protocol has no controller → runner error
   message. A target is offline after three heartbeat intervals without a
-  valid message; only a message that decodes as protocol v1 resets the timer,
+  valid message; only a message that decodes as the current protocol resets the timer,
   and malformed messages do not. Events are stored once per `(run_id, sequence)`, including across
   controller restarts; a run the controller did not start (for example one
   that outlived a controller restart) is adopted when it is the target's
@@ -638,8 +639,11 @@ by the REST API and `/ws/live`.
   `GET /api/refs`, which runs `git ls-remote` against the configured
   repository and caches for 60 s) + plan and suite selectors
   (`GET /api/plans`) + one target + build toggle → "Run". The controller
-  refuses a ref that is not in the list or a full commit ID (422); when the
-  list cannot be fetched it passes the ref on unchecked and logs a warning. One target per run; a multiselect is a later step.
+  refuses a ref that is not in the list or a full commit ID (422). The run
+  request carries the commit listed for the ref (the GUI sends the commit it
+  showed; a ref that has moved since is refused with 409), and the runner
+  runs exactly that commit. When the list cannot be fetched it passes the ref
+  on unchecked and logs a warning. One target per run; a multiselect is a later step.
 - **Live run:** the suite rendered as a checklist that ticks in real time
   from the run's events (✓ passed / ✗ failed / … running / ○ pending, always
   with text, in an `aria-live` region), the stage, elapsed time, Cancel, and a

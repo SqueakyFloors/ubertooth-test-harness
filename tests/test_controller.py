@@ -1,6 +1,6 @@
 """Controller service on 127.0.0.1 with an ephemeral port and no hardware.
 
-Most tests drive the controller with a scripted protocol-v1 runner; one runs
+Most tests drive the controller with a scripted protocol-v2 runner; one runs
 the real target runner end to end with the Host-only plan the runner tests
 use.
 """
@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -93,7 +94,7 @@ def event(run_id, sequence, event_type="test_started", status="running", **detai
 
 
 class FakeRunner:
-    """Scripted protocol-v1 runner over a real loopback WebSocket."""
+    """Scripted protocol-v2 runner over a real loopback WebSocket."""
 
     def __init__(self, port):
         self.url = f"ws://127.0.0.1:{port}/ws/runner"
@@ -196,7 +197,7 @@ class BindTests(ControllerTestCase):
         self.assertEqual({"127.0.0.1"}, addresses)
         status, payload, _ = await self.http("GET", "/")
         self.assertEqual(200, status)
-        self.assertEqual(1, payload["protocol_version"])
+        self.assertEqual(2, payload["protocol_version"])
         self.assertEqual("127.0.0.1", payload["bind"])
         self.assertIn("POST /api/targets/{host}/runs", payload["endpoints"])
         # No CDN-backed docs pages.
@@ -391,8 +392,8 @@ class RunTests(ControllerTestCase):
             )
             self.assertEqual("run", message["type"])
             self.assertEqual(
-                ("v1.2", "fast", "fast", ["Host version"], True),
-                (message["ref"], message["plan"], message["suite"],
+                ("v1.2", COMMIT, "fast", "fast", ["Host version"], True),
+                (message["ref"], message["commit"], message["plan"], message["suite"],
                  message["tests"], message["build"]),
             )
             await runner.send("run_accepted", request_id=message["request_id"], run_id="run-1")
@@ -438,6 +439,7 @@ class RunTests(ControllerTestCase):
         self.assertEqual(str(runner_dir), record["runner_run_directory"])
         self.assertEqual("Host_A", record["target"])
         self.assertEqual("v1.2", record["ref"])
+        self.assertEqual(COMMIT, record["commit"])
         report = (directory / "report.md").read_text()
         self.assertEqual(render_run(events), report)
         self.assertIn("**passed**: 1/1 tests", report)
@@ -881,6 +883,18 @@ class EndToEndTests(ControllerTestCase):
         self._fixture_directory.cleanup()
 
     async def test_real_runner_run_through_the_controller(self):
+        # The runner's checkout has moved on (a stale or differently
+        # configured clone): HEAD there is not the commit the repository
+        # lists for HEAD. The listed commit is the one that runs.
+        git = ["git", "-C", str(self.fixture.source)]
+        listed = subprocess.run(
+            [*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        subprocess.run(
+            [*git, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+             "commit", "-q", "--allow-empty", "-m", "local only"], check=True,
+        )
+        self.controller.ref_source = fake_ref_source(f"{listed}\tHEAD\n".encode())
         service = RunnerService(
             self.fixture.config(f"ws://127.0.0.1:{self.port}/ws/runner"),
             enumerator=StubEnumerator(), log=self.logs.append,
@@ -900,6 +914,9 @@ class EndToEndTests(ControllerTestCase):
             status, payload, _ = await self.http("GET", f"/api/runs/{run_id}")
             self.assertEqual("passed", payload["run"]["status"], payload["run"])
             self.assertEqual(0, payload["run"]["exit_code"])
+            self.assertEqual(("HEAD", listed), (payload["run"]["ref"], payload["run"]["commit"]))
+            sources = payload["events"][0]["details"]["sources"]
+            self.assertEqual(listed, sources[0]["commit"])
             runner_dir = self.fixture.output.resolve() / run_id
             on_runner = [
                 json.loads(line)

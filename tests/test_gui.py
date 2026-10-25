@@ -8,6 +8,7 @@ wires to and for HTML injection sinks.
 
 import contextlib
 import io
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -35,6 +36,7 @@ except ImportError:  # run as tests.test_gui
     )
 
 REPOSITORY = Path(__file__).resolve().parents[1]
+OTHER = "89abcdef" * 5
 SECURITY_HEADERS = {
     "x-content-type-options": "nosniff",
     "x-frame-options": "DENY",
@@ -153,6 +155,11 @@ class GuiServingTests(ControllerTestCase):
 
 class RefTests(ControllerTestCase):
 
+    async def accept(self, runner, post, message, run_id="run-1"):
+        await runner.send("run_accepted", request_id=message["request_id"], run_id=run_id)
+        status, payload, _ = await post
+        self.assertEqual(201, status, payload)
+
     def test_ls_remote_output_is_parsed(self):
         other = "f" * 40
         text = "\n".join((
@@ -241,6 +248,71 @@ class RefTests(ControllerTestCase):
             status, payload, _ = await post
             self.assertEqual(201, status, payload)
 
+    async def test_the_listed_commit_is_sent_and_recorded(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            message = await self.accepted_run(runner)
+            self.assertEqual(("main", COMMIT), (message["ref"], message["commit"]))
+        record = json.loads((self.results / "run-1" / "run.json").read_text())
+        self.assertEqual(("main", COMMIT), (record["ref"], record["commit"]))
+        status, payload, _ = await self.http("GET", "/api/runs/run-1")
+        self.assertEqual(COMMIT, payload["run"]["commit"])
+
+    async def test_a_ref_that_moved_since_it_was_listed_is_refused(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            status, payload, _ = await self.http(
+                "POST", "/api/targets/Host_A/runs",
+                {"ref": "main", "commit": OTHER, "plan": "fast", "suite": "fast"},
+            )
+            self.assertEqual(409, status, payload)
+            self.assertIn("moved", payload["detail"])
+            self.assertIn(OTHER, payload["detail"])
+            # The commit the caller saw, still current: sent unchanged.
+            post, message = await self.start_run(runner, commit=COMMIT)
+            self.assertEqual(COMMIT, message["commit"])
+            await self.accept(runner, post, message)
+
+    async def test_commit_must_be_a_full_lower_case_id(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            for commit in (COMMIT[:12], COMMIT.upper(), "main", ""):
+                with self.subTest(commit):
+                    status, payload, _ = await self.http(
+                        "POST", "/api/targets/Host_A/runs",
+                        {"ref": "main", "commit": commit, "plan": "fast",
+                         "suite": "fast"},
+                    )
+                    self.assertEqual(422, status, payload)
+            await self.accepted_run(runner)
+
+    async def test_a_name_listing_several_commits_is_refused(self):
+        self.controller.ref_source = fake_ref_source(
+            f"{COMMIT}\trefs/heads/v1\n{OTHER}\trefs/tags/v1\n".encode()
+        )
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            status, payload, _ = await self.http(
+                "POST", "/api/targets/Host_A/runs",
+                {"ref": "v1", "plan": "fast", "suite": "fast"},
+            )
+            self.assertEqual(422, status, payload)
+            self.assertIn("several commits", payload["detail"])
+            # Naming the commit itself is unambiguous.
+            post, message = await self.start_run(runner, ref=OTHER)
+            self.assertEqual((OTHER, OTHER), (message["ref"], message["commit"]))
+            await self.accept(runner, post, message)
+
+    async def test_a_full_commit_ref_is_its_own_commit(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            status, payload, _ = await self.http(
+                "POST", "/api/targets/Host_A/runs",
+                {"ref": COMMIT, "commit": OTHER, "plan": "fast", "suite": "fast"},
+            )
+            self.assertEqual(422, status, payload)
+            self.assertIn("does not match", payload["detail"])
+
     async def test_ref_listing_failure_does_not_block_runs(self):
         self.controller.ref_source = fake_ref_source(output=b"", code=128)
         status, payload, _ = await self.http("GET", "/api/refs")
@@ -251,7 +323,7 @@ class RefTests(ControllerTestCase):
             # Unlisted but well-formed: passed to the runner with a warning.
             with contextlib.redirect_stderr(io.StringIO()) as stderr:
                 message = await self.accepted_run(runner)
-            self.assertEqual("main", message["ref"])
+            self.assertEqual(("main", None), (message["ref"], message["commit"]))
             self.assertIn("not checked", stderr.getvalue())
             await runner.send("run_finished", request_id=message["request_id"],
                               run_id="run-1", status="passed", exit_code=0,
@@ -260,8 +332,17 @@ class RefTests(ControllerTestCase):
         async with FakeRunner(self.port) as runner:
             await self.registered(runner)
             with contextlib.redirect_stderr(io.StringIO()) as stderr:
-                await self.accepted_run(runner, run_id="run-2")
+                message = await self.accepted_run(runner, run_id="run-2")
             self.assertIn("no Ubertooth repository", stderr.getvalue())
+            await runner.send("run_finished", request_id=message["request_id"],
+                              run_id="run-2", status="passed", exit_code=0,
+                              run_directory="/x/run-2")
+            await wait_until(lambda: self.controller.runs["run-2"].finished_at)
+            # A commit the caller saw is still sent when nothing can be listed.
+            with contextlib.redirect_stderr(io.StringIO()):
+                post, message = await self.start_run(runner, commit=OTHER)
+            self.assertEqual(OTHER, message["commit"])
+            await self.accept(runner, post, message, "run-3")
 
     async def test_real_git_ls_remote_of_a_local_repository(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -419,6 +500,9 @@ class PageWiringTests(unittest.TestCase):
         for text in (self.html, self.js, self.css):
             self.assertNotRegex(text, r"(?i)(https?:)?//[a-z0-9.-]+\.[a-z]{2,}/")
             self.assertNotIn("@import", text)
+
+    def test_script_sends_the_commit_it_listed(self):
+        self.assertIn("commit: state.refCommits.get(", self.js)
 
     def test_script_wires_to_the_controller_endpoints(self):
         for endpoint in (

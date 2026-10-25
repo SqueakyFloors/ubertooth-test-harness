@@ -377,7 +377,9 @@ class RunnerService:
             f"--hardware={self.config.hardware}",
             f"--host={self.config.host}",
             f"--ubertooth-source={self.config.ubertooth_source}",
-            f"--ubertooth-ref={message['ref']}",
+            # The commit the controller listed for the ref, so a stale or
+            # differently configured checkout cannot substitute another one.
+            f"--ubertooth-ref={message['commit'] or message['ref']}",
             f"--run-id={run_id}",
             f"--output={self.config.output}",
         ]
@@ -421,7 +423,10 @@ class RunnerService:
         )
         self._run = run
         asyncio.create_task(self._supervise(run))
-        self.log(f"run {run_id} started ({message['plan']}/{message['suite']} @ {message['ref']})")
+        at = message["ref"]
+        if message["commit"] and message["commit"] != at:
+            at = f"{at} = {message['commit']}"
+        self.log(f"run {run_id} started ({message['plan']}/{message['suite']} @ {at})")
         await self._send("run_accepted", request_id=request_id, run_id=run_id)
         tasks.append(asyncio.create_task(self._stream(run)))
 

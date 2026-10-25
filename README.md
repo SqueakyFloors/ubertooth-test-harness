@@ -895,7 +895,10 @@ On every connection the runner sends `register` with its registry host, host
 name, OS identity, Python version, and attached Ubertooth serials, read from
 sysfs the same read-only way power isolation does (no device is opened, so no
 stop is sent; on macOS the serials are `null` with an `enumeration_error`).
-A `run` request names a git ref (resolved in `--ubertooth-source`), a plan in
+A `run` request names a git ref and the commit the controller listed for it
+(the runner runs exactly that commit, which must be in `--ubertooth-source`;
+only when the controller could not list refs is the commit `null` and the ref
+resolved in `--ubertooth-source`), a plan in
 `--plans-dir` (`fast` is `testplans/fast.yaml`), a suite, optional exact test
 names, and whether to `--build`. The runner starts `run-suite` in this harness
 environment with a new run ID, answers `run_accepted`, and forwards every
@@ -915,7 +918,8 @@ run.jsonl, so the controller deduplicates by `(run_id, sequence)`. SIGINT,
 SIGTERM, or SIGHUP stops the runner after cancelling and waiting for an
 active run.
 
-Messages are JSON objects with `"version": 1` and a `type`; each type has an
+Messages are JSON objects with `"version": 2` and a `type` (version 2 added
+the run's `commit`; a version 1 runner or controller is refused); each type has an
 exact field set, and anything else (unknown version or type, a missing or
 extra field, a wrong value) gets `protocol_error` and is not acted on. The
 schema is in [`ubertooth_harness/protocol.py`](ubertooth_harness/protocol.py)
@@ -955,8 +959,16 @@ repository). It defaults to the public fork, the same repository CI builds. A
 run may only name a ref from that list (or `HEAD`) or a full commit ID;
 anything else is refused with 422 before the runner is asked. If the list
 cannot be fetched (for example an offline lab), the ref is passed to the
-runner unchecked and the controller logs a warning. The ref is still resolved in the runner's
-`--ubertooth-source` checkout, so keep that checkout fetched. `--plans-dir`
+runner unchecked and the controller logs a warning. The run request carries
+the commit the list gives for the ref, and the runner runs that commit, not
+its own checkout's idea of the ref, so a stale or differently configured
+`--ubertooth-source` cannot substitute another commit; the commit must be
+present there (keep it fetched), or the run ends with `run_error`. The GUI
+sends the commit it showed: if the ref has moved since the page listed it,
+the start is refused (409, reload the refs). A name that is both a branch and
+a tag at different commits is refused (422); name the commit instead. The
+commit is recorded as `commit` in the run's `run.json` and shown next to the
+ref in the GUI. `--plans-dir`
 is the directory of plans the GUI lists (default `testplans/`).
 
 Start a runner on the same machine against it:
@@ -1030,13 +1042,13 @@ Endpoints (JSON unless noted; `GET /` lists them):
 | `GET /api/refs` | `{"repository", "refs": [{"name", "kind", "commit"}], "fetched_at"}` from `git ls-remote` (`kind` is `default`, `branch` or `tag`); 503 if it cannot be listed |
 | `GET /api/plans` | every `<plan>.yaml` in `--plans-dir` with its suites, test names, per-test `estimated_s` (from the `duration` argument, else null) and the suite total when every test has one; a plan that does not load is listed with its `error` |
 | `GET /api/targets`, `GET /api/targets/{host}` | registry: host, hostname, OS, Python, Ubertooth serials, last heartbeat, `online`/`offline`, connected, active run |
-| `POST /api/targets/{host}/runs` | start a run with the protocol `run` fields: `{"ref", "plan", "suite", "tests": [], "build": false}`; 201 with the run, 409 busy, offline, or rejected by the runner, 422 invalid or a ref not in `/api/refs` (full commit IDs are accepted), 504 no answer |
+| `POST /api/targets/{host}/runs` | start a run with the protocol `run` fields: `{"ref", "commit": null, "plan", "suite", "tests": [], "build": false}` (`commit`, optional, is the full commit the caller saw listed for `ref`); 201 with the run (including the `commit` sent to the runner), 409 busy, offline, rejected by the runner, or `ref` moved away from `commit`, 422 invalid, a ref not in `/api/refs` (full commit IDs are accepted), or a name listing several commits, 504 no answer |
 | `GET /api/runs[?target=HOST]` | runs, newest first |
 | `GET /api/runs/{run_id}` | status, every event, and the failure summary (`failures`) |
 | `GET /api/runs/{run_id}/report.md` | the run's report (Markdown) |
 | `POST /api/runs/{run_id}/cancel` | `{"reason": ""}`; 202 once the runner accepts |
 | `WS /ws/live[?run_id=ID]` | browser stream: a `snapshot`, then `target` and `run` updates, plus that run's `event` records |
-| `WS /ws/runner` | target runner protocol v1 |
+| `WS /ws/runner` | target runner protocol v2 |
 
 Every request and WebSocket handshake must carry `Host: 127.0.0.1:PORT` or
 `localhost:PORT` and, if it has an `Origin`, that same origin (runner
@@ -1049,7 +1061,7 @@ manifest record); a malformed or out-of-place message is counted on the
 target and ignored, and a first message that is not a valid `register`
 closes the connection. A target is `offline` after three heartbeat intervals
 without a valid message, and runs cannot be started on it: only a message that
-decodes as protocol v1 resets the offline timer, and malformed messages do
+decodes as protocol v2 resets the offline timer, and malformed messages do
 not. The controller allows one
 outstanding start request per target and refuses a target whose runner reports
 an active run. Each run is a flat directory `<results dir>/<run_id>/` with
