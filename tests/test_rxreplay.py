@@ -102,7 +102,8 @@ class ReplayRx:
     switches on a misbehavior per case: decoys, no-uap, wrong-uap, ignores-l,
     ignores-e, link-type, no-capture, dump-mangled, survey-no-uap,
     partial-record, empty-fails, missing-exit-0, u-fails, wrong-u-confirms,
-    dump-open-exit-0, dump-open-usage.
+    dump-open-exit-0, dump-open-usage, dump-open-stray (leaves a file beside
+    the fixture), dump-open-touches (rewrites the fixture).
     """
 
     def __init__(self, *, fixed=True, bugs=()):
@@ -160,6 +161,10 @@ class ReplayRx:
             prefix = "error: " if self.fixed else ""
             usage = ("ubertooth-rx - passive Classic Bluetooth discovery/decode\n"
                      if "dump-open-usage" in self.bugs else "")
+            if "dump-open-stray" in self.bugs:
+                (path.parent / "x.bin.tmp").write_bytes(b"")
+            if "dump-open-touches" in self.bugs:
+                path.write_bytes(path.read_bytes()[:-1])
             return self._result(command, code, "",
                                 f"{prefix}{dump}: No such file or directory\n{usage}")
         data = path.read_bytes()
@@ -412,6 +417,25 @@ class FixtureTests(unittest.TestCase):
             self.assertEqual(1, rxreplay.main(["dump-check", str(self.dir / "no"), str(path)]))
         self.assertIn("does not exist", out.getvalue())
 
+    def test_only_fixture(self):
+        path, _out = self.make()
+        base = 1_700_000_000
+        self.assertEqual("", rxreplay.only_fixture(self.dir, path.name, base, "full"))
+        self.assertIn("changed", rxreplay.only_fixture(self.dir, path.name, base + 1, "full"))
+        (self.dir / "stray").write_bytes(b"")
+        self.assertIn("unexpected file(s) left behind: stray",
+                      rxreplay.only_fixture(self.dir, path.name, base, "full"))
+        (self.dir / "stray").unlink()
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(0, rxreplay.main(["only-fixture", str(self.dir), path.name,
+                                               "--base-time", str(base)]))
+        self.assertIn(f"Replay directory: only {path.name}, unchanged", out.getvalue())
+        path.unlink()
+        self.assertIn("is gone", rxreplay.only_fixture(self.dir, path.name, base, "full"))
+        self.assertIn("not a directory",
+                      rxreplay.only_fixture(self.dir / "no", path.name, base, "full"))
+
     def test_files_lists_names_and_sizes(self):
         (self.dir / "a.bin").write_bytes(b"123")
         out = io.StringIO()
@@ -498,7 +522,8 @@ class ReplayCaseTests(unittest.TestCase):
         self.assertEqual({}, dict(definition.hardware_roles or {}))
         _a, smoke = replay_cases("smoke")
         self.assertEqual(["replay-decode-lap", "replay-lap-uap", "replay-pcapng",
-                          "replay-pcap"], [c.case_id for c in smoke])
+                          "replay-pcap", "replay-dump-unopenable"],
+                         [c.case_id for c in smoke])
         _a, full = replay_cases("comprehensive")
         self.assertEqual(18, len(full))
         context = {"capture dir": "/run/captures/x"}
@@ -519,9 +544,12 @@ class ReplayCaseTests(unittest.TestCase):
         argv = cases[0].steps[0].resolve_argv({"capture dir": "/c"})
         self.assertEqual(str(1_800_000_000 - 3600), argv[argv.index("--base-time") + 1])
 
-    def test_old_fork_passes_smoke_and_fails_only_the_fixed_cases(self):
-        summary, _events = run_replay(ReplayRx(fixed=False), coverage="smoke")
-        self.assertTrue(summary.passed, summary.failure_reason)
+    def test_old_fork_fails_only_the_fixed_cases(self):
+        # Smoke follows fork main: before 5ac22a8 the -d open failure has no
+        # "error: " prefix, so only that smoke case fails there.
+        summary, events = run_replay(ReplayRx(fixed=False), coverage="smoke")
+        self.assertFalse(summary.passed)
+        self.assertEqual(["-i -d to a file it cannot open"], failed_names(events))
         summary, events = run_replay(ReplayRx(fixed=False))
         self.assertFalse(summary.passed)
         self.assertEqual(["-i -d to a file it cannot open",
@@ -560,6 +588,8 @@ class ReplayCaseTests(unittest.TestCase):
             "missing-exit-0": {"-i of a missing file"},
             "dump-open-exit-0": {"-i -d to a file it cannot open"},
             "dump-open-usage": {"-i -d to a file it cannot open"},
+            "dump-open-stray": {"-i -d to a file it cannot open"},
+            "dump-open-touches": {"-i -d to a file it cannot open"},
             "u-fails": {"-i -l -u with the right UAP"},
             "wrong-u-confirms": {"-i -l -u with a wrong UAP confirms nothing"},
         }

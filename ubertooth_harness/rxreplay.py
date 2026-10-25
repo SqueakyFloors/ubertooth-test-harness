@@ -25,6 +25,11 @@ directory, and prints summaries only:
     python rxreplay.py fixture PATH [--variant full|truncated|empty]
     python rxreplay.py dump-check DUMP FIXTURE [--lap HEX]
     python rxreplay.py files DIR
+    python rxreplay.py only-fixture DIR NAME --base-time T [--variant V]
+
+``only-fixture`` passes when DIR holds NAME and nothing else, and NAME still
+holds the fixture written with that base time and variant: the directory as
+it was before the command under test ran.
 """
 
 from __future__ import annotations
@@ -371,6 +376,21 @@ def dump_check(dump: Path, fixture: Path, lap: int | None = None) -> str:
     return "records differ"  # pragma: no cover
 
 
+def only_fixture(directory: Path, name: str, base_time: int, variant: str) -> str:
+    """'' when ``directory`` is exactly the fixture step's output, else why not."""
+    if not directory.is_dir():
+        return f"{directory} is not a directory"
+    extra = sorted(entry.name for entry in directory.iterdir() if entry.name != name)
+    if extra:
+        return "unexpected file(s) left behind: " + ", ".join(extra)
+    path = directory / name
+    if not path.is_file():
+        return f"{name} is gone"
+    if path.read_bytes() != fixture_bytes(base_time, variant):
+        return f"{name} changed ({path.stat().st_size} bytes)"
+    return ""
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="rxreplay.py")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -384,6 +404,11 @@ def main(argv: list[str] | None = None) -> int:
     dump.add_argument("--lap", type=lambda text: int(text, 16), default=None)
     files = sub.add_parser("files", help="list a directory's files and sizes")
     files.add_argument("directory", type=Path)
+    only = sub.add_parser("only-fixture", help="the directory holds only the fixture")
+    only.add_argument("directory", type=Path)
+    only.add_argument("name")
+    only.add_argument("--base-time", type=int, required=True)
+    only.add_argument("--variant", choices=("full", "truncated", "empty"), default="full")
     args = parser.parse_args(argv)
 
     if args.command == "fixture":
@@ -402,6 +427,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Replay dump problem: {problem}")
             return 1
         print(f"Replay dump: {len(packet_record_indices(args.lap))} records match the fixture")
+        return 0
+    if args.command == "only-fixture":
+        problem = only_fixture(args.directory, args.name, args.base_time, args.variant)
+        if problem:
+            print(f"Replay directory problem: {problem}")
+            return 1
+        print(f"Replay directory: only {args.name}, unchanged")
         return 0
     entries = sorted(args.directory.iterdir()) if args.directory.is_dir() else []
     for entry in entries:
