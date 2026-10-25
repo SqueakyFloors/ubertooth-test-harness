@@ -110,6 +110,12 @@ class BuildPlanTests(unittest.TestCase):
             self.assertIn(f"-DCMAKE_PREFIX_PATH={prefix}", argv["host-configure"])
             for flag in ("-DINSTALL_UDEV_RULES=OFF", "-DENABLE_PYTHON=OFF", "-DREQUIRE_ALL=ON"):
                 self.assertIn(flag, argv["host-configure"])
+            # Only libbtbb's C library is built; the pinned libbtbb fork
+            # commit declares a cmake_minimum_required range, so CMake 4 needs
+            # no CMAKE_POLICY_VERSION_MINIMUM as upstream libbtbb does.
+            self.assertIn("-DENABLE_PYTHON=OFF", argv["libbtbb-configure"])
+            for step, command in argv.items():
+                self.assertNotIn("-DCMAKE_POLICY_VERSION_MINIMUM=3.5", command, step)
             for command in plan.commands:
                 self.assertNotIn("sudo", command.argv)
                 self.assertFalse(

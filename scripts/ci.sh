@@ -8,12 +8,22 @@
 # Run from the repository root. PYTHON selects the interpreter that runs
 # bootstrap.py (default python3). UBERTOOTH_SOURCE / LIBBTBB_SOURCE point the
 # build at existing clones instead of cloning from GitHub; the build always
-# uses UBERTOOTH_REF (default main) and LIBBTBB_REF (default master).
+# uses UBERTOOTH_REF (default main) and LIBBTBB_REF (default LIBBTBB_PIN).
 # Use scripts/local-ci.sh to run these checks against an exact commit.
 set -eu
 
 PYTHON=${PYTHON:-python3}
 WORK=${CI_TEMP:-${RUNNER_TEMP:-$(mktemp -d)}}
+
+# libbtbb comes from the same fork and the same pinned commit the Ubertooth
+# fork builds against, so a harness run tests the libbtbb the fork ships with
+# and a push to libbtbb cannot change a harness build. This pin is the
+# harness's own copy, deliberately: the harness never calls the fork's
+# installer. It must match the fork's pin (the LIBBTBB_REF in the fork's
+# .github/workflows/build.yml); bump it here and in README.md together, which
+# tests/test_libbtbb_pin.py checks.
+LIBBTBB_URL=https://github.com/SqueakyFloors/libbtbb.git
+LIBBTBB_PIN=84ab41fc99d172e812438bc9188f30a67216f748
 
 step() { printf '\n=== ci: %s ===\n' "$1"; }
 
@@ -66,11 +76,11 @@ run_build() {
     fi
     if [ -z "$bb" ]; then
         bb=$WORK/libbtbb
-        git clone --quiet https://github.com/greatscottgadgets/libbtbb.git "$bb"
+        git clone --quiet "$LIBBTBB_URL" "$bb"
     fi
     .venv/bin/python -m ubertooth_harness build \
         --ubertooth-source "$ut" --ubertooth-ref "${UBERTOOTH_REF:-main}" \
-        --libbtbb-source "$bb" --libbtbb-ref "${LIBBTBB_REF:-master}" \
+        --libbtbb-source "$bb" --libbtbb-ref "${LIBBTBB_REF:-$LIBBTBB_PIN}" \
         --with-python --output "$WORK/build" > "$WORK/build.json"
     cat "$WORK/build.json"
     "$WORK/build/prefix/bin/ubertooth-util" -H
@@ -87,7 +97,7 @@ run_build() {
         --plan testplans/host.yaml --suite host \
         --hardware "$WORK/host-only.yaml" --host CI_Host \
         --ubertooth-source "$ut" --ubertooth-ref "${UBERTOOTH_REF:-main}" \
-        --libbtbb-source "$bb" --libbtbb-ref "${LIBBTBB_REF:-master}" \
+        --libbtbb-source "$bb" --libbtbb-ref "${LIBBTBB_REF:-$LIBBTBB_PIN}" \
         --run-id ci-host --output "$WORK/runs"
 }
 
