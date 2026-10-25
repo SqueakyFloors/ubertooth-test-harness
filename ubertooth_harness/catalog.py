@@ -721,7 +721,8 @@ def builtin_catalog() -> TestCatalog:
             "Refused command lines",
             "A refused command line creates, truncates, and leaves behind no "
             "file, for every file option of btle, follow, rx, dump, specan, and "
-            "dfu, with no Ubertooth (UBERTOOTH_TEST_NO_DEVICES=1)",
+            "dfu, and scan and follow refuse a stray word, with no Ubertooth "
+            "(UBERTOOTH_TEST_NO_DEVICES=1)",
             MappingProxyType({"hosts": HOSTS, "coverage": COVERAGE}),
             MappingProxyType({}),
             command_builder=refusal_cases.refusal_cases,

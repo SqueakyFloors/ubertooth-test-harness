@@ -22,6 +22,10 @@ only the built library can tell. The ubertooth-follow cases declare that they
 need BlueZ (hostneeds.py), so on a host without it (every macOS host) they
 are left out before the run as not applicable.
 
+The BlueZ-only ubertooth-scan and ubertooth-follow must also refuse a stray
+word (the one argument rule): smoke checks a stray word on each, and
+comprehensive adds -h with a stray word, a bare -, and a word after --.
+
 Comprehensive coverage adds the checks that run after the option loop, a
 repeated -d, and ubertooth-dfu with an input that cannot be used, including
 -s <file.bin> -d <bad image>: since fork f2e06fa (#286) the files that are
@@ -31,6 +35,7 @@ replaces <file>.dfu (ubertooth-dfu.md).
 
 from __future__ import annotations
 
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -134,7 +139,8 @@ def _check(absent, kept, step_id="check") -> Step:
     if kept:
         what.append(", ".join(kept) + " unchanged")
     return Step(
-        step_id, "Check " + "; ".join(what) + "; nothing else in the directory",
+        step_id, "Check " + "; ".join(what) + "; nothing else in the directory"
+        if what else "Check that nothing is in the directory",
         lambda context: (sys.executable, _HELPER, "check", _dir(context),
                          "--absent", *absent, "--kept", *kept),
         output_patterns=(r"Refusal check: ",),
@@ -360,6 +366,55 @@ def _comprehensive_cases():
     return cases
 
 
+# The one argument rule on the BlueZ-only tools (fork 0b63b01;
+# opt_check_no_operands() in opt_parse.c, called right after the option loop
+# of ubertooth-scan.c and ubertooth-follow.c, before -h, any HCI device, or
+# any board): a leftover word, a bare "-", or a word after "--" is refused
+# with "error: unexpected argument '<word>'" and exit 1, even alongside -h
+# (ubertooth-scan.md and ubertooth-follow.md, ARGUMENTS). Argument
+# validation, which checks the rule on every other tool, needs a board and
+# so never runs in CI; these refusals need none, so they are here and run on
+# every Linux build in CI. Not applicable where the tools are not built
+# (macOS: no BlueZ).
+_BLUEZ_USAGE = {
+    "ubertooth-scan": r"(?m)^ubertooth-scan - active",
+    "ubertooth-follow": r"(?m)^ubertooth-follow - active",
+}
+# (slug, label, words, offending word, smoke)
+_STRAY_WAYS = (
+    ("stray", f"a stray word '{STRAY}'", (STRAY,), STRAY, True),
+    ("help-stray", f"-h and a stray word '{STRAY}'", ("-h", STRAY), STRAY, False),
+    ("bare-dash", "a bare -", ("-",), "-", False),
+    ("after-double-dash", "-x after --", ("--", "-x"), "-x", False),
+)
+
+
+def _bluez_stray_case(tool: str, way) -> StateCase:
+    slug, label, words, word, _smoke = way
+    short = _short(tool)
+    return _case(
+        f"{short}-{slug}", f"{short}: {label} is refused",
+        (
+            probe_step(tool),
+            tool_step("refuse", tool, words,
+                       patterns=(rf"(?m)^error: unexpected argument '{re.escape(word)}'$",),
+                       forbidden=(NO_BOARD_NOTE, _BLUEZ_USAGE[tool])),
+            _check((), ()),
+        ),
+        f"refused (exit 1) with error: unexpected argument '{word}', no usage, "
+        "before any board is asked for; nothing created",
+    )
+
+
+def bluez_stray_cases(coverage: str):
+    return tuple(
+        _bluez_stray_case(tool, way)
+        for tool in _BLUEZ_USAGE
+        for way in _STRAY_WAYS
+        if coverage == "comprehensive" or way[4]
+    )
+
+
 def refusal_cases(arguments, _resources, _resource_identities):
     """Host-only cases: every tool runs with UBERTOOTH_TEST_NO_DEVICES=1."""
     cases = []
@@ -368,6 +423,7 @@ def refusal_cases(arguments, _resources, _resource_identities):
             for way in _ways(tool):
                 cases.append(_refusal_case(tool, option, extension, way))
     cases += _extra_capture_cases()
+    cases += bluez_stray_cases(arguments["coverage"])
     if arguments["coverage"] == "comprehensive":
         cases += _comprehensive_cases()
     return tuple(cases)

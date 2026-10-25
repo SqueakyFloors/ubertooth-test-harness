@@ -49,7 +49,7 @@ Harness-wide checks that use the CLIs:
   the run; README "Host requirements").
 - **Linux only** (need BlueZ; not applicable on macOS, decided at planning, not
   skipped): `ubertooth-scan -h` and `ubertooth-follow -h` (Host CLI surface),
-  and every `follow` case of Refused command lines. `ubertooth-specan-ui -h`
+  and every `follow` and `scan` case of Refused command lines. `ubertooth-specan-ui -h`
   (Python tools) is not applicable without `--build --with-python`.
 - **Exclusive Ubertooth topology** (`exclusive` plan, Linux, power control):
   runs `ubertooth-util -s`, `ubertooth-util -v`, and `ubertooth-btle -f` with no
@@ -62,8 +62,11 @@ Harness-wide checks that use the CLIs:
   no device change on every built tool (util, btle, afh, debug, dfu, dump, ego,
   ducky, rx, specan, tx): Argument validation (one stray per tool for afh,
   debug, dfu, dump, tx in smoke; the rest comprehensive). `ubertooth-follow` and
-  `ubertooth-scan` are not built on every host
-  ([#40](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/40)).
+  `ubertooth-scan`, built only with BlueZ: Refused command lines (no Ubertooth,
+  so it runs in CI; Linux only, not applicable on macOS), a stray word on each
+  in smoke; comprehensive adds `-h stray` (refused, no usage), a bare `-`,
+  and `-- -x`, each refused naming the word
+  ([#100](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/100)).
   Optional values as the next word are covered where they can be read back
   without RF: `ubertooth-util -c -C -a -z -l -d` (Radio setting transitions),
   `ubertooth-btle -v` (BLE CRC transitions) and `-a` (BLE settings).
@@ -306,6 +309,8 @@ Combinations: two or more of `-f`/`-r`/`-i`: last one wins (`do_mode` is overwri
 | `-b <hciN>` | HCI device | Hard | Same |
 | `-U<0-7>` | select device | Hard | Same (Bluetooth inquiry scan is in the backlog) |
 
+A stray word, `-h stray`, a bare `-`, and `-- -x` are refused with `error: unexpected argument '<word>'` and exit 1 before any HCI device or board (one argument rule, `ubertooth-scan.md` ARGUMENTS): Covered (Refused command lines, no Ubertooth; `scan stray` in smoke, the rest comprehensive; Linux only).
+
 ## ubertooth-follow (BlueZ builds only)
 
 | Option | Meaning (short) | Status | Harness test / notes |
@@ -321,6 +326,8 @@ Combinations: two or more of `-f`/`-r`/`-i`: last one wins (`do_mode` is overwri
 | `-a` | enable AFH | Hard | Same |
 | `-b <hciN>` | HCI device | Hard | Same |
 | `-w <slots>` | USB delay | Hard | Same |
+
+A stray word with no file option, `-h stray`, a bare `-`, and `-- -x` are refused with `error: unexpected argument '<word>'` and exit 1 before any HCI device or board (one argument rule, `ubertooth-follow.md` ARGUMENTS): Covered (Refused command lines, no Ubertooth; `follow stray` in smoke, the rest comprehensive; Linux only).
 
 ## ubertooth-btbr (Python)
 
