@@ -156,7 +156,17 @@ Semantics:
   Records that arrive after a run ended rebuild its report.md. A registration
   replaces an existing connection for the same host (half-open reconnects);
   the controller logs a warning when the replaced connection was still online.
+  The replaced connection is closed (1008 `replaced`), and every `run` or
+  `cancel` request still waiting for its answer on it fails at once with 503
+  `runner reconnected`: no run is created and no cancel is recorded, a late
+  `run_accepted` on the old connection creates no run, and asking again
+  sends the request on the new connection.
   Any local process can register any host until runner authentication exists.
+- Live fan-out to browsers (`/ws/live`) is best effort and never slows a
+  runner: each browser has a queue of `LIVE_QUEUE_LIMIT` (1000) updates. A
+  browser that falls that far behind (whether it follows one run or none) has
+  its backlog dropped and is closed with 1013 `live stream overflowed`; it
+  reconnects for a fresh snapshot. Runners and other browsers are unaffected.
 
 Planned, not yet in the protocol: `deploy {ref}` (build host + firmware ahead
 of a run; today `run.build` builds inside the run directory), `flash {image,

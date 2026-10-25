@@ -935,6 +935,46 @@ class LiveOverflowTests(ControllerTestCase):
             self.assertEqual(("event", 2), (update["type"], update["event"]["sequence"]))
             await again.close()
 
+    async def test_an_unfiltered_browser_overflows_on_any_run(self):
+        async with FakeRunner(self.port) as runner, FakeRunner(self.port) as runner_b:
+            await self.registered(runner, interval=10)
+            await self.accepted_run(runner)
+            await self.registered(runner_b, "Host_B", interval=10)
+            await self.accepted_run(runner_b, "run-2", "Host_B")
+            everything = await self.live()  # run_id=None: every run's updates
+            other = await self.live("run-2")
+            await wait_until(lambda: len(self.controller._subscribers) == 2)
+            (unfiltered,) = [
+                subscriber for subscriber in self.controller._subscribers
+                if subscriber.run_id is None
+            ]
+            (following,) = [
+                subscriber for subscriber in self.controller._subscribers
+                if subscriber.run_id == "run-2"
+            ]
+            # A burst of run-1 updates: the unfiltered browser gets them all,
+            # the run-2 browser none.
+            run = self.controller.runs["run-1"]
+            for _ in range(LIVE_QUEUE_LIMIT + 1):
+                self.controller._publish_run(run)
+            self.assertTrue(unfiltered.overflowed)
+            self.assertEqual(1, unfiltered.queue.qsize())
+            self.assertEqual((False, 0), (following.overflowed, following.queue.qsize()))
+            with self.assertRaises(ConnectionClosed) as raised:
+                while True:
+                    message = json.loads(await asyncio.wait_for(everything.recv(), TIMEOUT_S))
+                    self.fail(f"update after the overflow: {message['type']}")
+            self.assertEqual(
+                (TRY_AGAIN_LATER, "live stream overflowed"),
+                (raised.exception.rcvd.code, raised.exception.rcvd.reason),
+            )
+            await wait_until(lambda: unfiltered not in self.controller._subscribers)
+            # The run-2 browser still gets updates.
+            await runner_b.heartbeat(active=None)
+            update = json.loads(await asyncio.wait_for(other.recv(), TIMEOUT_S))
+            self.assertEqual(("target", "Host_B"), (update["type"], update["target"]["host"]))
+            await other.close()
+
     async def test_a_queue_at_the_limit_is_still_delivered(self):
         async with FakeRunner(self.port) as runner:
             await self.registered(runner, interval=10)
