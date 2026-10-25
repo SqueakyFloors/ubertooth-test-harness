@@ -447,7 +447,9 @@ def raw_receive_cases(arguments, _resources, resource_identities):
             _case(serial, "ego-reject-bad-access-code", "E-GO rejects -a zz", (
                 Step("reject", "ubertooth-ego -r -a zz",
                      ("ubertooth-ego", "-U", serial, "-r", "-c", "2440", "-a", "zz"),
-                     expected_returncodes=(1,), output_patterns=(r"error: access code must be 2, 4, 6 or 8 hex digits \(got zz\)",),
+                     expected_returncodes=(1,),
+                     output_patterns=(
+                         r"error: access code must be 2, 4, 6 or 8 hex digits \(got zz\)",),
                      mutates=True),
             ), "rejected with exit 1 before any mode starts"),
         ]
