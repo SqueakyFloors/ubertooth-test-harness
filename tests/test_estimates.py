@@ -1,6 +1,10 @@
 """Catalog duration estimates (the GUI countdown)."""
 
+from dataclasses import replace
+import json
 from pathlib import Path
+import tempfile
+from types import MappingProxyType
 import unittest
 
 from ubertooth_harness.catalog import (
@@ -9,8 +13,14 @@ from ubertooth_harness.catalog import (
     Estimate,
     builtin_catalog,
 )
-from ubertooth_harness.gui import list_plans
+from ubertooth_harness.gui import list_plans, planned_invocations
+from ubertooth_harness.manifest import InvocationIdentity
 from ubertooth_harness.plan import load_plan
+from ubertooth_harness.planner import PlanCompiler
+from ubertooth_harness.resources import FileResourceRegistry
+from ubertooth_harness.stateful import COVERAGE_PROFILES
+
+from tests.test_run_isolation import HARDWARE
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 # Plans whose tests are not implemented yet: nothing to estimate.
@@ -34,7 +44,7 @@ class EstimateTests(unittest.TestCase):
                     self.assertNotIn(name, ESTIMATES)
                     continue
                 profiles = (
-                    {"smoke", "comprehensive"} if "coverage" in definition.arguments
+                    set(COVERAGE_PROFILES) if "coverage" in definition.arguments
                     else {DEFAULT_PROFILE}
                 )
                 self.assertEqual(profiles, set(definition.estimates))
@@ -102,6 +112,26 @@ class EstimateTests(unittest.TestCase):
         hid = self.catalog.get("Uberducky HID")
         self.assertIsNone(hid.estimated_seconds(arguments(hid, Uberducky="x")))
 
+    def test_missing_scaling_argument_is_no_estimate_not_an_error(self):
+        # A per-duration estimate on a call without a duration argument, and
+        # a per-count estimate without its count: None, never an exception.
+        definition = replace(
+            self.catalog.get("Host version"),
+            estimates=MappingProxyType({
+                DEFAULT_PROFILE: Estimate(1.0, per_duration=2, per_count=("flashes", 1)),
+            }),
+        )
+        self.assertIsNone(definition.estimated_seconds({}))
+        self.assertIsNone(definition.estimated_seconds({"duration": "2s"}))
+        self.assertIsNone(definition.estimated_seconds({"flashes": 3}))
+        self.assertIsNone(definition.estimated_seconds({"duration": "2s", "flashes": True}))
+        self.assertIsNone(definition.estimated_seconds({"duration": "bad", "flashes": 3}))
+        self.assertEqual(8.0, definition.estimated_seconds({"duration": "2s", "flashes": 3}))
+        # No duration argument on a test without calibrated estimates.
+        bare = replace(self.catalog.get("BLE monitor"), estimates=None)
+        self.assertIsNone(bare.estimated_seconds({}))
+        self.assertIsNone(bare.estimated_seconds({"duration": "bad"}))
+
     def test_estimate_rounds_to_a_tenth(self):
         self.assertEqual(0.3, Estimate(0.1, per_duration=0.1).seconds({"duration": "2s"}))
 
@@ -120,8 +150,72 @@ class EstimateTests(unittest.TestCase):
         # The release plan run at fork 7bb07c9 took 621.0 s of test time.
         plans = {plan["name"]: plan for plan in list_plans(REPOSITORY / "testplans")}
         (suite,) = plans["release"]["suites"]
-        load_plan(REPOSITORY / "testplans" / "release.yaml")
         self.assertAlmostEqual(621.0, suite["estimated_s"], delta=1.0)
+
+
+def manifest_event(invocations):
+    """The run's manifest record, as the controller stores it (JSON)."""
+    return json.loads(json.dumps({
+        "event_type": "manifest", "status": "passed",
+        "details": {"manifest": {"invocations": [
+            InvocationIdentity.from_invocation(item).to_dict() for item in invocations
+        ]}},
+    }))
+
+
+class PlannedInvocationTests(unittest.TestCase):
+    """The live countdown counts the invocations planned for the target."""
+
+    def setUp(self):
+        self.catalog = builtin_catalog()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "hardware.yaml"
+            path.write_text(HARDWARE, encoding="utf-8")
+            self.registry = FileResourceRegistry.load(path)
+
+    def compile(self, plan, suite):
+        path = REPOSITORY / "testplans" / f"{plan}.yaml"
+        return PlanCompiler(self.catalog, self.registry).compile(
+            load_plan(path, self.catalog), suite)
+
+    def test_each_ubertooth_is_one_estimated_invocation_per_board(self):
+        # exclusive.yaml selects Ubertooth: each; the host has three boards.
+        invocations = self.compile("exclusive", "exclusive")
+        self.assertEqual(3, len(invocations))
+        planned = planned_invocations([{"event_type": "run_started"},
+                                       manifest_event(invocations)])
+        self.assertEqual(
+            [(item.invocation_id, "Exclusive Ubertooth topology", 13.0)
+             for item in invocations],
+            [(p["invocation_id"], p["test_name"], p["estimated_s"]) for p in planned],
+        )
+        # The plan listing gives one invocation and flags it as per board.
+        plans = {plan["name"]: plan for plan in list_plans(REPOSITORY / "testplans")}
+        (suite,) = plans["exclusive"]["suites"]
+        self.assertEqual(13.0, suite["estimated_s"])
+        self.assertEqual(1, suite["per_board_tests"])
+        self.assertEqual([True], [test["per_board"] for test in suite["tests"]])
+        self.assertEqual(3 * 13.0, sum(p["estimated_s"] for p in planned))
+
+    def test_single_board_steps_match_the_plan_listing(self):
+        invocations = self.compile("fast", "fast")
+        planned = planned_invocations([manifest_event(invocations)])
+        plans = {plan["name"]: plan for plan in list_plans(REPOSITORY / "testplans")}
+        (suite,) = [s for s in plans["fast"]["suites"] if s["name"] == "fast"]
+        self.assertEqual(0, suite["per_board_tests"])
+        self.assertEqual([t["estimated_s"] for t in suite["tests"]],
+                         [p["estimated_s"] for p in planned])
+
+    def test_no_or_malformed_manifest(self):
+        self.assertIsNone(planned_invocations([]))
+        self.assertIsNone(planned_invocations([{"event_type": "manifest", "details": {}}]))
+        self.assertIsNone(planned_invocations(
+            [{"event_type": "manifest", "details": {"manifest": {"invocations": [1]}}}]))
+        unknown = planned_invocations([{"event_type": "manifest", "details": {"manifest": {
+            "invocations": [{"id": "001-x", "test_name": "No such test", "arguments": {}},
+                            {"id": "002-y", "test_name": "Host version", "arguments": 3}],
+        }}}])
+        self.assertEqual([None, None], [item["estimated_s"] for item in unknown])
 
 
 if __name__ == "__main__":

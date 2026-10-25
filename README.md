@@ -1016,9 +1016,11 @@ REST and `/ws/live` endpoints below.
   assumes about 8 s of power switching. A test with no implementation yet is
   estimated at its `duration` argument, if any. A Linux host, one board, or a
   failing test ends sooner or later, so the countdown is a guide, never a
-  timeout. An estimate is per invocation: `Ubertooth: each` on a host with
-  several boards runs the test once per board, which the plan listing cannot
-  count. Build and preflight time are not included: the countdown starts with
+  timeout. An estimate is per invocation: `Ubertooth: each` runs the test
+  once per board the target selects. Run setup counts such a test once and
+  says so; once the run's manifest arrives (before preflight) the live
+  checklist lists every planned invocation on the target with its estimate,
+  so the countdown counts every board. Build and preflight time are not included: the countdown starts with
   the first test. Otherwise the view shows elapsed time and says why. The
   view is linkable as `/ui/#run=<run_id>`.
 - **History:** every run, newest first, with started/finished times, ref,
@@ -1040,11 +1042,11 @@ Endpoints (JSON unless noted; `GET /` lists them):
 |---|---|
 | `GET /ui/` | the web GUI (HTML, `app.js`, `app.css`) |
 | `GET /api/refs` | `{"repository", "refs": [{"name", "kind", "commit"}], "fetched_at"}` from `git ls-remote` (`kind` is `default`, `branch` or `tag`); 503 if it cannot be listed |
-| `GET /api/plans` | every `<plan>.yaml` in `--plans-dir` with its suites, test names, per-test `estimated_s` (the catalog estimate of one invocation with the step's arguments, else null) and the suite total when every test has one; a plan that does not load is listed with its `error` |
+| `GET /api/plans` | every `<plan>.yaml` in `--plans-dir` with its suites, test names, per-test `estimated_s` (the catalog estimate of one invocation with the step's arguments, else null) and `per_board` (runs once per selected board), the suite total when every test has one, and `per_board_tests`; a plan that does not load is listed with its `error` |
 | `GET /api/targets`, `GET /api/targets/{host}` | registry: host, hostname, OS, Python, Ubertooth serials, last heartbeat, `online`/`offline`, connected, active run |
 | `POST /api/targets/{host}/runs` | start a run with the protocol `run` fields: `{"ref", "plan", "suite", "tests": [], "build": false}`; 201 with the run, 409 busy, offline, or rejected by the runner, 422 invalid or a ref not in `/api/refs` (full commit IDs are accepted), 504 no answer |
 | `GET /api/runs[?target=HOST]` | runs, newest first |
-| `GET /api/runs/{run_id}` | status, every event, and the failure summary (`failures`) |
+| `GET /api/runs/{run_id}` | status, every event, the failure summary (`failures`), and `invocations`: from the run's manifest, every planned invocation on the target with `invocation_id`, `test_name` and `estimated_s` (null before the manifest record) |
 | `GET /api/runs/{run_id}/report.md` | the run's report (Markdown) |
 | `POST /api/runs/{run_id}/cancel` | `{"reason": ""}`; 202 once the runner accepts |
 | `WS /ws/live[?run_id=ID]` | browser stream: a `snapshot`, then `target` and `run` updates, plus that run's `event` records |

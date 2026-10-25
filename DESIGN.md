@@ -649,7 +649,10 @@ by the REST API and `/ws/live`.
   (fixed seconds plus a multiple of the duration argument, calibrated from
   run records; a test without an implementation is estimated at its
   `duration` argument), and build/preflight are excluded; a suite with any
-  unestimated test shows elapsed time and says so.
+  unestimated test shows elapsed time and says so. Estimates are per
+  invocation; once the run's manifest record arrives, the checklist is its
+  planned invocations on the target (`invocations` in `GET /api/runs/{id}`),
+  so `Ubertooth: each` counts every selected board.
 - **History:** every run with ref, plan/suite, target, status,
   started/finished, a `report.md` link, and the failure summary from
   `GET /api/runs/{id}` (per failed phase or test: reason and last output

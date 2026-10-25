@@ -157,21 +157,32 @@ class Estimate:
     per_duration: float = 0.0
     per_count: tuple[str, float] | None = None
 
-    def seconds(self, arguments: Mapping) -> float:
+    def seconds(self, arguments: Mapping) -> float | None:
+        """The estimate, or None when an argument it scales by is absent."""
         total = self.fixed_s
         if self.per_duration:
-            total += self.per_duration * _duration_argument_seconds(arguments)
+            duration = _duration_argument_seconds(arguments)
+            if duration is None:
+                return None
+            total += self.per_duration * duration
         if self.per_count is not None:
             name, each = self.per_count
-            total += each * arguments[name]
+            count = arguments.get(name)
+            if isinstance(count, bool) or not isinstance(count, int):
+                return None
+            total += each * count
         return round(total, 1)
 
 
-def _duration_argument_seconds(arguments: Mapping) -> float:
+def _duration_argument_seconds(arguments: Mapping) -> float | None:
+    """The first duration argument in seconds; None if absent or invalid."""
     for name in DURATION_ARGUMENTS:
         if arguments.get(name) is not None:
-            return _duration_seconds(arguments[name])
-    raise CatalogError("the estimate needs a duration argument")
+            try:
+                return _duration_seconds(arguments[name])
+            except CatalogError:
+                return None
+    return None
 
 
 @dataclass(frozen=True)
@@ -205,15 +216,14 @@ class TestDefinition:
         """Expected seconds of one invocation with these normalized arguments.
 
         A test without calibrated estimates (no implementation yet) is
-        expected to run for its duration argument, if it has one.
+        expected to run for its duration argument, if it has one. None, never
+        an error, when there is no estimate for these arguments (for example
+        a per-duration estimate without a duration argument).
         """
         if self.estimates:
             estimate = self.estimates.get(arguments.get("coverage", DEFAULT_PROFILE))
             return None if estimate is None else estimate.seconds(arguments)
-        try:
-            return _duration_argument_seconds(arguments)
-        except CatalogError:
-            return None
+        return _duration_argument_seconds(arguments)
 
     def test_needs(self, arguments: Mapping) -> tuple[Needs, ...]:
         """The test-wide needs: the definition's and the plan's platforms."""

@@ -225,7 +225,10 @@
 
   function estimateText(suite) {
     if (suite.estimated_s !== null && suite.estimated_s !== undefined) {
-      return `Estimated test time ${formatSeconds(suite.estimated_s)} (from the catalog's per-test estimates; build and preflight not included).`;
+      const perBoard = suite.per_board_tests
+        ? ` ${suite.per_board_tests} test(s) run once per selected Ubertooth and are counted once here; the live countdown counts every board the run selects.`
+        : "";
+      return `Estimated test time ${formatSeconds(suite.estimated_s)} (from the catalog's per-test estimates; build and preflight not included).${perBoard}`;
     }
     return `No time estimate: ${suite.unestimated_tests} of ${suite.tests.length} tests have no estimated duration, so the live view shows elapsed time only.`;
   }
@@ -266,6 +269,7 @@
     return {
       run_id: runId, seen: new Set(), events: [], items: [],
       byInvocation: new Map(), log: [], partial: "", stage: "waiting",
+      invocations: null,
     };
   }
 
@@ -286,6 +290,7 @@
       const data = await api("GET", runPath(runId));
       if (state.selected !== runId) return;
       upsertRun(data.run);
+      state.live.invocations = Array.isArray(data.invocations) ? data.invocations : null;
       for (const record of data.events) addEvent(runId, record, false);
       // Now that the run's plan is known, lay out its checklist and replay.
       rebuildChecklist();
@@ -304,10 +309,19 @@
     if (run && Array.isArray(run.tests) && run.tests.length) {
       tests = tests.filter((test) => run.tests.includes(test.name));
     }
-    live.items = tests.map((test) => ({
-      name: test.name, estimated_s: test.estimated_s, status: "pending", reason: "",
-    }));
-    live.planned = Boolean(suite);
+    if (Array.isArray(live.invocations)) {
+      // The run's manifest: one item per invocation on the target, so a test
+      // with Ubertooth: each counts every board it selected.
+      live.items = live.invocations.map((invocation) => ({
+        name: invocation.test_name, invocation_id: invocation.invocation_id,
+        estimated_s: invocation.estimated_s, status: "pending", reason: "",
+      }));
+    } else {
+      live.items = tests.map((test) => ({
+        name: test.name, estimated_s: test.estimated_s, status: "pending", reason: "",
+      }));
+    }
+    live.planned = Array.isArray(live.invocations) || Boolean(suite);
     live.byInvocation = new Map();
     // Records from the socket and from REST may interleave; replay in order.
     const events = [...live.events].sort((a, b) => a.sequence - b.sequence);
@@ -320,6 +334,19 @@
     live.testsStarted = null;
     for (const record of events) addEvent(live.run_id, record, false);
     renderLive();
+  }
+
+  async function loadInvocations(runId) {
+    try {
+      const data = await api("GET", runPath(runId));
+      const live = state.live;
+      if (!live || live.run_id !== runId || !Array.isArray(data.invocations)) return;
+      live.invocations = data.invocations;
+      for (const record of data.events) addEvent(runId, record, false);
+      rebuildChecklist();
+    } catch (error) {
+      // Keep the plan's checklist; the next full load retries.
+    }
   }
 
   function pushLog(line) {
@@ -357,9 +384,15 @@
     else if (kind === "test_started") live.stage = "tests";
     else if (kind === "run_finished") live.stage = "finished";
 
+    if (kind === "manifest" && render && !Array.isArray(live.invocations)) {
+      // Live: fetch the planned invocations (with estimates) and re-lay out.
+      loadInvocations(runId);
+    }
     if (kind === "test_started") {
       const name = String(details.test_name ?? "");
-      let item = live.items.find((entry) => entry.name === name && entry.status === "pending");
+      const id = String(details.invocation_id ?? "");
+      let item = live.items.find((entry) => entry.invocation_id === id && entry.status === "pending") ||
+        live.items.find((entry) => entry.name === name && entry.status === "pending");
       if (!item) {
         item = { name, estimated_s: null, status: "pending", reason: "" };
         live.items.push(item);
@@ -373,7 +406,12 @@
       // Left out before the run: the host cannot run it (not a skip or failure).
       const name = String(details.test_name ?? "");
       if (!details.invocation_id) {
-        const item = live.items.find((entry) => entry.name === name && entry.status === "pending");
+        let item = live.items.find((entry) => entry.name === name && entry.status === "pending");
+        if (!item && Array.isArray(live.invocations)) {
+          // Left out at planning: not in the manifest, and takes no time.
+          item = { name, estimated_s: 0, status: "pending", reason: "" };
+          live.items.push(item);
+        }
         if (item) {
           item.status = "not applicable";
           item.reason = String(details.reason || "");

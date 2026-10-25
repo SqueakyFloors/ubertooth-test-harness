@@ -376,6 +376,33 @@ class FailureSummaryTests(ControllerTestCase):
             ],
             payload["failures"],
         )
+        # No manifest record: the live view lists the plan's tests.
+        self.assertIsNone(payload["invocations"])
+
+    async def test_run_detail_lists_the_planned_invocations(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            await self.accepted_run(runner)
+            manifest = {"invocations": [
+                {"id": f"00{n}-Exclusive Ubertooth topology",
+                 "test_name": "Exclusive Ubertooth topology",
+                 "arguments": {"platforms": ["linux"], "exclusive Ubertooth": True,
+                               "capture duration": "5s"}}
+                for n in (1, 2)
+            ]}
+            await runner.send("event", run_id="run-1", event=event(
+                "run-1", 1, "manifest", "passed", manifest=manifest))
+            await wait_until(lambda: self.controller.read_events(self.controller.runs["run-1"]))
+        status, payload, _ = await self.http("GET", "/api/runs/run-1")
+        self.assertEqual(200, status)
+        # One per board the planner selected, each with its estimate.
+        self.assertEqual(
+            [{"invocation_id": "001-Exclusive Ubertooth topology",
+              "test_name": "Exclusive Ubertooth topology", "estimated_s": 13.0},
+             {"invocation_id": "002-Exclusive Ubertooth topology",
+              "test_name": "Exclusive Ubertooth topology", "estimated_s": 13.0}],
+            payload["invocations"],
+        )
 
     def test_skipped_tests_are_not_failures_and_split_lines_are_joined(self):
         def record(kind, status=None, **details):
