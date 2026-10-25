@@ -23,6 +23,9 @@ from websockets.exceptions import ConnectionClosed, InvalidStatus
 from ubertooth_harness.cli import main
 from ubertooth_harness.controller import (
     BIND_ADDRESS,
+    LIVE_QUEUE_LIMIT,
+    POLICY_VIOLATION,
+    TRY_AGAIN_LATER,
     Controller,
     ControllerConfigError,
     ControllerServer,
@@ -867,6 +870,196 @@ class MalformedRunnerTests(ControllerTestCase):
         status, payload, _ = await self.http("GET", "/api/targets/Host_A")
         self.assertEqual(len(bad), payload["target"]["protocol_errors"])
         self.assertTrue(payload["target"]["last_protocol_error"])
+
+
+class LiveOverflowTests(ControllerTestCase):
+    """A browser that falls LIVE_QUEUE_LIMIT updates behind is dropped (#17)."""
+
+    async def live(self, run_id=None):
+        query = f"?run_id={run_id}" if run_id else ""
+        ws = await connect(f"ws://127.0.0.1:{self.port}/ws/live{query}", proxy=None)
+        snapshot = json.loads(await asyncio.wait_for(ws.recv(), TIMEOUT_S))
+        self.assertEqual("snapshot", snapshot["type"])
+        return ws
+
+    async def test_a_browser_that_falls_behind_is_closed_and_the_rest_carry_on(self):
+        async with FakeRunner(self.port) as runner, FakeRunner(self.port) as runner_b:
+            # Long heartbeat intervals: no offline/online updates interleave.
+            await self.registered(runner, interval=10)
+            await self.accepted_run(runner)
+            await self.registered(runner_b, "Host_B", interval=10)
+            await self.accepted_run(runner_b, "run-2", "Host_B")
+            behind = await self.live("run-1")
+            other = await self.live("run-2")  # not subscribed to run-1
+            await wait_until(lambda: len(self.controller._subscribers) == 2)
+            (lagging,) = [
+                subscriber for subscriber in self.controller._subscribers
+                if subscriber.run_id == "run-1"
+            ]
+            # A burst published without yielding: the session task cannot
+            # forward anything until it ends, so run-1's queue overflows.
+            run = self.controller.runs["run-1"]
+            for _ in range(LIVE_QUEUE_LIMIT + 1):
+                self.controller._publish_run(run)
+            self.assertTrue(lagging.overflowed)
+            # Bounded memory: the backlog is dropped for one close marker.
+            self.assertEqual(1, lagging.queue.qsize())
+            with self.assertRaises(ConnectionClosed) as raised:
+                while True:  # no update gets through after the overflow
+                    message = json.loads(await asyncio.wait_for(behind.recv(), TIMEOUT_S))
+                    self.fail(f"update after the overflow: {message['type']}")
+            self.assertEqual(
+                (TRY_AGAIN_LATER, "live stream overflowed"),
+                (raised.exception.rcvd.code, raised.exception.rcvd.reason),
+            )
+            await wait_until(lambda: lagging not in self.controller._subscribers)
+            # Nothing more is queued for the dropped subscriber.
+            self.controller._publish_run(run)
+            self.assertEqual(0, lagging.queue.qsize())
+
+            # The runner and the other browser are unaffected: the run goes
+            # on and the other browser gets the next target update.
+            await runner.send("event", run_id="run-1", event=event("run-1", 1, "run_started"))
+            await wait_until(lambda: self.controller.runs["run-1"].seen == {1})
+            self.assertTrue(self.controller.targets["Host_A"].connected)
+            await runner.heartbeat(active=None)
+            update = json.loads(await asyncio.wait_for(other.recv(), TIMEOUT_S))
+            self.assertEqual(("target", "Host_A", None),
+                             (update["type"], update["target"]["host"],
+                              update["target"]["active_run_id"]))
+            await other.close()
+            # A new browser can watch the run again.
+            again = await self.live("run-1")
+            await runner.send("event", run_id="run-1", event=event("run-1", 2))
+            update = json.loads(await asyncio.wait_for(again.recv(), TIMEOUT_S))
+            self.assertEqual(("event", 2), (update["type"], update["event"]["sequence"]))
+            await again.close()
+
+    async def test_a_queue_at_the_limit_is_still_delivered(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner, interval=10)
+            await self.accepted_run(runner)
+            ws = await self.live("run-1")
+            await wait_until(lambda: len(self.controller._subscribers) == 1)
+            run = self.controller.runs["run-1"]
+            for _ in range(LIVE_QUEUE_LIMIT):
+                self.controller._publish_run(run)
+            (subscriber,) = self.controller._subscribers
+            self.assertFalse(subscriber.overflowed)
+            for _ in range(LIVE_QUEUE_LIMIT):
+                update = json.loads(await asyncio.wait_for(ws.recv(), TIMEOUT_S))
+                self.assertEqual("run", update["type"])
+            await runner.send("event", run_id="run-1", event=event("run-1", 1))
+            update = json.loads(await asyncio.wait_for(ws.recv(), TIMEOUT_S))
+            self.assertEqual("event", update["type"])
+            await ws.close()
+
+
+class ReplacedRunnerTests(ControllerTestCase):
+    """A registration replaces a connection with a request pending on it (#17)."""
+
+    async def assert_replaced(self, old):
+        with self.assertRaises(ConnectionClosed) as raised:
+            while True:
+                await asyncio.wait_for(old.ws.recv(), TIMEOUT_S)
+        self.assertEqual((POLICY_VIOLATION, "replaced"),
+                         (raised.exception.rcvd.code, raised.exception.rcvd.reason))
+
+    async def test_pending_run_request_fails_and_the_new_connection_takes_over(self):
+        async with FakeRunner(self.port) as old:
+            await self.registered(old, interval=10)
+            post, message = await self.start_run(old)
+            self.assertEqual("run", message["type"])
+            # Has sent on the old link: its lock entry goes when the session ends.
+            (old_link,) = self.controller._send_locks
+            async with FakeRunner(self.port) as new:
+                await new.register(interval=10)
+                status, payload, _ = await post
+                self.assertEqual(503, status, payload)
+                self.assertIn("runner reconnected", payload["detail"])
+                self.assertEqual({}, self.controller._pending_runs)
+                self.assertTrue(any("still online" in line for line in self.logs))
+                await self.assert_replaced(old)
+                # The old session's end leaves the new one registered.
+                await wait_until(lambda: old_link not in self.controller._send_locks)
+                self.assertTrue(self.controller.targets["Host_A"].connected)
+                self.assertTrue(self.controller.targets["Host_A"].online)
+                self.assertEqual({}, self.controller.runs)
+                # The next request goes to the new connection and works.
+                post, message = await self.start_run(new)
+                await new.send(
+                    "run_accepted", request_id=message["request_id"], run_id="run-1"
+                )
+                status, payload, _ = await post
+                self.assertEqual(201, status, payload)
+                self.assertEqual("run-1", self.controller.targets["Host_A"].active_run_id)
+
+    async def test_late_acceptance_on_the_replaced_connection_creates_no_run(self):
+        async with FakeRunner(self.port) as old:
+            await self.registered(old, interval=10)
+            post, message = await self.start_run(old)
+            (old_link,) = self.controller._send_locks
+            async with FakeRunner(self.port) as new:
+                await new.register(interval=10)
+                self.assertEqual(503, (await post)[0])
+                # The old runner answers after it was replaced: the request
+                # is gone, so the answer (if it still arrives before the
+                # close) is a protocol error, never a run.
+                with contextlib.suppress(ConnectionClosed):
+                    await old.send(
+                        "run_accepted", request_id=message["request_id"], run_id="run-1"
+                    )
+                await self.assert_replaced(old)
+                # The old session has ended: whatever it received is handled.
+                await wait_until(lambda: old_link not in self.controller._send_locks)
+                self.assertNotIn("run-1", self.controller.runs)
+                self.assertEqual([], [path.name for path in self.results.iterdir()])
+                self.assertIsNone(self.controller.targets["Host_A"].active_run_id)
+
+    async def test_pending_cancel_fails_and_the_run_is_kept_when_named_again(self):
+        async with FakeRunner(self.port) as old:
+            await self.registered(old, interval=10)
+            await self.accepted_run(old)
+            cancel = asyncio.create_task(
+                self.http("POST", "/api/runs/run-1/cancel", {"reason": "operator"})
+            )
+            self.assertEqual("cancel", (await old.recv())["type"])
+            await wait_until(lambda: self.controller._pending_cancels["run-1"].awaited)
+            async with FakeRunner(self.port) as new:
+                await new.register(interval=10, active="run-1")
+                status, payload, _ = await cancel
+                self.assertEqual(503, status, payload)
+                self.assertIn("runner reconnected", payload["detail"])
+                self.assertEqual({}, self.controller._pending_cancels)
+                await self.assert_replaced(old)
+                run = self.controller.runs["run-1"]
+                self.assertEqual(("running", False), (run.status, run.cancel_requested))
+                # Asking again reaches the new connection.
+                cancel = asyncio.create_task(
+                    self.http("POST", "/api/runs/run-1/cancel", {"reason": "again"})
+                )
+                message = await new.recv()
+                self.assertEqual(("cancel", "again"), (message["type"], message["reason"]))
+                await new.send("cancel_accepted", run_id="run-1")
+                status, payload, _ = await cancel
+                self.assertEqual(202, status, payload)
+                self.assertTrue(payload["run"]["cancel_requested"])
+
+    async def test_pending_cancel_of_a_run_the_new_runner_does_not_name(self):
+        async with FakeRunner(self.port) as old:
+            await self.registered(old, interval=10)
+            await self.accepted_run(old)
+            cancel = asyncio.create_task(self.http("POST", "/api/runs/run-1/cancel", {}))
+            self.assertEqual("cancel", (await old.recv())["type"])
+            await wait_until(lambda: self.controller._pending_cancels["run-1"].awaited)
+            async with FakeRunner(self.port) as new:
+                await new.register(interval=10, active=None)
+                status, payload, _ = await cancel
+                self.assertEqual(503, status, payload)
+                await wait_until(lambda: self.controller.runs["run-1"].status == "lost")
+                self.assertEqual(409, (await self.http(
+                    "POST", "/api/runs/run-1/cancel", {}))[0])
+                await self.assert_replaced(old)
 
 
 class EndToEndTests(ControllerTestCase):
