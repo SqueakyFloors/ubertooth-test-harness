@@ -15,10 +15,10 @@ from ubertooth_harness.build import (
     required_tools,
 )
 from ubertooth_harness.events import open_run_publisher
-from ubertooth_harness.hostneeds import BLUEZ_TOOLS
 from ubertooth_harness.executor import CommandResult, SubprocessCommandExecutor
-from ubertooth_harness.report import load_events, render_run
+from ubertooth_harness.hostneeds import BLUEZ_TOOLS
 from ubertooth_harness.manifest import SourceRevision
+from ubertooth_harness.report import load_events, render_run
 
 
 UBERTOOTH = SourceRevision(

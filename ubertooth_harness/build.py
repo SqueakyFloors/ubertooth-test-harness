@@ -118,7 +118,9 @@ class BuildResult:
         }
 
 
-# Host tools the catalog runs; each must come from the run prefix.
+# Host tools every build must install into the run prefix (the catalog cases
+# with no host need). A Linux build must also install BLUEZ_TOOLS, and a
+# --with-python build PYTHON_TOOLS; required_tools() is the full rule.
 BUILT_TOOLS = (
     "ubertooth-util", "ubertooth-debug", "ubertooth-specan", "ubertooth-rx",
     "ubertooth-tx", "ubertooth-dump", "ubertooth-btle", "ubertooth-dfu",
@@ -129,7 +131,7 @@ PYTHON_TOOLS = ("ubertooth-specan-ui", "ubertooth-btbr")
 BUILD_DEADLINE_S = 3600.0
 
 
-def required_tools(plan: "BuildPlan") -> tuple[str, ...]:
+def required_tools(plan: BuildPlan) -> tuple[str, ...]:
     """Tools the build must install into the run prefix.
 
     A Linux build configures with REQUIRE_ALL=ON, so the BlueZ-only tools are
