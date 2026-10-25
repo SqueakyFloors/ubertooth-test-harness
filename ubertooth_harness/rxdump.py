@@ -75,6 +75,39 @@ def check(path: Path, fmt: str, *, min_records: int = 0, types=("br", "keep-aliv
     return records, ""
 
 
+def stale_records(path: Path) -> tuple[int, int, int]:
+    """(records, stale, le) for a ``full`` dump of one basic-rate stream.
+
+    A mode change runs cc2400_idle(), whose clkn_stop() sets the clock to 0,
+    so a stream's own records carry clk100ns (usb_pkt_rx bytes 4-7, little
+    endian) counting up from about 0; it wraps only after 3125 * 2^20 x 100
+    ns (about 327 s), far longer than a bounded run. Records before the last
+    place the clock goes backwards are left from an earlier mode
+    (SqueakyFloors/ubertooth#318). Keep-alive records are skipped in that
+    comparison: the firmware sends one byte, and the rest of the record is
+    whatever the host's buffer held. ``stale`` counts those leading records
+    plus any LE_PACKET record after them; ``le`` counts LE_PACKET records
+    anywhere. Raises ValueError for a file that is not whole full records.
+    """
+    data = path.read_bytes()
+    records, trailing = divmod(len(data), FULL_RECORD)
+    if trailing:
+        raise ValueError(f"{trailing} trailing bytes after {records} records")
+    types = [data[i * FULL_RECORD + 4] for i in range(records)]
+    start, previous = 0, None
+    for index in range(records):
+        if types[index] == PACKET_TYPES["keep-alive"]:
+            continue
+        offset = index * FULL_RECORD + 8
+        clock = struct.unpack("<I", data[offset:offset + 4])[0]
+        if previous is not None and clock < previous:
+            start = index
+        previous = clock
+    le = sum(kind == PACKET_TYPES["le"] for kind in types)
+    later_le = sum(kind == PACKET_TYPES["le"] for kind in types[start:])
+    return records, start + later_le, le
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="rxdump.py")
     parser.add_argument("path", type=Path)

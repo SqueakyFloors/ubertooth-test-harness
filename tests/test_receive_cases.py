@@ -9,7 +9,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from ubertooth_harness import receive_cases, rxdump
+from ubertooth_harness import capturefile, receive_cases, rxdump, stalecheck
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.stateful import StateCase
@@ -21,9 +21,20 @@ FULL = rxdump.FULL_RECORD
 BITS = rxdump.BITS_RECORD
 
 
-def full_record(pkt_type=0, channel=39, host_time=None):
+def full_record(pkt_type=0, channel=39, host_time=None, clock=0):
+    """One 68-byte record: host time, then usb_pkt_rx with clk100ns ``clock``."""
     host_time = int(time.time()) if host_time is None else host_time
-    return struct.pack(">I", host_time) + bytes([pkt_type, 0, channel]) + bytes(61)
+    return (struct.pack(">I", host_time) + bytes([pkt_type, 0, channel, 0])
+            + struct.pack("<I", clock) + bytes(56))
+
+
+def le_pcap(*channels):
+    """An LE PHDR pcap (link type 256) with one packet per RF channel."""
+    data = tt.FakeUbertooth.PCAP_HEADER(capturefile.LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR)
+    for channel in channels:
+        body = bytes([channel]) + bytes(9) + bytes.fromhex("d6be898e") + bytes(11)
+        data += struct.pack("<IIII", 0, 0, len(body), len(body)) + body
+    return data
 
 
 class ReceiveUbertooth(ToolUbertooth):
@@ -38,7 +49,10 @@ class ReceiveUbertooth(ToolUbertooth):
     afh-r-silent, afh-segfault (#185),
     dump-trailing, dump-bits-garbage, dump-ignores-l, dump-first-wins,
     dump-stalls, ego-exits, ego-ignores-channel, ego-ignores-length,
-    ego-accepts-bad-ac, reject:<tool>:<option>.
+    ego-accepts-bad-ac, reject:<tool>:<option>; fork #318: stale-le-into-dump
+    (a dump starts with two LE records), stale-br-into-dump (with a BR record
+    and a keep-alive from the previous dump), stale-into-ble (a btle -q
+    capture holds a basic-rate packet, RF channel 19).
     """
 
     def __init__(self, *args, bugs=(), **kwargs):
@@ -52,6 +66,11 @@ class ReceiveUbertooth(ToolUbertooth):
             out = io.StringIO()
             with redirect_stdout(out):
                 code = rxdump.main(list(command[2:]))
+            return self._result(command, code, out.getvalue(), "", on_output)
+        if command[1:2] == (receive_cases._STALE_CHECKER,):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = stalecheck.main(list(command[2:]))
             return self._result(command, code, out.getvalue(), "", on_output)
         if command[1:2] == (receive_cases._CAPTURE_CHECKER,):
             command = (command[0], tt.transitions._CAPTURE_CHECKER) + command[2:]
@@ -75,6 +94,14 @@ class ReceiveUbertooth(ToolUbertooth):
         if rejected:
             return self._result(command, 1, "usage\n", "", on_output)
         return handler(command, serial, options, timeout_s, on_output)
+
+    def _btle(self, command, options, on_output):
+        result = super()._btle(command, options, on_output)
+        if "-n" in options and "-q" in options:
+            # Live advertising packets on RF channel 0 (index 37).
+            channels = (0, 19, 0) if "stale-into-ble" in self.bugs else (0, 0)
+            Path(self._value(list(options), "-q")).write_bytes(le_pcap(*channels))
+        return result
 
     def _timed(self, command, code, stdout, stderr, duration, on_output, timed_out=False):
         if on_output and stdout:
@@ -184,7 +211,13 @@ class ReceiveUbertooth(ToolUbertooth):
                 record = b"2" * 400 + b"\n"
             data = record * records
         else:
-            data = (full_record(pkt_type=3) + full_record() * (records - 1))
+            data = b"".join(full_record(clock=5000 + 4000 * i) for i in range(records - 1))
+            data = full_record(pkt_type=3) + data
+            if "stale-le-into-dump" in self.bugs:
+                data = (full_record(pkt_type=1, channel=0, clock=209427)
+                        + full_record(pkt_type=1, channel=0, clock=19287773) + data)
+            if "stale-br-into-dump" in self.bugs:
+                data = full_record(clock=19107111) + full_record(pkt_type=3) + data
         if "dump-trailing" in self.bugs:
             data += b"\0"
         Path(self._value(options, "-d")).write_bytes(data)
@@ -250,12 +283,13 @@ class ReceiveCaseGenerationTests(unittest.TestCase):
         _a, smoke = cases_for(RAW, "smoke")
         self.assertEqual(["dump-full", "dump-bitstream", "ego-rx"], [c.case_id for c in smoke])
         _a, full = cases_for(RAW, "comprehensive")
-        self.assertEqual(10, len(full))
+        self.assertEqual(11, len(full))
+        self.assertEqual("stale-packets-across-mode-change", full[-1].case_id)
         self.assertTrue(all(isinstance(c, StateCase) for c in full))
 
     def test_every_case_restores_the_mode_reset_settings_and_selects_the_board(self):
         context = {"original channel": "2441", "original squelch": "-90",
-                   "original leds": "0/0/0", "capture dir": "/x"}
+                   "original leds": "0/0/0", "capture dir": "/x", "original crc": "1"}
         for test in (CLASSIC, RAW):
             _a, full = cases_for(test, "comprehensive")
             for case in full:
@@ -355,8 +389,15 @@ class RawReceiveTests(unittest.TestCase):
                  "-l -c: the last (-c) wins", "-c -l: the last (-l) wins"]
         egos = ["E-GO continuous receive (-r -c 2440)", "E-GO capture length -l 1",
                 "E-GO capture length -l 48", "E-GO access code -a 630f9ffe"]
+        stale = "No packets from the previous mode, BLE and BR alternated 5 times"
         expectations = {
-            "dump-trailing": dumps,  # a partial last bitstream record is ignored (no fflush)
+            # a partial last bitstream record is ignored (no fflush)
+            "dump-trailing": dumps + [stale],
+            # fork #318: LE records also fail every type-checked dump case;
+            # basic-rate ones and a stale capture only the stale case.
+            "stale-le-into-dump": dumps + [stale],
+            "stale-br-into-dump": [stale],
+            "stale-into-ble": [stale],
             "dump-stalls": dumps + ["Bitstream to a file (-b -d)"],
             "dump-bits-garbage": ["Bitstream to a file (-b -d)"],
             "dump-ignores-l": ["LE modulation (-l)", "-c -l: the last (-l) wins"],
@@ -374,7 +415,101 @@ class RawReceiveTests(unittest.TestCase):
                 self.assertEqual(sorted(names), failed_names(events))
 
 
+class StaleCaseTests(unittest.TestCase):
+
+    def test_case_alternates_bounded_streams(self):
+        _a, full = cases_for(RAW, "comprehensive")
+        case = full[-1]
+        context = {"capture dir": "/c", "original crc": "1"}
+        streams = [s for s in case.steps if s.continuous]
+        self.assertEqual(1 + 2 * receive_cases.STALE_ITERATIONS, len(streams))
+        tools = [s.resolve_argv(context)[0] for s in streams]
+        self.assertEqual(["ubertooth-btle"] + ["ubertooth-dump", "ubertooth-btle"] * 5, tools)
+        for step in streams:
+            self.assertEqual(2.0, step.timeout_s)
+        argv = streams[2].resolve_argv(context)
+        self.assertEqual(("ubertooth-btle", "-U", SERIAL, "-n", "-A37", "-q",
+                          "/c/stale-1.pcap"), argv)
+        ids = [s.step_id for s in case.steps]
+        # Every stream is followed by a stop before the next mode starts.
+        for index, step in enumerate(case.steps):
+            if step.continuous:
+                self.assertTrue(ids[index + 1].startswith("stop-"), ids[index + 1])
+        self.assertIn("read-original-crc", ids)
+        self.assertIn("verify-restored-crc", [s.step_id for s in case.cleanup])
+
+    def test_failure_reports_the_per_iteration_counts(self):
+        summary, events = run(RAW, ReceiveUbertooth(crc="1", bugs={"stale-br-into-dump"}))
+        self.assertFalse(summary.passed)
+        [event] = tt.steps(events, step_id="verify-no-stale")
+        self.assertEqual("BR dump 0/5, BLE capture 0/5", event.details["expected"])
+        self.assertEqual("BR dump 5/5, BLE capture 0/5", event.details["observed"])
+        summary, events = run(RAW, ReceiveUbertooth(crc="1", bugs={"stale-into-ble"}))
+        [event] = tt.steps(events, step_id="verify-no-stale")
+        self.assertEqual("BR dump 0/5, BLE capture 5/5", event.details["observed"])
+
+
 class CheckerTests(unittest.TestCase):
+
+    def test_stale_records(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "dump.bin"
+            path.write_bytes(full_record(pkt_type=3) + full_record(clock=5)
+                             + full_record(clock=9) + full_record(pkt_type=3, clock=1))
+            self.assertEqual((4, 0, 0), rxdump.stale_records(path))
+            path.write_bytes(full_record(pkt_type=1, clock=900) + full_record(pkt_type=1, clock=99)
+                             + full_record(clock=5) + full_record(clock=9))
+            self.assertEqual((4, 2, 2), rxdump.stale_records(path))
+            path.write_bytes(full_record(clock=900) + full_record(pkt_type=3)
+                             + full_record(clock=5) + full_record(pkt_type=1, clock=9))
+            self.assertEqual((4, 3, 1), rxdump.stale_records(path))
+            path.write_bytes(b"")
+            self.assertEqual((0, 0, 0), rxdump.stale_records(path))
+            path.write_bytes(full_record() + b"x")
+            with self.assertRaises(ValueError):
+                rxdump.stale_records(path)
+
+    def test_le_rf_channels(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "c.pcap"
+            path.write_bytes(le_pcap(0, 19, 0))
+            self.assertEqual([0, 19, 0], capturefile.le_rf_channels(path))
+            path.write_bytes(le_pcap())
+            self.assertEqual([], capturefile.le_rf_channels(path))
+            path.write_bytes(le_pcap(0)[:-3])
+            with self.assertRaises(capturefile.CaptureFileError):
+                capturefile.le_rf_channels(path)
+            path.write_bytes(tt.FakeUbertooth.PCAP_HEADER(192))
+            with self.assertRaises(capturefile.CaptureFileError):
+                capturefile.le_rf_channels(path)
+
+    def test_stalecheck(self):
+        with tempfile.TemporaryDirectory() as d:
+            clean, stale = Path(d) / "a.bin", Path(d) / "b.bin"
+            clean.write_bytes(full_record(clock=5) + full_record(clock=9))
+            stale.write_bytes(full_record(pkt_type=1, clock=99) + full_record(clock=5))
+            good, bad = Path(d) / "a.pcap", Path(d) / "b.pcap"
+            good.write_bytes(le_pcap(0, 0))
+            bad.write_bytes(le_pcap(19, 0))
+
+            def check(*args):
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    code = stalecheck.main([str(a) for a in args])
+                return code, out.getvalue()
+
+            code, out = check("--dumps", clean, stale, "--captures", good, bad)
+            self.assertEqual(0, code)
+            self.assertEqual(
+                "Stale packets: BR dump after BLE: 0, 1 records (LE: 0, 1); BLE capture "
+                "after BR dump: 0, 1 packets; stale iterations: BR dump 1/2, "
+                "BLE capture 1/2\n", out)
+            other = Path(d) / "c.pcap"
+            other.write_bytes(le_pcap(19, 19))
+            code, out = check("--dumps", clean, "--captures", other, "--channel", "19")
+            self.assertIn("BR dump 0/1, BLE capture 0/1", out)
+            code, out = check("--dumps", Path(d) / "missing.bin")
+            self.assertEqual((1, True), (code, "does not exist" in out))
 
     def check(self, data, fmt, *args, mtime=None):
         with tempfile.TemporaryDirectory() as d:
