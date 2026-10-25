@@ -153,7 +153,10 @@ Semantics:
   naming it as `active_run_id` (the runner restarted, or reports another run)
   becomes `lost` with a reason, is persisted, and is published live; runs
   loaded at controller startup stay `running` until their target registers.
-  Records that arrive after a run ended rebuild its report.md. A registration
+  Records that arrive after a run ended rebuild its report.md. A run's
+  report.md is written before its terminal status (finished, error, or
+  `lost`) is stored, served, or published, so a client that sees the status
+  can fetch the report. A registration
   replaces an existing connection for the same host (half-open reconnects);
   the controller logs a warning when the replaced connection was still online.
   Any local process can register any host until runner authentication exists.

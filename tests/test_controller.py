@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import socket
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -807,6 +808,73 @@ class ReviewFixTests(ControllerTestCase):
             await wait_until(lambda: 3 in self.controller.runs["run-1"].seen)
             await wait_until(lambda: report.read_text() == render_run([*events, late]))
         self.assertTrue(self.run_record()["report"])
+
+    def slow_report_writer(self):
+        """Hold every report compile 0.2 s in its worker thread.
+
+        Widens the window in which a status set before the report was
+        written could be seen (issue #22); with the fix the window is closed
+        whatever its width.
+        """
+        original = self.controller._write_report
+
+        def slow(run):
+            time.sleep(0.2)
+            return original(run)
+        self.controller._write_report = slow
+
+    def assert_report_with_status(self, run_id="run-1"):
+        run = self.controller.runs[run_id]
+        self.assertTrue(run.report)
+        self.assertTrue((self.results / run_id / "report.md").is_file())
+        self.assertEqual(run.status, self.run_record(run_id)["status"])
+        self.assertTrue(self.run_record(run_id)["report"])
+
+    async def test_terminal_status_is_never_seen_before_its_report(self):
+        self.slow_report_writer()
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            message = await self.accepted_run(runner)
+            await runner.send("event", run_id="run-1", event=event("run-1", 1, "run_started"))
+            await wait_until(lambda: self.controller.runs["run-1"].seen == {1})
+            async with connect(
+                f"ws://127.0.0.1:{self.port}/ws/live?run_id=run-1", proxy=None
+            ) as live:
+                json.loads(await asyncio.wait_for(live.recv(), TIMEOUT_S))  # snapshot
+                await runner.send(
+                    "run_finished", request_id=message["request_id"], run_id="run-1",
+                    status="failed", exit_code=1, run_directory="/",
+                )
+                # Polled at once and often: the first poll that sees the
+                # terminal status must also find the report.
+                await wait_until(
+                    lambda: self.controller.runs["run-1"].status == "failed", interval=0
+                )
+                self.assert_report_with_status()
+                status, _, _ = await self.http("GET", "/api/runs/run-1/report.md")
+                self.assertEqual(200, status)
+                while True:
+                    update = json.loads(await asyncio.wait_for(live.recv(), TIMEOUT_S))
+                    if update["type"] == "run":
+                        break
+                self.assertEqual(("failed", True),
+                                 (update["run"]["status"], update["run"]["report"]))
+
+    async def test_lost_status_is_never_seen_before_its_report(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            await self.accepted_run(runner)
+            await runner.send("event", run_id="run-1", event=event("run-1", 1, "run_started"))
+            await wait_until(lambda: self.controller.runs["run-1"].seen == {1})
+        await wait_until(lambda: not self.controller.targets["Host_A"].connected)
+        self.slow_report_writer()
+        async with FakeRunner(self.port) as runner:
+            await runner.register(active=None)
+            await wait_until(
+                lambda: self.controller.runs["run-1"].status == "lost", interval=0
+            )
+            self.assert_report_with_status()
+            self.assertEqual(200, (await self.http("GET", "/api/runs/run-1/report.md"))[0])
 
 
 class MalformedRunnerTests(ControllerTestCase):

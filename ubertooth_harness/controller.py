@@ -592,6 +592,13 @@ class Controller:
                 continue
             if run.run_id == target.active_run_id:
                 continue
+            # As for run_finished: the report first, then every state change
+            # without yielding. The run may have ended while the report was
+            # compiled; then it is no longer lost.
+            report = await asyncio.to_thread(self._write_report, run)
+            if not run.active:
+                continue
+            run.report = report
             run.status = LOST
             run.reason = (
                 f"target registered with active run {target.active_run_id}"
@@ -601,7 +608,6 @@ class Controller:
             pending = self._pending_cancels.pop(run.run_id, None)
             if pending is not None:
                 pending.fail(ControllerError(f"run {run.run_id} lost", 409))
-            run.report = await asyncio.to_thread(self._write_report, run)
             self._persist(run)
             self._publish_run(run)
             self.log(f"run {run.run_id} on {target.host}: {LOST} ({run.reason})")
@@ -731,6 +737,11 @@ class Controller:
                 raise _Violation(
                     f"{kind} request_id {message['request_id']} != {run.request_id}"
                 )
+            # The report depends only on run.jsonl. Compile it before any
+            # state changes, so nobody sees a terminal status without its
+            # report; everything below runs without yielding.
+            report = await asyncio.to_thread(self._write_report, run)
+            run.report = report
             run.request_id = message["request_id"]
             if run.status == LOST:
                 run.reason = None  # the runner did report the end after all
@@ -742,7 +753,6 @@ class Controller:
             else:
                 run.status = "error"
                 run.reason = message["reason"]
-            run.report = await asyncio.to_thread(self._write_report, run)
             self._persist(run)
             if target.active_run_id == run.run_id:
                 target.active_run_id = None
