@@ -76,7 +76,7 @@ TOOLS = (
     Tool("ubertooth-follow", r"(?m)^ubertooth-follow - active", 1,
          ("-e", "9"), r"error: maximum access code errors must be ",
          (("-r", "pcapng"), ("-q", "pcap"), ("-d", "dump"))),
-    Tool("ubertooth-rx", r"(?m)^ubertooth-rx - passive Classic Bluetooth", 1,
+    Tool("ubertooth-rx", r"(?m)^ubertooth-rx - passive Classic Bluetooth", 0,
          ("-c", "79"), r"error: channel must be ",
          (("-r", "pcapng"), ("-q", "pcap"), ("-d", "dump"))),
     # ubertooth-dump has no option value to check; -U without its value is

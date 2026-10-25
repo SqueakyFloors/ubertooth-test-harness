@@ -218,7 +218,7 @@ Combinations: `--padding` without `--wifi`, `--wifi` with `-l`/`-u`: Not covered
 | `-r<file>` | PCAPNG capture | Covered | Classic Bluetooth receive (smoke): pcapng, link type 255; repeated `-r` keeps the first (comprehensive). Raw receive replay (smoke): `-i -r` writes one packet per decoded line. Refused command lines (no Ubertooth, smoke): a stray word, `-h`, or `-c 79` after `-r` creates no file and leaves an existing one unchanged; `-r` twice with a stray word creates neither and prints `Ignoring extra capture file` on stderr |
 | `-q<file>` | PCAP capture | Covered | Classic Bluetooth receive (comprehensive): pcap, link type 255. Raw receive replay (smoke): `-i -q` writes one packet per decoded line. Refused command lines (smoke): as `-r`; comprehensive adds `-u` without `-l` |
 | `-d<file>` | binary dump | Covered | Classic Bluetooth receive (comprehensive): whole 68-byte BR records (`rxdump.py`); with no traffic the file is empty. Raw receive replay (comprehensive): `-i -d` writes exactly the fixture's packet records, byte for byte. Refused command lines (smoke): as `-r`; comprehensive adds `-z -l` and `-d` twice with `-h` |
-| `-s` | deprecated sweep flag | Covered | Classic Bluetooth receive (comprehensive): deprecation notice on stderr |
+| `-s` | deprecated sweep flag | N/A | Removed in fork `5ac22a8` (#350) |
 | `-V` | version | Covered | Host CLI surface (fast, release): host version line |
 | `-U <0-7>` | select device | Covered | Classic Bluetooth receive by serial, guard board unchanged |
 

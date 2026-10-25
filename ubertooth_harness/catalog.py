@@ -297,7 +297,7 @@ def _host_cli_surface_cases(_arguments, _resources, _resource_identities):
         ("ubertooth-util", 0),
         ("ubertooth-debug", 0),
         ("ubertooth-specan", 0),
-        ("ubertooth-rx", 1),
+        ("ubertooth-rx", 0),
         ("ubertooth-tx", 0),
         ("ubertooth-dump", 0),
         ("ubertooth-btle", 1),

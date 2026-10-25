@@ -111,7 +111,7 @@ class CatalogTests(unittest.TestCase):
         util = next(case for case in helps if case.argv[0] == "ubertooth-util")
         rx = next(case for case in helps if case.argv[0] == "ubertooth-rx")
         self.assertEqual((0,), util.expected_returncodes)
-        self.assertEqual((1,), rx.expected_returncodes)
+        self.assertEqual((0,), rx.expected_returncodes)
         self.assertTrue(definition.continue_on_case_failure)
 
     def test_ubertooth_identity_builds_named_isolated_and_composed_cases(self):
