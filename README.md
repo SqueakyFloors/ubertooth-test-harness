@@ -232,7 +232,9 @@ registry holding just the `Host` entry is enough:
 python -m ubertooth_harness run-suite --plan testplans/host.yaml --suite host \
   --hardware host-only.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
-  --libbtbb-source /path/to/libbtbb --libbtbb-ref master --build --output runs
+  --libbtbb-source /path/to/libbtbb \
+  --libbtbb-ref 84ab41fc99d172e812438bc9188f30a67216f748 \
+  --build --output runs
 ```
 
 `Raw receive replay` writes its own synthetic `ubertooth-rx -i` input with
@@ -504,9 +506,26 @@ the run builds the exact commits it tests instead:
 python -m ubertooth_harness run-suite --plan testplans/fast.yaml --suite fast \
   --hardware hardware.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref feature/my-change \
-  --libbtbb-source /path/to/libbtbb --libbtbb-ref master \
+  --libbtbb-source /path/to/libbtbb \
+  --libbtbb-ref 84ab41fc99d172e812438bc9188f30a67216f748 \
   --build [--with-firmware] [--with-python[=PYTHON]] --output runs
 ```
+
+The examples here and the default in `scripts/ci.sh` use one commit of the
+[`SqueakyFloors/libbtbb`](https://github.com/SqueakyFloors/libbtbb) fork: the
+commit the Ubertooth fork pins for its own builds, so a run builds the libbtbb
+that fork is built and tested against, not whatever upstream `master` holds
+that day. The harness keeps its own copy of that pin (it never calls the
+fork's installer) and `tests/test_libbtbb_pin.py` keeps the copies in
+`scripts/ci.sh` and this file in step; bump both when the fork bumps its pin.
+Only libbtbb's C library is installed and linked (`-DENABLE_PYTHON=OFF` skips
+its Python tools): the Ubertooth tools need nothing else from it.
+
+`--libbtbb-ref` can still name any ref, with one limit: the harness passes no
+`-DCMAKE_POLICY_VERSION_MINIMUM`, so a libbtbb declaring
+`cmake_minimum_required` below 3.5 — upstream `master` at the time of writing
+declares 2.8 — fails to configure under CMake 4 and needs CMake 3.x. The
+pinned commit declares a `3.5...3.31` range and configures under both.
 
 The resolved commits are cloned into `<run>/build/src` (the source checkouts
 are never modified), built out of tree, and installed into `<run>/build/prefix`.
@@ -668,7 +687,7 @@ lines open and close the run, build, preflight, and each test:
 00:00:10.438     === PREFLIGHT ===
 00:00:10.439     +++ Host version +++
 00:00:10.439 [C] ubertooth-util -H
-00:00:10.465 [R] ubertooth-util exit 0 in 0.025s; [O] libubertooth 1.1 (git-be97109), libbtbb 1.0 (git-f0fe176)
+00:00:10.465 [R] ubertooth-util exit 0 in 0.025s; [O] libubertooth 1.1 (git-be97109), libbtbb 1.0 (git-84ab41f)
 00:00:10.465     --- Host version EXIT: passed ---
 00:00:10.466     === PREFLIGHT EXIT: passed ===
 00:00:10.466     === TEST 002-Host CLI surface: Host CLI surface on Host_Mac ===
@@ -820,7 +839,8 @@ python -m ubertooth_harness runner \
   --controller ws://127.0.0.1:8765/ws/runner \
   --hardware hardware.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth \
-  [--libbtbb-source /path/to/libbtbb --libbtbb-ref master] \
+  [--libbtbb-source /path/to/libbtbb \
+   --libbtbb-ref 84ab41fc99d172e812438bc9188f30a67216f748] \
   [--plans-dir testplans] [--allow-power-changes] \
   --output runs
 ```
