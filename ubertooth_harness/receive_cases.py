@@ -544,7 +544,8 @@ def raw_receive_cases(arguments, _resources, resource_identities):
 # a last record cut short ("error: <file> ends in a partial record: N of 68
 # bytes, ignored") is reported on stderr after whatever was decoded, exit 1
 # (#203). An -i file fopen() cannot open prints "error: <name>: <strerror>",
-# exit 1 (fork 5ac22a8, #350). -u without -l is refused before the input or any
+# exit 1 (fork 5ac22a8, #350); so does a -d file it cannot open, before any
+# record is decoded or device opened. -u without -l is refused before the input or any
 # device is used: "error: -u <UAP> requires -l <LAP>", exit 1 (fork 57469f2,
 # #236). The other options work as live: -l/-u, -z, -e, -r/-q/-d.
 # The fixture is synthetic (rxreplay.py), never an over-the-air capture.
@@ -728,6 +729,21 @@ def replay_cases(arguments, _resources, _resource_identities, *, now=None):
                          forbidden=(r"ubertooth-rx - passive Classic Bluetooth",),
                          source="missing.bin"),
         ), "exit 1 with 'error: <file>: No such file or directory'"),
+        # main() opens the -d file before any device or record (fork
+        # 5ac22a8, #350), so this needs no board even without -i; -i keeps
+        # it off USB if the open were ever moved after the lookup.
+        _replay_case("replay-dump-unopenable", "-i -d to a file it cannot open", (
+            _fixture_step(base),
+            _replay_step("ubertooth-rx -i <fixture> -d <missing dir>/x.bin", (),
+                         returncodes=(1,), check=rxreplay.packets_check([]),
+                         patterns=(r"(?m)^error: .*no-such-dir/x\.bin: "
+                                   r"No such file or directory$",),
+                         forbidden=(r"ubertooth-rx - passive Classic Bluetooth",),
+                         files=(("-d", "no-such-dir/x.bin"),)),
+            _capture_absent("verify-absent", "Verify nothing was created",
+                            "no-such-dir"),
+        ), "exit 1 with 'error: <file>: No such file or directory', no usage, "
+           "no packet decoded, nothing created"),
         _replay_case("replay-systime", "-i packet lines carry the recorded systime", (
             _fixture_step(base),
             _replay_step("ubertooth-rx -i <fixture>", (), check=lambda output:

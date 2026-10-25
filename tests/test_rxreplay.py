@@ -101,7 +101,8 @@ class ReplayRx:
     after a device is opened, and ignored with -i). ``bugs``
     switches on a misbehavior per case: decoys, no-uap, wrong-uap, ignores-l,
     ignores-e, link-type, no-capture, dump-mangled, survey-no-uap,
-    partial-record, empty-fails, missing-exit-0, u-fails, wrong-u-confirms.
+    partial-record, empty-fails, missing-exit-0, u-fails, wrong-u-confirms,
+    dump-open-exit-0, dump-open-usage.
     """
 
     def __init__(self, *, fixed=True, bugs=()):
@@ -151,6 +152,16 @@ class ReplayRx:
             return self._result(command, 1 if self.fixed else 0, "",
                                 f"error: reading {path} failed: Is a directory\n"
                                 if self.fixed else "")
+        dump = self._value(options, "-d")
+        if dump is not None and not Path(dump).parent.is_dir():
+            # The -d file is opened before any record is read; 5ac22a8^
+            # used perror() (no "error: " prefix).
+            code = 0 if "dump-open-exit-0" in self.bugs else 1
+            prefix = "error: " if self.fixed else ""
+            usage = ("ubertooth-rx - passive Classic Bluetooth discovery/decode\n"
+                     if "dump-open-usage" in self.bugs else "")
+            return self._result(command, code, "",
+                                f"{prefix}{dump}: No such file or directory\n{usage}")
         data = path.read_bytes()
         if not data and "empty-fails" in self.bugs:
             return self._result(command, 1, "")
@@ -489,7 +500,7 @@ class ReplayCaseTests(unittest.TestCase):
         self.assertEqual(["replay-decode-lap", "replay-lap-uap", "replay-pcapng",
                           "replay-pcap"], [c.case_id for c in smoke])
         _a, full = replay_cases("comprehensive")
-        self.assertEqual(17, len(full))
+        self.assertEqual(18, len(full))
         context = {"capture dir": "/run/captures/x"}
         for case in full:
             self.assertIsInstance(case, StateCase)
@@ -513,7 +524,8 @@ class ReplayCaseTests(unittest.TestCase):
         self.assertTrue(summary.passed, summary.failure_reason)
         summary, events = run_replay(ReplayRx(fixed=False))
         self.assertFalse(summary.passed)
-        self.assertEqual(["-i -u without -l is refused",
+        self.assertEqual(["-i -d to a file it cannot open",
+                          "-i -u without -l is refused",
                           "-i of a directory reports the read error",
                           "-i of a file whose last record is cut",
                           "-i packet lines carry the recorded systime"],
@@ -546,6 +558,8 @@ class ReplayCaseTests(unittest.TestCase):
             "partial-record": {"-i of a file whose last record is cut"},
             "empty-fails": {"-i of an empty file"},
             "missing-exit-0": {"-i of a missing file"},
+            "dump-open-exit-0": {"-i -d to a file it cannot open"},
+            "dump-open-usage": {"-i -d to a file it cannot open"},
             "u-fails": {"-i -l -u with the right UAP"},
             "wrong-u-confirms": {"-i -l -u with a wrong UAP confirms nothing"},
         }
