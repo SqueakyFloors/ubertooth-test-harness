@@ -1,14 +1,14 @@
 """Case builder for Util mode refusals: ubertooth-util -f and -i, no Ubertooth.
 
 ``ubertooth-util -f`` (DFU) and ``-i`` (ISP) leave the application firmware,
-so the harness never runs them against a board. Since fork 4ed4a1d
+so the harness never runs them against a board. Since fork bbc1b49
 (util_check_modes(), host/ubertooth-tools/src/util_modes.c) a command line
 with two or more of the mode options -q -n -e -t -x -I -i -f is refused before
 any device is opened, exit 1, naming the given modes in that fixed order:
 
     error: options -i -f cannot be combined; give only one of -q -n -e -t -x -I -i -f
 
-and -z (read or set) with a mode is refused next, naming the first mode in the
+and since 4ed4a1d -z (read or set) with a mode is refused next, naming the first mode in the
 same order: ``error: -z cannot be combined with -f`` (ubertooth-util.md,
 DESCRIPTION and -z). Every command runs as ``env UBERTOOTH_TEST_NO_DEVICES=1
 ubertooth-util ...``, as in Refused command lines, so a regression that
