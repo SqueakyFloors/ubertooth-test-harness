@@ -128,7 +128,7 @@ Combinations to test:
 | `-I` / `-J` | interfere continuously (`-J` alias) | Hard | Same as `-i` |
 | `-U<index\|serial>` | select device | Covered | Every btle case uses a serial |
 | `-r<file>` | PCAPNG capture | Covered | BLE CRC transitions: the header and link type 256 are checked (smoke with `-n`, comprehensive with `-n` and `-f`). Packet content is not tested. Refused command lines (no Ubertooth, smoke): a stray word, `-h`, or `-A 40` after `-r` creates no file and leaves an existing one unchanged; comprehensive adds `-f -n`. `-r -` is refused (comprehensive, with `-c`) |
-| `-q<file>` | PCAP (LE_LL_WITH_PHDR) | Covered | As `-r`: pcap with link type 256. Refused command lines (smoke): as `-r`; `-q - -q <file>` prints `Ignoring extra capture file` on stderr, not into the stdout capture, and never creates the file. Comprehensive adds `-a -a<address>` |
+| `-q<file>` | PCAP (LE_LL_WITH_PHDR) | Covered | As `-r`: pcap with link type 256. Refused command lines (smoke): as `-r`; `-n -q - -q <file>` prints `Ignoring extra capture file` on stderr, not into the stdout capture, and never creates the file. Comprehensive adds `-a -a<address>` |
 | `-c<file>` | PCAP (PPI) | Covered | As `-r`: pcap with link type 192. Refused command lines (smoke): as `-r`; comprehensive adds `-c <file> -r -` |
 | `-A<37-39>` | advertising channel | Covered | 37 in smoke; 37, 38, and 39 in comprehensive. `-A36`/`-A40` rejected: Argument validation (comprehensive) |
 | `-v[01]` | get/set CRC check | Covered | Get, set, and applied by a mode (smoke); `-v0`, `-v 1` and `-v 0` as the next word, and repeated `-v` (comprehensive). `-v 2` rejected and `-v stray` refused: Argument validation (comprehensive) |

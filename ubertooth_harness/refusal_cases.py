@@ -227,13 +227,15 @@ def _extra_capture_cases():
     """'Ignoring extra capture file' goes to stderr, and neither file of a
     refused command appears."""
     btle = _case(
-        "btle-q-stdout-extra", "btle -q - -q <file>: the extra-file note is on stderr",
+        "btle-q-stdout-extra", "btle -n -q - -q <file>: the extra-file note is on stderr",
         (
             probe_step("ubertooth-btle"),
             # Accepted, so the PCAP header goes to stdout and the board lookup
-            # finds none: the note must not be in that capture.
+            # finds none: the note must not be in that capture. -n gives the
+            # command its work: since fork 482264d (#287) a command line with
+            # no mode is refused.
             tool_step("accepted", "ubertooth-btle",
-                       ("-q", "-", "-q", ("file", "extra.pcap")),
+                       ("-n", "-q", "-", "-q", ("file", "extra.pcap")),
                        patterns=(_EXTRA + r"\S*extra\.pcap", NO_BOARD_NOTE),
                        forbidden=(), check=_no_extra_on_stdout),
             _check(("extra.pcap",), ()),
