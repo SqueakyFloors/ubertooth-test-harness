@@ -24,7 +24,10 @@ def _pin() -> str:
     match = re.search(
         r"^LIBBTBB_PIN=([0-9a-f]{40})$", CI_SH.read_text(encoding="utf-8"), re.M
     )
-    assert match, "scripts/ci.sh must set LIBBTBB_PIN to a full commit hash"
+    if match is None:
+        raise AssertionError(
+            "scripts/ci.sh must set LIBBTBB_PIN to a full commit hash"
+        )
     return match.group(1)
 
 
@@ -36,10 +39,15 @@ class LibbtbbPinTests(unittest.TestCase):
         self.assertIn(f"LIBBTBB_URL={FORK_URL}", text)
         self.assertIn('git clone --quiet "$LIBBTBB_URL"', text)
         self.assertNotIn("greatscottgadgets/libbtbb", text)
-        # Both run_build invocations default the ref to the pin, and the
-        # LIBBTBB_REF override still wins.
-        self.assertEqual(2, text.count('--libbtbb-ref "${LIBBTBB_REF:-$LIBBTBB_PIN}"'))
-        self.assertNotIn("${LIBBTBB_REF:-master}", text)
+        # Every --libbtbb-ref the script passes defaults to the pin, and the
+        # LIBBTBB_REF override still wins over it. A new build invocation is
+        # welcome; one that reaches for another ref is not.
+        passed = re.findall(r"--libbtbb-ref (\S+)", text)
+        self.assertTrue(passed, "scripts/ci.sh passes no --libbtbb-ref")
+        self.assertEqual(
+            ['"${LIBBTBB_REF:-$LIBBTBB_PIN}"'] * len(passed), passed,
+            "every --libbtbb-ref in scripts/ci.sh must default to LIBBTBB_PIN",
+        )
 
     def test_readme_examples_name_the_same_pin(self):
         text = README.read_text(encoding="utf-8")

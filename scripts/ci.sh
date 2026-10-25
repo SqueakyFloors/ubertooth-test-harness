@@ -15,13 +15,16 @@ set -eu
 PYTHON=${PYTHON:-python3}
 WORK=${CI_TEMP:-${RUNNER_TEMP:-$(mktemp -d)}}
 
-# libbtbb comes from the same fork and the same pinned commit the Ubertooth
-# fork builds against, so a harness run tests the libbtbb the fork ships with
-# and a push to libbtbb cannot change a harness build. This pin is the
-# harness's own copy, deliberately: the harness never calls the fork's
-# installer. It must match the fork's pin (the LIBBTBB_REF in the fork's
-# .github/workflows/build.yml); bump it here and in README.md together, which
-# tests/test_libbtbb_pin.py checks.
+# libbtbb comes from this project's fork at a pinned commit, so a push to
+# libbtbb cannot change a harness build. The commit is the one the Ubertooth
+# fork pins for its own builds (fork issue #320, fork PR #322), so a harness
+# run builds the libbtbb the fork is moving to rather than upstream master.
+# This pin is the harness's own copy, deliberately: the harness never calls
+# the fork's installer. It must match the fork's (the LIBBTBB_REF in the
+# fork's .github/workflows/build.yml); bump it here and in README.md together,
+# which tests/test_libbtbb_pin.py checks. The pin has to stay reachable from
+# the clone's default branch: the build re-clones this clone, and that copies
+# branches and tags only.
 LIBBTBB_URL=https://github.com/SqueakyFloors/libbtbb.git
 LIBBTBB_PIN=84ab41fc99d172e812438bc9188f30a67216f748
 

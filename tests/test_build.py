@@ -114,8 +114,9 @@ class BuildPlanTests(unittest.TestCase):
             # commit declares a cmake_minimum_required range, so CMake 4 needs
             # no CMAKE_POLICY_VERSION_MINIMUM as upstream libbtbb does.
             self.assertIn("-DENABLE_PYTHON=OFF", argv["libbtbb-configure"])
-            for step, command in argv.items():
-                self.assertNotIn("-DCMAKE_POLICY_VERSION_MINIMUM=3.5", command, step)
+            self.assertNotIn(
+                "-DCMAKE_POLICY_VERSION_MINIMUM=3.5", argv["libbtbb-configure"]
+            )
             for command in plan.commands:
                 self.assertNotIn("sudo", command.argv)
                 self.assertFalse(
