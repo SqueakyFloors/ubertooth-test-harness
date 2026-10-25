@@ -188,13 +188,21 @@
       $("plan-status").textContent = `Cannot list plans: ${error.message}`;
     }
     const select = $("plan");
-    const usable = state.plans.filter((plan) => !plan.error);
+    // Only plans that load and are runnable can be started; a plan of
+    // planned tests (runnable: false, e.g. backlog) is listed, not offered.
+    const usable = state.plans.filter((plan) => !plan.error && plan.runnable === true);
     select.replaceChildren(...usable.map((plan) =>
       el("option", { value: plan.name, text: `${plan.name} — ${plan.title}` })));
     const broken = state.plans.filter((plan) => plan.error);
+    const planned = state.plans.filter((plan) => !plan.error && plan.runnable !== true);
+    const notes = [];
     if (broken.length) {
-      $("plan-status").textContent = `Not loadable: ${broken.map((plan) => `${plan.name} (${plan.error})`).join("; ")}`;
+      notes.push(`Not loadable: ${broken.map((plan) => `${plan.name} (${plan.error})`).join("; ")}`);
     }
+    if (planned.length) {
+      notes.push(`Not runnable (planned tests): ${planned.map((plan) => plan.name).join(", ")}`);
+    }
+    if (notes.length) $("plan-status").textContent = notes.join(". ");
     if (usable.some((plan) => plan.name === "fast")) select.value = "fast";
     renderSuites();
     if (state.live) rebuildChecklist();

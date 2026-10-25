@@ -146,6 +146,9 @@ _SPECAN_CHECKER = str(Path(specandump.__file__).resolve())
 def _specan_case(serial, case_id, name, options, fmt, low, high, seconds, *,
                  dump_file=None, stderr_pattern=None, extra_check=None,
                  expected_state=None):
+    if dump_file is not None and extra_check is not None:
+        # The samples go to the file, so a stdout check has nothing to read.
+        raise ValueError(f"{case_id}: extra_check needs stdout samples, not dump_file")
     steps = [
         _stop(serial, "establish-idle", "Establish idle before reading"),
     ]
@@ -401,12 +404,17 @@ def spectrum_cases(arguments, _resources, resource_identities):
 #
 # - every frequency's lowest reading, a noise floor, is between -115 and
 #   -80 dBm (the CC2400 floor is about -100 dBm; one quiet sample per
-#   frequency is enough, so busy Wi-Fi channels still have one);
+#   frequency is enough, so busy Wi-Fi channels still have one). Up to
+#   five of the 79 frequencies may stay above -80 dBm for the whole sweep (a
+#   continuous emitter nearby); none may read below -115 dBm;
 # - the mean reading is negative (below -54 dBm): most samples are noise;
 # - the readings vary (at least three values): the register is live.
 
 RSSI_OFFSET_DB = -54
 NOISE_FLOOR_DBM = (-115, -80)
+# Frequencies whose floor may stay above NOISE_FLOOR_DBM[1] (continuous
+# emitters); more fail the case.
+_BUSY_FREQUENCIES_ALLOWED = 5
 _LIVE_VALUES = 3
 
 
@@ -429,13 +437,21 @@ def rssi_sanity_check(output: str) -> str:
         return ""  # sweep_check reports "no sample lines"
     problems = []
     low, high = NOISE_FLOOR_DBM
-    off = {f: r + RSSI_OFFSET_DB for f, r in floor.items()
-           if not low <= r + RSSI_OFFSET_DB <= high}
-    if off:
-        first = sorted(off)[:3]
+    dbm = {f: r + RSSI_OFFSET_DB for f, r in sorted(floor.items())}
+    below = {f: r for f, r in dbm.items() if r < low}
+    busy = {f: r for f, r in dbm.items() if r > high}
+
+    def named(frequencies):
+        return ", ".join(f"{f} MHz {r} dBm" for f, r in frequencies.items())
+
+    if below:
         problems.append(
-            f"noise floor outside {low} to {high} dBm at {len(off)} frequencies "
-            f"(for example {', '.join(f'{f} MHz {off[f]} dBm' for f in first)})"
+            f"noise floor below {low} dBm at {len(below)} frequencies ({named(below)})"
+        )
+    if len(busy) > _BUSY_FREQUENCIES_ALLOWED:
+        problems.append(
+            f"noise floor above {high} dBm at {len(busy)} frequencies, more than "
+            f"{_BUSY_FREQUENCIES_ALLOWED} allowed ({named(busy)})"
         )
     mean = total / count
     if mean >= 0:
@@ -456,7 +472,8 @@ def rssi_sanity_cases(arguments, _resources, resource_identities):
             *BAND, seconds, extra_check=rssi_sanity_check,
             expected_state=(
                 f"full-band sweep; every frequency's noise floor {NOISE_FLOOR_DBM[0]} to "
-                f"{NOISE_FLOOR_DBM[1]} dBm, negative mean, at least {_LIVE_VALUES} "
+                f"{NOISE_FLOOR_DBM[1]} dBm (up to {_BUSY_FREQUENCIES_ALLOWED} above), "
+                f"negative mean, at least {_LIVE_VALUES} "
                 "distinct readings; channel, squelch, and LEDs restored"
             ),
         ),

@@ -402,13 +402,24 @@ class SpectrumRssiSanityTests(unittest.TestCase):
         readings = [(f, -45 + s) for s in range(2) for f in range(2402, 2405)]
         self.assertIn("only 2 distinct readings", self.check(_samples(readings)))
 
-    def test_a_frequency_with_no_quiet_reading_fails(self):
-        # 2440 never reads below -20 (-74 dBm): no noise floor there.
-        readings = [(f, -46 - s) for s in range(3) for f in range(2438, 2443) if f != 2440]
-        readings += [(2440, -20), (2440, -10)]
+    def test_up_to_five_busy_frequencies_pass(self):
+        # A continuous emitter: 2440-2444 never read below -20 (-74 dBm).
+        busy = range(2440, 2445)
+        readings = [(f, _live(f, s)) for s in range(3) for f in range(2402, 2481)
+                    if f not in busy]
+        readings += [(f, -20 + s) for s in range(2) for f in busy]
+        self.assertEqual("", self.check(_samples(readings)))
+
+    def test_more_than_five_busy_frequencies_fail_and_are_named(self):
+        busy = range(2440, 2446)
+        readings = [(f, _live(f, s)) for s in range(3) for f in range(2402, 2481)
+                    if f not in busy]
+        readings += [(f, -20 + s) for s in range(2) for f in busy]
         problem = self.check(_samples(readings))
-        self.assertIn("noise floor outside -115 to -80 dBm at 1 frequencies", problem)
-        self.assertIn("2440 MHz -74 dBm", problem)
+        self.assertIn("noise floor above -80 dBm at 6 frequencies, more than 5 allowed",
+                      problem)
+        for f in busy:
+            self.assertIn(f"{f} MHz -74 dBm", problem)
 
     def test_a_floor_below_the_receiver_floor_fails(self):
         readings = [(2402, -62), (2402, -40), (2403, -45), (2403, -47)]
@@ -417,6 +428,12 @@ class SpectrumRssiSanityTests(unittest.TestCase):
     def test_a_positive_mean_fails(self):
         readings = [(2402, -50), (2402, 30), (2402, 40), (2402, 20)]
         self.assertIn("is not negative", self.check(_samples(readings)))
+
+    def test_extra_check_is_refused_with_a_dump_file(self):
+        with self.assertRaisesRegex(ValueError, "extra_check needs stdout samples"):
+            tool_cases._specan_case(
+                SERIAL, "dump", "Dump", ("-d", "out.bin"), "default", 2402, 2480, 5,
+                dump_file="out.bin", extra_check=tool_cases.rssi_sanity_check)
 
     def test_no_samples_is_left_to_the_sweep_check(self):
         self.assertEqual("", self.check("Ubertooth stopped\n"))
