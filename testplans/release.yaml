@@ -8,6 +8,16 @@ suites:
         hosts: each
         Ubertooth: default
 
+    # No Ubertooth. Strict dfu-s-bad-image fails until fork #286 is fixed.
+    - Refused command lines:
+        hosts: each
+        coverage: comprehensive
+
+    # No Ubertooth. Strict sign-unreadable-input fails until fork #305 is fixed.
+    - DFU image checks:
+        hosts: each
+        coverage: comprehensive
+
     # No Ubertooth. Strict extcap-help-options fails until fork #268 is fixed.
     - Python tools:
         hosts: each

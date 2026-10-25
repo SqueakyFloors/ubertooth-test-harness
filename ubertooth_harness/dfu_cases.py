@@ -16,10 +16,10 @@ refused with exit 1 and "Signature check failed, firmware will not be
 updated" before a device is opened. -s refuses a .bin that already ends in a
 DFU suffix and writes nothing, and -s and -d only read their input.
 
-SqueakyFloors/ubertooth#267 (open at 6fee30c): -d <image> -r writes and
-resets correctly but exits 1 ("Detach failed") and skips "Verified firmware
-revision", so write-read-back and every cleanup that rewrites the test image
-fail on that commit until it is fixed. The cases are not changed for it.
+SqueakyFloors/ubertooth#267 (6fee30c, fixed in 89d9197): -d <image> -r
+writes and resets correctly but exits 1 ("Detach failed") and skips "Verified
+firmware revision", so write-read-back and every cleanup that rewrites the
+test image fail on that commit. The cases are not changed for it.
 
 SqueakyFloors/ubertooth#208: a failed -u read-back (seen once in about 20)
 leaves the board in DFU despite -r. A case step that hits it fails and the

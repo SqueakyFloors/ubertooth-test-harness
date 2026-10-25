@@ -21,7 +21,8 @@ suites:
 
     # Writes and reads back the selected board's firmware, so it comes after
     # every test that needs the resolved firmware (with Flash reliability).
-    # Both fail at fork 6fee30c on fork #267 (-d -r exits 1 after a good flash).
+    # Both fail at fork 6fee30c on fork #267 (-d -r exits 1 after a good
+    # flash), fixed in 89d9197.
     - DFU images:
         hosts: each
         Ubertooth: default

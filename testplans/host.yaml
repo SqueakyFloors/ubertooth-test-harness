@@ -10,6 +10,19 @@ suites:
         hosts: each
         coverage: smoke
 
+    # Every tool runs with UBERTOOTH_TEST_NO_DEVICES=1; skipped when the built
+    # libubertooth predates it (fork b6d8ede). ubertooth-follow cases skip
+    # where it is not built (no BlueZ).
+    - Refused command lines:
+        hosts: each
+        coverage: smoke
+
+    # ubertooth-dfu with UBERTOOTH_TEST_NO_DEVICES=1 on a synthetic image;
+    # sign-test-build skips without a firmware build (none here, or in CI).
+    - DFU image checks:
+        hosts: each
+        coverage: smoke
+
     # specan-ui is skipped without --build --with-python and numpy/qtpy.
     - Python tools:
         hosts: each

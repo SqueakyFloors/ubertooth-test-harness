@@ -4,7 +4,7 @@ suites:
   # Writes the selected board's firmware and ends on the verified test build;
   # pass --artifact "test build=PATH" or --build --with-firmware. Needs fork
   # e8edd15 (#198, #199) and 9d710fe (#200). At 6fee30c every write fails on
-  # fork #267 (-d -r exits 1 after a good flash).
+  # fork #267 (-d -r exits 1 after a good flash), fixed in 89d9197.
   firmware:
     - DFU images:
         hosts: each

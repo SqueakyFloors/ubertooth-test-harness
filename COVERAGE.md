@@ -7,11 +7,13 @@ that changes coverage. Options come from each
 tool's `getopt` string and usage text on this fork's `main`. Coverage comes
 from the harness catalog (`ubertooth_harness/catalog.py`,
 `ubertooth_harness/transitions.py`, `ubertooth_harness/util_cases.py`,
-`ubertooth_harness/receive_cases.py`, `ubertooth_harness/dfu_cases.py`), its plans (`testplans/*.yaml`) and its
+`ubertooth_harness/receive_cases.py`, `ubertooth_harness/dfu_cases.py`,
+`ubertooth_harness/refusal_cases.py`, `ubertooth_harness/dfu_host_cases.py`), its plans (`testplans/*.yaml`) and its
 preflight, flash, and guard code. Profiles: **smoke** runs in the `fast` plan,
 **comprehensive** in the `release` plan; tests without a profile name their plan.
-The `host` plan holds the tests that need no Ubertooth (Host CLI surface and
-Raw receive replay smoke); CI runs it against the tools it builds.
+The `host` plan holds the tests that need no Ubertooth (Host CLI surface, Raw
+receive replay, Refused command lines, DFU image checks, and Python tools
+smoke); CI runs it against the tools it builds.
 Status legend:
 **Covered**: a harness test runs the option and checks its output or effect.
 The test and profile are named.
@@ -39,6 +41,10 @@ Harness-wide checks that use the CLIs:
 - **DFU images** (smoke in the `slow` plan, comprehensive in the `firmware`
   plan): writes the test image, reads it back, and tries bad images on the
   selected board; every case ends with the test image read back and verified.
+- **DFU image checks** (no Ubertooth; smoke in the `host` and `fast` plans and
+  CI, comprehensive in `release`): `ubertooth-dfu -d <image> -r` and `-s` with
+  `UBERTOOTH_TEST_NO_DEVICES=1` on a synthetic image; the test build only for
+  `sign-test-build`, which is skipped without one.
 - **Exclusive Ubertooth topology** (`exclusive` plan, Linux, power control):
   runs `ubertooth-util -s`, `ubertooth-util -v`, and `ubertooth-btle -f` with no
   `-U` while only one board is powered.
@@ -120,9 +126,9 @@ Combinations to test:
 | `-i` / `-j` | interfere once (`-j` alias) | Hard | Jams a live connection (transmits RF) |
 | `-I` / `-J` | interfere continuously (`-J` alias) | Hard | Same as `-i` |
 | `-U<index\|serial>` | select device | Covered | Every btle case uses a serial |
-| `-r<file>` | PCAPNG capture | Covered | BLE CRC transitions: the header and link type 256 are checked (smoke with `-n`, comprehensive with `-n` and `-f`). `-r -` (stdout) and packet content are not tested |
-| `-q<file>` | PCAP (LE_LL_WITH_PHDR) | Covered | As `-r`: pcap with link type 256 |
-| `-c<file>` | PCAP (PPI) | Covered | As `-r`: pcap with link type 192 |
+| `-r<file>` | PCAPNG capture | Covered | BLE CRC transitions: the header and link type 256 are checked (smoke with `-n`, comprehensive with `-n` and `-f`). Packet content is not tested. Refused command lines (no Ubertooth, smoke): a stray word, `-h`, or `-A 40` after `-r` creates no file and leaves an existing one unchanged; comprehensive adds `-f -n`. `-r -` is refused (comprehensive, with `-c`) |
+| `-q<file>` | PCAP (LE_LL_WITH_PHDR) | Covered | As `-r`: pcap with link type 256. Refused command lines (smoke): as `-r`; `-q - -q <file>` prints `Ignoring extra capture file` on stderr, not into the stdout capture, and never creates the file. Comprehensive adds `-a -a<address>` |
+| `-c<file>` | PCAP (PPI) | Covered | As `-r`: pcap with link type 192. Refused command lines (smoke): as `-r`; comprehensive adds `-c <file> -r -` |
 | `-A<37-39>` | advertising channel | Covered | 37 in smoke; 37, 38, and 39 in comprehensive. `-A36`/`-A40` rejected: Argument validation (comprehensive) |
 | `-v[01]` | get/set CRC check | Covered | Get, set, and applied by a mode (smoke); `-v0`, `-v 1` and `-v 0` as the next word, and repeated `-v` (comprehensive). `-v 2` rejected and `-v stray` refused: Argument validation (comprehensive) |
 | `-x<0-32>` | allowed access-address errors | Partial | `-x33` rejected (Argument validation); `-x0`/`-x32` accepted (BLE settings, comprehensive). The effect on capture needs traffic |
@@ -155,13 +161,13 @@ Combinations: list and range output: Covered. `-v0`/`-v2` output: Covered. `Debu
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
 | `-h` | help | Covered | Host CLI surface (exit 1) |
-| `-d <file>` | write DFU image | Covered | Flash reliability (slow): repeated exact-verified writes. DFU images (smoke): write, then read back. Bad images (DFU images, comprehensive): a wrong CRC, a truncated file, a binary without a suffix, a text file, a suffix without `UFD`, and a suffix for another vendor or product must be refused with exit 1 and "Signature check failed, firmware will not be updated" before a device is opened (no "operation started", no "firmware programming attempt"); a wrong vendor or product names the ID in the refusal; the board must stay in its application with the same revision and flash (read back). Fixed in `e8edd15` ([ubertooth#198](https://github.com/SqueakyFloors/ubertooth/issues/198), [ubertooth#199](https://github.com/SqueakyFloors/ubertooth/issues/199)); at 3b22c95 every rejection left the board in the DFU bootloader and a wrong vendor or product was written. At 6fee30c `-d <image> -r` exits 1 after a good flash ([ubertooth#267](https://github.com/SqueakyFloors/ubertooth/issues/267)), so the write cases fail until that is fixed |
-| `-r` | reset after the operation | Covered | Flash reliability (slow) and DFU images, with `-d` and with `-u`; after `-u -r` the application must answer with the same revision |
+| `-d <file>` | write DFU image | Covered | Flash reliability (slow): repeated exact-verified writes. DFU images (smoke): write, then read back. Bad images (DFU images, comprehensive): a wrong CRC, a truncated file, a binary without a suffix, a text file, a suffix without `UFD`, and a suffix for another vendor or product must be refused with exit 1 and "Signature check failed, firmware will not be updated" before a device is opened (no "operation started", no "firmware programming attempt"); a wrong vendor or product names the ID in the refusal; the board must stay in its application with the same revision and flash (read back). Fixed in `e8edd15` ([ubertooth#198](https://github.com/SqueakyFloors/ubertooth/issues/198), [ubertooth#199](https://github.com/SqueakyFloors/ubertooth/issues/199)); at 3b22c95 every rejection left the board in the DFU bootloader and a wrong vendor or product was written. `-d <image> -r` exited 1 after a good flash at 6fee30c ([ubertooth#267](https://github.com/SqueakyFloors/ubertooth/issues/267), fixed in `89d9197`). DFU image checks (no Ubertooth, smoke, in CI): the same seven bad images, made from a synthetic image, are refused by `-d <image> -r` with the image check's message, exit 1, before any board lookup (no "no board is selected" note, no DFU stage log), the image and its directory unchanged; a good image passes the check and reaches the lookup. Comprehensive adds an empty file, 15 bytes, a suffix with no firmware, a suffix length of 200 in an 80-byte file, DFU version 2.0, no revision marker (with `-r`), a directory and a missing file (all refused before the lookup), and DFU 1.1 and the `ffff:ffff` wildcard (accepted) |
+| `-r` | reset after the operation | Covered | Flash reliability (slow) and DFU images, with `-d` and with `-u`; after `-u -r` the application must answer with the same revision. DFU image checks: with `-r`, `-d` names the image's expected revision (`DFU expected revision:`), and an image with no revision marker is refused before the board lookup (comprehensive) |
 | `-U <index\|serial>` | select device | Covered | Flash reliability and DFU images (by serial; optionally alternating boards) |
-| `-u <file>` | read firmware from the device | Covered | DFU images (smoke): after `-d <test image> -r`, `-u <file> -r` must give 245760 bytes (flash 0x4000-0x3ffff) that start with the whole image, suffix included, padded with 0xff to 256 bytes. Comprehensive: every rejection is checked by a read-back. A read-back fails now and then (about 1 in 20) and leaves the board in DFU despite `-r` ([ubertooth#208](https://github.com/SqueakyFloors/ubertooth/issues/208)); `-u` truncates its file before it finds a device ([ubertooth#200](https://github.com/SqueakyFloors/ubertooth/issues/200) item 4, not tested) |
-| `-s <file>` | add DFU suffix to a binary | Covered | DFU images (smoke): the test image without its suffix, suffixed with `-s`, must equal the build's `.dfu` (VID:PID 1d50:6003, bcdDFU 0100, CRC). Comprehensive: a `.dfu` is refused (exit 1, unchanged); a `.bin` that already has a suffix is refused ("already has a DFU suffix, so ... was not written", nothing written) and a read-only `.bin` is suffixed (fork `9d710fe`, [ubertooth#200](https://github.com/SqueakyFloors/ubertooth/issues/200)) |
+| `-u <file>` | read firmware from the device | Covered | DFU images (smoke): after `-d <test image> -r`, `-u <file> -r` must give 245760 bytes (flash 0x4000-0x3ffff) that start with the whole image, suffix included, padded with 0xff to 256 bytes. Comprehensive: every rejection is checked by a read-back. A read-back fails now and then (about 1 in 20) and leaves the board in DFU despite `-r` ([ubertooth#208](https://github.com/SqueakyFloors/ubertooth/issues/208)); `-u` truncates its file before it finds a device ([ubertooth#200](https://github.com/SqueakyFloors/ubertooth/issues/200) item 4, fixed). Refused command lines (no Ubertooth, smoke): a stray word, `-h`, or a later `-s other.txt` creates no file, no temporary file, and leaves an existing one unchanged; comprehensive: `-u <file> -s <missing .bin>` and `-u <file> -d <bad image>` (exit 1, no device) leave the file and no temporary file |
+| `-s <file>` | add DFU suffix to a binary | Covered | DFU images (smoke): the test image without its suffix, suffixed with `-s`, must equal the build's `.dfu` (VID:PID 1d50:6003, bcdDFU 0100, CRC). Comprehensive: a `.dfu` is refused (exit 1, unchanged); a `.bin` that already has a suffix is refused ("already has a DFU suffix, so ... was not written", nothing written) and a read-only `.bin` is suffixed (fork `9d710fe`, [ubertooth#200](https://github.com/SqueakyFloors/ubertooth/issues/200)). Refused command lines (smoke): a stray word, `-h`, or a second `-s other.txt` writes no `.dfu` and leaves an existing one unchanged. Strict (comprehensive): `-s <file.bin> -d <bad image>` writes no `.dfu`; at 6fee30c it does ([ubertooth#286](https://github.com/SqueakyFloors/ubertooth/issues/286)). DFU image checks (no Ubertooth, smoke, in CI): `-s` of a synthetic binary gives exactly the suffix and CRC the harness computes; a read-only `.bin` is suffixed; a `.dfu` and a suffixed `.bin` are refused with nothing written; `-s` of the test build's binary gives the build's `.dfu` byte for byte when the run has a firmware build (skipped otherwise). Comprehensive: a missing `.bin` and a `.bin` whose suffix has a wrong CRC write nothing; strict: `-s` of an input it cannot read (a directory) leaves an existing `.dfu` alone; at 6fee30c it truncates it to 0 bytes ([ubertooth#305](https://github.com/SqueakyFloors/ubertooth/issues/305)). Not checked: `-s` of an empty `.bin` writes a 16-byte `.dfu` that `-d` refuses ("no firmware"); the docs do not say what it should do |
 
-Combinations: `-d` without `-r` and `-u` without `-r` (board stays in DFU): Not covered (Hard: leaves the application firmware). `-d` then `-u` of the same image: Covered (DFU images). A bad image or wrong suffix is rejected: Covered (DFU images, comprehensive; fails on builds without the ubertooth#198/#199 fix `e8edd15`). `-d -r` exit status after a good flash: Covered (every write; fails at 6fee30c, ubertooth#267).
+Combinations: `-d` without `-r` and `-u` without `-r` (board stays in DFU): Not covered (Hard: leaves the application firmware). `-d` then `-u` of the same image: Covered (DFU images). A bad image or wrong suffix is rejected: Covered (DFU images, comprehensive; fails on builds without the ubertooth#198/#199 fix `e8edd15`). `-d -r` exit status after a good flash: Covered (every write; fails at 6fee30c, ubertooth#267, fixed in `89d9197`).
 
 ## ubertooth-specan
 
@@ -171,7 +177,7 @@ Combinations: `-d` without `-r` and `-u` without `-r` (board stays in DFU): Not 
 | `-v` | verbose to stderr | Covered | Spectrum analyzer (comprehensive): line format and range |
 | `-g` | feedgnuplot output | Covered | Spectrum analyzer (comprehensive): line format and range |
 | `-G` | 3D feedgnuplot output | Covered | Spectrum analyzer (comprehensive): line format and range |
-| `-d <file>` | write output to a file | Covered | Spectrum analyzer (comprehensive): binary 3-byte records checked by `specandump.py`; `-d -x.bin` writes the file `-x.bin` and nothing to stdout (fork `053363a`, [ubertooth#231](https://github.com/SqueakyFloors/ubertooth/issues/231)). `-d -` (binary samples on stdout): Not covered |
+| `-d <file>` | write output to a file | Covered | Spectrum analyzer (comprehensive): binary 3-byte records checked by `specandump.py`; `-d -x.bin` writes the file `-x.bin` and nothing to stdout (fork `053363a`, [ubertooth#231](https://github.com/SqueakyFloors/ubertooth/issues/231)). `-d -` (binary samples on stdout): Not covered. Refused command lines (no Ubertooth, smoke): a stray word, `-h` (exit 0), or `-l 9999` after `-d` creates no file and leaves an existing one unchanged; comprehensive adds `-l` above `-u` and `-d` twice with `-h` |
 | `-l <2402-2480>` | lower frequency | Covered | Spectrum analyzer (comprehensive) ranges; `-l 2401` rejected (Argument validation). A range change reported stale samples before `20bcf11` ([ubertooth#173](https://github.com/SqueakyFloors/ubertooth/issues/173)) |
 | `-u <2402-2480>` | upper frequency | Covered | As `-l` |
 | `-U <index\|serial>` | select device | Covered | Spectrum analyzer by serial, guard board unchanged |
@@ -200,12 +206,12 @@ Combinations: `--padding` without `--wifi`, `--wifi` with `-l`/`-u`: Not covered
 | `-u <UAP>` | UAP to decode | Partial | Raw receive replay (comprehensive): `-i -l -u` with the right UAP confirms it (CLK6 0, hop reversal starts), a wrong UAP confirms nothing. Following a live piconet needs one |
 | `-z` | survey mode | Covered | Classic Bluetooth receive (smoke): `-z -t N` exits 0 after N s; `Survey Results` and piconet address lines. Raw receive replay (comprehensive): `-i -z` lists exactly the fixture's two piconets, one with its UAP |
 | `-i <file>` | input file instead of a device | Covered | Raw receive replay, no Ubertooth (smoke, also in CI): a synthetic fixture (`rxreplay.py`) decodes to the exact LAP/error/channel lines, decoy records (LE, DISCARD, channel 79) skipped. Comprehensive: empty file exits 0 with no lines; a cut last record is decoded up to the cut, then reported ("ends in a partial record: 58 of 68 bytes, ignored"), exit 1; a missing file exits 1 ("Could not open file"); lines carry the recorded systime ([ubertooth#202](https://github.com/SqueakyFloors/ubertooth/issues/202)); a directory exits 1 with "error: reading <file> failed: Is a directory" ([ubertooth#203](https://github.com/SqueakyFloors/ubertooth/issues/203)); fixed in `a55ac89`, after 3b22c95 |
-| `-c <ch>` | fixed BT channel | Covered | Classic Bluetooth receive (comprehensive): `-c 39`, every packet on channel 39. No range check: `-c 79` tunes 2481 MHz ([ubertooth#155](https://github.com/SqueakyFloors/ubertooth/issues/155)); the usage's "Default: 39" is wrong, the default sweeps ([ubertooth#186](https://github.com/SqueakyFloors/ubertooth/issues/186)) |
+| `-c <ch>` | fixed BT channel | Covered | Classic Bluetooth receive (comprehensive): `-c 39`, every packet on channel 39. `-c 79` is refused (0-78, [ubertooth#155](https://github.com/SqueakyFloors/ubertooth/issues/155)): Refused command lines uses it as the bad value; the usage's "Default: 39" is wrong, the default sweeps ([ubertooth#186](https://github.com/SqueakyFloors/ubertooth/issues/186)) |
 | `-e <0-4>` | max access-code errors | Covered | Classic Bluetooth receive (comprehensive): `-e 0` and `-e 4`, no packet over the limit. Raw receive replay (comprehensive): the fixture's one-bit-error access code is reported as `err=1` by default and dropped with `-e 0`. `-e 5` is accepted ([ubertooth#155](https://github.com/SqueakyFloors/ubertooth/issues/155)) |
 | `-t <s>` | sniff timeout | Covered | Classic Bluetooth receive: every `ubertooth-rx` case must exit 0 by itself, no earlier than N-0.5 s and within N+5 s |
-| `-r<file>` | PCAPNG capture | Covered | Classic Bluetooth receive (smoke): pcapng, link type 255; repeated `-r` keeps the first (comprehensive). Raw receive replay (smoke): `-i -r` writes one packet per decoded line |
-| `-q<file>` | PCAP capture | Covered | Classic Bluetooth receive (comprehensive): pcap, link type 255. Raw receive replay (smoke): `-i -q` writes one packet per decoded line |
-| `-d<file>` | binary dump | Covered | Classic Bluetooth receive (comprehensive): whole 68-byte BR records (`rxdump.py`); with no traffic the file is empty. Raw receive replay (comprehensive): `-i -d` writes exactly the fixture's packet records, byte for byte |
+| `-r<file>` | PCAPNG capture | Covered | Classic Bluetooth receive (smoke): pcapng, link type 255; repeated `-r` keeps the first (comprehensive). Raw receive replay (smoke): `-i -r` writes one packet per decoded line. Refused command lines (no Ubertooth, smoke): a stray word, `-h`, or `-c 79` after `-r` creates no file and leaves an existing one unchanged; `-r` twice with a stray word creates neither and prints `Ignoring extra capture file` on stderr |
+| `-q<file>` | PCAP capture | Covered | Classic Bluetooth receive (comprehensive): pcap, link type 255. Raw receive replay (smoke): `-i -q` writes one packet per decoded line. Refused command lines (smoke): as `-r`; comprehensive adds `-u` without `-l` |
+| `-d<file>` | binary dump | Covered | Classic Bluetooth receive (comprehensive): whole 68-byte BR records (`rxdump.py`); with no traffic the file is empty. Raw receive replay (comprehensive): `-i -d` writes exactly the fixture's packet records, byte for byte. Refused command lines (smoke): as `-r`; comprehensive adds `-z -l` and `-d` twice with `-h` |
 | `-s` | deprecated sweep flag | Covered | Classic Bluetooth receive (comprehensive): deprecation notice on stderr |
 | `-V` | version | Covered | Host CLI surface (fast, release): host version line |
 | `-U <0-7>` | select device | Covered | Classic Bluetooth receive by serial, guard board unchanged |
@@ -220,7 +226,7 @@ Combinations: `-u` without `-l` rejected: Covered (Argument validation, smoke; R
 | `-b` | raw bitstream only | Covered | Raw receive (smoke): 401-byte records of 400 `0`/`1` symbols and a newline |
 | `-c` | classic modulation | Covered | Raw receive (comprehensive): `-l -c` leaves MDMCTRL 0x0029 (read with `ubertooth-debug`) |
 | `-l` | LE modulation | Covered | Raw receive (comprehensive): `-l` and `-c -l` leave MDMCTRL 0x0040 |
-| `-d <file>` | write to a file | Covered | Raw receive (smoke): whole 68-byte records (host time, usb_pkt_rx), at least 50 per second (`rxdump.py`) |
+| `-d <file>` | write to a file | Covered | Raw receive (smoke): whole 68-byte records (host time, usb_pkt_rx), at least 50 per second (`rxdump.py`). Refused command lines (no Ubertooth, smoke): a stray word, `-h`, or `-U` without its value after `-d` creates no file and leaves an existing one unchanged; `-d` twice with `-h` (comprehensive) |
 | `-U<0-7>` | select device | Covered | Raw receive by serial, guard board unchanged |
 
 Combinations: `-c` with `-l`: last one wins. Covered (Raw receive, comprehensive). Output size over a bounded run: Covered (record count). Output to stdout: Not covered (it would log raw symbols).
@@ -298,10 +304,10 @@ Combinations: two or more of `-f`/`-r`/`-i`: last one wins (`do_mode` is overwri
 | `-l<LAP>` | target LAP | Hard | Needs a BR/EDR piconet and an adapter (backlog) |
 | `-u<UAP>` | target UAP | Hard | Same |
 | `-U<0-7>` | select device | Hard | Same |
-| `-r<file>` | PCAPNG capture | Hard | Same |
-| `-q<file>` | PCAP capture | Hard | Same |
+| `-r<file>` | PCAPNG capture | Partial | Capture needs a piconet (Hard). Refused command lines (no Ubertooth, smoke, skipped where not built): a stray word, `-h`, or `-e 9` after it creates no file and leaves an existing one unchanged |
+| `-q<file>` | PCAP capture | Partial | Capture needs a piconet (Hard). Refused command lines (no Ubertooth, smoke, skipped where not built): a stray word, `-h`, or `-e 9` after it creates no file and leaves an existing one unchanged; `-q` twice with a stray word creates neither and prints `Ignoring extra capture file` on stderr |
 | `-e <n>` | max access-code errors | Hard | Same |
-| `-d <file>` | binary dump | Hard | Same |
+| `-d <file>` | binary dump | Partial | Capture needs a piconet (Hard). Refused command lines (no Ubertooth, smoke, skipped where not built): a stray word, `-h`, or `-e 9` after it creates no file and leaves an existing one unchanged; `-d` twice with `-h` (comprehensive) |
 | `-a` | enable AFH | Hard | Same |
 | `-b <hciN>` | HCI device | Hard | Same |
 | `-w <slots>` | USB delay | Hard | Same |
@@ -353,7 +359,7 @@ and fail until the fix is on the commit under test.
 | [#189](https://github.com/SqueakyFloors/ubertooth/issues/189) | firmware | LED specan threshold wraps in int8: `-q183`..`-q225` and bare `-q` light nothing | Fixed (`aa4f620`, #204): 16-bit threshold, `-q` now 20-120, default -85 dBm | Ubertooth util modes (`-q120` lights every LED, smoke); Argument validation (`-q183` refused) |
 | [#190](https://github.com/SqueakyFloors/ubertooth/issues/190) | ubertooth-util | `-m` says "invalid range test result" when there is no result | Fixed (`7180f74`, #197): `no range test result yet` | Ubertooth util modes (smoke) |
 | [#191](https://github.com/SqueakyFloors/ubertooth/issues/191) | firmware | Stopping LED specan (and specan) skips the idle reset (LEDs stay on, channel and squelch kept) | Fixed (`aa4f620`, #204) | Ubertooth util modes (every `-q` case), Spectrum analyzer and BLE settings (`-p`) stop resets (comprehensive) |
-| [#193](https://github.com/SqueakyFloors/ubertooth/issues/193) | btle, rx, follow, specan, dump, dfu | A refused command line still creates or truncates its output file (`-q`, `-r`, `-d`, `-u`) | Open | None yet |
+| [#193](https://github.com/SqueakyFloors/ubertooth/issues/193) | btle, rx, follow, specan, dump, dfu | A refused command line still creates or truncates its output file (`-q`, `-r`, `-d`, `-u`) | Fixed on main (`6fee30c`, #264) | Refused command lines (smoke, in CI) |
 | [#198](https://github.com/SqueakyFloors/ubertooth/issues/198) | ubertooth-dfu | `-d` with a rejected image leaves the board in the DFU bootloader | Fixed on main after 3b22c95 (`e8edd15`, #217); fails at 3b22c95 | DFU images (comprehensive, every reject case: refused before a device is opened) |
 | [#199](https://github.com/SqueakyFloors/ubertooth/issues/199) | ubertooth-dfu | `-d` writes an image whose suffix names another vendor or product | Fixed on main after 3b22c95 (#217); fails at 3b22c95 | DFU images (comprehensive: the refusal names the ID) |
 | [#200](https://github.com/SqueakyFloors/ubertooth/issues/200) | ubertooth-dfu | `-s` adds a second suffix and needs a writable input; `-u` truncates on failure | Fixed on main (`9d710fe`) | DFU images (comprehensive `-s` cases); `-u` replacing only a complete dump: not checked |
@@ -366,9 +372,11 @@ and fail until the fix is on the commit under test.
 | [#235](https://github.com/SqueakyFloors/ubertooth/issues/235) | ubertooth-debug | `-r` error says `> 0x00 and < 0xff`; 0x00-0xff are accepted | Open | None (message text; `Reject -r 0x100` checks only its start) |
 | [#236](https://github.com/SqueakyFloors/ubertooth/issues/236) | ubertooth-rx | `-u` without `-l` is refused only after the board is opened | Fixed on main (`57469f2`) | Raw receive replay (comprehensive, no Ubertooth: `-i <file> -u`); Argument validation for the bare `-u` |
 | [#239](https://github.com/SqueakyFloors/ubertooth/issues/239) | firmware | Boards still stop answering control requests (-7) after a stream ends, until re-plugged | Open | Any streaming test |
-| [#267](https://github.com/SqueakyFloors/ubertooth/issues/267) | ubertooth-dfu | `-d <image> -r` exits 1 ("Detach failed") after a good flash and skips the revision check | Open (regression in `3c92a19`) | Flash reliability and DFU images (every write fails at 6fee30c) |
+| [#267](https://github.com/SqueakyFloors/ubertooth/issues/267) | ubertooth-dfu | `-d <image> -r` exits 1 ("Detach failed") after a good flash and skips the revision check | Fixed on main (`89d9197`); regression in `3c92a19`, fails at 6fee30c | Flash reliability and DFU images (every write) |
 | [#268](https://github.com/SqueakyFloors/ubertooth/issues/268) | btle-extcap | `-h` names options that do not exist (`--list-interfaces`, `--list-dlts`, `--config`) | Open | Python tools (comprehensive, strict) |
 | [#269](https://github.com/SqueakyFloors/ubertooth/issues/269) | btle-extcap | With two or more boards, `--extcap-interfaces` shows `0:` instead of the serial | Open | BLE extcap interfaces (comprehensive, strict) |
+| [#286](https://github.com/SqueakyFloors/ubertooth/issues/286) | ubertooth-dfu | `-s <file.bin> -d <bad image>` writes the `.dfu` before the image check refuses the command | Open | Refused command lines (comprehensive, strict) |
+| [#305](https://github.com/SqueakyFloors/ubertooth/issues/305) | ubertooth-dfu | `-s <file.bin>` truncates `<file>.dfu` before it reads the input, so a failed `-s` leaves it empty | Open | DFU image checks (comprehensive, strict) |
 
 A test that fails cleanly (device verified restored, guards unchanged) no longer ends the run ([#41](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/41)), so strict cases do not hide later tests.
 
@@ -414,5 +422,7 @@ Next, harness work:
    add `-f`/`-i` rejection cases only if no accepted pair can reach those modes.
 10. Done (#37): headless `ubertooth-specan-ui -h` (`--build --with-python`) and `btle-extcap --extcap-interfaces/--extcap-dlts/--extcap-config`. Still open: specan-ui argument checks, `btle-extcap --capture`.
 11. Done (#28): `ubertooth-scan -h` and `ubertooth-follow -h` (skipped where not built).
-12. Peer-based tests from the backlog (known BLE advertiser, AFH map,
+12. Done (#63): `Refused command lines`: no file created, truncated, or left behind by a refused command line, for every file option, with no Ubertooth (in CI).
+    Done (#65): `DFU image checks`: `ubertooth-dfu -d` bad-image refusals and `-s`, with no Ubertooth (in CI).
+13. Peer-based tests from the backlog (known BLE advertiser, AFH map,
     piconet follow, two-board range test), once fixtures are registered.

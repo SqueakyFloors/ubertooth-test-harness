@@ -199,8 +199,11 @@ class NamedTestSequencer:
         """
         by_label = {image_label(item.name): item for item in manifest.artifacts}
         context = {}
-        for label in case.artifacts:
+        for label in case.artifacts + case.optional_artifacts:
             identity = by_label.get(label)
+            if identity is None and label not in case.artifacts:
+                # Optional: the steps see no key and decide for themselves.
+                continue
             if identity is None:
                 raise HarnessError(
                     f"{case.name}: no firmware image for '{label}'; pass --artifact "
@@ -214,6 +217,8 @@ class NamedTestSequencer:
             if changed:
                 raise HarnessError(f"{case.name}: {label} image changed or is missing: {path}")
             context[artifact_key(label)] = str(path)
+        if not case.artifacts:
+            return context
         try:
             context[EXPECTED_REVISION_KEY] = manifest.source("Ubertooth").expected_revision
         except ManifestError as error:
@@ -560,7 +565,7 @@ class NamedTestSequencer:
             },
         )
         context: dict[str, str] = {}
-        if case.artifacts:
+        if case.artifacts or (case.optional_artifacts and manifest is not None):
             # Checked when the run was planned; hashed again here. Nothing
             # has run yet, so a refusal leaves the device as it was.
             try:
@@ -883,7 +888,7 @@ class NamedTestSequencer:
                     for board in planned_guards[invocation.invocation_id]
                 )
             for case in planned_cases[invocation.invocation_id]:
-                if isinstance(case, StateCase) and case.artifacts:
+                if isinstance(case, StateCase) and (case.artifacts or case.optional_artifacts):
                     try:
                         self._case_artifacts(case, manifest)
                     except HarnessError as error:
