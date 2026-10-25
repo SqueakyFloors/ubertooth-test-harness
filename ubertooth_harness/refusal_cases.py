@@ -311,6 +311,12 @@ def _comprehensive_cases():
            ("-d", ("file", "new.specan"), "-l", "2480", "-u", "2402"),
            (r"error: lower frequency must not exceed upper frequency",), ("new.specan",),
            "refused (exit 1); new.specan not created")
+    # A -d file that cannot be opened is one "error: " line, before any board
+    # lookup (fork fcadf34, ubertooth-specan.md DIAGNOSTICS).
+    simple("specan-d-unopenable", "specan -d in a missing directory", "ubertooth-specan",
+           ("-d", ("file", "missing/new.specan")),
+           (r"(?m)^error: \S*/missing/new\.specan: No such file or directory$",),
+           ("missing",), "exit 1 with no board lookup; nothing created")
     # A repeated -d keeps the last name; neither is opened when refused.
     for tool in ("ubertooth-follow", "ubertooth-rx", "ubertooth-dump", "ubertooth-specan"):
         spec = next(item for item in TOOLS if item.name == tool)

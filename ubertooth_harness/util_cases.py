@@ -43,7 +43,14 @@ from ubertooth_harness.patterns import (
     FIRMWARE_PATTERN,
     PART_ID_PATTERN,
 )
-from ubertooth_harness.stateful import Observation, StateCase, Step, require
+from ubertooth_harness.stateful import (
+    Observation,
+    StateCase,
+    Step,
+    no_diagnostics_on_stdout,
+    nothing_on_stdout,
+    require,
+)
 from ubertooth_harness.transitions import (
     BOOT_DEFAULT_CHANNEL,
     CHANNEL,
@@ -151,10 +158,16 @@ def _sample_step(serial, step_id, name, check) -> Step:
 # Board-side modes: -I and -q
 
 MODE_SQUELCH = "-60"
-IDENTIFY_START = (
-    r"Flashing LEDs on ubertooth device \S+\n"
-    r"The board is blinking; stop it with ubertooth-util -S or any mode option"
-)
+# -I reports the blink once, on stderr, naming the selector so the stop can be
+# pasted (fork fcadf34, ubertooth-util.md DIAGNOSTICS); there is no separate
+# "Flashing LEDs" line any more.
+def identify_start(serial: str) -> str:
+    return (rf"(?m)^note: the board is blinking; stop it with ubertooth-util "
+            rf"-U {re.escape(serial)} -S or any mode option$")
+
+
+# Progress lines of the modes; on stderr, and each said once.
+SAID_ONCE = r"Flashing LEDs"
 
 
 def specan_start(threshold: int) -> str:
@@ -188,6 +201,8 @@ def _mode_case(serial, case_id, name, options, start, behavior, *, prior=None,
                 SQUELCH.set_arg(MODE_SQUELCH), "-d1",
             ),
             mutates=True,
+            # Setters are silent, -z <n> too (no "Setting squelch" line).
+            output_check=nothing_on_stdout,
         ),
         CHANNEL.verify(serial, "verify-channel-set", "Channel set before the mode",
                        "channel before mode", target),
@@ -199,7 +214,8 @@ def _mode_case(serial, case_id, name, options, start, behavior, *, prior=None,
         steps += [
             Step("start-prior-mode", "Start " + " ".join(prior_options),
                  _util(serial, *prior_options), output_patterns=(prior_start,),
-                 mutates=True),
+                 forbidden_patterns=(SAID_ONCE,),
+                 output_check=no_diagnostics_on_stdout, mutates=True),
             _sample_step(serial, "sample-prior-mode",
                          f"{' '.join(prior_options)} {prior_behavior[0]}",
                          prior_behavior[1]),
@@ -207,7 +223,9 @@ def _mode_case(serial, case_id, name, options, start, behavior, *, prior=None,
     command = " ".join(options)
     steps += [
         Step("start-mode", f"Start {command}", _util(serial, *options),
-             output_patterns=(start,) + tuple(extra_patterns), mutates=True),
+             output_patterns=(start,) + tuple(extra_patterns),
+             forbidden_patterns=(SAID_ONCE,),
+             output_check=no_diagnostics_on_stdout, mutates=True),
         _sample_step(serial, "sample-mode", f"{command} {label}", check),
     ]
     if prior is None:
@@ -270,7 +288,8 @@ def _range_result_case(serial, case_id, name):
             # the board has no result.
             Step("reset", "Full reset (clears any range-test result)",
                  _util(serial, "-r"), timeout_s=RESET_TIMEOUT_S,
-                 output_patterns=(r"Resetting ubertooth device",), mutates=True),
+                 output_patterns=(r"Resetting ubertooth device",),
+                 output_check=nothing_on_stdout, mutates=True),
             Step("verify-firmware-after-reset", "Firmware answers after reset",
                  _util(serial, "-v"), output_patterns=(FIRMWARE_PATTERN,)),
             Step(
@@ -291,7 +310,7 @@ def _range_result_case(serial, case_id, name):
 
 def util_mode_cases(arguments, _resources, resource_identities):
     serial = _serial(resource_identities, "Ubertooth util modes")
-    identify = (("-I",), IDENTIFY_START, BLINK)
+    identify = (("-I",), identify_start(serial), BLINK)
     # -120 dBm, the bottom of the radio's RSSI range: every reading lights.
     specan_lit = (("-q120",), specan_start(120), LIT)
     cases = [
@@ -319,7 +338,7 @@ def util_mode_cases(arguments, _resources, resource_identities):
                        prior=identify),
             _mode_case(serial, "identify-after-serial-query",
                        "-s -I reports the serial, then blinks",
-                       ("-s", "-I"), IDENTIFY_START, BLINK,
+                       ("-s", "-I"), identify_start(serial), BLINK,
                        extra_patterns=(rf"Serial No: {re.escape(serial)}",)),
         ]
     return tuple(cases)

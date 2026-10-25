@@ -129,6 +129,10 @@ class FakeTools:
         for option, value in files.values():
             if value == "-":
                 out.append("\x00pcap header\x00")
+            elif not Path(value).parent.is_dir():
+                # ubertooth-specan since fork fcadf34: one "error: " line.
+                return self._result(command, 1, "".join(out), "".join(err)
+                                    + f"error: {value}: No such file or directory\n")
             else:
                 self._create(tool, option, value)
         return self._result(command, 1, "".join(out),
@@ -284,7 +288,7 @@ class CaseTests(unittest.TestCase):
         # extra-capture-file cases.
         self.assertEqual(13 * 3 + 3, len(smoke))
         _a, full = cases("comprehensive")
-        self.assertEqual(len(smoke) + 13, len(full))
+        self.assertEqual(len(smoke) + 14, len(full))
         self.assertEqual(len(full), len({case.case_id for case in full}))
         context = {"capture dir": "/run/captures/x"}
         for case in full:

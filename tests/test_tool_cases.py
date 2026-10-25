@@ -21,13 +21,16 @@ class ToolUbertooth(FakeUbertooth):
     ``stale_specan`` (#173), ``debug_exit_is_value`` (#164), ``btle_aa_bugs``
     (#171), ``specan_stop_resets=False`` (#191: stopping specan skips the idle
     reset), ``promisc_stop_resets=False`` (the same for btle -p), and
-    ``dash_is_stdout`` (#231: any -d value starting with "-" means stdout).
+    ``dash_is_stdout`` (#231: any -d value starting with "-" means stdout),
+    and ``before_fcadf34`` (#326: "Ubertooth stopped" on stdout, and a -d
+    file that takes no data reports every failed write and runs on).
     """
 
     def __init__(self, *args, stale_specan=False, debug_exit_is_value=False,
                  btle_aa_bugs=False, specan_stop_resets=True, promisc_stop_resets=True,
-                 dash_is_stdout=False, **kwargs):
+                 dash_is_stdout=False, before_fcadf34=False, **kwargs):
         super().__init__(*args, **kwargs)
+        self.before_fcadf34 = before_fcadf34
         self.stale_specan = stale_specan
         self.debug_exit_is_value = debug_exit_is_value
         self.btle_aa_bugs = btle_aa_bugs
@@ -85,6 +88,13 @@ class ToolUbertooth(FakeUbertooth):
                 for f in range(lo, hi + 1):
                     data += bytes([f >> 8, f & 0xFF, 0xD3])
             name = opts[opts.index("-d") + 1]
+            if name == tool_cases.FULL_DEVICE:
+                if self.before_fcadf34:
+                    return self._result(command, 124, "", "Error writing to file (0)\n" * 50
+                                        + "HARD TIMEOUT\n", on_output, timed_out=True)
+                return self._result(
+                    command, 1, "", "error: writing samples failed: wrote 0 of 3 bytes "
+                    "(No space left on device)\nUbertooth stopped\n", on_output)
             if name == "-" or (self.dash_is_stdout and name.startswith("-")):
                 return self._result(command, 124, bytes(data).decode("latin-1"),
                                     "HARD TIMEOUT\n", on_output, timed_out=True)
@@ -98,7 +108,10 @@ class ToolUbertooth(FakeUbertooth):
             if fmt != "default":
                 lines.append("")
         stderr = "verbose: debug\n" if "-v" in opts else ""
-        return self._result(command, 124, "\n".join(lines) + "\n", stderr + "HARD TIMEOUT\n",
+        stdout = "\n".join(lines) + "\n"
+        if self.before_fcadf34:
+            stdout += "Ubertooth stopped\n"
+        return self._result(command, 124, stdout, stderr + "HARD TIMEOUT\n",
                             on_output, timed_out=True)
 
     def _leave(self, resets):
@@ -239,7 +252,9 @@ class SpectrumAnalyzerTests(unittest.TestCase):
         _a, smoke = cases_for_duration("smoke")
         _a, full = cases_for_duration("comprehensive")
         self.assertEqual(["full-band"], [c.case_id for c in smoke])
-        self.assertEqual(10, len(full))
+        self.assertEqual(11, len(full))
+        full_device = next(c for c in full if c.case_id == "dump-file-full-device")
+        self.assertEqual(("linux",), full_device.needs.platforms)
         self.assertEqual("stop-resets-board", full[-1].case_id)
         self.assertTrue(all(isinstance(c, StateCase) for c in full))
 
@@ -268,6 +283,16 @@ class SpectrumAnalyzerTests(unittest.TestCase):
         self.assertFalse(summary.passed)
         self.assertEqual(["-d -x.bin writes the file -x.bin, not stdout"], failed_names(events))
         self.assertIn("stdout is not empty", summary.failure_reason)
+
+    def test_output_before_fcadf34_fails(self):
+        # Fork #326: "Ubertooth stopped" left stdout, and a failed -d write
+        # is said once and ends the run with exit 1.
+        summary, events = run_spectrum(ToolUbertooth(crc="1", before_fcadf34=True))
+        self.assertFalse(summary.passed)
+        failed = failed_names(events)
+        self.assertIn("-d /dev/full: the failed write ends the run, exit 1", failed)
+        self.assertIn("Full band sweep (default range)", failed)
+        self.assertIn("progress or diagnostic lines on stdout", summary.failure_reason)
 
     def test_a_specan_stop_without_the_idle_reset_fails(self):
         # SqueakyFloors/ubertooth#191 (fork builds before aa4f620).
