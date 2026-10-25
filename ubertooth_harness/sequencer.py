@@ -22,13 +22,7 @@ from ubertooth_harness.manifest import ManifestError, RunManifest
 from ubertooth_harness.planner import TestInvocation, alternated_roles
 from ubertooth_harness.power import PowerControllerError
 from ubertooth_harness.preflight import PreflightCheck
-from ubertooth_harness.rawlog import (
-    OUTPUT_DIR,
-    RECORD_OUTPUT_CHARS,
-    RECORD_OUTPUT_EVENTS,
-    CommandOutputLog,
-    OmittedOutput,
-)
+from ubertooth_harness.rawlog import OUTPUT_DIR, CappedOutput
 from ubertooth_harness.topology import IsolationCancelled, applied_power_isolation
 from ubertooth_harness.report import write_report
 from ubertooth_harness.cases import FlashCase
@@ -418,58 +412,47 @@ class NamedTestSequencer:
         timeout_s: float,
         owner: Mapping,
         continuous: bool = False,
-        output_dir: Path | None = None,
+        output_dir: Path,
     ) -> CommandResult:
         """Run one command, recording it and every response in run.jsonl.
 
-        With ``output_dir``, a command whose output passes the per-command
-        record limits (rawlog.RECORD_OUTPUT_*) keeps the first part in
-        run.jsonl and its full output in ``output/<command id>.log``;
-        ``command_finished`` names the file and summarizes what was left out.
+        A command whose output passes the per-command record limits
+        (rawlog.RECORD_*) keeps its first and last output records in
+        run.jsonl, with a ``command_output_omitted`` record between them, and
+        its full output in ``output/<command id>.log``; ``command_finished``
+        names the file and summarizes what was left out.
         """
         details = dict(owner)
         details.update({"command_id": command_id, "argv": list(argv)})
         publisher.emit("command_started", "running", details)
         streamed = []
-        recorded = {"chars": 0, "events": 0}
-        early: list[tuple] = []  # what run.jsonl holds, until a spill opens
-        spill: dict = {}
 
-        def record(stream_name: str, text: str) -> None:
+        def record(stream_name: str, text: str, received) -> None:
             output_details = dict(owner)
             output_details.update({
                 "command_id": command_id,
                 "stream": stream_name,
                 "text": text,
             })
+            if received is not None:
+                # A tail record emitted after the command ended.
+                output_details["received"] = received
             publisher.emit("command_output", "running", output_details)
+
+        def open_spill():
+            path = _output_log_path(output_dir, command_id)
+            return path, path.relative_to(output_dir).as_posix()
+
+        def note(omitted: dict) -> None:
+            note_details = dict(owner)
+            note_details.update({"command_id": command_id, **omitted})
+            publisher.emit("command_output_omitted", "running", note_details)
+
+        capped = CappedOutput(record, open_spill)
 
         def output(stream_name: str, text: str) -> None:
             streamed.append(stream_name)
-            moment = publisher.utc_now()
-            if not spill and (
-                output_dir is None
-                or (
-                    recorded["events"] < RECORD_OUTPUT_EVENTS
-                    and recorded["chars"] + len(text) <= RECORD_OUTPUT_CHARS
-                )
-            ):
-                recorded["events"] += 1
-                recorded["chars"] += len(text)
-                if output_dir is not None:
-                    early.append((moment, stream_name, text))
-                record(stream_name, text)
-                return
-            if not spill:
-                path = _output_log_path(output_dir, command_id)
-                spill["log"] = CommandOutputLog(path)
-                spill["file"] = path.relative_to(output_dir).as_posix()
-                spill["omitted"] = OmittedOutput()
-                for chunk in early:
-                    spill["log"].write(*chunk)
-                early.clear()
-            spill["log"].write(moment, stream_name, text)
-            spill["omitted"].add(stream_name, text)
+            capped.add(publisher.utc_now(), stream_name, text)
 
         try:
             result = self.executor.run(
@@ -485,8 +468,8 @@ class NamedTestSequencer:
                     for start in range(0, len(text), _OUTPUT_CHUNK):
                         output(stream_name, text[start:start + _OUTPUT_CHUNK])
         finally:
-            if spill:
-                spill["log"].close()
+            capped.close()
+        spilled = capped.finish(note)
         command_status = (
             "canceled" if result.cancelled
             # A continuous mode reaching its deadline is the expected stop.
@@ -502,9 +485,7 @@ class NamedTestSequencer:
             "timed_out": result.timed_out,
             "cancelled": result.cancelled,
         })
-        if spill:
-            finished["output_file"] = spill["file"]
-            finished["output_omitted"] = spill["omitted"].summary()
+        finished.update(spilled)
         publisher.emit("command_finished", command_status, finished)
         return result
 

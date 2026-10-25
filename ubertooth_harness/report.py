@@ -17,7 +17,7 @@ from typing import Iterable, Mapping, Sequence
 
 from ubertooth_harness.events import REPORT, RUN_LOG
 from ubertooth_harness.executor import CommandResult
-from ubertooth_harness.rawlog import TAGS, CommandCapture, format_command_record
+from ubertooth_harness.rawlog import NOTE, TAGS, CommandCapture, format_command_record
 
 
 REDACTED = "<serial>"
@@ -356,9 +356,9 @@ def elapsed(origin: datetime.datetime):
     return stamp
 
 
-def _omitted_text(fd: Mapping, when: str) -> str:
-    """[M] lines for output kept in output/<command id>.log, not run.jsonl."""
-    summary = fd.get("output_omitted") or {}
+def _omitted_text(note: Mapping) -> str:
+    """[M] note text for output kept in output/<command id>.log, not run.jsonl."""
+    summary = note.get("output_omitted") or {}
     lines = summary.get("lines") or {}
     chars = summary.get("chars") or {}
     counts = ", ".join(
@@ -367,18 +367,24 @@ def _omitted_text(fd: Mapping, when: str) -> str:
         if lines.get(stream) or chars.get(stream)
     )
     text = (
-        f"{when} [M] full output in {fd['output_file']}; not in run.jsonl: "
+        f"full output in {note.get('output_file', '')}; left out of run.jsonl here: "
         f"{counts or 'nothing'}\n"
     )
     for shape in summary.get("common_shapes") or []:
         text += (
-            f"{when} [M]   {shape.get('count', 0)} x {TAGS.get(shape.get('stream'), '[?]')} "
+            f"  {shape.get('count', 0)} x {TAGS.get(shape.get('stream'), '[?]')} "
             f"{shape.get('shape', '')}\n"
         )
     rest = summary.get("distinct_shapes", 0) - len(summary.get("common_shapes") or [])
     if rest > 0:
-        text += f"{when} [M]   and {rest} other line shapes\n"
+        text += f"  and {rest} other line shapes\n"
     return text
+
+
+def _output_time(output: Mapping) -> datetime.datetime:
+    """When a chunk arrived; tail records carry it in ``received``."""
+    received = output["details"].get("received")
+    return _time({"timestamp": received}) if received else _time(output)
 
 
 def _command_record(
@@ -389,9 +395,13 @@ def _command_record(
     omitted = 0
     kept = []
     total = 0
+    capped = bool(fd.get("output_file"))  # already capped when recorded
     for output in outputs:
+        if output["event_type"] == "command_output_omitted":
+            kept.append(output)
+            continue
         text = output["details"].get("text", "")
-        if total + len(text) > MAX_COMMAND_OUTPUT_CHARS:
+        if not capped and total + len(text) > MAX_COMMAND_OUTPUT_CHARS:
             omitted += len(text)
             continue
         total += len(text)
@@ -410,7 +420,9 @@ def _command_record(
     )
     capture = CommandCapture(lambda: _time(started))
     capture.chunks = [
-        (_time(o), o["details"].get("stream", "stdout"), o["details"].get("text", ""))
+        (_output_time(o), NOTE, _omitted_text(o["details"]))
+        if o["event_type"] == "command_output_omitted"
+        else (_output_time(o), o["details"].get("stream", "stdout"), o["details"].get("text", ""))
         for o in outputs
     ]
     capture.finished = _time(finished) if finished else None
@@ -421,8 +433,6 @@ def _command_record(
             f"{stamp(_time(finished or started))} [M] {omitted} more characters of output "
             "are in run.jsonl\n"
         )
-    if fd.get("output_file"):
-        record += _omitted_text(fd, stamp(_time(finished)))
     if finished is None:
         tool = Path(result.argv[0]).name if result.argv else "command"
         record += f"{stamp(_time(outputs[-1] if outputs else started))} [R] {tool} did not finish\n"
@@ -454,7 +464,7 @@ def _transcript(run: _Run) -> list[str]:
         if kind == "command_started":
             pending[details.get("command_id", "")] = {"started": event, "outputs": []}
             continue
-        if kind == "command_output":
+        if kind in ("command_output", "command_output_omitted"):
             record = pending.get(details.get("command_id", ""))
             if record is not None:
                 record["outputs"].append(event)

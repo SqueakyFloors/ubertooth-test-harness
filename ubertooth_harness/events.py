@@ -173,6 +173,11 @@ class TerminalEventSink:
             *complete, self._partial[name] = text.split("\n")
             for part in complete:
                 self.stream.write(f"{tag} {part.rstrip(chr(13))}\n")
+        elif event.event_type == "command_output_omitted":
+            self._flush_partial()
+            self.stream.write(
+                f"[M] output left out; full output in {details.get('output_file', '')}\n"
+            )
         elif event.event_type == "command_finished":
             from ubertooth_harness.executor import CommandResult
             from ubertooth_harness.rawlog import result_text

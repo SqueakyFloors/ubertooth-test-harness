@@ -352,6 +352,15 @@
     } else {
       flushPartial();
     }
+    if (kind === "command_output_omitted") {
+      // Output left out of run.jsonl (in output/); the command's last records follow.
+      const counts = details.output_omitted && details.output_omitted.lines;
+      let count = 0;
+      if (counts && typeof counts === "object") {
+        for (const value of Object.values(counts)) if (typeof value === "number") count += value;
+      }
+      pushLog(`[... ${count} output lines left out; full output in ${String(details.output_file ?? "")} ...]`);
+    }
     if (kind === "build_started") live.stage = "building";
     else if (kind === "preflight_started") live.stage = "preflight";
     else if (kind === "test_started") live.stage = "tests";

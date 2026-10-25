@@ -300,6 +300,19 @@ def _text(value) -> str:
     return str(value)[:_MAX_FIELD]
 
 
+def omitted_line(details: Mapping) -> str:
+    """One log line for a command_output_omitted record."""
+    summary = details.get("output_omitted")
+    lines = summary.get("lines") if isinstance(summary, dict) else None
+    count = sum(
+        value for value in (lines or {}).values() if isinstance(value, int)
+    ) if isinstance(lines, dict) else 0
+    return _text(
+        f"[... {count} output lines left out; full output in "
+        f"{details.get('output_file', '')} ...]"
+    )
+
+
 def failure_summary(run: Mapping, events: Sequence[Mapping]) -> list[dict]:
     """What failed in a run: one entry per failed phase or test, then the run.
 
@@ -325,6 +338,16 @@ def failure_summary(run: Mapping, events: Sequence[Mapping]) -> list[dict]:
                 lines = (partials.get(invocation, "") + text).split("\n")
                 partials[invocation] = lines.pop()[-_MAX_FIELD:]
                 tail.extend(line[:500] for line in lines if line.strip())
+        elif kind == "command_output_omitted":
+            # Output left out of run.jsonl (kept in output/): end the partial
+            # line and mark the gap before the command's last records.
+            invocation = _text(details.get("invocation_id"))
+            if invocation:
+                tail = tails.setdefault(invocation, collections.deque(maxlen=FAILURE_LOG_LINES))
+                rest = partials.pop(invocation, "")
+                if rest.strip():
+                    tail.append(rest[:500])
+                tail.append(omitted_line(details))
         elif kind in ("build_finished", "preflight_finished") and status not in (
             "passed", "skipped"
         ):

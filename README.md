@@ -740,20 +740,30 @@ rest stays in run.jsonl. The live terminal stream on stderr uses the same
 `[C]`/`[O]`/`[E]`/`[R]` command tags.
 
 Every response is kept, but run.jsonl holds at most the first 200 output
-records or 64 KiB of output text of each preflight or test command. Past that,
-the command's full output, from its first line, goes to
-`output/<command id>.log` in the run directory as it arrives, one
-`<UTC time> [O]` or `[E]` line per output line in arrival order, and
-run.jsonl and the live stream get no more output records for it. Its
-`command_finished` record names the file (`output_file`) and summarizes what
-run.jsonl left out (`output_omitted`): stdout and stderr line and character
-counts and the ten most common line shapes (digit runs replaced by `N`) with
-their counts. report.md shows them as `[M]` lines after the command:
+records or 64 KiB, and the last 50 records or 16 KiB, of each preflight or
+test command's output (bytes as written to run.jsonl, JSON escapes included,
+so a 4-byte character counts 12). Past the first limits, the command's full
+output, from its first line, goes to `output/<command id>.log` in the run
+directory as it arrives, one `<UTC time> [O]` or `[E]` line per output line in
+arrival order. The live stream then gets no more output records until the
+command ends; then a `command_output_omitted` record names the file
+(`output_file`), summarizes what run.jsonl left out (`output_omitted`:
+stdout and stderr line and character counts and the ten most common line
+shapes, digit runs replaced by `N`, with their counts) and gives in `received`
+when the left-out output ended; it is followed by the last
+records (each with its arrival time in `received`, starting at a whole line),
+so the GUI failure summary and report.md show how the command ended.
+`command_finished` repeats `output_file` and `output_omitted`. The newest
+output, such as the harness's own timeout, cancellation or `OUTPUT SINK ERROR`
+line, is always among the last records. report.md shows the gap as `[M]`
+lines between the first and last lines:
 
 ```text
+00:07:00.120 [E] rx block timestamp 283640 * 100 nanoseconds
+00:07:02.940 [M] full output in output/016-Raw-receive-dump-full-receive.log; left out of run.jsonl here: 6893 stderr lines (309933 characters)
+00:07:02.940 [M]   6893 x [E] rx block timestamp N * N nanoseconds
+00:07:02.944 [E] rx block timestamp 290481 * 100 nanoseconds
 00:07:02.951 [R] ubertooth-dump exit 124 in 3.012s, stopped at its planned deadline
-00:07:02.951 [M] full output in output/016-Raw-receive-dump-full-receive.log; not in run.jsonl: 7141 stderr lines (321345 characters)
-00:07:02.951 [M]   7141 x [E] rx block timestamp N * N nanoseconds
 ```
 
 This keeps the per-block progress lines `ubertooth-dump` prints on stderr
