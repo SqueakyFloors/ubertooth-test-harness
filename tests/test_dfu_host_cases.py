@@ -122,7 +122,7 @@ class FakeDfu:
     def _check(path: Path, want_revision: bool) -> str:
         failed = "Signature check failed, firmware will not be updated\n"
         if path.is_dir():
-            return "Could not read the whole file\n" + failed
+            return f"error: {path} is not a regular file\n"
         data = path.read_bytes()
         if len(data) < 16:
             return (f"Too short for a 16-byte DFU suffix: the file is {len(data)} byte(s)\n"

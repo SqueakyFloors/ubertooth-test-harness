@@ -295,7 +295,7 @@ def _comprehensive_cases():
             image, patterns, _REFUSED))
     cases.append(_refusal_case(
         "reject-directory", "-d refuses a directory", (_mkdir("folder.dfu"),),
-        "folder.dfu", (_CHECKING, _CHECK_FAILED), _REFUSED))
+        "folder.dfu", (r"error: \S*folder\.dfu is not a regular file",), _REFUSED))
     cases.append(_refusal_case(
         "reject-missing", "-d refuses a missing file", (), "missing.dfu",
         (r"missing\.dfu: No such file or directory",),

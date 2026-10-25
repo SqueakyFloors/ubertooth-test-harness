@@ -388,7 +388,7 @@ def _dump_case(serial, seconds, case_id, name, options, fmt, *, modulation=None)
 # Receives on -c <MHz> until signalled; each packet prints
 # "time=<clk> delta_t=<ms> ms freq=<MHz> " and a line of -l hex bytes. With no
 # E-GO board in range nothing is printed. -a sets the access code; a value
-# sscanf cannot read is rejected with "Invalid access code" and exit 1.
+# that is not 2, 4, 6 or 8 hex digits is rejected with exit 1.
 
 _EGO_PACKET = re.compile(r"^time=\d+ delta_t=-?\d+\.\d{6} ms freq=(?P<f>\d+) ?$")
 
@@ -447,7 +447,7 @@ def raw_receive_cases(arguments, _resources, resource_identities):
             _case(serial, "ego-reject-bad-access-code", "E-GO rejects -a zz", (
                 Step("reject", "ubertooth-ego -r -a zz",
                      ("ubertooth-ego", "-U", serial, "-r", "-c", "2440", "-a", "zz"),
-                     expected_returncodes=(1,), output_patterns=(r"Invalid access code",),
+                     expected_returncodes=(1,), output_patterns=(r"error: access code must be 2, 4, 6 or 8 hex digits \(got zz\)",),
                      mutates=True),
             ), "rejected with exit 1 before any mode starts"),
         ]

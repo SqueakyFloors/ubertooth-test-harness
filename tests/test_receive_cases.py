@@ -197,7 +197,7 @@ class ReceiveUbertooth(ToolUbertooth):
         code = self._value(options, "-a")
         if code is not None and not all(c in "0123456789abcdef" for c in code[:2].lower()) \
                 and "ego-accepts-bad-ac" not in self.bugs:
-            return self._result(command, 1, "Invalid access code\nusage\n", "", on_output)
+            return self._result(command, 1, "error: access code must be 2, 4, 6 or 8 hex digits (got zz)\n", "", on_output)
         if "ego-exits" in self.bugs:
             return self._result(command, 1, "Error: E-GO not supported by this firmware\n", "",
                                 on_output)
