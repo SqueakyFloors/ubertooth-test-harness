@@ -355,7 +355,7 @@ class CaptureTests(unittest.TestCase):
             with self.subTest(bug):
                 code, out = fixture.capture(
                     (f"--extcap-interface=ubertooth{SERIAL_A}", "--channel=38"),
-                    bug=bug, board=SERIAL_A, channel=38)
+                    bug=bug, board=SERIAL_A, channel=38, seconds=2)
                 self.assertEqual(1, code, out)
                 self.assertRegex(out, rf"(?m)^FAIL: .*{re.escape(failure)}")
                 self.assertNotIn("capture checks passed", out)
