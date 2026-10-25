@@ -23,12 +23,10 @@ need BlueZ (hostneeds.py), so on a host without it (every macOS host) they
 are left out before the run as not applicable.
 
 Comprehensive coverage adds the checks that run after the option loop, a
-repeated -d, and ubertooth-dfu with an input that cannot be used. One of those
-is strict and fails at 6fee30c:
-
-- SqueakyFloors/ubertooth#286: ubertooth-dfu -s <file.bin> -d <bad image>
-  writes (or overwrites) <file>.dfu before the image check refuses the
-  command.
+repeated -d, and ubertooth-dfu with an input that cannot be used, including
+-s <file.bin> -d <bad image>: since fork f2e06fa (#286) the files that are
+only read are checked first, so the refused image neither creates nor
+replaces <file>.dfu (ubertooth-dfu.md).
 """
 
 from __future__ import annotations
@@ -313,6 +311,12 @@ def _comprehensive_cases():
            ("-d", ("file", "new.specan"), "-l", "2480", "-u", "2402"),
            (r"error: lower frequency must not exceed upper frequency",), ("new.specan",),
            "refused (exit 1); new.specan not created")
+    # A -d file that cannot be opened is one "error: " line, before any board
+    # lookup (fork fcadf34, ubertooth-specan.md DIAGNOSTICS).
+    simple("specan-d-unopenable", "specan -d in a missing directory", "ubertooth-specan",
+           ("-d", ("file", "missing/new.specan")),
+           (r"(?m)^error: \S*/missing/new\.specan: No such file or directory$",),
+           ("missing",), "exit 1 with no board lookup; nothing created")
     # A repeated -d keeps the last name; neither is opened when refused.
     for tool in ("ubertooth-follow", "ubertooth-rx", "ubertooth-dump", "ubertooth-specan"):
         spec = next(item for item in TOOLS if item.name == tool)
@@ -339,8 +343,8 @@ def _comprehensive_cases():
            (r"Signature check failed",), (),
            "exit 1 with no device opened; kept.bin unchanged; no temporary file",
            seeded=("kept.bin", "bad.dfu"), kept=("kept.bin", "bad.dfu"))
-    # Strict: fails at 6fee30c (SqueakyFloors/ubertooth#286). The image check
-    # refuses the command, but -s has already written the .dfu.
+    # The image check refuses the command before -s writes anything (fork
+    # #286, fixed in f2e06fa): new.dfu is not created, kept.dfu not replaced.
     cases.append(_case(
         "dfu-s-bad-image", "dfu -s <file.bin> -d <bad image> writes no .dfu", (
             probe_step("ubertooth-dfu"),

@@ -63,13 +63,17 @@ class ModeUbertooth(FakeUbertooth):
     - ``range_values``: -m prints result values although no test ran.
     - ``read_stalls``: a predicate on the LED read attempt number (from 0)
       that makes that ``-d`` read fail with -9 (#213).
+    - ``before_fcadf34``: the mode lines on stdout, and -I's two lines
+      ("Flashing LEDs ...", then the blink note without the selector), as
+      before fork fcadf34 (#326) moved them to stderr.
     """
 
     def __init__(self, *args, specan_stop_resets=True, replace_resets=True,
                  range_text="no range test result yet", blink=True,
                  stop_ends_mode=True, mode_resets_channel=False, range_values=False,
-                 read_stalls=lambda attempt: False, **kwargs):
+                 read_stalls=lambda attempt: False, before_fcadf34=False, **kwargs):
         super().__init__(*args, **kwargs)
+        self.before_fcadf34 = before_fcadf34
         self.specan_stop_resets = specan_stop_resets
         self.replace_resets = replace_resets
         self.range_text = range_text
@@ -145,8 +149,8 @@ class ModeUbertooth(FakeUbertooth):
         if "-S" in options and not self.stop_ends_mode and self.mode in (
             "identify", "led-specan"
         ):
-            return self._result(command, 0, f"Stopping ubertooth device {self.serial}\n",
-                                "", on_output)
+            return self._result(command, 0, "", f"Stopping ubertooth device {self.serial}\n",
+                                on_output)
         if "-m" in options:
             if self.range_values:
                 text = "request PA level : 7\nrequest number   : 3\n"
@@ -173,14 +177,20 @@ class ModeUbertooth(FakeUbertooth):
             self.state["channel"] = "2441"
         if mode == "-I":
             self.mode = "identify"
-            out = (f"Flashing LEDs on ubertooth device {self.serial}\n"
-                   "The board is blinking; stop it with ubertooth-util -S or any "
-                   "mode option\n")
+            if self.before_fcadf34:
+                out = (f"Flashing LEDs on ubertooth device {self.serial}\n"
+                       "The board is blinking; stop it with ubertooth-util -S or any "
+                       "mode option\n")
+            else:
+                out = (f"note: the board is blinking; stop it with ubertooth-util "
+                       f"-U {self.serial} -S or any mode option\n")
         else:
             self.threshold = int(mode[2:]) if len(mode) > 2 else 85
             self.mode = "led-specan"
             out = f"Entering LED specan mode (threshold -{self.threshold} dBm)\n"
-        return self._result(command, 0, prefix + out, "", on_output)
+        if self.before_fcadf34:
+            return self._result(command, 0, prefix + out, "", on_output)
+        return self._result(command, 0, prefix, out, on_output)
 
 
 SMOKE_MODE_CASES = ["identify-blinks-until-stop", "led-specan-120-lights-leds",
@@ -250,6 +260,17 @@ class UtilModeCaseTests(unittest.TestCase):
         self.assertEqual(("1", "0", "0"), tuple(device.state[k] for k in ("usr", "rx", "tx")))
         self.assertEqual("1", device.state["crc"])
         self.assertIsNone(device.mode)
+
+    def test_mode_lines_on_stdout_before_fcadf34_fail(self):
+        # Fork #326: the mode lines leave stdout, and -I says the blink once.
+        summary, events = run_test("Ubertooth util modes", ModeUbertooth(
+            crc="1", before_fcadf34=True))
+        self.assertFalse(summary.passed)
+        failed = {e.details["case_id"].rsplit("-Ubertooth util modes-", 1)[-1]
+                  for e in events
+                  if e.event_type == "check_finished" and e.status == "failed"}
+        self.assertEqual({"identify-blinks-until-stop", "led-specan-120-lights-leds"}, failed)
+        self.assertIn("progress and diagnostics go to stderr", summary.failure_reason)
 
     def test_comprehensive_passes_on_fork_main(self):
         device = ModeUbertooth(crc="1")

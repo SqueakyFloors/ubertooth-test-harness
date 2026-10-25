@@ -628,7 +628,10 @@ class NamedTestSequencer:
                     step_canceled = canceled
                     break
                 if skipped:
-                    if mutated:
+                    # A declared run-time skip (Step.skip_returncode) stands
+                    # after a change: the full cleanup below still restores
+                    # and verifies the board.
+                    if mutated and step.skip_returncode is None:
                         # A precondition can only skip a case before it changes
                         # anything; afterwards it is a failure.
                         step_failure = skipped

@@ -24,11 +24,13 @@ from pathlib import Path
 import sys
 
 from ubertooth_harness import specandump
+from ubertooth_harness.hostneeds import Needs
 from ubertooth_harness.stateful import (
     CAPTURE_DIR_KEY,
     Observation,
     StateCase,
     Step,
+    nothing_on_stdout,
     require,
 )
 from ubertooth_harness.transitions import (
@@ -69,7 +71,10 @@ def duration_seconds(value: str) -> float:
 # with a blank line after each sweep; -G "<seconds> <MHz> <dBm>" with the same
 # blank lines; -d writes 3-byte binary records (MHz big-endian, int8 dBm) to
 # the file instead of stdout (only a bare "-d -" means stdout, fork 053363a).
-# -v only adds stderr.
+# -v only adds stderr. Stdout carries only the samples: "Ubertooth stopped",
+# errors and progress are on stderr (fork fcadf34, ubertooth-specan.md
+# DIAGNOSTICS), and a run that cannot write its samples says so once and
+# exits 1.
 
 _LINE_FORMATS = {
     "default": re.compile(r"^(?P<t>\d+\.\d+), (?P<f>\d+), (?P<r>-?\d+)$"),
@@ -90,9 +95,13 @@ def sweep_check(fmt: str, low: int, high: int):
         outside = {}
         bad = 0
         samples = 0
+        progress = 0
         for line in output.splitlines():
             line = line.strip()
-            if not line or line.startswith(("HARD TIMEOUT", "Ubertooth stopped")):
+            if not line or line.startswith("HARD TIMEOUT"):
+                continue
+            if line.startswith(("Ubertooth stopped", "error: ", "warning: ", "note: ")):
+                progress += 1
                 continue
             match = pattern.match(line)
             if match is None:
@@ -108,6 +117,9 @@ def sweep_check(fmt: str, low: int, high: int):
             else:
                 outside[frequency] = outside.get(frequency, 0) + 1
         problems = []
+        if progress:
+            problems.append(f"{progress} progress or diagnostic lines on stdout "
+                            "(they go to stderr)")
         if samples == 0:
             problems.append("no sample lines")
         missing = sorted(set(range(low, high + 1)) - seen)
@@ -229,6 +241,42 @@ def _specan_dash_file_case(serial, seconds):
     )
 
 
+# A -d file that takes no data: the first failed write ends the sweep, which
+# says so once and exits 1 by itself (fork fcadf34, ubertooth-specan.md
+# DIAGNOSTICS). /dev/full exists on Linux only.
+FULL_DEVICE = "/dev/full"
+WRITE_FAILED = (r"(?m)^error: writing samples failed: (?:wrote \d of 3 bytes|"
+                r"could not flush the samples) \(No space left on device\)$")
+_WRITE_FAILED_TWICE = r"(?s)writing samples failed.*writing samples failed"
+
+
+def _specan_full_device_case(serial, seconds):
+    steps = [_stop(serial, "establish-idle", "Establish idle before reading")]
+    steps.extend(_read_originals(serial, MODE_RESET_SETTINGS))
+    steps.append(Step(
+        "sweep",
+        f"ubertooth-specan -d {FULL_DEVICE} ends by itself",
+        _specan_argv(serial, ("-d", FULL_DEVICE)),
+        # A full-band sweep fills a stdio buffer within a second.
+        timeout_s=max(seconds, 5.0) + 5.0, mutates=True,
+        expected_returncodes=(1,),
+        output_patterns=(WRITE_FAILED,),
+        forbidden_patterns=(_WRITE_FAILED_TWICE,),
+        output_check=nothing_on_stdout,
+    ))
+    steps.append(_stop(serial))
+    return StateCase(
+        "dump-file-full-device",
+        f"-d {FULL_DEVICE}: the failed write ends the run, exit 1",
+        tuple(steps),
+        _cleanup(serial, MODE_RESET_SETTINGS),
+        expected_state=("one 'error: writing samples failed' line on stderr, exit 1 "
+                        "before the harness stops it; channel, squelch, and LEDs "
+                        "restored"),
+        needs=Needs(platforms=("linux",)),
+    )
+
+
 # ---------------------------------------------------------------------------
 # A mode stop resets the board (fork aa4f620, SqueakyFloors/ubertooth#191)
 #
@@ -255,7 +303,7 @@ def stop_reset_steps(serial, run_step):
              "Set channel, squelch, and every LED away from the stop defaults",
              lambda context: _util(serial, CHANNEL.set_arg(target(context)),
                                    SQUELCH.set_arg(STOP_RESET_SQUELCH), "-d1"),
-             mutates=True),
+             mutates=True, output_check=nothing_on_stdout),
         CHANNEL.verify(serial, "verify-channel-set", "Channel set before the run",
                        "channel before run", target),
         SQUELCH.verify(serial, "verify-squelch-set", "Squelch set before the run",
@@ -323,6 +371,7 @@ def spectrum_cases(arguments, _resources, resource_identities):
                          ("-l", "2430", "-u", "2440"), "default", 2430, 2440, seconds,
                          dump_file="specan.bin"),
             _specan_dash_file_case(serial, seconds),
+            _specan_full_device_case(serial, seconds),
             _specan_stop_reset_case(serial, seconds),
         ]
     return tuple(cases)
@@ -521,7 +570,8 @@ def btle_settings_cases(arguments, _resources, resource_identities):
                 Step("set", "Set access address", lambda c: _btle(serial, f"-a{other_aa(c)}"),
                      mutates=True),
                 Step("reset", "Full reset", _util(serial, "-r"), timeout_s=RESET_TIMEOUT_S,
-                     output_patterns=(r"Resetting ubertooth device",), mutates=True),
+                     output_patterns=(r"Resetting ubertooth device",),
+                     output_check=nothing_on_stdout, mutates=True),
                 _aa_read(serial, "verify-reset", "Verify advertising access address",
                          "access address after reset", ADVERTISING_AA),
             ), expected_state="access address back to the advertising address 8e89bed6; "

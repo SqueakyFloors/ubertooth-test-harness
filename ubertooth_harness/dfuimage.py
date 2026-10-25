@@ -555,6 +555,12 @@ def _parser() -> argparse.ArgumentParser:
     same.add_argument("second")
     absent = sub.add_parser("absent")
     absent.add_argument("path")
+    regular = sub.add_parser("regular", help="PATH is a regular file, not a symlink")
+    regular.add_argument("path")
+    regular.add_argument("--mode", help="its permission bits, in octal")
+    sub.add_parser("not-root", help="say whether this process runs as root")
+    state.add_argument("--allow", action="append", default=[],
+                       help="an entry that may change (or appear)")
     readback = sub.add_parser("check-readback")
     readback.add_argument("readback")
     readback.add_argument("image")
@@ -626,7 +632,10 @@ def _main(args, board_factory) -> int:
         print("Directory entries: " + json.dumps(state, sort_keys=True))
         if args.before is None:
             return 0
-        changes = state_changes(json.loads(args.before), state)
+        before = json.loads(args.before)
+        changes = state_changes(
+            {k: v for k, v in before.items() if k not in args.allow},
+            {k: v for k, v in state.items() if k not in args.allow})
         if changes:
             print("Directory changed: " + "; ".join(changes))
             return 1
@@ -653,6 +662,23 @@ def _main(args, board_factory) -> int:
             print(f"Changed: {args.first} differs from {args.second}")
             return 1
         print("Unchanged")
+        return 0
+    if command == "regular":
+        entry = os.lstat(args.path)
+        mode = stat.S_IMODE(entry.st_mode)
+        if not stat.S_ISREG(entry.st_mode):
+            print(f"Not a regular file: {args.path} "
+                  f"({'a symlink' if stat.S_ISLNK(entry.st_mode) else 'mode %o' % entry.st_mode})")
+            return 1
+        if args.mode is not None and mode != int(args.mode, 8):
+            print(f"Mode {mode:o}, not {args.mode}: {args.path}")
+            return 1
+        print(f"Regular file: {entry.st_size} bytes, mode {mode:o}")
+        return 0
+    if command == "not-root":
+        uid = os.geteuid()
+        print("Root: " + ("yes, a read-only directory does not stop root" if uid == 0
+                          else f"no (uid {uid})"))
         return 0
     if command == "absent":
         if Path(args.path).exists():

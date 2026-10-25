@@ -427,16 +427,18 @@ class FakeUbertooth:
                     f"error: options {named} cannot be combined; give only one of "
                     + " ".join(UTIL_MODE_ORDER)
                 )
-            return self._result(command, 0, "Entering LED specan mode\n", "", on_output)
+            return self._result(command, 0, "", "Entering LED specan mode\n", on_output)
         if (set_squelch is not None or get_squelch) and modes:
             return fail(f"error: -z cannot be combined with -{modes[0]}")
         lines = []
+        # Progress on stderr, as at fork fcadf34; stdout only what was asked.
+        progress = []
         if "r" in flags:
             self.state.update(self.BOOT_STATE)
             self.mode = None
-            lines.append(f"Resetting ubertooth device {self.serial}")
+            progress.append(f"Resetting ubertooth device {self.serial}")
         if "S" in flags:
-            lines.append(f"Stopping ubertooth device {self.serial}")
+            progress.append(f"Stopping ubertooth device {self.serial}")
             self.stops += 1
             self._stop_mode()
         # Configuration in ubertooth-util's order: all LEDs, channel, USR LED, PA.
@@ -473,7 +475,7 @@ class FakeUbertooth:
         if "s" in flags:
             lines.append(f"Serial No: {self.serial}")
         if set_squelch is not None:
-            lines.append(f"Setting squelch to {set_squelch}")
+            # Silent since fork fcadf34.
             self.state["squelch"] = set_squelch
         if get_squelch:
             lines.append(f"Squelch set to {self.state['squelch']}")
@@ -481,7 +483,8 @@ class FakeUbertooth:
             self._stop_mode()
             self.mode = "xmas"
         stdout = "".join(line + "\n" for line in lines)
-        return self._result(command, 0, stdout, "", on_output)
+        stderr = "".join(line + "\n" for line in progress)
+        return self._result(command, 0, stdout, stderr, on_output)
 
 
 def cases_for(test_name, coverage="smoke"):
@@ -1484,6 +1487,21 @@ class OptionRuleTests(unittest.TestCase):
         self.assertEqual(sorted(set_and_read), failed)
         _summary, events = run_test("Radio setting transitions", FakeUbertooth())
         self.assertEqual([], [e for e in steps(events, step_id="set-and-read")])
+
+    def test_util_progress_on_stdout_before_fcadf34_fails(self):
+        # Fork #326: -S, -r and the setters print nothing on stdout.
+        class Before(FakeUbertooth):
+            @staticmethod
+            def _result(command, returncode, stdout, stderr, on_output, timed_out=False):
+                if command[0] == "ubertooth-util":
+                    stdout, stderr = stdout + stderr, ""
+                return FakeUbertooth._result(command, returncode, stdout, stderr,
+                                             on_output, timed_out)
+
+        summary, _events = run_test("Radio setting transitions", Before())
+        self.assertFalse(summary.passed)
+        self.assertIn("'Stopping ubertooth device", summary.failure_reason)
+        self.assertIn("progress goes to stderr", summary.failure_reason)
 
     def test_next_word_cases_pass_and_restore_on_fork_main(self):
         device = FakeUbertooth()

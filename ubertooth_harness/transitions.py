@@ -77,6 +77,7 @@ from ubertooth_harness.stateful import (
     Step,
     Unrestorable,
     compatible_pairs,
+    nothing_on_stdout,
     require,
 )
 
@@ -110,6 +111,7 @@ def _stop(serial: str, step_id: str = "stop", name: str = "Stop current operatio
         name,
         _util(serial, "-S"),
         output_patterns=(r"Stopping ubertooth device",),
+        output_check=nothing_on_stdout,
     )
 
 
@@ -226,6 +228,7 @@ class Setting:
                     serial, *self.set_options(self.restorable_original(context))
                 ),
                 mutates=True,
+                output_check=nothing_on_stdout,
             ),
             self.verify(
                 serial,
@@ -343,6 +346,7 @@ def _setting_case(serial: str, setting: Setting) -> StateCase:
                 f"Set different {setting.key}",
                 lambda context: _util(serial, *setting.set_options(target(context))),
                 mutates=True,
+                output_check=nothing_on_stdout,
             ),
             setting.verify(
                 serial, "verify-set", f"Verify {setting.key} after set",
@@ -408,6 +412,7 @@ def _repeated_case(serial: str, setting: Setting) -> StateCase:
                     *setting.set_options(last(context)),
                 ),
                 mutates=True,
+                output_check=nothing_on_stdout,
             ),
             setting.verify(
                 serial, "verify-last", "Verify the last option won",
@@ -471,6 +476,7 @@ def _reset_case(serial: str) -> StateCase:
                     PA_LEVEL.set_arg(PA_ZERO), "-z-60", "-d1",
                 ),
                 mutates=True,
+                output_check=nothing_on_stdout,
             ),
             PA_LEVEL.verify(
                 serial, "verify-pa-level-before-reset", "PA level 0 before reset",
@@ -494,6 +500,7 @@ def _reset_case(serial: str) -> StateCase:
                 _util(serial, "-r"),
                 timeout_s=RESET_TIMEOUT_S,
                 output_patterns=(r"Resetting ubertooth device",),
+                output_check=nothing_on_stdout,
                 mutates=True,
             ),
             Step(
@@ -660,6 +667,7 @@ def _value_form_case(serial, case_id, name, setting, target, away, argv_options)
                 f"Preset a different {setting.key} (attached value)",
                 lambda context: _util(serial, *setting.set_options(away(context))),
                 mutates=True,
+                output_check=nothing_on_stdout,
             ),
             setting.verify(
                 serial, "verify-preset", f"Verify preset {setting.key}",
@@ -744,6 +752,7 @@ def _next_word_composition_case(serial):
                     SQUELCH.set_arg(away_squelch(context)), "-d0",
                 ),
                 mutates=True,
+                output_check=nothing_on_stdout,
             ),
             CHANNEL.verify(serial, "verify-preset-channel", "Verify preset channel",
                            "channel after preset", away_channel),
@@ -1237,7 +1246,7 @@ def ble_crc_cases(arguments, _resources, resource_identities):
 # them (btle -s, -i/-I, ducky -q/-b, util -t/-n/-e) are not used.
 
 _VALIDATED = (CHANNEL, SQUELCH, LEDS)
-_ANY_MODE_START = r"Entering |Starting |Flashing LEDs|systime="
+_ANY_MODE_START = r"Entering |Starting |Flashing LEDs|the board is blinking|systime="
 _STRAY = r"error: unexpected argument '{}'"
 
 
@@ -1459,7 +1468,7 @@ _MODE_OPTIONS = (
     ("-x", "xmas"),
     ("-I", "identify"),
 )
-_MODE_START = r"Entering |Starting |Flashing LEDs"
+_MODE_START = r"Entering |Starting |Flashing LEDs|the board is blinking"
 _PA_WRITING_MODES = {"-n", "-e"}
 
 

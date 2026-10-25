@@ -26,18 +26,21 @@ _MARKER = re.compile(rb"ubertooth ([\x21-\x7e]+) \(")
 
 
 class FakeDfu:
-    """ubertooth-dfu's file handling and image check as at fork 6fee30c, run
-    with UBERTOOTH_TEST_NO_DEVICES=1, plus the case helpers in process.
+    """ubertooth-dfu's file handling and image check as at fork f2e06fa, run
+    with UBERTOOTH_TEST_NO_DEVICES=1, plus the case helpers in process: -s
+    checks a -d image first, then writes a temporary file beside <file>.dfu
+    (with the mode of the file it replaces) and renames it into place.
 
-    ``fixed`` models the fix of fork #305 (-s reads its input before it opens
-    the output). ``bugs``: check-late (the board lookup comes before the image
-    check), touch-image (a refused -d rewrites its image), double-suffix (-s
-    signs an already suffixed .bin), needs-writable (-s opens its input r+b),
-    other-product (-s writes product 0x6002). ``switch`` False is a library
-    from before b6d8ede."""
+    ``bugs``: check-late (the board lookup comes before the image check),
+    touch-image (a refused -d rewrites its image), double-suffix (-s signs an
+    already suffixed .bin), needs-writable (-s opens its input r+b),
+    other-product (-s writes product 0x6002), and the -s output as before
+    f2e06fa: truncate-first (fork #305: <file>.dfu opened "w+b" before the
+    read), sign-first (fork #286: signed before the -d image check),
+    write-through (into what a symlink points at), mode-lost, temp-left.
+    ``switch`` False is a library from before b6d8ede."""
 
-    def __init__(self, *, fixed=False, bugs=(), switch=True):
-        self.fixed = fixed
+    def __init__(self, *, bugs=(), switch=True):
         self.bugs = set(bugs)
         self.switch = switch
         self.commands = []
@@ -49,6 +52,15 @@ class FakeDfu:
             return self._result(command, 0, "libubertooth 1.1 (git-test), libbtbb 1.0\n")
         if command[0] == "mkdir":
             os.mkdir(command[1])
+            return self._result(command, 0, "")
+        if command[0] == "chmod":
+            try:
+                os.chmod(command[2], int(command[1], 8))
+            except FileNotFoundError as error:
+                return self._result(command, 1, "", f"chmod: {error}\n")
+            return self._result(command, 0, "")
+        if command[0] == "ln":
+            os.symlink(command[2], command[3])
             return self._result(command, 0, "")
         if command[0] == sys.executable:
             helper = Path(command[1]).name
@@ -81,16 +93,18 @@ class FakeDfu:
             return self._result(command, 1, "Error: -s requires a .bin\n")
         if image is not None and not Path(image).exists():
             return self._result(command, 1, "", f"{image}: No such file or directory\n")
-        if sign is not None:
+        out = "Checking firmware signature\n" if image is not None else ""
+        problem = ""
+        if image is not None and "check-late" not in self.bugs:
+            problem = self._check(Path(image), "-r" in words)
+        if sign is not None and (not problem or "sign-first" in self.bugs):
             failure = self._sign(Path(sign))
             if failure:
                 return self._result(command, 1, "", failure)
             if image is None:
                 return self._result(command, 0, "")
-        out = "Checking firmware signature\n"
         if "check-late" in self.bugs:
             return self._result(command, 1, out, "DFU +0.000s: operation started\n" + NOTE)
-        problem = self._check(Path(image), "-r" in words)
         if problem:
             if "touch-image" in self.bugs and Path(image).is_file():
                 Path(image).write_bytes(Path(image).read_bytes() + b"\0")
@@ -111,12 +125,25 @@ class FakeDfu:
                 return f"error: {source} already has a DFU suffix, so {target} was not written\n"
             if "needs-writable" in self.bugs and not os.access(source, os.W_OK):
                 return f"{source}: Permission denied\n"
-        if not self.fixed:
+        if "truncate-first" in self.bugs:
             target.write_bytes(b"")  # fork #305: opened "w+b" before the read
         if source.is_dir():
             return "error: read 0 of 64 byte(s) from the input file\n"
         product = 0x6002 if "other-product" in self.bugs else dfuimage.PRODUCT
-        target.write_bytes(dfuimage.with_suffix(source.read_bytes(), product=product))
+        signed = dfuimage.with_suffix(source.read_bytes(), product=product)
+        if "write-through" in self.bugs:
+            target.write_bytes(signed)
+            return ""
+        temp = target.with_name(target.name + ".a1b2c3")
+        try:
+            temp.write_bytes(signed)
+        except PermissionError:
+            return f"{target}: Permission denied\n"
+        if target.exists() and "mode-lost" not in self.bugs:
+            os.chmod(temp, os.stat(target).st_mode & 0o7777)
+        if "temp-left" in self.bugs:
+            temp.with_name(temp.name + "x").write_bytes(b"")
+        os.replace(temp, target)
         return ""
 
     @staticmethod
@@ -206,7 +233,6 @@ def names(*case_ids, coverage="comprehensive"):
     return sorted(by_id[case_id] for case_id in case_ids)
 
 
-STRICT = names("sign-unreadable-input")
 REJECTS = [f"reject-{kind}" for kind in dfuimage.BAD_KINDS]
 
 
@@ -264,7 +290,7 @@ class CaseTests(unittest.TestCase):
         _a, smoke = cases("smoke")
         self.assertEqual(7 + 1 + 5, len(smoke))
         _a, full = cases("comprehensive")
-        self.assertEqual(len(smoke) + 13, len(full))
+        self.assertEqual(len(smoke) + 18, len(full))
         self.assertEqual(len(full), len({case.case_id for case in full}))
         context = {"capture dir": "/run/captures/x", "directory before": "{}"}
         for case in full:
@@ -291,7 +317,7 @@ class CaseTests(unittest.TestCase):
                 for path in (a for a in argv if a.startswith("/run")):
                     self.assertTrue(path.startswith("/run/captures/x"), path)
 
-    def test_fork_tools_pass_smoke_and_fail_only_the_strict_case(self):
+    def test_fork_tools_pass_everything(self):
         summary, events = run(FakeDfu(), coverage="smoke")
         self.assertTrue(summary.passed, summary.failure_reason)
         # No firmware build: left out before the run, not skipped.
@@ -301,47 +327,60 @@ class CaseTests(unittest.TestCase):
         (left_out,) = [e for e in events if e.event_type == "not_applicable"]
         self.assertIn("needs a firmware build", left_out.details["reason"])
         summary, events = run(FakeDfu())
-        self.assertFalse(summary.passed)
-        self.assertEqual(STRICT, failed_names(events))
-
-    def test_fixed_tools_pass_everything(self):
-        summary, _events = run(FakeDfu(fixed=True))
         self.assertTrue(summary.passed, summary.failure_reason)
+        self.assertEqual(names("sign-test-build"), not_applicable_names(events))
+        # Only root is a runtime skip: a read-only directory does not stop it.
+        expected = ["sign-read-only-directory"] if os.geteuid() == 0 else []
+        self.assertEqual(names(*expected), skipped_names(events))
+
+    def test_the_sign_output_before_f2e06fa_fails(self):
+        for bug, failing in (
+                # Both write <file>.dfu in place, which a read-only directory
+                # does not stop.
+                ("truncate-first", ("sign-unreadable-input", "sign-read-only-directory",
+                                    "sign-replaces-symlink")),
+                ("write-through", ("sign-replaces-symlink", "sign-read-only-directory")),
+                ("mode-lost", ("sign-replaces-existing",)),
+                ("temp-left", ("sign-no-temporary-file", "sign-replaces-existing"))):
+            with self.subTest(bug):
+                summary, events = run(FakeDfu(bugs=(bug,)))
+                self.assertFalse(summary.passed)
+                self.assertEqual(names(*failing), failed_names(events))
 
     def test_test_build_is_signed_and_compared_when_the_run_has_one(self):
         build = dfuimage.with_suffix(b"ubertooth git-test (builder) " + bytes(range(200)))
-        tools = FakeDfu(fixed=True)
+        tools = FakeDfu()
         summary, events = run(tools, coverage="smoke", test_build=build)
         self.assertTrue(summary.passed, summary.failure_reason)
         self.assertEqual([], skipped_names(events))
         self.assertEqual([], not_applicable_names(events))
         self.assertTrue(any(c[-1].endswith("build.bin") and c[3:4] == ("-s",)
                             for c in tools.commands))
-        summary, events = run(FakeDfu(fixed=True, bugs=("other-product",)),
+        summary, events = run(FakeDfu(bugs=("other-product",)),
                               coverage="smoke", test_build=build)
         self.assertFalse(summary.passed)
         self.assertEqual(names("sign-synthetic", "sign-test-build", "sign-read-only-input",
                                coverage="smoke"), failed_names(events))
 
     def test_a_board_lookup_before_the_image_check_fails_every_refusal(self):
-        summary, events = run(FakeDfu(fixed=True, bugs=("check-late",)), coverage="smoke")
+        summary, events = run(FakeDfu(bugs=("check-late",)), coverage="smoke")
         self.assertFalse(summary.passed)
         # The good image never reaches a check that names its revision.
         self.assertEqual(names(*REJECTS, "accept-synthetic", coverage="smoke"),
                          failed_names(events))
 
     def test_a_refusal_that_rewrites_the_image_fails(self):
-        summary, events = run(FakeDfu(fixed=True, bugs=("touch-image",)))
+        summary, events = run(FakeDfu(bugs=("touch-image",)))
         self.assertFalse(summary.passed)
         edge = [f"reject-{kind}" for kind in ("empty", "short", "suffix-only",
                                               "long-suffix-length", "dfu-2.0", "no-marker")]
         self.assertEqual(names(*REJECTS, *edge), failed_names(events))
 
     def test_double_suffix_and_writable_input_fail(self):
-        summary, events = run(FakeDfu(fixed=True, bugs=("double-suffix",)))
+        summary, events = run(FakeDfu(bugs=("double-suffix",)))
         self.assertEqual(names("sign-refuses-suffixed-bin", "sign-refuses-corrupt-suffix"),
                          failed_names(events))
-        summary, events = run(FakeDfu(fixed=True, bugs=("needs-writable",)), coverage="smoke")
+        summary, events = run(FakeDfu(bugs=("needs-writable",)), coverage="smoke")
         self.assertEqual(names("sign-read-only-input", coverage="smoke"), failed_names(events))
 
     def test_old_library_skips_without_running_a_tool(self):

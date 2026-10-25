@@ -63,6 +63,34 @@ def require(context: Context, key: str) -> str:
         raise MissingContext(key) from error
 
 
+# ubertooth-util and ubertooth-specan keep only what was asked for on stdout
+# (fork fcadf34, SqueakyFloors/ubertooth#326; host/doc/ubertooth-util.md and
+# ubertooth-specan.md, DIAGNOSTICS): progress lines such as "Stopping
+# ubertooth device", errors, warnings and notes go to stderr, and a setter
+# (-a -c -C -d -l -z <n>) prints nothing.
+_DIAGNOSTIC_LINE = re.compile(
+    r"(?m)^(?:Entering |Starting |Stopping ubertooth|Resetting ubertooth|"
+    r"Flashing LEDs|Setting squelch|Ubertooth stopped|note: |warning: |error: ).*$")
+
+
+def nothing_on_stdout(stdout: str) -> str:
+    """A Step.output_check for a command that reports nothing (a setter, -S,
+    -r): its progress lines belong on stderr."""
+    if stdout.strip():
+        first = stdout.strip().splitlines()[0]
+        return f"stdout is not empty (first line {first!r}); progress goes to stderr"
+    return ""
+
+
+def no_diagnostics_on_stdout(stdout: str) -> str:
+    """A Step.output_check for a command that also prints a result: no
+    progress, error, warning or note line on stdout."""
+    match = _DIAGNOSTIC_LINE.search(stdout)
+    if match:
+        return f"{match[0]!r} is on stdout; progress and diagnostics go to stderr"
+    return ""
+
+
 @dataclass(frozen=True)
 class Observation:
     """Extract one setting from output and optionally compare it."""
@@ -134,6 +162,12 @@ class Step:
     # A command that should stop itself after a timeout of its own (for
     # example ubertooth-rx -t N) must not exit before this many seconds.
     min_duration_s: float = 0.0
+    # Exit status by which the command reports, with a "SKIP: <reason>" line
+    # on stdout, that the case cannot be decided here, for a reason only the
+    # run itself can find (for example no traffic in range). The case is
+    # skipped even when this step or an earlier one changed the board; the
+    # cleanup still runs in full, and a cleanup failure still fails the case.
+    skip_returncode: int | None = None
 
     def resolve_argv(self, context: Context) -> tuple[str, ...]:
         value = self.argv(context) if callable(self.argv) else self.argv
@@ -160,6 +194,15 @@ class Step:
                 )
         elif result.timed_out:
             return StepOutcome(f"{self.name}: command timed out", expected)
+        elif (self.skip_returncode is not None
+              and result.returncode == self.skip_returncode):
+            match = re.search(r"(?m)^SKIP: (.+)$", result.stdout)
+            if match is None:
+                return StepOutcome(
+                    f"{self.name}: command exited {result.returncode} without a "
+                    "SKIP: line", expected)
+            return StepOutcome(
+                "", expected, skipped=f"{self.name}: skipped, {match[1].strip()}")
         elif result.returncode not in self.expected_returncodes:
             return StepOutcome(
                 f"{self.name}: command exited {result.returncode}", expected

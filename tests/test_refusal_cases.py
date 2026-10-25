@@ -35,18 +35,18 @@ VALUE_OPTIONS = {
 
 
 class FakeTools:
-    """The six tools' argument handling as at fork 6fee30c (#264): file
-    options are named in the option loop and opened after every check, and
-    "Ignoring extra capture file" goes to stderr. ``bugs`` switches on a
-    misbehavior: open-early (a file option creates its file in the loop),
-    extra-stdout, temp-left (dfu -u leaves its temporary file); ``fixed``
-    models the fix of fork #286 (dfu -s writes nothing when -d is refused).
+    """The six tools' argument handling as at fork f2e06fa (#264, #286): file
+    options are named in the option loop and opened after every check, dfu
+    -s writes nothing when -d is refused, and "Ignoring extra capture file"
+    goes to stderr. ``bugs`` switches on a misbehavior: open-early (a file
+    option creates its file in the loop), extra-stdout, temp-left (dfu -u
+    leaves its temporary file), sign-first (fork #286, before f2e06fa: dfu -s
+    writes its .dfu before the -d image check).
     ``missing`` tools are not installed; ``switch`` False is a library from
     before b6d8ede."""
 
-    def __init__(self, *, bugs=(), fixed=False, missing=(), switch=True):
+    def __init__(self, *, bugs=(), missing=(), switch=True):
         self.bugs = set(bugs)
-        self.fixed = fixed
         self.missing = set(missing)
         self.switch = switch
         self.commands = []
@@ -129,6 +129,10 @@ class FakeTools:
         for option, value in files.values():
             if value == "-":
                 out.append("\x00pcap header\x00")
+            elif not Path(value).parent.is_dir():
+                # ubertooth-specan since fork fcadf34: one "error: " line.
+                return self._result(command, 1, "".join(out), "".join(err)
+                                    + f"error: {value}: No such file or directory\n")
             else:
                 self._create(tool, option, value)
         return self._result(command, 1, "".join(out),
@@ -189,7 +193,7 @@ class FakeTools:
             if not source.exists():
                 self._drop(temp)
                 return self._result(command, 1, "", f"{source}: No such file or directory\n")
-            if not (self.fixed and image is not None):
+            if image is None or "sign-first" in self.bugs:
                 Path(str(source)[:-4] + ".dfu").write_bytes(source.read_bytes() + b"suffix")
         if image is not None:
             self._drop(temp)
@@ -224,7 +228,6 @@ def run(executor, coverage="comprehensive"):
         return summary, sink.events
 
 
-STRICT = {"dfu -s <file.bin> -d <bad image> writes no .dfu"}
 
 
 class HelperTests(unittest.TestCase):
@@ -285,7 +288,7 @@ class CaseTests(unittest.TestCase):
         # extra-capture-file cases.
         self.assertEqual(13 * 3 + 3, len(smoke))
         _a, full = cases("comprehensive")
-        self.assertEqual(len(smoke) + 13, len(full))
+        self.assertEqual(len(smoke) + 14, len(full))
         self.assertEqual(len(full), len({case.case_id for case in full}))
         context = {"capture dir": "/run/captures/x"}
         for case in full:
@@ -304,19 +307,20 @@ class CaseTests(unittest.TestCase):
                     self.assertTrue(path == "/run/captures/x"
                                     or path.startswith("/run/captures/x/"), path)
 
-    def test_fork_tools_pass_smoke_and_fail_only_the_strict_case(self):
+    def test_fork_tools_pass_everything(self):
         summary, _events = run(FakeTools(), coverage="smoke")
         self.assertTrue(summary.passed, summary.failure_reason)
-        summary, events = run(FakeTools())
-        self.assertFalse(summary.passed)
-        self.assertEqual(sorted(STRICT), failed_names(events))
-
-    def test_fixed_tools_pass_everything(self):
-        summary, _events = run(FakeTools(fixed=True))
+        summary, _events = run(FakeTools())
         self.assertTrue(summary.passed, summary.failure_reason)
 
+    def test_dfu_signing_before_the_image_check_fails(self):
+        summary, events = run(FakeTools(bugs=("sign-first",)))
+        self.assertFalse(summary.passed)
+        self.assertEqual(["dfu -s <file.bin> -d <bad image> writes no .dfu"],
+                         failed_names(events))
+
     def test_files_opened_in_the_option_loop_fail(self):
-        summary, events = run(FakeTools(fixed=True, bugs=("open-early",)), coverage="smoke")
+        summary, events = run(FakeTools(bugs=("open-early",)), coverage="smoke")
         self.assertFalse(summary.passed)
         failed = failed_names(events)
         # Every file option in every refusal; btle -n -q - -q <file> opened the
@@ -324,7 +328,7 @@ class CaseTests(unittest.TestCase):
         self.assertEqual(13 * 3 + 3, len(failed))
 
     def test_extra_capture_note_on_stdout_fails(self):
-        summary, events = run(FakeTools(fixed=True, bugs=("extra-stdout",)), coverage="smoke")
+        summary, events = run(FakeTools(bugs=("extra-stdout",)), coverage="smoke")
         self.assertFalse(summary.passed)
         self.assertEqual(sorted([
             "btle -n -q - -q <file>: the extra-file note is on stderr",
@@ -333,14 +337,14 @@ class CaseTests(unittest.TestCase):
         ]), failed_names(events))
 
     def test_dfu_temporary_file_left_behind_fails(self):
-        summary, events = run(FakeTools(fixed=True, bugs=("temp-left",)))
+        summary, events = run(FakeTools(bugs=("temp-left",)))
         self.assertFalse(summary.passed)
         self.assertEqual(sorted([
             "dfu -u <kept> -d <bad image>", "dfu -u <kept> -s <missing .bin>",
         ]), failed_names(events))
 
     def test_missing_tool_and_old_library_skip(self):
-        tools = FakeTools(missing=("ubertooth-follow",), fixed=True)
+        tools = FakeTools(missing=("ubertooth-follow",))
         summary, _events = run(tools)
         self.assertTrue(summary.passed, summary.failure_reason)
         self.assertFalse(any(c[2:3] == ("ubertooth-follow",) for c in tools.commands

@@ -124,9 +124,11 @@ class SubprocessExecutorTests(unittest.TestCase):
                 sys.executable,
                 "-u",
                 "-c",
-                "import sys,time; print('before'); sys.stdout.flush(); time.sleep(2)",
+                "import sys,time; print('before'); sys.stdout.flush(); time.sleep(10)",
             ],
-            timeout_s=0.08,
+            # Room for the interpreter to start on a loaded host (0.08 s
+            # missed 'before' now and then).
+            timeout_s=1.0,
             on_output=lambda stream, text: chunks.append((stream, text)),
         )
 

@@ -12,14 +12,17 @@ from unittest import mock
 
 from ubertooth_harness import extcapcapture, pytools, python_cases
 from ubertooth_harness.catalog import builtin_catalog
+from ubertooth_harness.executor import CommandResult
+from ubertooth_harness.stateful import Step
 import tests.test_transitions as tt
 from tests.test_python_cases import git
 from tests.test_transitions import SERIAL
 
 TEST = "BLE extcap capture"
 
-# btle-extcap.py --capture as at fork 71e1a8a, trimmed to the capture path.
-EXTCAP = '''#!/usr/bin/env python3
+# btle-extcap.py --capture as at fork 71e1a8a, trimmed to the capture path:
+# before fork #342, it exits 0 whatever ubertooth-btle did.
+EXTCAP_71E1A8A = '''#!/usr/bin/env python3
 import getopt, re, signal, sys
 from subprocess import Popen
 
@@ -67,8 +70,87 @@ def capture(interface, fifo, channel):
 if __name__ == "__main__":
     main()
 '''
-# The fix SqueakyFloors/ubertooth#334 asks for.
-FIXED_EXTCAP = EXTCAP.replace("    p.wait()\n", "    sys.exit(p.wait())\n")
+# btle-extcap.py --capture as at fork d04f79e (#342), trimmed to the capture
+# path: Wireshark's options, the channel checked before ubertooth-btle runs,
+# and ubertooth-btle's exit status kept (0 for SIGTERM or SIGPIPE).
+EXTCAP = '''#!/usr/bin/env python3
+import getopt, re, signal, sys
+from subprocess import Popen
+
+child = None
+stop_signal = None
+
+def sig_handler(sig, frame):
+    global stop_signal
+    stop_signal = sig
+    if child is not None:
+        child.terminate()
+
+def main():
+    signal.signal(signal.SIGTERM, sig_handler)
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], "h", [
+            "capture", "extcap-interface=", "fifo=", "channel=", "extcap-version=",
+            "extcap-capture-filter="])
+    except getopt.GetoptError as err:
+        print("error: %s" % err, file=sys.stderr)
+        sys.exit(1)
+    if args:
+        print("error: unexpected argument '%s'" % args[0], file=sys.stderr)
+        sys.exit(1)
+    interface = ''
+    fifo = None
+    channel = "37"
+    capture_filter = ''
+    do_capture = False
+    for o, a in opts:
+        if o == "--capture":
+            do_capture = True
+        elif o == "--extcap-interface":
+            interface = a
+        elif o == "--fifo":
+            fifo = a
+        elif o == "--channel":
+            channel = a
+        elif o == "--extcap-capture-filter":
+            capture_filter = a
+    m = re.match(r'ubertooth([0-9a-fA-F]+)$', interface)
+    if not m:
+        print("error: --extcap-interface must be ubertooth<serial>, as "
+              "--extcap-interfaces lists it", file=sys.stderr)
+        sys.exit(1)
+    interface = m.group(1)
+    if do_capture:
+        if fifo is None:
+            print("error: --capture needs --fifo=PATH", file=sys.stderr)
+            sys.exit(1)
+        if channel not in ("37", "38", "39"):
+            print("error: advertising channel index must be 37-39 (got %s)" % channel,
+                  file=sys.stderr)
+            sys.exit(1)
+        if capture_filter:
+            print("warning: this interface applies no capture filter; "
+                  "filter the packets in Wireshark instead (got %s)" % capture_filter,
+                  file=sys.stderr)
+        sys.exit(capture(interface, fifo, channel))
+
+def capture(interface, fifo, channel):
+    global child
+    if stop_signal is not None:
+        return 0
+    child = Popen(["ubertooth-btle", "-f", "-U", interface, "-q", fifo, "-A", channel])
+    if stop_signal is not None:
+        child.terminate()
+    status = child.wait()
+    if status < 0:
+        if stop_signal is not None or -status == signal.SIGPIPE:
+            return 0
+        return 128 - status
+    return status
+
+if __name__ == "__main__":
+    main()
+'''
 
 SERIAL_A = "1ff0ff1967102caf8334fa5ac52000f5"
 SERIAL_B = "0b700017490c2cafa039ee5ac52000f5"
@@ -77,10 +159,13 @@ NO_BOARD = "0badc0de" * 4
 # ubertooth-btle -f -U <serial> -q <fifo> -A <channel> as at fork 71e1a8a: -A
 # is checked before the FIFO is opened; the FIFO is opened (header written)
 # before the board, so an unknown serial ends after the header with exit 1;
-# SIGTERM ends the capture with exit 0. FAKE_BTLE switches on a bug;
-# FAKE_RECORDS caps the records sent.
+# SIGTERM ends the capture with exit 0. FAKE_BTLE switches on a bug ("quiet"
+# is no traffic in range: the header, then no record); FAKE_RECORDS caps the
+# records sent.
 FAKE_BTLE = r'''#!PYTHON
 import os, signal, struct, sys, time
+# A C program's default: a write to a FIFO nobody reads any more kills it.
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 stop = False
 def quit(*_args):
     global stop
@@ -89,8 +174,12 @@ signal.signal(signal.SIGTERM, quit)
 args = sys.argv[1:]
 bug = os.environ.get("FAKE_BTLE", "")
 limit = int(os.environ.get("FAKE_RECORDS", "0"))
+if bug == "quiet":
+    limit = -1
 channel = int(args[args.index("-A") + 1])
 if channel not in (37, 38, 39):
+    if bug == "slow-refusal":
+        time.sleep(1)
     print(f"error: advertising channel index must be 37-39 (got {channel})", file=sys.stderr)
     sys.exit(1)
 board = args[args.index("-U") + 1]
@@ -98,7 +187,7 @@ out = open(args[args.index("-q") + 1], "wb")
 out.write(struct.pack("<IHHiIII", 0xa1b23c4d, 2, 4, 0, 0, 400,
                       192 if bug == "link-type" else 256))
 if board not in os.environ.get("FAKE_BOARDS", "").split(","):
-    print(f"error: no Ubertooth with serial {board}", file=sys.stderr)
+    print(f"no Ubertooth found with serial matching '{board}'", file=sys.stderr)
     out.close()
     sys.exit(1)
 rf = {37: 0, 38: 12, 39: 39}[channel]
@@ -204,7 +293,9 @@ class Fixture:
             code = extcapcapture.capture(
                 (sys.executable, str(self.script), "--capture", f"--fifo={self.fifo}",
                  *extcap_args),
-                self.fifo, options.pop("seconds", 0.5), out=print, **options)
+                # 1.5 s: two Python start-ups must fit before SIGTERM even on a
+                # loaded runner (0.5 s failed now and then).
+                self.fifo, options.pop("seconds", 1.5), out=print, **options)
         self.assertGone()
         return code, out.getvalue()
 
@@ -265,13 +356,13 @@ class CaptureTests(unittest.TestCase):
             "wrong-channel": "advertising records on RF channel(s) [0], not only 12",
             "link-type": "link type 192, not 256",
             "truncated": "truncated",
-            "exits": "btle-extcap exited 0 before the stop",
+            "exits": "btle-extcap exited 1 before the stop",
         }
         for bug, failure in cases.items():
             with self.subTest(bug):
                 code, out = fixture.capture(
                     (f"--extcap-interface=ubertooth{SERIAL_A}", "--channel=38"),
-                    bug=bug, board=SERIAL_A, channel=38)
+                    bug=bug, board=SERIAL_A, channel=38, seconds=2)
                 self.assertEqual(1, code, out)
                 self.assertRegex(out, rf"(?m)^FAIL: .*{re.escape(failure)}")
                 self.assertNotIn("capture checks passed", out)
@@ -297,8 +388,8 @@ class CaptureTests(unittest.TestCase):
         self.assertIn("FAIL: btle-extcap did not exit within 1s of SIGTERM", out)
         self.assertIn("processes left: none", out)
 
-    def test_refused_capture_at_fork_main_fails_strictly(self):
-        fixture = self.fixture()
+    def test_refused_capture_before_fork_342_fails(self):
+        fixture = self.fixture(EXTCAP_71E1A8A)
         for args in ((f"--extcap-interface=ubertooth{NO_BOARD}",),
                      (f"--extcap-interface=ubertooth{SERIAL_A}", "--channel=40")):
             with self.subTest(args):
@@ -307,8 +398,8 @@ class CaptureTests(unittest.TestCase):
                 self.assertIn("extcap exit: 0 (before the stop)", out)
                 self.assertIn("FAIL: btle-extcap exited 0 although its capture failed", out)
 
-    def test_refused_capture_passes_once_the_exit_status_is_kept(self):
-        fixture = self.fixture(FIXED_EXTCAP)
+    def test_refused_capture_passes_at_fork_342(self):
+        fixture = self.fixture()
         for args in ((f"--extcap-interface=ubertooth{NO_BOARD}",),
                      (f"--extcap-interface=ubertooth{SERIAL_A}", "--channel=40")):
             with self.subTest(args):
@@ -319,12 +410,115 @@ class CaptureTests(unittest.TestCase):
                                     board=SERIAL_A, channel=37)
         self.assertEqual(0, code, out)
 
+    def test_no_btle_fails_when_ubertooth_btle_ran(self):
+        # The 71e1a8a script leaves -A 40 to ubertooth-btle, which refuses it;
+        # a refusal slow enough to be seen fails --no-btle.
+        script = EXTCAP_71E1A8A.replace("    p.wait()\n", "    sys.exit(p.wait())\n")
+        fixture = self.fixture(script)
+        code, out = fixture.capture(
+            (f"--extcap-interface=ubertooth{SERIAL_A}", "--channel=40"),
+            refused=True, no_btle=True, seconds=3, bug="slow-refusal")
+        self.assertEqual(1, code, out)
+        self.assertIn("FAIL: ubertooth-btle was started for a refused command line", out)
+        code, out = self.fixture().capture(
+            (f"--extcap-interface=ubertooth{SERIAL_A}", "--channel=40"),
+            refused=True, no_btle=True)
+        self.assertEqual(0, code, out)
+        self.assertNotIn("ubertooth-btle started:", out)
+
+    def test_no_btle_catches_an_ubertooth_btle_that_exits_between_looks(self):
+        # The race: the script starts ubertooth-btle, which refuses -A 40 and
+        # exits before any look at the script's children. Here no look ever
+        # sees it; the shim's record alone fails the case.
+        script = EXTCAP_71E1A8A.replace("    p.wait()\n", "    sys.exit(p.wait())\n")
+        fixture = self.fixture(script)
+        with mock.patch.object(extcapcapture, "_children", return_value={}):
+            code, out = fixture.capture(
+                (f"--extcap-interface=ubertooth{SERIAL_A}", "--channel=40"),
+                refused=True, no_btle=True)
+        self.assertEqual(1, code, out)
+        self.assertRegex(out, rf"(?m)^ubertooth-btle started: -f -U {SERIAL_A} -q \S+ -A 40$")
+        self.assertIn("FAIL: ubertooth-btle was started for a refused command line", out)
+        self.assertIn("extcap exit: 1 (before the stop)", out)
+        # The shim ran the real (fake) ubertooth-btle: its refusal is what
+        # ended the script.
+        self.assertNotIn("not found", out)
+
+    def test_no_btle_needs_refused(self):
+        with self.assertRaises(ValueError):
+            extcapcapture.capture(("true",), "/nonexistent/fifo", 1, no_btle=True)
+
+    def test_a_capture_filter_is_warned_about_and_ignored(self):
+        code, out = self.fixture().capture(
+            (f"--extcap-interface=ubertooth{SERIAL_A}", "--extcap-capture-filter", "x"),
+            board=SERIAL_A, channel=37)
+        self.assertEqual(0, code, out)
+        code, out = self.fixture(EXTCAP_71E1A8A).capture(
+            (f"--extcap-interface=ubertooth{SERIAL_A}", "--extcap-capture-filter", "x"),
+            board=SERIAL_A, channel=37)
+        self.assertEqual(1, code, out)
+        self.assertIn("FAIL: btle-extcap exited 1 before the stop", out)
+
+    def test_closing_the_fifo_ends_the_capture(self):
+        code, out = self.fixture().capture(
+            (f"--extcap-interface=ubertooth{SERIAL_A}",), board=SERIAL_A, channel=37,
+            close=True)
+        self.assertEqual(0, code, out)
+        self.assertIn("extcap exit: 0 (after the FIFO closed)", out)
+        self.assertIn("processes left: none", out)
+
+    def test_no_traffic_skips_the_close_and_stops_with_sigterm(self):
+        code, out = self.fixture().capture(
+            (f"--extcap-interface=ubertooth{SERIAL_A}",), board=SERIAL_A, channel=37,
+            close=True, bug="quiet")
+        self.assertEqual(pytools.SKIP_EXIT, code, out)
+        self.assertIn("records: 0 ", out)
+        self.assertIn("extcap exit: 0 (after SIGTERM)", out)
+        self.assertIn("processes left: none", out)
+        self.assertRegex(out, r"(?m)^SKIP: no advertising traffic in range")
+        self.assertNotIn("FAIL", out)
+        self.assertNotIn("capture checks passed", out)
+
+    def test_no_traffic_with_a_failed_check_fails_rather_than_skips(self):
+        # The capture never reaches the FIFO: a failure, not a skip.
+        code, out = self.fixture().capture(
+            (f"--extcap-interface=ubertooth{SERIAL_A}",), board=SERIAL_A, channel=37,
+            close=True, bug="quiet", boards="")
+        self.assertEqual(1, code, out)
+        self.assertNotIn("SKIP:", out)
+
+    def test_closing_the_fifo_with_a_writer_that_sends_nothing_fails(self):
+        # FAKE_RECORDS caps the records, so the writer never gets SIGPIPE.
+        with mock.patch.object(extcapcapture, "STOP_WAIT_S", 1.0):
+            code, out = self.fixture().capture(
+                (f"--extcap-interface=ubertooth{SERIAL_A}",), board=SERIAL_A,
+                channel=37, close=True, records=2)
+        self.assertEqual(1, code, out)
+        self.assertIn("FAIL: btle-extcap did not exit within 1s of the FIFO closing", out)
+        self.assertIn("processes left: none", out)
+
     def test_refused_mode_fails_a_capture_that_keeps_running(self):
         code, out = self.fixture().capture(
             (f"--extcap-interface=ubertooth{SERIAL_A}",), refused=True)
         self.assertEqual(1, code)
         self.assertIn("FAIL: btle-extcap was still capturing at the stop", out)
         self.assertIn("packet records were written", out)
+
+
+class StepSkipTests(unittest.TestCase):
+
+    def test_skip_returncode_needs_a_skip_line(self):
+        step = Step("capture", "Capture", ("x",), skip_returncode=77,
+                    output_patterns=("passed",))
+        skipped = step.evaluate(CommandResult(("x",), 77, "SKIP: quiet air\n", "",
+                                              0.1, False), {})
+        self.assertEqual(("", "Capture: skipped, quiet air"),
+                         (skipped.failure, skipped.skipped))
+        bare = step.evaluate(CommandResult(("x",), 77, "", "", 0.1, False), {})
+        self.assertIn("exited 77 without a SKIP: line", bare.failure)
+        plain = Step("capture", "Capture", ("x",)).evaluate(
+            CommandResult(("x",), 77, "SKIP: quiet air\n", "", 0.1, False), {})
+        self.assertIn("command exited 77", plain.failure)
 
 
 class MainTests(unittest.TestCase):
@@ -344,6 +538,14 @@ class MainTests(unittest.TestCase):
                     f"--extcap-interface=ubertooth{SERIAL_A}", f"--fifo={fixture.fifo}"])
             self.assertEqual(0, code, out.getvalue())
             fixture.assertGone()
+
+    def test_no_btle_without_refused_is_a_usage_error(self):
+        with mock.patch("sys.stderr", io.StringIO()) as err, \
+                self.assertRaises(SystemExit) as raised:
+            extcapcapture.main(["--seconds", "1", "--fifo", "/nonexistent/x",
+                                "--no-btle", "--", "--capture"])
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("--no-btle needs --refused", err.getvalue())
 
     def test_an_existing_fifo_path_is_refused(self):
         with tempfile.NamedTemporaryFile() as existing, \
@@ -379,7 +581,8 @@ class CaseTests(unittest.TestCase):
         self.assertEqual(["extcap-capture"], list(self.cases("smoke")))
         self.assertEqual(
             ["extcap-capture", "extcap-capture-37", "extcap-capture-38",
-             "extcap-capture-39", "extcap-capture-no-board", "extcap-capture-bad-channel"],
+             "extcap-capture-39", "extcap-capture-no-board", "extcap-capture-bad-channel",
+             "extcap-capture-filter", "extcap-capture-reader-closes"],
             list(self.cases("comprehensive")))
 
     def test_capture_commands(self):
@@ -402,6 +605,10 @@ class CaseTests(unittest.TestCase):
                       capture_argv("extcap-capture-no-board"))
         self.assertIn("--refused", capture_argv("extcap-capture-no-board"))
         self.assertIn("--channel=40", capture_argv("extcap-capture-bad-channel"))
+        self.assertIn("--no-btle", capture_argv("extcap-capture-bad-channel"))
+        self.assertEqual(("--extcap-capture-filter", "btle.length > 20"),
+                         capture_argv("extcap-capture-filter")[-2:])
+        self.assertIn("--close", capture_argv("extcap-capture-reader-closes"))
         for case in cases.values():
             self.assertTrue(case.capture_dir)
             self.assertEqual("cleanup-stop", case.cleanup[0].step_id)
@@ -423,16 +630,18 @@ class ExtcapUbertooth(tt.FakeUbertooth):
     extcapcapture.py for real against the fake ubertooth-btle; the capture
     puts the board in a mode, as ubertooth-btle -f does."""
 
-    def __init__(self, fixture, fork, **kwargs):
+    def __init__(self, fixture, fork, bug="", **kwargs):
         super().__init__(**kwargs)
         self.fixture = fixture
         self.fork = fork
+        self.bug = bug
 
     def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
         command = tuple(argv)
         if command[:2] == (sys.executable, python_cases._EXTCAP_CAPTURE):
             self.commands.append(command)
             env = {"PATH": self.fixture.path, "FAKE_BOARDS": self.serial,
+                   "FAKE_BTLE": self.bug,
                    pytools.SOURCE_ENV: self.fork[0], pytools.COMMIT_ENV: self.fork[1]}
             result = subprocess.run(command, env=env, capture_output=True, text=True,
                                     timeout=timeout_s)
@@ -446,18 +655,18 @@ class ExtcapUbertooth(tt.FakeUbertooth):
 
 class SequencedCaptureTests(unittest.TestCase):
 
-    def run_test(self, coverage):
+    def run_test(self, coverage, script=EXTCAP, bug=""):
         with tempfile.TemporaryDirectory() as directory:
             fixture = Fixture(directory)
             source = Path(directory) / "src"
-            script = source / pytools.EXTCAP_PATH
-            script.parent.mkdir(parents=True)
-            script.write_text(EXTCAP)
+            path = source / pytools.EXTCAP_PATH
+            path.parent.mkdir(parents=True)
+            path.write_text(script)
             git("init", "-q", cwd=source)
             git("add", ".", cwd=source)
             git("commit", "-q", "-m", "fixture", cwd=source)
             fork = (str(source), git("rev-parse", "HEAD", cwd=source))
-            device = ExtcapUbertooth(fixture, fork)
+            device = ExtcapUbertooth(fixture, fork, bug)
             original = tt.cases_for
 
             def with_duration(name, cov="smoke"):
@@ -486,11 +695,31 @@ class SequencedCaptureTests(unittest.TestCase):
         self.assertEqual(1, len(capture))
         self.assertIn(f"--extcap-interface=ubertooth{SERIAL}", capture[0])
 
-    def test_comprehensive_fails_only_the_strict_cases(self):
+    def failed(self, events):
+        return {event.details["case_id"].removeprefix(f"001-{TEST}-")
+                for event in tt.case_results(events) if event.status == "failed"}
+
+    def test_comprehensive_passes_at_fork_342(self):
         _summary, events, _device = self.run_test("comprehensive")
-        failed = {event.details["case_id"].removeprefix(f"001-{TEST}-")
-                  for event in tt.case_results(events) if event.status == "failed"}
-        self.assertEqual({"extcap-capture-no-board", "extcap-capture-bad-channel"}, failed)
+        self.assertEqual(set(), self.failed(events))
+
+    def test_no_traffic_skips_only_the_reader_closes_case(self):
+        _summary, events, device = self.run_test("comprehensive", bug="quiet")
+        statuses = {event.details["case_id"].removeprefix(f"001-{TEST}-"): event.status
+                    for event in tt.case_results(events)}
+        self.assertEqual("skipped", statuses.pop("extcap-capture-reader-closes"),
+                         [e.details for e in tt.case_results(events)])
+        self.assertEqual({"passed"}, set(statuses.values()), statuses)
+        (skipped,) = [e for e in tt.case_results(events) if e.status == "skipped"]
+        self.assertIn("no advertising traffic in range", skipped.details["reason"])
+        # The skip came after the capture changed the board: cleanup restored it.
+        self.assertEqual("2441", device.state["channel"])
+        self.assertIsNone(device.mode)
+
+    def test_comprehensive_before_fork_342_fails_the_342_cases(self):
+        _summary, events, _device = self.run_test("comprehensive", EXTCAP_71E1A8A)
+        self.assertEqual({"extcap-capture-no-board", "extcap-capture-bad-channel",
+                          "extcap-capture-filter"}, self.failed(events))
 
 
 if __name__ == "__main__":
