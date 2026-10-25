@@ -224,8 +224,8 @@ parent YAML item reports one aggregate outcome. Remaining named tests are
 catalog-validated and resource-planned but gain their hardcoded implementations
 in subsequent slices.
 
-`Host CLI surface`, `Raw receive replay`, `Refused command lines`, and
-`Python tools` need no Ubertooth, so `testplans/host.yaml` runs on a host with none registered or attached; a
+`Host CLI surface`, `Raw receive replay`, `Refused command lines`,
+`DFU image checks`, and `Python tools` need no Ubertooth, so `testplans/host.yaml` runs on a host with none registered or attached; a
 registry holding just the `Host` entry is enough:
 
 ```sh
@@ -249,6 +249,20 @@ tool is not built (`ubertooth-follow` needs BlueZ). Each case seeds files with
 known contents in its own capture directory, refuses one command naming a new
 file and one naming a seeded file, then checks that nothing was created,
 truncated, or left behind (`ubertooth_harness/refusal.py`).
+
+`DFU image checks` runs `ubertooth-dfu -d <image> -r` and `-s` the same way,
+with the same skip. `-d` checks the whole image before it opens a device, so
+each bad image must be refused with the image check's message before the board
+lookup (no switch note, no DFU stage log) and leave its directory, the image
+included, exactly as it was; a good image must get past the check to the
+lookup, which finds no board. The host-only plan has no firmware build (CI has
+no ARM toolchain), so the cases use a synthetic image (`dfuimage.py synth`:
+filler with a `ubertooth harness-synthetic (` revision marker and the suffix
+the harness computes) and derive the bad images from it as `DFU images` does
+from the test build. `sign-test-build` signs the test build's binary and
+compares the result with the build's `.dfu` when the run has one
+(`--build --with-firmware`, or `--artifact "test build=PATH"`), and is skipped
+with that reason otherwise.
 
 `Python tools` runs `ubertooth-specan-ui -h` with no display (`DISPLAY`,
 `WAYLAND_DISPLAY`, and `QT_QPA_PLATFORM` removed) from a
@@ -290,6 +304,7 @@ python -m ubertooth_harness run-suite \
 | `Classic Bluetooth receive` | `ubertooth-rx -z -t N` survey (exits 0 by itself, N = `duration` in whole seconds, no earlier than N-0.5 s, survey lines are piconet addresses); `-t N -r` PCAPNG with link type 255; `ubertooth-afh -t N` with no piconet in range says no packet arrived and exits 2 after about N s, printing no map (fork #187, 3b22c95) | adds `-t N` without `-z`; `-c 39` (every packet on channel 39); `-e 0` and `-e 4` (no packet over the limit); `-s` deprecation notice; `-q` PCAP (link type 255); repeated `-r` (first wins, extra file never created); `-d` (68-byte BR records, checked by `rxdump.py`); `afh -t N -e 2` (same exit 2); `afh -r` one map line per second; `afh` with an unknown `-U` exits 1 (fork #185, fixed in 219a5b0) |
 | `Raw receive` | `ubertooth-dump -d` (68-byte records) and `-b -d` (401-byte bitstream records), checked by `rxdump.py` with at least 50 records per second; `ubertooth-ego -r -c 2440` runs until stopped | adds `dump -l`, `-l -c`, `-c -l` (the last modulation wins, read back from CC2400 MDMCTRL with `ubertooth-debug`); `ego -l 1`, `-l 48`, `-a 630f9ffe`; `ego -a zz` rejected |
 | `Refused command lines` | no Ubertooth; `host` and `fast` plans, and CI: every file option (`btle -r -q -c`, `follow -r -q -d`, `rx -r -q -d`, `dump -d`, `specan -d`, `dfu -s -u`) refused by a stray word, `-h`, and a bad later value (`dump`: `-U` without its value) creates no file, leaves an existing one unchanged, and leaves no other file; the refusal comes before any board lookup; `Ignoring extra capture file` is on stderr (`btle -q - -q`, `rx -r -r`, `follow -q -q`); follow cases skip where it is not built | adds the checks after the option loop (`btle -f -n`, `-a -a<address>`, `-r -`; `rx -z -l`, `-u` without `-l`; `specan -l` above `-u`), `-d` twice with `-h`, and `dfu -u` with a missing `-s` input or a bad `-d` image (no temporary file); strict: `dfu -s <file.bin> -d <bad image>` writes no `.dfu` (fork #286) |
+| `DFU image checks` | no Ubertooth; `host` and `fast` plans, and CI: the seven bad images of `DFU images` (wrong CRC, truncated, no suffix, text, no `UFD`, wrong vendor, wrong product), made from a synthetic image, are refused by `-d <image> -r` with the image check's message and exit 1 before any board lookup, the directory unchanged; the synthetic image passes the check and reaches the lookup; `-s` suffixes a binary exactly as the harness computes, accepts a read-only `.bin`, and refuses a `.dfu` and a suffixed `.bin` (nothing written); `-s` of the test build's binary gives the build's `.dfu` byte for byte when the run has a firmware build, else skipped | adds `-d` of an empty file, 15 bytes, a suffix with no firmware, a suffix length (200) larger than the file, DFU version 2.0, no revision marker, a directory and a missing file (all refused before the lookup), DFU 1.1 and the `ffff:ffff` wildcard (accepted), `-s` of a missing `.bin` and of a `.bin` with a wrong-CRC suffix; strict: `-s` of an input it cannot read (a directory) leaves an existing `.dfu` alone (fork #305) |
 | `Python tools` | no Ubertooth; `host` and `fast` plans, and CI: `ubertooth-specan-ui -h` without a display shows its argparse usage (`-U`, `-l`, `-u`, `--wifi`, `--padding`), skipped without `--build --with-python` or numpy/qtpy/Qt; `btle-extcap.py -h` exits 0; `--extcap-dlts` lists DLT 256 (`DLT_BLUETOOTH_LE_LL_WITH_PHDR`); `--extcap-config` lists the `--channel` selector with 37 (default), 38, 39 | adds `--extcap-dlts` with no interface and `--extcap-config` with a non-Ubertooth interface (exit 1), an unknown option (exit 2, usage); strict: `-h` names the real options (fork #268) |
 | `BLE extcap interfaces` | `btle-extcap.py --extcap-interfaces` lists one `ubertooth<N>` interface per attached board, `N` from 0, guards unchanged | strict: each line shows the board's serial; with two or more boards it shows `0:` (fork #269) |
 | `Raw receive replay` | no Ubertooth; `host` and `fast` plans, and CI: `ubertooth-rx -i` on a synthetic fixture (`rxreplay.py`, built from the spec encoding, never a real capture) prints exactly the fixture's LAP/error/channel lines and skips the decoy records; `-l <LAP>` derives the UAP (CLK6 0); `-r` PCAPNG and `-q` PCAP with link type 255 and one packet per line | adds `-z` (both piconets, one with its UAP); `-l` of an ID-only LAP (no UAP); `-l -u` with the right UAP (confirmed, hop reversal) and a wrong one (nothing confirmed); `-e 0` drops the one-error access code; `-d` writes the packet records back byte for byte (and passes `rxdump.py`); `-l -q` captures one LAP; empty file exit 0; cut last record ignored, exit 0; missing file exit 1; strict: lines carry the recorded systime (fork #202) and `-i <directory>` exits 1 (fork #203); both are fixed on fork main after 3b22c95 |
@@ -401,8 +416,8 @@ and channel are recorded and restored. Pairs with `-I` never exit on their own
 ### Guard Ubertooths
 
 Every test in the [table above](#option-compositions-and-stateful-transitions)
-except `Raw receive replay`, `Refused command lines`, and `Python tools` (which
-open no Ubertooth), and
+except `Raw receive replay`, `Refused command lines`, `DFU image checks`, and
+`Python tools` (which open no Ubertooth), and
 `Ubertooth count` and `BLE extcap interfaces`,
 binds each other registered Ubertooth on the host as a `guard Ubertooth 1`,
 `2`, ... resource of the same invocation, so the
