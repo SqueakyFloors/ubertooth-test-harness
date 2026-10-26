@@ -188,7 +188,9 @@ class ArgumentValidationTests(unittest.TestCase):
         tools = {r.tool for r in transitions.REJECTIONS}
         stray_tools = {r.tool for r in transitions.REJECTIONS if r.case_id in STRAY_CASES}
         self.assertEqual(tools, stray_tools)
-        self.assertEqual(11, len(tools))  # every built tool but follow and scan (#40)
+        # Every tool but follow and scan: those are built only with BlueZ, and
+        # their stray-word cases are in Refused command lines (no board).
+        self.assertEqual(11, len(tools))
 
     def test_tools_that_ignore_stray_words_fail_every_stray_case(self):
         # Before fork #146 (util) and #155 (every other tool) a leftover word

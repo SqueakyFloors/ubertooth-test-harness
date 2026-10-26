@@ -8,9 +8,9 @@ One declaration, ``Needs``, sits on a case (``CommandCase.needs``,
 - the host platform, from the resource registry;
 - the tools built only with BlueZ (libbluetooth): ubertooth-scan and
   ubertooth-follow. macOS has no BlueZ, so never; a Linux build of the run
-  (``--build``, which configures with REQUIRE_ALL=ON) has them when its
-  manifest lists them; installed Linux tools have them when they are on the
-  test PATH;
+  (``--build``, which configures with REQUIRE_ALL=ON) always has them: the
+  build fails unless both are in the run prefix, so their cases are required;
+  installed Linux tools have them when they are on the test PATH;
 - the Python tools build: ``run-suite --build --with-python``;
 - a firmware build: the run's "test build" image (``--build --with-firmware``
   or ``--artifact "test build=PATH"``).
@@ -189,13 +189,16 @@ def run_capabilities(
     host: str, platform: str, build: Mapping | None, artifact_names: Iterable[str],
     path: str | None = None,
 ) -> HostCapabilities:
-    """What a run has, from its manifest: the build record and artifacts."""
+    """What a run has, from its manifest: the build record and artifacts.
+
+    A Linux build has every BlueZ tool: build.py fails the build unless both
+    are in the run prefix (REQUIRE_ALL=ON), so their cases are required there
+    and never left out as not applicable (#40).
+    """
     names = set(artifact_names)
     labels = {name.lower().replace(" ", "_") for name in names}
     if build:
-        bluez = frozenset(tool for tool in BLUEZ_TOOLS if f"built {tool}" in names)
-        if platform != "linux":
-            bluez = frozenset()
+        bluez = frozenset(BLUEZ_TOOLS) if platform == "linux" else frozenset()
     else:
         bluez = _installed_bluez(platform, path)
     return HostCapabilities(
