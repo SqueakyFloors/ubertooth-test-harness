@@ -215,13 +215,21 @@ class ReceiveUbertooth(ToolUbertooth):
                 record = b"2" * 400 + b"\n"
             data = record * records
         else:
-            data = b"".join(full_record(clock=5000 + 4000 * i) for i in range(records - 1))
-            data = full_record(pkt_type=3) + data
+            # One host time for the whole file: reading the clock per record
+            # let the prepended records below land in a later second than
+            # the ones after them, which rxdump.py rightly reports as a host
+            # time going backwards.
+            now = int(time.time())
+            data = b"".join(full_record(host_time=now, clock=5000 + 4000 * i)
+                            for i in range(records - 1))
+            data = full_record(pkt_type=3, host_time=now) + data
             if "stale-le-into-dump" in self.bugs:
-                data = (full_record(pkt_type=1, channel=0, clock=209427)
-                        + full_record(pkt_type=1, channel=0, clock=19287773) + data)
+                data = (full_record(pkt_type=1, channel=0, host_time=now, clock=209427)
+                        + full_record(pkt_type=1, channel=0, host_time=now, clock=19287773)
+                        + data)
             if "stale-br-into-dump" in self.bugs:
-                data = full_record(clock=19107111) + full_record(pkt_type=3) + data
+                data = (full_record(host_time=now, clock=19107111)
+                        + full_record(pkt_type=3, host_time=now) + data)
         if "dump-trailing" in self.bugs:
             data += b"\0"
         Path(self._value(options, "-d")).write_bytes(data)
@@ -420,6 +428,17 @@ class RawReceiveTests(unittest.TestCase):
                 summary, events = run(RAW, ReceiveUbertooth(crc="1", bugs={bug}))
                 self.assertFalse(summary.passed)
                 self.assertEqual(sorted(names), failed_names(events))
+
+    def test_dump_files_survive_a_second_boundary(self):
+        # A fake dump read the wall clock per record, so a second
+        # boundary between records put a later host time before an earlier
+        # one and "Full records to a file (-d)" failed at random. A clock
+        # that ticks 1 ms per call crosses several boundaries in every dump.
+        start = float(int(time.time()))
+        ticks = iter(range(10 ** 9))
+        with mock.patch.object(time, "time", lambda: start + next(ticks) / 1000):
+            summary, _events = run(RAW, ReceiveUbertooth(crc="1"))
+        self.assertTrue(summary.passed, summary.failure_reason)
 
 
 class StaleCaseTests(unittest.TestCase):

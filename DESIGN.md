@@ -153,10 +153,29 @@ Semantics:
   naming it as `active_run_id` (the runner restarted, or reports another run)
   becomes `lost` with a reason, is persisted, and is published live; runs
   loaded at controller startup stay `running` until their target registers.
-  Records that arrive after a run ended rebuild its report.md. A registration
-  replaces an existing connection for the same host (half-open reconnects);
+  A registration replaces an existing connection for the same host
+  (half-open reconnects);
   the controller logs a warning when the replaced connection was still online.
+  The replaced connection is closed (1008 `replaced`), and every `run` or
+  `cancel` request still waiting for its answer on it fails at once with 503
+  `runner reconnected`: no run is created and no cancel is recorded, a late
+  `run_accepted` on the old connection creates no run, and asking again
+  sends the request on the new connection.
   Any local process can register any host until runner authentication exists.
+- Live fan-out to browsers (`/ws/live`) is best effort and never slows a
+  runner: each browser has a queue of `LIVE_QUEUE_LIMIT` (1000) updates. A
+  browser that falls that far behind (whether it follows one run or none) has
+  its backlog dropped and is closed with 1013 `live stream overflowed`; it
+  reconnects for a fresh snapshot. Runners and other browsers are unaffected.
+- Reports: the controller compiles each run's report.md from its own copy of
+  run.jsonl, and writes it before the run's terminal status (finished, error,
+  or `lost`) is stored, served, or published, so a client that sees the
+  status can fetch the report. A run with no records yet (for example a
+  `run_error` before the first event), or whose records cannot be compiled,
+  gets a short report that names the status and reason. If report.md cannot
+  be written at all, the terminal status is still stored and published, with
+  `report` false and the failure in `report_error`. Records that arrive after
+  a run ended rebuild its report.md.
 
 Planned, not yet in the protocol: `deploy {ref}` (build host + firmware ahead
 of a run; today `run.build` builds inside the run directory), `flash {image,

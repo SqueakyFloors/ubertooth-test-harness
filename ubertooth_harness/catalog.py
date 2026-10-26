@@ -729,8 +729,8 @@ def builtin_catalog() -> TestCatalog:
         ),
         TestDefinition(
             "Util mode refusals",
-            "ubertooth-util refuses -f and -i with any other mode, and -z with "
-            "either, before any board lookup, with no Ubertooth "
+            "ubertooth-util refuses -i with any other mode, -z with -i, and "
+            "the removed -f, before any board lookup, with no Ubertooth "
             "(UBERTOOTH_TEST_NO_DEVICES=1)",
             MappingProxyType({"hosts": HOSTS, "coverage": COVERAGE}),
             MappingProxyType({}),
