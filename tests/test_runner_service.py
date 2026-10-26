@@ -166,8 +166,8 @@ class RunnerFixture:
 
 def run_request(request_id="r1", **overrides):
     fields = dict(
-        request_id=request_id, ref="HEAD", plan="local", suite="fast",
-        tests=[], build=False,
+        request_id=request_id, ref="HEAD", commit=None, plan="local",
+        suite="fast", tests=[], build=False,
     )
     fields.update(overrides)
     return encode_controller_message("run", **fields)
@@ -189,11 +189,19 @@ class ProtocolTests(unittest.TestCase):
         cases = {
             "not json": "not json",
             "array": "[]",
-            "unknown version": json.dumps({**good, "version": 2}),
+            "unknown version": json.dumps({**good, "version": 99}),
+            "previous version": json.dumps({**good, "version": 1}),
             "string version": json.dumps({**good, "version": "1"}),
             "missing version": json.dumps({k: v for k, v in good.items() if k != "version"}),
             "unknown type": json.dumps({**good, "type": "deploy"}),
-            "runner type": json.dumps({"version": 1, "type": "protocol_error", "reason": "x"}),
+            "runner type": json.dumps(
+                {"version": PROTOCOL_VERSION, "type": "protocol_error", "reason": "x"}
+            ),
+            "missing commit": json.dumps({k: v for k, v in good.items() if k != "commit"}),
+            "short commit": json.dumps({**good, "commit": "0123456789ab"}),
+            "upper-case commit": json.dumps({**good, "commit": "A" * 40}),
+            "commit ref name": json.dumps({**good, "commit": "main"}),
+            "numeric commit": json.dumps({**good, "commit": 1}),
             "extra field": json.dumps({**good, "priority": 1}),
             "missing field": json.dumps({k: v for k, v in good.items() if k != "suite"}),
             "option ref": json.dumps({**good, "ref": "--upload-pack=x"}),
@@ -381,6 +389,40 @@ class RunnerServiceTests(unittest.IsolatedAsyncioTestCase):
             accepted = await controller.next("run_accepted", skip=("heartbeat",))
             self.assertEqual("third", accepted["request_id"])
             # Stopping the runner cancels the active run (see running()).
+
+    async def test_the_sent_commit_is_run_not_the_ref_name(self):
+        head = subprocess.run(
+            ["git", "-C", str(self.fixture.source), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        async with StubController() as controller, self.running(controller):
+            await controller.next("register")
+            # The name does not resolve in this checkout; the commit does.
+            await controller.send(run_request(ref="listed-elsewhere", commit=head))
+            run_id = (await controller.next("run_accepted"))["run_id"]
+            finished = await controller.next("run_finished", skip=("heartbeat", "event"))
+            self.assertEqual("passed", finished["status"], finished)
+            run_dir = self.fixture.output.resolve() / run_id
+            started = json.loads((run_dir / "run.jsonl").read_text().splitlines()[0])
+            source = started["details"]["sources"][0]
+            self.assertEqual(
+                (head, head, "listed-elsewhere"),
+                (source["requested_ref"], source["commit"], source["ref_name"]),
+            )
+            # report.md names the branch the run came from and the commit.
+            report = (run_dir / "report.md").read_text()
+            self.assertIn(f"`listed-elsewhere` at `{head}`", report)
+        self.assertTrue(any(f"listed-elsewhere = {head}" in line for line in self.logs))
+
+    async def test_a_commit_missing_from_the_checkout_is_a_run_error(self):
+        missing = "f" * 40
+        async with StubController() as controller, self.running(controller):
+            await controller.next("register")
+            # HEAD resolves here, but the controller listed another commit.
+            await controller.send(run_request(commit=missing))
+            await controller.next("run_accepted")
+            error = await controller.next("run_error", skip=("heartbeat", "event"))
+            self.assertIn(missing, error["reason"])
 
     async def test_run_refused_before_its_directory_is_a_run_error(self):
         async with StubController() as controller, self.running(controller):

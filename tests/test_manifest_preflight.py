@@ -10,7 +10,6 @@ from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.manifest import (
     GitRevisionResolver,
     ManifestError,
-    RunManifest,
     build_run_manifest,
 )
 from ubertooth_harness.planner import TestInvocation
@@ -155,6 +154,16 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(f"git-{branch.short_commit}", branch.expected_revision)
             with self.assertRaises(Exception):
                 branch.commit = "other"
+            self.assertNotIn("ref_name", branch.to_dict())
+            named = GitRevisionResolver().resolve(
+                "Ubertooth", source, commit, "main"
+            )
+            self.assertEqual(
+                (commit, commit, "main"),
+                (named.requested_ref, named.commit, named.to_dict()["ref_name"]),
+            )
+            with self.assertRaisesRegex(ManifestError, "single line"):
+                GitRevisionResolver().resolve("Ubertooth", source, commit, "a\nb")
 
     def test_rejects_dirty_or_unknown_source_revision(self):
         with tempfile.TemporaryDirectory() as directory:

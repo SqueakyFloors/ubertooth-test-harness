@@ -19,9 +19,12 @@ response, refusals included, carries the GUI security headers
 
 The web GUI (``/ui/``) is static files served from memory by exact name. A
 run may only name a ref that ``git ls-remote`` lists for the configured
-Ubertooth repository; without a repository no run is dispatched.
+Ubertooth repository (or a full commit ID). The run request carries the
+commit listed for that ref, and the runner runs exactly that commit, so a
+stale or differently configured runner checkout cannot substitute another
+one; the commit is recorded in ``run.json``.
 
-Target runners connect to ``/ws/runner`` and speak protocol v1
+Target runners connect to ``/ws/runner`` and speak protocol v2
 (``ubertooth_harness/protocol.py``), decoded strictly. Each run is stored as a
 flat directory ``<results dir>/<run_id>/`` holding ``run.json`` (the
 controller's record), ``run.jsonl`` (the runner's events appended as received,
@@ -59,6 +62,7 @@ from ubertooth_harness.protocol import (
     MAX_RUNNER_MESSAGE_BYTES,
     PROTOCOL_VERSION,
     ProtocolError,
+    commit_id,
     decode_runner_message,
     encode_controller_message,
 )
@@ -93,8 +97,6 @@ UNKNOWN_RUN = 4404
 LOST = "lost"
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-# A full SHA-1 or SHA-256 commit ID, accepted as a run ref without listing.
-_COMMIT_ID_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 
 
 class ControllerConfigError(ValueError):
@@ -190,7 +192,8 @@ class Target:
 
 
 _RUN_FIELDS = (
-    "run_id", "target", "request_id", "ref", "plan", "suite", "tests", "build",
+    "run_id", "target", "request_id", "ref", "commit", "plan", "suite", "tests",
+    "build",
     "status", "created_at", "finished_at", "exit_code", "reason",
     "runner_run_directory", "report", "report_error", "cancel_requested", "adopted",
 )
@@ -207,6 +210,11 @@ class Run:
     directory: Path
     request_id: str | None = None
     ref: str | None = None
+    # The commit sent to the runner: the one listed for ``ref`` when the run
+    # started. None when the ref list was unavailable (the runner resolved
+    # ``ref`` itself; run.jsonl's sources record the result) or for a run
+    # adopted from a runner report.
+    commit: str | None = None
     plan: str | None = None
     suite: str | None = None
     tests: list = dataclasses.field(default_factory=list)
@@ -739,7 +747,7 @@ class Controller:
                 run_id=run_id, target=target.host,
                 directory=self._run_directory(run_id),
                 request_id=message["request_id"], ref=fields["ref"],
-                plan=fields["plan"], suite=fields["suite"],
+                commit=fields["commit"], plan=fields["plan"], suite=fields["suite"],
                 tests=list(fields["tests"]), build=fields["build"],
             )
             self.runs[run_id] = run
@@ -882,35 +890,65 @@ class Controller:
         except RefListError as error:
             raise ControllerError(f"cannot list refs: {error}", 503) from None
 
-    async def check_ref(self, ref: str) -> None:
-        """Refuse a ref that is not a branch, tag, or full commit of the repository.
+    async def resolve_ref(self, ref: str, commit: str | None = None) -> str | None:
+        """The commit to run for ``ref``; refuse a ref the repository does not list.
 
-        A full commit ID is accepted as is (for example a pull request head).
+        ``ref`` is a branch, tag or ``HEAD`` from ``git ls-remote`` of the
+        configured repository, or a full commit ID (for example a pull
+        request head), which is its own commit. ``commit``, when given, is
+        the commit the caller saw listed for ``ref`` (the GUI sends it); a
+        ref that has moved since is refused (409) rather than running a
+        commit the caller did not choose.
+
         If the ref list cannot be fetched (offline lab, no repository
         configured), the ref is not refused here: the protocol has already
-        validated its form, and the runner resolves it in its own checkout;
-        a warning is logged instead.
+        validated its form and a warning is logged. The caller's ``commit``
+        is then sent as is; without one, None is returned and the runner
+        resolves ``ref`` in its own checkout.
         """
-        if _COMMIT_ID_RE.fullmatch(ref):
-            return
+        if commit is not None and not commit_id(commit):
+            raise ControllerError("commit must be a full lower-case commit ID", 422)
+        if commit_id(ref):
+            if commit is not None and commit != ref:
+                raise ControllerError(f"commit {commit} does not match ref {ref}", 422)
+            return ref
         try:
             data = await self.list_refs()
         except ControllerError as error:
             print(f"warning: ref {ref[:200]!r} not checked: {error}",
                   file=sys.stderr, flush=True)
-            return
-        if not any(item["name"] == ref for item in data["refs"]):
+            return commit
+        listed = {item["commit"] for item in data["refs"] if item["name"] == ref}
+        if not listed:
             raise ControllerError(
                 f"ref {ref[:200]!r} is not a branch or tag of {data['repository']}", 422
             )
+        if commit is not None:
+            if commit not in listed:
+                raise ControllerError(
+                    f"ref {ref[:200]!r} moved: listed at {commit}, now "
+                    f"{', '.join(sorted(listed))}; list the refs again", 409
+                )
+            # Also how a branch and a tag of the same name are told apart:
+            # the GUI lists both and sends the chosen entry's commit.
+            return commit
+        if len(listed) > 1:
+            raise ControllerError(
+                f"ref {ref[:200]!r} is both a branch and a tag of "
+                f"{data['repository']} at different commits; pick the branch or "
+                "the tag entry in the GUI's ref list, or send that entry's "
+                "commit as `commit`", 422
+            )
+        (current,) = listed
+        return current
 
     async def start_run(
         self, host: str, *, ref: str, plan: str, suite: str,
-        tests: list[str], build: bool,
+        tests: list[str], build: bool, commit: str | None = None,
     ) -> Run:
         # Checked first: everything after it runs without yielding until the
         # request is recorded as pending.
-        await self.check_ref(ref)
+        commit = await self.resolve_ref(ref, commit)
         target, link = self._target_link(host)
         if target.active_run_id is not None:
             raise ControllerError(
@@ -924,7 +962,10 @@ class Controller:
             if pending.host == host and pending.awaited:
                 raise ControllerError(f"a run request to {host} is already pending", 409)
         request_id = uuid.uuid4().hex
-        fields = dict(ref=ref, plan=plan, suite=suite, tests=list(tests), build=build)
+        fields = dict(
+            ref=ref, commit=commit, plan=plan, suite=suite, tests=list(tests),
+            build=build,
+        )
         try:
             text = encode_controller_message("run", request_id=request_id, **fields)
         except ProtocolError as error:
@@ -1124,13 +1165,13 @@ ENDPOINTS = {
     "GET /api/plans": "test plans with suites, tests and duration estimates",
     "GET /api/targets": "registered targets",
     "GET /api/targets/{host}": "one target",
-    "POST /api/targets/{host}/runs": "start a run: {ref, plan, suite, tests, build}",
+    "POST /api/targets/{host}/runs": "start a run: {ref, commit, plan, suite, tests, build}",
     "GET /api/runs": "runs, newest first (?target=HOST)",
     "GET /api/runs/{run_id}": "one run with its events, failure summary and planned invocations",
     "GET /api/runs/{run_id}/report.md": "the run's report",
     "POST /api/runs/{run_id}/cancel": "cancel an active run: {reason}",
     "WS /ws/live": "live target and run updates (?run_id=ID adds that run's events)",
-    "WS /ws/runner": "target runner protocol v1",
+    "WS /ws/runner": "target runner protocol v2",
 }
 
 
@@ -1142,6 +1183,8 @@ def create_app(controller: Controller):
     class RunRequest(BaseModel):
         model_config = ConfigDict(extra="forbid", strict=True)
         ref: str
+        # The commit the caller saw listed for ref (optional).
+        commit: str | None = None
         plan: str
         suite: str
         tests: list[str] = Field(default_factory=list)
@@ -1215,7 +1258,7 @@ def create_app(controller: Controller):
     async def start_run(host: str, request: RunRequest):
         run = await controller.start_run(
             host, ref=request.ref, plan=request.plan, suite=request.suite,
-            tests=request.tests, build=request.build,
+            tests=request.tests, build=request.build, commit=request.commit,
         )
         return {"run": run.view()}
 

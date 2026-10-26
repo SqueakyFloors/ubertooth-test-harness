@@ -2,7 +2,7 @@
 
 Every message is one JSON object in one WebSocket text frame:
 
-    {"version": 1, "type": "<type>", ...fields}
+    {"version": 2, "type": "<type>", ...fields}
 
 Each type has an exact field set. Decoding is strict: a message that is not a
 JSON object, has an unknown version or type, lacks a field, carries an extra
@@ -21,7 +21,9 @@ import re
 from typing import Any, Callable, Mapping
 
 
-PROTOCOL_VERSION = 1
+# Version 2 added ``commit`` to the run message (version 1 runners resolved
+# the ref name in their own checkout).
+PROTOCOL_VERSION = 2
 # Bounds what the runner accepts from the controller. Outbound events may be
 # larger (the manifest record is bounded at 1 MiB).
 MAX_INBOUND_MESSAGE_BYTES = 64 * 1024
@@ -31,6 +33,8 @@ MAX_RUNNER_MESSAGE_BYTES = 4 * 1024 * 1024
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+# A full SHA-1 or SHA-256 commit ID, lower case.
+_COMMIT_ID_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 _MAX_TEXT = 4096
 
 
@@ -66,6 +70,11 @@ def _line(value) -> bool:
 
 def _git_ref(value) -> bool:
     return _line(value) and not any(char.isspace() for char in value)
+
+
+def commit_id(value) -> bool:
+    """A full lower-case SHA-1 or SHA-256 commit ID."""
+    return isinstance(value, str) and bool(_COMMIT_ID_RE.fullmatch(value))
 
 
 def _optional(check: Validator) -> Validator:
@@ -121,13 +130,18 @@ def _run_event(value) -> bool:
 
 # Controller -> runner.
 CONTROLLER_MESSAGES: Mapping[str, Mapping[str, Validator]] = {
-    # Start one run. ``ref`` is resolved in the runner's configured Ubertooth
-    # checkout; ``plan`` names <plans dir>/<plan>.yaml; ``tests`` selects
-    # exact test names (empty: the whole suite); ``build`` builds the
-    # resolved commits into the run directory first.
+    # Start one run. ``commit`` is the commit the controller listed for
+    # ``ref`` (git ls-remote of the configured repository); the runner runs
+    # exactly that commit, which must be in its Ubertooth checkout. ``commit``
+    # is null only when the controller could not list the refs; the runner
+    # then resolves ``ref`` in its own checkout. ``plan`` names
+    # <plans dir>/<plan>.yaml; ``tests`` selects exact test names (empty: the
+    # whole suite); ``build`` builds the resolved commits into the run
+    # directory first.
     "run": {
         "request_id": _identifier,
         "ref": _git_ref,
+        "commit": _optional(commit_id),
         "plan": _name,
         "suite": _name,
         "tests": _test_names,

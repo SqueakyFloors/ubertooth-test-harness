@@ -27,6 +27,8 @@
     targets: new Map(),
     runs: new Map(),
     plans: [],
+    // ref option value ("<kind>:<name>") -> {name, kind, commit} as listed
+    refOptions: new Map(),
     selected: null, // run_id shown in the live view
     live: null, // {run_id, seen:Set, events:[], items:[], byInvocation:Map, log:[], partial, stage}
     socket: null,
@@ -92,7 +94,9 @@
     if (!response.ok) {
       const detail = payload && typeof payload.detail === "string"
         ? payload.detail : `HTTP ${response.status}`;
-      throw new Error(detail);
+      const error = new Error(detail);
+      error.status = response.status;
+      throw error;
     }
     return payload;
   }
@@ -153,6 +157,13 @@
 
   // ----- run setup ---------------------------------------------------------
 
+  // "main (0123456789ab)": the ref and the commit that was run.
+  function refLabel(run) {
+    if (!run.ref) return "–";
+    if (!run.commit || run.commit === run.ref) return run.ref;
+    return `${run.ref} (${String(run.commit).slice(0, 12)})`;
+  }
+
   async function loadRefs() {
     const select = $("ref");
     const status = $("refs-status");
@@ -161,19 +172,26 @@
       const data = await api("GET", "/api/refs");
       const groups = { default: "Default branch", branch: "Branches", tag: "Tags" };
       const current = select.value;
+      // One entry per listed ref, keyed by kind and name, so a branch and a
+      // tag of the same name are separate choices; each sends its own
+      // commit, which the controller accepts for that name.
+      const key = (ref) => `${ref.kind}:${ref.name}`;
+      state.refOptions = new Map(data.refs.map((ref) => [key(ref), ref]));
       select.replaceChildren(...Object.entries(groups).map(([kind, label]) => {
         const refs = data.refs.filter((ref) => ref.kind === kind);
         if (!refs.length) return null;
         return el("optgroup", { label },
           ...refs.map((ref) => el("option", {
-            value: ref.name, text: `${ref.name} (${String(ref.commit).slice(0, 12)})`,
+            value: key(ref),
+            text: `${ref.name} (${kind === "tag" ? "tag" : "branch"}, ${String(ref.commit).slice(0, 12)})`,
           })));
       }).filter(Boolean));
-      const preferred = [current, "main", "master", "HEAD"]
-        .find((name) => name && data.refs.some((ref) => ref.name === name));
+      const preferred = [current, "branch:main", "branch:master", "default:HEAD"]
+        .find((value) => value && state.refOptions.has(value));
       if (preferred) select.value = preferred;
       status.textContent = `${data.refs.length} refs from ${data.repository}, listed ${data.fetched_at}.`;
     } catch (error) {
+      state.refOptions = new Map();
       select.replaceChildren(el("option", { value: "", text: "(refs unavailable)" }));
       status.textContent = `Cannot list refs: ${error.message}`;
     }
@@ -245,8 +263,12 @@
     event.preventDefault();
     const status = $("run-status");
     const host = $("target").value;
+    const chosen = state.refOptions.get($("ref").value);
     const body = {
-      ref: $("ref").value,
+      ref: chosen ? chosen.name : "",
+      // The commit this page listed: the controller refuses the run if the
+      // ref has moved since, and the runner runs exactly this commit.
+      commit: chosen ? chosen.commit : null,
       plan: $("plan").value,
       suite: $("suite").value,
       tests: [],
@@ -258,7 +280,7 @@
     }
     const button = $("run-button");
     button.disabled = true;
-    status.textContent = `Starting ${body.plan}/${body.suite} at ${body.ref} on ${host}…`;
+    status.textContent = `Starting ${body.plan}/${body.suite} at ${refLabel(body)} on ${host}…`;
     try {
       const data = await api("POST", `/api/targets/${encodeURIComponent(host)}/runs`, body);
       upsertRun(data.run);
@@ -266,6 +288,12 @@
       selectRun(data.run.run_id);
     } catch (error) {
       status.textContent = `Not started: ${error.message}`;
+      if (error.status === 409) {
+        // The ref may have moved since this page listed it: list the refs
+        // again so the next Run sends the current commit.
+        await loadRefs();
+        status.textContent = `Not started: ${error.message}. The ref list has been reloaded; check the ref and press Run again.`;
+      }
     } finally {
       button.disabled = false;
     }
@@ -474,7 +502,7 @@
       ["Run", el("code", { text: run.run_id })],
       ["Status", statusBadge(run.status)],
       ["Stage", live.stage],
-      ["Ref", run.ref ?? "–"],
+      ["Ref", refLabel(run)],
       ["Plan / suite", `${run.plan ?? "–"} / ${run.suite ?? "–"}`],
       ["Target", run.target ?? "–"],
       ["Started", timeElement(run.created_at)],
@@ -590,7 +618,7 @@
         el("td", {}, timeElement(run.created_at)),
         el("td", {}, timeElement(run.finished_at)),
         el("td", {}, el("code", { text: run.run_id })),
-        el("td", { text: run.ref ?? "–" }),
+        el("td", { text: refLabel(run) }),
         el("td", { text: `${run.plan ?? "–"} / ${run.suite ?? "–"}` }),
         el("td", { text: run.target }),
         el("td", {}, statusBadge(run.status)),
@@ -620,7 +648,7 @@
       const run = data.run;
       $("failures-run").replaceChildren(
         el("dt", { text: "Target" }), el("dd", { text: run.target }),
-        el("dt", { text: "Ref" }), el("dd", { text: run.ref ?? "–" }),
+        el("dt", { text: "Ref" }), el("dd", { text: refLabel(run) }),
         el("dt", { text: "Plan / suite" }), el("dd", { text: `${run.plan ?? "–"} / ${run.suite ?? "–"}` }),
         el("dt", { text: "Status" }), el("dd", {}, statusBadge(run.status)));
       if (!data.failures.length) {

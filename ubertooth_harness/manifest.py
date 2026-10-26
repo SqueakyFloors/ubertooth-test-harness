@@ -126,13 +126,17 @@ class SourceRevision:
     requested_ref: str
     commit: str
     short_commit: str
+    # The branch or tag name ``requested_ref`` (then a commit) was listed
+    # for, when the caller chose the commit by name elsewhere (the target
+    # runner passes the controller's ref). Recorded only, never resolved.
+    ref_name: str | None = None
 
     @property
     def expected_revision(self) -> str:
         return f"git-{self.short_commit}"
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "name": self.name,
             "source_path": self.source_path,
             "repository": self.repository,
@@ -141,24 +145,30 @@ class SourceRevision:
             "short_commit": self.short_commit,
             "expected_revision": self.expected_revision,
         }
+        if self.ref_name is not None:
+            data["ref_name"] = self.ref_name
+        return data
 
 
 class GitRevisionResolver:
     """Resolve a local branch, tag, or commit without changing the checkout."""
 
     def resolve(
-        self, name: str, source_path: Path | str, requested_ref: str
+        self, name: str, source_path: Path | str, requested_ref: str,
+        ref_name: str | None = None,
     ) -> SourceRevision:
         path = Path(source_path).expanduser().resolve()
         if not isinstance(name, str) or not name.strip():
             raise ManifestError("source name must be non-empty")
-        if (
-            not isinstance(requested_ref, str)
-            or not requested_ref.strip()
-            or "\x00" in requested_ref
-            or "\n" in requested_ref
-        ):
-            raise ManifestError("source ref must be a non-empty single line")
+        refs = (requested_ref,) if ref_name is None else (requested_ref, ref_name)
+        for value in refs:
+            if (
+                not isinstance(value, str)
+                or not value.strip()
+                or "\x00" in value
+                or "\n" in value
+            ):
+                raise ManifestError("source ref must be a non-empty single line")
         if not path.is_dir():
             raise ManifestError(f"source path is not a directory: {path}")
         if _git(path, "rev-parse", "--is-inside-work-tree") != "true":
@@ -184,6 +194,7 @@ class GitRevisionResolver:
             requested_ref=requested_ref,
             commit=commit.lower(),
             short_commit=short_commit.lower(),
+            ref_name=ref_name,
         )
 
 
