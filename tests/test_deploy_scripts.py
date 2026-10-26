@@ -632,7 +632,7 @@ class HarnessOpenTest(unittest.TestCase):
         argv, _ = self.dry_run("--two-hop", "--host", "lab1", "--jump", "bastion",
                                "--port", "9001", "--jump-socket", "/tmp/h.sock")
         self.assertEqual(argv, (
-            "ssh -t -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 "
+            "ssh -t -o RemoteCommand=none -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 "
             "-L 127.0.0.1:9001:/tmp/h.sock bastion "
             "ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 "
             "-o StreamLocalBindMask=0177 -o StreamLocalBindUnlink=yes "

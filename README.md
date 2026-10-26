@@ -1342,7 +1342,10 @@ only to the jump host's SSH configuration. It relays through a Unix socket on
 the jump host that only your account there can open (mode 0600, default
 `/tmp/ubertooth-harness-USER-PORT.sock`, `--jump-socket` to pick another),
 not a TCP port: the controller has no authentication, so a loopback port on
-a shared jump host would let every user there drive it. Keep
+a shared jump host would let every user there drive it. It overrides a
+`RemoteCommand` that the jump host's SSH configuration sets. With `-J`, the
+lab host's key is checked against the laptop's `known_hosts`; with
+`--two-hop`, against the jump host's. Keep
 `--local-port` equal to `--port`: the controller accepts only
 `Host: 127.0.0.1:PORT`.
 
