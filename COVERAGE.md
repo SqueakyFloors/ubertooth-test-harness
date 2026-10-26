@@ -49,7 +49,9 @@ Harness-wide checks that use the CLIs:
   the run; README "Host requirements").
 - **Linux only** (need BlueZ; not applicable on macOS, decided at planning, not
   skipped): `ubertooth-scan -h` and `ubertooth-follow -h` (Host CLI surface),
-  and every `follow` case of Refused command lines. `ubertooth-specan-ui -h`
+  and every `follow` case of Refused command lines. A Linux `--build` must
+  install both tools into the run prefix (the build fails otherwise), so these
+  cases always run there ([#40](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/40)). `ubertooth-specan-ui -h`
   (Python tools) is not applicable without `--build --with-python`.
 - **Exclusive Ubertooth topology** (`exclusive` plan, Linux, power control):
   runs `ubertooth-util -s`, `ubertooth-util -v`, and `ubertooth-btle -f` with no
@@ -62,8 +64,8 @@ Harness-wide checks that use the CLIs:
   no device change on every built tool (util, btle, afh, debug, dfu, dump, ego,
   ducky, rx, specan, tx): Argument validation (one stray per tool for afh,
   debug, dfu, dump, tx in smoke; the rest comprehensive). `ubertooth-follow` and
-  `ubertooth-scan` are not built on every host
-  ([#40](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/40)).
+  `ubertooth-scan` (Linux only, BlueZ) have no stray-word case yet
+  ([#100](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/100)).
   Optional values as the next word are covered where they can be read back
   without RF: `ubertooth-util -c -C -a -z -l -d` (Radio setting transitions),
   `ubertooth-btle -v` (BLE CRC transitions) and `-a` (BLE settings).
@@ -298,7 +300,7 @@ Combinations: two or more of `-f`/`-r`/`-i`: last one wins (`do_mode` is overwri
 
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
-| `-h` | help | Covered | Host CLI surface (exit 1); Linux only: not applicable on macOS (no BlueZ) |
+| `-h` | help | Covered | Host CLI surface (exit 1); Linux only: not applicable on macOS (no BlueZ); required in a Linux `--build` run (the tool must be in the run prefix, #40), checked in CI |
 | `-s` | BlueZ HCI scan | Hard | Needs a Bluetooth adapter and discoverable peers |
 | `-x` | extended inquiry | Hard | Same |
 | `-t <s>` | scan time | Hard | Same |
@@ -310,7 +312,7 @@ Combinations: two or more of `-f`/`-r`/`-i`: last one wins (`do_mode` is overwri
 
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
-| `-h` | help | Covered | Host CLI surface (exit 1); Linux only: not applicable on macOS (no BlueZ) |
+| `-h` | help | Covered | Host CLI surface (exit 1); Linux only: not applicable on macOS (no BlueZ); required in a Linux `--build` run (the tool must be in the run prefix, #40), checked in CI |
 | `-l<LAP>` | target LAP | Hard | Needs a BR/EDR piconet and an adapter (backlog) |
 | `-u<UAP>` | target UAP | Hard | Same |
 | `-U<0-7>` | select device | Hard | Same |

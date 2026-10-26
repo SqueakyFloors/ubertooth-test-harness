@@ -12,11 +12,13 @@ from ubertooth_harness.build import (
     missing_tools,
     plan_build,
     require_tools,
+    required_tools,
 )
 from ubertooth_harness.events import open_run_publisher
 from ubertooth_harness.executor import CommandResult, SubprocessCommandExecutor
-from ubertooth_harness.report import load_events, render_run
+from ubertooth_harness.hostneeds import BLUEZ_TOOLS
 from ubertooth_harness.manifest import SourceRevision
+from ubertooth_harness.report import load_events, render_run
 
 
 UBERTOOTH = SourceRevision(
@@ -45,9 +47,13 @@ class FakeBuildExecutor:
     """Succeeds for every command and installs fake artifacts on install."""
 
     def __init__(self, plan, *, host_version=None, fail_step=None, missing_library=None,
-                 installed_tools=BUILT_TOOLS):
+                 installed_tools=None):
         self.plan = plan
-        self.installed_tools = installed_tools
+        # By default every tool the plan's platform builds (the BlueZ tools
+        # on Linux).
+        self.installed_tools = (
+            required_tools(plan) if installed_tools is None else installed_tools
+        )
         self.host_version = host_version or (
             "libubertooth 1.1 (git-aaaaaaa), libbtbb 1.0 (git-bbbbbbb)\n"
         )
@@ -185,7 +191,7 @@ class BuilderTests(unittest.TestCase):
                 set(result.toolchain),
             )
             self.assertEqual(
-                [f"built {tool}" for tool in sorted(BUILT_TOOLS)]
+                [f"built {tool}" for tool in sorted(BUILT_TOOLS + BLUEZ_TOOLS)]
                 + ["built libubertooth.so.1.1", "built bluetooth_rxtx.dfu"],
                 [item.name for item in result.artifacts],
             )
@@ -234,6 +240,26 @@ class BuilderTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(BuildError, "did not install: ubertooth-btle"):
                 Builder(executor, publisher_in(work)).run(plan)
+
+    def test_a_linux_build_must_install_the_bluez_tools(self):
+        # REQUIRE_ALL=ON on Linux: a build without them is a build problem,
+        # not a reason to leave their cases out (#40).
+        for tool in BLUEZ_TOOLS:
+            with tempfile.TemporaryDirectory() as work, self.subTest(tool=tool):
+                plan = make_plan(work)
+                executor = FakeBuildExecutor(
+                    plan, installed_tools=tuple(t for t in required_tools(plan) if t != tool)
+                )
+                with self.assertRaisesRegex(BuildError, f"did not install: {tool} into"):
+                    Builder(executor, publisher_in(work)).run(plan)
+
+    def test_a_macos_build_does_not_need_the_bluez_tools(self):
+        with tempfile.TemporaryDirectory() as work:
+            plan = make_plan(work, platform="macos")
+            self.assertEqual(BUILT_TOOLS, required_tools(plan))
+            result = Builder(FakeBuildExecutor(plan), publisher_in(work)).run(plan)
+            names = {item.name for item in result.artifacts}
+            self.assertFalse({f"built {tool}" for tool in BLUEZ_TOOLS} & names)
 
     def test_catalog_tools_match_the_built_tool_list(self):
         from ubertooth_harness.catalog import builtin_catalog

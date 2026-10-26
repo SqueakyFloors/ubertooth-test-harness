@@ -314,7 +314,7 @@ run.
 
 | Needs | Cases | Not applicable when |
 |---|---|---|
-| BlueZ (`ubertooth-scan`, `ubertooth-follow`) | `Host CLI surface` scan and follow `-h`; every `follow` case of `Refused command lines` | macOS (no BlueZ): Linux only; on Linux, a run that uses installed tools without them on `PATH` (a Linux `--build` configures with `REQUIRE_ALL=ON`, so it always has them) |
+| BlueZ (`ubertooth-scan`, `ubertooth-follow`) | `Host CLI surface` scan and follow `-h`; every `follow` case of `Refused command lines` | macOS (no BlueZ): Linux only; on Linux, a run that uses installed tools without them on `PATH` (a Linux `--build` configures with `REQUIRE_ALL=ON` and fails unless both are in the run prefix, so its cases are required) |
 | Python tools build | `Python tools` `ubertooth-specan-ui -h` | the run has no `--build --with-python` |
 | firmware build | `DFU image checks` `sign-test-build` | the run has no `--build --with-firmware` and no `--artifact "test build=PATH"` |
 | platform | plan entries with `platforms:` (Flash reliability, Exclusive Ubertooth topology, MAC polling soak; the `exclusive` and `mac-polling` plans list Linux only) | the host's platform is not listed |
@@ -586,7 +586,10 @@ BlueZ on Linux, the ARM compiler when building firmware, and the Python with
 `--with-python`), the CMake flags,
 every build command with its exit code, and hashes of every built tool,
 library, and firmware image. Every host tool the catalog runs must be in the
-prefix, so a missing one cannot fall through to an installed copy. The build
+prefix, so a missing one cannot fall through to an installed copy. On Linux
+that includes `ubertooth-scan` and `ubertooth-follow` (BlueZ), so their cases
+are always required in a Linux `--build` run, never left out as not
+applicable. The build
 commands are recorded in run.jsonl and appear under `=== BUILD ===` in the
 report. A missing tool or library stops
 the run first, naming what to install. Ctrl-C cancels the build, and the
@@ -1207,7 +1210,9 @@ lines, Util mode refusals, DFU image checks, and Python tools smoke, which need
 no Ubertooth) with them against a one-host registry, then checks that no case
 skipped at run time and that the not-applicable cases match `--dry-run`: the
 follow and scan cases on macOS, none of them on Linux; `sign-test-build` and
-specan-ui on both (no firmware build, installed tools). The
+specan-ui on both (no firmware build, installed tools). On Linux it also
+checks that the build installed `ubertooth-scan` and `ubertooth-follow` and
+that their `-h` cases passed. The
 checks themselves are in `scripts/ci.sh`. To run them on an exact commit
 without GitHub Actions, locally or on another host over SSH:
 
