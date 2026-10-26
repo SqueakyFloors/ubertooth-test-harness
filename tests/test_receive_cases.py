@@ -44,7 +44,9 @@ class ReceiveUbertooth(ToolUbertooth):
     each case can be shown to fail:
 
     rx-ignores-timeout, rx-exits-early, rx-ignores-channel, rx-ignores-errors,
-    rx-link-type, rx-writes-extra, rx-dump-trailing,
+    rx-link-type, rx-writes-extra, rx-dump-trailing, rx-sweep-notice (-s
+    prints the notice it printed before 5ac22a8), rx-sweep-overrides-channel
+    (-s sweeps although -c names a channel),
     rx-no-survey, afh-zero-map (#187), afh-no-message, afh-exits-0, afh-exits-early,
     afh-r-silent, afh-segfault (#185),
     dump-trailing, dump-bits-garbage, dump-ignores-l, dump-first-wins,
@@ -125,6 +127,8 @@ class ReceiveUbertooth(ToolUbertooth):
         if "rx-ignores-errors" in self.bugs:
             errors = 4
         lines = []
+        if "-s" in options and "rx-sweep-overrides-channel" in self.bugs:
+            channel = None
         for index, ch in enumerate((10, 40, 70)):
             if channel is not None and "rx-ignores-channel" not in self.bugs:
                 ch = int(channel)
@@ -153,6 +157,8 @@ class ReceiveUbertooth(ToolUbertooth):
                         data += b"\0\0\0"
                 Path(path).write_bytes(data)
         stderr = ""
+        if "-s" in options and "rx-sweep-notice" in self.bugs:
+            stderr = "sweep mode is now the default and the -s argument is deprecated\n"
         self._run_mode("2402" if channel is None else str(2402 + int(channel)))
         stdout = "\n".join(lines) + "\n"
         if "rx-ignores-timeout" in self.bugs or seconds == 0:
@@ -285,7 +291,7 @@ class ReceiveCaseGenerationTests(unittest.TestCase):
         self.assertEqual(["rx-survey-timeout", "rx-capture-pcapng", "afh-timeout-no-packets"],
                          [c.case_id for c in smoke])
         _a, full = cases_for(CLASSIC, "comprehensive")
-        self.assertEqual(13, len(full))
+        self.assertEqual(15, len(full))
         _a, smoke = cases_for(RAW, "smoke")
         self.assertEqual(["dump-full", "dump-bitstream", "ego-rx"], [c.case_id for c in smoke])
         _a, full = cases_for(RAW, "comprehensive")
@@ -348,6 +354,7 @@ class ClassicReceiveTests(unittest.TestCase):
     def test_each_case_can_fail(self):
         rx = ["Survey (-z -t) ends by itself", "PCAPNG capture (-r)",
               "Sniff all LAPs (-t) ends by itself", "Fixed channel (-c 39)",
+              "Explicit sweep (-s)", "-s -c 39: the channel wins",
               "No access-code errors (-e 0)", "Four access-code errors (-e 4)",
               "PCAP capture (-q)",
               "Repeated -r: the first file is written, the extra ignored",
@@ -361,7 +368,10 @@ class ClassicReceiveTests(unittest.TestCase):
                              "Repeated -r: the first file is written, the extra ignored"],
             "rx-writes-extra": ["Repeated -r: the first file is written, the extra ignored"],
             "rx-dump-trailing": ["Packet dump (-d)"],
-            "rx-ignores-channel": ["Fixed channel (-c 39)"],
+            "rx-ignores-channel": ["Fixed channel (-c 39)", "-s -c 39: the channel wins"],
+            "rx-sweep-notice": ["Explicit sweep (-s)", "-s -c 39: the channel wins"],
+            "rx-sweep-overrides-channel": ["-s -c 39: the channel wins"],
+            "reject:ubertooth-rx:-s": ["Explicit sweep (-s)", "-s -c 39: the channel wins"],
             "rx-ignores-errors": ["No access-code errors (-e 0)"],
             "reject:ubertooth-rx:-e": ["No access-code errors (-e 0)",
                                        "Four access-code errors (-e 4)"],
