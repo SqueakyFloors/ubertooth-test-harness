@@ -13,8 +13,8 @@ suites:
         hosts: each
         coverage: comprehensive
 
-    # No Ubertooth. Strict count-with-mode and all-with-mode fail until fork
-    # #332 and #333 are fixed.
+    # No Ubertooth. Follows fork main db5649b: -f is an unknown option and
+    # -N prints the count, then runs the rest of the command.
     - Util mode refusals:
         hosts: each
         coverage: comprehensive
