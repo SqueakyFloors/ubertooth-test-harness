@@ -8,13 +8,15 @@ from pathlib import Path
 from unittest import mock
 
 from ubertooth_harness import cli, pytools
-from ubertooth_harness.build import BuildError, Builder, PYTHON_TOOLS, resolve_python
+from ubertooth_harness.build import (
+    BuildError, Builder, PYTHON_TOOLS, required_tools, resolve_python,
+)
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.plan import load_plan
 
 from tests.test_build import (
-    LIBBTBB, UBERTOOTH, BUILT_TOOLS, FakeBuildExecutor, make_plan, publisher_in,
+    LIBBTBB, UBERTOOTH, FakeBuildExecutor, make_plan, publisher_in,
 )
 
 REPOSITORY = Path(__file__).resolve().parents[1]
@@ -412,7 +414,10 @@ class PythonBuildTests(unittest.TestCase):
         )
 
     def run_build(self, plan, interpreter="/opt/py/bin/python3", tools=PYTHON_TOOLS):
-        executor = FakeBuildExecutor(plan, installed_tools=BUILT_TOOLS)
+        # Every C tool the plan needs (the BlueZ tools on Linux); the Python
+        # tools are written below, for ``interpreter``.
+        executor = FakeBuildExecutor(plan, installed_tools=tuple(
+            tool for tool in required_tools(plan) if tool not in PYTHON_TOOLS))
         original = executor.run
 
         def run(argv, **options):

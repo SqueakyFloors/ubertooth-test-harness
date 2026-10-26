@@ -118,9 +118,14 @@ class NeedsTests(unittest.TestCase):
         build = {"python": "/usr/bin/python3"}
         names = ("built ubertooth-util", "built ubertooth-follow", "test build")
         linux = run_capabilities("Host_Linux", "linux", build, names)
-        self.assertEqual((frozenset({"ubertooth-follow"}), True, True, "build"),
+        # A Linux build has both BlueZ tools whatever the manifest lists:
+        # build.py fails a build without them, so their cases are required.
+        self.assertEqual((frozenset(BLUEZ_TOOLS), True, True, "build"),
                          (linux.bluez_tools, linux.python_tools, linux.firmware_build,
                           linux.basis))
+        self.assertEqual([], split_cases(
+            builtin_catalog().get("Host CLI surface").command_cases({}, {}, {}),
+            linux)[1])
         mac = run_capabilities("Host_Mac", "macos", {"python": None}, ("built ubertooth-util",))
         self.assertEqual((frozenset(), False, False),
                          (mac.bluez_tools, mac.python_tools, mac.firmware_build))
