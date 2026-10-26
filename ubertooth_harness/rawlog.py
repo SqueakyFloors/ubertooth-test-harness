@@ -306,6 +306,74 @@ class CappedOutput:
         return details
 
 
+# Chunk size for output a non-streaming executor returns only at the end.
+COLLECTED_CHUNK_CHARS = 4096
+
+
+def output_log_path(output_dir: Path, name: str) -> Path:
+    """A new output/<name>.log; a repeated name gets a numbered file."""
+    safe = "".join(c if c.isalnum() or c in "._-" else "-" for c in name)
+    base = output_dir / OUTPUT_DIR / safe
+    path = base.with_name(base.name + ".log")
+    number = 2
+    while path.exists():
+        path = base.with_name(f"{base.name}-{number}.log")
+        number += 1
+    return path
+
+
+def record_output(
+    publisher,
+    run: Callable[[Callable[[str, str], None]], CommandResult],
+    *,
+    details: dict,
+    output_dir: Path,
+    spill_name: str,
+) -> tuple[CommandResult, dict]:
+    """Run ``run(on_output)``, recording its output in run.jsonl within the
+    per-command limits (RECORD_*), and the full output in
+    ``output/<spill_name>.log`` once past them.
+
+    Each ``command_output`` and ``command_output_omitted`` record carries
+    ``details`` (the owner and ``command_id``). Returns the result and the
+    details to add to ``command_finished`` (``output_file`` and
+    ``output_omitted`` when output was left out, else nothing).
+    """
+    streamed = []
+
+    def record(stream: str, text: str, received) -> None:
+        output_details = {**details, "stream": stream, "text": text}
+        if received is not None:
+            # A tail record emitted after the command ended.
+            output_details["received"] = received
+        publisher.emit("command_output", "running", output_details)
+
+    def open_spill():
+        path = output_log_path(output_dir, spill_name)
+        return path, path.relative_to(output_dir).as_posix()
+
+    def note(omitted: dict) -> None:
+        publisher.emit("command_output_omitted", "running", {**details, **omitted})
+
+    capped = CappedOutput(record, open_spill)
+
+    def output(stream: str, text: str) -> None:
+        streamed.append(stream)
+        capped.add(publisher.utc_now(), stream, text)
+
+    try:
+        result = run(output)
+        if not streamed:
+            # The executor did not stream; record its collected output so
+            # the run directory still holds every response.
+            for stream, text in (("stdout", result.stdout), ("stderr", result.stderr)):
+                for start in range(0, len(text), COLLECTED_CHUNK_CHARS):
+                    output(stream, text[start:start + COLLECTED_CHUNK_CHARS])
+    finally:
+        capped.close()
+    return result, capped.finish(note)
+
+
 def result_text(result: CommandResult, *, stopped: bool = False) -> str:
     """'[R] <tool> exit <code> in <seconds>s', plus timeout or cancellation.
 

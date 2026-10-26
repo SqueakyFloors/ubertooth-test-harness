@@ -377,11 +377,23 @@ def omitted_line(details: Mapping) -> str:
     )
 
 
+# Tail key for build command output, which has no invocation.
+_BUILD_TAIL = "\0build"
+
+
+def _tail_key(details: Mapping) -> str:
+    """Which failure log an output record belongs to: its test, or the build."""
+    invocation = _text(details.get("invocation_id"))
+    if not invocation and details.get("phase") == "build":
+        return _BUILD_TAIL
+    return invocation
+
+
 def failure_summary(run: Mapping, events: Sequence[Mapping]) -> list[dict]:
     """What failed in a run: one entry per failed phase or test, then the run.
 
-    Each entry has ``step``, ``status``, ``reason`` and, for tests, the last
-    few output lines the test printed (``log``).
+    Each entry has ``step``, ``status``, ``reason`` and, for tests and a
+    failed build, the last few output lines printed (``log``).
     """
     failures: list[dict] = []
     tails: dict[str, collections.deque] = {}
@@ -395,7 +407,7 @@ def failure_summary(run: Mapping, events: Sequence[Mapping]) -> list[dict]:
         status = event.get("status")
         if kind == "command_output":
             text = details.get("text")
-            invocation = _text(details.get("invocation_id"))
+            invocation = _tail_key(details)
             if isinstance(text, str) and invocation:
                 tail = tails.setdefault(invocation, collections.deque(maxlen=FAILURE_LOG_LINES))
                 # Output chunks need not end at a line break: join them first.
@@ -405,7 +417,7 @@ def failure_summary(run: Mapping, events: Sequence[Mapping]) -> list[dict]:
         elif kind == "command_output_omitted":
             # Output left out of run.jsonl (kept in output/): end the partial
             # line and mark the gap before the command's last records.
-            invocation = _text(details.get("invocation_id"))
+            invocation = _tail_key(details)
             if invocation:
                 tail = tails.setdefault(invocation, collections.deque(maxlen=FAILURE_LOG_LINES))
                 rest = partials.pop(invocation, "")
@@ -415,9 +427,17 @@ def failure_summary(run: Mapping, events: Sequence[Mapping]) -> list[dict]:
         elif kind in ("build_finished", "preflight_finished") and status not in (
             "passed", "skipped"
         ):
+            log = []
+            if kind == "build_finished":
+                rest = partials.pop(_BUILD_TAIL, "")
+                if rest.strip():
+                    tails.setdefault(
+                        _BUILD_TAIL, collections.deque(maxlen=FAILURE_LOG_LINES)
+                    ).append(rest[:500])
+                log = list(tails.get(_BUILD_TAIL, ()))
             failures.append({
                 "step": kind.removesuffix("_finished"), "status": _text(status),
-                "reason": _text(details.get("reason")), "log": [],
+                "reason": _text(details.get("reason")), "log": log,
             })
         elif kind == "test_finished" and status not in ("passed", "skipped", "not_applicable"):
             invocation = _text(details.get("invocation_id"))

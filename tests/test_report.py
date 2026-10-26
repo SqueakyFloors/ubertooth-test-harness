@@ -118,24 +118,24 @@ class ReportTests(unittest.TestCase):
             self.assertNotIn("cccc2222", report)
             self.assertNotIn(SERIAL, report)
 
-    def test_long_command_output_is_capped_in_the_report(self):
-        from ubertooth_harness.report import MAX_COMMAND_OUTPUT_CHARS
-
+    def test_report_shows_every_recorded_output_record(self):
+        # run.jsonl output is capped when recorded (rawlog.RECORD_*), so the
+        # report keeps every record, including how a long command ended.
         with tempfile.TemporaryDirectory() as directory:
             run = Path(directory) / "run-a"
             publisher = open_run_publisher(run, "run-a")
             publisher.emit("command_started", "running", {"command_id": "c", "argv": ["ubertooth-btle", "-f"]})
             chunk = "x" * 4000 + "\n"
-            count = MAX_COMMAND_OUTPUT_CHARS // len(chunk) + 10
-            for _ in range(count):
+            for _ in range(20):
                 publisher.emit("command_output", "running", {"command_id": "c", "stream": "stdout", "text": chunk})
+            publisher.emit("command_output", "running", {"command_id": "c", "stream": "stdout", "text": "the end\n"})
             publisher.emit("command_finished", "stopped", {"command_id": "c", "returncode": 124, "duration_s": 4.0, "timed_out": True})
 
             report = render_run(load_events(run / "run.jsonl"))
 
-            self.assertLess(len(report), MAX_COMMAND_OUTPUT_CHARS * 2)
-            self.assertIn("[M] ", report)
-            self.assertIn("more characters of output are in run.jsonl", report)
+            self.assertEqual(20, report.count(chunk.rstrip()))
+            self.assertIn("[O] the end", report)
+            self.assertNotIn("more characters of output", report)
 
     def test_older_runs_with_offset_timestamps_render_elapsed_times(self):
         events = [
