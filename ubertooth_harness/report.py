@@ -196,6 +196,15 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
             f"`{source.get('requested_ref')}` = `{source.get('commit')}` "
             f"({source.get('expected_revision')}) from {source.get('repository')}",
         ))
+    pin = next((e for e in run.events if e["event_type"] == "libbtbb_pin"), None)
+    if pin is not None:
+        # How the libbtbb built compares with the fork's install.sh pin (#85).
+        status = pin.get("status", "")
+        message = pin.get("details", {}).get("message", "")
+        rows.append((
+            "libbtbb pin",
+            message if status == "passed" else f"**{status}**: {message}",
+        ))
     build = manifest.get("build") or {}
     if build:
         toolchain = ", ".join(f"{k} {v}" for k, v in sorted(build.get("toolchain", {}).items()))
