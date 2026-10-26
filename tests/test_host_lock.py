@@ -315,9 +315,13 @@ class HostLockCliTests(unittest.TestCase):
         # The child stays alive after the cancel, so a free lock proves the
         # harness released it, not that the kernel did at exit.
         code = textwrap.dedent("""\
-            import json, sys, time
+            import json, signal, sys, time
             from unittest import mock
             from ubertooth_harness import cli
+
+            # A child of a background shell inherits SIGINT ignored; the real
+            # run-suite installs its own handler inside the mocked function.
+            signal.signal(signal.SIGINT, signal.default_int_handler)
 
             def run_leased(*_args, **_kwargs):
                 print("held", flush=True)
