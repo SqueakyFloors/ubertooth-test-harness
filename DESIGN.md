@@ -153,10 +153,19 @@ Semantics:
   naming it as `active_run_id` (the runner restarted, or reports another run)
   becomes `lost` with a reason, is persisted, and is published live; runs
   loaded at controller startup stay `running` until their target registers.
-  Records that arrive after a run ended rebuild its report.md. A registration
-  replaces an existing connection for the same host (half-open reconnects);
-  the controller logs a warning when the replaced connection was still online.
-  Any local process can register any host until runner authentication exists.
+  A registration replaces an existing connection for the same host
+  (half-open reconnects); the controller logs a warning when the replaced
+  connection was still online. Any local process can register any host until
+  runner authentication exists.
+- Reports: the controller compiles each run's report.md from its own copy of
+  run.jsonl, and writes it before the run's terminal status (finished, error,
+  or `lost`) is stored, served, or published, so a client that sees the
+  status can fetch the report. A run with no records yet (for example a
+  `run_error` before the first event), or whose records cannot be compiled,
+  gets a short report that names the status and reason. If report.md cannot
+  be written at all, the terminal status is still stored and published, with
+  `report` false and the failure in `report_error`. Records that arrive after
+  a run ended rebuild its report.md.
 
 Planned, not yet in the protocol: `deploy {ref}` (build host + firmware ahead
 of a run; today `run.build` builds inside the run directory), `flash {image,

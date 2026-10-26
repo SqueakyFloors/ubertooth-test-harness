@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import socket
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -473,7 +474,13 @@ class RunTests(ControllerTestCase):
         record = json.loads((self.results / "run-1" / "run.json").read_text())
         self.assertEqual(("error", 2, "cannot resolve ref"),
                          (record["status"], record["exit_code"], record["reason"]))
-        self.assertEqual(404, (await self.http("GET", "/api/runs/run-1/report.md"))[0])
+        # No run.jsonl yet: a short report still names the error (#22).
+        self.assertTrue(record["report"])
+        self.assertIsNone(record["report_error"])
+        status, body, _ = await self.http("GET", "/api/runs/run-1/report.md")
+        self.assertEqual(200, status)
+        self.assertIn("cannot resolve ref", body)
+        self.assertIn("no run records", body)
 
     async def test_busy_rejection_is_propagated(self):
         async with FakeRunner(self.port) as runner:
@@ -580,7 +587,9 @@ class RunTests(ControllerTestCase):
             self.assertEqual(409, status)
             self.assertIn("not active", payload["detail"])
             self.assertEqual(404, (await self.http("POST", "/api/runs/zzz/cancel", {}))[0])
-        self.assertFalse(self.controller.runs["run-1"].report)
+        # No records: a short report names the status.
+        self.assertTrue(self.controller.runs["run-1"].report)
+        self.assertIn("canceled", (self.results / "run-1" / "report.md").read_text())
 
     async def test_replayed_events_are_deduplicated_across_reconnect_and_restart(self):
         async with FakeRunner(self.port) as runner:
@@ -807,6 +816,201 @@ class ReviewFixTests(ControllerTestCase):
             await wait_until(lambda: 3 in self.controller.runs["run-1"].seen)
             await wait_until(lambda: report.read_text() == render_run([*events, late]))
         self.assertTrue(self.run_record()["report"])
+
+    def slow_report_writer(self):
+        """Hold every report compile 0.2 s in its worker thread.
+
+        Widens the window in which a status set before the report was
+        written could be seen (issue #22); with the fix the window is closed
+        whatever its width.
+        """
+        original = self.controller._write_report
+
+        def slow(*args):
+            time.sleep(0.2)
+            return original(*args)
+        self.controller._write_report = slow
+
+    def assert_report_with_status(self, run_id="run-1"):
+        run = self.controller.runs[run_id]
+        self.assertTrue(run.report)
+        self.assertTrue((self.results / run_id / "report.md").is_file())
+        self.assertEqual(run.status, self.run_record(run_id)["status"])
+        self.assertTrue(self.run_record(run_id)["report"])
+
+    async def test_terminal_status_is_never_seen_before_its_report(self):
+        self.slow_report_writer()
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            message = await self.accepted_run(runner)
+            await runner.send("event", run_id="run-1", event=event("run-1", 1, "run_started"))
+            await wait_until(lambda: self.controller.runs["run-1"].seen == {1})
+            async with connect(
+                f"ws://127.0.0.1:{self.port}/ws/live?run_id=run-1", proxy=None
+            ) as live:
+                json.loads(await asyncio.wait_for(live.recv(), TIMEOUT_S))  # snapshot
+                await runner.send(
+                    "run_finished", request_id=message["request_id"], run_id="run-1",
+                    status="failed", exit_code=1, run_directory="/",
+                )
+                # Polled at once and often: the first poll that sees the
+                # terminal status must also find the report.
+                await wait_until(
+                    lambda: self.controller.runs["run-1"].status == "failed", interval=0
+                )
+                self.assert_report_with_status()
+                status, _, _ = await self.http("GET", "/api/runs/run-1/report.md")
+                self.assertEqual(200, status)
+                while True:
+                    update = json.loads(await asyncio.wait_for(live.recv(), TIMEOUT_S))
+                    if update["type"] == "run":
+                        break
+                self.assertEqual(("failed", True),
+                                 (update["run"]["status"], update["run"]["report"]))
+
+    async def test_lost_status_is_never_seen_before_its_report(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            await self.accepted_run(runner)
+            await runner.send("event", run_id="run-1", event=event("run-1", 1, "run_started"))
+            await wait_until(lambda: self.controller.runs["run-1"].seen == {1})
+        await wait_until(lambda: not self.controller.targets["Host_A"].connected)
+        self.slow_report_writer()
+        async with FakeRunner(self.port) as runner:
+            await runner.register(active=None)
+            await wait_until(
+                lambda: self.controller.runs["run-1"].status == "lost", interval=0
+            )
+            self.assert_report_with_status()
+            self.assertEqual(200, (await self.http("GET", "/api/runs/run-1/report.md"))[0])
+
+    async def finish_after_one_event(self, runner, message, kind="run_finished"):
+        await runner.send("event", run_id="run-1", event=event("run-1", 1, "run_started"))
+        await wait_until(lambda: self.controller.runs["run-1"].seen == {1})
+        if kind == "run_finished":
+            await runner.send(
+                "run_finished", request_id=message["request_id"], run_id="run-1",
+                status="passed", exit_code=0, run_directory="/",
+            )
+        else:
+            await runner.send(
+                "run_error", request_id=message["request_id"], run_id="run-1",
+                exit_code=2, reason="build failed",
+            )
+
+    async def test_run_error_before_any_record_has_a_report(self):
+        self.slow_report_writer()
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            message = await self.accepted_run(runner)
+            await runner.send(
+                "run_error", request_id=message["request_id"], run_id="run-1",
+                exit_code=2, reason="cannot resolve ref",
+            )
+            await wait_until(
+                lambda: self.controller.runs["run-1"].status == "error", interval=0
+            )
+            self.assert_report_with_status()
+            self.assertFalse((self.results / "run-1" / "run.jsonl").exists())
+            status, body, _ = await self.http("GET", "/api/runs/run-1/report.md")
+            self.assertEqual(200, status)
+            self.assertIn("| Status | error |", body)
+            self.assertIn("cannot resolve ref", body)
+
+    async def test_lost_before_any_record_has_a_report(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            await self.accepted_run(runner)
+        await wait_until(lambda: not self.controller.targets["Host_A"].connected)
+        self.slow_report_writer()
+        async with FakeRunner(self.port) as runner:
+            await runner.register(active=None)
+            await wait_until(
+                lambda: self.controller.runs["run-1"].status == "lost", interval=0
+            )
+            self.assert_report_with_status()
+            status, body, _ = await self.http("GET", "/api/runs/run-1/report.md")
+            self.assertEqual(200, status)
+            self.assertIn("| Status | lost |", body)
+            self.assertIn("no longer has this run", body)
+
+    async def test_removed_run_log_still_gives_a_report(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            message = await self.accepted_run(runner)
+            await runner.send("event", run_id="run-1", event=event("run-1", 1, "run_started"))
+            await wait_until(lambda: self.controller.runs["run-1"].seen == {1})
+            (self.results / "run-1" / "run.jsonl").unlink()
+            await runner.send(
+                "run_error", request_id=message["request_id"], run_id="run-1",
+                exit_code=2, reason="build failed",
+            )
+            await wait_until(lambda: self.controller.runs["run-1"].status == "error")
+        self.assert_report_with_status()
+        record = self.run_record()
+        self.assertIn("could not compile report.md", record["report_error"])
+        body = (self.results / "run-1" / "report.md").read_text()
+        self.assertIn("build failed", body)
+        self.assertIn("Report problem", body)
+
+    async def raising_report_compile_ends_the_run(self, kind):
+        def broken(output_dir):
+            raise OSError(28, "No space left on device")
+        with patch("ubertooth_harness.controller.write_report", broken):
+            async with FakeRunner(self.port) as runner:
+                await self.registered(runner)
+                message = await self.accepted_run(runner)
+                await self.finish_after_one_event(runner, message, kind)
+                await wait_until(lambda: not self.controller.runs["run-1"].active)
+                self.assertIsNone(self.controller.targets["Host_A"].active_run_id)
+        self.assert_report_with_status()
+        self.assertIn("No space left on device", self.run_record()["report_error"])
+
+    async def test_raising_report_compile_still_finishes_the_run(self):
+        await self.raising_report_compile_ends_the_run("run_finished")
+
+    async def test_raising_report_compile_still_records_the_run_error(self):
+        await self.raising_report_compile_ends_the_run("run_error")
+
+    async def test_failed_report_write_still_marks_the_run_lost(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            await self.accepted_run(runner)
+        await wait_until(lambda: not self.controller.targets["Host_A"].connected)
+
+        def broken(*args):
+            raise OSError(28, "No space left on device")
+        self.controller._write_report = broken
+        async with FakeRunner(self.port) as runner:
+            await runner.register(active=None)
+            await wait_until(lambda: self.controller.runs["run-1"].status == "lost")
+        record = self.run_record()
+        self.assertEqual(("lost", False), (record["status"], record["report"]))
+        self.assertIn("No space left on device", record["report_error"])
+
+    async def test_failed_report_write_is_recorded_and_the_status_published(self):
+        def broken(*args):
+            raise OSError(28, "No space left on device")
+        self.controller._write_report = broken
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            message = await self.accepted_run(runner)
+            async with connect(
+                f"ws://127.0.0.1:{self.port}/ws/live?run_id=run-1", proxy=None
+            ) as live:
+                json.loads(await asyncio.wait_for(live.recv(), TIMEOUT_S))  # snapshot
+                await self.finish_after_one_event(runner, message)
+                while True:
+                    update = json.loads(await asyncio.wait_for(live.recv(), TIMEOUT_S))
+                    if update["type"] == "run":
+                        break
+        self.assertEqual("passed", update["run"]["status"])
+        self.assertFalse(update["run"]["report"])
+        self.assertIn("No space left on device", update["run"]["report_error"])
+        record = self.run_record()
+        self.assertEqual(("passed", False), (record["status"], record["report"]))
+        self.assertIn("No space left on device", record["report_error"])
+        self.assertTrue(any("No space left on device" in line for line in self.logs))
 
 
 class MalformedRunnerTests(ControllerTestCase):
