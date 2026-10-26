@@ -276,7 +276,9 @@ def _parser() -> argparse.ArgumentParser:
     _add_lease_options(run_suite)
 
     boards = subparsers.add_parser(
-        "boards", help="show which registered Ubertooths are free or leased, and by whom"
+        "boards",
+        help="show which registered Ubertooths, and this host's power/firmware "
+        "lock, are free or leased, and by whom",
     )
     boards.add_argument("--hardware", type=Path, required=True)
     boards.add_argument("--host", help="only boards attached to this host")
@@ -289,6 +291,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     lease.add_argument("--hardware", type=Path, required=True)
     lease.add_argument("boards", nargs="+", metavar="ALIAS", help="registered Ubertooth aliases")
+    lease.add_argument(
+        "--host-lock", action="store_true",
+        help="also hold this host's power/firmware lock, for a command that "
+        "switches USB power or writes firmware (automatic for ubertooth-dfu)",
+    )
     _add_lease_options(lease)
     lease.epilog = "usage: ubertooth-harness lease --hardware H ALIAS... -- COMMAND [ARG...]"
 
@@ -639,6 +646,8 @@ def _run_suite(args: argparse.Namespace) -> int:
         ),
         directory=args.lease_dir,
         wait_s=args.wait_for_boards * 60,
+        # Power isolation and firmware writes hold this host's lock too.
+        host_lock=board_leases.needs_host_lock(invocations, catalog),
     )
     try:
         return _run_leased(
@@ -827,6 +836,8 @@ def _boards_command(args: argparse.Namespace) -> int:
         {"resource": alias, "key": None, "held": False, "holder": {}, "unleasable": problem}
         for alias, problem in registered if problem is not None
     ]
+    # The host lock is local to the host this runs on, like the leases.
+    states.append(board_leases.host_lock_state(directory=args.lease_dir))
     if args.json:
         print(json.dumps(states, indent=2, sort_keys=True))
         return 0
@@ -854,11 +865,15 @@ def _lease_command(args: argparse.Namespace) -> int:
         if resource.type != "Ubertooth":
             raise HarnessError(f"resource {alias} is not an Ubertooth")
         boards.append(board_leases.Board(alias, board_leases.board_key(alias, resource.identity)))
+    # A manual firmware write (or DFU read-back) must not overlap another
+    # command's power changes or writes on this host.
+    host_lock = args.host_lock or Path(command[0]).name == "ubertooth-dfu"
     with board_leases.acquire(
         boards,
         board_leases.holder_info(run_id=None, owner=args.owner, purpose="lease: " + " ".join(command)),
         directory=args.lease_dir,
         wait_s=args.wait_for_boards * 60,
+        host_lock=host_lock,
     ) as held:
         # The command inherits the locks, so the boards stay leased until it
         # exits even if this process is killed first.

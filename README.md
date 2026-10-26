@@ -172,8 +172,10 @@ first, bit 0 = port 1), OR in the bits for those ports, and send `SP` + the
 password padded to 8 characters + the new mask, each CR-terminated. For
 example, with the factory password `pass`, if `GP` returns `09000000` (ports 1
 and 4 set) and port 3 must come back, send `SPpass    0D000000`. Acroname:
-enable the port's power through BrainStem. Exclusive host/hub ownership across concurrent harness runs is not
-yet enforced ([#25](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/25)).
+enable the port's power through BrainStem. A run with power isolation
+(StarTech or Acroname) holds the [host lock](#sharing-boards-leases) for the
+whole run, so no other harness command switches power or writes firmware on
+that host meanwhile.
 
 [`testplans/exclusive.yaml`](testplans/exclusive.yaml) runs the `Exclusive Ubertooth topology` test, which
 checks with no `-U` selector that the selected board answers `ubertooth-util
@@ -683,6 +685,27 @@ ubertooth-harness lease --hardware hardware.yaml --owner "agent #14" UT_Mac0 -- 
 `lease` holds the named boards for exactly as long as the command runs; the
 command inherits the locks, so they stay held even if the harness process is
 killed first. Use it for every manual Ubertooth command on a shared host.
+
+### The host lock
+
+Every harness command that switches USB power or writes firmware also holds
+the host lock, `<lease dir>/host-power.lock`, the same kind of `flock` lease
+(released by the kernel when the holder exits, so it never goes stale): a
+`run-suite` with power isolation (StarTech or Acroname) or an exclusive
+Ubertooth check, `Flash reliability`, or `DFU images` holds it for the whole
+run, and `lease` holds it for its command with `--host-lock`, or always when
+the command is `ubertooth-dfu`. A second such command on the host fails at
+once, before any build or device command, and names the holder (owner, run,
+command, pid, and since when); `--wait-for-boards` waits for it as for a
+board. `ubertooth-harness boards` shows it as `host lock`, and the run report
+records it. Runs that neither switch power nor write firmware do not take it,
+so they still share the host.
+
+Lock order: the host lock first, then the boards in serial order, taken in one
+all-or-nothing attempt. Nothing blocks while holding a lock (a busy lock
+releases everything and the attempt is retried until the deadline), and no
+command takes the host lock after it already holds a board, so runs and
+manual leases cannot deadlock.
 
 ## MAC polling workload soak
 
