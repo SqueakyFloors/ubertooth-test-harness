@@ -281,19 +281,25 @@
 
   function renderSuiteTests() {
     const suite = findSuite($("plan").value, $("suite").value);
-    $("suite-tests").textContent = suite
-      ? `${suite.tests.map((test) => test.name).join(", ")}. ${estimateText(suite)}`
-      : "";
+    $("suite-tests").textContent = suite ? suite.tests.map((test) => test.name).join(", ") : "";
+    const box = $("suite-estimate");
+    box.hidden = !suite;
+    if (!suite) return;
+    const known = suite.estimated_s !== null && suite.estimated_s !== undefined;
+    box.classList.toggle("estimate-unknown", !known);
+    $("suite-estimate-value").textContent = known ? formatSeconds(suite.estimated_s) : "no estimate";
+    $("suite-estimate-note").textContent = estimateText(suite);
   }
 
+  // The note under the estimate box; an indicator, so no closing period.
   function estimateText(suite) {
     if (suite.estimated_s !== null && suite.estimated_s !== undefined) {
       const perBoard = suite.per_board_tests
-        ? ` ${suite.per_board_tests} test(s) run once per selected Ubertooth and are counted once here; the live countdown counts every board the run selects.`
+        ? `; ${suite.per_board_tests} test(s) run once per selected Ubertooth and are counted once here (the live countdown counts every board)`
         : "";
-      return `Estimated test time ${formatSeconds(suite.estimated_s)} (from the catalog's per-test estimates; build and preflight not included).${perBoard}`;
+      return `From the catalog's per-test estimates; build and preflight not included${perBoard}`;
     }
-    return `No time estimate: ${suite.unestimated_tests} of ${suite.tests.length} tests have no estimated duration, so the live view shows elapsed time only.`;
+    return `${suite.unestimated_tests} of ${suite.tests.length} tests have no estimated duration, so the live view shows elapsed time only`;
   }
 
   async function submitRun(event) {
@@ -720,7 +726,7 @@
     socket.addEventListener("open", () => {
       state.retry = 1000;
       $("connection").className = "conn conn-up";
-      $("connection").textContent = "Connected to the controller (live updates on).";
+      $("connection").textContent = "Connected to the controller (live updates on)";
       loadRuns();
       if (state.selected) selectRun(state.selected, false);
     });
@@ -747,7 +753,7 @@
       const wait = state.retry;
       state.retry = Math.min(state.retry * 2, 30000);
       $("connection").className = "conn conn-down";
-      $("connection").textContent = `Disconnected from the controller; retrying in ${Math.round(wait / 1000)} s.`;
+      $("connection").textContent = `Disconnected from the controller; retrying in ${Math.round(wait / 1000)} s`;
       window.setTimeout(connect, wait);
     });
   }

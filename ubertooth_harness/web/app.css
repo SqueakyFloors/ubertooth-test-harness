@@ -327,6 +327,19 @@ button.primary:disabled:hover { background: var(--primary); }
   background: var(--surface-2); border: 1px solid var(--line);
 }
 
+.estimate {
+  display: grid; grid-template-columns: auto 1fr; align-items: baseline;
+  gap: 0.15rem 0.75rem; padding: 0.6rem 0.8rem;
+  border: 1px solid var(--run-line); border-left: 4px solid var(--primary);
+  border-radius: var(--radius-small); background: var(--surface-2);
+}
+.estimate-label { font-size: 0.8rem; font-weight: 650; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.04em; }
+.estimate-value { font-size: 1.35rem; font-weight: 700; font-variant-numeric: tabular-nums;
+  grid-column: 2; grid-row: 1; justify-self: start; }
+.estimate-note { grid-column: 1 / -1; font-size: 0.82rem; color: var(--muted); }
+.estimate-unknown .estimate-value { font-size: 1rem; color: var(--muted); }
+
 .field-check { display: flex; align-items: center; gap: 0.5rem; }
 .field-check input { width: 1.05rem; height: 1.05rem; margin: 0; accent-color: var(--primary); }
 .field-check label { font-weight: normal; }
