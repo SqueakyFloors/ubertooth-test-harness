@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -14,8 +15,9 @@ from ubertooth_harness.executor import CommandResult
 
 
 class HostVersionExecutor:
-    def __init__(self, revision):
+    def __init__(self, revision, libbtbb="git-btbb"):
         self.revision = revision
+        self.libbtbb = libbtbb
         self.commands = []
 
     def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
@@ -23,7 +25,7 @@ class HostVersionExecutor:
         self.commands.append(command)
         output = (
             f"libubertooth 1.1 ({self.revision}), "
-            "libbtbb 1.0 (git-btbb)\n"
+            f"libbtbb 1.0 ({self.libbtbb})\n"
         )
         if on_output:
             on_output("stdout", output)
@@ -383,6 +385,64 @@ suites:
                 [("ubertooth-util", "-H"), ("ubertooth-util", "-H")],
                 executor.commands,
             )
+
+    def test_run_suite_with_a_libbtbb_source_records_the_pin_check(self):
+        # Without --build: run.jsonl still gets run_started, then the check,
+        # and the run goes on (#85).
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            git = ["git", "-C", str(source), "-c", "user.name=Test",
+                   "-c", "user.email=test@example.invalid"]
+            subprocess.run(["git", "init", "-q", str(source)], check=True)
+            (source / "install.sh").write_text(f'LIBBTBB_REF="{"0" * 40}"\n')
+            subprocess.run(git + ["add", "install.sh"], check=True)
+            subprocess.run(git + ["commit", "-qm", "source"], check=True)
+            short_commit = subprocess.run(
+                git + ["rev-parse", "--short", "HEAD"],
+                check=True, capture_output=True, text=True,
+            ).stdout.strip()
+            plan = root / "plan.yaml"
+            plan.write_text(
+                "plan: cli named\nsuites:\n  fast:\n    - Host version:\n"
+                "        hosts: each\n"
+            )
+            platform = "macos" if sys.platform == "darwin" else "linux"
+            hardware = root / "hardware.yaml"
+            hardware.write_text(
+                f"resources:\n  Host_Local:\n    type: Host\n    platform: {platform}\n"
+                "    roles: [test target]\n"
+            )
+            output = root / "runs"
+            terminal = io.StringIO()
+            executor = HostVersionExecutor(f"git-{short_commit}", f"git-{short_commit}")
+            with (
+                patch("ubertooth_harness.cli.SubprocessCommandExecutor",
+                      return_value=executor),
+                patch.dict(os.environ, {"UBERTOOTH_HARNESS_LIBBTBB_PIN_SHOWN": ""}),
+                redirect_stderr(terminal),
+                redirect_stdout(io.StringIO()),
+            ):
+                result = main([
+                    "run-suite", "--plan", str(plan), "--suite", "fast",
+                    "--hardware", str(hardware), "--host", "Host_Local",
+                    "--ubertooth-source", str(source), "--ubertooth-ref", "HEAD",
+                    "--libbtbb-source", str(source), "--libbtbb-ref", "HEAD",
+                    "--run-id", "pin-cli-run", "--output", str(output),
+                ])
+
+            self.assertEqual(0, result, terminal.getvalue())
+            events = [json.loads(line) for line in
+                      (output / "pin-cli-run" / "run.jsonl").read_text().splitlines()]
+            kinds = [event["event_type"] for event in events]
+            self.assertEqual(["run_started", "libbtbb_pin", "manifest"], kinds[:3])
+            self.assertEqual(1, kinds.count("run_started"))
+            self.assertEqual("warning", events[1]["status"])
+            self.assertEqual("0" * 40, events[1]["details"]["fork_pin_ref"])
+            self.assertEqual("passed", events[-1]["status"])
+            self.assertEqual(1, terminal.getvalue().count("warning: libbtbb pin differs"))
+            self.assertIn("| libbtbb pin | **warning**",
+                          (output / "pin-cli-run" / "report.md").read_text())
 
 
 if __name__ == "__main__":
