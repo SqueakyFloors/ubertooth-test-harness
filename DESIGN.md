@@ -161,7 +161,11 @@ Semantics:
   `cancel` request still waiting for its answer on it fails at once with 503
   `runner reconnected`: no run is created and no cancel is recorded, a late
   `run_accepted` on the old connection creates no run, and asking again
-  sends the request on the new connection.
+  sends the request on the new connection. The target's error counters
+  (`protocol_errors`, `last_protocol_error`, `last_runner_protocol_error`)
+  carry over to the new registration. A message still read on the replaced
+  connection is never acted on or counted: the controller logs a warning,
+  closes that connection, and stops reading it.
   Any local process can register any host until runner authentication exists.
 - Live fan-out to browsers (`/ws/live`) is best effort and never slows a
   runner: each browser has a queue of `LIVE_QUEUE_LIMIT` (1000) updates. A

@@ -1308,6 +1308,124 @@ class ReplacedRunnerTests(ControllerTestCase):
                 await self.assert_replaced(old)
 
 
+class SupersededSessionTests(ControllerTestCase):
+    """Messages read on a replaced connection never act (#110)."""
+
+    def slow_close(self, host="Host_A", delay_s=0.5):
+        """Make the host's current link take delay_s to close (slow handshake)."""
+        link = self.controller._links[host]
+        close = link.close
+
+        async def slow(code, reason=""):
+            await asyncio.sleep(delay_s)
+            await close(code, reason)
+
+        link.close = slow
+        return link
+
+    async def replace(self, new, host="Host_A", **kwargs):
+        stale = self.controller.targets[host]
+        old_link = self.controller._links[host]
+        await new.register(host, **kwargs)
+        await wait_until(lambda: self.controller._links.get(host) not in (None, old_link))
+        return stale
+
+    async def assert_closed_replaced(self, old):
+        with self.assertRaises(ConnectionClosed) as raised:
+            while True:
+                await asyncio.wait_for(old.ws.recv(), TIMEOUT_S)
+        self.assertEqual((POLICY_VIOLATION, "replaced"),
+                         (raised.exception.rcvd.code, raised.exception.rcvd.reason))
+
+    def dropped_warnings(self):
+        return [line for line in self.logs if "replaced connection" in line]
+
+    async def test_protocol_errors_on_the_old_connection_are_dropped(self):
+        async with FakeRunner(self.port) as old:
+            await self.registered(old, interval=10)
+            self.slow_close()
+            async with FakeRunner(self.port) as new:
+                stale = await self.replace(new, interval=10)
+                for _ in range(3):
+                    with contextlib.suppress(ConnectionClosed):
+                        await old.send("cancel_accepted", run_id="nope")
+                await self.assert_closed_replaced(old)
+                current = self.controller.targets["Host_A"]
+                self.assertIsNot(stale, current)
+                # Nothing was counted, on either object: the session ended
+                # at the first message read after the replacement.
+                self.assertEqual((0, None), (stale.protocol_errors, stale.last_protocol_error))
+                self.assertEqual((0, None),
+                                 (current.protocol_errors, current.last_protocol_error))
+                self.assertEqual(1, len(self.dropped_warnings()), self.logs)
+                status, payload, _ = await self.http("GET", "/api/targets/Host_A")
+                self.assertEqual(200, status, payload)
+                self.assertEqual(0, payload["target"]["protocol_errors"])
+                self.assertTrue(current.connected and current.online)
+
+    async def test_heartbeat_on_the_old_connection_changes_nothing(self):
+        async with FakeRunner(self.port) as old:
+            await self.registered(old, interval=10)
+            self.slow_close()
+            async with FakeRunner(self.port) as new:
+                stale = await self.replace(new, interval=10)
+                seen = (stale.last_seen, stale.last_seen_at)
+                with contextlib.suppress(ConnectionClosed):
+                    await old.heartbeat(active="run-9")
+                await self.assert_closed_replaced(old)
+                current = self.controller.targets["Host_A"]
+                self.assertIsNone(stale.last_heartbeat)
+                self.assertEqual(seen, (stale.last_seen, stale.last_seen_at))
+                self.assertIsNone(current.last_heartbeat)
+                self.assertIsNone(current.active_run_id)
+                self.assertNotIn("run-9", self.controller.runs)
+                self.assertEqual(1, len(self.dropped_warnings()), self.logs)
+
+    async def test_event_and_run_finished_on_the_old_connection_are_dropped(self):
+        async with FakeRunner(self.port) as old:
+            await self.registered(old, interval=10)
+            message = await self.accepted_run(old)
+            self.slow_close()
+            async with FakeRunner(self.port) as new:
+                await self.replace(new, interval=10, active="run-1")
+                with contextlib.suppress(ConnectionClosed):
+                    await old.send("event", run_id="run-1", event=event("run-1", 1))
+                    await old.send(
+                        "run_finished", request_id=message["request_id"], run_id="run-1",
+                        status="passed", exit_code=0, run_directory="/tmp/run-1",
+                    )
+                await self.assert_closed_replaced(old)
+                run = self.controller.runs["run-1"]
+                # The run stays as the current connection reports it.
+                self.assertEqual(("running", None), (run.status, run.finished_at))
+                self.assertEqual(set(), run.seen)
+                self.assertEqual("run-1", self.controller.targets["Host_A"].active_run_id)
+                # The new connection still reports the run normally.
+                await new.send("event", run_id="run-1", event=event("run-1", 1))
+                await new.send(
+                    "run_finished", request_id=message["request_id"], run_id="run-1",
+                    status="passed", exit_code=0, run_directory="/tmp/run-1",
+                )
+                await wait_until(lambda: run.status == "passed")
+                self.assertEqual({1}, run.seen)
+                self.assertIsNone(self.controller.targets["Host_A"].active_run_id)
+
+    async def test_runner_protocol_error_is_carried_to_the_new_target(self):
+        async with FakeRunner(self.port) as old:
+            await self.registered(old, interval=10)
+            await old.send("protocol_error", reason="bad controller message")
+            await wait_until(
+                lambda: self.controller.targets["Host_A"].last_runner_protocol_error
+            )
+            async with FakeRunner(self.port) as new:
+                stale = await self.replace(new, interval=10)
+                current = self.controller.targets["Host_A"]
+                self.assertIsNot(stale, current)
+                self.assertEqual("bad controller message",
+                                 current.last_runner_protocol_error)
+                await self.assert_closed_replaced(old)
+
+
 class EndToEndTests(ControllerTestCase):
     """The real target runner against the real controller, no hardware."""
 

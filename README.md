@@ -1010,6 +1010,8 @@ connection is half-open can reconnect); the controller logs a warning when the
 replaced connection was still online. The old connection is closed (1008
 `replaced`), and a start or cancel request still waiting on it fails with 503
 `runner reconnected`; ask again and the request goes to the new connection.
+Anything the old connection still sends is dropped with a warning, never
+applied to the target.
 
 ```sh
 python -m ubertooth_harness controller --port 8765 \
