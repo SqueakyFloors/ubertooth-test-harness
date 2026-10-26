@@ -144,6 +144,29 @@ assert summary["not_applicable_cases"] == len(items) == planned, (len(items), pl
 # Every follow/scan case on macOS (no BlueZ); none on Linux (built with BlueZ).
 assert (len(bluez) >= 12) if platform == "macos" else not bluez, bluez
 EOF
+
+    step "BlueZ tools: required in a Linux build's prefix, and their cases run"
+    .venv/bin/python - "$platform" "$WORK/build.json" "$WORK/runs/ci-host/run.jsonl" <<'EOF'
+import json, sys
+platform, build, record = sys.argv[1:]
+tools = ("ubertooth-scan", "ubertooth-follow")
+names = {item["name"] for item in json.load(open(build))["artifacts"]}
+built = [tool for tool in tools if f"built {tool}" in names]
+results = {}
+for line in open(record):
+    event = json.loads(line)
+    case_id = event["details"].get("case_id", "")
+    if event["event_type"] == "check_finished":
+        for tool in tools:
+            if case_id.endswith(f"-{tool}-help"):
+                results[tool] = event["status"]
+print(f"{platform}: built {built}, help cases {results}")
+if platform == "linux":
+    assert built == list(tools), built
+    assert results == {tool: "passed" for tool in tools}, results
+else:
+    assert not built and not results, (built, results)
+EOF
 }
 
 case "${1:-}" in

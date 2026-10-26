@@ -16,25 +16,23 @@ from tests.test_tool_cases import failed_names
 NAME = "Util mode refusals"
 REPOSITORY = Path(__file__).resolve().parents[1]
 NOTE = "note: UBERTOOTH_TEST_NO_DEVICES is set, so no board is selected\n"
-MODES = "qnetxIif"  # util_modes.h order
+MODES = "qnetxIi"  # util_modes.h order
+USAGE = "ubertooth-util - command line utility\nUsage: ...\n"
 DFU_NOTE = "ubertooth-util -f is no longer required - use ubertooth-dfu instead\n"
-STRICT = {
-    "util -N with -f or -i is refused, not dropped",
-    "util -U all with -f or -i: only the -U all refusal",
-}
+COUNT_CASE = "count-with-mode"
 
 
 class FakeUtil:
-    """ubertooth-util's argument checks as at fork 89d9197: stray word, -h/-H,
-    util_check_modes(), -z with a mode, the -f note, -U all, -N, then the
-    board lookup. ``fixed`` models fixes of fork #332 (-N with another option
-    refused) and #333 (the -f note after the -U all check). ``bugs``:
-    pairs-accepted (no mode check), squelch-dropped (no -z check),
-    note-early (the -f note before every check), order-as-given (modes named
-    in command order). ``switch`` False is a library from before b6d8ede."""
+    """ubertooth-util's argument checks as at fork main db5649b: unknown
+    options (-f was removed), stray word, -h/-H, util_check_modes(), -z with
+    a mode, -U all, then -N, which prints the count and carries on to the
+    board lookup. ``bugs``: pairs-accepted (no mode check), squelch-dropped
+    (no -z check), order-as-given (modes named in command order), dfu-mode
+    (-f still a mode, as before db5649b), count-drops (-N prints the count
+    and exits 0, dropping the rest, as before db5649b). ``switch`` False is a
+    library from before b6d8ede."""
 
-    def __init__(self, *, fixed=False, bugs=(), switch=True):
-        self.fixed = fixed
+    def __init__(self, *, bugs=(), switch=True):
         self.bugs = set(bugs)
         self.switch = switch
         self.commands = []
@@ -57,7 +55,7 @@ class FakeUtil:
         return CommandResult(command, code, stdout, stderr, 0.01, False)
 
     def _util(self, command, words):
-        err = []
+        modes_known = MODES + ("f" if "dfu-mode" in self.bugs else "")
         given, operands, device, squelch = [], [], None, False
         index = 0
         while index < len(words):
@@ -67,6 +65,9 @@ class FakeUtil:
                 operands.append(word)
                 continue
             option = word[1]
+            if option == "f" and "dfu-mode" not in self.bugs:
+                return self._result(command, 1, "", "error: unrecognized option '-f'\n"
+                                    + USAGE)
             if option == "U":
                 device = word[2:] or words[index]
                 index += 0 if word[2:] else 1
@@ -74,42 +75,36 @@ class FakeUtil:
             if option == "z":
                 squelch = True
             given.append(option)
-        if "f" in given and "note-early" in self.bugs:
-            err.append(DFU_NOTE)
         if operands:
-            return self._result(command, 1, "", "".join(err)
-                                + f"error: unexpected argument '{operands[0]}'\n")
+            return self._result(command, 1, "",
+                                f"error: unexpected argument '{operands[0]}'\n")
         if "H" in given:
-            return self._result(command, 0, "libubertooth 1.1 (git-test)\n", "".join(err))
+            return self._result(command, 0, "libubertooth 1.1 (git-test)\n")
         if "h" in given:
-            return self._result(command, 0, "ubertooth-util - command line utility\n")
-        modes = [mode for mode in MODES if mode in given]
+            return self._result(command, 0, USAGE)
+        modes = [mode for mode in modes_known if mode in given]
         if "order-as-given" in self.bugs:
-            modes = list(dict.fromkeys(option for option in given if option in MODES))
+            modes = list(dict.fromkeys(option for option in given if option in modes_known))
         if len(modes) > 1 and "pairs-accepted" not in self.bugs:
-            return self._result(command, 1, "", "".join(err) + "error: options "
+            return self._result(command, 1, "", "error: options "
                                 + " ".join("-" + mode for mode in modes)
                                 + " cannot be combined; give only one of "
-                                + " ".join("-" + mode for mode in MODES) + "\n")
+                                + " ".join("-" + mode for mode in modes_known) + "\n")
         if squelch and modes and "squelch-dropped" not in self.bugs:
-            return self._result(command, 1, "", "".join(err)
-                                + f"error: -z cannot be combined with -{modes[0]}\n")
-        if "f" in given and not self.fixed and "note-early" not in self.bugs:
-            err.append(DFU_NOTE)
+            return self._result(command, 1, "",
+                                f"error: -z cannot be combined with -{modes[0]}\n")
         if device == "all":
-            return self._result(command, 1, "", "".join(err)
-                                + "error: -U all only supports the read-only queries -b, "
+            return self._result(command, 1, "",
+                                "error: -U all only supports the read-only queries -b, "
                                 "-v, -V, -p and -s; select one device with "
                                 "-U<index|serial> for other options\n")
-        if "f" in given and self.fixed:
-            err.append(DFU_NOTE)
+        err = DFU_NOTE if "f" in given else ""
         if "N" in given:
-            if self.fixed and len(given) > 1:
-                return self._result(command, 1, "", "error: -N cannot be combined with "
-                                    "other options\n")
-            return self._result(command, 0, "0\n", "".join(err) + NOTE)
-        return self._result(command, 1, "", "".join(err) + NOTE
-                            + "could not open Ubertooth device\n")
+            err += NOTE
+            if "count-drops" in self.bugs or given == ["N"]:
+                return self._result(command, 0, "0\n", err)
+            return self._result(command, 1, "0\n", err + "could not open Ubertooth device\n")
+        return self._result(command, 1, "", err + NOTE + "could not open Ubertooth device\n")
 
 
 def cases(coverage):
@@ -136,18 +131,23 @@ class PatternTests(unittest.TestCase):
 
     def test_messages_follow_the_fork_order(self):
         self.assertRegex(
-            "error: options -i -f cannot be combined; give only one of "
-            "-q -n -e -t -x -I -i -f\n",
-            util_refusal_cases.modes_pattern(("-f", "-i")))
+            "error: options -x -i cannot be combined; give only one of "
+            "-q -n -e -t -x -I -i\n",
+            util_refusal_cases.modes_pattern(("-i", "-x")))
         self.assertNotRegex(
-            "error: options -f -i cannot be combined; give only one of "
+            "error: options -i -x cannot be combined; give only one of "
+            "-q -n -e -t -x -I -i\n",
+            util_refusal_cases.modes_pattern(("-i", "-x")))
+        # The mode list before db5649b, which named -f, no longer matches.
+        self.assertNotRegex(
+            "error: options -x -i cannot be combined; give only one of "
             "-q -n -e -t -x -I -i -f\n",
-            util_refusal_cases.modes_pattern(("-f", "-i")))
+            util_refusal_cases.modes_pattern(("-i", "-x")))
         # -i and -I are different options.
         self.assertNotRegex(
-            "error: options -I -f cannot be combined; give only one of "
-            "-q -n -e -t -x -I -i -f\n",
-            util_refusal_cases.modes_pattern(("-i", "-f")))
+            "error: options -x -I cannot be combined; give only one of "
+            "-q -n -e -t -x -I -i\n",
+            util_refusal_cases.modes_pattern(("-i", "-x")))
         self.assertRegex("error: -z cannot be combined with -i\n",
                          util_refusal_cases.squelch_pattern("-i"))
         self.assertNotRegex("error: -z cannot be combined with -I\n",
@@ -161,12 +161,12 @@ class CaseTests(unittest.TestCase):
         self.assertTrue(definition.implemented)
         self.assertEqual({}, dict(definition.hardware_roles or {}))
         _a, smoke = cases("smoke")
-        # -f and -i with each of the six other modes, and with each other;
-        # then -z with each.
-        self.assertEqual(6 * 2 + 1 + 2, len(smoke))
+        # -i with each of the six other modes; -z with -i; -f unknown.
+        self.assertEqual(6 + 1 + 1, len(smoke))
         _a, full = cases("comprehensive")
         self.assertEqual(len(smoke) + 6, len(full))
         self.assertEqual(len(full), len({case.case_id for case in full}))
+        self.assertNotIn("-f", util_refusal_cases.MODES)
         smoke_ids = {case.case_id for case in smoke}
         pairs = set()
         for case in full:
@@ -184,42 +184,48 @@ class CaseTests(unittest.TestCase):
                     pairs.add(argv[3:])
                 if step not in case.cleanup:
                     self.assertEqual((1,), step.expected_returncodes)
-                    self.assertIn(refusal_cases.NO_BOARD_NOTE, step.forbidden_patterns)
-                    self.assertIn(util_refusal_cases.DFU_NOTE, step.forbidden_patterns)
-        # Every ordered pair with -f or -i, in both orders.
+                    # The -N case runs -i, so the switch's note is printed.
+                    if case.case_id == COUNT_CASE:
+                        self.assertNotIn(refusal_cases.NO_BOARD_NOTE, step.forbidden_patterns)
+                    else:
+                        self.assertIn(refusal_cases.NO_BOARD_NOTE, step.forbidden_patterns)
+        # Every ordered pair with -i, in both orders.
         modes = util_refusal_cases.MODES
-        expected = {(a, b) for a in modes for b in modes
-                    if a != b and {a, b} & {"-f", "-i"}}
+        expected = {(a, b) for a in modes for b in modes if a != b and "-i" in (a, b)}
         self.assertEqual(expected, pairs & expected)
-        self.assertEqual(26, len(expected))
+        self.assertEqual(12, len(expected))
 
-    def test_fork_tool_passes_smoke_and_fails_only_the_strict_cases(self):
+    def test_fork_main_passes_everything(self):
         summary, _events = run(FakeUtil(), coverage="smoke")
         self.assertTrue(summary.passed, summary.failure_reason)
-        summary, events = run(FakeUtil())
-        self.assertFalse(summary.passed)
-        self.assertEqual(sorted(STRICT), failed_names(events))
-
-    def test_fixed_tool_passes_everything(self):
-        summary, _events = run(FakeUtil(fixed=True))
+        summary, _events = run(FakeUtil())
         self.assertTrue(summary.passed, summary.failure_reason)
 
     def test_an_accepted_pair_fails_every_pair_case(self):
-        summary, events = run(FakeUtil(fixed=True, bugs=("pairs-accepted",)), coverage="smoke")
+        summary, events = run(FakeUtil(bugs=("pairs-accepted",)), coverage="smoke")
         self.assertFalse(summary.passed)
-        self.assertEqual(13, len(failed_names(events)))
+        self.assertEqual(6, len(failed_names(events)))
 
-    def test_dropped_squelch_fails_the_squelch_cases(self):
-        summary, events = run(FakeUtil(fixed=True, bugs=("squelch-dropped",)), coverage="smoke")
-        self.assertEqual(["util -z with -f refused", "util -z with -i refused"],
+    def test_dropped_squelch_fails_the_squelch_case(self):
+        summary, events = run(FakeUtil(bugs=("squelch-dropped",)), coverage="smoke")
+        self.assertEqual(["util -z with -i refused"], failed_names(events))
+
+    def test_command_order_fails_every_pair_case(self):
+        summary, events = run(FakeUtil(bugs=("order-as-given",)), coverage="smoke")
+        self.assertEqual(6, len(failed_names(events)))
+
+    def test_dfu_still_a_mode_fails_the_unknown_option_and_pair_cases(self):
+        # Before db5649b: -f is a mode, so the mode list in every pair
+        # refusal names it too.
+        summary, events = run(FakeUtil(bugs=("dfu-mode",)), coverage="smoke")
+        failed = failed_names(events)
+        self.assertIn("util -f is refused as an unknown option", failed)
+        self.assertEqual(6 + 1, len(failed))
+
+    def test_count_dropping_the_mode_fails_the_count_case(self):
+        summary, events = run(FakeUtil(bugs=("count-drops",)))
+        self.assertEqual(["util -N with -i prints the count, then runs -i"],
                          failed_names(events))
-
-    def test_early_dfu_note_and_command_order_fail(self):
-        summary, events = run(FakeUtil(fixed=True, bugs=("note-early",)), coverage="smoke")
-        # Every case with -f: its six pairs, -i -f, and -z with -f.
-        self.assertEqual(8, len(failed_names(events)))
-        summary, events = run(FakeUtil(fixed=True, bugs=("order-as-given",)), coverage="smoke")
-        self.assertEqual(13, len(failed_names(events)))
 
     def test_old_library_skips_and_runs_only_the_host_version(self):
         old = FakeUtil(switch=False)

@@ -19,6 +19,7 @@ NOTE = "note: UBERTOOTH_TEST_NO_DEVICES is set, so no board is selected\n"
 USAGE = {
     "ubertooth-btle": "ubertooth-btle - passive Bluetooth Low Energy monitoring\n",
     "ubertooth-follow": "ubertooth-follow - active(bluez) CLK discovery and follow\n",
+    "ubertooth-scan": "ubertooth-scan - active(Bluez) device scan and inquiry\n",
     "ubertooth-rx": "ubertooth-rx - passive Classic Bluetooth discovery/decode\n",
     "ubertooth-dump": "ubertooth-dump - output a continuous stream of received bits\n",
     "ubertooth-specan": "ubertooth-specan - output a continuous stream of signal strengths\n",
@@ -27,21 +28,25 @@ USAGE = {
 FILE_OPTIONS = {
     "ubertooth-btle": "rqc", "ubertooth-follow": "rqd", "ubertooth-rx": "rqd",
     "ubertooth-dump": "d", "ubertooth-specan": "d", "ubertooth-dfu": "su",
+    "ubertooth-scan": "",
 }
 VALUE_OPTIONS = {
     "ubertooth-btle": "AxstU", "ubertooth-follow": "lueUbw", "ubertooth-rx": "iluUecst",
     "ubertooth-dump": "U", "ubertooth-specan": "luU", "ubertooth-dfu": "dU",
+    "ubertooth-scan": "Uteb",
 }
 
 
 class FakeTools:
-    """The six tools' argument handling as at fork f2e06fa (#264, #286): file
+    """The seven tools' argument handling as at fork f2e06fa (#264, #286): file
     options are named in the option loop and opened after every check, dfu
     -s writes nothing when -d is refused, and "Ignoring extra capture file"
     goes to stderr. ``bugs`` switches on a misbehavior: open-early (a file
     option creates its file in the loop), extra-stdout, temp-left (dfu -u
     leaves its temporary file), sign-first (fork #286, before f2e06fa: dfu -s
-    writes its .dfu before the -d image check).
+    writes its .dfu before the -d image check), help-first (-h prints the
+    usage before the stray-word check), no-double-dash (a word after "--"
+    is read as an option).
     ``missing`` tools are not installed; ``switch`` False is a library from
     before b6d8ede."""
 
@@ -84,6 +89,12 @@ class FakeTools:
         index = 0
         while index < len(words):
             word = words[index]
+            if word == "--" and "no-double-dash" not in self.bugs:
+                operands.extend(words[index + 1:])
+                break
+            if word == "--":
+                index += 1
+                continue
             if not word.startswith("-") or word == "-":
                 operands.append(word)
                 index += 1
@@ -115,6 +126,8 @@ class FakeTools:
                 continue
             flags.append((option, None))
             index += 1
+        if ("h", None) in flags and "help-first" in self.bugs:
+            return self._result(command, 1, "".join(out) + USAGE[tool], "".join(err))
         if operands:
             return self._result(command, 1, "".join(out), "".join(err)
                                 + f"error: unexpected argument '{operands[0]}'\n")
@@ -285,10 +298,10 @@ class CaseTests(unittest.TestCase):
         self.assertEqual({}, dict(definition.hardware_roles or {}))
         _a, smoke = cases("smoke")
         # 3 ways for each of 13 file options (dump has its -U), plus the three
-        # extra-capture-file cases.
-        self.assertEqual(13 * 3 + 3, len(smoke))
+        # extra-capture-file cases and a stray word on scan and follow.
+        self.assertEqual(13 * 3 + 3 + 2, len(smoke))
         _a, full = cases("comprehensive")
-        self.assertEqual(len(smoke) + 14, len(full))
+        self.assertEqual(len(smoke) + 14 + 6, len(full))
         self.assertEqual(len(full), len({case.case_id for case in full}))
         context = {"capture dir": "/run/captures/x"}
         for case in full:
@@ -324,8 +337,9 @@ class CaseTests(unittest.TestCase):
         self.assertFalse(summary.passed)
         failed = failed_names(events)
         # Every file option in every refusal; btle -n -q - -q <file> opened the
-        # ignored file too.
+        # ignored file too. The scan and follow stray cases name no file.
         self.assertEqual(13 * 3 + 3, len(failed))
+        self.assertFalse([name for name in failed if "is refused" in name])
 
     def test_extra_capture_note_on_stdout_fails(self):
         summary, events = run(FakeTools(bugs=("extra-stdout",)), coverage="smoke")
@@ -353,6 +367,54 @@ class CaseTests(unittest.TestCase):
         summary, _events = run(old)
         self.assertTrue(summary.passed, summary.failure_reason)
         self.assertFalse(any(c[:2] == refusal_cases.NO_DEVICES for c in old.commands))
+
+
+class BluezStrayWordTests(unittest.TestCase):
+    """The one argument rule on ubertooth-scan and ubertooth-follow (fork
+    0b63b01, opt_check_no_operands(); ubertooth-scan.md and
+    ubertooth-follow.md, ARGUMENTS)."""
+
+    def test_cases_need_bluez_and_name_the_offending_word(self):
+        _a, smoke = cases("smoke")
+        smoke_ids = {c.case_id for c in smoke}
+        self.assertLessEqual({"scan-stray", "follow-stray"}, smoke_ids)
+        self.assertFalse({"scan-help-stray", "follow-bare-dash"} & smoke_ids)
+        _a, full = cases("comprehensive")
+        ids = [c.case_id for c in full]
+        for tool in ("scan", "follow"):
+            for slug in ("stray", "help-stray", "bare-dash", "after-double-dash"):
+                case = full[ids.index(f"{tool}-{slug}")]
+                with self.subTest(case.case_id):
+                    self.assertEqual((f"ubertooth-{tool}",), case.needs.bluez_tools)
+                    refuse = case.steps[[s.step_id for s in case.steps].index("refuse")]
+                    self.assertEqual(refusal_cases.NO_DEVICES + (f"ubertooth-{tool}",),
+                                     refuse.resolve_argv({"capture dir": "/x"})[:3])
+                    self.assertEqual((1,), refuse.expected_returncodes)
+        case = full[ids.index("scan-after-double-dash")]
+        refuse = case.steps[[s.step_id for s in case.steps].index("refuse")]
+        self.assertEqual(("--", "-x"), refuse.resolve_argv({"capture dir": "/x"})[3:])
+        self.assertIn("'\\-x'", refuse.output_patterns[0])
+
+    def test_not_applicable_without_bluez(self):
+        from ubertooth_harness.hostneeds import HostCapabilities, unmet
+        _a, full = cases("comprehensive")
+        mac = HostCapabilities("Host_Mac", "macos", bluez_tools=frozenset())
+        left_out = [c.case_id for c in full if unmet(c.needs, mac)]
+        for tool in ("scan", "follow"):
+            for slug in ("stray", "help-stray", "bare-dash", "after-double-dash"):
+                self.assertIn(f"{tool}-{slug}", left_out)
+
+    def test_help_before_the_stray_check_fails(self):
+        summary, events = run(FakeTools(bugs=("help-first",)))
+        self.assertFalse(summary.passed)
+        self.assertIn("scan: -h and a stray word 'stray' is refused", failed_names(events))
+        self.assertIn("follow: -h and a stray word 'stray' is refused", failed_names(events))
+
+    def test_a_word_after_double_dash_read_as_an_option_fails(self):
+        summary, events = run(FakeTools(bugs=("no-double-dash",)))
+        self.assertFalse(summary.passed)
+        self.assertEqual(["follow: -x after -- is refused", "scan: -x after -- is refused"],
+                         failed_names(events))
 
 
 if __name__ == "__main__":
