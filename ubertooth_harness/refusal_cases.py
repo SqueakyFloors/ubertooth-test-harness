@@ -8,8 +8,9 @@ passed (ubertooth-dfu adds: and leaves no temporary file). The same change
 moved "Ignoring extra capture file" to standard error, so it cannot land in a
 capture written to stdout (ubertooth-btle -q -). Since fork e4f1dc5 (fork
 #377) ubertooth-btle words that note "warning: ignoring extra capture file:"
-and exits 0 for -h, which still creates and truncates nothing
-(ubertooth-btle.md, DIAGNOSTICS and EXIT STATUS).
+(ubertooth-btle.md, DIAGNOSTICS). -h exits 0 on every tool since fork
+12211ce (fork #406; btle since e4f1dc5) and still creates and truncates
+nothing.
 
 Each case seeds files with known contents in its own capture directory,
 refuses one command naming a new file and one naming a seeded file, then
@@ -78,11 +79,12 @@ class Tool:
 
 
 TOOLS = (
-    # -h exits 0 since fork e4f1dc5 (fork #377); it was 1.
+    # -h exits 0 on every tool: btle since fork e4f1dc5 (fork #377), follow
+    # and dfu since 12211ce (fork #406); each was 1.
     Tool("ubertooth-btle", r"(?m)^ubertooth-btle - passive Bluetooth Low Energy", 0,
          ("-A", "40"), r"error: advertising channel index must be ",
          (("-r", "pcapng"), ("-q", "pcap"), ("-c", "pcap"))),
-    Tool("ubertooth-follow", r"(?m)^ubertooth-follow - active", 1,
+    Tool("ubertooth-follow", r"(?m)^ubertooth-follow - active", 0,
          ("-e", "9"), r"error: maximum access code errors must be ",
          (("-r", "pcapng"), ("-q", "pcap"), ("-d", "dump"))),
     Tool("ubertooth-rx", r"(?m)^ubertooth-rx - passive Classic Bluetooth", 0,
@@ -97,9 +99,10 @@ TOOLS = (
          ("-l", "9999"), r"error: lower frequency must be ",
          (("-d", "specan"),)),
     # -s names the .bin to sign and writes the .dfu beside it; -u writes its
-    # name through a temporary file. A second -s that is not a .bin is refused.
-    Tool("ubertooth-dfu", r"(?m)^ubertooth-dfu - Ubertooth firmware update tool", 1,
-         ("-s", "other.txt"), r"Error: -s requires a \.bin",
+    # name through a temporary file. A second -s that is not a .bin is refused
+    # ("error: ..." since fork 12211ce, it was "Error: ...").
+    Tool("ubertooth-dfu", r"(?m)^ubertooth-dfu - Ubertooth firmware update tool", 0,
+         ("-s", "other.txt"), r"error: -s requires a \.bin",
          (("-s", "bin"), ("-u", "bin"))),
 )
 

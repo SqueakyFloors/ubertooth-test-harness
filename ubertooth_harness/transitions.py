@@ -1334,9 +1334,9 @@ REJECTIONS = (
               r"error: advertising channel index must be 37-39 \(got 36\)"),
     Rejection("btle-adv-index-40", "ubertooth-btle", ("-A40",),
               r"error: advertising channel index must be 37-39 \(got 40\)"),
-    # btle prints its usage text after this message for a MAC it cannot parse;
-    # one "error: " line on stderr since fork e4f1dc5 (fork #377), it was
-    # "Error: MAC address is wrong length" on stdout.
+    # One "error: " line on stderr since fork e4f1dc5 (fork #377), it was
+    # "Error: MAC address is wrong length" on stdout; no usage text after it
+    # since 12211ce (fork #406).
     Rejection("btle-bad-target-mac", "ubertooth-btle", ("-tnot-a-mac",),
               r"error: MAC address must be xx:xx:xx:xx:xx:xx \(got not-a-mac\)"),
     Rejection("ego-length-0", "ubertooth-ego", ("-l0",),

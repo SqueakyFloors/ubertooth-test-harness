@@ -90,7 +90,7 @@ class FakeDfu:
         options = dict(zip(rest[0::2], rest[1::2]))
         sign, image = options.get("-s"), options.get("-d")
         if sign is not None and not sign.endswith(".bin"):
-            return self._result(command, 1, "Error: -s requires a .bin\n")
+            return self._result(command, 1, "error: -s requires a .bin\n")
         if image is not None and not Path(image).exists():
             return self._result(command, 1, "", f"{image}: No such file or directory\n")
         out = "Checking firmware signature\n" if image is not None else ""

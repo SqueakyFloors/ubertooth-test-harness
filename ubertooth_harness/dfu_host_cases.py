@@ -247,7 +247,7 @@ def _sign_cases():
            needs=Needs(firmware_build=True)),
         _case("sign-refuses-dfu", "-s refuses a .dfu", (
             _synth(), _state_before(),
-            _sign(SYNTHETIC_DFU, returncodes=(1,), patterns=(r"Error: -s requires a \.bin",)),
+            _sign(SYNTHETIC_DFU, returncodes=(1,), patterns=(r"error: -s requires a \.bin",)),
             _state_after(),
         ), "exit 1; nothing written, the .dfu unchanged"),
         _case("sign-refuses-suffixed-bin", "-s refuses a .bin that already has a suffix", (

@@ -171,7 +171,7 @@ def _suffix_extra_cases(serial):
                          pattern=r"Copied"),
             Step("suffix", "ubertooth-dfu -s signed.dfu",
                  _tool("ubertooth-dfu", "-s", _file("signed.dfu")),
-                 expected_returncodes=(1,), output_patterns=(r"-s requires a \.bin",)),
+                 expected_returncodes=(1,), output_patterns=(r"error: -s requires a \.bin",)),
             _helper_step("unchanged", "signed.dfu unchanged", "same", _file("signed.dfu"), _image,
                          pattern=r"Unchanged"),
         ), "refused with exit 1; the file unchanged"),
