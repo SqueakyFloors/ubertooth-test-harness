@@ -169,7 +169,10 @@ if [ "$two_hop" = 1 ]; then
     esac
     # The inner ssh runs on the jump host and creates the socket there, owner
     # only (mask 0177), replacing a stale one from an earlier tunnel.
-    cmd=(ssh -t "${opts[@]}" -L "127.0.0.1:$local_port:$jump_socket" "$jump"
+    # RemoteCommand=none: a jump-host alias that sets RemoteCommand in its
+    # ssh config would otherwise refuse the inner ssh ("Cannot execute
+    # command-line and remote command").
+    cmd=(ssh -t -o RemoteCommand=none "${opts[@]}" -L "127.0.0.1:$local_port:$jump_socket" "$jump"
          ssh -N "${opts[@]}" -o StreamLocalBindMask=0177 -o StreamLocalBindUnlink=yes
          -L "$jump_socket:127.0.0.1:$port" "$host")
 elif [ -n "$jump" ]; then
