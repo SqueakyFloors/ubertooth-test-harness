@@ -198,10 +198,13 @@ strictly ordered events (`run_started`, operation start/result, and one terminal
 `run_started` (and any build commands) comes one `manifest` record, then
 `preflight_started`, per-check command/output events, and `preflight_finished`
 before any `test_started`. `report.md` is compiled from run.jsonl when the run
-ends; no other per-test or per-command files are written. Every external process
-additionally emits `command_started`,
-bounded incremental `command_output` chunks tagged `stdout`/`stderr`, and
-`command_finished`. Stdout and stderr are drained concurrently before process
+ends. Every external process (build, preflight, test, and flash commands alike)
+additionally emits `command_started`, bounded incremental `command_output`
+chunks tagged `stdout`/`stderr`, and `command_finished`. run.jsonl keeps only
+the first and last output records of a command that prints a lot (200 records
+or 64 KiB, then 50 records or 16 KiB), with a `command_output_omitted` record
+between them; that command's full output goes to `output/<command id>.log` in
+the run directory, the only other per-command file. Stdout and stderr are drained concurrently before process
 completion, timeout, or cancellation, so a CLI or GUI displays the command as
 it happens without deadlocking a noisy child.
 

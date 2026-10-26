@@ -22,7 +22,7 @@ from ubertooth_harness.manifest import ManifestError, RunManifest
 from ubertooth_harness.planner import TestInvocation, alternated_roles
 from ubertooth_harness.power import PowerControllerError
 from ubertooth_harness.preflight import PreflightCheck
-from ubertooth_harness.rawlog import OUTPUT_DIR, CappedOutput
+from ubertooth_harness.rawlog import record_output
 from ubertooth_harness.topology import IsolationCancelled, applied_power_isolation
 from ubertooth_harness.report import write_report
 from ubertooth_harness.cases import FlashCase
@@ -71,7 +71,6 @@ class SequencerSummary:
 
 
 _MAX_REASON_CHARS = 4096
-_OUTPUT_CHUNK = 4096
 
 
 def _full_reason(error: BaseException) -> str:
@@ -116,17 +115,6 @@ class StateCaseResult:
 
 def _path_safe(name: str) -> str:
     return "".join(c if c.isalnum() or c in "._-" else "-" for c in name)
-
-
-def _output_log_path(output_dir: Path, command_id: str) -> Path:
-    """A new output/<command id>.log; a repeated ID gets a numbered name."""
-    base = output_dir / OUTPUT_DIR / _path_safe(command_id)
-    path = base.with_name(base.name + ".log")
-    number = 2
-    while path.exists():
-        path = base.with_name(f"{base.name}-{number}.log")
-        number += 1
-    return path
 
 
 class NamedTestSequencer:
@@ -250,6 +238,7 @@ class NamedTestSequencer:
         case: FlashCase,
         case_id: str,
         manifest: RunManifest,
+        output_dir: Path,
     ) -> tuple[str, str]:
         """Run flash reliability as one case; return (failure, status)."""
         owner = {
@@ -261,7 +250,8 @@ class NamedTestSequencer:
         try:
             request = self._flash_request(case, invocation, manifest)
             summary = FlashReliabilityRunner(self.executor, clock=self.clock).run(
-                request, publisher, cancellation=token, owner=owner
+                request, publisher, cancellation=token, owner=owner,
+                output_dir=output_dir,
             )
             failure = "" if summary.passed else f"{case.name}: {summary.failure_reason}"
             status = summary.status
@@ -425,51 +415,18 @@ class NamedTestSequencer:
         details = dict(owner)
         details.update({"command_id": command_id, "argv": list(argv)})
         publisher.emit("command_started", "running", details)
-        streamed = []
-
-        def record(stream_name: str, text: str, received) -> None:
-            output_details = dict(owner)
-            output_details.update({
-                "command_id": command_id,
-                "stream": stream_name,
-                "text": text,
-            })
-            if received is not None:
-                # A tail record emitted after the command ended.
-                output_details["received"] = received
-            publisher.emit("command_output", "running", output_details)
-
-        def open_spill():
-            path = _output_log_path(output_dir, command_id)
-            return path, path.relative_to(output_dir).as_posix()
-
-        def note(omitted: dict) -> None:
-            note_details = dict(owner)
-            note_details.update({"command_id": command_id, **omitted})
-            publisher.emit("command_output_omitted", "running", note_details)
-
-        capped = CappedOutput(record, open_spill)
-
-        def output(stream_name: str, text: str) -> None:
-            streamed.append(stream_name)
-            capped.add(publisher.utc_now(), stream_name, text)
-
-        try:
-            result = self.executor.run(
+        result, spilled = record_output(
+            publisher,
+            lambda on_output: self.executor.run(
                 argv,
                 timeout_s=timeout_s,
                 cancellation=token,
-                on_output=output,
-            )
-            if not streamed:
-                # The executor did not stream; record its collected output so
-                # the run directory still holds every response.
-                for stream_name, text in (("stdout", result.stdout), ("stderr", result.stderr)):
-                    for start in range(0, len(text), _OUTPUT_CHUNK):
-                        output(stream_name, text[start:start + _OUTPUT_CHUNK])
-        finally:
-            capped.close()
-        spilled = capped.finish(note)
+                on_output=on_output,
+            ),
+            details={**owner, "command_id": command_id},
+            output_dir=output_dir,
+            spill_name=command_id,
+        )
         command_status = (
             "canceled" if result.cancelled
             # A continuous mode reaching its deadline is the expected stop.
@@ -1228,7 +1185,8 @@ class NamedTestSequencer:
                             case_id = f"{invocation.invocation_id}-{case.case_id}"
                             if isinstance(case, FlashCase):
                                 failure_text, flash_status = self._run_flash_case(
-                                    publisher, token, invocation, case, case_id, manifest
+                                    publisher, token, invocation, case, case_id, manifest,
+                                    output_dir,
                                 )
                                 if failure_text:
                                     unsafe = True
