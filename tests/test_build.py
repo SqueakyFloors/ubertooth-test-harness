@@ -184,7 +184,7 @@ class BuilderTests(unittest.TestCase):
             plan = make_plan(work, with_firmware=True)
             executor = FakeBuildExecutor(plan)
 
-            result = Builder(executor, publisher_in(work)).run(plan)
+            result = Builder(executor, publisher_in(work), run_dir=work).run(plan)
 
             self.assertEqual(
                 {"cmake", "cc", "pkg-config", "libusb-1.0", "bluez", "arm-none-eabi-gcc"},
@@ -217,7 +217,7 @@ class BuilderTests(unittest.TestCase):
             executor = FakeBuildExecutor(plan, fail_step="host-build")
 
             with self.assertRaisesRegex(BuildError, "Build Ubertooth host tools exited 2"):
-                Builder(executor, publisher_in(work)).run(plan)
+                Builder(executor, publisher_in(work), run_dir=work).run(plan)
 
             self.assertNotIn("host-install", [c[0] for c, _cwd in executor.calls])
 
@@ -230,7 +230,7 @@ class BuilderTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as work, self.subTest(reported=reported):
                 plan = make_plan(work)
                 with self.assertRaisesRegex(BuildError, "expected"):
-                    Builder(FakeBuildExecutor(plan, host_version=reported), publisher_in(work)).run(plan)
+                    Builder(FakeBuildExecutor(plan, host_version=reported), publisher_in(work), run_dir=work).run(plan)
 
     def test_every_catalog_tool_must_come_from_the_prefix(self):
         with tempfile.TemporaryDirectory() as work:
@@ -239,7 +239,7 @@ class BuilderTests(unittest.TestCase):
                 plan, installed_tools=tuple(t for t in BUILT_TOOLS if t != "ubertooth-btle")
             )
             with self.assertRaisesRegex(BuildError, "did not install: ubertooth-btle"):
-                Builder(executor, publisher_in(work)).run(plan)
+                Builder(executor, publisher_in(work), run_dir=work).run(plan)
 
     def test_a_linux_build_must_install_the_bluez_tools(self):
         # REQUIRE_ALL=ON on Linux: a build without them is a build problem,
@@ -251,13 +251,13 @@ class BuilderTests(unittest.TestCase):
                     plan, installed_tools=tuple(t for t in required_tools(plan) if t != tool)
                 )
                 with self.assertRaisesRegex(BuildError, f"did not install: {tool} into"):
-                    Builder(executor, publisher_in(work)).run(plan)
+                    Builder(executor, publisher_in(work), run_dir=work).run(plan)
 
     def test_a_macos_build_does_not_need_the_bluez_tools(self):
         with tempfile.TemporaryDirectory() as work:
             plan = make_plan(work, platform="macos")
             self.assertEqual(BUILT_TOOLS, required_tools(plan))
-            result = Builder(FakeBuildExecutor(plan), publisher_in(work)).run(plan)
+            result = Builder(FakeBuildExecutor(plan), publisher_in(work), run_dir=work).run(plan)
             names = {item.name for item in result.artifacts}
             self.assertFalse({f"built {tool}" for tool in BLUEZ_TOOLS} & names)
 
@@ -286,7 +286,7 @@ class BuilderTests(unittest.TestCase):
 
             executor.run = run
             with self.assertRaisesRegex(BuildError, "build canceled: received SIGINT"):
-                Builder(executor, publisher_in(work), cancellation=token).run(plan)
+                Builder(executor, publisher_in(work), run_dir=work, cancellation=token).run(plan)
             self.assertEqual(1, sum(c[0][:2] == ("cmake", "--build") for c in executor.calls))
 
     def test_whole_build_deadline_caps_command_timeouts(self):
@@ -308,14 +308,14 @@ class BuilderTests(unittest.TestCase):
                 return now[0]
 
             with self.assertRaisesRegex(BuildError, "exceeded 10s"):
-                Builder(executor, publisher_in(work), deadline_s=10.0, clock=clock).run(plan)
+                Builder(executor, publisher_in(work), run_dir=work, deadline_s=10.0, clock=clock).run(plan)
             self.assertTrue(all(timeout <= 10.0 for timeout in timeouts))
 
     def test_missing_library_is_named(self):
         with tempfile.TemporaryDirectory() as work:
             plan = make_plan(work)
             with self.assertRaisesRegex(BuildError, "missing library: bluez.*libbluetooth-dev"):
-                Builder(FakeBuildExecutor(plan, missing_library="bluez"), publisher_in(work)).run(plan)
+                Builder(FakeBuildExecutor(plan, missing_library="bluez"), publisher_in(work), run_dir=work).run(plan)
 
 
 class ExecutorEnvironmentTests(unittest.TestCase):

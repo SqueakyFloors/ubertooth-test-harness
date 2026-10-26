@@ -9,6 +9,19 @@ A run takes every board it touches (selected, guard, alternated, and
 power-isolated boards) all or nothing, before preflight, and holds them until
 it ends. Taking all or nothing (release everything and retry when any board
 is busy) means two multi-board runs can never deadlock.
+
+The host lock, ``<lease dir>/host-power.lock``, is the same kind of lease for
+the host itself: every harness command that switches USB power (power
+isolation, StarTech or Acroname) or writes firmware (Flash reliability, DFU
+images, a manual ``ubertooth-dfu`` under ``lease``) holds it for as long as
+it runs, so power changes and firmware writes on one host never overlap.
+A second such command fails at once and names the holder.
+
+Lock order: the host lock is always taken first, then the boards in serial
+order, in one all-or-nothing attempt; nothing ever blocks while holding a
+lock (a busy lock releases everything and the attempt is retried until the
+deadline). A process never takes the host lock after it already holds a
+board lease, so no two harness processes can wait on each other.
 """
 
 from __future__ import annotations
@@ -46,6 +59,11 @@ class Board:
 
     alias: str
     key: str
+
+
+# The per-host power/firmware lock. Its key cannot clash with a board's,
+# which is always 32 hex digits.
+HOST_LOCK = Board("host lock", "host-power")
 
 
 @dataclass
@@ -115,6 +133,21 @@ def boards_for_invocations(invocations: Iterable, registry) -> tuple[Board, ...]
             board = Board(alias, board_key(alias, registry.get(alias).identity))
             found.setdefault(board.key, board)
     return tuple(sorted(found.values(), key=lambda b: b.key))
+
+
+def needs_host_lock(invocations: Iterable, catalog) -> bool:
+    """True when the run switches USB power or writes firmware on its host.
+
+    Power isolation (and the exclusive-Ubertooth check, which scans USB while
+    another run could be switching it) and tests that write firmware hold the
+    host lock for the whole run.
+    """
+    for invocation in invocations:
+        if invocation.power_isolation or getattr(invocation, "exclusive_ubertooth", False):
+            return True
+        if catalog.get(invocation.test_name).writes_firmware:
+            return True
+    return False
 
 
 def holder_info(*, run_id: str | None, owner: str | None, purpose: str) -> dict:
@@ -210,9 +243,14 @@ def acquire(
     wait_s: float = 0.0,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
+    host_lock: bool = False,
 ) -> LeaseSet:
-    """Lease every board, all or nothing, waiting up to wait_s for busy ones."""
-    if not boards:
+    """Lease every board, all or nothing, waiting up to wait_s for busy ones.
+
+    With host_lock, the host lock is taken too, before any board (see the
+    module docstring for the order).
+    """
+    if not boards and not host_lock:
         return LeaseSet()
     root = lease_dir(directory)
     try:
@@ -226,6 +264,8 @@ def acquire(
     for board in boards:
         unique.setdefault(board.key, board)  # first alias wins, as in boards_for_invocations
     ordered = sorted(unique.values(), key=lambda b: b.key)
+    if host_lock:
+        ordered.insert(0, HOST_LOCK)
     while True:
         held: list[Lease] = []
         busy: tuple[Board, Path] | None = None
@@ -247,6 +287,13 @@ def acquire(
         board, path = busy
         if clock() >= deadline:
             waited = f" after waiting {wait_s:g}s" if wait_s else ""
+            if board == HOST_LOCK:
+                raise LeaseError(
+                    f"this host's power/firmware lock is in use{waited}: held by "
+                    f"{describe_holder(read_holder(path))} ({path}); another "
+                    "harness command is switching USB power or writing firmware "
+                    "here; retry when it ends, or use --wait-for-boards MINUTES"
+                )
             raise LeaseError(
                 f"{board.alias} is in use{waited}: held by "
                 f"{describe_holder(read_holder(path))} ({path}); "
@@ -273,6 +320,13 @@ def board_states(
                 os.close(fd)
         states.append(state)
     return states
+
+
+def host_lock_state(*, directory: Path | str | None = None) -> dict:
+    """Free or held, and by whom, for the host lock (as board_states)."""
+    state = board_states([HOST_LOCK], directory=directory)[0]
+    state["host_lock"] = True
+    return state
 
 
 def exit_status(returncode: int) -> int:

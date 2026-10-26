@@ -28,8 +28,6 @@ LEGEND = (
     "`+++` opens a step and `---` closes it; `===` marks the run, build, "
     "preflight, and each test."
 )
-# A continuous capture can print megabytes; the full output stays in run.jsonl.
-MAX_COMMAND_OUTPUT_CHARS = 64 * 1024
 
 
 def load_events(path: Path | str) -> list[dict]:
@@ -284,6 +282,14 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
         ))
     artifacts = manifest.get("artifacts", [])
     held = manifest.get("leases") or []
+    host_lock = [item for item in held if item.get("key") == "host-power"]
+    held = [item for item in held if item.get("key") != "host-power"]
+    if host_lock:
+        rows.append((
+            "Host lock",
+            f"since {host_lock[0].get('acquired_at')} (held for the whole run: "
+            "no other harness power change or firmware write on this host)",
+        ))
     if held:
         rows.append((
             "Board leases",
@@ -407,21 +413,8 @@ def _command_record(
 ) -> str:
     sd = started["details"]
     fd = finished["details"] if finished else {}
-    omitted = 0
-    kept = []
-    total = 0
-    capped = bool(fd.get("output_file"))  # already capped when recorded
-    for output in outputs:
-        if output["event_type"] == "command_output_omitted":
-            kept.append(output)
-            continue
-        text = output["details"].get("text", "")
-        if not capped and total + len(text) > MAX_COMMAND_OUTPUT_CHARS:
-            omitted += len(text)
-            continue
-        total += len(text)
-        kept.append(output)
-    outputs = kept
+    # Every command's output records are already capped in run.jsonl
+    # (rawlog.RECORD_*, the rest in output/), so the report shows them all.
     stdout = "".join(o["details"]["text"] for o in outputs if o["details"].get("stream") == "stdout")
     stderr = "".join(o["details"]["text"] for o in outputs if o["details"].get("stream") == "stderr")
     result = CommandResult(
@@ -443,11 +436,6 @@ def _command_record(
     capture.finished = _time(finished) if finished else None
     stopped = bool(finished) and finished.get("status") == "stopped"
     record = format_command_record(result, capture, stopped=stopped, stamp=stamp)
-    if omitted:
-        record += (
-            f"{stamp(_time(finished or started))} [M] {omitted} more characters of output "
-            "are in run.jsonl\n"
-        )
     if finished is None:
         tool = Path(result.argv[0]).name if result.argv else "command"
         record += f"{stamp(_time(outputs[-1] if outputs else started))} [R] {tool} did not finish\n"

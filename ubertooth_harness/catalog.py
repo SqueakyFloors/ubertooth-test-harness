@@ -206,6 +206,9 @@ class TestDefinition:
     # The test writes the firmware it then verifies, so preflight does not
     # require the resolved revision on its Ubertooth beforehand.
     establishes_firmware: bool = False
+    # The test writes firmware to a board, so run-suite holds the host lock
+    # (leases.py) for the run: no power change or other write may overlap it.
+    writes_firmware: bool = False
     # Cross-argument rule checked on the normalized arguments (no registry).
     check_arguments: Callable[[Mapping], None] | None = None
     # The planner binds every other registered Ubertooth on the host as a
@@ -987,6 +990,7 @@ def builtin_catalog() -> TestCatalog:
             MappingProxyType({"Ubertooth": "Ubertooth"}),
             command_builder=_flash_reliability_cases,
             establishes_firmware=True,
+            writes_firmware=True,
             check_arguments=_check_alternation,
         ),
         stateful_test(
@@ -998,6 +1002,7 @@ def builtin_catalog() -> TestCatalog:
             # Every case ends with the test image written, read back, and
             # verified, so the test must be the last on its board.
             establishes_firmware=True,
+            writes_firmware=True,
         ),
         TestDefinition(
             "Exclusive Ubertooth topology",

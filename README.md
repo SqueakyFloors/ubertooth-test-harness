@@ -172,8 +172,10 @@ first, bit 0 = port 1), OR in the bits for those ports, and send `SP` + the
 password padded to 8 characters + the new mask, each CR-terminated. For
 example, with the factory password `pass`, if `GP` returns `09000000` (ports 1
 and 4 set) and port 3 must come back, send `SPpass    0D000000`. Acroname:
-enable the port's power through BrainStem. Exclusive host/hub ownership across concurrent harness runs is not
-yet enforced ([#25](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/25)).
+enable the port's power through BrainStem. A run with power isolation
+(StarTech or Acroname) holds the [host lock](#sharing-boards-leases) for the
+whole run, so no other harness command switches power or writes firmware on
+that host meanwhile.
 
 [`testplans/exclusive.yaml`](testplans/exclusive.yaml) runs the `Exclusive Ubertooth topology` test, which
 checks with no `-U` selector that the selected board answers `ubertooth-util
@@ -710,6 +712,27 @@ ubertooth-harness lease --hardware hardware.yaml --owner "agent #14" UT_Mac0 -- 
 command inherits the locks, so they stay held even if the harness process is
 killed first. Use it for every manual Ubertooth command on a shared host.
 
+### The host lock
+
+Every harness command that switches USB power or writes firmware also holds
+the host lock, `<lease dir>/host-power.lock`, the same kind of `flock` lease
+(released by the kernel when the holder exits, so it never goes stale): a
+`run-suite` with power isolation (StarTech or Acroname) or an exclusive
+Ubertooth check, `Flash reliability`, or `DFU images` holds it for the whole
+run, and `lease` holds it for its command with `--host-lock`, or always when
+the command is `ubertooth-dfu`. A second such command on the host fails at
+once, before any build or device command, and names the holder (owner, run,
+command, pid, and since when); `--wait-for-boards` waits for it as for a
+board. `ubertooth-harness boards` shows it as `host lock`, and the run report
+records it. Runs that neither switch power nor write firmware do not take it,
+so they still share the host.
+
+Lock order: the host lock first, then the boards in serial order, taken in one
+all-or-nothing attempt. Nothing blocks while holding a lock (a busy lock
+releases everything and the attempt is retried until the deadline), and no
+command takes the host lock after it already holds a board, so runs and
+manual leases cannot deadlock.
+
 ## MAC polling workload soak
 
 [`testplans/mac-polling.yaml`](testplans/mac-polling.yaml) contains one dedicated `MAC polling soak` item.
@@ -790,24 +813,26 @@ lines open and close the run, build, preflight, and each test:
 
 A command that printed one line is two lines, with the response on the `[R]`
 line. Longer output stamps each `[O]`/`[E]` line when it arrived, in arrival
-order, before the `[R]` line. Very long output is capped in the report; the
-rest stays in run.jsonl. The live terminal stream on stderr uses the same
+order, before the `[R]` line. The live terminal stream on stderr uses the same
 `[C]`/`[O]`/`[E]`/`[R]` command tags.
 
 Every response is kept, but run.jsonl holds at most the first 200 output
-records or 64 KiB, and the last 50 records or 16 KiB, of each preflight or
-test command's output (bytes as written to run.jsonl, JSON escapes included,
-so a 4-byte character counts 12). Past the first limits, the command's full
-output, from its first line, goes to `output/<command id>.log` in the run
-directory as it arrives, one `<UTC time> [O]` or `[E]` line per output line in
-arrival order. The live stream then gets no more output records until the
+records or 64 KiB, and the last 50 records or 16 KiB, of each build,
+preflight, test or flash command's output (bytes as written to run.jsonl, JSON
+escapes included, so a 4-byte character counts 12). Past the first limits, the
+command's full output, from its first line, goes to `output/<command id>.log`
+in the run directory as it arrives, one `<UTC time> [O]` or `[E]` line per
+output line in arrival order. A flash command's file also names its test, for
+example `output/003-Flash-reliability-flash-0001.log`, because flash command
+IDs repeat in every flash test. The live stream then gets no more output records until the
 command ends; then a `command_output_omitted` record names the file
 (`output_file`), summarizes what run.jsonl left out (`output_omitted`:
 stdout and stderr line and character counts and the ten most common line
 shapes, digit runs replaced by `N`, with their counts) and gives in `received`
 when the left-out output ended; it is followed by the last
 records (each with its arrival time in `received`, starting at a whole line),
-so the GUI failure summary and report.md show how the command ended.
+so the GUI failure summary (for a failed test or build) and report.md show how
+the command ended; report.md shows every output record run.jsonl holds.
 `command_finished` repeats `output_file` and `output_omitted`. The newest
 output, such as the harness's own timeout, cancellation or `OUTPUT SINK ERROR`
 line, is always among the last records. report.md shows the gap as `[M]`
@@ -822,8 +847,9 @@ lines between the first and last lines:
 ```
 
 This keeps the per-block progress lines `ubertooth-dump` prints on stderr
-(about 2500 a second) and long packet listings out of run.jsonl: on a release
-run that cut run.jsonl from 48 MB to about 20 MB, and the dump stderr records
+(about 2500 a second), the per-block progress of each `ubertooth-dfu` in a
+flash reliability run, compiler output, and long packet listings out of
+run.jsonl: on a release run that cut run.jsonl from 48 MB to about 20 MB, and the dump stderr records
 from 15 MB to 1 MB. Checks still see each command's complete output. Through
 the runner service the `output/` files stay in the runner's run directory;
 only run.jsonl records reach the controller.
@@ -1036,6 +1062,8 @@ connection is half-open can reconnect); the controller logs a warning when the
 replaced connection was still online. The old connection is closed (1008
 `replaced`), and a start or cancel request still waiting on it fails with 503
 `runner reconnected`; ask again and the request goes to the new connection.
+Anything the old connection still sends is dropped with a warning, never
+applied to the target.
 
 ```sh
 python -m ubertooth_harness controller --port 8765 \

@@ -161,7 +161,13 @@ Semantics:
   `cancel` request still waiting for its answer on it fails at once with 503
   `runner reconnected`: no run is created and no cancel is recorded, a late
   `run_accepted` on the old connection creates no run, and asking again
-  sends the request on the new connection.
+  sends the request on the new connection. The target's error counters
+  (`protocol_errors`, `last_protocol_error`, `last_runner_protocol_error`)
+  carry over to the new registration. A message read on the replaced
+  connection after the replacement is never acted on or counted: the
+  controller logs a warning, closes that connection, and stops reading it. A
+  message whose handling had already begun (for example a `run_finished`
+  writing its report) still completes on the shared run.
   Any local process can register any host until runner authentication exists.
 - Live fan-out to browsers (`/ws/live`) is best effort and never slows a
   runner: each browser has a queue of `LIVE_QUEUE_LIMIT` (1000) updates. A
@@ -192,10 +198,13 @@ strictly ordered events (`run_started`, operation start/result, and one terminal
 `run_started` (and any build commands) comes one `manifest` record, then
 `preflight_started`, per-check command/output events, and `preflight_finished`
 before any `test_started`. `report.md` is compiled from run.jsonl when the run
-ends; no other per-test or per-command files are written. Every external process
-additionally emits `command_started`,
-bounded incremental `command_output` chunks tagged `stdout`/`stderr`, and
-`command_finished`. Stdout and stderr are drained concurrently before process
+ends. Every external process (build, preflight, test, and flash commands alike)
+additionally emits `command_started`, bounded incremental `command_output`
+chunks tagged `stdout`/`stderr`, and `command_finished`. run.jsonl keeps only
+the first and last output records of a command that prints a lot (200 records
+or 64 KiB, then 50 records or 16 KiB), with a `command_output_omitted` record
+between them; that command's full output goes to `output/<command id>.log` in
+the run directory, the only other per-command file. Stdout and stderr are drained concurrently before process
 completion, timeout, or cancellation, so a CLI or GUI displays the command as
 it happens without deadlocking a noisy child.
 
@@ -399,9 +408,16 @@ The cancellation token is checked before every scan of that wait, so a cancel
 records `isolation_finished` as canceled. On success the sequencer records
 `isolation_confirmed` (the enumerated set) before the cases and a passed
 `isolation_finished` after them.
-Controllers are closed when the run ends. Exclusive host/hub
-ownership across concurrent runs is not yet enforced ([#25](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/25)). Active firmware
-writes must never overlap isolation changes.
+Controllers are closed when the run ends. Active firmware
+writes must never overlap isolation changes, so a run that isolates power
+(StarTech or Acroname), checks an exclusive Ubertooth, or writes firmware
+(`Flash reliability`, `DFU images`) holds the per-host lock
+`<lease dir>/host-power.lock` (an `flock` lease, like a board's, recorded in
+the manifest) from before preflight until it ends ([#4](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/4)). A second
+such command on the host fails at once and names the holder. The host lock is
+taken first, then the board leases in serial order, all or nothing and
+without blocking while any lock is held, so lock order cannot deadlock (see
+README, "The host lock").
 
 The exclusive-topology btle case runs `timeout --foreground -k 2 -s INT`, so
 [`timeout`](https://www.gnu.org/software/coreutils/manual/html_node/timeout-invocation.html) and btle stay in the command's own process group (the executor
