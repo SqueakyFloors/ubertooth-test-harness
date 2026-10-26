@@ -29,7 +29,7 @@ WORK=${CI_TEMP:-${RUNNER_TEMP:-$(mktemp -d)}}
 # one of another libbtbb, or one made before the pin landed, needs
 # LIBBTBB_REF as well or the build stops at "unable to resolve libbtbb ref".
 LIBBTBB_URL=https://github.com/SqueakyFloors/libbtbb.git
-LIBBTBB_PIN=84ab41fc99d172e812438bc9188f30a67216f748
+LIBBTBB_PIN=b32cf5adde496548057fdf6ea7c852378ad7411a
 
 step() { printf '\n=== ci: %s ===\n' "$1"; }
 

@@ -583,6 +583,18 @@ class Controller:
                 text = await link.receive()
                 if text is None:
                     break
+                if self._links.get(target.host) is not link:
+                    # A later registration replaced this connection: its
+                    # target is no longer the host's current one, so nothing
+                    # read here may act. End the session before reading more.
+                    # A message already being dispatched when the replacement
+                    # registered still finishes; its run state is shared.
+                    self.log(
+                        f"warning: dropped a message from {target.host} on a "
+                        "replaced connection"
+                    )
+                    await link.close(POLICY_VIOLATION, "replaced")
+                    break
                 try:
                     message = decode_runner_message(text)
                     target.last_seen = self.clock()
@@ -638,6 +650,7 @@ class Controller:
             last_seen=self.clock(),
             protocol_errors=old.protocol_errors if old else 0,
             last_protocol_error=old.last_protocol_error if old else None,
+            last_runner_protocol_error=old.last_runner_protocol_error if old else None,
         )
         self.targets[host] = target
         self._links[host] = link

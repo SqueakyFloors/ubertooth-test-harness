@@ -18,6 +18,7 @@ from ubertooth_harness.executor import CommandExecutor, CommandResult
 from ubertooth_harness.manifest import FileIdentity, SourceRevision
 from ubertooth_harness.preflight import host_version_patterns
 from ubertooth_harness.pytools import PYTHON_ENV, PYTHON_TOOLS_ENV
+from ubertooth_harness.rawlog import record_output
 from ubertooth_harness.events import EventPublisher
 from ubertooth_harness.hostneeds import BLUEZ_TOOLS
 
@@ -347,6 +348,7 @@ class Builder:
         executor: CommandExecutor,
         publisher: EventPublisher,
         *,
+        run_dir: Path,
         cancellation: CancellationToken | None = None,
         deadline_s: float = BUILD_DEADLINE_S,
         clock: Callable[[], float] | None = None,
@@ -355,6 +357,9 @@ class Builder:
 
         self.executor = executor
         self.publisher = publisher
+        # The run directory: a command whose output passes the run.jsonl
+        # record limits keeps its full output in output/<command id>.log here.
+        self.run_dir = Path(run_dir)
         self.cancellation = cancellation or CancellationToken()
         self.deadline_s = deadline_s
         self.clock = clock or time.monotonic
@@ -368,15 +373,6 @@ class Builder:
             {**owner, "command_id": command_id, "argv": list(argv),
              "cwd": str(cwd) if cwd else None},
         )
-        streamed = []
-
-        def output(stream: str, text: str) -> None:
-            streamed.append(stream)
-            self.publisher.emit(
-                "command_output", "running",
-                {**owner, "command_id": command_id, "stream": stream, "text": text},
-            )
-
         if self.cancellation.is_cancelled():
             raise BuildError(f"build canceled: {self.cancellation.reason}")
         if self._deadline is not None:
@@ -386,16 +382,17 @@ class Builder:
             timeout_s = min(timeout_s, remaining)
         options = {
             "timeout_s": timeout_s,
-            "on_output": output,
             "cancellation": self.cancellation,
         }
         if cwd is not None:
             options["cwd"] = str(cwd)
-        result = self.executor.run(argv, **options)
-        if not streamed:
-            for stream, text in (("stdout", result.stdout), ("stderr", result.stderr)):
-                for start in range(0, len(text), 4096):
-                    output(stream, text[start:start + 4096])
+        result, spilled = record_output(
+            self.publisher,
+            lambda on_output: self.executor.run(argv, on_output=on_output, **options),
+            details={**owner, "command_id": command_id},
+            output_dir=self.run_dir,
+            spill_name=command_id,
+        )
         status = (
             "canceled" if result.cancelled
             else "passed" if result.returncode == 0 and not result.timed_out
@@ -405,7 +402,7 @@ class Builder:
             "command_finished", status,
             {**owner, "command_id": command_id, "returncode": result.returncode,
              "duration_s": result.duration_s, "timed_out": result.timed_out,
-             "cancelled": result.cancelled},
+             "cancelled": result.cancelled, **spilled},
         )
         return result
 

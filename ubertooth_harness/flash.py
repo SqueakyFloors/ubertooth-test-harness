@@ -11,6 +11,7 @@ from ubertooth_harness.cancellation import CancellationToken
 from ubertooth_harness.events import EventPublisher
 from ubertooth_harness.executor import CommandExecutor, CommandResult
 from ubertooth_harness.plan import FlashStep
+from ubertooth_harness.rawlog import record_output
 
 
 _VERSION_RE = re.compile(r"Firmware version:\s+(?P<revision>\S+)\s+\(API:")
@@ -74,6 +75,7 @@ class FlashReliabilityRunner:
         self.executor = executor
         self.clock = clock
         self._owner: dict = {}
+        self._output_dir: Path | None = None
 
     @staticmethod
     def _sha256(path: Path) -> str:
@@ -174,32 +176,20 @@ class FlashReliabilityRunner:
                 "argv": list(argv),
             },
         )
-        streamed = []
-
-        def publish_output(stream: str, text: str) -> None:
-            streamed.append(stream)
-            publisher.emit(
-                "command_output",
-                "running",
-                {
-                    **owner,
-                    "command_id": command_id,
-                    "operation": operation,
-                    "stream": stream,
-                    "text": text,
-                },
-            )
-
-        result = self.executor.run(
-            argv,
-            timeout_s=timeout_s,
-            cancellation=cancellation,
-            on_output=publish_output,
+        invocation = owner.get("invocation_id")
+        result, spilled = record_output(
+            publisher,
+            lambda on_output: self.executor.run(
+                argv,
+                timeout_s=timeout_s,
+                cancellation=cancellation,
+                on_output=on_output,
+            ),
+            details={**owner, "command_id": command_id, "operation": operation},
+            output_dir=self._output_dir,
+            # Flash command IDs repeat in every flash case; name the case too.
+            spill_name=f"{invocation}-{command_id}" if invocation else command_id,
         )
-        if not streamed:
-            for stream, text in (("stdout", result.stdout), ("stderr", result.stderr)):
-                for start in range(0, len(text), 4096):
-                    publish_output(stream, text[start:start + 4096])
         if result.cancelled:
             status = "canceled"
         elif result.returncode == 0 and not result.timed_out:
@@ -217,6 +207,7 @@ class FlashReliabilityRunner:
                 "duration_s": result.duration_s,
                 "timed_out": result.timed_out,
                 "cancelled": result.cancelled,
+                **spilled,
             },
         )
         return result
@@ -300,10 +291,17 @@ class FlashReliabilityRunner:
         *,
         cancellation: CancellationToken | None = None,
         owner: Mapping | None = None,
+        output_dir: Path,
     ) -> FlashRunSummary:
-        """Run the flash sequence, recording into the run's publisher."""
+        """Run the flash sequence, recording into the run's publisher.
+
+        ``output_dir`` is the run directory: a command whose output passes
+        the run.jsonl record limits keeps its full output in
+        ``output/<command id>.log`` there, as test commands do.
+        """
         image_hashes = self._validate_request(request)
         self._owner = dict(owner or {})
+        self._output_dir = Path(output_dir)
         token = cancellation or CancellationToken()
         started = self.clock()
         deadline = started + request.total_timeout_s

@@ -137,7 +137,7 @@ def run_flash(executor, clock, request, directory, *, cancellation=None, sink=No
     results = Path(directory) / "results"
     publisher = open_run_publisher(results, "test-run", sink)
     summary = FlashReliabilityRunner(executor, clock=clock).run(
-        request, publisher, cancellation=cancellation
+        request, publisher, cancellation=cancellation, output_dir=results
     )
     write_report(results)
     return summary
@@ -717,7 +717,8 @@ class AlternatingFlashTests(unittest.TestCase):
         from ubertooth_harness.events import EventPublisher
 
         sink = CollectEventSink()
-        summary = runner.run(request, EventPublisher("r", sink))
+        with tempfile.TemporaryDirectory() as directory:
+            summary = runner.run(request, EventPublisher("r", sink), output_dir=Path(directory))
 
         self.assertEqual("failed", summary.status)
         self.assertIn("current revision of selected matches every image", summary.failure_reason)

@@ -130,8 +130,11 @@ def _signals_cancel(token: CancellationToken):
             signal.signal(signum, handler)
 
 
-def _build(sources, work_dir: Path, with_firmware: bool, publisher, with_python=None):
-    """Build resolved sources into work_dir, recording into the run's publisher."""
+def _build(
+    sources, work_dir: Path, with_firmware: bool, publisher, with_python=None, *, run_dir: Path
+):
+    """Build resolved sources into work_dir, recording into the run's publisher
+    (long command output goes to run_dir's output/)."""
     platform = _detected_platform()
     require_tools(platform, with_firmware)
     python = resolve_python(with_python) if with_python else None
@@ -151,6 +154,7 @@ def _build(sources, work_dir: Path, with_firmware: bool, publisher, with_python=
         return Builder(
             SubprocessCommandExecutor(plan.environment()),
             publisher,
+            run_dir=run_dir,
             cancellation=token,
         ).run(plan)
 
@@ -211,7 +215,9 @@ def _build_command(args: argparse.Namespace) -> int:
     publisher.emit("run_started", "running", run_started_details("build", "build", "", sources))
     _record_libbtbb_pin(publisher, sources)
     try:
-        result = _build(sources, output, args.with_firmware, publisher, args.with_python)
+        result = _build(
+            sources, output, args.with_firmware, publisher, args.with_python, run_dir=output
+        )
     except BuildError as error:
         _finish_failed_run(publisher, output, str(error))
         raise
@@ -522,7 +528,8 @@ def _prepare_run(
     executor = SubprocessCommandExecutor(_test_environment(sources, None))
     if args.build:
         built = _build(
-            sources, run_dir / "build", args.with_firmware, publisher, args.with_python
+            sources, run_dir / "build", args.with_firmware, publisher, args.with_python,
+            run_dir=run_dir,
         )
         artifacts = artifacts + built.artifacts
         names = {item.name for item in artifacts}

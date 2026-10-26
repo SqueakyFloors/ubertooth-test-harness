@@ -431,7 +431,7 @@ class PythonBuildTests(unittest.TestCase):
             return result
 
         executor.run = run
-        return Builder(executor, publisher_in(plan.work_dir)).run(plan)
+        return Builder(executor, publisher_in(plan.work_dir), run_dir=plan.work_dir).run(plan)
 
     def test_default_build_keeps_python_off(self):
         with tempfile.TemporaryDirectory() as work:
