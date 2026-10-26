@@ -8,6 +8,61 @@ firmware-flash reliability runner. The persistent [target runner](#target-runner
 dials the [controller](#controller), which listens on `127.0.0.1` only; remote
 access is an SSH tunnel.
 
+## Quick start: use the web GUI from your laptop
+
+The controller and runner run on the lab host (see
+[Deploy on the lab host](#deploy-on-the-lab-host)); the GUI is a web page the
+controller serves on the lab host's `127.0.0.1:8765`. From a laptop you reach
+it through an SSH tunnel; nothing is exposed on the network.
+
+1. **Get a checkout** of this repository on the laptop (macOS or Linux):
+
+   ```sh
+   git clone https://github.com/SqueakyFloors/ubertooth-test-harness.git
+   cd ubertooth-test-harness
+   ```
+
+2. **Name your hosts once**, in a private file outside the checkout (never
+   committed), readable only by you:
+
+   ```sh
+   mkdir -p ~/.config/ubertooth-harness
+   cat > ~/.config/ubertooth-harness/harness-open.conf <<'EOF'
+   HARNESS_HOST=<lab host, as your SSH config or the jump host knows it>
+   HARNESS_JUMP=<jump host, or leave empty for a direct connection>
+   EOF
+   chmod 600 ~/.config/ubertooth-harness/harness-open.conf
+   ```
+
+3. **Open the GUI:**
+
+   ```sh
+   scripts/harness-open --two-hop    # through the jump host's own SSH login
+   ```
+
+   It opens the tunnel, waits until the controller answers, opens
+   `http://127.0.0.1:8765/ui/` in your browser, and keeps the tunnel up until
+   Ctrl-C. Use plain `scripts/harness-open` (one `ssh -J` hop) instead when
+   your laptop can log in to the lab host directly with its own key.
+
+4. **Run something:** in Run setup pick a git ref (for example `main`), a plan
+   (`host` needs no board and is a safe first run), the target, keep "Build the
+   ref on the target first" ticked, and press Run. The Live run card ticks off
+   each test; History keeps every run with its `report.md`.
+
+If it does not connect:
+
+| Message | Cause and fix |
+|---|---|
+| `no such file or directory: scripts/harness-open` | Run it from the root of this repository's checkout. |
+| `REMOTE HOST IDENTIFICATION HAS CHANGED` | The laptop's `known_hosts` has an old key for the lab host. Check the new key with the lab host's owner, then `ssh-keygen -R <lab host>`. `--two-hop` checks the key on the jump host instead. |
+| `Permission denied (publickey...)` with plain `harness-open` | The laptop's key is not accepted on the lab host; use `--two-hop`. |
+| `127.0.0.1:8765 is already in use on this machine` | Another tunnel is already open; use that browser tab, or stop the old tunnel. |
+| The page loads but Run fails at once | The run's reason is shown under Run setup and in History; see [Target runner service](#target-runner-service). |
+
+On the lab host itself, open `http://127.0.0.1:8765/ui/` in its browser, or
+use the desktop launcher from `scripts/install-desktop-shortcut.sh`.
+
 ## Environment
 
 The harness runs only in its own Python 3.12 virtual environment, never in a
@@ -1144,12 +1199,17 @@ Open `http://127.0.0.1:8765/ui/` (through the tunnel above when the
 controller is on another machine; a browser that asks `GET /` for HTML is
 sent there). It is three static files in `ubertooth_harness/web/` (vanilla
 JavaScript, no build step, nothing loaded from another site) and uses only the
-REST and `/ws/live` endpoints below.
+REST and `/ws/live` endpoints below. Each section is a card: Targets and
+Run setup side by side on a wide window, Live run and History full width
+below, one column on a narrow one. It follows the system light or dark
+setting, uses the system font, and shows every status as a pill with its
+word and symbol (colour only reinforces it).
 
 ![The web GUI with one target, a live run and its history](docs/gui.png)
 
 - **Targets:** one card per registered target: host, host name, OS, Python,
-  Ubertooth serials (or why they are unknown), online/offline, last seen, and
+  Ubertooth serials (or why they are unknown), online/offline (plus busy
+  while it runs), last seen, and
   the active run with a Watch button.
 - **Run setup:** git ref (default branch, branches and tags from
   `/api/refs`), plan and suite (from `/api/plans`, with the suite's tests;
@@ -1158,7 +1218,7 @@ REST and `/ws/live` endpoints below.
 - **Live run:** the suite's tests as a checklist that ticks from the run's
   events (✓ passed, ✗ failed, … running, ○ pending or not run; always text
   plus symbol), the current stage (building, preflight, tests), elapsed time,
-  a Cancel button, and the last 200 log lines. A countdown is shown only when
+  a Cancel button, and the last 200 log lines in a scrolling console panel. A countdown is shown only when
   every test in the suite has an estimate. Every implemented test has a
   catalog estimate (`ESTIMATES` in `ubertooth_harness/catalog.py`) for each
   coverage profile: fixed seconds, plus a multiple of its `duration` argument
