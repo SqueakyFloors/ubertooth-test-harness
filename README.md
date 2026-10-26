@@ -940,7 +940,9 @@ target. There is no authentication yet ([DESIGN.md section
 on hosts whose local users you trust. A registration for a host that is
 already connected replaces the old connection (so a runner whose previous
 connection is half-open can reconnect); the controller logs a warning when the
-replaced connection was still online.
+replaced connection was still online. The old connection is closed (1008
+`replaced`), and a start or cancel request still waiting on it fails with 503
+`runner reconnected`; ask again and the request goes to the new connection.
 
 ```sh
 python -m ubertooth_harness controller --port 8765 \
@@ -1035,7 +1037,7 @@ Endpoints (JSON unless noted; `GET /` lists them):
 | `GET /api/runs/{run_id}` | status, every event, and the failure summary (`failures`) |
 | `GET /api/runs/{run_id}/report.md` | the run's report (Markdown) |
 | `POST /api/runs/{run_id}/cancel` | `{"reason": ""}`; 202 once the runner accepts |
-| `WS /ws/live[?run_id=ID]` | browser stream: a `snapshot`, then `target` and `run` updates, plus that run's `event` records |
+| `WS /ws/live[?run_id=ID]` | browser stream: a `snapshot`, then `target` and `run` updates, plus that run's `event` records; a browser 1000 updates behind is closed with 1013 `live stream overflowed` (reconnect for a new snapshot) |
 | `WS /ws/runner` | target runner protocol v1 |
 
 Every request and WebSocket handshake must carry `Host: 127.0.0.1:PORT` or
