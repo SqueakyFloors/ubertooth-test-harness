@@ -295,6 +295,12 @@ class PlanTests(ControllerTestCase):
         self.assertEqual(expected, sorted(plans))
         fast = plans["fast"]
         self.assertIsNone(fast["error"])
+        # Plans of planned tests are listed but marked not runnable.
+        self.assertEqual(
+            {"backlog", "mac-polling"},
+            {name for name, plan in plans.items() if plan["runnable"] is not True},
+        )
+        self.assertIs(True, fast["runnable"])
         (suite,) = fast["suites"]
         self.assertEqual("fast", suite["name"])
         plan = load_plan(REPOSITORY / "testplans" / "fast.yaml")
@@ -303,9 +309,9 @@ class PlanTests(ControllerTestCase):
             [test["name"] for test in suite["tests"]],
         )
         estimates = {test["name"]: test["estimated_s"] for test in suite["tests"]}
-        # Not implemented: its duration argument. Implemented: the catalog's.
-        self.assertEqual(10, estimates["BLE monitor"])
+        # Runnable plans name only implemented tests: catalog estimates.
         self.assertEqual(0.4, estimates["Ubertooth identity"])
+        self.assertEqual(6, estimates["Spectrum RSSI sanity"])
         self.assertEqual(4.3, estimates["BLE extcap capture"])  # smoke, 3s
         # Every test has an estimate: the suite total is their sum.
         self.assertNotIn(None, estimates.values())
@@ -338,6 +344,16 @@ class PlanTests(ControllerTestCase):
         self.assertEqual(1, partial["unestimated_tests"])
         self.assertTrue(plans["broken"]["error"])
         self.assertEqual([], plans["broken"]["suites"])
+        self.assertIs(False, plans["broken"]["runnable"])
+        self.assertIs(True, plans["timed"]["runnable"])
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "planned.yaml").write_text(
+                "plan: Planned\nrunnable: false\nsuites:\n  later:\n"
+                "    - BLE monitor:\n        duration: 10s\n",
+                encoding="utf-8",
+            )
+            (planned,) = list_plans(Path(directory))
+        self.assertEqual((None, False), (planned["error"], planned["runnable"]))
 
 
 class FailureSummaryTests(ControllerTestCase):
@@ -466,6 +482,19 @@ class PageWiringTests(unittest.TestCase):
         ):
             self.assertIn(endpoint, self.js)
         self.assertIn('"Content-Type"] = "application/json"', self.js)
+
+    def test_only_runnable_plans_are_offered_to_start(self):
+        # The plan <select> is filled from plans that load and are runnable;
+        # the others are only named in the status line.
+        body = self.js[self.js.index("async function loadPlans()"):
+                       self.js.index("function findSuite(")]
+        self.assertIn(
+            "const usable = state.plans.filter((plan) => !plan.error && plan.runnable === true);",
+            body,
+        )
+        self.assertIn("select.replaceChildren(...usable.map(", body)
+        self.assertEqual(1, body.count("select.replaceChildren("))
+        self.assertIn("Not runnable (planned tests)", body)
 
     def test_script_has_no_html_injection_sinks(self):
         for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write",

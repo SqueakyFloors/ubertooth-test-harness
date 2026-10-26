@@ -1,4 +1,7 @@
 plan: MAC polling Ubertooth stability
+# The soak is planned, not implemented: validate-plan compiles it, run-suite
+# refuses it.
+runnable: false
 suites:
   mac-polling:
     - MAC polling soak:

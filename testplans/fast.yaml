@@ -95,17 +95,13 @@ suites:
         Ubertooth: default
         coverage: smoke
 
-    - BLE monitor:
-        hosts: each
-        Ubertooth: default
-        duration: 10s
-
     - Spectrum analyzer:
         hosts: each
         Ubertooth: default
         coverage: smoke
         duration: 3s
 
+    # Live RSSI: a noise floor at every frequency, mostly noise, and varying.
     - Spectrum RSSI sanity:
         hosts: each
         Ubertooth: default

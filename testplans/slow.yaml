@@ -1,24 +1,6 @@
 plan: Ubertooth reliability
 suites:
   slow:
-    - BLE soak:
-        hosts: each
-        Ubertooth: default
-        duration: 30m
-        sample every: 5s
-
-    - Spectrum soak:
-        hosts: each
-        Ubertooth: default
-        duration: 15m
-        sample every: 5s
-
-    - Classic Bluetooth receive soak:
-        hosts: each
-        Ubertooth: default
-        duration: 15m
-        sample every: 5s
-
     # Writes and reads back the selected board's firmware, so it comes after
     # every test that needs the resolved firmware (with Flash reliability).
     # Both fail at fork 6fee30c on fork #267 (-d -r exits 1 after a good

@@ -58,6 +58,9 @@ def flash_step(arguments: Mapping, platform: str) -> FlashStep:
 class Plan:
     name: str
     suites: Mapping[str, tuple[TestStep, ...]]
+    # False for a plan of planned tests (backlog.yaml, mac-polling.yaml): it
+    # may name tests with no implementation yet. A runnable plan may not.
+    runnable: bool = True
 
     def steps(self, suite: str) -> tuple[TestStep, ...]:
         try:
@@ -102,6 +105,9 @@ def load_plan(path: Path | str, catalog: TestCatalog | None = None) -> Plan:
         raise PlanError("plan name must be a non-empty string")
     if not isinstance(suites, dict) or not suites:
         raise PlanError("plan suites must be a non-empty mapping")
+    runnable = raw.get("runnable", True)
+    if not isinstance(runnable, bool):
+        raise PlanError("plan runnable must be true or false")
 
     normalized_suites = {}
     for suite_name, raw_steps in suites.items():
@@ -128,4 +134,30 @@ def load_plan(path: Path | str, catalog: TestCatalog | None = None) -> Plan:
                 raise PlanError(f"{location}: {error}") from error
             steps.append(TestStep(test_name, normalized))
         normalized_suites[suite_name] = tuple(steps)
-    return Plan(name, MappingProxyType(normalized_suites))
+    return Plan(name, MappingProxyType(normalized_suites), runnable)
+
+
+def unimplemented_tests(plan: Plan, catalog: TestCatalog | None = None) -> tuple[str, ...]:
+    """Tests the plan names that have no implementation, in plan order."""
+    test_catalog = catalog or builtin_catalog()
+    names = []
+    for steps in plan.suites.values():
+        for step in steps:
+            if not test_catalog.get(step.test_name).implemented and step.test_name not in names:
+                names.append(step.test_name)
+    return tuple(names)
+
+
+def check_runnable(plan: Plan, catalog: TestCatalog | None = None) -> None:
+    """Refuse a runnable plan that names a test with no implementation:
+    run-suite would refuse its suite. Planned tests go in a plan with
+    ``runnable: false`` (testplans/backlog.yaml)."""
+    if not plan.runnable:
+        return
+    missing = unimplemented_tests(plan, catalog)
+    if missing:
+        raise PlanError(
+            f"plan {plan.name} names tests with no implementation: "
+            + ", ".join(missing)
+            + "; move them to a plan with 'runnable: false' (testplans/backlog.yaml)"
+        )

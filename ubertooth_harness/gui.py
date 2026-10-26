@@ -267,6 +267,8 @@ def list_plans(plans_dir: Path) -> list[dict]:
     """Every ``<name>.yaml`` plan with its suites, tests and estimates.
 
     A plan that does not load is listed with its error and no suites.
+    ``runnable`` is the plan's ``runnable`` flag (false for plans of planned
+    tests, such as backlog.yaml); the GUI offers only runnable plans.
     Estimates are per invocation: a ``per_board`` test runs once for every
     board it selects on the target, which only the run's plan (its manifest)
     counts; see planned_invocations.
@@ -284,7 +286,7 @@ def list_plans(plans_dir: Path) -> list[dict]:
             plan = load_plan(path, catalog)
         except PlanError as error:
             plans.append({"name": path.stem, "title": None, "error": str(error),
-                          "suites": []})
+                          "runnable": False, "suites": []})
             continue
         suites = []
         for suite, steps in plan.suites.items():
@@ -309,7 +311,7 @@ def list_plans(plans_dir: Path) -> list[dict]:
                 "per_board_tests": sum(test["per_board"] for test in tests),
             })
         plans.append({"name": path.stem, "title": plan.name, "error": None,
-                      "suites": suites})
+                      "runnable": plan.runnable, "suites": suites})
     return plans
 
 

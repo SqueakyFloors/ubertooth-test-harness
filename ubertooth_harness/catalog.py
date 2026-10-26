@@ -621,6 +621,8 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "Multi-board selection": _profiles(Estimate(1.2), Estimate(4.4)),
     "BLE mode conflicts": _default(Estimate(4.2)),
     "Ubertooth util conflicts": _default(Estimate(15.9)),
+    # One full-band sweep of its duration, plus the board reads around it.
+    "Spectrum RSSI sanity": _default(Estimate(1.0, per_duration=1)),
     "Spectrum analyzer": _profiles(
         Estimate(0.6, per_duration=1), Estimate(7.1, per_duration=10)
     ),
@@ -807,8 +809,14 @@ def builtin_catalog() -> TestCatalog:
             continue_on_case_failure=True,
             guards_other_ubertooths=True,
         ),
-        _device_test(
-            "Spectrum RSSI sanity", "Validate live spectrum RSSI", extra={"duration": DURATION}
+        TestDefinition(
+            "Spectrum RSSI sanity",
+            "ubertooth-specan reports live RSSI: a noise floor at every frequency, "
+            "a negative mean, and varying readings",
+            MappingProxyType({"hosts": HOSTS, "Ubertooth": UBERTOOTH, "duration": DURATION}),
+            MappingProxyType({"Ubertooth": "Ubertooth"}),
+            command_builder=tool_cases.rssi_sanity_cases,
+            guards_other_ubertooths=True,
         ),
         TestDefinition(
             "Classic Bluetooth receive",
