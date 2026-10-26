@@ -200,12 +200,14 @@ suites:
             self.assertIn("    +++ flash 1: test_build", report)
             self.assertIn("[C] ubertooth-dfu -U aaaa0000aaaa0000aaaa0000aaaa0000 -d", report)
             self.assertIn("    --- flash reliability EXIT: passed, 4/4 verified ---", report)
-            # The selected and guard boards were leased for the whole run.
+            # The host lock (a flash run writes firmware), then the selected
+            # and guard boards, were leased for the whole run.
             manifest = next(e for e in events if e["event_type"] == "manifest")
             self.assertEqual(
-                ["UT_0", "UT_1"],
+                ["host lock", "UT_0", "UT_1"],
                 [item["resource"] for item in manifest["details"]["manifest"]["leases"]],
             )
+            self.assertIn("| Host lock | since ", report)
             self.assertIn("| Board leases | UT_0 since ", report)
             self.assertIn("aaaa0000aaaa0000aaaa0000aaaa0000", report)  # serials are shown by default
             self.assertIn("UT_0 serial aaaa0000aaaa0000aaaa0000aaaa0000: firmware written by this run", report)

@@ -254,7 +254,10 @@ class LeaseCliTests(unittest.TestCase):
         lines = out.splitlines()
         self.assertRegex(lines[0], r"^UT_0 +free$")
         self.assertRegex(lines[1], r"^UT_1 +held  agent-7, run run-agent-7")
-        self.assertEqual([False, True], [s["held"] for s in json.loads(raw)])
+        self.assertRegex(lines[2], r"^host lock +free$")
+        states = json.loads(raw)
+        self.assertEqual([False, True, False], [s["held"] for s in states])
+        self.assertTrue(states[2]["host_lock"])
 
     def test_lease_holds_the_board_while_the_command_runs(self):
         probe = (

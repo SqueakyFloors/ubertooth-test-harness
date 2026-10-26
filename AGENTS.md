@@ -19,7 +19,9 @@
   `run-suite` (it leases its boards), and every manual Ubertooth command goes
   through `ubertooth-harness lease ... -- <command>`. Check
   `ubertooth-harness boards` first; never use or reflash a board someone else
-  holds.
+  holds. Anything that switches USB power or writes firmware also holds the
+  host lock (`run-suite` takes it itself; use `lease --host-lock` for a manual
+  power change; `ubertooth-dfu` under `lease` takes it automatically).
 - A power cycle or manual recovery may gather diagnostics but never converts a
   failed reliability run into a pass.
 - Local development servers must bind to `127.0.0.1`. Do not add a remotely

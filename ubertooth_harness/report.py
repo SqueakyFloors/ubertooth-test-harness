@@ -282,6 +282,14 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
         ))
     artifacts = manifest.get("artifacts", [])
     held = manifest.get("leases") or []
+    host_lock = [item for item in held if item.get("key") == "host-power"]
+    held = [item for item in held if item.get("key") != "host-power"]
+    if host_lock:
+        rows.append((
+            "Host lock",
+            f"since {host_lock[0].get('acquired_at')} (held for the whole run: "
+            "no other harness power change or firmware write on this host)",
+        ))
     if held:
         rows.append((
             "Board leases",
