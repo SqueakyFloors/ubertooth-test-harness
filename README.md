@@ -241,7 +241,7 @@ python -m ubertooth_harness run-suite --plan testplans/host.yaml --suite host \
   --hardware host-only.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
   --libbtbb-source /path/to/libbtbb \
-  --libbtbb-ref 84ab41fc99d172e812438bc9188f30a67216f748 \
+  --libbtbb-ref b32cf5adde496548057fdf6ea7c852378ad7411a \
   --build --output runs
 ```
 
@@ -555,7 +555,7 @@ python -m ubertooth_harness run-suite --plan testplans/fast.yaml --suite fast \
   --hardware hardware.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref feature/my-change \
   --libbtbb-source /path/to/libbtbb \
-  --libbtbb-ref 84ab41fc99d172e812438bc9188f30a67216f748 \
+  --libbtbb-ref b32cf5adde496548057fdf6ea7c852378ad7411a \
   --build [--with-firmware] [--with-python[=PYTHON]] --output runs
 ```
 
@@ -944,7 +944,7 @@ python -m ubertooth_harness runner \
   --hardware hardware.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth \
   [--libbtbb-source /path/to/libbtbb \
-   --libbtbb-ref 84ab41fc99d172e812438bc9188f30a67216f748] \
+   --libbtbb-ref b32cf5adde496548057fdf6ea7c852378ad7411a] \
   [--plans-dir testplans] [--allow-power-changes] \
   --output runs
 ```
@@ -1013,6 +1013,8 @@ connection is half-open can reconnect); the controller logs a warning when the
 replaced connection was still online. The old connection is closed (1008
 `replaced`), and a start or cancel request still waiting on it fails with 503
 `runner reconnected`; ask again and the request goes to the new connection.
+Anything the old connection still sends is dropped with a warning, never
+applied to the target.
 
 ```sh
 python -m ubertooth_harness controller --port 8765 \
