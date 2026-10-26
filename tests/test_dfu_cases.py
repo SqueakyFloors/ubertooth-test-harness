@@ -199,7 +199,7 @@ class FakeDfuBoard:
 
     def _sign(self, command, path):
         if path.suffix != ".bin":
-            return self._result(command, 1, "Error: -s requires a .bin\n")
+            return self._result(command, 1, "error: -s requires a .bin\n")
         if self.flags.get("needs_write_access") and not os.access(path, os.W_OK):
             return self._result(command, 1, "", f"{path}: Permission denied\n")
         data = path.read_bytes()

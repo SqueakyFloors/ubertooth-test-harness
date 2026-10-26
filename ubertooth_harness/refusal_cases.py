@@ -6,7 +6,11 @@ line creates and truncates nothing: every file option only names its file
 while the command line is read, and the file is opened once every check has
 passed (ubertooth-dfu adds: and leaves no temporary file). The same change
 moved "Ignoring extra capture file" to standard error, so it cannot land in a
-capture written to stdout (ubertooth-btle -q -).
+capture written to stdout (ubertooth-btle -q -). Since fork e4f1dc5 (fork
+#377) ubertooth-btle words that note "warning: ignoring extra capture file:"
+(ubertooth-btle.md, DIAGNOSTICS). -h exits 0 on every tool since fork
+12211ce (fork #406; btle since e4f1dc5) and still creates and truncates
+nothing.
 
 Each case seeds files with known contents in its own capture directory,
 refuses one command naming a new file and one naming a seeded file, then
@@ -59,6 +63,8 @@ NO_BOARD_NOTE = r"UBERTOOTH_TEST_NO_DEVICES is set, so no board is selected"
 STRAY = "stray"
 _STRAY_PATTERN = rf"error: unexpected argument '{STRAY}'"
 _EXTRA = "Ignoring extra capture file: "
+# ubertooth-btle since fork e4f1dc5 (fork #377); rx and follow keep _EXTRA.
+_BTLE_EXTRA = "warning: ignoring extra capture file: "
 _TIMEOUT_S = 10.0
 
 
@@ -73,10 +79,12 @@ class Tool:
 
 
 TOOLS = (
-    Tool("ubertooth-btle", r"(?m)^ubertooth-btle - passive Bluetooth Low Energy", 1,
+    # -h exits 0 on every tool: btle since fork e4f1dc5 (fork #377), follow
+    # and dfu since 12211ce (fork #406); each was 1.
+    Tool("ubertooth-btle", r"(?m)^ubertooth-btle - passive Bluetooth Low Energy", 0,
          ("-A", "40"), r"error: advertising channel index must be ",
          (("-r", "pcapng"), ("-q", "pcap"), ("-c", "pcap"))),
-    Tool("ubertooth-follow", r"(?m)^ubertooth-follow - active", 1,
+    Tool("ubertooth-follow", r"(?m)^ubertooth-follow - active", 0,
          ("-e", "9"), r"error: maximum access code errors must be ",
          (("-r", "pcapng"), ("-q", "pcap"), ("-d", "dump"))),
     Tool("ubertooth-rx", r"(?m)^ubertooth-rx - passive Classic Bluetooth", 0,
@@ -91,9 +99,10 @@ TOOLS = (
          ("-l", "9999"), r"error: lower frequency must be ",
          (("-d", "specan"),)),
     # -s names the .bin to sign and writes the .dfu beside it; -u writes its
-    # name through a temporary file. A second -s that is not a .bin is refused.
-    Tool("ubertooth-dfu", r"(?m)^ubertooth-dfu - Ubertooth firmware update tool", 1,
-         ("-s", "other.txt"), r"Error: -s requires a \.bin",
+    # name through a temporary file. A second -s that is not a .bin is refused
+    # ("error: ..." since fork 12211ce, it was "Error: ...").
+    Tool("ubertooth-dfu", r"(?m)^ubertooth-dfu - Ubertooth firmware update tool", 0,
+         ("-s", "other.txt"), r"error: -s requires a \.bin",
          (("-s", "bin"), ("-u", "bin"))),
 )
 
@@ -191,7 +200,8 @@ def _case(case_id, name, steps, expected_state) -> StateCase:
 
 
 def _no_extra_on_stdout(stdout: str) -> str:
-    if _EXTRA in stdout:
+    # Either wording: ubertooth-btle's lower-case one, or rx and follow's.
+    if _EXTRA.lower() in stdout.lower():
         return f"'{_EXTRA.strip()}' went to stdout, where a capture can be"
     return ""
 
@@ -253,7 +263,7 @@ def _extra_capture_cases():
             # no mode is refused.
             tool_step("accepted", "ubertooth-btle",
                        ("-n", "-q", "-", "-q", ("file", "extra.pcap")),
-                       patterns=(_EXTRA + r"\S*extra\.pcap", NO_BOARD_NOTE),
+                       patterns=(_BTLE_EXTRA + r"\S*extra\.pcap", NO_BOARD_NOTE),
                        forbidden=(), check=_no_extra_on_stdout),
             _check(("extra.pcap",), ()),
         ),
