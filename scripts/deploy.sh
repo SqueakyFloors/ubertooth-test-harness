@@ -199,7 +199,7 @@ if [ -n "$external_board_lock" ]; then
     # The harness checks it again; checked here so a bad value never
     # reaches the unit. ~/ is expanded now: systemd does not expand it.
     case $external_board_lock in
-        "~/"*) external_board_lock=$HOME/${external_board_lock#"~/"} ;;
+        \~/*) external_board_lock=$HOME/${external_board_lock#\~/} ;;
     esac
     case $external_board_lock in
         /*) ;;
