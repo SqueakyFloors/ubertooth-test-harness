@@ -1126,12 +1126,17 @@ Open `http://127.0.0.1:8765/ui/` (through the tunnel above when the
 controller is on another machine; a browser that asks `GET /` for HTML is
 sent there). It is three static files in `ubertooth_harness/web/` (vanilla
 JavaScript, no build step, nothing loaded from another site) and uses only the
-REST and `/ws/live` endpoints below.
+REST and `/ws/live` endpoints below. Each section is a card: Targets and
+Run setup side by side on a wide window, Live run and History full width
+below, one column on a narrow one. It follows the system light or dark
+setting, uses the system font, and shows every status as a pill with its
+word and symbol (colour only reinforces it).
 
 ![The web GUI with one target, a live run and its history](docs/gui.png)
 
 - **Targets:** one card per registered target: host, host name, OS, Python,
-  Ubertooth serials (or why they are unknown), online/offline, last seen, and
+  Ubertooth serials (or why they are unknown), online/offline (plus busy
+  while it runs), last seen, and
   the active run with a Watch button.
 - **Run setup:** git ref (default branch, branches and tags from
   `/api/refs`), plan and suite (from `/api/plans`, with the suite's tests;
@@ -1140,7 +1145,7 @@ REST and `/ws/live` endpoints below.
 - **Live run:** the suite's tests as a checklist that ticks from the run's
   events (✓ passed, ✗ failed, … running, ○ pending or not run; always text
   plus symbol), the current stage (building, preflight, tests), elapsed time,
-  a Cancel button, and the last 200 log lines. A countdown is shown only when
+  a Cancel button, and the last 200 log lines in a scrolling console panel. A countdown is shown only when
   every test in the suite has an estimate. Every implemented test has a
   catalog estimate (`ESTIMATES` in `ubertooth_harness/catalog.py`) for each
   coverage profile: fixed seconds, plus a multiple of its `duration` argument
