@@ -657,9 +657,11 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # capture, plus up to 5 s removal and 10 s return deadlines with 1 s
     # settles; about 8 s of power switching is assumed.
     "Exclusive Ubertooth topology": _default(Estimate(8.0, per_duration=1)),
-    # Two resets of about 0.8 s each, the round trip, and the reads and
-    # restores of both boards (Linux lab host).
-    "Two-device range test": _default(Estimate(6.0)),
+    # No passing run yet: about 6 s from the test's start to -n on the Linux
+    # lab host (two resets), plus the result and about 40 reads and restores
+    # of both boards. A run on fork main fails after about 69 s: the wedged
+    # boards (fork #26) make every cleanup command time out.
+    "Two-device range test": _default(Estimate(10.0)),
 })
 
 
