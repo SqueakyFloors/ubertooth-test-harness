@@ -38,6 +38,17 @@
 
   const $ = (id) => document.getElementById(id);
 
+  // Display name of a target: its registered ID with spaces for underscores
+  // (Host_Linux -> "Host Linux"); the ID itself is unchanged everywhere else.
+  function targetName(host) {
+    return String(host ?? "–").replace(/_/g, " ");
+  }
+
+  function targetTitle(target) {
+    const name = targetName(target.host);
+    return target.hostname ? `${name} (${target.hostname})` : name;
+  }
+
   // Build an element; children are nodes or strings (as text).
   function el(tag, attributes, ...children) {
     const node = document.createElement(tag);
@@ -106,6 +117,34 @@
 
   // ----- targets -----------------------------------------------------------
 
+  // One small box per piece of equipment the target reports, grouped by kind.
+  // Ubertooths (the devices under test) first; hubs and Bluetooth devices
+  // join here once the runner reports them.
+  function attachedEquipment(target) {
+    const serials = target.ubertooth_serials;
+    let boards;
+    if (!Array.isArray(serials)) {
+      boards = [el("p", { className: "hint",
+        text: `Unknown: ${target.enumeration_error || "the runner could not list its USB devices"}` })];
+    } else if (!serials.length) {
+      boards = [el("p", { className: "hint", text: "No Ubertooth attached." })];
+    } else {
+      // On USB as of the runner's last report; unknown while it is offline.
+      const state = target.status === "online" ? ["ok", "on USB"] : ["warn", "unknown (runner offline)"];
+      boards = [el("ul", { className: "devices" }, ...serials.map((serial, index) =>
+        el("li", { className: "device" },
+          el("div", { className: "device-head" },
+            el("span", { className: `dot dot-${state[0]}`, "aria-hidden": "true" }),
+            el("span", { className: "device-name", text: `Ubertooth ${index + 1}` }),
+            el("span", { className: "device-state", text: state[1] })),
+          el("code", { className: "device-serial", title: "USB serial number", text: serial }))))];
+    }
+    return el("section", { className: "equipment", "aria-label": `Attached equipment on ${targetName(target.host)}` },
+      el("h4", { text: "Attached equipment" }),
+      el("div", { className: "equipment-group" },
+        el("h5", { text: "Ubertooths (devices under test)" }), ...boards));
+  }
+
   function renderTargets() {
     const list = $("targets");
     const targets = [...state.targets.values()].sort((a, b) => a.host.localeCompare(b.host));
@@ -114,9 +153,6 @@
       const os = target.os || {};
       const osText = [os.system, os.macos_version || os.distribution, os.release, os.architecture]
         .filter(Boolean).join(" ");
-      const serials = Array.isArray(target.ubertooth_serials)
-        ? (target.ubertooth_serials.length ? target.ubertooth_serials.join(", ") : "none attached")
-        : `unknown (${target.enumeration_error || "enumeration unavailable"})`;
       const active = target.active_run_id
         ? el("span", {}, el("code", { text: target.active_run_id }), " ",
           el("button", {
@@ -127,16 +163,15 @@
         : "none";
       return el("li", {},
         el("article", { className: "card target-card", "aria-labelledby": `target-${target.host}` },
-          el("h3", { id: `target-${target.host}`, text: target.host }),
+          el("h3", { id: `target-${target.host}`, text: targetTitle(target) }),
           el("dl", { className: "summary summary-compact" },
             el("dt", { text: "Status" }), el("dd", { className: "badges" }, statusBadge(target.status),
               target.active_run_id ? statusBadge("busy") : null),
-            el("dt", { text: "Host name" }), el("dd", { text: target.hostname }),
             el("dt", { text: "OS" }), el("dd", { text: osText || "unknown" }),
             el("dt", { text: "Python" }), el("dd", { text: target.python }),
-            el("dt", { text: "Ubertooth serials" }), el("dd", { text: serials }),
             el("dt", { text: "Last seen" }), el("dd", {}, timeElement(target.last_seen_at)),
-            el("dt", { text: "Active run" }), el("dd", {}, active))));
+            el("dt", { text: "Active run" }), el("dd", {}, active)),
+          attachedEquipment(target)));
     }));
     renderTargetSelect();
   }
@@ -152,7 +187,7 @@
     select.replaceChildren(...targets.map((target) => {
       const notes = [target.status];
       if (target.active_run_id) notes.push("busy");
-      return el("option", { value: target.host, text: `${target.host} (${notes.join(", ")})` });
+      return el("option", { value: target.host, text: `${targetName(target.host)} (${notes.join(", ")})` });
     }));
     if (targets.some((target) => target.host === current)) select.value = current;
   }
@@ -506,7 +541,7 @@
       ["Stage", live.stage],
       ["Ref", refLabel(run)],
       ["Plan / suite", `${run.plan ?? "–"} / ${run.suite ?? "–"}`],
-      ["Target", run.target ?? "–"],
+      ["Target", run.target ? targetName(run.target) : "–"],
       ["Started", timeElement(run.created_at)],
       ["Finished", timeElement(run.finished_at)],
     ];
@@ -630,7 +665,7 @@
         el("td", {}, el("code", { text: run.run_id })),
         el("td", { text: refLabel(run) }),
         el("td", { text: `${run.plan ?? "–"} / ${run.suite ?? "–"}` }),
-        el("td", { text: run.target }),
+        el("td", { text: targetName(run.target) }),
         el("td", {}, statusBadge(run.status)),
         actions);
     }));
@@ -657,7 +692,7 @@
       const data = await api("GET", runPath(runId));
       const run = data.run;
       $("failures-run").replaceChildren(
-        el("dt", { text: "Target" }), el("dd", { text: run.target }),
+        el("dt", { text: "Target" }), el("dd", { text: targetName(run.target) }),
         el("dt", { text: "Ref" }), el("dd", { text: refLabel(run) }),
         el("dt", { text: "Plan / suite" }), el("dd", { text: `${run.plan ?? "–"} / ${run.suite ?? "–"}` }),
         el("dt", { text: "Status" }), el("dd", {}, statusBadge(run.status)));

@@ -1189,10 +1189,15 @@ word and symbol (colour only reinforces it).
 
 ![The web GUI with one target, a live run and its history](docs/gui.png)
 
-- **Targets:** one card per registered target: host, host name, OS, Python,
-  Ubertooth serials (or why they are unknown), online/offline (plus busy
-  while it runs), last seen, and
-  the active run with a Watch button.
+- **Targets:** one card per registered target, titled with its name
+  (underscores shown as spaces) and the machine's host name in brackets:
+  online/offline (plus busy while it runs), OS, Python, last seen, the active
+  run with a Watch button, and an **Attached equipment** box. That box groups
+  equipment by kind; today it holds the Ubertooths (the devices under test),
+  one small box each with its USB serial and a status dot with text (green: on
+  USB in the runner's last report; yellow: unknown while the runner is
+  offline), or why the runner could not list them. USB hubs and Bluetooth test
+  devices will join it as their own groups.
 - **Run setup:** git ref (default branch, branches and tags from
   `/api/refs`), plan and suite (from `/api/plans`, with the suite's tests;
   only runnable plans are offered, and plans of planned tests such as
