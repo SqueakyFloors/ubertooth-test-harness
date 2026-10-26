@@ -3,99 +3,134 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>Ubertooth test harness</title>
 <link rel="stylesheet" href="/ui/app.css">
 <script src="/ui/app.js" defer></script>
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to content</a>
-<header>
-  <h1>Ubertooth test harness</h1>
-  <p id="connection" role="status">Connecting to the controller…</p>
+<header class="app-header">
+  <div class="app-header-inner">
+    <h1>Ubertooth test harness</h1>
+    <p id="connection" class="conn conn-wait" role="status">Connecting to the controller…</p>
+  </div>
 </header>
-<noscript><p>This page needs JavaScript. The REST API is described at <a href="/">/</a>.</p></noscript>
+<noscript><p class="noscript">This page needs JavaScript. The REST API is described at <a href="/">/</a>.</p></noscript>
 
-<main id="main">
-  <section aria-labelledby="targets-heading">
-    <h2 id="targets-heading">Targets</h2>
-    <p id="targets-empty">No target runner has registered yet.</p>
-    <ul id="targets" class="cards"></ul>
-  </section>
-
-  <section aria-labelledby="setup-heading">
-    <h2 id="setup-heading">Run setup</h2>
-    <form id="run-form" novalidate>
-      <div class="field">
-        <label for="ref">Git ref</label>
-        <select id="ref" name="ref" required aria-describedby="refs-status"></select>
-        <button type="button" id="refs-reload">Reload refs</button>
-        <p id="refs-status" class="hint" role="status">Loading refs…</p>
-      </div>
-      <div class="field">
-        <label for="plan">Plan</label>
-        <select id="plan" name="plan" required aria-describedby="plan-status"></select>
-        <p id="plan-status" class="hint" role="status"></p>
-      </div>
-      <div class="field">
-        <label for="suite">Suite</label>
-        <select id="suite" name="suite" required aria-describedby="suite-tests"></select>
-        <p id="suite-tests" class="hint"></p>
-      </div>
-      <div class="field">
-        <label for="target">Target</label>
-        <select id="target" name="target" required></select>
-      </div>
-      <div class="field">
-        <input type="checkbox" id="build" name="build" checked>
-        <label for="build">Build the ref on the target first</label>
-      </div>
-      <button type="submit" id="run-button">Run</button>
-      <p id="run-status" role="status" aria-live="polite"></p>
-    </form>
-  </section>
-
-  <section aria-labelledby="live-heading">
-    <h2 id="live-heading">Live run</h2>
-    <p id="live-empty">No run selected. Start one, or choose Watch on a target or a history row.</p>
-    <div id="live" hidden>
-      <dl id="live-summary" class="summary"></dl>
-      <p id="live-clock" class="clock" role="timer" aria-live="off"></p>
-      <p id="live-estimate" class="hint"></p>
-      <button type="button" id="cancel-button" hidden>Cancel run</button>
-      <p id="cancel-status" role="status"></p>
-      <h3 id="checklist-heading">Checklist</h3>
-      <ol id="checklist" class="checklist" aria-labelledby="checklist-heading"
-          aria-live="polite" aria-relevant="additions text"></ol>
-      <h3 id="log-heading">Log tail</h3>
-      <pre id="log" class="log" tabindex="0" aria-labelledby="log-heading"></pre>
+<main id="main" class="layout">
+  <section class="panel panel-targets" aria-labelledby="targets-heading">
+    <div class="panel-head">
+      <h2 id="targets-heading">Targets</h2>
+    </div>
+    <div class="panel-body">
+      <p id="targets-empty" class="empty">No target runner has registered yet.</p>
+      <ul id="targets" class="cards"></ul>
     </div>
   </section>
 
-  <section aria-labelledby="history-heading">
-    <h2 id="history-heading">History</h2>
-    <div class="table-wrap">
-      <table>
-        <caption>Runs, newest first</caption>
-        <thead>
-          <tr>
-            <th scope="col">Started</th>
-            <th scope="col">Finished</th>
-            <th scope="col">Run</th>
-            <th scope="col">Ref</th>
-            <th scope="col">Plan / suite</th>
-            <th scope="col">Target</th>
-            <th scope="col">Status</th>
-            <th scope="col">Actions</th>
-          </tr>
-        </thead>
-        <tbody id="history"></tbody>
-      </table>
+  <section class="panel panel-setup" aria-labelledby="setup-heading">
+    <div class="panel-head">
+      <h2 id="setup-heading">Run setup</h2>
     </div>
-    <p id="history-empty">No runs yet.</p>
-    <div id="failures" hidden>
-      <h3 id="failures-heading" tabindex="-1">Failure summary</h3>
-      <dl id="failures-run" class="summary"></dl>
-      <ul id="failures-list"></ul>
+    <div class="panel-body">
+      <form id="run-form" class="form" novalidate>
+        <div class="field">
+          <label for="ref">Git ref</label>
+          <div class="control-row">
+            <select id="ref" name="ref" required aria-describedby="refs-status"></select>
+            <button type="button" id="refs-reload">Reload refs</button>
+          </div>
+          <p id="refs-status" class="hint" role="status">Loading refs…</p>
+        </div>
+        <div class="field-pair">
+          <div class="field">
+            <label for="plan">Plan</label>
+            <select id="plan" name="plan" required aria-describedby="plan-status"></select>
+            <p id="plan-status" class="hint" role="status"></p>
+          </div>
+          <div class="field">
+            <label for="suite">Suite</label>
+            <select id="suite" name="suite" required aria-describedby="suite-tests"></select>
+          </div>
+        </div>
+        <p id="suite-tests" class="hint suite-tests"></p>
+        <div class="field">
+          <label for="target">Target</label>
+          <select id="target" name="target" required></select>
+        </div>
+        <div class="field field-check">
+          <input type="checkbox" id="build" name="build" checked>
+          <label for="build">Build the ref on the target first</label>
+        </div>
+        <div class="form-actions">
+          <button type="submit" id="run-button" class="primary">Run</button>
+          <p id="run-status" class="hint" role="status" aria-live="polite"></p>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <section class="panel panel-live" aria-labelledby="live-heading">
+    <div class="panel-head">
+      <h2 id="live-heading">Live run</h2>
+    </div>
+    <div class="panel-body">
+      <p id="live-empty" class="empty">No run selected. Start one, or choose Watch on a target or a history row.</p>
+      <div id="live" class="live" hidden>
+        <div class="live-overview">
+          <dl id="live-summary" class="summary"></dl>
+          <div class="live-time">
+            <p id="live-clock" class="clock" role="timer" aria-live="off"></p>
+            <p id="live-estimate" class="hint"></p>
+          </div>
+          <div class="live-actions">
+            <button type="button" id="cancel-button" class="danger" hidden>Cancel run</button>
+            <p id="cancel-status" class="hint" role="status"></p>
+          </div>
+        </div>
+        <div class="live-checklist">
+          <h3 id="checklist-heading">Checklist</h3>
+          <ol id="checklist" class="checklist" aria-labelledby="checklist-heading"
+              aria-live="polite" aria-relevant="additions text"></ol>
+        </div>
+        <div class="live-log">
+          <h3 id="log-heading">Log tail</h3>
+          <pre id="log" class="log" tabindex="0" aria-labelledby="log-heading"></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel panel-history" aria-labelledby="history-heading">
+    <div class="panel-head">
+      <h2 id="history-heading">History</h2>
+    </div>
+    <div class="panel-body">
+      <div class="table-wrap">
+        <table class="history">
+          <caption>Runs, newest first</caption>
+          <thead>
+            <tr>
+              <th scope="col" class="time">Started</th>
+              <th scope="col" class="time">Finished</th>
+              <th scope="col">Run</th>
+              <th scope="col">Ref</th>
+              <th scope="col">Plan / suite</th>
+              <th scope="col">Target</th>
+              <th scope="col">Status</th>
+              <th scope="col" class="actions">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="history"></tbody>
+        </table>
+      </div>
+      <p id="history-empty" class="empty">No runs yet.</p>
+      <div id="failures" class="subpanel" hidden>
+        <h3 id="failures-heading" tabindex="-1">Failure summary</h3>
+        <dl id="failures-run" class="summary"></dl>
+        <ul id="failures-list" class="failures"></ul>
+      </div>
     </div>
   </section>
 </main>
