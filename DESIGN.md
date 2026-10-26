@@ -115,7 +115,7 @@ Target runner → controller:
 | `register` | `host` (registry alias), `hostname`, `os` (system, release, architecture, distribution or macOS version), `python`, `ubertooth_serials` (list, or `null` when enumeration is unavailable), `enumeration_error`, `heartbeat_interval_s`, `active_run_id` |
 | `heartbeat` | `active_run_id`, `elapsed_s`, `last_event_sequence`, `last_event_type` |
 | `run_accepted` | `request_id`, `run_id` |
-| `run_rejected` | `request_id`, `reason` (busy, unknown plan, cannot start) |
+| `run_rejected` | `request_id`, `reason` (busy, cannot build: the runner has no libbtbb and `build` is set, unknown plan, cannot start) |
 | `event` | `run_id`, `event` (one run.jsonl record, unchanged, with its own `schema_version`) |
 | `run_finished` | `request_id`, `run_id`, `status` (from the run's `run_finished` record), `exit_code`, `run_directory` |
 | `run_error` | `request_id`, `run_id`, `exit_code`, `reason` (run ended without a `run_finished` record) |
@@ -133,6 +133,17 @@ Semantics:
   `--allow-power-changes` setting (never set by the controller). It tails the
   child's run.jsonl and forwards each complete record as it is written, in
   sequence order; run.jsonl and report.md remain the source of truth.
+- A commit (or ref) missing from the runner's checkout, because it was
+  pushed after the checkout was last fetched, is fetched once from the
+  checkout's remote within 60 s and resolved again (manifest.py
+  `GitRevisionResolver`, for libbtbb too); the fetch never moves the working
+  tree, `HEAD` or a local branch, and a failure is a `run_error` naming the
+  remote and why.
+- Whether a runner can build (it has a libbtbb source and ref) is not in
+  `register`: a new field would need a protocol version bump. The runner
+  logs it at startup and refuses a `run` with `build` set that it cannot
+  honour with `run_rejected`, which the controller returns as 409 and the GUI
+  shows, so no run starts only to fail.
 - `cancel` sends the child SIGINT, which run-suite maps to its cooperative
   `CancellationToken` (including power-isolation restoration).
 - The run continues if the controller disconnects. The runner reconnects with
@@ -720,7 +731,11 @@ controller binds `127.0.0.1`; the runner dials it over loopback. It is
 idempotent (a unit and its service change only when the content, which records
 the checkout commit, changes), never runs sudo, and prints the one-time
 `sudo loginctl enable-linger <user>` when linger is off, since user services
-otherwise stop at logout. `scripts/install-desktop-shortcut.sh` adds a GUI
+otherwise stop at logout. By default it also gives the runner a libbtbb for
+Build runs: a clone of the libbtbb fork under the harness data directory
+(cloned once, fetched on later deploys) at the `LIBBTBB_REF` pin in the
+Ubertooth checkout's `origin/main` `install.sh` (else the harness's
+`LIBBTBB_PIN`); `--no-libbtbb` opts out. `scripts/install-desktop-shortcut.sh` adds a GUI
 launcher for the desktop user, and `scripts/harness-open` opens a
 loopback-to-loopback SSH tunnel (`-J`, or `--two-hop` through an
 owner-only Unix socket on the jump host, never a TCP port there) and the

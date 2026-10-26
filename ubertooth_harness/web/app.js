@@ -290,7 +290,7 @@
       selectRun(data.run.run_id);
     } catch (error) {
       status.textContent = `Not started: ${error.message}`;
-      if (error.status === 409) {
+      if (error.status === 409 && !error.message.startsWith("runner rejected the run")) {
         // The ref may have moved since this page listed it: list the refs
         // again so the next Run sends the current commit.
         await loadRefs();
