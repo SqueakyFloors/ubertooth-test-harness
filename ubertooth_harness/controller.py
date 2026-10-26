@@ -51,6 +51,7 @@ from ubertooth_harness.gui import (
     failure_summary,
     list_plans,
     load_assets,
+    planned_invocations,
     security_headers,
 )
 from ubertooth_harness.report import write_report
@@ -1125,7 +1126,7 @@ ENDPOINTS = {
     "GET /api/targets/{host}": "one target",
     "POST /api/targets/{host}/runs": "start a run: {ref, plan, suite, tests, build}",
     "GET /api/runs": "runs, newest first (?target=HOST)",
-    "GET /api/runs/{run_id}": "one run with its events and failure summary",
+    "GET /api/runs/{run_id}": "one run with its events, failure summary and planned invocations",
     "GET /api/runs/{run_id}/report.md": "the run's report",
     "POST /api/runs/{run_id}/cancel": "cancel an active run: {reason}",
     "WS /ws/live": "live target and run updates (?run_id=ID adds that run's events)",
@@ -1232,7 +1233,10 @@ def create_app(controller: Controller):
         run = controller.get_run(run_id)
         events = await asyncio.to_thread(controller.read_events, run)
         view = run.view()
-        return {"run": view, "events": events, "failures": failure_summary(view, events)}
+        return {
+            "run": view, "events": events, "failures": failure_summary(view, events),
+            "invocations": planned_invocations(events),
+        }
 
     @app.get("/api/runs/{run_id}/report.md")
     async def get_report(run_id: str):

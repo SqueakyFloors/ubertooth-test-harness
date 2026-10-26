@@ -303,11 +303,14 @@ class PlanTests(ControllerTestCase):
             [test["name"] for test in suite["tests"]],
         )
         estimates = {test["name"]: test["estimated_s"] for test in suite["tests"]}
+        # Not implemented: its duration argument. Implemented: the catalog's.
         self.assertEqual(10, estimates["BLE monitor"])
-        self.assertIsNone(estimates["Ubertooth identity"])
-        # Not every test has an estimate: no suite total.
-        self.assertIsNone(suite["estimated_s"])
-        self.assertEqual(list(estimates.values()).count(None), suite["unestimated_tests"])
+        self.assertEqual(0.4, estimates["Ubertooth identity"])
+        self.assertEqual(4.3, estimates["BLE extcap capture"])  # smoke, 3s
+        # Every test has an estimate: the suite total is their sum.
+        self.assertNotIn(None, estimates.values())
+        self.assertAlmostEqual(sum(estimates.values()), suite["estimated_s"], places=6)
+        self.assertEqual(0, suite["unestimated_tests"])
 
     def test_estimates_sum_and_broken_plans_are_listed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -315,15 +318,24 @@ class PlanTests(ControllerTestCase):
             (root / "timed.yaml").write_text(
                 "plan: Timed\nsuites:\n  quick:\n"
                 "    - BLE monitor:\n        duration: 10s\n"
-                "    - Spectrum analyzer:\n        coverage: smoke\n        duration: 2m\n",
+                "    - Spectrum analyzer:\n        coverage: smoke\n        duration: 2m\n"
+                "  partial:\n"
+                "    - Host CLI surface: {}\n"
+                "    - Uberducky HID:\n        Uberducky: x\n",
                 encoding="utf-8",
             )
             (root / "broken.yaml").write_text("plan: Broken\nsuites: []\n", encoding="utf-8")
             (root / "bad name.yaml").write_text("plan: x\n", encoding="utf-8")
             plans = {plan["name"]: plan for plan in list_plans(root)}
         self.assertEqual({"timed", "broken"}, set(plans))
-        self.assertEqual(130, plans["timed"]["suites"][0]["estimated_s"])
+        # BLE monitor 10 s; smoke Spectrum analyzer 0.6 s plus one 2m sweep.
+        self.assertEqual(130.6, plans["timed"]["suites"][0]["estimated_s"])
         self.assertEqual(0, plans["timed"]["suites"][0]["unestimated_tests"])
+        # Not implemented and no duration argument: no estimate.
+        partial = plans["timed"]["suites"][1]
+        self.assertEqual([3.6, None], [t["estimated_s"] for t in partial["tests"]])
+        self.assertIsNone(partial["estimated_s"])
+        self.assertEqual(1, partial["unestimated_tests"])
         self.assertTrue(plans["broken"]["error"])
         self.assertEqual([], plans["broken"]["suites"])
 
@@ -363,6 +375,33 @@ class FailureSummaryTests(ControllerTestCase):
                  "reason": "Ubertooth identity: expected pattern missing", "log": []},
             ],
             payload["failures"],
+        )
+        # No manifest record: the live view lists the plan's tests.
+        self.assertIsNone(payload["invocations"])
+
+    async def test_run_detail_lists_the_planned_invocations(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            await self.accepted_run(runner)
+            manifest = {"invocations": [
+                {"id": f"00{n}-Exclusive Ubertooth topology",
+                 "test_name": "Exclusive Ubertooth topology",
+                 "arguments": {"platforms": ["linux"], "exclusive Ubertooth": True,
+                               "capture duration": "5s"}}
+                for n in (1, 2)
+            ]}
+            await runner.send("event", run_id="run-1", event=event(
+                "run-1", 1, "manifest", "passed", manifest=manifest))
+            await wait_until(lambda: self.controller.read_events(self.controller.runs["run-1"]))
+        status, payload, _ = await self.http("GET", "/api/runs/run-1")
+        self.assertEqual(200, status)
+        # One per board the planner selected, each with its estimate.
+        self.assertEqual(
+            [{"invocation_id": "001-Exclusive Ubertooth topology",
+              "test_name": "Exclusive Ubertooth topology", "estimated_s": 13.0},
+             {"invocation_id": "002-Exclusive Ubertooth topology",
+              "test_name": "Exclusive Ubertooth topology", "estimated_s": 13.0}],
+            payload["invocations"],
         )
 
     def test_skipped_tests_are_not_failures_and_split_lines_are_joined(self):

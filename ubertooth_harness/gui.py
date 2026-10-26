@@ -23,7 +23,7 @@ import re
 import time
 from typing import Awaitable, Callable, Mapping, Sequence
 
-from ubertooth_harness.catalog import CatalogError, _duration_seconds
+from ubertooth_harness.catalog import CatalogError, TestCatalog, builtin_catalog
 from ubertooth_harness.manifest import ManifestError, _safe_repository
 from ubertooth_harness.plan import PlanError, TestStep, load_plan
 from ubertooth_harness.protocol import _git_ref, _name
@@ -42,8 +42,6 @@ REFS_TTL_S = 60.0
 REFS_FAILURE_TTL_S = 5.0
 LS_REMOTE_TIMEOUT_S = 20.0
 MAX_LS_REMOTE_BYTES = 8 * 1024 * 1024
-# Plan arguments whose value is how long the test runs.
-DURATION_ARGUMENTS = ("duration", "capture duration")
 # Failure summary bounds.
 FAILURE_LOG_LINES = 5
 _MAX_FIELD = 2000
@@ -239,33 +237,51 @@ class GitRefSource:
 # ----- plans ---------------------------------------------------------------
 
 
-def step_estimate_s(step: TestStep) -> float | None:
-    """Seconds a step is expected to run, from its duration argument, if any."""
-    for name in DURATION_ARGUMENTS:
-        value = step.arguments.get(name)
-        if value is not None:
-            try:
-                return _duration_seconds(value)
-            except CatalogError:
-                return None
-    return None
+def step_estimate_s(step: TestStep, catalog: TestCatalog | None = None) -> float | None:
+    """Seconds one invocation of a step is expected to run (catalog estimate).
+
+    None for a test the catalog does not know, arguments it refuses, or a
+    test with neither an estimate nor a duration argument.
+    """
+    return _estimate(catalog or builtin_catalog(), step.test_name, step.arguments)
+
+
+def _estimate(catalog: TestCatalog, test_name, arguments) -> float | None:
+    try:
+        definition = catalog.get(test_name)
+        return definition.estimated_seconds(definition.normalize_arguments(arguments))
+    except (CatalogError, TypeError, ValueError):
+        return None
+
+
+def _per_board(catalog: TestCatalog, step: TestStep) -> bool:
+    """True when the step runs once per selected board (a role set to each)."""
+    try:
+        roles = catalog.get(step.test_name).hardware_roles or {}
+    except CatalogError:
+        return False
+    return any(step.arguments.get(role) == "each" for role in roles)
 
 
 def list_plans(plans_dir: Path) -> list[dict]:
     """Every ``<name>.yaml`` plan with its suites, tests and estimates.
 
     A plan that does not load is listed with its error and no suites.
+    Estimates are per invocation: a ``per_board`` test runs once for every
+    board it selects on the target, which only the run's plan (its manifest)
+    counts; see planned_invocations.
     """
     plans = []
     try:
         paths = sorted(Path(plans_dir).glob("*.yaml"))
     except OSError:
         return []
+    catalog = builtin_catalog()
     for path in paths:
         if not _name(path.stem) or not path.is_file():
             continue
         try:
-            plan = load_plan(path)
+            plan = load_plan(path, catalog)
         except PlanError as error:
             plans.append({"name": path.stem, "title": None, "error": str(error),
                           "suites": []})
@@ -273,7 +289,11 @@ def list_plans(plans_dir: Path) -> list[dict]:
         suites = []
         for suite, steps in plan.suites.items():
             tests = [
-                {"name": step.test_name, "estimated_s": step_estimate_s(step)}
+                {
+                    "name": step.test_name,
+                    "estimated_s": step_estimate_s(step, catalog),
+                    "per_board": _per_board(catalog, step),
+                }
                 for step in steps
             ]
             estimates = [test["estimated_s"] for test in tests]
@@ -282,13 +302,55 @@ def list_plans(plans_dir: Path) -> list[dict]:
                 "tests": tests,
                 # Only when every test has one; build and preflight excluded.
                 "estimated_s": (
-                    sum(estimates) if estimates and None not in estimates else None
+                    round(sum(estimates), 1)
+                    if estimates and None not in estimates else None
                 ),
                 "unestimated_tests": estimates.count(None),
+                "per_board_tests": sum(test["per_board"] for test in tests),
             })
         plans.append({"name": path.stem, "title": plan.name, "error": None,
                       "suites": suites})
     return plans
+
+
+def planned_invocations(
+    events: Sequence[Mapping], catalog: TestCatalog | None = None
+) -> list[dict] | None:
+    """The run's invocations on its target, in order, each with its estimate.
+
+    Read from the run's ``manifest`` record, which lists exactly what the
+    planner compiled for the target host: one invocation per selected board
+    for ``Ubertooth: each``. None until that record arrives (or if it is
+    malformed); the live view then lists the plan's tests instead.
+    """
+    manifest = None
+    for event in events:
+        if isinstance(event, Mapping) and event.get("event_type") == "manifest":
+            details = event.get("details")
+            if isinstance(details, Mapping):
+                manifest = details.get("manifest")
+    if not isinstance(manifest, Mapping):
+        return None
+    invocations = manifest.get("invocations")
+    if not isinstance(invocations, list):
+        return None
+    catalog = catalog or builtin_catalog()
+    planned = []
+    for invocation in invocations:
+        if not isinstance(invocation, Mapping):
+            return None
+        test_name = invocation.get("test_name")
+        arguments = invocation.get("arguments")
+        planned.append({
+            "invocation_id": _text(invocation.get("id")),
+            "test_name": _text(test_name),
+            "estimated_s": (
+                _estimate(catalog, test_name, arguments)
+                if isinstance(test_name, str) and isinstance(arguments, Mapping)
+                else None
+            ),
+        })
+    return planned
 
 
 # ----- failure summary -----------------------------------------------------
