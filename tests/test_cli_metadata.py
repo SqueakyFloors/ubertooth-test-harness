@@ -42,7 +42,7 @@ class SurfaceTools:
             text = "garbage\n" if tool in self.broken else VERSION
             return CommandResult(command, 0, text, "", 0.01, False)
         if command[1:] == ("-h",):
-            code = 0 if tool not in ("ubertooth-btle", "ubertooth-dfu",
+            code = 0 if tool not in ("ubertooth-dfu",
                                      "ubertooth-scan", "ubertooth-follow") else 1
             return CommandResult(command, code, f"{tool} - usage\n", "", 0.01, False)
         raise AssertionError(f"unexpected command {command}")

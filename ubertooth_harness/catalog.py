@@ -364,7 +364,8 @@ def _host_cli_surface_cases(_arguments, _resources, _resource_identities):
         ("ubertooth-rx", 0),
         ("ubertooth-tx", 0),
         ("ubertooth-dump", 0),
-        ("ubertooth-btle", 1),
+        # -h exits 0 since fork e4f1dc5 (fork #377); it was 1.
+        ("ubertooth-btle", 0),
         ("ubertooth-dfu", 1),
         ("ubertooth-ego", 0),
         ("ubertooth-afh", 0),

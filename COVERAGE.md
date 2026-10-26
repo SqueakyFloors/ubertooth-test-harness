@@ -128,7 +128,7 @@ Combinations to test:
 
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
-| `-h` | help | Covered | Host CLI surface |
+| `-h` | help | Covered | Host CLI surface (exit 0 since fork `e4f1dc5`, fork #377; it was 1) |
 | `-f` | follow connections | Covered | BLE CRC transitions (smoke: CRC on, channel 37; comprehensive: every CRC value × channel and capture format). Exclusive topology runs it without `-U`. Following a real connection is not checked (needs a peer) |
 | `-n` | advertisements only | Covered | BLE CRC transitions and capture cases (smoke, comprehensive). Packet content is not checked. Raw receive (comprehensive): `-n -A37 -q` after a `dump -d` captures no basic-rate packet (every packet on RF channel 0; [ubertooth#318](https://github.com/SqueakyFloors/ubertooth/issues/318)) |
 | `-p` | promiscuous | Partial | BLE settings (comprehensive): a bounded receive-only run, then `-S`, resets LEDs, channel 2441 MHz, and squelch -120 (PA kept); access address and CRC are restored afterwards. BLE mode conflicts (release). Following a connection needs a peer |
@@ -138,8 +138,8 @@ Combinations to test:
 | `-i` / `-j` | interfere once (`-j` alias) | Hard | Jams a live connection (transmits RF) |
 | `-I` / `-J` | interfere continuously (`-J` alias) | Hard | Same as `-i` |
 | `-U<index\|serial>` | select device | Covered | Every btle case uses a serial |
-| `-r<file>` | PCAPNG capture | Covered | BLE CRC transitions: the header and link type 256 are checked (smoke with `-n`, comprehensive with `-n` and `-f`). Packet content is not tested. Refused command lines (no Ubertooth, smoke): a stray word, `-h`, or `-A 40` after `-r` creates no file and leaves an existing one unchanged; comprehensive adds `-f -n`. `-r -` is refused (comprehensive, with `-c`) |
-| `-q<file>` | PCAP (LE_LL_WITH_PHDR) | Covered | As `-r`: pcap with link type 256. Refused command lines (smoke): as `-r`; `-n -q - -q <file>` prints `Ignoring extra capture file` on stderr, not into the stdout capture, and never creates the file. Comprehensive adds `-a -a<address>` |
+| `-r<file>` | PCAPNG capture | Covered | BLE CRC transitions: the header and link type 256 are checked (smoke with `-n`, comprehensive with `-n` and `-f`). Packet content is not tested. Refused command lines (no Ubertooth, smoke): a stray word, `-h` (exit 0 since fork `e4f1dc5`), or `-A 40` after `-r` creates no file and leaves an existing one unchanged; comprehensive adds `-f -n`. `-r -` is refused (comprehensive, with `-c`) |
+| `-q<file>` | PCAP (LE_LL_WITH_PHDR) | Covered | As `-r`: pcap with link type 256. Refused command lines (smoke): as `-r`; `-n -q - -q <file>` prints `warning: ignoring extra capture file` (wording since fork `e4f1dc5`) on stderr, not into the stdout capture, and never creates the file. Comprehensive adds `-a -a<address>` |
 | `-c<file>` | PCAP (PPI) | Covered | As `-r`: pcap with link type 192. Refused command lines (smoke): as `-r`; comprehensive adds `-c <file> -r -` |
 | `-A<37-39>` | advertising channel | Covered | 37 in smoke; 37, 38, and 39 in comprehensive. `-A36`/`-A40` rejected: Argument validation (comprehensive) |
 | `-v[01]` | get/set CRC check | Covered | Get, set, and applied by a mode (smoke); `-v0`, `-v 1` and `-v 0` as the next word, and repeated `-v` (comprehensive). `-v 2` rejected and `-v stray` refused: Argument validation (comprehensive) |
@@ -153,7 +153,8 @@ Combinations to test:
 - Repeated capture options are first-wins and the extra file is never created (`-r -r`, `-q -c`, `-c -q`): Covered (comprehensive).
 - `-r` together with `-q` (separate handles): both files written: Covered (comprehensive). `-r` with `-c`: Covered (comprehensive).
 - Capture with each CRC value and mode: Covered (comprehensive).
-- `-i`/`-I` without `-f`/`-p`: accepted and ignored (the jam mode is only sent with a sniffing mode, per source). Hard: with a mode it transmits.
+- `-i`/`-I` without `-f`/`-p`: refused before any device is opened since fork `e4f1dc5` (fork #377; it was accepted and ignored): Not covered. Hard: with a mode it transmits.
+- `-a`/`-s` with `-f`, `-n` or `-p`: refused before any device is opened since fork `e4f1dc5`: Not covered.
 - `-a`/`-v` get and set without a mode do not start sniffing: Covered (BLE settings); `-a -v` reports both (comprehensive).
 - `-A` with `-p` or `-f` after a follow hop: Not covered (needs a peer).
 

@@ -1114,7 +1114,8 @@ def _repeated_capture_case(first, second):
                         option_b, _capture_path(file_b)(context),
                     ),
                     timeout_s=MODE_TIMEOUT_S,
-                    output_patterns=(r"Ignoring extra capture file: ",),
+                    # The note's wording since fork e4f1dc5 (fork #377).
+                    output_patterns=(r"warning: ignoring extra capture file: ",),
                     mutates=True,
                     continuous=True,
                 ),
@@ -1152,7 +1153,7 @@ def _two_handle_capture_case(serial, second="-q"):
                     second, _capture_path(file_q)(context),
                 ),
                 timeout_s=MODE_TIMEOUT_S,
-                forbidden_patterns=(r"Ignoring extra capture file",),
+                forbidden_patterns=(r"(?i)ignoring extra capture file",),
                 mutates=True,
                 continuous=True,
             ),
@@ -1333,9 +1334,11 @@ REJECTIONS = (
               r"error: advertising channel index must be 37-39 \(got 36\)"),
     Rejection("btle-adv-index-40", "ubertooth-btle", ("-A40",),
               r"error: advertising channel index must be 37-39 \(got 40\)"),
-    # btle prints its usage text after this message for a MAC it cannot parse.
+    # btle prints its usage text after this message for a MAC it cannot parse;
+    # one "error: " line on stderr since fork e4f1dc5 (fork #377), it was
+    # "Error: MAC address is wrong length" on stdout.
     Rejection("btle-bad-target-mac", "ubertooth-btle", ("-tnot-a-mac",),
-              r"Error: MAC address is wrong length"),
+              r"error: MAC address must be xx:xx:xx:xx:xx:xx \(got not-a-mac\)"),
     Rejection("ego-length-0", "ubertooth-ego", ("-l0",),
               r"error: capture length must be 1-48 \(got 0\)", smoke=True),
     Rejection("ego-length-49", "ubertooth-ego", ("-l49",),
