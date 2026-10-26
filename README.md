@@ -201,7 +201,7 @@ python -m ubertooth_harness run-suite \
   --hardware hardware.yaml --host Host_Linux \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
   --libbtbb-source /path/to/libbtbb \
-  --libbtbb-ref 84ab41fc99d172e812438bc9188f30a67216f748 \
+  --libbtbb-ref b32cf5adde496548057fdf6ea7c852378ad7411a \
   --build --output runs
 ```
 
