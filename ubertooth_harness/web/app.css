@@ -308,14 +308,32 @@ button.primary:disabled:hover { background: var(--primary); }
   grid-template-columns: minmax(0, 1fr);
   grid-template-areas: "overview" "checklist" "log";
 }
-.live-overview { grid-area: overview; display: grid; gap: 0.9rem; align-content: start; }
+.live-overview {
+  grid-area: overview; display: grid; gap: 0.9rem; align-items: start;
+  grid-template-columns: minmax(0, 1fr);
+  padding-bottom: var(--gap); border-bottom: 1px solid var(--line);
+}
 .live-checklist { grid-area: checklist; min-width: 0; }
 .live-log { grid-area: log; min-width: 0; }
+/* The run summary flows across the top as label-over-value items. */
+.live .summary {
+  display: flex; flex-wrap: wrap; gap: 0.6rem 1.75rem;
+}
+.summary-item { display: grid; gap: 0.1rem; min-width: 0; }
+.summary-item-wide { flex-basis: 100%; }
+@media (min-width: 48rem) {
+  .live-overview { grid-template-columns: minmax(0, 1fr) minmax(12rem, 16rem); }
+  .live-overview .live-time { grid-column: 2; grid-row: 1; }
+  .live-overview .live-actions { grid-column: 2; grid-row: 2; justify-content: flex-end; }
+  .live-overview .summary { grid-column: 1; grid-row: 1 / span 2; }
+}
+/* Checklist and log tail side by side, the log wider. */
 @media (min-width: 60rem) {
   .live {
-    grid-template-columns: minmax(15rem, 19rem) minmax(0, 1fr);
-    grid-template-areas: "overview checklist" "log log";
+    grid-template-columns: minmax(18rem, 2fr) minmax(0, 3fr);
+    grid-template-areas: "overview overview" "checklist log";
   }
+  .live-log .log { max-height: 36rem; }
 }
 
 .live-time {

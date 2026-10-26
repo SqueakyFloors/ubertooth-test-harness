@@ -510,9 +510,12 @@
       ["Started", timeElement(run.created_at)],
       ["Finished", timeElement(run.finished_at)],
     ];
-    if (run.reason) fields.push(["Reason", run.reason]);
-    $("live-summary").replaceChildren(...fields.flatMap(([term, value]) =>
-      [el("dt", { text: term }), el("dd", {}, value)]));
+    if (run.reason) fields.push(["Reason", run.reason, "summary-item summary-item-wide"]);
+    // One <div> per term/description pair (valid in a <dl>), so the summary
+    // can flow across the top of the card.
+    $("live-summary").replaceChildren(...fields.map(([term, value, className]) =>
+      el("div", { className: className || "summary-item" },
+        el("dt", { text: term }), el("dd", {}, value))));
     $("cancel-button").hidden = run.status !== "running";
 
     $("checklist").replaceChildren(...live.items.map((item) => {
