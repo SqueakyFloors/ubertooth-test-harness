@@ -295,6 +295,37 @@ suites:
             })
         self.assertEqual((), transitions.guard_boards({"Ubertooth": {"serial": "abc"}}))
 
+    def test_only_the_tests_ubertooth_roles_are_selectors(self):
+        # A USB power controller also has a serial, but the test never
+        # selects it with -U, so its short serial is not refused.
+        identities = {
+            "Ubertooth": {"serial": A},
+            "USB power controller": {"serial": "0x1234abcd"},
+            "guard Ubertooth 1": {"serial": B},
+        }
+        (guard,) = transitions.guard_boards(identities)
+        self.assertEqual(B, guard.serial)
+        # A multi-board test names its Ubertooth roles; each must be a full,
+        # distinct serial.
+        roles = transitions.ubertooth_roles(
+            {"sender": "Ubertooth", "responder": "Ubertooth",
+             "USB power controller": "USB power controller"})
+        self.assertEqual(("sender", "responder"), roles)
+        pair = {"sender": {"serial": A}, "responder": {"serial": C},
+                "USB power controller": {"serial": "0x1234abcd"},
+                "guard Ubertooth 1": {"serial": B}}
+        self.assertEqual(1, len(transitions.guard_boards(pair, roles)))
+        with self.assertRaisesRegex(StateCaseError, "responder needs a full"):
+            transitions.guard_boards({**pair, "responder": {"serial": "c" * 8}}, roles)
+        with self.assertRaisesRegex(StateCaseError, "must differ"):
+            transitions.guard_boards({**pair, "responder": {"serial": B}}, roles)
+        # Alternated boards are Ubertooths the test selects too.
+        with self.assertRaisesRegex(StateCaseError, "alternated Ubertooth 2 needs a full"):
+            transitions.guard_boards({
+                "Ubertooth": {"serial": A}, "alternated Ubertooth 2": {"serial": "c" * 8},
+                "guard Ubertooth 1": {"serial": B},
+            })
+
     def test_run_suite_refuses_short_serials_before_any_device_access(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

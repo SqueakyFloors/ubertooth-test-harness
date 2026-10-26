@@ -903,7 +903,8 @@ class NamedTestSequencer:
             )
             try:
                 planned_guards[invocation.invocation_id] = transitions.guard_boards(
-                    invocation.resource_identities
+                    invocation.resource_identities,
+                    transitions.ubertooth_roles(definition.hardware_roles),
                 )
             except StateCaseError as error:
                 raise ValueError(f"{invocation.invocation_id}: {error}") from error

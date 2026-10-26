@@ -4,11 +4,6 @@ plan: Ubertooth backlog
 runnable: false
 suites:
   backlog:
-    - Two-device range test:
-        host: Host_Linux
-        sender: default
-        responder: explicit required
-
     - Capture known BLE advertiser:
         advertiser: required
         Ubertooth: default

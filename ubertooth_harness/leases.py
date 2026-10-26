@@ -93,7 +93,8 @@ def lease_dir(override: Path | str | None = None) -> Path:
 def board_key(alias: str, identity: Mapping) -> str:
     """Lock-file key: the board's full serial, lowercase.
 
-    libubertooth matches -U against the END of a serial, so a short serial
+    libubertooth matches -U case-insensitively against the START of a serial
+    (a prefix), so a short serial
     and the full one select the same board but would take different locks.
     Only a full 32-hex-digit serial identifies a board unambiguously.
     """

@@ -58,10 +58,10 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-from typing import Callable, Mapping
+from typing import Callable, Iterable, Mapping
 
 from ubertooth_harness import capturefile
-from ubertooth_harness.cases import CommandCase, guard_roles
+from ubertooth_harness.cases import ALTERNATED_ROLE_PREFIX, CommandCase, guard_roles
 from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
     COMPILE_INFO_PATTERN,
@@ -1669,12 +1669,28 @@ class GuardBoard:
         return f"{self.role} {setting}"
 
 
-def guard_boards(resource_identities: Mapping) -> tuple[GuardBoard, ...]:
+def ubertooth_roles(hardware_roles: Mapping | None) -> tuple[str, ...]:
+    """The roles a test definition binds to an Ubertooth (its hardware roles)."""
+    return tuple(
+        role for role, kind in (hardware_roles or {}).items() if kind == "Ubertooth"
+    )
+
+
+def guard_boards(
+    resource_identities: Mapping, tested_roles: Iterable[str] = ("Ubertooth",)
+) -> tuple[GuardBoard, ...]:
     """The invocation's guard boards, validated as unambiguous -U selectors.
 
-    libubertooth matches -U against the END of a serial, so every selector the
-    test uses (selected board and guards) must be a full 32-hex-digit serial
-    that no other selector ends with.
+    libubertooth matches -U case-insensitively against the START of a serial
+    (a prefix match), so every selector the test uses (each board it selects
+    and each guard) must be a full 32-hex-digit serial that no other selector
+    shares.
+
+    ``tested_roles`` are the Ubertooth roles the test itself selects (its
+    definition's hardware roles; ``ubertooth_roles``), for example "Ubertooth"
+    or "sender" and "responder". Alternated boards are Ubertooths too. Other
+    resources, such as a USB power controller with its own serial, are not
+    boards the test selects with -U and are left out.
     """
     roles = guard_roles(resource_identities)
     if not roles:
@@ -1683,8 +1699,15 @@ def guard_boards(resource_identities: Mapping) -> tuple[GuardBoard, ...]:
         GuardBoard(role, str(resource_identities[role].get("serial", "")).lower())
         for role in roles
     )
-    selected = str(resource_identities.get("Ubertooth", {}).get("serial", "")).lower()
-    selectors = (("Ubertooth", selected),) + tuple((b.role, b.serial) for b in boards)
+    selected = tuple(tested_roles) + tuple(
+        role for role in resource_identities if role.startswith(ALTERNATED_ROLE_PREFIX)
+    )
+    tested = tuple(
+        (role, str(resource_identities.get(role, {}).get("serial", "")).lower())
+        for role in selected
+        if role in resource_identities
+    ) or (("Ubertooth", ""),)
+    selectors = tested + tuple((b.role, b.serial) for b in boards)
     for role, selector in selectors:
         if not (len(selector) == 32 and all(c in "0123456789abcdef" for c in selector)):
             raise StateCaseError(

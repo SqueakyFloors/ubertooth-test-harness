@@ -6,7 +6,7 @@ import re
 from types import MappingProxyType
 from typing import Mapping
 
-from ubertooth_harness.cases import GUARD_ROLE_PREFIX
+from ubertooth_harness.cases import ALTERNATED_ROLE_PREFIX, GUARD_ROLE_PREFIX
 from ubertooth_harness.catalog import CatalogError, TestCatalog
 from ubertooth_harness.hostneeds import (
     NotApplicable,
@@ -23,9 +23,6 @@ class PlanningError(ValueError):
     """A valid plan cannot be satisfied by registered resources."""
 
 
-# Role names for the further boards an "alternate Ubertooths" flash test
-# writes in turn; the plan-selected board keeps the "Ubertooth" role.
-ALTERNATED_ROLE_PREFIX = "alternated Ubertooth "
 _FULL_SERIAL = re.compile(r"[0-9a-f]{32}")
 
 
@@ -93,8 +90,9 @@ class PlanCompiler:
         boards = (selected, *others)
         for alias in boards:
             serial = self.registry.get(alias).identity.get("serial", "")
-            # libubertooth matches -U against the END of any attached board's
-            # serial, so a short selector could reach an unregistered board.
+            # libubertooth matches -U against the start (a prefix) of any
+            # attached board's serial, so a short selector could reach an
+            # unregistered board.
             if not isinstance(serial, str) or not _FULL_SERIAL.fullmatch(serial.lower()):
                 raise PlanningError(
                     f"{name}: {alias} needs a full 32-hex-digit serial to be alternated"
