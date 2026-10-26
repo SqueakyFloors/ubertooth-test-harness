@@ -11,8 +11,8 @@ suites:
         coverage: smoke
 
     # Every tool runs with UBERTOOTH_TEST_NO_DEVICES=1; skipped when the built
-    # libubertooth predates it (fork b6d8ede). ubertooth-follow cases skip
-    # where it is not built (no BlueZ).
+    # libubertooth predates it (fork b6d8ede). ubertooth-follow and
+    # ubertooth-scan cases are not applicable where they are not built (no BlueZ).
     - Refused command lines:
         hosts: each
         coverage: smoke
