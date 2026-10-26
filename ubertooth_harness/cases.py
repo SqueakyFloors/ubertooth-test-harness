@@ -10,6 +10,9 @@ from ubertooth_harness.hostneeds import NO_NEEDS, Needs
 # test binds and must leave unchanged; the plan-selected board keeps the
 # "Ubertooth" role.
 GUARD_ROLE_PREFIX = "guard Ubertooth "
+# Role names for the further boards an "alternate Ubertooths" flash test
+# writes in turn; the plan-selected board keeps the "Ubertooth" role.
+ALTERNATED_ROLE_PREFIX = "alternated Ubertooth "
 
 
 def guard_roles(resources: Mapping) -> tuple[str, ...]:

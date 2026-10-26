@@ -406,14 +406,28 @@ def util_mode_cases(arguments, _resources, resource_identities):
 # keeps no result, so `-m` on the responder still says "no range test result
 # yet".
 #
+# Both modes run on the board's stored channel (*chan_ptr: transmit on it,
+# receive with FSDIV one below it), so the two boards must be on the same
+# one. Leaving either mode runs the idle reset in bluetooth_rxtx.c
+# (cc2400_idle(): channel = 2441, LEDs off): the range test asks for idle
+# itself when it ends, and the repeater's -S does. The test therefore sets
+# both boards to RANGE_CHANNEL (2410, not the 2441 that -r leaves) before
+# -e and -n, so the channel reads after the test show that reset ran, not
+# just the value -r left behind.
+#
 # The check: a fresh result (both boards reset first, so neither has an old
 # one), with each PA level between 0 and the plan's "maximum PA level" and
 # each copy number between 0 and 15. The boards in a lab sit centimetres
 # apart, so a working link gets through at a low level; the plan sets how
-# low. Both boards must still answer USB while and after the repeater runs,
-# and -S must stop it (fork #26 is the firmware bug where they did not).
+# low. The responder must answer USB with its RX LED on once -e started and
+# before -n, so a failing run tells a wedged repeater from a wedged sender,
+# and again after the sender's wait; -S must stop it (fork #26 is the
+# firmware bug where the repeater answered nothing).
 
 RANGE_PA_LEVELS = 8  # PA levels 0-7 (FREND.PA_LEVEL)
+# Both boards run the test here: any channel other than the 2441 that -r and
+# the idle reset leave.
+RANGE_CHANNEL = "2410"
 RANGE_COPIES = 16  # copies sent at each PA level
 # A working round trip takes well under a second: 128 short packets each way
 # plus the repeater's turnaround delay. The sender is polled for this long.
@@ -430,14 +444,22 @@ RANGE_RESULT = (
     r"reply number     : (?P<reply_number>\d+)$"
 )
 RANGE_MISMATCH = r"invalid range test: mismatch on byte \d+"
+# The bytes cc2400_rangetest() compares (reply byte n against its request).
+RANGE_COMPARED_FIELDS = (
+    ((0, 0), "length"),
+    ((1, 1), "packet type"),
+    ((2, 17), "sender serial number"),
+)
 REPEATER_START = r"(?m)^Starting repeater$"
 RANGE_TEST_START = r"(?m)^Starting range test$"
 # Reads the sender's -m until it reports a result or a mismatch, or the
 # deadline passes. Each read whose output or exit status differs from the
-# previous one is logged as one line ("read <n>: exit <code>: <output>"), so
-# the record shows how the board answered while the test ran without a line
-# for every poll. Exits 0 once a result or a mismatch is seen, 1 at the
-# deadline. Arguments: ubertooth-util, serial, deadline (s), interval (s).
+# previous one is logged as one line ("read <n>: exit <code>: <output>") on
+# stdout, so the record shows how the board answered while the test ran
+# without a line for every poll. Exits 0 once a result or a mismatch is
+# seen; at the deadline prints "no range test result within ..." and exits
+# 1. range_poll_check turns that log into the step's failure reason.
+# Arguments: ubertooth-util, serial, deadline (s), interval (s).
 RANGE_POLL = (
     'end=$(( $(date +%s) + $2 )); i=0; last=; '
     'while :; do i=$((i + 1)); '
@@ -446,7 +468,7 @@ RANGE_POLL = (
     '[ "$this" = "$last" ] || printf "read %s: %s\\n" "$i" "$this"; last=$this; '
     'case "$out" in *"request PA level"*|*"mismatch on byte"*) exit 0;; esac; '
     'if [ "$(date +%s)" -ge "$end" ]; then '
-    'echo "no range test result within $2 s ($i reads)" >&2; exit 1; fi; '
+    'echo "no range test result within $2 s ($i reads)"; exit 1; fi; '
     'sleep "$3"; done'
 )
 
@@ -454,6 +476,30 @@ RANGE_POLL = (
 def range_poll_argv(serial: str) -> tuple[str, ...]:
     return ("sh", "-c", RANGE_POLL, "ubertooth-util", serial,
             str(RANGE_RESULT_DEADLINE_S), RANGE_POLL_INTERVAL_S)
+
+
+def range_field(byte: int) -> str:
+    """The request field a mismatching byte belongs to."""
+    for (first, last), name in RANGE_COMPARED_FIELDS:
+        if first <= byte <= last:
+            return name if first == last else f"{name} byte {byte - first}"
+    return "a byte the firmware does not compare"
+
+
+def range_poll_check(stdout: str) -> str:
+    """The poll log: a result passes; a mismatch or no result names why."""
+    reads = re.findall(r"(?m)^read \d+: (.*)$", stdout)
+    mismatch = re.search(r"mismatch on byte (\d+)", stdout)
+    if mismatch is not None:
+        byte = int(mismatch[1])
+        return (f"the reply differs from the request at byte {byte} "
+                f"({range_field(byte)})")
+    if "request PA level" in stdout:
+        return ""
+    deadline = re.search(r"(?m)^no range test result within .*$", stdout)
+    summary = deadline[0] if deadline else "the poll ended without a result"
+    last = reads[-1] if reads else "no read logged"
+    return f"{summary}; last read: {last}"
 
 
 def range_result_check(maximum_pa: int):
@@ -560,23 +606,47 @@ def range_test_cases(arguments, _resources, resource_identities):
     sender_leds, sender_channel = setting("sender", LEDS), setting("sender", CHANNEL)
     responder_leds = setting("responder", LEDS)
     responder_channel = setting("responder", CHANNEL)
+    channels = {"sender": sender_channel, "responder": responder_channel}
+    for role, serial in boards:
+        label = role.capitalize()
+        steps += [
+            Step(f"{role}-set-test-channel", f"{label}: set the test channel {RANGE_CHANNEL} MHz",
+                 _util(serial, *channels[role].set_options(RANGE_CHANNEL)),
+                 output_check=nothing_on_stdout, mutates=True),
+            channels[role].verify(serial, f"{role}-test-channel",
+                                  f"{label}: on the test channel",
+                                  f"{role} test channel", RANGE_CHANNEL),
+        ]
+
+    def repeating(step_id, name):
+        # The repeater lights RX while it listens; reading the LEDs also shows
+        # the board answers USB with the repeater running.
+        return Step(step_id, name, _util(responder, "-d"),
+                    output_patterns=(r"(?m)^RX LED status : 1$",))
+
     steps += [
         Step("responder-start-repeater", "Responder: start the repeater (-e)",
              _util(responder, "-e"), output_patterns=(REPEATER_START,),
              output_check=nothing_on_stdout, mutates=True),
+        # Before -n: a failure here is the repeater, not the sender.
+        repeating("responder-repeating",
+                  "Responder: repeating (RX LED on) and answering USB before -n"),
+        responder_channel.verify(responder, "responder-channel-while-repeating",
+                                 "Responder: the repeater keeps the test channel",
+                                 "responder channel while repeating", RANGE_CHANNEL),
         Step("sender-start-range-test", "Sender: start the range test (-n)",
              _util(sender, "-n"), output_patterns=(RANGE_TEST_START,),
              output_check=nothing_on_stdout, mutates=True),
         Step("sender-wait-for-result",
              f"Sender: read -m until a result appears (up to {RANGE_RESULT_DEADLINE_S} s)",
-             range_poll_argv(sender), timeout_s=RANGE_POLL_TIMEOUT_S),
+             range_poll_argv(sender), timeout_s=RANGE_POLL_TIMEOUT_S,
+             # The poll's own exit is not the verdict; its log is.
+             expected_returncodes=(0, 1), output_check=range_poll_check),
         Step("sender-range-result", "Sender: range-test result",
              _util(sender, "-m"), output_check=range_result_check(maximum_pa),
              forbidden_patterns=(RANGE_MISMATCH,)),
-        # The repeater lights RX while it listens; reading the LEDs also shows
-        # the board still answers USB with the repeater running.
-        Step("responder-repeating", "Responder: still repeating (RX LED on) and answering USB",
-             _util(responder, "-d"), output_patterns=(r"(?m)^RX LED status : 1$",)),
+        repeating("responder-repeating-after-test",
+                  "Responder: still repeating (RX LED on) and answering USB after the test"),
         Step("responder-no-result", "Responder: the repeater keeps no result",
              _util(responder, "-m"), output_patterns=(RANGE_RESULT_NONE,),
              forbidden_patterns=(RANGE_RESULT_VALUES,)),
@@ -584,14 +654,14 @@ def range_test_cases(arguments, _resources, resource_identities):
                            "Sender: LEDs off once -n ended by itself",
                            "sender leds after test", "0/0/0"),
         sender_channel.verify(sender, "sender-channel-after-test",
-                              "Sender: channel reset once the test ended",
+                              "Sender: channel back to 2441 MHz (idle reset) once the test ended",
                               "sender channel after test", BOOT_DEFAULT_CHANNEL),
         _stop(responder, "responder-stop", "Responder: stop the repeater with -S"),
         responder_leds.verify(responder, "responder-leds-after-stop",
                               "Responder: LEDs off after the stop",
                               "responder leds after stop", "0/0/0"),
         responder_channel.verify(responder, "responder-channel-after-stop",
-                                 "Responder: channel reset by the stop",
+                                 "Responder: channel back to 2441 MHz (idle reset) after -S",
                                  "responder channel after stop", BOOT_DEFAULT_CHANNEL),
     ]
     return (
@@ -605,9 +675,10 @@ def range_test_cases(arguments, _resources, resource_identities):
             expected_state=(
                 "the sender's -m reports request and reply PA levels 0-"
                 f"{maximum_pa} and copy numbers 0-{RANGE_COPIES - 1}; the sender is "
-                "idle once the test ends; the responder answers USB while "
-                "repeating, keeps no result, and stops on -S; every setting of "
-                "both boards restored"
+                f"idle at 2441 MHz once the test ends (both ran at {RANGE_CHANNEL}); "
+                "the responder answers USB while repeating, before -n and after "
+                "the test, keeps no result, and -S returns it to idle at 2441 MHz; "
+                "every setting of both boards restored"
             ),
         ),
     )

@@ -51,16 +51,28 @@ class RangeBoard(FakeUbertooth):
       USB request until power is removed.
     - ``sender_answers_usb=False``: the sender serves no USB request while it
       waits for a reply that never comes.
+    - ``idle_reset_keeps_channel=True``: a firmware whose idle reset left the
+      stored channel alone.
+
+    The round trip needs the repeater on the sender's channel, as both modes
+    run on the stored channel.
     """
 
     def __init__(self, serial, air, *, repeater_answers_usb=True,
-                 sender_answers_usb=True, **kwargs):
+                 sender_answers_usb=True, idle_reset_keeps_channel=False, **kwargs):
         super().__init__(serial=serial, **kwargs)
         self.air = air
         air.boards[serial] = self
         self.result = None
         self.repeater_answers_usb = repeater_answers_usb
         self.sender_answers_usb = sender_answers_usb
+        self.idle_reset_keeps_channel = idle_reset_keeps_channel
+
+    def _stop_mode(self):
+        channel = self.state["channel"]
+        super()._stop_mode()
+        if self.idle_reset_keeps_channel:
+            self.state["channel"] = channel
 
     def deaf(self):
         if self.mode == "repeater":
@@ -99,8 +111,9 @@ class RangeBoard(FakeUbertooth):
             return self._result(command, 0, "", "Starting repeater\n", on_output)
         if options == ("-n",):
             self._stop_mode()
-            repeating = any(board.mode == "repeater" for serial, board in
-                            self.air.boards.items() if serial != self.serial)
+            repeating = any(
+                board.mode == "repeater" and board.state["channel"] == self.state["channel"]
+                for serial, board in self.air.boards.items() if serial != self.serial)
             if not repeating or self.air.result is None:
                 self.mode = "waiting"  # listens for a reply that never comes
             else:
@@ -138,8 +151,9 @@ class PairBench:
             done = "request PA level" in read[1] or "mismatch on byte" in read[1]
             if done:
                 return board._result(command, 0, line, "", on_output)
-            return board._result(command, 1, line,
-                                 "no range test result within 10 s (40 reads)\n", on_output)
+            return board._result(command, 1,
+                                 line + "no range test result within 10 s (40 reads)\n",
+                                 "", on_output)
         selections = [command[i + 1] for i, item in enumerate(command) if item == "-U"]
         return self.boards[selections[-1]].run(
             argv, timeout_s=timeout_s, cancellation=cancellation, on_output=on_output)
@@ -305,9 +319,42 @@ class RangePollScriptTests(unittest.TestCase):
     def test_no_result_by_the_deadline_exits_1(self):
         result = self.run_poll('echo "no range test result yet"\n', deadline="1")
         self.assertEqual(1, result.returncode)
-        self.assertEqual(["read 1: exit 0: no range test result yet"],
-                         result.stdout.splitlines())
-        self.assertRegex(result.stderr, r"^no range test result within 1 s \(\d+ reads\)$")
+        lines = result.stdout.splitlines()
+        self.assertEqual("read 1: exit 0: no range test result yet", lines[0])
+        self.assertRegex(lines[1], r"^no range test result within 1 s \(\d+ reads\)$")
+        self.assertEqual(2, len(lines))
+        self.assertEqual("", result.stderr)
+        self.assertEqual(
+            "no range test result within 1 s ("
+            + lines[1].split("(")[1] + "; last read: exit 0: no range test result yet",
+            util_cases.range_poll_check(result.stdout))
+
+
+class RangePollCheckTests(unittest.TestCase):
+
+    def test_a_result_passes(self):
+        self.assertEqual("", util_cases.range_poll_check(
+            "read 1: exit 0: no range test result yet\n"
+            "read 4: exit 0: request PA level : 0 request number   : 1\n"))
+
+    def test_a_mismatch_names_the_field(self):
+        cases = {0: "byte 0 (length)", 1: "byte 1 (packet type)",
+                 2: "byte 2 (sender serial number byte 0)",
+                 17: "byte 17 (sender serial number byte 15)"}
+        for byte, expected in cases.items():
+            with self.subTest(byte):
+                reason = util_cases.range_poll_check(
+                    f"read 1: exit 1: error: invalid range test: mismatch on byte {byte}\n")
+                self.assertEqual(f"the reply differs from the request at {expected}", reason)
+
+    def test_no_result_names_the_last_read(self):
+        reason = util_cases.range_poll_check(
+            "read 1: exit 0: no range test result yet\n"
+            "read 2: exit 1: no Ubertooth found with serial matching 'x'\n"
+            "no range test result within 10 s (40 reads)\n")
+        self.assertEqual("no range test result within 10 s (40 reads); last read: "
+                         "exit 1: no Ubertooth found with serial matching 'x'", reason)
+        self.assertIn("ended without a result", util_cases.range_poll_check(""))
 
 
 class RangeExecutionTests(unittest.TestCase):
@@ -338,30 +385,71 @@ class RangeExecutionTests(unittest.TestCase):
         self.assertLess(bench.commands.index(("ubertooth-util", "-U", B, "-e")),
                         bench.commands.index(("ubertooth-util", "-U", A, "-n")))
 
-    def test_repeater_that_stops_answering_usb_fails(self):
+    def test_both_boards_run_on_the_test_channel(self):
+        _air, sender, responder = pair()
+        bench = PairBench(sender, responder)
+        summary, events, _report = run_guarded(invocation(), bench)
+        self.assertTrue(summary.passed, failed_steps(events))
+        start = bench.commands.index(("ubertooth-util", "-U", B, "-e"))
+        for serial in (A, B):
+            self.assertLess(bench.commands.index(("ubertooth-util", "-U", serial, "-c2410")),
+                            start)
+        (during,) = steps(events, step_id="responder-channel-while-repeating")
+        self.assertEqual("passed", during.status)
+
+    def test_an_idle_reset_that_keeps_the_channel_fails(self):
+        # The channel checks after the test are real: 2410 left there fails.
+        air = Air()
+        sender = RangeBoard(A, air, idle_reset_keeps_channel=True)
+        responder = RangeBoard(B, air, idle_reset_keeps_channel=True)
+        summary, events, _report = self.run_pair(sender, responder)
+        self.assertFalse(summary.passed)
+        failed = failed_steps(events)
+        self.assertEqual("sender-channel-after-test", failed[0])
+        (step,) = steps(events, step_id="sender-channel-after-test")
+        self.assertIn("observed 2410", step.details["reason"])
+
+    def test_repeater_that_stops_answering_usb_fails_before_the_range_test(self):
         # Fork #26 on main: the responder answers nothing once -e started.
+        # The first check runs before -n, so the sender never transmits.
         _air, sender, responder = pair(repeater_answers_usb=False)
         summary, events, _report = self.run_pair(sender, responder)
         self.assertFalse(summary.passed)
         failed = failed_steps(events)
         self.assertEqual("responder-repeating", failed[0])
         self.assertIn("responder-cleanup-stop", failed)
+        self.assertNotIn(("ubertooth-util", "-U", A, "-n"), sender.commands)
+
+    def test_a_wedged_sender_fails_at_the_wait_after_the_repeater_answered(self):
+        _air, sender, responder = pair(Air(result=None))
+        sender.sender_answers_usb = False
+        summary, events, _report = self.run_pair(sender, responder)
+        self.assertFalse(summary.passed)
+        (before,) = steps(events, step_id="responder-repeating")
+        self.assertEqual("passed", before.status)
+        self.assertEqual("sender-wait-for-result", failed_steps(events)[0])
+        (wait,) = steps(events, step_id="sender-wait-for-result")
+        self.assertIn("last read: exit 1: no Ubertooth found", wait.details["reason"])
 
     def test_no_reply_fails_at_the_wait_and_still_cleans_up(self):
         _air, sender, responder = pair(Air(result=None))
         summary, events, _report = self.run_pair(sender, responder)
         self.assertFalse(summary.passed)
         self.assertEqual(["sender-wait-for-result"], failed_steps(events))
+        (wait,) = steps(events, step_id="sender-wait-for-result")
+        self.assertIn("no range test result within 10 s (40 reads); last read: "
+                      "exit 0: no range test result yet", wait.details["reason"])
         self.assertIsNone(responder.mode)
         self.assertIsNone(sender.mode)
 
-    def test_a_mismatch_fails(self):
+    def test_a_mismatch_fails_naming_the_field(self):
         _air, sender, responder = pair(Air(mismatch=17))
         summary, events, _report = self.run_pair(sender, responder)
         self.assertFalse(summary.passed)
-        self.assertEqual(["sender-range-result"], failed_steps(events))
-        (result,) = steps(events, step_id="sender-range-result")
-        self.assertIn("exited 1", result.details["reason"])
+        self.assertEqual(["sender-wait-for-result"], failed_steps(events))
+        (wait,) = steps(events, step_id="sender-wait-for-result")
+        self.assertIn("differs from the request at byte 17 (sender serial number byte 15)",
+                      wait.details["reason"])
 
     def test_level_above_the_plan_maximum_fails(self):
         _air, sender, responder = pair(Air(result=(0, 0, 4, 2)))

@@ -190,9 +190,10 @@ python -m ubertooth_harness run-suite \
 ```
 
 [`testplans/range.yaml`](testplans/range.yaml) runs the `Two-device range test`
-between the host's default board (sender) and `UT_Linux1` (responder). Both
-transmit on 2.4 GHz, the sender at every PA level up to 0 dBm, so run it only
-where that is allowed. Both boards need firmware built from the commit under
+between the host's default board (sender) and `UT_Linux1` (responder). The
+test transmits: both boards send on 2.4 GHz, the sender at every PA level up
+to 0 dBm. Run it only where that is allowed, for example with the boards in a
+shielded box or on an RF-isolated bench. Both boards need firmware built from the commit under
 test (flash the `--build --with-firmware` image first, as for any device test):
 
 ```sh
@@ -394,7 +395,7 @@ python -m ubertooth_harness run-suite \
 | `Raw receive replay` | no Ubertooth; `host` and `fast` plans, and CI: `ubertooth-rx -i` on a synthetic fixture (`rxreplay.py`, built from the spec encoding, never a real capture) prints exactly the fixture's LAP/error/channel lines and skips the decoy records; `-l <LAP>` derives the UAP (CLK6 0); `-r` PCAPNG and `-q` PCAP with link type 255 and one packet per line; `-s` gives the same lines with no notice and `-h` lists it as the default sweep (fork #361); `-d` into a missing directory exits 1 with one `error: <file>: No such file or directory` line, no usage and no packet line, and the directory holds only the unchanged fixture (fork 5ac22a8) | adds `-z` (both piconets, one with its UAP); `-l` of an ID-only LAP (no UAP); `-l -u` with the right UAP (confirmed, hop reversal) and a wrong one (nothing confirmed); `-e 0` drops the one-error access code; `-d` writes the packet records back byte for byte (and passes `rxdump.py`); `-l -q` captures one LAP; empty file exit 0; missing file exit 1 (`error: <file>: No such file or directory`); lines carry the recorded systime (fork #202); `-i <directory>` and a cut last record are reported, exit 1 (fork #203; both fixed in a55ac89); `-i -u` without `-l` refused before the input is used (fork #236, fixed in 57469f2; the bare `-u` is in Argument validation, under a lease) |
 | `Ubertooth util modes` | `-I` blinks every LED (sampled at jittered intervals until both phases appear, at most 60 samples or 10 s including a read in flight), `-q120` (-120 dBm) lights every LED; each returns at once, its start line on stderr (`-I`: one `note: the board is blinking; stop it with ubertooth-util -U <serial> -S ...` line; fork #326), keeps channel and PA, and `-S` ends it with the idle reset (LEDs off, 2441 MHz, squelch -120, PA kept); originals are restored; `-m` after `-r` says `no range test result yet` (fork #190) | adds `-q20` and bare `-q` (-85 dBm) running until `-S`, `-I` ending `-q` and `-q` ending `-I` (the new mode starts at 2441 MHz), `-s -I`. A failed LED read (fork #213) is retried once and the retry recorded; two in a row fail the case |
 | `Multi-board selection` | needs two or more registered boards on the host (a one-board host skips it): `-U all -s` and `-s` without `-U` list every registered board and only those; `-N` counts them; each `-U<index>` opens the board the listing names at that index | adds `-U all -vVspb` and `-vVspb` without `-U` (five lines per board), `-C` without `-U` refused; `-U<n>` past the last board is refused with `no Ubertooth at index` (fork #188, fixed in 0c7e9c0) |
-| `Two-device range test` | no `coverage` argument; `range` plan; two registered boards on one host (`sender`, `responder`; the same board in both roles is refused), `allow RF transmission: true`: both boards reset (so neither has an old result), `-e` on the responder, `-n` on the sender, then the sender's `-m` is read until a result appears (10 s deadline) and must give request and reply PA levels at most `maximum PA level` (0-7, default 7; the plan sets 3) and copy numbers 0-15; a mismatch fails; the sender is idle afterwards (LEDs off, 2441 MHz); the responder answers USB with its RX LED on, keeps no result, and `-S` stops it (LEDs off, 2441 MHz); channel, PA, squelch, LEDs and CRC of both boards restored, other registered boards guarded. Fails on fork main (fork #26) | no comprehensive profile |
+| `Two-device range test` | no `coverage` argument; `range` plan; two registered boards on one host (`sender`, `responder`; the same board in both roles is refused), `allow RF transmission: true`: both boards reset (so neither has an old result) and set to 2410 MHz, `-e` on the responder, which must then answer USB with its RX LED on and still be at 2410 MHz before `-n` on the sender (so a failure tells a wedged repeater from a wedged sender), then the sender's `-m` is read until a result appears (10 s deadline) and must give request and reply PA levels at most `maximum PA level` (0-7, default 7; the plan sets 3) and copy numbers 0-15; a mismatch fails, naming the field that differs; the sender is idle afterwards (LEDs off, back to 2441 MHz: the idle reset ran); the responder still answers USB with its RX LED on, keeps no result, and `-S` stops it (LEDs off, back to 2441 MHz); channel, PA, squelch, LEDs and CRC of both boards restored, other registered boards guarded. Fails on fork main (fork #26) | no comprehensive profile |
 | `DFU images` | writes the selected board's firmware; slow plan (not fast): `-d <test image> -r`, then `-u -r` reads back the image padded with 0xff; `-s` on the image without its suffix gives the build's `.dfu` | `firmware` plan (not release): adds `-s` refusing a `.dfu`; seven bad images (wrong CRC, truncated, no suffix, text, no `UFD`, wrong vendor, wrong product) refused before a device is opened (fork #198, #199, fixed in e8edd15), the board still in its application with the same flash (read back); `-s` refuses a suffixed `.bin` and accepts a read-only one (fork #200, fixed in 9d710fe). At 6fee30c `-d <image> -r` exits 1 after a good flash (fork #267, fixed in 89d9197), so the write cases fail there |
 | `BLE mode conflicts` | no `coverage` argument; release plan | every combination of `ubertooth-btle -f -n -p` must be rejected before sniffing |
 | `Ubertooth util conflicts` | no `coverage` argument; requires `allow RF transmission: true`; release plan | every pair of `-q -n -e -t -x -I` must be rejected with the fork's `error: options ... cannot be combined` before a mode starts |
@@ -520,7 +521,8 @@ board), so a guarded test may follow a flash on another board.
 
 A guarded test therefore needs every registered Ubertooth on its host to be
 attached, idle, and readable, each registered with its full 32-hex-digit
-serial (libubertooth matches `-U` against the end of a serial). `run-suite`
+serial (libubertooth matches `-U` case-insensitively against the start of a
+serial). `run-suite`
 refuses shorter serials for the selected host before any build or device
 access. Planning stays permissive: `validate-plan --hardware` prints a
 `warning:` line for each such invocation but still exits 0.
@@ -688,7 +690,7 @@ and, for `Flash reliability` and exclusive tests, every Ubertooth on the host
 `UBERTOOTH_HARNESS_LEASE_DIR`); the kernel drops it when the process exits, so
 leases never go stale. Boards are taken all or nothing, so two runs cannot
 deadlock. A leased board needs its full 32-hex-digit serial in the hardware
-registry: libubertooth matches `-U` against the end of a serial, so a short
+registry: libubertooth matches `-U` against the start of a serial, so a short
 serial would select the same board under a different lock.
 
 If a board is held, the run fails before any build or device command and names

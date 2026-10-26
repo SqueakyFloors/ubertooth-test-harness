@@ -2,8 +2,9 @@ plan: Two-device range test
 suites:
   range:
     # Needs two registered Ubertooths on one Linux host: the default board
-    # sends (-n) and UT_Linux1 repeats (-e). Both transmit, the sender at
-    # every PA level up to 0 dBm, so run it only where that is allowed.
+    # sends (-n) and UT_Linux1 repeats (-e). The test transmits: both boards
+    # send, the sender at every PA level up to 0 dBm. Run it only where that
+    # is allowed, for example in a shielded box or on an RF-isolated bench.
     # Other registered boards on the host are guarded (read only).
     - Two-device range test:
         host: Host_Linux

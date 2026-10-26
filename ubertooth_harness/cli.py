@@ -52,7 +52,7 @@ from ubertooth_harness.resources import FileResourceRegistry, RegistryError
 from ubertooth_harness.report import render_runs, write_report
 from ubertooth_harness.sequencer import NamedTestSequencer, run_started_details
 from ubertooth_harness.stateful import StateCaseError
-from ubertooth_harness.transitions import guard_boards
+from ubertooth_harness.transitions import guard_boards, ubertooth_roles
 
 
 _DEFAULT_PLAN = Path(__file__).resolve().parents[1] / "testplans" / "slow.yaml"
@@ -494,7 +494,10 @@ def _validate(
                         f"{action.controller_alias} port {action.port}"
                     )
                 try:
-                    guard_boards(invocation.resource_identities)
+                    guard_boards(
+                        invocation.resource_identities,
+                        ubertooth_roles(catalog.get(invocation.test_name).hardware_roles),
+                    )
                 except StateCaseError as error:
                     # Planning stays permissive; run-suite refuses this host.
                     print(f"    warning: {error}; run-suite refuses this invocation")
@@ -608,7 +611,10 @@ def _run_suite(args: argparse.Namespace) -> int:
     for invocation in invocations:
         # Guards need unambiguous -U selectors; fail before any build or device access.
         try:
-            guard_boards(invocation.resource_identities)
+            guard_boards(
+                invocation.resource_identities,
+                ubertooth_roles(catalog.get(invocation.test_name).hardware_roles),
+            )
         except StateCaseError as error:
             raise HarnessError(f"{invocation.invocation_id}: {error}") from error
     unavailable = sorted({
