@@ -587,6 +587,8 @@ class Controller:
                     # A later registration replaced this connection: its
                     # target is no longer the host's current one, so nothing
                     # read here may act. End the session before reading more.
+                    # A message already being dispatched when the replacement
+                    # registered still finishes; its run state is shared.
                     self.log(
                         f"warning: dropped a message from {target.host} on a "
                         "replaced connection"
