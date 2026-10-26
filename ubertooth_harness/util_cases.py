@@ -36,7 +36,10 @@ the case.
 from __future__ import annotations
 
 import re
+import sys
+from pathlib import Path
 
+from ubertooth_harness import ledblink
 from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
     COMPILE_INFO_PATTERN,
@@ -76,17 +79,29 @@ from ubertooth_harness.transitions import (
 # Three separate control reads make one -d report, so a sample taken while the
 # identify blink toggles can mix states; the checks only need whole-on and
 # whole-off samples to appear (blink) or every sample whole-on/off (steady).
-# The interval keeps the sample period (about 0.12 s with the command time)
-# away from the 0.334 s blink period, so the samples cannot alias to one phase.
+# A -d read takes about 0.28 s, so a fixed 0.05 s pause gives a sample period
+# close to the 0.334 s blink period; the blink sampler jitters its pauses.
 #
 # A read that fails (SqueakyFloors/ubertooth#213: a control request stalls
 # while LED specan runs) is retried once; its partial output is dropped, and a
 # "LED sample <i>: -d exited <code>, retrying" line goes to stderr so the run
 # record shows every retry. A retry that fails too ends the sampler with exit 1.
+#
+# The steady checks (every LED on, or off) take LED_SAMPLES samples with the
+# shell loop below. The blink check runs ledblink.py instead: it samples until
+# a whole-on and a whole-off sample have both appeared, up to
+# LED_BLINK_MAX_SAMPLES samples or LED_BLINK_DEADLINE_S seconds on a monotonic
+# clock, the deadline covering reads in flight (stopped with SIGTERM), so it
+# ends within LED_BLINK_DEADLINE_S + ledblink.GRACE_S. Its pauses are jittered
+# by one blink period, so the samples cannot lock to one phase.
 
 LED_SAMPLES = 12
 LED_SAMPLE_INTERVAL_S = "0.05"
+LED_BLINK_MAX_SAMPLES = 60
+LED_BLINK_DEADLINE_S = 10
+LED_SAMPLE_TIMEOUT_S = 30.0
 LED_RETRY_LINE = r"LED sample \d+: -d exited \d+, retrying"
+_LEDBLINK = str(Path(ledblink.__file__).resolve())
 LED_SAMPLER = (
     'i=0; while [ "$i" -lt "$2" ]; do sleep "$3"; '
     'out=$("$0" -U "$1" -d); code=$?; '
@@ -102,6 +117,15 @@ def led_sampler_argv(serial: str) -> tuple[str, ...]:
     return (
         "sh", "-c", LED_SAMPLER, "ubertooth-util", serial,
         str(LED_SAMPLES), LED_SAMPLE_INTERVAL_S,
+    )
+
+
+def led_blink_sampler_argv(serial: str) -> tuple[str, ...]:
+    return (
+        sys.executable, _LEDBLINK, "ubertooth-util", serial,
+        "--max-samples", str(LED_BLINK_MAX_SAMPLES),
+        "--deadline", str(LED_BLINK_DEADLINE_S),
+        "--interval", LED_SAMPLE_INTERVAL_S,
     )
 
 
@@ -121,11 +145,11 @@ def _sample_count(samples) -> str:
 def blink_check(stdout: str) -> str:
     """Identify is running: whole-on and whole-off samples both appear."""
     samples = led_samples(stdout)
-    reason = _sample_count(samples)
-    if reason:
-        return reason
+    if not samples:
+        return "no LED samples"
     if ALL_ON not in samples or ALL_OFF not in samples:
-        return "LEDs did not blink (USR/RX/TX samples: " + ", ".join(samples) + ")"
+        return (f"LEDs did not blink in {ledblink.plural(len(samples), 'sample')} "
+                "(USR/RX/TX samples: " + ", ".join(samples) + ")")
     return ""
 
 
@@ -149,8 +173,11 @@ def any_samples_check(stdout: str) -> str:
 
 
 def _sample_step(serial, step_id, name, check) -> Step:
-    # Room for a retry of every sample.
-    return Step(step_id, name, led_sampler_argv(serial), timeout_s=30.0,
+    # Room for a retry of every sample; the blink sampler stops by its own
+    # deadline plus the SIGTERM grace, well before this.
+    argv = (led_blink_sampler_argv(serial) if check is blink_check
+            else led_sampler_argv(serial))
+    return Step(step_id, name, argv, timeout_s=LED_SAMPLE_TIMEOUT_S,
                 output_check=check)
 
 

@@ -15,6 +15,7 @@ from pathlib import Path
 import socket
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -24,6 +25,9 @@ from websockets.exceptions import ConnectionClosed, InvalidStatus
 from ubertooth_harness.cli import main
 from ubertooth_harness.controller import (
     BIND_ADDRESS,
+    LIVE_QUEUE_LIMIT,
+    POLICY_VIOLATION,
+    TRY_AGAIN_LATER,
     Controller,
     ControllerConfigError,
     ControllerServer,
@@ -475,7 +479,13 @@ class RunTests(ControllerTestCase):
         record = json.loads((self.results / "run-1" / "run.json").read_text())
         self.assertEqual(("error", 2, "cannot resolve ref"),
                          (record["status"], record["exit_code"], record["reason"]))
-        self.assertEqual(404, (await self.http("GET", "/api/runs/run-1/report.md"))[0])
+        # No run.jsonl yet: a short report still names the error (#22).
+        self.assertTrue(record["report"])
+        self.assertIsNone(record["report_error"])
+        status, body, _ = await self.http("GET", "/api/runs/run-1/report.md")
+        self.assertEqual(200, status)
+        self.assertIn("cannot resolve ref", body)
+        self.assertIn("no run records", body)
 
     async def test_busy_rejection_is_propagated(self):
         async with FakeRunner(self.port) as runner:
@@ -582,7 +592,9 @@ class RunTests(ControllerTestCase):
             self.assertEqual(409, status)
             self.assertIn("not active", payload["detail"])
             self.assertEqual(404, (await self.http("POST", "/api/runs/zzz/cancel", {}))[0])
-        self.assertFalse(self.controller.runs["run-1"].report)
+        # No records: a short report names the status.
+        self.assertTrue(self.controller.runs["run-1"].report)
+        self.assertIn("canceled", (self.results / "run-1" / "report.md").read_text())
 
     async def test_replayed_events_are_deduplicated_across_reconnect_and_restart(self):
         async with FakeRunner(self.port) as runner:
@@ -810,6 +822,201 @@ class ReviewFixTests(ControllerTestCase):
             await wait_until(lambda: report.read_text() == render_run([*events, late]))
         self.assertTrue(self.run_record()["report"])
 
+    def slow_report_writer(self):
+        """Hold every report compile 0.2 s in its worker thread.
+
+        Widens the window in which a status set before the report was
+        written could be seen (issue #22); with the fix the window is closed
+        whatever its width.
+        """
+        original = self.controller._write_report
+
+        def slow(*args):
+            time.sleep(0.2)
+            return original(*args)
+        self.controller._write_report = slow
+
+    def assert_report_with_status(self, run_id="run-1"):
+        run = self.controller.runs[run_id]
+        self.assertTrue(run.report)
+        self.assertTrue((self.results / run_id / "report.md").is_file())
+        self.assertEqual(run.status, self.run_record(run_id)["status"])
+        self.assertTrue(self.run_record(run_id)["report"])
+
+    async def test_terminal_status_is_never_seen_before_its_report(self):
+        self.slow_report_writer()
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            message = await self.accepted_run(runner)
+            await runner.send("event", run_id="run-1", event=event("run-1", 1, "run_started"))
+            await wait_until(lambda: self.controller.runs["run-1"].seen == {1})
+            async with connect(
+                f"ws://127.0.0.1:{self.port}/ws/live?run_id=run-1", proxy=None
+            ) as live:
+                json.loads(await asyncio.wait_for(live.recv(), TIMEOUT_S))  # snapshot
+                await runner.send(
+                    "run_finished", request_id=message["request_id"], run_id="run-1",
+                    status="failed", exit_code=1, run_directory="/",
+                )
+                # Polled at once and often: the first poll that sees the
+                # terminal status must also find the report.
+                await wait_until(
+                    lambda: self.controller.runs["run-1"].status == "failed", interval=0
+                )
+                self.assert_report_with_status()
+                status, _, _ = await self.http("GET", "/api/runs/run-1/report.md")
+                self.assertEqual(200, status)
+                while True:
+                    update = json.loads(await asyncio.wait_for(live.recv(), TIMEOUT_S))
+                    if update["type"] == "run":
+                        break
+                self.assertEqual(("failed", True),
+                                 (update["run"]["status"], update["run"]["report"]))
+
+    async def test_lost_status_is_never_seen_before_its_report(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            await self.accepted_run(runner)
+            await runner.send("event", run_id="run-1", event=event("run-1", 1, "run_started"))
+            await wait_until(lambda: self.controller.runs["run-1"].seen == {1})
+        await wait_until(lambda: not self.controller.targets["Host_A"].connected)
+        self.slow_report_writer()
+        async with FakeRunner(self.port) as runner:
+            await runner.register(active=None)
+            await wait_until(
+                lambda: self.controller.runs["run-1"].status == "lost", interval=0
+            )
+            self.assert_report_with_status()
+            self.assertEqual(200, (await self.http("GET", "/api/runs/run-1/report.md"))[0])
+
+    async def finish_after_one_event(self, runner, message, kind="run_finished"):
+        await runner.send("event", run_id="run-1", event=event("run-1", 1, "run_started"))
+        await wait_until(lambda: self.controller.runs["run-1"].seen == {1})
+        if kind == "run_finished":
+            await runner.send(
+                "run_finished", request_id=message["request_id"], run_id="run-1",
+                status="passed", exit_code=0, run_directory="/",
+            )
+        else:
+            await runner.send(
+                "run_error", request_id=message["request_id"], run_id="run-1",
+                exit_code=2, reason="build failed",
+            )
+
+    async def test_run_error_before_any_record_has_a_report(self):
+        self.slow_report_writer()
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            message = await self.accepted_run(runner)
+            await runner.send(
+                "run_error", request_id=message["request_id"], run_id="run-1",
+                exit_code=2, reason="cannot resolve ref",
+            )
+            await wait_until(
+                lambda: self.controller.runs["run-1"].status == "error", interval=0
+            )
+            self.assert_report_with_status()
+            self.assertFalse((self.results / "run-1" / "run.jsonl").exists())
+            status, body, _ = await self.http("GET", "/api/runs/run-1/report.md")
+            self.assertEqual(200, status)
+            self.assertIn("| Status | error |", body)
+            self.assertIn("cannot resolve ref", body)
+
+    async def test_lost_before_any_record_has_a_report(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            await self.accepted_run(runner)
+        await wait_until(lambda: not self.controller.targets["Host_A"].connected)
+        self.slow_report_writer()
+        async with FakeRunner(self.port) as runner:
+            await runner.register(active=None)
+            await wait_until(
+                lambda: self.controller.runs["run-1"].status == "lost", interval=0
+            )
+            self.assert_report_with_status()
+            status, body, _ = await self.http("GET", "/api/runs/run-1/report.md")
+            self.assertEqual(200, status)
+            self.assertIn("| Status | lost |", body)
+            self.assertIn("no longer has this run", body)
+
+    async def test_removed_run_log_still_gives_a_report(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            message = await self.accepted_run(runner)
+            await runner.send("event", run_id="run-1", event=event("run-1", 1, "run_started"))
+            await wait_until(lambda: self.controller.runs["run-1"].seen == {1})
+            (self.results / "run-1" / "run.jsonl").unlink()
+            await runner.send(
+                "run_error", request_id=message["request_id"], run_id="run-1",
+                exit_code=2, reason="build failed",
+            )
+            await wait_until(lambda: self.controller.runs["run-1"].status == "error")
+        self.assert_report_with_status()
+        record = self.run_record()
+        self.assertIn("could not compile report.md", record["report_error"])
+        body = (self.results / "run-1" / "report.md").read_text()
+        self.assertIn("build failed", body)
+        self.assertIn("Report problem", body)
+
+    async def raising_report_compile_ends_the_run(self, kind):
+        def broken(output_dir):
+            raise OSError(28, "No space left on device")
+        with patch("ubertooth_harness.controller.write_report", broken):
+            async with FakeRunner(self.port) as runner:
+                await self.registered(runner)
+                message = await self.accepted_run(runner)
+                await self.finish_after_one_event(runner, message, kind)
+                await wait_until(lambda: not self.controller.runs["run-1"].active)
+                self.assertIsNone(self.controller.targets["Host_A"].active_run_id)
+        self.assert_report_with_status()
+        self.assertIn("No space left on device", self.run_record()["report_error"])
+
+    async def test_raising_report_compile_still_finishes_the_run(self):
+        await self.raising_report_compile_ends_the_run("run_finished")
+
+    async def test_raising_report_compile_still_records_the_run_error(self):
+        await self.raising_report_compile_ends_the_run("run_error")
+
+    async def test_failed_report_write_still_marks_the_run_lost(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            await self.accepted_run(runner)
+        await wait_until(lambda: not self.controller.targets["Host_A"].connected)
+
+        def broken(*args):
+            raise OSError(28, "No space left on device")
+        self.controller._write_report = broken
+        async with FakeRunner(self.port) as runner:
+            await runner.register(active=None)
+            await wait_until(lambda: self.controller.runs["run-1"].status == "lost")
+        record = self.run_record()
+        self.assertEqual(("lost", False), (record["status"], record["report"]))
+        self.assertIn("No space left on device", record["report_error"])
+
+    async def test_failed_report_write_is_recorded_and_the_status_published(self):
+        def broken(*args):
+            raise OSError(28, "No space left on device")
+        self.controller._write_report = broken
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            message = await self.accepted_run(runner)
+            async with connect(
+                f"ws://127.0.0.1:{self.port}/ws/live?run_id=run-1", proxy=None
+            ) as live:
+                json.loads(await asyncio.wait_for(live.recv(), TIMEOUT_S))  # snapshot
+                await self.finish_after_one_event(runner, message)
+                while True:
+                    update = json.loads(await asyncio.wait_for(live.recv(), TIMEOUT_S))
+                    if update["type"] == "run":
+                        break
+        self.assertEqual("passed", update["run"]["status"])
+        self.assertFalse(update["run"]["report"])
+        self.assertIn("No space left on device", update["run"]["report_error"])
+        record = self.run_record()
+        self.assertEqual(("passed", False), (record["status"], record["report"]))
+        self.assertIn("No space left on device", record["report_error"])
+        self.assertTrue(any("No space left on device" in line for line in self.logs))
+
 
 class MalformedRunnerTests(ControllerTestCase):
 
@@ -869,6 +1076,236 @@ class MalformedRunnerTests(ControllerTestCase):
         status, payload, _ = await self.http("GET", "/api/targets/Host_A")
         self.assertEqual(len(bad), payload["target"]["protocol_errors"])
         self.assertTrue(payload["target"]["last_protocol_error"])
+
+
+class LiveOverflowTests(ControllerTestCase):
+    """A browser that falls LIVE_QUEUE_LIMIT updates behind is dropped (#17)."""
+
+    async def live(self, run_id=None):
+        query = f"?run_id={run_id}" if run_id else ""
+        ws = await connect(f"ws://127.0.0.1:{self.port}/ws/live{query}", proxy=None)
+        snapshot = json.loads(await asyncio.wait_for(ws.recv(), TIMEOUT_S))
+        self.assertEqual("snapshot", snapshot["type"])
+        return ws
+
+    async def test_a_browser_that_falls_behind_is_closed_and_the_rest_carry_on(self):
+        async with FakeRunner(self.port) as runner, FakeRunner(self.port) as runner_b:
+            # Long heartbeat intervals: no offline/online updates interleave.
+            await self.registered(runner, interval=10)
+            await self.accepted_run(runner)
+            await self.registered(runner_b, "Host_B", interval=10)
+            await self.accepted_run(runner_b, "run-2", "Host_B")
+            behind = await self.live("run-1")
+            other = await self.live("run-2")  # not subscribed to run-1
+            await wait_until(lambda: len(self.controller._subscribers) == 2)
+            (lagging,) = [
+                subscriber for subscriber in self.controller._subscribers
+                if subscriber.run_id == "run-1"
+            ]
+            # A burst published without yielding: the session task cannot
+            # forward anything until it ends, so run-1's queue overflows.
+            run = self.controller.runs["run-1"]
+            for _ in range(LIVE_QUEUE_LIMIT + 1):
+                self.controller._publish_run(run)
+            self.assertTrue(lagging.overflowed)
+            # Bounded memory: the backlog is dropped for one close marker.
+            self.assertEqual(1, lagging.queue.qsize())
+            with self.assertRaises(ConnectionClosed) as raised:
+                while True:  # no update gets through after the overflow
+                    message = json.loads(await asyncio.wait_for(behind.recv(), TIMEOUT_S))
+                    self.fail(f"update after the overflow: {message['type']}")
+            self.assertEqual(
+                (TRY_AGAIN_LATER, "live stream overflowed"),
+                (raised.exception.rcvd.code, raised.exception.rcvd.reason),
+            )
+            await wait_until(lambda: lagging not in self.controller._subscribers)
+            # Nothing more is queued for the dropped subscriber.
+            self.controller._publish_run(run)
+            self.assertEqual(0, lagging.queue.qsize())
+
+            # The runner and the other browser are unaffected: the run goes
+            # on and the other browser gets the next target update.
+            await runner.send("event", run_id="run-1", event=event("run-1", 1, "run_started"))
+            await wait_until(lambda: self.controller.runs["run-1"].seen == {1})
+            self.assertTrue(self.controller.targets["Host_A"].connected)
+            await runner.heartbeat(active=None)
+            update = json.loads(await asyncio.wait_for(other.recv(), TIMEOUT_S))
+            self.assertEqual(("target", "Host_A", None),
+                             (update["type"], update["target"]["host"],
+                              update["target"]["active_run_id"]))
+            await other.close()
+            # A new browser can watch the run again.
+            again = await self.live("run-1")
+            await runner.send("event", run_id="run-1", event=event("run-1", 2))
+            update = json.loads(await asyncio.wait_for(again.recv(), TIMEOUT_S))
+            self.assertEqual(("event", 2), (update["type"], update["event"]["sequence"]))
+            await again.close()
+
+    async def test_an_unfiltered_browser_overflows_on_any_run(self):
+        async with FakeRunner(self.port) as runner, FakeRunner(self.port) as runner_b:
+            await self.registered(runner, interval=10)
+            await self.accepted_run(runner)
+            await self.registered(runner_b, "Host_B", interval=10)
+            await self.accepted_run(runner_b, "run-2", "Host_B")
+            everything = await self.live()  # run_id=None: every run's updates
+            other = await self.live("run-2")
+            await wait_until(lambda: len(self.controller._subscribers) == 2)
+            (unfiltered,) = [
+                subscriber for subscriber in self.controller._subscribers
+                if subscriber.run_id is None
+            ]
+            (following,) = [
+                subscriber for subscriber in self.controller._subscribers
+                if subscriber.run_id == "run-2"
+            ]
+            # A burst of run-1 updates: the unfiltered browser gets them all,
+            # the run-2 browser none.
+            run = self.controller.runs["run-1"]
+            for _ in range(LIVE_QUEUE_LIMIT + 1):
+                self.controller._publish_run(run)
+            self.assertTrue(unfiltered.overflowed)
+            self.assertEqual(1, unfiltered.queue.qsize())
+            self.assertEqual((False, 0), (following.overflowed, following.queue.qsize()))
+            with self.assertRaises(ConnectionClosed) as raised:
+                while True:
+                    message = json.loads(await asyncio.wait_for(everything.recv(), TIMEOUT_S))
+                    self.fail(f"update after the overflow: {message['type']}")
+            self.assertEqual(
+                (TRY_AGAIN_LATER, "live stream overflowed"),
+                (raised.exception.rcvd.code, raised.exception.rcvd.reason),
+            )
+            await wait_until(lambda: unfiltered not in self.controller._subscribers)
+            # The run-2 browser still gets updates.
+            await runner_b.heartbeat(active=None)
+            update = json.loads(await asyncio.wait_for(other.recv(), TIMEOUT_S))
+            self.assertEqual(("target", "Host_B"), (update["type"], update["target"]["host"]))
+            await other.close()
+
+    async def test_a_queue_at_the_limit_is_still_delivered(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner, interval=10)
+            await self.accepted_run(runner)
+            ws = await self.live("run-1")
+            await wait_until(lambda: len(self.controller._subscribers) == 1)
+            run = self.controller.runs["run-1"]
+            for _ in range(LIVE_QUEUE_LIMIT):
+                self.controller._publish_run(run)
+            (subscriber,) = self.controller._subscribers
+            self.assertFalse(subscriber.overflowed)
+            for _ in range(LIVE_QUEUE_LIMIT):
+                update = json.loads(await asyncio.wait_for(ws.recv(), TIMEOUT_S))
+                self.assertEqual("run", update["type"])
+            await runner.send("event", run_id="run-1", event=event("run-1", 1))
+            update = json.loads(await asyncio.wait_for(ws.recv(), TIMEOUT_S))
+            self.assertEqual("event", update["type"])
+            await ws.close()
+
+
+class ReplacedRunnerTests(ControllerTestCase):
+    """A registration replaces a connection with a request pending on it (#17)."""
+
+    async def assert_replaced(self, old):
+        with self.assertRaises(ConnectionClosed) as raised:
+            while True:
+                await asyncio.wait_for(old.ws.recv(), TIMEOUT_S)
+        self.assertEqual((POLICY_VIOLATION, "replaced"),
+                         (raised.exception.rcvd.code, raised.exception.rcvd.reason))
+
+    async def test_pending_run_request_fails_and_the_new_connection_takes_over(self):
+        async with FakeRunner(self.port) as old:
+            await self.registered(old, interval=10)
+            post, message = await self.start_run(old)
+            self.assertEqual("run", message["type"])
+            # Has sent on the old link: its lock entry goes when the session ends.
+            (old_link,) = self.controller._send_locks
+            async with FakeRunner(self.port) as new:
+                await new.register(interval=10)
+                status, payload, _ = await post
+                self.assertEqual(503, status, payload)
+                self.assertIn("runner reconnected", payload["detail"])
+                self.assertEqual({}, self.controller._pending_runs)
+                self.assertTrue(any("still online" in line for line in self.logs))
+                await self.assert_replaced(old)
+                # The old session's end leaves the new one registered.
+                await wait_until(lambda: old_link not in self.controller._send_locks)
+                self.assertTrue(self.controller.targets["Host_A"].connected)
+                self.assertTrue(self.controller.targets["Host_A"].online)
+                self.assertEqual({}, self.controller.runs)
+                # The next request goes to the new connection and works.
+                post, message = await self.start_run(new)
+                await new.send(
+                    "run_accepted", request_id=message["request_id"], run_id="run-1"
+                )
+                status, payload, _ = await post
+                self.assertEqual(201, status, payload)
+                self.assertEqual("run-1", self.controller.targets["Host_A"].active_run_id)
+
+    async def test_late_acceptance_on_the_replaced_connection_creates_no_run(self):
+        async with FakeRunner(self.port) as old:
+            await self.registered(old, interval=10)
+            post, message = await self.start_run(old)
+            (old_link,) = self.controller._send_locks
+            async with FakeRunner(self.port) as new:
+                await new.register(interval=10)
+                self.assertEqual(503, (await post)[0])
+                # The old runner answers after it was replaced: the request
+                # is gone, so the answer (if it still arrives before the
+                # close) is a protocol error, never a run.
+                with contextlib.suppress(ConnectionClosed):
+                    await old.send(
+                        "run_accepted", request_id=message["request_id"], run_id="run-1"
+                    )
+                await self.assert_replaced(old)
+                # The old session has ended: whatever it received is handled.
+                await wait_until(lambda: old_link not in self.controller._send_locks)
+                self.assertNotIn("run-1", self.controller.runs)
+                self.assertEqual([], [path.name for path in self.results.iterdir()])
+                self.assertIsNone(self.controller.targets["Host_A"].active_run_id)
+
+    async def test_pending_cancel_fails_and_the_run_is_kept_when_named_again(self):
+        async with FakeRunner(self.port) as old:
+            await self.registered(old, interval=10)
+            await self.accepted_run(old)
+            cancel = asyncio.create_task(
+                self.http("POST", "/api/runs/run-1/cancel", {"reason": "operator"})
+            )
+            self.assertEqual("cancel", (await old.recv())["type"])
+            await wait_until(lambda: self.controller._pending_cancels["run-1"].awaited)
+            async with FakeRunner(self.port) as new:
+                await new.register(interval=10, active="run-1")
+                status, payload, _ = await cancel
+                self.assertEqual(503, status, payload)
+                self.assertIn("runner reconnected", payload["detail"])
+                self.assertEqual({}, self.controller._pending_cancels)
+                await self.assert_replaced(old)
+                run = self.controller.runs["run-1"]
+                self.assertEqual(("running", False), (run.status, run.cancel_requested))
+                # Asking again reaches the new connection.
+                cancel = asyncio.create_task(
+                    self.http("POST", "/api/runs/run-1/cancel", {"reason": "again"})
+                )
+                message = await new.recv()
+                self.assertEqual(("cancel", "again"), (message["type"], message["reason"]))
+                await new.send("cancel_accepted", run_id="run-1")
+                status, payload, _ = await cancel
+                self.assertEqual(202, status, payload)
+                self.assertTrue(payload["run"]["cancel_requested"])
+
+    async def test_pending_cancel_of_a_run_the_new_runner_does_not_name(self):
+        async with FakeRunner(self.port) as old:
+            await self.registered(old, interval=10)
+            await self.accepted_run(old)
+            cancel = asyncio.create_task(self.http("POST", "/api/runs/run-1/cancel", {}))
+            self.assertEqual("cancel", (await old.recv())["type"])
+            await wait_until(lambda: self.controller._pending_cancels["run-1"].awaited)
+            async with FakeRunner(self.port) as new:
+                await new.register(interval=10, active=None)
+                status, payload, _ = await cancel
+                self.assertEqual(503, status, payload)
+                await wait_until(lambda: self.controller.runs["run-1"].status == "lost")
+                self.assertEqual(409, (await self.http(
+                    "POST", "/api/runs/run-1/cancel", {}))[0])
+                await self.assert_replaced(old)
 
 
 class EndToEndTests(ControllerTestCase):

@@ -206,13 +206,21 @@
       $("plan-status").textContent = `Cannot list plans: ${error.message}`;
     }
     const select = $("plan");
-    const usable = state.plans.filter((plan) => !plan.error);
+    // Only plans that load and are runnable can be started; a plan of
+    // planned tests (runnable: false, e.g. backlog) is listed, not offered.
+    const usable = state.plans.filter((plan) => !plan.error && plan.runnable === true);
     select.replaceChildren(...usable.map((plan) =>
       el("option", { value: plan.name, text: `${plan.name} — ${plan.title}` })));
     const broken = state.plans.filter((plan) => plan.error);
+    const planned = state.plans.filter((plan) => !plan.error && plan.runnable !== true);
+    const notes = [];
     if (broken.length) {
-      $("plan-status").textContent = `Not loadable: ${broken.map((plan) => `${plan.name} (${plan.error})`).join("; ")}`;
+      notes.push(`Not loadable: ${broken.map((plan) => `${plan.name} (${plan.error})`).join("; ")}`);
     }
+    if (planned.length) {
+      notes.push(`Not runnable (planned tests): ${planned.map((plan) => plan.name).join(", ")}`);
+    }
+    if (notes.length) $("plan-status").textContent = notes.join(". ");
     if (usable.some((plan) => plan.name === "fast")) select.value = "fast";
     renderSuites();
     if (state.live) rebuildChecklist();
@@ -243,7 +251,10 @@
 
   function estimateText(suite) {
     if (suite.estimated_s !== null && suite.estimated_s !== undefined) {
-      return `Estimated test time ${formatSeconds(suite.estimated_s)} (from the tests' duration arguments; build and preflight not included).`;
+      const perBoard = suite.per_board_tests
+        ? ` ${suite.per_board_tests} test(s) run once per selected Ubertooth and are counted once here; the live countdown counts every board the run selects.`
+        : "";
+      return `Estimated test time ${formatSeconds(suite.estimated_s)} (from the catalog's per-test estimates; build and preflight not included).${perBoard}`;
     }
     return `No time estimate: ${suite.unestimated_tests} of ${suite.tests.length} tests have no estimated duration, so the live view shows elapsed time only.`;
   }
@@ -294,6 +305,7 @@
     return {
       run_id: runId, seen: new Set(), events: [], items: [],
       byInvocation: new Map(), log: [], partial: "", stage: "waiting",
+      invocations: null,
     };
   }
 
@@ -314,6 +326,7 @@
       const data = await api("GET", runPath(runId));
       if (state.selected !== runId) return;
       upsertRun(data.run);
+      state.live.invocations = Array.isArray(data.invocations) ? data.invocations : null;
       for (const record of data.events) addEvent(runId, record, false);
       // Now that the run's plan is known, lay out its checklist and replay.
       rebuildChecklist();
@@ -332,10 +345,19 @@
     if (run && Array.isArray(run.tests) && run.tests.length) {
       tests = tests.filter((test) => run.tests.includes(test.name));
     }
-    live.items = tests.map((test) => ({
-      name: test.name, estimated_s: test.estimated_s, status: "pending", reason: "",
-    }));
-    live.planned = Boolean(suite);
+    if (Array.isArray(live.invocations)) {
+      // The run's manifest: one item per invocation on the target, so a test
+      // with Ubertooth: each counts every board it selected.
+      live.items = live.invocations.map((invocation) => ({
+        name: invocation.test_name, invocation_id: invocation.invocation_id,
+        estimated_s: invocation.estimated_s, status: "pending", reason: "",
+      }));
+    } else {
+      live.items = tests.map((test) => ({
+        name: test.name, estimated_s: test.estimated_s, status: "pending", reason: "",
+      }));
+    }
+    live.planned = Array.isArray(live.invocations) || Boolean(suite);
     live.byInvocation = new Map();
     // Records from the socket and from REST may interleave; replay in order.
     const events = [...live.events].sort((a, b) => a.sequence - b.sequence);
@@ -348,6 +370,19 @@
     live.testsStarted = null;
     for (const record of events) addEvent(live.run_id, record, false);
     renderLive();
+  }
+
+  async function loadInvocations(runId) {
+    try {
+      const data = await api("GET", runPath(runId));
+      const live = state.live;
+      if (!live || live.run_id !== runId || !Array.isArray(data.invocations)) return;
+      live.invocations = data.invocations;
+      for (const record of data.events) addEvent(runId, record, false);
+      rebuildChecklist();
+    } catch (error) {
+      // Keep the plan's checklist; the next full load retries.
+    }
   }
 
   function pushLog(line) {
@@ -380,14 +415,33 @@
     } else {
       flushPartial();
     }
+    if (kind === "command_output_omitted") {
+      // Output left out of run.jsonl (in output/); the command's last records follow.
+      const counts = details.output_omitted && details.output_omitted.lines;
+      let count = 0;
+      if (counts && typeof counts === "object") {
+        for (const value of Object.values(counts)) if (typeof value === "number") count += value;
+      }
+      pushLog(`[... ${count} output lines left out; full output in ${String(details.output_file ?? "")} ...]`);
+    }
     if (kind === "build_started") live.stage = "building";
     else if (kind === "preflight_started") live.stage = "preflight";
     else if (kind === "test_started") live.stage = "tests";
     else if (kind === "run_finished") live.stage = "finished";
 
+    if (kind === "manifest" && render && !Array.isArray(live.invocations)) {
+      // Live: fetch the planned invocations (with estimates) and re-lay out.
+      loadInvocations(runId);
+    }
+    if (kind === "libbtbb_pin" && status !== "passed") {
+      // The libbtbb differs from the fork's install.sh pin, or was not compared.
+      pushLog(`warning: ${String(details.message ?? "")}`);
+    }
     if (kind === "test_started") {
       const name = String(details.test_name ?? "");
-      let item = live.items.find((entry) => entry.name === name && entry.status === "pending");
+      const id = String(details.invocation_id ?? "");
+      let item = live.items.find((entry) => entry.invocation_id === id && entry.status === "pending") ||
+        live.items.find((entry) => entry.name === name && entry.status === "pending");
       if (!item) {
         item = { name, estimated_s: null, status: "pending", reason: "" };
         live.items.push(item);
@@ -401,7 +455,12 @@
       // Left out before the run: the host cannot run it (not a skip or failure).
       const name = String(details.test_name ?? "");
       if (!details.invocation_id) {
-        const item = live.items.find((entry) => entry.name === name && entry.status === "pending");
+        let item = live.items.find((entry) => entry.name === name && entry.status === "pending");
+        if (!item && Array.isArray(live.invocations)) {
+          // Left out at planning: not in the manifest, and takes no time.
+          item = { name, estimated_s: 0, status: "pending", reason: "" };
+          live.items.push(item);
+        }
         if (item) {
           item.status = "not applicable";
           item.reason = String(details.reason || "");
@@ -497,7 +556,7 @@
       return;
     }
     const total = estimates.reduce((sum, value) => sum + value, 0);
-    $("live-estimate").textContent = `Estimate ${formatSeconds(total)} from the tests' duration arguments; build and preflight are not included.`;
+    $("live-estimate").textContent = `Estimate ${formatSeconds(total)} from the catalog's per-test estimates; build and preflight are not included.`;
     const testsStart = live.testsStarted ? Date.parse(live.testsStarted) : NaN;
     const testsElapsed = Number.isNaN(testsStart) ? null : Math.max(0, (end - testsStart) / 1000);
     if (run.status !== "running") {

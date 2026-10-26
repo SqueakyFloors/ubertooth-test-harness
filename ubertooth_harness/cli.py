@@ -35,6 +35,7 @@ from ubertooth_harness.executor import SubprocessCommandExecutor
 from ubertooth_harness.isolation import IsolationRuntime, IsolationSetupError
 from ubertooth_harness.flash import HarnessError
 from ubertooth_harness import leases as board_leases
+from ubertooth_harness import libbtbbpin
 from ubertooth_harness.manifest import (
     FileIdentity,
     GitRevisionResolver,
@@ -42,7 +43,7 @@ from ubertooth_harness.manifest import (
     build_run_manifest,
 )
 from ubertooth_harness.hostneeds import planned_capabilities, split_cases
-from ubertooth_harness.plan import PlanError, image_label, load_plan
+from ubertooth_harness.plan import PlanError, check_runnable, image_label, load_plan
 from ubertooth_harness import pytools
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.planner import PlanCompiler, PlanningError
@@ -183,14 +184,32 @@ def _resolve_sources(args: argparse.Namespace):
     return tuple(sources)
 
 
+def _terminal_sink() -> TerminalEventSink:
+    """The live stderr stream; quiet about a libbtbb pin check already shown."""
+    quiet = {libbtbbpin.EVENT} if os.environ.get(libbtbbpin.SHOWN_ENV) else set()
+    return TerminalEventSink(sys.stderr, quiet_events=quiet)
+
+
+def _record_libbtbb_pin(publisher, sources) -> None:
+    """Record how the libbtbb compares with the fork's install.sh pin.
+
+    A libbtbb other than the fork's pin may be deliberate: the record warns
+    and the run goes on (#85). The terminal stream prints it on stderr.
+    """
+    check = libbtbbpin.check_sources(sources)
+    if check is not None:
+        publisher.emit(libbtbbpin.EVENT, check.status, check.details())
+
+
 def _build_command(args: argparse.Namespace) -> int:
     sources = _resolve_sources(args)
     if Path(args.output).exists():
         raise HarnessError(f"build output already exists: {args.output}")
     output = Path(args.output)
     output.mkdir(parents=True)
-    publisher = open_run_publisher(output, generate_run_id(), TerminalEventSink(sys.stderr))
+    publisher = open_run_publisher(output, generate_run_id(), _terminal_sink())
     publisher.emit("run_started", "running", run_started_details("build", "build", "", sources))
+    _record_libbtbb_pin(publisher, sources)
     try:
         result = _build(sources, output, args.with_firmware, publisher, args.with_python)
     except BuildError as error:
@@ -444,11 +463,12 @@ def _validate(
 ) -> int:
     catalog = builtin_catalog()
     plan = load_plan(plan_path, catalog)
-    print(f"plan: {plan.name}")
+    print(f"plan: {plan.name}" + ("" if plan.runnable else " (not runnable: planned tests)"))
     for suite_name, steps in plan.suites.items():
         print(f"{suite_name}: {len(steps)} named test(s)")
         for step in steps:
             print(f"  - {step.test_name}")
+    check_runnable(plan, catalog)
     if hardware_path is not None:
         registry = FileResourceRegistry.load(hardware_path)
         compiler = PlanCompiler(catalog, registry)
@@ -493,7 +513,7 @@ def _prepare_run(
     """Build (when requested), then the manifest and preflight checks."""
     built = None
     executor = SubprocessCommandExecutor(_test_environment(sources, None))
-    if publisher is not None:
+    if args.build:
         built = _build(
             sources, run_dir / "build", args.with_firmware, publisher, args.with_python
         )
@@ -703,13 +723,19 @@ def _run_leased(
     built = None
     publisher = None
     executor = SubprocessCommandExecutor()
-    if args.build:
+    if args.build or args.libbtbb_source:
+        # Records before the sequencer's: the build, and the libbtbb pin check.
         run_dir = create_run_directory(args.output, run_id)
-        publisher = open_run_publisher(run_dir, run_id, TerminalEventSink(sys.stderr))
+        publisher = open_run_publisher(run_dir, run_id, _terminal_sink())
         publisher.emit(
             "run_started", "running",
             run_started_details(plan.name, args.suite, args.host, sources),
         )
+        try:
+            _record_libbtbb_pin(publisher, sources)
+        except BaseException as error:
+            _finish_failed_run(publisher, run_dir, str(error) or type(error).__name__)
+            raise
     try:
         manifest, preflight_checks, executor, built = _prepare_run(
             args, plan, invocations, sources, artifacts, run_id, preflight_policy,
@@ -721,7 +747,7 @@ def _run_leased(
         if isolation is not None:
             isolation.close()
         raise
-    if built is None:
+    if publisher is None:
         run_dir = create_run_directory(args.output, run_id)
     cancellation = CancellationToken()
     previous_handlers = {}
@@ -737,7 +763,7 @@ def _run_leased(
         summary = NamedTestSequencer(
             executor,
             catalog=catalog,
-            event_sink=TerminalEventSink(sys.stderr),
+            event_sink=_terminal_sink(),
             isolation=isolation,
             registry=registry,
         ).run(

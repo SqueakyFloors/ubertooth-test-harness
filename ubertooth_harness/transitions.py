@@ -1359,7 +1359,8 @@ REJECTIONS = (
     # The one argument rule (fork 8b58f75 for util, 0b63b01 for every other
     # tool): a leftover word is refused before any device is opened, and the
     # rest of the command does not run. ubertooth-follow and ubertooth-scan
-    # are not built on every host (harness #40), so they are not listed.
+    # are built only with BlueZ: their stray-word cases need no board, so
+    # they are in Refused command lines (refusal_cases.py), which runs in CI.
     Rejection("util-stray-after-set", "ubertooth-util", ("-c2470", "stray"),
               _stray("stray")),
     Rejection("util-stray-after-mode", "ubertooth-util", ("-x", "stray"),
