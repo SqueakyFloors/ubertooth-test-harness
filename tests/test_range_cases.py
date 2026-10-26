@@ -47,8 +47,8 @@ class RangeBoard(FakeUbertooth):
     with the idle reset (LEDs off, 2441 MHz) at PA level 7, where its sweep
     stopped. -r clears the result. Knobs model fork firmware bugs:
 
-    - ``repeater_answers_usb=False``: fork #26 on main, the repeater serves no
-      USB request until power is removed.
+    - ``repeater_answers_usb=False``: fork #26 before fork 0684c11, the
+      repeater serves no USB request until power is removed.
     - ``sender_answers_usb=False``: the sender serves no USB request while it
       waits for a reply that never comes.
     - ``idle_reset_keeps_channel=True``: a firmware whose idle reset left the
@@ -410,7 +410,8 @@ class RangeExecutionTests(unittest.TestCase):
         self.assertIn("observed 2410", step.details["reason"])
 
     def test_repeater_that_stops_answering_usb_fails_before_the_range_test(self):
-        # Fork #26 on main: the responder answers nothing once -e started.
+        # Fork #26 before 0684c11: the responder answers nothing once -e
+        # started.
         # The first check runs before -n, so the sender never transmits.
         _air, sender, responder = pair(repeater_answers_usb=False)
         summary, events, _report = self.run_pair(sender, responder)
