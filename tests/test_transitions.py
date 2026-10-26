@@ -277,7 +277,8 @@ class FakeUbertooth:
             elif option == "t" and value != "none" and not re.fullmatch(
                 r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}(?:/\d+)?", value
             ):
-                return fail("", "Error: MAC address is wrong length\nUsage:\n")
+                return fail("error: MAC address must be xx:xx:xx:xx:xx:xx"
+                            f" (got {value})\nUsage:")
         if leftover and self.reject_strays:
             return fail(f"error: unexpected argument '{leftover[0]}'")
         if get_aa and set_aa:
@@ -346,7 +347,7 @@ class FakeUbertooth:
             path = options[index + 1]
             handle = "pcapng" if item == "-r" else "pcap"
             if handle in handles:
-                lines += f"Ignoring extra capture file: {path}\n"
+                lines += f"warning: ignoring extra capture file: {path}\n"
                 continue
             handles[handle] = path
             data = (

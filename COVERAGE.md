@@ -83,7 +83,7 @@ Harness-wide checks that use the CLIs:
 | `-h` | help | Covered | Host CLI surface (fast, release): exit 0 and tool name in the output |
 | `-H`, `--host-version` | host tools version | Covered | `-H` in preflight on every run; `--host-version` in Host CLI surface (fast, release) |
 | `-U<index\|serial>` | select device | Covered | Every device test selects by serial. Repeated `-U` (index 99, then serial) is last-wins (util compositions, comprehensive). Multi-board selection (smoke): each `-U<index>` opens the board that index names in `-U all -s`. Comprehensive: an index past the last board is refused with exit 1 and `no Ubertooth at index <n> (<n> attached)` (it opened another device before `0c7e9c0`, [ubertooth#188](https://github.com/SqueakyFloors/ubertooth/issues/188)) |
-| `-U all` | identity queries for every board | Covered | Multi-board selection (smoke): `-U all -s` lists every registered board, and only those, with indices in order; comprehensive: `-U all -vVspb` gives five lines per board. Rejected with a setter or mode: Argument validation (comprehensive) |
+| `-U all` | identity queries for every board | Covered | Multi-board selection (smoke): `-U all -s` lists every registered board, and only those, with indices in order; comprehensive: `-U all -vVspb` gives five lines per board. Rejected with a setter or mode: Argument validation (comprehensive). Since fork `d9c63d9` `-U all` with no query is refused with `error: -U all needs one of the read-only queries -b, -v, -V, -p or -s to list`, and `-U all -N` alone prints the count and exits 0 (it was refused): Not covered |
 | `-N` | count devices | Covered | Ubertooth count (fast, release): equals the registered boards on the host. With `-i` it prints the count and the command carries on (fork `db5649b`; it dropped the mode before, [ubertooth#332](https://github.com/SqueakyFloors/ubertooth/issues/332)): `-N -i` and `-i -N` print `0`, then `-i` finds no board, exit 1: Util mode refusals (comprehensive) |
 | `-v` | firmware revision | Covered | Ubertooth identity (fast, release), preflight, util compositions (smoke) |
 | `-V` | compile info | Covered | Ubertooth identity, preflight, util compositions (smoke) |
@@ -128,7 +128,7 @@ Combinations to test:
 
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
-| `-h` | help | Covered | Host CLI surface |
+| `-h` | help | Covered | Host CLI surface (exit 0 since fork `e4f1dc5`, fork #377; it was 1) |
 | `-f` | follow connections | Covered | BLE CRC transitions (smoke: CRC on, channel 37; comprehensive: every CRC value × channel and capture format). Exclusive topology runs it without `-U`. Following a real connection is not checked (needs a peer) |
 | `-n` | advertisements only | Covered | BLE CRC transitions and capture cases (smoke, comprehensive). Packet content is not checked. Raw receive (comprehensive): `-n -A37 -q` after a `dump -d` captures no basic-rate packet (every packet on RF channel 0; [ubertooth#318](https://github.com/SqueakyFloors/ubertooth/issues/318)) |
 | `-p` | promiscuous | Partial | BLE settings (comprehensive): a bounded receive-only run, then `-S`, resets LEDs, channel 2441 MHz, and squelch -120 (PA kept); access address and CRC are restored afterwards. BLE mode conflicts (release). Following a connection needs a peer |
@@ -138,8 +138,8 @@ Combinations to test:
 | `-i` / `-j` | interfere once (`-j` alias) | Hard | Jams a live connection (transmits RF) |
 | `-I` / `-J` | interfere continuously (`-J` alias) | Hard | Same as `-i` |
 | `-U<index\|serial>` | select device | Covered | Every btle case uses a serial |
-| `-r<file>` | PCAPNG capture | Covered | BLE CRC transitions: the header and link type 256 are checked (smoke with `-n`, comprehensive with `-n` and `-f`). Packet content is not tested. Refused command lines (no Ubertooth, smoke): a stray word, `-h`, or `-A 40` after `-r` creates no file and leaves an existing one unchanged; comprehensive adds `-f -n`. `-r -` is refused (comprehensive, with `-c`) |
-| `-q<file>` | PCAP (LE_LL_WITH_PHDR) | Covered | As `-r`: pcap with link type 256. Refused command lines (smoke): as `-r`; `-n -q - -q <file>` prints `Ignoring extra capture file` on stderr, not into the stdout capture, and never creates the file. Comprehensive adds `-a -a<address>` |
+| `-r<file>` | PCAPNG capture | Covered | BLE CRC transitions: the header and link type 256 are checked (smoke with `-n`, comprehensive with `-n` and `-f`). Packet content is not tested. Refused command lines (no Ubertooth, smoke): a stray word, `-h` (exit 0 since fork `e4f1dc5`), or `-A 40` after `-r` creates no file and leaves an existing one unchanged; comprehensive adds `-f -n`. `-r -` is refused (comprehensive, with `-c`) |
+| `-q<file>` | PCAP (LE_LL_WITH_PHDR) | Covered | As `-r`: pcap with link type 256. Refused command lines (smoke): as `-r`; `-n -q - -q <file>` prints `warning: ignoring extra capture file` (wording since fork `e4f1dc5`) on stderr, not into the stdout capture, and never creates the file. Comprehensive adds `-a -a<address>` |
 | `-c<file>` | PCAP (PPI) | Covered | As `-r`: pcap with link type 192. Refused command lines (smoke): as `-r`; comprehensive adds `-c <file> -r -` |
 | `-A<37-39>` | advertising channel | Covered | 37 in smoke; 37, 38, and 39 in comprehensive. `-A36`/`-A40` rejected: Argument validation (comprehensive) |
 | `-v[01]` | get/set CRC check | Covered | Get, set, and applied by a mode (smoke); `-v0`, `-v 1` and `-v 0` as the next word, and repeated `-v` (comprehensive). `-v 2` rejected and `-v stray` refused: Argument validation (comprehensive) |
@@ -153,7 +153,8 @@ Combinations to test:
 - Repeated capture options are first-wins and the extra file is never created (`-r -r`, `-q -c`, `-c -q`): Covered (comprehensive).
 - `-r` together with `-q` (separate handles): both files written: Covered (comprehensive). `-r` with `-c`: Covered (comprehensive).
 - Capture with each CRC value and mode: Covered (comprehensive).
-- `-i`/`-I` without `-f`/`-p`: accepted and ignored (the jam mode is only sent with a sniffing mode, per source). Hard: with a mode it transmits.
+- `-i`/`-I` without `-f`/`-p`: refused before any device is opened since fork `e4f1dc5` (fork #377; it was accepted and ignored): Not covered. Hard: with a mode it transmits.
+- `-a`/`-s` with `-f`, `-n` or `-p`: refused before any device is opened since fork `e4f1dc5`: Not covered.
 - `-a`/`-v` get and set without a mode do not start sniffing: Covered (BLE settings); `-a -v` reports both (comprehensive).
 - `-A` with `-p` or `-f` after a follow hop: Not covered (needs a peer).
 
@@ -172,14 +173,14 @@ Combinations: list and range output: Covered. `-v0`/`-v2` output: Covered. `Debu
 
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
-| `-h` | help | Covered | Host CLI surface (exit 1) |
+| `-h` | help | Covered | Host CLI surface (exit 0 since fork `12211ce`, fork #406; it was 1) |
 | `-d <file>` | write DFU image | Covered | Flash reliability (slow): repeated exact-verified writes. DFU images (smoke): write, then read back. Bad images (DFU images, comprehensive): a wrong CRC, a truncated file, a binary without a suffix, a text file, a suffix without `UFD`, and a suffix for another vendor or product must be refused with exit 1 and "Signature check failed, firmware will not be updated" before a device is opened (no "operation started", no "firmware programming attempt"); a wrong vendor or product names the ID in the refusal; the board must stay in its application with the same revision and flash (read back). Fixed in `e8edd15` ([ubertooth#198](https://github.com/SqueakyFloors/ubertooth/issues/198), [ubertooth#199](https://github.com/SqueakyFloors/ubertooth/issues/199)); at 3b22c95 every rejection left the board in the DFU bootloader and a wrong vendor or product was written. `-d <image> -r` exited 1 after a good flash at 6fee30c ([ubertooth#267](https://github.com/SqueakyFloors/ubertooth/issues/267), fixed in `89d9197`). DFU image checks (no Ubertooth, smoke, in CI): the same seven bad images, made from a synthetic image, are refused by `-d <image> -r` with the image check's message, exit 1, before any board lookup (no "no board is selected" note, no DFU stage log), the image and its directory unchanged; a good image passes the check and reaches the lookup. Comprehensive adds an empty file, 15 bytes, a suffix with no firmware, a suffix length of 200 in an 80-byte file, DFU version 2.0, no revision marker (with `-r`), a directory and a missing file (all refused before the lookup), and DFU 1.1 and the `ffff:ffff` wildcard (accepted) |
 | `-r` | reset after the operation | Covered | Flash reliability (slow) and DFU images, with `-d` and with `-u`; after `-u -r` the application must answer with the same revision. DFU image checks: with `-r`, `-d` names the image's expected revision (`DFU expected revision:`), and an image with no revision marker is refused before the board lookup (comprehensive) |
 | `-U <index\|serial>` | select device | Covered | Flash reliability and DFU images (by serial; optionally alternating boards) |
 | `-u <file>` | read firmware from the device | Covered | DFU images (smoke): after `-d <test image> -r`, `-u <file> -r` must give 245760 bytes (flash 0x4000-0x3ffff) that start with the whole image, suffix included, padded with 0xff to 256 bytes. Comprehensive: every rejection is checked by a read-back. A read-back fails now and then (about 1 in 20) and leaves the board in DFU despite `-r` ([ubertooth#208](https://github.com/SqueakyFloors/ubertooth/issues/208)); `-u` truncates its file before it finds a device ([ubertooth#200](https://github.com/SqueakyFloors/ubertooth/issues/200) item 4, fixed). Refused command lines (no Ubertooth, smoke): a stray word, `-h`, or a later `-s other.txt` creates no file, no temporary file, and leaves an existing one unchanged; comprehensive: `-u <file> -s <missing .bin>` and `-u <file> -d <bad image>` (exit 1, no device) leave the file and no temporary file |
 | `-s <file>` | add DFU suffix to a binary | Covered | DFU images (smoke): the test image without its suffix, suffixed with `-s`, must equal the build's `.dfu` (VID:PID 1d50:6003, bcdDFU 0100, CRC). Comprehensive: a `.dfu` is refused (exit 1, unchanged); a `.bin` that already has a suffix is refused ("already has a DFU suffix, so ... was not written", nothing written) and a read-only `.bin` is suffixed (fork `9d710fe`, [ubertooth#200](https://github.com/SqueakyFloors/ubertooth/issues/200)). Refused command lines (smoke): a stray word, `-h`, or a second `-s other.txt` writes no `.dfu` and leaves an existing one unchanged. Comprehensive: `-s <file.bin> -d <bad image>` neither creates nor replaces the `.dfu` (fixed in f2e06fa, [ubertooth#286](https://github.com/SqueakyFloors/ubertooth/issues/286)). DFU image checks (no Ubertooth, smoke, in CI): `-s` of a synthetic binary gives exactly the suffix and CRC the harness computes; a read-only `.bin` is suffixed; a `.dfu` and a suffixed `.bin` are refused with nothing written; `-s` of the test build's binary gives the build's `.dfu` byte for byte when the run has a firmware build (not applicable otherwise). Comprehensive: a missing `.bin` and a `.bin` whose suffix has a wrong CRC write nothing; `-s` of an input it cannot read (a directory) leaves an existing `.dfu` alone (fixed in f2e06fa, [ubertooth#305](https://github.com/SqueakyFloors/ubertooth/issues/305)); the signed file goes in place through a temporary file (f2e06fa): only `<file>.dfu` is added, an earlier `.dfu` is replaced keeping its mode (600), a `.dfu` symlink is replaced by a regular file and its target left alone, signing into a read-only directory fails (`<file>.dfu: Permission denied`, exit 1, the directory unchanged; skipped as root), and `-s` with an accepted `-d <image> -r` writes the `.dfu` before the board lookup fails (exit 1). Not checked: `-s` of an empty `.bin` writes a 16-byte `.dfu` that `-d` refuses ("no firmware"); the docs do not say what it should do |
 
-Combinations: `-d` without `-r` and `-u` without `-r` (board stays in DFU): Not covered (Hard: leaves the application firmware). `-d` then `-u` of the same image: Covered (DFU images). A bad image or wrong suffix is rejected: Covered (DFU images, comprehensive; fails on builds without the ubertooth#198/#199 fix `e8edd15`). `-d -r` exit status after a good flash: Covered (every write; fails at 6fee30c, ubertooth#267, fixed in `89d9197`).
+Combinations: `-d` without `-r` and `-u` without `-r` (board stays in DFU): Not covered (Hard: leaves the application firmware). A command line with no function (`-d`, `-u`, `-s` or `-r`), `-U <serial>` alone for one, is refused with `error: nothing to do: ...` and exit 1 before any device is opened since fork `12211ce` (it exited 0 having done nothing): Not covered. `-d` then `-u` of the same image: Covered (DFU images). A bad image or wrong suffix is rejected: Covered (DFU images, comprehensive; fails on builds without the ubertooth#198/#199 fix `e8edd15`). `-d -r` exit status after a good flash: Covered (every write; fails at 6fee30c, ubertooth#267, fixed in `89d9197`).
 
 ## ubertooth-specan
 
@@ -217,7 +218,7 @@ Combinations: `--padding` without `--wifi`, `--wifi` with `-l`/`-u`: Not covered
 
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
-| `-h` | help | Covered | Host CLI surface (exit 1) |
+| `-h` | help | Covered | Host CLI surface (exit 0) |
 | `-l <LAP>` | LAP to decode | Partial | Raw receive replay: `-i -l` keeps only that LAP's lines and derives the UAP from the fixture (smoke); `-l` with ID packets only gives no UAP, `-l -q` captures only that LAP (comprehensive). Live use needs a BR/EDR piconet |
 | `-u <UAP>` | UAP to decode | Partial | Raw receive replay (comprehensive): `-i -l -u` with the right UAP confirms it (CLK6 0, hop reversal starts), a wrong UAP confirms nothing. Following a live piconet needs one |
 | `-z` | survey mode | Covered | Classic Bluetooth receive (smoke): `-z -t N` exits 0 after N s; `Survey Results` and piconet address lines. Raw receive replay (comprehensive): `-i -z` lists exactly the fixture's two piconets, one with its UAP |
@@ -238,7 +239,7 @@ Combinations: `-u` without `-l` rejected: Covered (Argument validation, smoke; R
 
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
-| `-h` | help | Covered | Host CLI surface (exit 1) |
+| `-h` | help | Covered | Host CLI surface (exit 0) |
 | `-b` | raw bitstream only | Covered | Raw receive (smoke): 401-byte records of 400 `0`/`1` symbols and a newline |
 | `-c` | classic modulation | Covered | Raw receive (comprehensive): `-l -c` leaves MDMCTRL 0x0029 (read with `ubertooth-debug`) |
 | `-l` | LE modulation | Covered | Raw receive (comprehensive): `-l` and `-c -l` leave MDMCTRL 0x0040 |
@@ -251,7 +252,7 @@ Combinations: `-c` with `-l`: last one wins. Covered (Raw receive, comprehensive
 
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
-| `-h` | help | Covered | Host CLI surface (exit 1) |
+| `-h` | help | Covered | Host CLI surface (exit 0) |
 | `-l <LAP>` | target LAP | N/A | The tool does nothing (its usage text says so) |
 | `-u <UAP>` | target UAP | N/A | Same |
 | `-t <s>` | timeout | N/A | Same |
@@ -288,7 +289,7 @@ The receive transfer is given back between the detection and monitoring phases (
 | `-a <code>` | access code | Covered | Raw receive (comprehensive): `-a 630f9ffe` accepted, `-a zz` rejected with exit 1 |
 | `-U <index\|serial>` | select device | Covered | Raw receive by serial, guard board unchanged |
 
-Combinations: two or more of `-f`/`-r`/`-i`: last one wins (`do_mode` is overwritten, per source). Not covered; `-i` transmits.
+Combinations: two or more of `-f`/`-r`/`-i`: last one wins (`do_mode` is overwritten, per source). Not covered; `-i` transmits. `-c` with `-f`, `-i` or `-j` is refused before any device is opened since fork `12211ce` (fork #394; it was dropped without a word): Not covered.
 
 ## ubertooth-ducky
 
@@ -306,7 +307,7 @@ Combinations: two or more of `-f`/`-r`/`-i`: last one wins (`do_mode` is overwri
 
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
-| `-h` | help | Covered | Host CLI surface (exit 1); Linux only: not applicable on macOS (no BlueZ); required in a Linux `--build` run (the tool must be in the run prefix, #40), checked in CI |
+| `-h` | help | Covered | Host CLI surface (exit 0 since fork `12211ce`, fork #406; it was 1); Linux only: not applicable on macOS (no BlueZ); required in a Linux `--build` run (the tool must be in the run prefix, #40), checked in CI |
 | `-s` | BlueZ HCI scan | Hard | Needs a Bluetooth adapter and discoverable peers |
 | `-x` | extended inquiry | Hard | Same |
 | `-t <s>` | scan time | Hard | Same |
@@ -320,7 +321,7 @@ A stray word, `-h stray`, a bare `-`, and `-- -x` are refused with `error: unexp
 
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
-| `-h` | help | Covered | Host CLI surface (exit 1); Linux only: not applicable on macOS (no BlueZ); required in a Linux `--build` run (the tool must be in the run prefix, #40), checked in CI |
+| `-h` | help | Covered | Host CLI surface (exit 0 since fork `12211ce`, fork #406; it was 1); Linux only: not applicable on macOS (no BlueZ); required in a Linux `--build` run (the tool must be in the run prefix, #40), checked in CI |
 | `-l<LAP>` | target LAP | Hard | Needs a BR/EDR piconet and an adapter (backlog) |
 | `-u<UAP>` | target UAP | Hard | Same |
 | `-U<0-7>` | select device | Hard | Same |

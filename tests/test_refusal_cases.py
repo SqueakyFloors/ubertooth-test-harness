@@ -41,7 +41,9 @@ class FakeTools:
     """The seven tools' argument handling as at fork f2e06fa (#264, #286): file
     options are named in the option loop and opened after every check, dfu
     -s writes nothing when -d is refused, and "Ignoring extra capture file"
-    goes to stderr. ``bugs`` switches on a misbehavior: open-early (a file
+    goes to stderr; ubertooth-btle as at fork e4f1dc5 (#377): -h exits 0 and
+    the note reads "warning: ignoring extra capture file"; every -h exits 0
+    (fork 12211ce, #406) and dfu says "error: -s requires a .bin". ``bugs`` switches on a misbehavior: open-early (a file
     option creates its file in the loop), extra-stdout, temp-left (dfu -u
     leaves its temporary file), sign-first (fork #286, before f2e06fa: dfu -s
     writes its .dfu before the -d image check), help-first (-h prints the
@@ -117,8 +119,12 @@ class FakeTools:
                     if "open-early" in self.bugs and value != "-":
                         self._create(tool, option, value)
                     if key in files and option in "rqc":
+                        # ubertooth-btle's wording since fork e4f1dc5.
+                        note = ("warning: ignoring extra capture file: "
+                                if tool == "ubertooth-btle"
+                                else "Ignoring extra capture file: ")
                         (out if "extra-stdout" in self.bugs else err).append(
-                            f"Ignoring extra capture file: {value}\n")
+                            f"{note}{value}\n")
                     elif key not in files or option in "dsu":
                         files[key] = (option, value)
                 else:
@@ -132,7 +138,7 @@ class FakeTools:
             return self._result(command, 1, "".join(out), "".join(err)
                                 + f"error: unexpected argument '{operands[0]}'\n")
         if ("h", None) in flags:
-            return self._result(command, 0 if tool in ("ubertooth-specan", "ubertooth-dump", "ubertooth-rx") else 1,
+            return self._result(command, 0,
                                 "".join(out) + USAGE[tool], "".join(err))
         refused = self._after_loop(tool, flags, files)
         if refused:
@@ -172,7 +178,7 @@ class FakeTools:
         if (tool, option) in bad and value == bad[(tool, option)][0]:
             return bad[(tool, option)][1]
         if tool == "ubertooth-dfu" and option == "s" and not value.endswith(".bin"):
-            return "Error: -s requires a .bin\n"
+            return "error: -s requires a .bin\n"
         if tool == "ubertooth-btle" and option == "r" and value == "-":
             return "Error: PCAPNG capture to stdout is not supported; use -q - or -c -\n"
         return ""

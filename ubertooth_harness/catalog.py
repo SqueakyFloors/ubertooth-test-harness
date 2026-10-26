@@ -364,8 +364,10 @@ def _host_cli_surface_cases(_arguments, _resources, _resource_identities):
         ("ubertooth-rx", 0),
         ("ubertooth-tx", 0),
         ("ubertooth-dump", 0),
-        ("ubertooth-btle", 1),
-        ("ubertooth-dfu", 1),
+        # -h exits 0 on every tool: btle since fork e4f1dc5 (fork #377), dfu,
+        # scan and follow since 12211ce (fork #406); each was 1.
+        ("ubertooth-btle", 0),
+        ("ubertooth-dfu", 0),
         ("ubertooth-ego", 0),
         ("ubertooth-afh", 0),
         ("ubertooth-ducky", 0),
@@ -388,7 +390,7 @@ def _host_cli_surface_cases(_arguments, _resources, _resource_identities):
             f"{tool} help (BlueZ builds)",
             (tool, "-h"),
             (re.escape(tool),),
-            expected_returncodes=(1,),
+            expected_returncodes=(0,),
             needs=tool_needs(tool),
         )
         for tool in BLUEZ_TOOLS
