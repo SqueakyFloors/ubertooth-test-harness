@@ -123,6 +123,13 @@ def _required_text(value):
     return value
 
 
+def _pa_level(value):
+    # FREND.PA_LEVEL: 0 (-25 dBm) to 7 (0 dBm).
+    if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 7:
+        raise CatalogError("must be a PA level 0-7")
+    return value
+
+
 def _coverage(value):
     try:
         return coverage_profile(value)
@@ -650,6 +657,9 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # capture, plus up to 5 s removal and 10 s return deadlines with 1 s
     # settles; about 8 s of power switching is assumed.
     "Exclusive Ubertooth topology": _default(Estimate(8.0, per_duration=1)),
+    # Two resets of about 0.8 s each, the round trip, and the reads and
+    # restores of both boards (Linux lab host).
+    "Two-device range test": _default(Estimate(6.0)),
 })
 
 
@@ -796,6 +806,23 @@ def builtin_catalog() -> TestCatalog:
             MappingProxyType({"Ubertooth": "Ubertooth"}),
             command_builder=transitions.util_conflict_cases,
             continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+        ),
+        TestDefinition(
+            "Two-device range test",
+            "ubertooth-util -e (repeater) on the responder and -n (range test) "
+            "on the sender: the sender's -m reports a clean round trip at or "
+            "below the plan's PA level, and both boards stop and are restored",
+            MappingProxyType({
+                "host": ArgumentRule(_required_text, required=True),
+                "sender": ArgumentRule(_selector, required=True),
+                "responder": ArgumentRule(_selector, required=True),
+                # Both boards transmit, the sender at every PA level up to 0 dBm.
+                "allow RF transmission": ArgumentRule(_required_true, required=True),
+                "maximum PA level": ArgumentRule(_pa_level, default=7),
+            }),
+            MappingProxyType({"sender": "Ubertooth", "responder": "Ubertooth"}),
+            command_builder=util_cases.range_test_cases,
             guards_other_ubertooths=True,
         ),
         _device_test("BLE monitor", "Monitor BLE traffic", extra={"duration": DURATION}),
@@ -1016,16 +1043,6 @@ def builtin_catalog() -> TestCatalog:
     ]
     definitions.extend(
         [
-            TestDefinition(
-                "Two-device range test",
-                "Two-Ubertooth RF range and integrity test",
-                MappingProxyType({
-                    "host": ArgumentRule(_required_text, required=True),
-                    "sender": ArgumentRule(_selector, required=True),
-                    "responder": ArgumentRule(_selector, required=True),
-                }),
-                MappingProxyType({"sender": "Ubertooth", "responder": "Ubertooth"}),
-            ),
             _device_test(
                 "Capture known BLE advertiser", "Capture a registered BLE advertiser",
                 extra={"advertiser": ArgumentRule(_required_text, required=True)},

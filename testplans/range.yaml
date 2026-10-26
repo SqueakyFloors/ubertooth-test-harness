@@ -1,0 +1,15 @@
+plan: Two-device range test
+suites:
+  range:
+    # Needs two registered Ubertooths on one Linux host: the default board
+    # sends (-n) and UT_Linux1 repeats (-e). Both transmit, the sender at
+    # every PA level up to 0 dBm, so run it only where that is allowed.
+    # Other registered boards on the host are guarded (read only).
+    - Two-device range test:
+        host: Host_Linux
+        sender: default
+        responder: UT_Linux1
+        allow RF transmission: true
+        # The lab boards sit a few centimetres apart; a working link gets
+        # through at the lowest levels.
+        maximum PA level: 3

@@ -1683,8 +1683,14 @@ def guard_boards(resource_identities: Mapping) -> tuple[GuardBoard, ...]:
         GuardBoard(role, str(resource_identities[role].get("serial", "")).lower())
         for role in roles
     )
-    selected = str(resource_identities.get("Ubertooth", {}).get("serial", "")).lower()
-    selectors = (("Ubertooth", selected),) + tuple((b.role, b.serial) for b in boards)
+    # Every board the test itself selects: the "Ubertooth" role, or each role
+    # of a multi-board test (for example sender and responder).
+    tested = tuple(
+        (role, str(identity.get("serial", "")).lower())
+        for role, identity in resource_identities.items()
+        if role not in roles and "serial" in identity
+    ) or (("Ubertooth", ""),)
+    selectors = tested + tuple((b.role, b.serial) for b in boards)
     for role, selector in selectors:
         if not (len(selector) == 32 and all(c in "0123456789abcdef" for c in selector)):
             raise StateCaseError(

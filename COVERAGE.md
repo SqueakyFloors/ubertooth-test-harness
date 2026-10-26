@@ -102,9 +102,9 @@ Harness-wide checks that use the CLIs:
 | `-I` | identify (flash LEDs) | Covered | Ubertooth util modes (smoke): returns at once with one line on stderr, `note: the board is blinking; stop it with ubertooth-util -U <serial> -S or any mode option`, and no `Flashing LEDs` line (fork `fcadf34`, [ubertooth#326](https://github.com/SqueakyFloors/ubertooth/issues/326)); all LEDs blink (`-d` is sampled by `ledblink.py` with pauses jittered over one blink period until a whole-on and a whole-off sample have both appeared, at most 60 samples or 10 s on a monotonic clock; a read still running at 10 s is stopped with SIGTERM, so sampling ends within 12 s), channel and PA kept, `-S` ends it (LEDs off, idle reset), originals restored. Comprehensive: `-I` ends a running `-q` and `-q` ends `-I` (the new mode runs at 2441 MHz: ending the prior mode ran the idle reset), `-s -I` |
 | `-q[20-120]` | LED spectrum analyzer, threshold -N dBm | Covered | Ubertooth util modes (smoke): `Entering LED specan mode (threshold -N dBm)` on stderr, not stdout (fork `fcadf34`); `-q120` (-120 dBm) lights every LED, channel and PA kept, `-S` runs the idle reset (LEDs off, 2441 MHz, squelch -120, PA kept; [ubertooth#191](https://github.com/SqueakyFloors/ubertooth/issues/191), fixed in `aa4f620`), originals restored. Comprehensive: `-q20` and bare `-q` (-85 dBm) run until `-S` with the same reset. `-q0`, `-q19`, `-q121`, `-q183` (where the old int8 threshold wrapped, [ubertooth#189](https://github.com/SqueakyFloors/ubertooth/issues/189)), `-qabc` rejected: Argument validation (comprehensive) |
 | `-t` | continuous TX test | Hard | Transmits RF. Only the conflict rejections run it (Ubertooth util conflicts, release) |
-| `-n` | start range test | Hard | Transmits RF; a useful test needs a responder board. Conflict rejections only |
-| `-e` | repeater mode | Hard | Transmits RF; needs a sender board. Conflict rejections only |
-| `-m` | show range test result | Partial | Ubertooth util modes (smoke): after `-r`, exit 0, `no range test result yet`, and no result values (it said "invalid range test result" before `7180f74`, [ubertooth#190](https://github.com/SqueakyFloors/ubertooth/issues/190)). A real result needs a range test, which transmits |
+| `-n` | start range test | Partial | Two-device range test (`range` plan; two boards on one Linux host, `allow RF transmission: true`): after `-r` on both boards, `-e` on the responder, then `-n` on the sender prints `Starting range test` on stderr and nothing on stdout; the sender's `-m` must report a result within 10 s, with request and reply PA levels at most the plan's `maximum PA level` (3) and copy numbers 0-15, and the sender must be idle afterwards (LEDs off, 2441 MHz) with no `-S`. Strict: fails on fork main (no result; both boards stop answering USB, [ubertooth#26](https://github.com/SqueakyFloors/ubertooth/issues/26)). Also the conflict rejections |
+| `-e` | repeater mode | Partial | Two-device range test: `Starting repeater` on stderr, nothing on stdout; while it runs the responder must answer USB with its RX LED on, its `-m` must still say `no range test result yet`, and `-S` must stop it (LEDs off, 2441 MHz). Strict: on fork main the repeater answers no USB request until power is removed ([ubertooth#26](https://github.com/SqueakyFloors/ubertooth/issues/26)). Also the conflict rejections |
+| `-m` | show range test result | Partial | Ubertooth util modes (smoke): after `-r`, exit 0, `no range test result yet`, and no result values (it said "invalid range test result" before `7180f74`, [ubertooth#190](https://github.com/SqueakyFloors/ubertooth/issues/190)). A real result: Two-device range test (strict; the result lines, PA levels at most the plan's maximum, copy numbers 0-15, and a mismatch fails); none has been seen on hardware yet |
 | `-f` | DFU mode (removed) | Covered | Removed in fork `db5649b` (use `ubertooth-dfu`). `-f` alone and `-f -i` are refused as an unknown option, `error: unrecognized option '-f'`, exit 1, with no Ubertooth: Util mode refusals (smoke). The deprecation note above the `-U all` refusal ([ubertooth#333](https://github.com/SqueakyFloors/ubertooth/issues/333)) went with it |
 | `-i` | ISP mode | Hard | Leaves the application firmware; recovery needs ISP tooling, so never run alone. Its refusals run with no Ubertooth: Util mode refusals (below) |
 | `-9` | firmware test command (undocumented) | N/A | Removed in fork `5ac22a8` ([ubertooth#350](https://github.com/SqueakyFloors/ubertooth/issues/350)) |
@@ -430,8 +430,8 @@ A test that fails cleanly (device verified restored, guards unchanged) no longer
   `ubertooth-afh`, `ubertooth-follow`), BLE connection (`ubertooth-btle -f/-p`
   with real traffic, `-t`), E-GO skateboard, Uberducky.
 - **Needs a host Bluetooth adapter / BlueZ:** `ubertooth-scan`, `ubertooth-follow` (Linux).
-- **Needs a second Ubertooth:** `ubertooth-util -n`/`-e`/`-m` range test with
-  a real result. `-U all` and no-selector listing need two registered boards
+- **Needs a second Ubertooth:** the `ubertooth-util -n`/`-e`/`-m` range test
+  (Two-device range test, `range` plan), `-U all` and no-selector listing
   (Multi-board selection).
 - **Other firmware:** `ubertooth-btbr`.
 - **Does nothing:** `ubertooth-tx`.
@@ -462,7 +462,8 @@ Next, harness work:
 12. Done (#63): `Refused command lines`: no file created, truncated, or left behind by a refused command line, for every file option, with no Ubertooth (in CI).
     Done (#65): `DFU image checks`: `ubertooth-dfu -d` bad-image refusals and `-s`, with no Ubertooth (in CI).
 13. Peer-based tests from the backlog (known BLE advertiser, AFH map,
-    piconet follow, two-board range test), once fixtures are registered.
+    piconet follow), once fixtures are registered. Done (#89): the
+    two-board range test (`range` plan).
     The fixtures each needs are tracked as `hardware needed` issues: BLE
     advertiser [#86](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/86),
     BLE connection [#87](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/87),

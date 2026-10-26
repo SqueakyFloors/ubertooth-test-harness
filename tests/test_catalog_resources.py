@@ -407,6 +407,7 @@ suites:
         host: Host_Linux
         sender: UT_Linux0
         responder: UT_Linux1
+        allow RF transmission: true
 """,
             )
 
@@ -432,6 +433,7 @@ suites:
         host: Host_Linux
         sender: each
         responder: each
+        allow RF transmission: true
 """,
             )
 
@@ -449,6 +451,7 @@ suites:
         host: Host_Linux
         sender: default
         responder: default
+        allow RF transmission: true
 """,
             )
 
