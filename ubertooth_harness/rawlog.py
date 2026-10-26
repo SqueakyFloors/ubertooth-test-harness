@@ -18,8 +18,11 @@ Longer output stamps each line when it arrived, in arrival order, then the
 result line. Timestamps use the same clock and format as ``run.jsonl``.
 """
 
+import collections
 import datetime
+import json
 from pathlib import Path
+import re
 import shlex
 from typing import Callable
 
@@ -63,6 +66,14 @@ def _output_lines(
     lines: list[tuple[datetime.datetime, str, str]] = []
     pending = {"stdout": "", "stderr": ""}
     for moment, stream, text in chunks:
+        if stream == NOTE:
+            # A harness note between output records ends any partial line.
+            for name, rest in pending.items():
+                if rest:
+                    lines.append((moment, name, rest.rstrip("\r")))
+            pending = {"stdout": "", "stderr": ""}
+            lines.extend((moment, NOTE, line) for line in text.splitlines())
+            continue
         pending[stream] = pending.get(stream, "") + text
         while "\n" in pending[stream]:
             line, pending[stream] = pending[stream].split("\n", 1)
@@ -73,7 +84,226 @@ def _output_lines(
     return lines
 
 
-TAGS = {"stdout": "[O]", "stderr": "[E]"}
+# Pseudo stream for harness [M] notes placed among a command's output lines.
+NOTE = "note"
+TAGS = {"stdout": "[O]", "stderr": "[E]", NOTE: "[M]"}
+
+OUTPUT_DIR = "output"
+
+# Per-command limits on the output records kept in run.jsonl (#49): the first
+# RECORD_OUTPUT_EVENTS records or RECORD_OUTPUT_BYTES, and the last
+# RECORD_TAIL_EVENTS records or RECORD_TAIL_BYTES. Past the first limits the
+# command's full output goes to output/<command id>.log. Bytes are those the
+# text takes in run.jsonl (UTF-8 of its JSON string, escapes included).
+RECORD_OUTPUT_BYTES = 64 * 1024
+RECORD_OUTPUT_EVENTS = 200
+RECORD_TAIL_BYTES = 16 * 1024
+RECORD_TAIL_EVENTS = 50
+RECORD_PIECE_CHARS = 1024
+# Distinct line shapes listed in the summary of the output left out.
+SUMMARY_SHAPES = 10
+
+_DIGITS = re.compile(r"\d+")
+
+
+def line_shape(line: str) -> str:
+    """A line with every run of digits replaced by N, so repeated progress
+    lines ('rx block timestamp 283441 * 100 nanoseconds') count as one."""
+    return _DIGITS.sub("N", line)
+
+
+class _LineSplitter:
+    def __init__(self):
+        self.pending = {"stdout": "", "stderr": ""}
+
+    def feed(self, stream: str, text: str) -> list[str]:
+        self.pending[stream] = self.pending.get(stream, "") + text
+        *lines, self.pending[stream] = self.pending[stream].split("\n")
+        return [line.rstrip("\r") for line in lines]
+
+    def rest(self):
+        for stream, text in self.pending.items():
+            if text:
+                yield stream, text.rstrip("\r")
+        self.pending = {"stdout": "", "stderr": ""}
+
+
+class CommandOutputLog:
+    """A command's full output, one '<UTC> [O]/[E] <line>' per line.
+
+    Written as it arrives (flushed per chunk), so an interrupted run keeps
+    everything received so far.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._stream = path.open("x", encoding="utf-8")
+        self._lines = _LineSplitter()
+        self._last = None
+
+    def write(self, moment: datetime.datetime, stream: str, text: str) -> None:
+        self._last = moment
+        for line in self._lines.feed(stream, text):
+            self._stream.write(f"{_stamp(moment)} {TAGS[stream]} {line}\n")
+        self._stream.flush()
+
+    def close(self) -> None:
+        for stream, line in self._lines.rest():
+            self._stream.write(f"{_stamp(self._last)} {TAGS[stream]} {line}\n")
+        self._stream.close()
+
+
+class OmittedOutput:
+    """Counts of the output left out of run.jsonl, per stream and line shape."""
+
+    def __init__(self):
+        self.chars = {"stdout": 0, "stderr": 0}
+        self.lines = {"stdout": 0, "stderr": 0}
+        self.shapes: dict[tuple[str, str], int] = {}
+        self._lines = _LineSplitter()
+
+    def _count(self, stream: str, line: str) -> None:
+        self.lines[stream] += 1
+        key = (stream, line_shape(line))
+        self.shapes[key] = self.shapes.get(key, 0) + 1
+
+    def add(self, stream: str, text: str) -> None:
+        self.chars[stream] = self.chars.get(stream, 0) + len(text)
+        for line in self._lines.feed(stream, text):
+            self._count(stream, line)
+
+    def summary(self) -> dict:
+        for stream, line in self._lines.rest():
+            self._count(stream, line)
+        common = sorted(self.shapes.items(), key=lambda item: (-item[1], item[0]))
+        return {
+            "chars": dict(self.chars),
+            "lines": dict(self.lines),
+            "distinct_shapes": len(self.shapes),
+            "common_shapes": [
+                {"stream": stream, "shape": shape[:200], "count": count}
+                for (stream, shape), count in common[:SUMMARY_SHAPES]
+            ],
+        }
+
+
+def record_bytes(text: str) -> int:
+    """Bytes ``text`` takes in a run.jsonl record (JSON string, UTF-8)."""
+    return len(json.dumps(text).encode("utf-8")) - 2
+
+
+Chunk = tuple  # (moment: datetime, stream: str, text: str)
+
+
+class CappedOutput:
+    """The output records one command leaves in run.jsonl, within the
+    RECORD_* limits, plus its full output in a spill file once past them.
+
+    ``record(stream, text, received)`` emits one ``command_output`` record
+    (``received`` is None while the command runs, else the chunk's arrival
+    time as a run.jsonl UTC timestamp); ``open_spill()`` returns ``(path, name)`` for the spill file.
+    The first records are emitted as output arrives. Past the head limits
+    the newest output is held as a tail; ``finish(note)`` emits
+    ``note(details)`` for the part left out, then the tail, so report.md and
+    the GUI still see how the command ended. The newest chunk is always kept,
+    so a harness marker the executor appends at the end (timeout,
+    cancellation, OUTPUT SINK ERROR) reaches run.jsonl.
+    """
+
+    def __init__(
+        self,
+        record: Callable[[str, str, str | None], None],
+        open_spill: Callable[[], tuple[Path, str]],
+    ):
+        self._record = record
+        self._open_spill = open_spill
+        self._head_events = 0
+        self._head_bytes = 0
+        self._head: list[Chunk] = []  # copied into the spill file when it opens
+        self._spilling = False
+        self._log: CommandOutputLog | None = None
+        self.file = ""
+        self._tail: collections.deque = collections.deque()
+        self._tail_bytes = 0
+        self._omitted = OmittedOutput()
+        # Last character on each stream left out before the tail, to start
+        # the tail at a line boundary.
+        self._dropped_end = {"stdout": "", "stderr": ""}
+        self._dropped_at: datetime.datetime | None = None
+
+    @property
+    def spilled(self) -> bool:
+        return self._spilling
+
+    def add(self, moment: datetime.datetime, stream: str, text: str) -> None:
+        # At most 12 bytes per character in JSON (an escaped surrogate pair),
+        # so each record stays well inside the event details limit.
+        for start in range(0, len(text), RECORD_PIECE_CHARS):
+            self._add(moment, stream, text[start:start + RECORD_PIECE_CHARS])
+
+    def _add(self, moment: datetime.datetime, stream: str, text: str) -> None:
+        size = record_bytes(text)
+        if not self._spilling and (
+            self._head_events < RECORD_OUTPUT_EVENTS
+            and self._head_bytes + size <= RECORD_OUTPUT_BYTES
+        ):
+            self._head_events += 1
+            self._head_bytes += size
+            self._head.append((moment, stream, text))
+            self._record(stream, text, None)
+            return
+        self._spilling = True
+        # The tail first: if the spill file fails, the newest output is still
+        # kept for run.jsonl.
+        self._tail.append((moment, stream, text, size))
+        self._tail_bytes += size
+        while len(self._tail) > 1 and (
+            len(self._tail) > RECORD_TAIL_EVENTS or self._tail_bytes > RECORD_TAIL_BYTES
+        ):
+            dropped_at, dropped_stream, dropped, dropped_size = self._tail.popleft()
+            self._tail_bytes -= dropped_size
+            self._drop(dropped_at, dropped_stream, dropped)
+        if self._log is None:
+            path, self.file = self._open_spill()
+            self._log = CommandOutputLog(path)
+            for chunk in self._head:
+                self._log.write(*chunk)
+            self._head.clear()
+        self._log.write(moment, stream, text)
+
+    def _drop(self, moment: datetime.datetime, stream: str, text: str) -> None:
+        self._dropped_at = moment
+        if text:
+            self._omitted.add(stream, text)
+            self._dropped_end[stream] = text[-1]
+
+    def close(self) -> None:
+        if self._log is not None:
+            self._log.close()
+
+    def finish(self, note: Callable[[dict], None]) -> dict:
+        """Emit the left-out note and the tail; details for command_finished."""
+        if not self._spilling:
+            return {}
+        tail = []
+        for moment, stream, text, _size in self._tail:
+            if self._dropped_end.get(stream, "") not in ("", "\n"):
+                # Starts inside a line that was left out: begin at the next line.
+                cut = text.find("\n") + 1 if "\n" in text else len(text)
+                self._drop(moment, stream, text[:cut])
+                text = text[cut:]
+                if not text:
+                    continue
+            tail.append((moment, stream, text))
+        details = {"output_file": self.file, "output_omitted": self._omitted.summary()}
+        note_details = dict(details)
+        if self._dropped_at is not None:
+            note_details["received"] = _stamp(self._dropped_at)  # end of the gap
+        note(note_details)
+        for moment, stream, text in tail:
+            self._record(stream, text, _stamp(moment))
+        return details
 
 
 def result_text(result: CommandResult, *, stopped: bool = False) -> str:

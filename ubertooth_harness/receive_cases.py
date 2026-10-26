@@ -177,11 +177,19 @@ def packet_check(*, channel=None, max_errors=None, survey=False):
     return check
 
 
+# What -s must not print now that it only states the default (fork 7b46ec4):
+# the notice it printed before 5ac22a8, or any warning or error.
+SWEEP_NOTICES = (r"(?i)deprecated", r"(?m)^(?:warning|error): ")
+# The -h line for -s (fork 7b46ec4, ubertooth-rx.c usage()).
+SWEEP_HELP = r"(?m)^\s+-s sweep all channels - the default; a -c channel wins over it$"
+
+
 def _rx(serial, *options):
     return ("ubertooth-rx", "-U", serial) + tuple(options)
 
 
-def _rx_run(serial, seconds, options, *, name, check=None, patterns=(), files=()):
+def _rx_run(serial, seconds, options, *, name, check=None, patterns=(), forbidden=(),
+            files=()):
     """Run ubertooth-rx -t N; it must exit 0 by itself, about N s later.
     ``files`` maps an option to a file name in the capture directory."""
     def argv(context):
@@ -199,16 +207,18 @@ def _rx_run(serial, seconds, options, *, name, check=None, patterns=(), files=()
         mutates=True,
         output_check=check,
         output_patterns=patterns,
+        forbidden_patterns=forbidden,
     )
 
 
 def _rx_case(serial, seconds, case_id, name, options, expected_state, *,
-             check=None, patterns=(), files=(), verify=()):
+             check=None, patterns=(), forbidden=(), files=(), verify=()):
     return _case(
         serial, case_id, name,
         (_rx_run(serial, seconds, options, name=f"ubertooth-rx -t {seconds} "
                  + " ".join(options + tuple(o for o, _f in files)),
-                 check=check, patterns=patterns, files=files),) + tuple(verify),
+                 check=check, patterns=patterns, forbidden=forbidden,
+                 files=files),) + tuple(verify),
         f"exits 0 by itself after about {seconds}s; " + expected_state,
         capture_dir=bool(files),
     )
@@ -300,6 +310,14 @@ def classic_receive_cases(arguments, _resources, resource_identities):
                      (), "packet lines only in the documented format"),
             _rx_case(serial, n, "rx-fixed-channel", "Fixed channel (-c 39)", ("-c", "39"),
                      "every packet on channel 39", check=packet_check(channel=39)),
+            # -s states the default sweep (fork 7b46ec4, #361; ubertooth-rx.md):
+            # accepted with no notice, and a -c channel wins over it.
+            _rx_case(serial, n, "rx-sweep-explicit", "Explicit sweep (-s)", ("-s",),
+                     "packet lines only in the documented format; no notice",
+                     check=packet_check(), forbidden=SWEEP_NOTICES),
+            _rx_case(serial, n, "rx-sweep-fixed-channel-wins", "-s -c 39: the channel wins",
+                     ("-s", "-c", "39"), "every packet on channel 39; no notice",
+                     check=packet_check(channel=39), forbidden=SWEEP_NOTICES),
             _rx_case(serial, n, "rx-ac-errors-0", "No access-code errors (-e 0)", ("-e", "0"),
                      "no packet with access-code errors", check=packet_check(max_errors=0)),
             _rx_case(serial, n, "rx-ac-errors-4", "Four access-code errors (-e 4)", ("-e", "4"),
@@ -544,9 +562,11 @@ def raw_receive_cases(arguments, _resources, resource_identities):
 # a last record cut short ("error: <file> ends in a partial record: N of 68
 # bytes, ignored") is reported on stderr after whatever was decoded, exit 1
 # (#203). An -i file fopen() cannot open prints "error: <name>: <strerror>",
-# exit 1 (fork 5ac22a8, #350). -u without -l is refused before the input or any
-# device is used: "error: -u <UAP> requires -l <LAP>", exit 1 (fork 57469f2,
-# #236). The other options work as live: -l/-u, -z, -e, -r/-q/-d.
+# exit 1 (fork 5ac22a8, #350); so does a -d file it cannot open, before any
+# record is decoded or device opened. -u without -l is refused before the
+# input or any device is used: "error: -u <UAP> requires -l <LAP>", exit 1
+# (fork 57469f2, #236). The other options work as live: -l/-u, -z, -e,
+# -r/-q/-d.
 # The fixture is synthetic (rxreplay.py), never an over-the-air capture.
 
 _REPLAY = str(Path(rxreplay.__file__).resolve())
@@ -649,6 +669,38 @@ def replay_cases(arguments, _resources, _resource_identities, *, now=None):
             _capture_packets("verify-capture", "Verify the -q file", "replay.pcap",
                              "pcap", count),
         ), f"pcap, link type 255, {count} packets"),
+        # main() opens the -d file before any device or record (fork
+        # 5ac22a8, #350), so this needs no board even without -i; -i keeps
+        # it off USB if the open were ever moved after the lookup. In smoke
+        # so CI's host run covers it: it needs only the built ubertooth-rx.
+        _replay_case("replay-dump-unopenable", "-i -d to a file it cannot open", (
+            _fixture_step(base),
+            _replay_step("ubertooth-rx -i <fixture> -d <missing dir>/x.bin", (),
+                         returncodes=(1,), check=rxreplay.packets_check([]),
+                         patterns=(r"(?m)^error: .*no-such-dir/x\.bin: "
+                                   r"No such file or directory$",),
+                         forbidden=(r"ubertooth-rx - passive Classic Bluetooth",),
+                         files=(("-d", "no-such-dir/x.bin"),)),
+            # The whole directory, not one name: only the fixture, unchanged.
+            Step("verify-directory", "Verify the directory holds only the unchanged fixture",
+                 lambda context: (sys.executable, _REPLAY, "only-fixture",
+                                  require(context, CAPTURE_DIR_KEY), _FIXTURE,
+                                  "--base-time", str(base)),
+                 output_patterns=(rf"Replay directory: only {re.escape(_FIXTURE)}, "
+                                  r"unchanged",)),
+        ), "exit 1 with 'error: <file>: No such file or directory', no usage, "
+           "no packet decoded, nothing created or changed"),
+        # -s states the default sweep (fork 7b46ec4, #361), so the replay is
+        # the same with it; -h lists it as the default. In smoke so CI's host
+        # run covers it.
+        _replay_case("replay-sweep-explicit", "-i -s decodes as without -s", (
+            _fixture_step(base),
+            _replay_step("ubertooth-rx -i <fixture> -s", ("-s",),
+                         check=rxreplay.packets_check(full), forbidden=SWEEP_NOTICES),
+            Step("help", "ubertooth-rx -h lists -s as the default sweep",
+                 ("ubertooth-rx", "-h"), timeout_s=10.0, output_patterns=(SWEEP_HELP,)),
+        ), f"exit 0; the same {count} packet lines; no notice; -h lists -s as the "
+           "default"),
     ]
     if arguments["coverage"] != "comprehensive":
         return tuple(cases)

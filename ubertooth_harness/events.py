@@ -110,8 +110,11 @@ class JsonlEventSink:
 class TerminalEventSink:
     """Render command events immediately without contaminating summary stdout."""
 
-    def __init__(self, stream: TextIO):
+    def __init__(self, stream: TextIO, *, quiet_events=frozenset()):
         self.stream = stream
+        # Event types recorded in run.jsonl but not printed here (for example
+        # a libbtbb pin check the caller already printed).
+        self.quiet_events = frozenset(quiet_events)
         self._argv: list[str] = []
         self._partial = {"stdout": "", "stderr": ""}
 
@@ -124,8 +127,16 @@ class TerminalEventSink:
 
     def emit(self, event: RunEvent) -> None:
         details = event.details
+        if event.event_type in self.quiet_events:
+            return
         if event.event_type == "run_started":
             self.stream.write(f"\n== run {event.run_id} started ==\n")
+        elif event.event_type == "libbtbb_pin":
+            message = details.get("message", "")
+            if event.status == "passed":
+                self.stream.write(f"[libbtbb pin] {message}\n")
+            else:
+                self.stream.write(f"warning: {message}\n")
         elif event.event_type == "manifest":
             self.stream.write("\n[manifest recorded]\n")
         elif event.event_type == "not_applicable":
@@ -173,6 +184,11 @@ class TerminalEventSink:
             *complete, self._partial[name] = text.split("\n")
             for part in complete:
                 self.stream.write(f"{tag} {part.rstrip(chr(13))}\n")
+        elif event.event_type == "command_output_omitted":
+            self._flush_partial()
+            self.stream.write(
+                f"[M] output left out; full output in {details.get('output_file', '')}\n"
+            )
         elif event.event_type == "command_finished":
             from ubertooth_harness.executor import CommandResult
             from ubertooth_harness.rawlog import result_text

@@ -22,6 +22,7 @@ from ubertooth_harness.manifest import ManifestError, RunManifest
 from ubertooth_harness.planner import TestInvocation, alternated_roles
 from ubertooth_harness.power import PowerControllerError
 from ubertooth_harness.preflight import PreflightCheck
+from ubertooth_harness.rawlog import OUTPUT_DIR, CappedOutput
 from ubertooth_harness.topology import IsolationCancelled, applied_power_isolation
 from ubertooth_harness.report import write_report
 from ubertooth_harness.cases import FlashCase
@@ -115,6 +116,17 @@ class StateCaseResult:
 
 def _path_safe(name: str) -> str:
     return "".join(c if c.isalnum() or c in "._-" else "-" for c in name)
+
+
+def _output_log_path(output_dir: Path, command_id: str) -> Path:
+    """A new output/<command id>.log; a repeated ID gets a numbered name."""
+    base = output_dir / OUTPUT_DIR / _path_safe(command_id)
+    path = base.with_name(base.name + ".log")
+    number = 2
+    while path.exists():
+        path = base.with_name(f"{base.name}-{number}.log")
+        number += 1
+    return path
 
 
 class NamedTestSequencer:
@@ -400,34 +412,64 @@ class NamedTestSequencer:
         timeout_s: float,
         owner: Mapping,
         continuous: bool = False,
+        output_dir: Path,
     ) -> CommandResult:
+        """Run one command, recording it and every response in run.jsonl.
+
+        A command whose output passes the per-command record limits
+        (rawlog.RECORD_*) keeps its first and last output records in
+        run.jsonl, with a ``command_output_omitted`` record between them, and
+        its full output in ``output/<command id>.log``; ``command_finished``
+        names the file and summarizes what was left out.
+        """
         details = dict(owner)
         details.update({"command_id": command_id, "argv": list(argv)})
         publisher.emit("command_started", "running", details)
         streamed = []
 
-        def output(stream_name: str, text: str) -> None:
-            streamed.append(stream_name)
+        def record(stream_name: str, text: str, received) -> None:
             output_details = dict(owner)
             output_details.update({
                 "command_id": command_id,
                 "stream": stream_name,
                 "text": text,
             })
+            if received is not None:
+                # A tail record emitted after the command ended.
+                output_details["received"] = received
             publisher.emit("command_output", "running", output_details)
 
-        result = self.executor.run(
-            argv,
-            timeout_s=timeout_s,
-            cancellation=token,
-            on_output=output,
-        )
-        if not streamed:
-            # The executor did not stream; record its collected output so
-            # run.jsonl still holds every response.
-            for stream_name, text in (("stdout", result.stdout), ("stderr", result.stderr)):
-                for start in range(0, len(text), _OUTPUT_CHUNK):
-                    output(stream_name, text[start:start + _OUTPUT_CHUNK])
+        def open_spill():
+            path = _output_log_path(output_dir, command_id)
+            return path, path.relative_to(output_dir).as_posix()
+
+        def note(omitted: dict) -> None:
+            note_details = dict(owner)
+            note_details.update({"command_id": command_id, **omitted})
+            publisher.emit("command_output_omitted", "running", note_details)
+
+        capped = CappedOutput(record, open_spill)
+
+        def output(stream_name: str, text: str) -> None:
+            streamed.append(stream_name)
+            capped.add(publisher.utc_now(), stream_name, text)
+
+        try:
+            result = self.executor.run(
+                argv,
+                timeout_s=timeout_s,
+                cancellation=token,
+                on_output=output,
+            )
+            if not streamed:
+                # The executor did not stream; record its collected output so
+                # the run directory still holds every response.
+                for stream_name, text in (("stdout", result.stdout), ("stderr", result.stderr)):
+                    for start in range(0, len(text), _OUTPUT_CHUNK):
+                        output(stream_name, text[start:start + _OUTPUT_CHUNK])
+        finally:
+            capped.close()
+        spilled = capped.finish(note)
         command_status = (
             "canceled" if result.cancelled
             # A continuous mode reaching its deadline is the expected stop.
@@ -443,6 +485,7 @@ class NamedTestSequencer:
             "timed_out": result.timed_out,
             "cancelled": result.cancelled,
         })
+        finished.update(spilled)
         publisher.emit("command_finished", command_status, finished)
         return result
 
@@ -501,6 +544,7 @@ class NamedTestSequencer:
             timeout_s=step.timeout_s,
             owner=details,
             continuous=step.continuous,
+            output_dir=output_dir,
         )
         outcome = step.evaluate(result, context)
         if (
@@ -1044,6 +1088,7 @@ class NamedTestSequencer:
                 argv=check.argv,
                 timeout_s=check.timeout_s,
                 owner={"phase": "preflight", "check_id": check.check_id},
+                output_dir=output_dir,
             )
             failure = check.result_failure(result)
             if failure:
@@ -1253,6 +1298,7 @@ class NamedTestSequencer:
                                     "invocation_id": invocation.invocation_id,
                                     "case_id": case_id,
                                 },
+                                output_dir=output_dir,
                             )
                             missing = case.missing_tool(result)
                             case_failure = "" if missing else case.result_failure(result)

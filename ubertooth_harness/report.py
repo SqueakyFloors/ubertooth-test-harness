@@ -17,7 +17,7 @@ from typing import Iterable, Mapping, Sequence
 
 from ubertooth_harness.events import REPORT, RUN_LOG
 from ubertooth_harness.executor import CommandResult
-from ubertooth_harness.rawlog import CommandCapture, format_command_record
+from ubertooth_harness.rawlog import NOTE, TAGS, CommandCapture, format_command_record
 
 
 REDACTED = "<serial>"
@@ -196,6 +196,15 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
             f"`{source.get('requested_ref')}` = `{source.get('commit')}` "
             f"({source.get('expected_revision')}) from {source.get('repository')}",
         ))
+    pin = next((e for e in run.events if e["event_type"] == "libbtbb_pin"), None)
+    if pin is not None:
+        # How the libbtbb built compares with the fork's install.sh pin (#85).
+        status = pin.get("status", "")
+        message = pin.get("details", {}).get("message", "")
+        rows.append((
+            "libbtbb pin",
+            message if status == "passed" else f"**{status}**: {message}",
+        ))
     build = manifest.get("build") or {}
     if build:
         toolchain = ", ".join(f"{k} {v}" for k, v in sorted(build.get("toolchain", {}).items()))
@@ -356,6 +365,37 @@ def elapsed(origin: datetime.datetime):
     return stamp
 
 
+def _omitted_text(note: Mapping) -> str:
+    """[M] note text for output kept in output/<command id>.log, not run.jsonl."""
+    summary = note.get("output_omitted") or {}
+    lines = summary.get("lines") or {}
+    chars = summary.get("chars") or {}
+    counts = ", ".join(
+        f"{lines.get(stream, 0)} {stream} lines ({chars.get(stream, 0)} characters)"
+        for stream in ("stdout", "stderr")
+        if lines.get(stream) or chars.get(stream)
+    )
+    text = (
+        f"full output in {note.get('output_file', '')}; left out of run.jsonl here: "
+        f"{counts or 'nothing'}\n"
+    )
+    for shape in summary.get("common_shapes") or []:
+        text += (
+            f"  {shape.get('count', 0)} x {TAGS.get(shape.get('stream'), '[?]')} "
+            f"{shape.get('shape', '')}\n"
+        )
+    rest = summary.get("distinct_shapes", 0) - len(summary.get("common_shapes") or [])
+    if rest > 0:
+        text += f"  and {rest} other line shapes\n"
+    return text
+
+
+def _output_time(output: Mapping) -> datetime.datetime:
+    """When a chunk arrived; tail records carry it in ``received``."""
+    received = output["details"].get("received")
+    return _time({"timestamp": received}) if received else _time(output)
+
+
 def _command_record(
     started: Mapping, outputs: list[Mapping], finished: Mapping | None, stamp
 ) -> str:
@@ -364,9 +404,13 @@ def _command_record(
     omitted = 0
     kept = []
     total = 0
+    capped = bool(fd.get("output_file"))  # already capped when recorded
     for output in outputs:
+        if output["event_type"] == "command_output_omitted":
+            kept.append(output)
+            continue
         text = output["details"].get("text", "")
-        if total + len(text) > MAX_COMMAND_OUTPUT_CHARS:
+        if not capped and total + len(text) > MAX_COMMAND_OUTPUT_CHARS:
             omitted += len(text)
             continue
         total += len(text)
@@ -385,7 +429,9 @@ def _command_record(
     )
     capture = CommandCapture(lambda: _time(started))
     capture.chunks = [
-        (_time(o), o["details"].get("stream", "stdout"), o["details"].get("text", ""))
+        (_output_time(o), NOTE, _omitted_text(o["details"]))
+        if o["event_type"] == "command_output_omitted"
+        else (_output_time(o), o["details"].get("stream", "stdout"), o["details"].get("text", ""))
         for o in outputs
     ]
     capture.finished = _time(finished) if finished else None
@@ -427,7 +473,7 @@ def _transcript(run: _Run) -> list[str]:
         if kind == "command_started":
             pending[details.get("command_id", "")] = {"started": event, "outputs": []}
             continue
-        if kind == "command_output":
+        if kind in ("command_output", "command_output_omitted"):
             record = pending.get(details.get("command_id", ""))
             if record is not None:
                 record["outputs"].append(event)

@@ -1,6 +1,6 @@
 """Explicit catalog of known tests and their argument/resource contracts."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import re
 from types import MappingProxyType
 from typing import Callable, Mapping
@@ -137,6 +137,54 @@ class ArgumentRule:
     required: bool = False
 
 
+# Arguments whose value is how long a test (or its capture) runs.
+DURATION_ARGUMENTS = ("duration", "capture duration")
+# Estimate key of a test without a coverage argument.
+DEFAULT_PROFILE = "default"
+
+
+@dataclass(frozen=True)
+class Estimate:
+    """Expected wall time of one test invocation, in seconds.
+
+    ``fixed_s``, plus ``per_duration`` times the test's duration argument
+    (``duration`` or ``capture duration``), plus ``per_count[1]`` seconds for
+    each unit of the integer argument named ``per_count[0]`` (for example
+    seconds per flash). Build, preflight and planning are not included.
+    """
+
+    fixed_s: float
+    per_duration: float = 0.0
+    per_count: tuple[str, float] | None = None
+
+    def seconds(self, arguments: Mapping) -> float | None:
+        """The estimate, or None when an argument it scales by is absent."""
+        total = self.fixed_s
+        if self.per_duration:
+            duration = _duration_argument_seconds(arguments)
+            if duration is None:
+                return None
+            total += self.per_duration * duration
+        if self.per_count is not None:
+            name, each = self.per_count
+            count = arguments.get(name)
+            if isinstance(count, bool) or not isinstance(count, int):
+                return None
+            total += each * count
+        return round(total, 1)
+
+
+def _duration_argument_seconds(arguments: Mapping) -> float | None:
+    """The first duration argument in seconds; None if absent or invalid."""
+    for name in DURATION_ARGUMENTS:
+        if arguments.get(name) is not None:
+            try:
+                return _duration_seconds(arguments[name])
+            except CatalogError:
+                return None
+    return None
+
+
 @dataclass(frozen=True)
 class TestDefinition:
     name: str
@@ -160,6 +208,22 @@ class TestDefinition:
     # What every case of the test needs from the host (hostneeds.py). The
     # plan's `platforms:` argument adds a platform need (test_needs).
     needs: Needs = NO_NEEDS
+    # Expected wall time by coverage profile (DEFAULT_PROFILE for a test
+    # without a coverage argument); see ESTIMATES.
+    estimates: Mapping[str, Estimate] | None = None
+
+    def estimated_seconds(self, arguments: Mapping) -> float | None:
+        """Expected seconds of one invocation with these normalized arguments.
+
+        A test without calibrated estimates (no implementation yet) is
+        expected to run for its duration argument, if it has one. None, never
+        an error, when there is no estimate for these arguments (for example
+        a per-duration estimate without a duration argument).
+        """
+        if self.estimates:
+            estimate = self.estimates.get(arguments.get("coverage", DEFAULT_PROFILE))
+            return None if estimate is None else estimate.seconds(arguments)
+        return _duration_argument_seconds(arguments)
 
     def test_needs(self, arguments: Mapping) -> tuple[Needs, ...]:
         """The test-wide needs: the definition's and the plan's platforms."""
@@ -522,6 +586,71 @@ def _flash_reliability_cases(arguments, _resources, resource_identities):
     return (FlashCase("flash-reliability", "Flash reliability", arguments, serial),)
 
 
+def _profiles(smoke: Estimate, comprehensive: Estimate) -> Mapping[str, Estimate]:
+    return MappingProxyType({"smoke": smoke, "comprehensive": comprehensive})
+
+
+def _default(estimate: Estimate) -> Mapping[str, Estimate]:
+    return MappingProxyType({DEFAULT_PROFILE: estimate})
+
+
+# Expected wall time of every implemented test, for the GUI countdown.
+# Calibrated from run records on a macOS host with two Ubertooths on the
+# release plan's firmware (bluetooth_rxtx, API 1.14): comprehensive values are
+# the release plan run at fork 7bb07c9 (every test comprehensive, duration
+# 3s); smoke values are the median of the recorded smoke runs, or, for a
+# test with no smoke record, the comprehensive time per step scaled to the
+# smoke steps. per_duration counts the steps that run for the duration
+# argument (continuous modes stopped at it, self-timed -t captures). A
+# failing test can end early, and a Linux host or a single board differs,
+# so these are estimates for a countdown, never a timeout.
+ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
+    "Host version": _default(Estimate(0.5)),
+    "Help smoke": _default(Estimate(0.5)),
+    "Host CLI surface": _default(Estimate(3.6)),
+    "Ubertooth count": _default(Estimate(0.5)),
+    "Ubertooth identity": _default(Estimate(0.4)),
+    "Debug register read": _default(Estimate(0.5)),
+    "Ubertooth util compositions": _profiles(Estimate(0.2), Estimate(2.6)),
+    "Argument validation": _profiles(Estimate(15.8), Estimate(92.2)),
+    "Radio setting transitions": _profiles(Estimate(7.2), Estimate(28.2)),
+    "BLE CRC transitions": _profiles(Estimate(26.3), Estimate(153.5)),
+    "BLE settings": _profiles(Estimate(1.1), Estimate(8.7)),
+    "Debug registers": _profiles(Estimate(0.6), Estimate(5.5)),
+    "Ubertooth util modes": _profiles(Estimate(13.0), Estimate(44.3)),
+    "Multi-board selection": _profiles(Estimate(1.2), Estimate(4.4)),
+    "BLE mode conflicts": _default(Estimate(4.2)),
+    "Ubertooth util conflicts": _default(Estimate(15.9)),
+    # One full-band sweep of its duration, plus the board reads around it.
+    "Spectrum RSSI sanity": _default(Estimate(1.0, per_duration=1)),
+    "Spectrum analyzer": _profiles(
+        Estimate(0.6, per_duration=1), Estimate(7.1, per_duration=10)
+    ),
+    "Classic Bluetooth receive": _profiles(
+        Estimate(2.7, per_duration=3), Estimate(12.5, per_duration=12)
+    ),
+    "Raw receive": _profiles(
+        Estimate(2.1, per_duration=3), Estimate(9.0, per_duration=20)
+    ),
+    "Raw receive replay": _profiles(Estimate(0.9), Estimate(3.9)),
+    "Refused command lines": _profiles(Estimate(10.0), Estimate(20.7)),
+    "Util mode refusals": _profiles(Estimate(1.9), Estimate(3.0)),
+    "DFU image checks": _profiles(Estimate(8.7), Estimate(37.4)),
+    "Python tools": _profiles(Estimate(0.5), Estimate(7.7)),
+    "BLE extcap interfaces": _profiles(Estimate(0.4), Estimate(1.4)),
+    "BLE extcap capture": _profiles(
+        Estimate(1.3, per_duration=1), Estimate(10.2, per_duration=6)
+    ),
+    # Three load runs of four flashes each took 10.4-10.7 s.
+    "Flash reliability": _default(Estimate(0, per_count=("flashes", 2.65))),
+    "DFU images": _profiles(Estimate(11.7), Estimate(69.0)),
+    # No run record (Linux only, needs power switching): two queries and the
+    # capture, plus up to 5 s removal and 10 s return deadlines with 1 s
+    # settles; about 8 s of power switching is assumed.
+    "Exclusive Ubertooth topology": _default(Estimate(8.0, per_duration=1)),
+})
+
+
 def builtin_catalog() -> TestCatalog:
     """Return the fixed catalog; YAML cannot add executable implementations."""
     def stateful_test(name, description, builder, *, coverage=True, **options):
@@ -727,7 +856,8 @@ def builtin_catalog() -> TestCatalog:
             "Refused command lines",
             "A refused command line creates, truncates, and leaves behind no "
             "file, for every file option of btle, follow, rx, dump, specan, and "
-            "dfu, with no Ubertooth (UBERTOOTH_TEST_NO_DEVICES=1)",
+            "dfu, and scan and follow refuse a stray word, with no Ubertooth "
+            "(UBERTOOTH_TEST_NO_DEVICES=1)",
             MappingProxyType({"hosts": HOSTS, "coverage": COVERAGE}),
             MappingProxyType({}),
             command_builder=refusal_cases.refusal_cases,
@@ -735,8 +865,8 @@ def builtin_catalog() -> TestCatalog:
         ),
         TestDefinition(
             "Util mode refusals",
-            "ubertooth-util refuses -f and -i with any other mode, and -z with "
-            "either, before any board lookup, with no Ubertooth "
+            "ubertooth-util refuses -i with any other mode, -z with -i, and "
+            "the removed -f, before any board lookup, with no Ubertooth "
             "(UBERTOOTH_TEST_NO_DEVICES=1)",
             MappingProxyType({"hosts": HOSTS, "coverage": COVERAGE}),
             MappingProxyType({}),
@@ -941,4 +1071,7 @@ def builtin_catalog() -> TestCatalog:
             ),
         ]
     )
-    return TestCatalog(definitions)
+    return TestCatalog(
+        replace(definition, estimates=ESTIMATES.get(definition.name))
+        for definition in definitions
+    )
