@@ -441,6 +441,28 @@ class RunnerServiceTests(unittest.IsolatedAsyncioTestCase):
             rejected = await controller.next("run_rejected")
             self.assertIn("unknown plan", rejected["reason"])
 
+    async def test_build_without_libbtbb_is_rejected_up_front(self):
+        async with StubController() as controller, self.running(controller):
+            await controller.next("register")
+            await controller.send(run_request(build=True))
+            rejected = await controller.next("run_rejected")
+            self.assertEqual("r1", rejected["request_id"])
+            self.assertIn("no libbtbb, so it cannot build", rejected["reason"])
+            # No run started, so nothing was written for it.
+            self.assertFalse(self.fixture.output.exists())
+        self.assertIn("builds disabled", self.logs[0])
+
+    async def test_startup_log_names_the_libbtbb_builds_use(self):
+        libbtbb = self.fixture.root / "libbtbb"
+        libbtbb.mkdir()
+        async with StubController() as controller, self.running(
+            controller, libbtbb_source=libbtbb, libbtbb_ref="abc1234",
+        ):
+            await controller.next("register")
+        self.assertEqual(
+            f"builds enabled: libbtbb abc1234 from {libbtbb.resolve()}", self.logs[0]
+        )
+
     async def test_malformed_messages_are_rejected_and_not_acted_on(self):
         good = json.loads(run_request())
         async with StubController() as controller, self.running(controller):

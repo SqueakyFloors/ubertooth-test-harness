@@ -576,7 +576,10 @@ failing. Modulation, access address, and USB re-enumeration are not read.
 
 By default a run tests the Ubertooth tools already installed, and preflight
 refuses to start when they do not match the requested commit. With `--build`
-the run builds the exact commits it tests instead:
+the run builds the exact commits it tests instead (a `--ubertooth-ref` or
+`--libbtbb-ref` its checkout does not have yet is fetched from that
+checkout's remote first, as described under [Target runner
+service](#target-runner-service)):
 
 ```sh
 python -m ubertooth_harness run-suite --plan testplans/fast.yaml --suite fast \
@@ -1011,11 +1014,25 @@ name, OS identity, Python version, and attached Ubertooth serials, read from
 sysfs the same read-only way power isolation does (no device is opened, so no
 stop is sent; on macOS the serials are `null` with an `enumeration_error`).
 A `run` request names a git ref and the commit the controller listed for it
-(the runner runs exactly that commit, which must be in `--ubertooth-source`;
-only when the controller could not list refs is the commit `null` and the ref
-resolved in `--ubertooth-source`), a plan in
-`--plans-dir` (`fast` is `testplans/fast.yaml`), a suite, optional exact test
-names, and whether to `--build`. The runner starts `run-suite` in this harness
+(the runner runs exactly that commit; only when the controller could not list
+refs is the commit `null` and the ref resolved in `--ubertooth-source`), a
+plan in `--plans-dir` (`fast` is `testplans/fast.yaml`), a suite, optional
+exact test names, and whether to `--build`. When the commit (or ref) is not
+in `--ubertooth-source` yet, typically because it was pushed after the
+checkout was last fetched, the run fetches it once from the checkout's remote
+(`origin`, or the remote a `remote/name` ref names) within 60 s and resolves
+it again; a full commit is fetched directly, a name fetches every branch and
+tag. The fetch only adds objects, remote-tracking branches and tags: the
+working tree, `HEAD` and local branches stay as they are, and a dirty
+checkout is still refused first. If the fetch fails, or the remote does not
+have the commit either, the run ends with `run_error` naming the ref, the
+remote and why. The `--libbtbb-ref` commit is fetched into
+`--libbtbb-source` the same way. A runner started without
+`--libbtbb-source`/`--libbtbb-ref` cannot build: it says so in its log at
+startup (`builds disabled: ...`; with them, `builds enabled: libbtbb REF from
+DIR`), and answers a `run` with `build` set with `run_rejected` and that
+reason, which the GUI shows as "Not started: runner rejected the run: ...",
+instead of starting a run that fails at once. The runner starts `run-suite` in this harness
 environment with a new run ID, answers `run_accepted`, and forwards every
 run.jsonl record unchanged as an `event` message as it is written, then
 `run_finished` (the run's own status and exit code) or `run_error` (the run
@@ -1081,8 +1098,9 @@ cannot be fetched (for example an offline lab), the ref is passed to the
 runner unchecked and the controller logs a warning. The run request carries
 the commit the list gives for the ref, and the runner runs that commit, not
 its own checkout's idea of the ref, so a stale or differently configured
-`--ubertooth-source` cannot substitute another commit; the commit must be
-present there (keep it fetched), or the run ends with `run_error`. The GUI
+`--ubertooth-source` cannot substitute another commit; a commit missing there
+is fetched from its remote (see [Target runner service](#target-runner-service)),
+and the run ends with `run_error` only when that fails. The GUI
 sends the commit it showed: if the ref has moved since the page listed it,
 the start is refused (409) and the page lists the refs again by itself, so
 the next Run sends the current commit. A name that is both a branch and a
@@ -1250,16 +1268,37 @@ runner (`After=`/`Wants=` the controller) dials
 | Option | |
 |---|---|
 | `--runner-host NAME` | registry Host resource of this machine (required) |
-| `--ubertooth-source DIR` | Ubertooth checkout the runner runs the listed commit from (required; keep it fetched) |
+| `--ubertooth-source DIR` | Ubertooth checkout the runner runs the listed commit from (required; a commit missing there is fetched from its `origin` at run time) |
 | `--hardware FILE` | resource registry (default `hardware.yaml` in the checkout) |
 | `--plans-dir DIR` | plans for the GUI and the runner (default `testplans/`) |
 | `--ubertooth-repo URL` | repository whose refs the GUI offers (default the public fork) |
-| `--libbtbb-source DIR`, `--libbtbb-ref REF`, `--allow-power-changes` | passed to the runner |
+| `--libbtbb-source DIR` | libbtbb checkout the runner builds from (default: deploy's own clone of the [libbtbb fork](https://github.com/SqueakyFloors/libbtbb), see below) |
+| `--libbtbb-ref REF` | libbtbb commit the runner builds (default: the fork's pin, see below) |
+| `--no-libbtbb` | no libbtbb: the runner cannot build and refuses runs with Build checked |
+| `--allow-power-changes` | passed to the runner |
 | `--port N` | controller port on `127.0.0.1` (default 8765) |
 | `--no-start` | write the units (and daemon-reload) only |
 | `--uninstall` | stop, disable and remove the two units only; the venv and results stay |
 | `--force` | restart even while a run is active (cancels it) |
 | `--dry-run` | print what it would do, change nothing |
+
+**libbtbb for Build.** A GUI run with Build checked builds libbtbb too, so by
+default the deployed runner gets one. Without `--libbtbb-source`, deploy
+clones `https://github.com/SqueakyFloors/libbtbb.git` into
+`${XDG_DATA_HOME:-~/.local/share}/ubertooth-harness/sources/libbtbb` the first
+time and fetches it (branches and tags) on every later deploy; a path there
+that is not a git clone is refused, and a failed clone stops the deploy
+before any unit is written (pass `--libbtbb-source` or `--no-libbtbb`). A
+`--libbtbb-source` you name is used as it is, never cloned or fetched by
+deploy. Without `--libbtbb-ref`, deploy fetches `main` into the
+`--ubertooth-source` checkout's `origin/main` and uses the literal
+`LIBBTBB_REF` commit its `install.sh` sets there, the libbtbb the fork is
+built against; when that cannot be read it falls back to the harness's own
+copy of the pin (`LIBBTBB_PIN` in `scripts/ci.sh`, see [Building the resolved
+revision](#building-the-resolved-revision)). Either way it prints which ref it
+chose and where from. Each clone or fetch is limited to 60 s and never
+prompts for credentials. `--no-libbtbb` deploys a runner without libbtbb,
+which refuses Build runs up front with a clear reason.
 
 Rerunning with the same options changes nothing. A unit is rewritten, and its
 service restarted, only when its content changes; the units record the

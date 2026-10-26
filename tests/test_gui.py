@@ -581,7 +581,12 @@ class PageWiringTests(unittest.TestCase):
 
     def test_a_refused_start_reloads_the_ref_list(self):
         self.assertIn("error.status = response.status;", self.js)
-        self.assertRegex(self.js, r"if \(error\.status === 409\) \{[^}]*await loadRefs\(\);")
+        # A ref that moved (409) reloads the list; a runner's own refusal
+        # (also 409, for example a Build it cannot do) is shown as it is.
+        self.assertRegex(
+            self.js,
+            r'if \(error\.status === 409 && !error\.message\.startsWith\("runner rejected the run"\)\) \{[^}]*await loadRefs\(\);',
+        )
 
     def test_script_wires_to_the_controller_endpoints(self):
         for endpoint in (
