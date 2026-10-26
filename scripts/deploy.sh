@@ -33,6 +33,12 @@
 #   --libbtbb-source DIR      passed to the runner
 #   --libbtbb-ref REF         passed to the runner
 #   --allow-power-changes     passed to the runner (lets runs switch USB power)
+#   --external-board-lock TEMPLATE
+#                             passed to the runner: every run also holds each
+#                             board's own lock file from other tools on this
+#                             host, TEMPLATE with {serial} (the full serial),
+#                             e.g. /var/lock/board-{serial}.lock; absolute or
+#                             starting with ~/
 #   --no-start                write the units (and daemon-reload) only
 #   --force                   restart even while a run is active (it is
 #                             cancelled); without it, deploy refuses
@@ -57,6 +63,7 @@ ubertooth_repo=
 libbtbb_source=
 libbtbb_ref=
 allow_power_changes=0
+external_board_lock=
 no_start=0
 force=0
 uninstall=0
@@ -81,6 +88,7 @@ while [ "$#" -gt 0 ]; do
         --libbtbb-source) need_value "$@"; libbtbb_source=$2; shift ;;
         --libbtbb-ref) need_value "$@"; libbtbb_ref=$2; shift ;;
         --allow-power-changes) allow_power_changes=1 ;;
+        --external-board-lock) need_value "$@"; external_board_lock=$2; shift ;;
         --no-start) no_start=1 ;;
         --force) force=1 ;;
         --uninstall) uninstall=1 ;;
@@ -187,6 +195,23 @@ safe --ubertooth-repo "$ubertooth_repo"
 safe --libbtbb-source "$libbtbb_source"
 safe --libbtbb-ref "$libbtbb_ref"
 case $runner_host in -*) die "--runner-host must not start with -" ;; esac
+if [ -n "$external_board_lock" ]; then
+    # The harness checks it again; checked here so a bad value never
+    # reaches the unit. ~/ is expanded now: systemd does not expand it.
+    case $external_board_lock in
+        "~/"*) external_board_lock=$HOME/${external_board_lock#"~/"} ;;
+    esac
+    case $external_board_lock in
+        /*) ;;
+        *) die "--external-board-lock must be an absolute path (or start with ~/): $external_board_lock" ;;
+    esac
+    lock_rest=${external_board_lock/"{serial}"/}
+    case $lock_rest in
+        *"{"*|*"}"*) die "--external-board-lock must contain {serial} exactly once and no other brace: $external_board_lock" ;;
+    esac
+    [ "$lock_rest" != "$external_board_lock" ] || die "--external-board-lock must contain {serial}: $external_board_lock"
+    safe --external-board-lock "$lock_rest"
+fi
 case $libbtbb_ref in -*) die "--libbtbb-ref must not start with -" ;; esac
 case $ubertooth_repo in -*) die "--ubertooth-repo must not start with -" ;; esac
 
@@ -215,6 +240,7 @@ runner_args="$runner_args --ubertooth-source $ubertooth_source --plans-dir $plan
 [ -z "$libbtbb_source" ] || runner_args="$runner_args --libbtbb-source $libbtbb_source"
 [ -z "$libbtbb_ref" ] || runner_args="$runner_args --libbtbb-ref $libbtbb_ref"
 [ "$allow_power_changes" = 0 ] || runner_args="$runner_args --allow-power-changes"
+[ -z "$external_board_lock" ] || runner_args="$runner_args --external-board-lock $external_board_lock"
 
 header="# Written by scripts/deploy.sh from $ROOT (commit $commit).
 # Rerun that script to change it; edits here are overwritten."

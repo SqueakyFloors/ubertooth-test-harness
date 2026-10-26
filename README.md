@@ -731,7 +731,50 @@ Lock order: the host lock first, then the boards in serial order, taken in one
 all-or-nothing attempt. Nothing blocks while holding a lock (a busy lock
 releases everything and the attempt is retried until the deadline), and no
 command takes the host lock after it already holds a board, so runs and
-manual leases cannot deadlock.
+manual leases cannot deadlock. With external board locks (below) the full
+order is: external board locks, host lock, leases.
+
+### External board locks
+
+A lease only excludes other harness commands. If a lab's own scripts lock
+boards with their own per-board `flock` files, give the harness their path
+as a template and every lease takes that board's file too:
+
+```sh
+export UBERTOOTH_HARNESS_EXTERNAL_BOARD_LOCK='/var/lock/board-{serial}.lock'
+# or, per command (lease, run-suite, boards, runner):
+ubertooth-harness lease --external-board-lock '/var/lock/board-{serial}.lock' \
+    --hardware hardware.yaml UT_Mac0 -- ubertooth-util -U <serial> -v
+```
+
+The template is an absolute path (or starts with `~/`) with exactly one
+`{serial}`, replaced by the board's full 32-hex-digit serial in lowercase,
+and no other brace; `--external-board-lock` overrides the variable and
+`--external-board-lock ''` turns it off for one command. Unset, nothing
+changes. Each external lock is an exclusive `flock` on that file, taken in
+the same all-or-nothing attempt as the leases and dropped by the kernel when
+the holder exits, like a lease. A missing file is created (mode 0644, an
+existing file keeps its mode and content; the harness opens it read-only and
+never writes to it), but a missing directory is an error, so a mistyped
+template cannot start a lock tree nobody else uses. A board whose external
+lock is held fails the run (or waits, with `--wait-for-boards`) with
+`UT_0 is in use: held outside the harness: <path>`, followed by the first
+line of the file if it holds any text (any format; a JSON object is
+described like a lease's holder). `boards` shows such a board as `held
+outside the harness: <path>`, and the run report lists the external locks
+the run held. `runner` passes the option to every run it starts
+(`deploy.sh --external-board-lock`).
+
+Full lock order, one hierarchy for every command: the external board locks
+in serial order, then the host lock, then the board leases in serial order.
+A lab wrapper that takes a board's own lock file and then runs
+`ubertooth-harness lease` (which may take the host lock, then the leases)
+follows the same order, so the two cannot deadlock; the harness also never
+blocks while holding a lock. Do not set the template for a command that such
+a wrapper runs: the wrapper already holds those files, so the command would
+find them busy and refuse (it fails, it does not hang). Use
+`--external-board-lock ''` there, or drop the wrapper and let the harness
+take both locks.
 
 ## MAC polling workload soak
 
@@ -1255,6 +1298,7 @@ runner (`After=`/`Wants=` the controller) dials
 | `--plans-dir DIR` | plans for the GUI and the runner (default `testplans/`) |
 | `--ubertooth-repo URL` | repository whose refs the GUI offers (default the public fork) |
 | `--libbtbb-source DIR`, `--libbtbb-ref REF`, `--allow-power-changes` | passed to the runner |
+| `--external-board-lock TEMPLATE` | passed to the runner: runs also hold a lab's own per-board lock files ([External board locks](#external-board-locks)); `~/` is expanded here |
 | `--port N` | controller port on `127.0.0.1` (default 8765) |
 | `--no-start` | write the units (and daemon-reload) only |
 | `--uninstall` | stop, disable and remove the two units only; the venv and results stay |
