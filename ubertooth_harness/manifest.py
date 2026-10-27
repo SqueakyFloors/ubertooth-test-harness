@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
+import time
 from types import MappingProxyType
 from typing import Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
@@ -19,6 +21,12 @@ from ubertooth_harness.planner import TestInvocation
 
 MANIFEST_SCHEMA_VERSION = 4
 _COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
+# Hard limit on fetching a ref the source checkout does not have yet.
+FETCH_TIMEOUT_S = 60.0
+
+
+def _stderr_log(message: str) -> None:
+    print(f"note: {message}", file=sys.stderr, flush=True)
 
 
 def _frozen(value):
@@ -150,8 +158,107 @@ class SourceRevision:
         return data
 
 
+def _rev_parse(path: Path, ref: str) -> str | None:
+    """The commit ``ref`` names in the checkout, or None when it names none."""
+    try:
+        return _git(path, "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}")
+    except ManifestError:
+        return None
+
+
+def _fetch_remote(path: Path, requested_ref: str) -> str | None:
+    """The remote to fetch a missing ref from: the remote a ``remote/name``
+    ref names, else origin, else the only remote; None when there is none."""
+    if "/" in requested_ref:
+        candidate = requested_ref.split("/", 1)[0]
+        if _git(path, "config", "--get", f"remote.{candidate}.url", allow_failure=True):
+            return candidate
+    if _git(path, "config", "--get", "remote.origin.url", allow_failure=True):
+        return "origin"
+    remotes = _git(path, "remote", allow_failure=True).split()
+    return remotes[0] if len(remotes) == 1 else None
+
+
+def _last_line(text: str) -> str:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    line = lines[-1] if lines else "no output"
+    # Never repeat credentials a remote URL may carry.
+    return re.sub(r"(://)[^/@\s]+@", r"\1", line)[:300]
+
+
 class GitRevisionResolver:
-    """Resolve a local branch, tag, or commit without changing the checkout."""
+    """Resolve a local branch, tag, or commit without changing the checkout.
+
+    A ref the checkout does not have (a commit pushed since it was last
+    fetched, typically) is fetched once from the checkout's remote, within
+    ``fetch_timeout_s``, and resolved again. Fetching only updates
+    remote-tracking refs, tags and objects: the working tree, HEAD and local
+    branches are never touched.
+    """
+
+    def __init__(self, *, fetch_timeout_s: float = FETCH_TIMEOUT_S, log=None):
+        self.fetch_timeout_s = fetch_timeout_s
+        self.log = log if log is not None else _stderr_log
+
+    def _fetch(self, path: Path, remote: str, requested_ref: str) -> str | None:
+        """Fetch what ``requested_ref`` may need; None on success, else why not.
+
+        A full commit is fetched directly first; a name (or a commit the
+        remote will not serve directly) fetches every branch and tag.
+        """
+        attempts = []
+        if _COMMIT_RE.fullmatch(requested_ref):
+            attempts.append([requested_ref])
+        attempts.append([
+            f"+refs/heads/*:refs/remotes/{remote}/*", "refs/tags/*:refs/tags/*",
+        ])
+        deadline = time.monotonic() + self.fetch_timeout_s
+        environment = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+        problem = None
+        for refspecs in attempts:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return problem or f"timed out after {self.fetch_timeout_s:g}s"
+            command = [
+                "git", "-C", str(path), "fetch", "--quiet", "--no-recurse-submodules",
+                remote, *refspecs,
+            ]
+            try:
+                result = subprocess.run(
+                    command, capture_output=True, text=True, timeout=remaining,
+                    stdin=subprocess.DEVNULL, env=environment, check=False,
+                )
+            except subprocess.TimeoutExpired:
+                return f"timed out after {self.fetch_timeout_s:g}s"
+            except OSError as error:
+                return str(error)
+            if result.returncode == 0:
+                if _rev_parse(path, requested_ref) is not None:
+                    return None
+                problem = None
+            else:
+                problem = _last_line(result.stderr or result.stdout)
+        return problem
+
+    def _fetch_and_retry(self, name: str, path: Path, requested_ref: str) -> str:
+        failure = f"unable to resolve {name} ref '{requested_ref}' in {path}"
+        remote = _fetch_remote(path, requested_ref)
+        if remote is None:
+            raise ManifestError(f"{failure}; it has no remote to fetch it from")
+        self.log(f"{name} ref '{requested_ref}' is not in {path}; fetching from {remote}")
+        problem = self._fetch(path, remote, requested_ref)
+        commit = _rev_parse(path, requested_ref)
+        if commit is None and not _COMMIT_RE.fullmatch(requested_ref) \
+                and not requested_ref.startswith(("refs/", f"{remote}/")):
+            # A branch that exists only on the remote.
+            commit = _rev_parse(path, f"{remote}/{requested_ref}")
+        if commit is not None:
+            return commit
+        if problem:
+            raise ManifestError(f"{failure}; fetching from {remote} failed: {problem}")
+        raise ManifestError(
+            f"{failure}; fetched from {remote}, which does not have it either"
+        )
 
     def resolve(
         self, name: str, source_path: Path | str, requested_ref: str,
@@ -176,13 +283,9 @@ class GitRevisionResolver:
         dirty = _git(path, "status", "--porcelain", "--untracked-files=all")
         if dirty:
             raise ManifestError(f"source worktree is dirty: {path}")
-        revision = f"{requested_ref}^{{commit}}"
-        try:
-            commit = _git(path, "rev-parse", "--verify", "--end-of-options", revision)
-        except ManifestError as error:
-            raise ManifestError(
-                f"unable to resolve {name} ref '{requested_ref}' in {path}"
-            ) from error
+        commit = _rev_parse(path, requested_ref)
+        if commit is None:
+            commit = self._fetch_and_retry(name.strip(), path, requested_ref)
         if not _COMMIT_RE.fullmatch(commit):
             raise ManifestError(f"resolved {name} commit is invalid: {commit}")
         short_commit = _git(path, "rev-parse", "--short", commit)
