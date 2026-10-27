@@ -176,7 +176,7 @@ class RefTests(ControllerTestCase):
         ))
         refs = parse_ls_remote(text)
         self.assertEqual(
-            [("HEAD", "default"), ("feature/a", "branch"), ("main", "branch"),
+            [("HEAD", "default"), ("main", "branch"), ("feature/a", "branch"),
              ("v2", "tag"), ("v1", "tag")],
             [(ref.name, ref.kind) for ref in refs],
         )

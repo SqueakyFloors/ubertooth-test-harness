@@ -234,7 +234,10 @@
     status.textContent = "Loading refs…";
     try {
       const data = await api("GET", "/api/refs");
-      const groups = { default: "Default branch", branch: "Branches", tag: "Tags" };
+      // Branches first (main at the top, as the controller orders them),
+      // then tags; the remote's HEAD is the same commit as its default branch
+      // and is listed last.
+      const groups = { branch: "Branches", tag: "Tags", default: "Remote HEAD" };
       const current = select.value;
       // One entry per listed ref, keyed by kind and name, so a branch and a
       // tag of the same name are separate choices; each sends its own
@@ -253,7 +256,7 @@
       const preferred = [current, "branch:main", "branch:master", "default:HEAD"]
         .find((value) => value && state.refOptions.has(value));
       if (preferred) select.value = preferred;
-      status.textContent = `${data.refs.length} refs from ${data.repository}, listed ${data.fetched_at}.`;
+      status.textContent = `${data.refs.length} refs from ${data.repository}, listed ${data.fetched_at}`;
     } catch (error) {
       state.refOptions = new Map();
       select.replaceChildren(el("option", { value: "", text: "(refs unavailable)" }));
@@ -746,16 +749,21 @@
     });
     $("checklist").replaceChildren(...phaseRows, ...live.items.map((item) => {
       const shown = itemStatus(item, run);
-      const id = item.invocation_id
+      const known = item.invocation_id
         || [...live.byInvocation.entries()].find(([, value]) => value === item)?.[0] || null;
+      // A transcript exists once the test has started; until then the row
+      // is shown greyed and does nothing.
+      const started = item.status !== "pending";
+      const id = known && started ? known : null;
       const open = id && live.shown === id;
       return el("li", {
-        className: `check check-${shown.replace(/ /g, "-")}${id ? " check-clickable" : ""}${open ? " check-open" : ""}`,
+        className: `check check-${shown.replace(/ /g, "-")}${id ? " check-clickable" : " check-locked"}${open ? " check-open" : ""}`,
         "aria-current": shown === "running" ? "step" : null,
         // Click (or Enter/Space) to show this test's transcript above the log.
         tabindex: id ? "0" : null, role: id ? "button" : null,
         "aria-expanded": id ? (open ? "true" : "false") : null,
-        title: id ? "Show this test's commands and output" : null,
+        "aria-disabled": id ? null : "true",
+        title: id ? "Show this test's commands and output" : "The transcript is available once this test starts",
         onclick: id ? () => showTranscript(id) : null,
         onkeydown: id ? (event) => {
           if (event.key === "Enter" || event.key === " ") { event.preventDefault(); showTranscript(id); }

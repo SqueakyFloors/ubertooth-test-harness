@@ -113,7 +113,8 @@ def parse_ls_remote(text: str) -> list[GitRef]:
     """HEAD, branches and tags from ``git ls-remote`` output.
 
     Annotated tags use their peeled commit. Names the run protocol would
-    refuse are dropped. Order: HEAD, branches by name, tags newest name first.
+    refuse are dropped. Order: HEAD, branches (main and master first, then by name), tags newest
+    name first.
     """
     found: dict[tuple[str, str], str] = {}
     peeled: dict[str, str] = {}
@@ -138,8 +139,10 @@ def parse_ls_remote(text: str) -> list[GitRef]:
         GitRef(name, kind, peeled.get(name, commit) if kind == "tag" else commit)
         for (kind, name), commit in found.items()
     ]
+    # main (then master) first among branches, the rest by name.
     branches = sorted((r for r in refs if r.kind != "tag"),
-                      key=lambda r: (_KIND_ORDER[r.kind], r.name))
+                      key=lambda r: (_KIND_ORDER[r.kind],
+                                     {"main": 0, "master": 1}.get(r.name, 2), r.name))
     tags = sorted((r for r in refs if r.kind == "tag"), key=lambda r: r.name, reverse=True)
     return branches + tags
 
