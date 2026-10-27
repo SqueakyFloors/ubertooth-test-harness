@@ -469,6 +469,7 @@
     live.phases = [
       { key: "boards", name: "Boards", status: "running", reason: "Waiting for the run's boards (another session may hold them)" },
       { key: "build", name: "Build", status: runInfo && runInfo.build === false ? "not requested" : "pending", reason: "" },
+      { key: "build_flash", name: "Flash", status: runInfo && (runInfo.build === false || runInfo.flash_build === false) ? "not requested" : "pending", reason: "" },
       { key: "preflight", name: "Preflight", status: "pending", reason: "" },
     ];
     // The estimate covers tests only, so the countdown starts with the first test.
@@ -508,7 +509,8 @@
   function recordTranscript(live, kind, status, details) {
     // Tests by invocation ID; build and preflight output (no invocation ID)
     // under "phase:build" / "phase:preflight" while that step runs.
-    const phaseKey = kind.startsWith("build") || live.stage === "building" ? "phase:build"
+    const phaseKey = kind.startsWith("build_flash") || live.stage === "flashing" ? "phase:build_flash"
+      : kind.startsWith("build") || live.stage === "building" ? "phase:build"
       : kind.startsWith("preflight") || live.stage === "preflight" ? "phase:preflight" : null;
     const id = details.invocation_id || phaseKey;
     if (!id) return;
@@ -538,9 +540,15 @@
       const extra = details.timed_out ? ", timed out" : details.cancelled ? ", cancelled" : "";
       lines.push({ kind: status === "passed" || status === "stopped" ? "result" : "result-bad",
         text: `→ exit ${rc}${took}${extra} (${status})` });
+    } else if (kind === "build_flash_board_finished") {
+      flush("stdout"); flush("stderr");
+      const what = status === "skipped" ? `already on ${details.before || "the build's firmware"}`
+        : status === "passed" || details.written ? `${details.before || "?"} → ${details.after || "?"}` : details.reason || status;
+      lines.push({ kind: status === "failed" ? "result-bad" : "result",
+        text: `=== ${details.resource ?? ""}: ${status}, ${what} ===` });
     } else if (kind === "build_step_started") {
       lines.push({ kind: "note", text: `+++ ${details.step_name ?? details.step_id ?? ""} +++` });
-    } else if (kind === "test_finished" || kind === "build_finished" || kind === "preflight_finished") {
+    } else if (kind === "test_finished" || kind === "build_finished" || kind === "preflight_finished" || kind === "build_flash_finished") {
       flush("stdout"); flush("stderr");
       lines.push({ kind: status === "passed" ? "result" : "result-bad",
         text: `=== ${status}${details.reason ? `: ${details.reason}` : ""} ===` });
@@ -620,7 +628,8 @@
       boardsPhase.status = "passed";
       boardsPhase.reason = "";
     }
-    if (kind === "build_started" || kind === "preflight_started") {
+    if (kind === "build_flash_started") live.stage = "flashing";
+    if (kind === "build_started" || kind === "preflight_started" || kind === "build_flash_started") {
       const phase = (live.phases || []).find((entry) => `${entry.key}_started` === kind);
       if (phase) phase.status = "running";
     }
@@ -675,9 +684,15 @@
         item.reason = String(details.reason || "");
       }
       pushLog(`=== TEST ${details.test_name ?? ""}: ${status}${details.reason ? ": " + details.reason : ""} ===`);
+    } else if (kind === "build_flash_board_finished") {
+      flush("stdout"); flush("stderr");
+      const what = status === "skipped" ? `already on ${details.before || "the build's firmware"}`
+        : status === "passed" || details.written ? `${details.before || "?"} → ${details.after || "?"}` : details.reason || status;
+      lines.push({ kind: status === "failed" ? "result-bad" : "result",
+        text: `=== ${details.resource ?? ""}: ${status}, ${what} ===` });
     } else if (kind === "build_step_started") {
       pushLog(`+++ ${details.step_name ?? details.step_id ?? ""} +++`);
-    } else if (kind === "build_finished" || kind === "preflight_finished") {
+    } else if (kind === "build_finished" || kind === "preflight_finished" || kind === "build_flash_finished") {
       const phase = (live.phases || []).find((entry) => `${entry.key}_finished` === kind);
       if (phase) { phase.status = status || "passed"; phase.reason = String(details.reason || ""); }
       pushLog(`=== ${kind.replace("_finished", "").toUpperCase()}: ${status}${details.reason ? ": " + details.reason : ""} ===`);
