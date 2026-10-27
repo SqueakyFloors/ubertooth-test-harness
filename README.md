@@ -47,7 +47,7 @@ it through an SSH tunnel; nothing is exposed on the network.
 
 4. **Run something:** in Run setup pick a git ref (for example `main`), a plan
    (`host` needs no board and is a safe first run), the target, keep "Build the
-   ref on the target first" ticked, and press Run. The Live run card ticks off
+   selected commit's host tools on the target first" ticked, and press Run. The Live run card ticks off
    each test; History keeps every run with its `report.md`.
 
 If it does not connect:
