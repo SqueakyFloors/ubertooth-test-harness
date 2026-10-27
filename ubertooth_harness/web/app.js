@@ -531,7 +531,6 @@
     if (live.follow === false || !current) return;
     const top = Math.max(0, current.offsetTop - box.offsetTop - current.offsetHeight);
     if (Math.abs(box.scrollTop - top) > 2) {
-      state.autoScrolling = true;
       box.scrollTop = top;
     }
   }
@@ -987,13 +986,19 @@
     if (linked && RUN_ID.test(linked[1])) state.selected = linked[1];
     connect();
     window.setInterval(renderClock, 1000);
-    $("checklist-scroll").addEventListener("scroll", () => {
-      // A scroll the page did not make means the user is looking elsewhere.
-      if (state.autoScrolling) { state.autoScrolling = false; return; }
+    // Only the user's own scrolling (wheel, touch, drag, keys) stops the
+    // list following the running test; scrolls the page makes do not.
+    const stopFollowing = () => {
       if (state.live && state.live.follow !== false) {
         state.live.follow = false;
         $("follow-current").hidden = false;
       }
+    };
+    for (const type of ["wheel", "touchmove", "mousedown"]) {
+      $("checklist-scroll").addEventListener(type, stopFollowing, { passive: true });
+    }
+    $("checklist-scroll").addEventListener("keydown", (event) => {
+      if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) stopFollowing();
     });
     $("follow-current").addEventListener("click", () => {
       if (state.live) { state.live.follow = true; renderLive(); }
