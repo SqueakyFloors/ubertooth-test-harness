@@ -162,6 +162,9 @@ code { overflow-wrap: anywhere; }
 .panel-targets { grid-area: targets; }
 .panel-setup { grid-area: setup; }
 .panel-live { grid-area: live; }
+/* A finished run being viewed: a grey card, so it is not mistaken for live. */
+.panel-past { background: var(--surface-2); }
+.panel-past > .panel-head { background: var(--line); }
 .panel-history { grid-area: history; }
 
 @media (min-width: 60rem) {
@@ -396,6 +399,11 @@ button.primary:disabled:hover { background: var(--primary); }
 .live-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; }
 .live-actions .hint { margin: 0; }
 
+.checklist-head {
+  display: flex; justify-content: space-between; padding: 0 0.55rem 0.25rem 2.1rem;
+  font-size: 0.72rem; font-weight: 650; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--muted);
+}
 .checklist {
   list-style: none; margin: 0; padding: 0; counter-reset: check;
   display: grid; gap: 0.25rem;

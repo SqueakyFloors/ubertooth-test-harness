@@ -552,6 +552,10 @@
     const live = state.live;
     if (!live) return;
     const run = state.runs.get(live.run_id) || { run_id: live.run_id, status: "running" };
+    // A running run is live; any other is a past run, shown on a grey card.
+    const isLive = run.status === "running";
+    $("live-heading").textContent = isLive ? "Live run" : "Past run";
+    $("live-heading").closest(".panel").classList.toggle("panel-past", !isLive);
     const fields = [
       ["Run", el("code", { text: run.run_id })],
       ["Status", statusBadge(run.status)],
@@ -560,7 +564,6 @@
       ["Plan / suite", `${run.plan ?? "–"} / ${run.suite ?? "–"}`],
       ["Target", run.target ? targetName(run.target) : "–"],
       ["Started", timeElement(run.created_at)],
-      ["Finished", timeElement(run.finished_at)],
     ];
     if (run.reason) fields.push(["Reason", run.reason, "summary-item summary-item-wide"]);
     // One <div> per term/description pair (valid in a <dl>), so the summary
@@ -578,7 +581,7 @@
       },
         statusBadge(shown), " ", el("span", { className: "check-name", text: item.name }),
         item.estimated_s !== null && item.estimated_s !== undefined
-          ? el("span", { className: "hint check-estimate", text: `~${formatSeconds(item.estimated_s)}`, title: "estimated duration" }) : null,
+          ? el("span", { className: "hint check-estimate", text: formatSeconds(item.estimated_s), "aria-label": `estimated runtime ${formatSeconds(item.estimated_s)}` }) : null,
         item.reason ? el("span", { className: "reason", text: ` — ${item.reason}` }) : null);
     }));
     if (!live.items.length) {
@@ -608,24 +611,29 @@
     const estimates = live.items.map((item) => item.estimated_s);
     const known = live.planned && estimates.length > 0 &&
       estimates.every((value) => value !== null && value !== undefined);
+    const finished = run.status !== "running";
+    const finishedText = () => {
+      const at = run.finished_at ? new Date(run.finished_at).toLocaleTimeString() : "";
+      return `Finished${at ? ` ${at}` : ""}, took ${formatSeconds(elapsed)}`;
+    };
     if (!known) {
-      $("live-clock").textContent = `Elapsed ${formatSeconds(elapsed)}`;
+      $("live-clock").textContent = finished ? finishedText() : `Elapsed ${formatSeconds(elapsed)}`;
       const missing = estimates.filter((value) => value === null || value === undefined).length;
       $("live-estimate").textContent = live.planned
-        ? `No countdown: ${missing} of ${estimates.length} tests have no estimated duration, so only elapsed time is shown.`
-        : "No countdown: this run's plan is unknown here, so only elapsed time is shown.";
+        ? `No countdown: ${missing} of ${estimates.length} tests have no estimated duration, so only elapsed time is shown`
+        : "No countdown: this run's plan is unknown here, so only elapsed time is shown";
       return;
     }
     const total = estimates.reduce((sum, value) => sum + value, 0);
-    $("live-estimate").textContent = `Estimate ~${formatSeconds(total)} from the catalog's per-test estimates; build and preflight not included`;
+    $("live-estimate").textContent = `Estimate ${formatSeconds(total)} from the catalog's per-test estimates; build and preflight not included`;
     const testsStart = live.testsStarted ? Date.parse(live.testsStarted) : NaN;
     const testsElapsed = Number.isNaN(testsStart) ? null : Math.max(0, (end - testsStart) / 1000);
-    if (run.status !== "running") {
-      $("live-clock").textContent = `Finished after ${formatSeconds(elapsed)}`;
+    if (finished) {
+      $("live-clock").textContent = finishedText();
     } else if (testsElapsed === null) {
       $("live-clock").textContent = `Countdown starts with the first test (elapsed ${formatSeconds(elapsed)})`;
     } else if (testsElapsed <= total) {
-      $("live-clock").textContent = `~${formatSeconds(total - testsElapsed)} remaining (elapsed ${formatSeconds(elapsed)})`;
+      $("live-clock").textContent = `${formatSeconds(total - testsElapsed)} remaining, estimated (elapsed ${formatSeconds(elapsed)})`;
     } else {
       $("live-clock").textContent = `Over the estimate by ${formatSeconds(testsElapsed - total)} (elapsed ${formatSeconds(elapsed)})`;
     }
@@ -660,7 +668,7 @@
     $("history").replaceChildren(...runs.map((run) => {
       const actions = el("td", { className: "actions" },
         el("button", {
-          type: "button", text: "Watch", "aria-label": `Watch run ${run.run_id}`,
+          type: "button", text: "View", "aria-label": `View run ${run.run_id}`,
           onclick: () => selectRun(run.run_id),
         }));
       if (run.report) {
