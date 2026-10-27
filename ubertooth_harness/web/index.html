@@ -99,10 +99,20 @@
           <div class="checklist-head" aria-hidden="true">
             <span>Test</span><span>Est. runtime</span>
           </div>
-          <ol id="checklist" class="checklist" aria-labelledby="checklist-heading"
-              aria-live="polite" aria-relevant="additions text"></ol>
+          <div id="checklist-scroll" class="checklist-scroll">
+            <ol id="checklist" class="checklist" aria-labelledby="checklist-heading"
+                aria-live="polite" aria-relevant="additions text"></ol>
+          </div>
+          <button type="button" id="follow-current" class="follow-current" hidden>Follow the current test</button>
         </div>
         <div class="live-log">
+          <section id="transcript-box" class="transcript-box" hidden aria-labelledby="transcript-title">
+            <div class="transcript-head">
+              <h3 id="transcript-title">Transcript</h3>
+              <button type="button" id="transcript-close" aria-label="Close the transcript">Close</button>
+            </div>
+            <pre id="transcript" class="log transcript" tabindex="-1"></pre>
+          </section>
           <h3 id="log-heading" class="visually-hidden">Log tail</h3>
           <pre id="log" class="log" tabindex="0" aria-labelledby="log-heading"></pre>
         </div>

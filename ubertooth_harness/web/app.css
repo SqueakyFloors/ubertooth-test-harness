@@ -532,3 +532,26 @@ th[aria-sort="descending"] button.sort::after { content: " ▼"; font-size: 0.7e
 .report-body .table-wrap { margin: 0.5rem 0 1rem; }
 .report-body td, .report-body th { vertical-align: top; overflow-wrap: anywhere; }
 .report-code { height: auto; max-height: 40rem; }
+
+/* Click a test to see its transcript above the log tail. */
+.check-clickable { cursor: pointer; }
+.check-clickable:hover { background: var(--surface-2); }
+.check-open { border-color: var(--primary); }
+.transcript-box { margin-bottom: 0.75rem; }
+.transcript-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.35rem; }
+.transcript-head h3 { margin: 0; font-size: 0.95rem; }
+.transcript { height: 16rem; }
+.transcript .t-command { color: #79c0ff; font-weight: 600; }
+.transcript .t-stderr { color: #ffa198; }
+.transcript .t-result { color: #7ee787; }
+.transcript .t-result-bad { color: #ff7b72; font-weight: 600; }
+.transcript .t-note { color: #8b949e; font-style: italic; }
+
+/* The test list scrolls in a box as tall as the log; the running step stays
+   near its top. */
+.checklist-scroll {
+  height: 24rem; overflow-y: auto; position: relative;
+  border: 1px solid var(--line); border-radius: var(--radius-small); padding: 0.25rem;
+}
+@media (min-width: 60rem) { .checklist-scroll { height: 32rem; } }
+.follow-current { margin-top: 0.4rem; }

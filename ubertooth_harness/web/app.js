@@ -368,6 +368,9 @@
       run_id: runId, seen: new Set(), events: [], items: [],
       byInvocation: new Map(), log: [], partial: "", stage: "waiting",
       invocations: null,
+      // invocation ID -> transcript lines ({kind, text}) of that test.
+      transcripts: new Map(), partials: new Map(),
+      shown: null,  // invocation ID whose transcript is open
     };
   }
 
@@ -480,6 +483,83 @@
     }
   }
 
+  // One test's transcript: each command sent, its output as it arrives
+  // (stderr marked), and how it ended. Keyed by invocation ID.
+  function recordTranscript(live, kind, status, details) {
+    const id = details.invocation_id;
+    if (!id) return;
+    const key = String(id);
+    if (!live.transcripts.has(key)) live.transcripts.set(key, []);
+    const lines = live.transcripts.get(key);
+    const flush = (stream) => {
+      const pkey = `${key}\u0000${stream}`;
+      const rest = live.partials.get(pkey);
+      if (rest) { lines.push({ kind: stream, text: rest }); live.partials.delete(pkey); }
+    };
+    if (kind === "command_started") {
+      const argv = Array.isArray(details.argv) ? details.argv.map(String).join(" ") : "";
+      lines.push({ kind: "command", text: `$ ${argv}` });
+    } else if (kind === "command_output") {
+      const stream = details.stream === "stderr" ? "stderr" : "stdout";
+      const pkey = `${key}\u0000${stream}`;
+      const parts = ((live.partials.get(pkey) || "") + String(details.text ?? "")).split("\n");
+      live.partials.set(pkey, parts.pop());
+      for (const text of parts) lines.push({ kind: stream, text });
+    } else if (kind === "command_output_omitted") {
+      lines.push({ kind: "note", text: "… output left out here (the full output is in the run's output/ directory)" });
+    } else if (kind === "command_finished") {
+      flush("stdout"); flush("stderr");
+      const rc = details.returncode === null || details.returncode === undefined ? "–" : details.returncode;
+      const took = typeof details.duration_s === "number" ? `, ${details.duration_s.toFixed(2)} s` : "";
+      const extra = details.timed_out ? ", timed out" : details.cancelled ? ", cancelled" : "";
+      lines.push({ kind: status === "passed" || status === "stopped" ? "result" : "result-bad",
+        text: `→ exit ${rc}${took}${extra} (${status})` });
+    } else if (kind === "test_finished") {
+      flush("stdout"); flush("stderr");
+      lines.push({ kind: status === "passed" ? "result" : "result-bad",
+        text: `=== ${status}${details.reason ? `: ${details.reason}` : ""} ===` });
+    }
+    if (lines.length > 4000) lines.splice(0, lines.length - 4000);
+  }
+
+  // Keep the running step near the top of the test list, unless the user
+  // has scrolled the list themselves ("Follow the current test" resumes).
+  function followCurrent(live) {
+    const box = $("checklist-scroll");
+    const current = box.querySelector('[aria-current="step"]');
+    $("follow-current").hidden = live.follow !== false || !current;
+    if (live.follow === false || !current) return;
+    const top = Math.max(0, current.offsetTop - box.offsetTop - current.offsetHeight);
+    if (Math.abs(box.scrollTop - top) > 2) {
+      state.autoScrolling = true;
+      box.scrollTop = top;
+    }
+  }
+
+  function showTranscript(id) {
+    const live = state.live;
+    if (!live) return;
+    live.shown = live.shown === id ? null : id;
+    renderLive();
+    if (live.shown) $("transcript").focus();
+  }
+
+  function renderTranscript(live) {
+    const box = $("transcript-box");
+    const id = live.shown;
+    box.hidden = !id;
+    if (!id) return;
+    const item = live.items.find((entry) => entry.invocation_id === id) ||
+      [...live.byInvocation.entries()].filter(([key]) => key === id).map(([, value]) => value)[0];
+    $("transcript-title").textContent = `Transcript: ${item ? item.name : id}`;
+    const lines = live.transcripts.get(id) || [];
+    const node = $("transcript");
+    const atBottom = node.scrollTop + node.clientHeight >= node.scrollHeight - 4;
+    node.replaceChildren(...(lines.length ? lines : [{ kind: "note", text: "Nothing recorded yet" }])
+      .map((line) => el("span", { className: `t-${line.kind}`, text: `${line.text}\n` })));
+    if (atBottom) node.scrollTop = node.scrollHeight;
+  }
+
   function addEvent(runId, record, render = true) {
     const live = state.live;
     if (!live || live.run_id !== runId || !record || typeof record !== "object") return;
@@ -489,6 +569,7 @@
     const details = record.details && typeof record.details === "object" ? record.details : {};
     const kind = String(record.event_type);
     const status = String(record.status || "");
+    recordTranscript(live, kind, status, details);
     if (kind === "command_output") {
       const text = live.partial + String(details.text ?? "");
       const lines = text.split("\n");
@@ -650,9 +731,20 @@
     });
     $("checklist").replaceChildren(...phaseRows, ...live.items.map((item) => {
       const shown = itemStatus(item, run);
+      const id = item.invocation_id
+        || [...live.byInvocation.entries()].find(([, value]) => value === item)?.[0] || null;
+      const open = id && live.shown === id;
       return el("li", {
-        className: `check check-${shown.replace(/ /g, "-")}`,
+        className: `check check-${shown.replace(/ /g, "-")}${id ? " check-clickable" : ""}${open ? " check-open" : ""}`,
         "aria-current": shown === "running" ? "step" : null,
+        // Click (or Enter/Space) to show this test's transcript above the log.
+        tabindex: id ? "0" : null, role: id ? "button" : null,
+        "aria-expanded": id ? (open ? "true" : "false") : null,
+        title: id ? "Show this test's commands and output" : null,
+        onclick: id ? () => showTranscript(id) : null,
+        onkeydown: id ? (event) => {
+          if (event.key === "Enter" || event.key === " ") { event.preventDefault(); showTranscript(id); }
+        } : null,
       },
         statusBadge(shown), " ", el("span", { className: "check-name", text: item.name }),
         item.boards && item.boards.length
@@ -667,6 +759,8 @@
         text: "Tests appear here as they start (this run's plan is not in the controller's plans directory).",
       }));
     }
+    followCurrent(live);
+    renderTranscript(live);
     const logNode = $("log");
     const lines = live.partial ? [...live.log, live.partial] : live.log;
     logNode.textContent = lines.join("\n");
@@ -893,6 +987,20 @@
     if (linked && RUN_ID.test(linked[1])) state.selected = linked[1];
     connect();
     window.setInterval(renderClock, 1000);
+    $("checklist-scroll").addEventListener("scroll", () => {
+      // A scroll the page did not make means the user is looking elsewhere.
+      if (state.autoScrolling) { state.autoScrolling = false; return; }
+      if (state.live && state.live.follow !== false) {
+        state.live.follow = false;
+        $("follow-current").hidden = false;
+      }
+    });
+    $("follow-current").addEventListener("click", () => {
+      if (state.live) { state.live.follow = true; renderLive(); }
+    });
+    $("transcript-close").addEventListener("click", () => {
+      if (state.live) { state.live.shown = null; renderLive(); }
+    });
     // Click a column header to sort by it; click again to reverse.
     for (const th of document.querySelectorAll("table.history th[data-sort]")) {
       th.querySelector(".sort").addEventListener("click", () => {
