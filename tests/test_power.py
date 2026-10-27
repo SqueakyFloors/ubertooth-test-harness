@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from ubertooth_harness import cli
+from ubertooth_harness.environment import HarnessEnvironmentError
 
 from ubertooth_harness.power import (
     ACRONAME_DRIVER,
@@ -17,6 +18,7 @@ from ubertooth_harness.power import (
     PowerControllerError,
     SimulatedPowerController,
     controller_from_resource,
+    controller_ports,
     preserved_power_state,
 )
 from ubertooth_harness.resources import Resource
@@ -219,6 +221,7 @@ class AcronamePowerControllerTests(unittest.TestCase):
 
         with self.assertRaisesRegex(PowerControllerError, "0x12345678: error 3"):
             acroname(hub).connect()
+        self.assertTrue(hub.disconnected)
 
     def test_rejects_wrong_controller_identity(self):
         hub = FakeHub(0x87654321)
@@ -248,6 +251,25 @@ class AcronamePowerControllerTests(unittest.TestCase):
             with self.assertRaisesRegex(PowerControllerError, "0-7"):
                 controller.set_power_enabled(port, False)
         self.assertEqual([], hub.usb.calls)
+
+    def test_unarmed_is_reported_before_the_connection_is_needed(self):
+        with self.assertRaisesRegex(PowerControllerError, "not armed"):
+            acroname(FakeHub(0x12345678)).set_power_enabled(0, False)
+
+    def test_a_brainstem_without_the_usbhub3p_names_is_named(self):
+        fake = mock.MagicMock(__version__="9.9")
+        with mock.patch.dict(sys.modules, {"brainstem": fake, "brainstem.defs": None}):
+            with self.assertRaisesRegex(PowerControllerError, "9.9 lacks the USBHub3"):
+                AcronameUSBHub3pController(0x12345678).connect()
+
+    def test_controller_ports_refuses_an_unknown_driver(self):
+        resource = Resource(
+            alias="Hub", type="USB power controller", platform=None, roles=(),
+            defaults={}, attached_to="Host_Linux", identity={}, capabilities=(),
+            power={}, driver="some future hub",
+        )
+        with self.assertRaisesRegex(PowerControllerError, "unsupported"):
+            controller_ports(resource)
 
     def test_real_power_changes_are_unarmed_by_default(self):
         hub = FakeHub(0x12345678)
@@ -383,6 +405,16 @@ class PowerCommandTests(unittest.TestCase):
         ports = json.loads(out)["ports"]
         self.assertEqual(list(range(8)), [row["port"] for row in ports])
         self.assertEqual("UT_Linux0", ports[2]["resource"])
+
+    def test_refused_outside_the_harness_environment(self):
+        refusal = HarnessEnvironmentError("needs its own Python 3.12 environment")
+        with mock.patch.object(cli, "require_harness_environment", side_effect=refusal), \
+                mock.patch.object(cli, "controller_from_resource") as build:
+            status, out, err = self.run_power(SIMULATED_DRIVER)
+
+        self.assertEqual(2, status)
+        self.assertIn("own Python 3.12 environment", err)
+        build.assert_not_called()
 
     def test_missing_brainstem_fails_closed(self):
         with mock.patch.dict(sys.modules, {"brainstem": None}):

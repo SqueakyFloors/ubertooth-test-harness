@@ -178,10 +178,12 @@ class AcronameUSBHub3pController:
     Uses the hub's `usb` entity, which addresses downstream ports 0-7 by
     index (validated on a USBHub3+ with BrainStem 2.12.5). `getPortState`
     returns a bit mask: bit 0 VBUS on, bit 1 USB 2.0 data on, bit 3 USB 3.0
-    data on. Data is reported and restored as the USB 2.0 and 3.0 pair,
-    which `setDataEnable`/`setDataDisable` switch together; a port with only
-    one of them on is reported as data off, so restoration turns both on.
-    The BrainStem library is imported lazily: see requirements-acroname.txt.
+    data on. Data is reported and switched as the USB 2.0 and 3.0 pair
+    (`setDataEnable`/`setDataDisable` switch both): a port with only one of
+    them on is reported as data off. Power isolation switches only VBUS, which
+    leaves the data bits as they were (checked on the hub), so such a port is
+    left as it was found. The BrainStem library is imported lazily: see
+    requirements-acroname.txt.
     """
 
     def __init__(
@@ -212,13 +214,20 @@ class AcronameUSBHub3pController:
             return
         try:
             import brainstem
-            from brainstem.defs import MODEL_USBHUB_3P
-            from brainstem.link import Spec
-            from brainstem.result import Result
         except ImportError as error:
             raise PowerControllerError(
                 "BrainStem Python API is not installed; run "
                 "python3 bootstrap.py --with-acroname"
+            ) from error
+        try:
+            from brainstem.defs import MODEL_USBHUB_3P
+            from brainstem.link import Spec
+            from brainstem.result import Result
+        except ImportError as error:
+            version = getattr(brainstem, "__version__", "unknown")
+            raise PowerControllerError(
+                f"BrainStem Python API {version} lacks the USBHub3+ names this "
+                "driver uses; install the version requirements-acroname.txt pins"
             ) from error
         self._module_factory = brainstem.stem.USBHub3p
         self._no_error = Result.NO_ERROR
@@ -234,6 +243,7 @@ class AcronameUSBHub3pController:
             self._usb_transport, self.serial_number
         )
         if result != self._no_error:
+            hub.disconnect()  # a failed connect may leave a partial link
             raise PowerControllerError(
                 f"unable to connect to USBHub3+ serial "
                 f"0x{self.serial_number:08x}: error {result}"
@@ -255,13 +265,13 @@ class AcronameUSBHub3pController:
                         f"controller 0x{self.serial_number:08x} is model "
                         f"{model}, not a USBHub3+ ({self._model})"
                     )
-            version = self._result_value(
+            version = int(self._result_value(
                 hub.system.getVersion(), "controller firmware version"
-            )
+            ))
         except Exception:
             hub.disconnect()
             raise
-        self.firmware_version = f"0x{int(version):08x}"
+        self.firmware_version = f"0x{version:08x}"
         self._hub = hub
 
     def _usb(self):
@@ -294,11 +304,16 @@ class AcronameUSBHub3pController:
         if not self.allow_changes:
             raise PowerControllerError("real power-controller changes are not armed")
 
-    def _set(self, port: int, enabled: bool, what: str, on, off, bits: int) -> None:
+    def _set(self, port: int, enabled: bool, what: str, bits: int) -> None:
         self._require_changes_armed()
         port = _validate_port(port)
         requested = bool(enabled)
-        result = (on if requested else off)(port)
+        usb = self._usb()
+        switch = {
+            ("power", True): usb.setPowerEnable, ("power", False): usb.setPowerDisable,
+            ("data", True): usb.setDataEnable, ("data", False): usb.setDataDisable,
+        }[(what, requested)]
+        result = switch(port)
         if result != self._no_error:
             raise PowerControllerError(
                 f"set {what} on port {port} failed with error {result}"
@@ -309,14 +324,10 @@ class AcronameUSBHub3pController:
             raise PowerControllerError(f"{what} readback mismatch on port {port}")
 
     def set_power_enabled(self, port: int, enabled: bool) -> None:
-        usb = self._usb()
-        self._set(port, enabled, "power", usb.setPowerEnable,
-                  usb.setPowerDisable, USBHUB3P_STATE_VBUS)
+        self._set(port, enabled, "power", USBHUB3P_STATE_VBUS)
 
     def set_data_enabled(self, port: int, enabled: bool) -> None:
-        usb = self._usb()
-        self._set(port, enabled, "data", usb.setDataEnable,
-                  usb.setDataDisable, USBHUB3P_STATE_DATA)
+        self._set(port, enabled, "data", USBHUB3P_STATE_DATA)
 
     def close(self) -> None:
         self.firmware_version = None
@@ -606,7 +617,11 @@ def controller_ports(resource: Resource) -> tuple[int, ...]:
     """Every switchable downstream port of a registered controller."""
     if resource.driver == STARTECH_DRIVER:
         return tuple(STARTECH_PORTS)
-    return USBHUB3P_PORTS
+    if resource.driver in (ACRONAME_DRIVER, SIMULATED_DRIVER):
+        return USBHUB3P_PORTS
+    raise PowerControllerError(
+        f"unsupported power-controller driver '{resource.driver}'"
+    )
 
 
 def controller_from_resource(

@@ -163,7 +163,9 @@ API is not installed`. The driver imports BrainStem lazily, connects over USB
 to the one configured controller serial (a hub with another serial is not
 found), reads the serial and model back, and addresses downstream ports 0-7
 through the hub's `usb` entity: `getPortState` gives power (bit 0) and USB 2.0
-and 3.0 data (bits 1 and 3, reported and switched as a pair), `getPortVoltage`
+and 3.0 data (bits 1 and 3, reported and switched as a pair; a port with only
+one on reads as data off, and isolation, which switches only VBUS, leaves it
+as found), `getPortVoltage`
 and `getPortCurrent` give VBUS in microvolts and microamps. Every BrainStem
 error code fails the call, every write is read back (a stale readback fails),
 and ports outside 0-7 are refused before the hub is asked. Real power/data
@@ -180,7 +182,7 @@ board attached; a board re-enumerates 0.37-0.59 s after power-on and answers
 
 `ubertooth-harness power --hardware hardware.yaml <controller>` reads every
 port of a registered controller (power, data, VBUS, current, and the board
-mapped to it) without changing anything:
+mapped to it) without changing anything; `--json` gives the same as JSON:
 
 ```text
 Hub_Linux1 (acroname BrainStem USBHub3+), firmware 0x28000000
@@ -1277,8 +1279,8 @@ word and symbol (colour only reinforces it).
   They are calibrated from run records on a macOS host with two Ubertooths:
   the release plan run for comprehensive, the recorded smoke runs for smoke
   (or the comprehensive time per step scaled to the smoke steps where no
-  smoke run exists); `Exclusive Ubertooth topology` has no run record and
-  assumes about 8 s of power switching. A test with no implementation yet is
+  smoke run exists); `Exclusive Ubertooth topology` and `Two-device range
+  test` (Linux only) are calibrated from runs on the Linux lab host. A test with no implementation yet is
   estimated at its `duration` argument, if any. A Linux host, one board, or a
   failing test ends sooner or later, so the countdown is a guide, never a
   timeout. An estimate is per invocation: `Ubertooth: each` runs the test

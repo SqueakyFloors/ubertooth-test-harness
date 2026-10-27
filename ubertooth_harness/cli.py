@@ -300,7 +300,7 @@ def _parser() -> argparse.ArgumentParser:
     power = subparsers.add_parser(
         "power",
         help="read a USB power controller's ports (power, data, VBUS, current) "
-        "and the boards mapped to them; changes nothing",
+        "and the resources mapped to them; changes nothing",
     )
     power.add_argument("--hardware", type=Path, required=True)
     power.add_argument("controller", metavar="ALIAS", help="registered USB power controller")
@@ -892,7 +892,7 @@ def _power_command(args: argparse.Namespace) -> int:
         mapped = {
             int(board.power["port"]): board.alias
             for board in registry.resources.values()
-            if board.type == "Ubertooth" and board.power.get("controller") == resource.alias
+            if board.power.get("controller") == resource.alias
         }
         controller.connect()
         try:
@@ -990,6 +990,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "lease":
             return _lease_command(args)
         if args.command == "power":
+            # Opens a real controller: only from the harness environment.
+            require_harness_environment()
             return _power_command(args)
         if args.command == "report":
             text = render_runs(args.runs, redact_serials=args.redact_serials, title=args.title)
