@@ -216,7 +216,7 @@ code { overflow-wrap: anywhere; }
 .status-busy {
   color: var(--info-fg); background: var(--info-bg); border-color: var(--info-line);
 }
-.status-pending, .status-not-run, .status-offline, .status-skipped,
+.status-pending, .status-not-run, .status-offline, .status-skipped, .status-not-requested,
 .status-not-applicable, .status-canceled, .status-unknown {
   color: var(--neutral-fg); background: var(--neutral-bg); border-color: var(--neutral-line);
 }
@@ -373,6 +373,7 @@ button.primary:disabled:hover { background: var(--primary); }
 }
 .summary-item { display: grid; gap: 0.1rem; min-width: 0; }
 .summary-item-wide { flex-basis: 100%; }
+.summary-item dd + dt { margin-top: 0.4rem; }
 @media (min-width: 48rem) {
   .live-overview { grid-template-columns: minmax(0, 1fr) minmax(12rem, 16rem); }
   .live-overview .live-time { grid-column: 2; grid-row: 1; }
@@ -420,8 +421,19 @@ button.primary:disabled:hover { background: var(--primary); }
 }
 .check .status { min-width: 6.5rem; }
 .check-name { flex: 1 1 8rem; min-width: 0; overflow-wrap: anywhere; }
+.check-board {
+  flex: none; font-size: 0.75rem; color: var(--muted);
+  padding: 0 0.4rem; border: 1px solid var(--line); border-radius: 999px;
+}
 .check-estimate { flex: none; margin: 0; font-size: 0.8rem; font-variant-numeric: tabular-nums; }
 .check .reason { flex-basis: 100%; padding-left: 2.1rem; font-size: 0.85rem; }
+/* Build and preflight come before the tests: no number, a divider below. */
+.check-phase { counter-increment: none; }
+.check-phase::before { content: ""; }
+.check-phase:has(+ .check:not(.check-phase)) { margin-bottom: 0.35rem; }
+.check-phase + .check:not(.check-phase) { border-top: 1px dashed var(--line); padding-top: 0.5rem; }
+.check .reason { color: var(--bad-fg); }
+.check-passed .reason, .check-not-requested .reason { color: var(--muted); }
 .check-running {
   background: var(--running-row); border-color: var(--run-line);
   border-left-color: var(--run-fg);

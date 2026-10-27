@@ -19,6 +19,7 @@
     lost: ["?", "lost"],
     "not run": ["○", "not run"],
     "did not finish": ["✗", "did not finish"],
+    "not requested": ["–", "not requested"],
     online: ["●", "online"],
     offline: ["○", "offline"],
     busy: ["◆", "busy"],
@@ -390,6 +391,13 @@
     if (scroll) $("live-heading").scrollIntoView({ block: "start" });
   }
 
+  // The boards an invocation uses, e.g. "UT Linux0" or "sender: UT Linux0".
+  function boardLabels(resources) {
+    if (!resources || typeof resources !== "object") return [];
+    return Object.entries(resources).map(([role, alias]) =>
+      role === "Ubertooth" ? targetName(alias) : `${role}: ${targetName(alias)}`);
+  }
+
   function rebuildChecklist() {
     const live = state.live;
     if (!live) return;
@@ -405,6 +413,7 @@
       live.items = live.invocations.map((invocation) => ({
         name: invocation.test_name, invocation_id: invocation.invocation_id,
         estimated_s: invocation.estimated_s, status: "pending", reason: "",
+        boards: boardLabels(invocation.resources),
       }));
     } else {
       live.items = tests.map((test) => ({
@@ -420,6 +429,12 @@
     live.log = [];
     live.partial = "";
     live.stage = "waiting";
+    // Phases before the tests, shown above them; status follows their events.
+    const runInfo = state.runs.get(live.run_id);
+    live.phases = [
+      { key: "build", name: "Build", status: runInfo && runInfo.build === false ? "not requested" : "pending", reason: "" },
+      { key: "preflight", name: "Preflight", status: "pending", reason: "" },
+    ];
     // The estimate covers tests only, so the countdown starts with the first test.
     live.testsStarted = null;
     for (const record of events) addEvent(live.run_id, record, false);
@@ -478,6 +493,10 @@
       }
       pushLog(`[... ${count} output lines left out; full output in ${String(details.output_file ?? "")} ...]`);
     }
+    if (kind === "build_started" || kind === "preflight_started") {
+      const phase = (live.phases || []).find((entry) => `${entry.key}_started` === kind);
+      if (phase) phase.status = "running";
+    }
     if (kind === "build_started") live.stage = "building";
     else if (kind === "preflight_started") live.stage = "preflight";
     else if (kind === "test_started") live.stage = "tests";
@@ -532,6 +551,8 @@
     } else if (kind === "build_step_started") {
       pushLog(`+++ ${details.step_name ?? details.step_id ?? ""} +++`);
     } else if (kind === "build_finished" || kind === "preflight_finished") {
+      const phase = (live.phases || []).find((entry) => `${entry.key}_finished` === kind);
+      if (phase) { phase.status = status || "passed"; phase.reason = String(details.reason || ""); }
       pushLog(`=== ${kind.replace("_finished", "").toUpperCase()}: ${status}${details.reason ? ": " + details.reason : ""} ===`);
     } else if (kind === "run_started") {
       pushLog(`=== RUN ${record.run_id}: ${details.plan_name ?? ""} / ${details.suite ?? ""} on ${details.host ?? ""} ===`);
@@ -548,6 +569,16 @@
     return item.status;
   }
 
+  // Every board the run's plan uses (from its manifest), or why it is unknown.
+  function runBoards(live) {
+    if (!Array.isArray(live.invocations)) return "known once the run's plan arrives";
+    const aliases = new Set();
+    for (const invocation of live.invocations) {
+      for (const alias of Object.values(invocation.resources || {})) aliases.add(targetName(alias));
+    }
+    return aliases.size ? [...aliases].sort().join(", ") : "none (host only)";
+  }
+
   function renderLive() {
     const live = state.live;
     if (!live) return;
@@ -556,36 +587,63 @@
     const isLive = run.status === "running";
     $("live-heading").textContent = isLive ? "Live run" : "Past run";
     $("live-heading").closest(".panel").classList.toggle("panel-past", !isLive);
-    const fields = [
-      ["Run", el("code", { text: run.run_id })],
-      ["Status", statusBadge(run.status)],
-      ["Stage", live.stage],
-      ["Ref", refLabel(run)],
-      ["Plan / suite", `${run.plan ?? "–"} / ${run.suite ?? "–"}`],
-      ["Target", run.target ? targetName(run.target) : "–"],
-      ["Started", timeElement(run.created_at)],
+    // Column groups across the top of the card; each group stacks its
+    // label/value pairs vertically. "–" until a value is known.
+    const groups = [
+      [["Run", el("code", { text: run.run_id })]],
+      [["Status", statusBadge(run.status)], ["Stage", live.stage]],
+      [["Ref", refLabel(run)],
+        ["Plan / suite", `${run.plan ?? "–"} / ${run.suite ?? "–"}`],
+        ["Target", run.target ? targetName(run.target) : "–"]],
+      [["Boards", runBoards(live)]],
+      [["Started", timeElement(run.created_at)], ["Finished", timeElement(run.finished_at)]],
     ];
-    if (run.reason) fields.push(["Reason", run.reason, "summary-item summary-item-wide"]);
-    // One <div> per term/description pair (valid in a <dl>), so the summary
-    // can flow across the top of the card.
-    $("live-summary").replaceChildren(...fields.map(([term, value, className]) =>
-      el("div", { className: className || "summary-item" },
-        el("dt", { text: term }), el("dd", {}, value))));
+    const items = groups.map((pairs) => el("div", { className: "summary-item" },
+      ...pairs.flatMap(([term, value]) => [el("dt", { text: term }), el("dd", {}, value)])));
+    if (run.reason) {
+      items.push(el("div", { className: "summary-item summary-item-wide" },
+        el("dt", { text: "Reason" }), el("dd", {}, run.reason)));
+    }
+    $("live-summary").replaceChildren(...items);
     $("cancel-button").hidden = run.status !== "running";
 
-    $("checklist").replaceChildren(...live.items.map((item) => {
+    // A phase still pending or running when the run ended did not finish.
+    const phaseStatus = (phase) => (run.status === "running" ? phase.status
+      : phase.status === "pending" ? "not run" : phase.status === "running" ? "did not finish" : phase.status);
+    // A run that ended in a phase with no failure of its own (for example a
+    // ref that did not resolve) shows the run's reason on that phase.
+    const phases = live.phases || [];
+    let blamed = null;
+    if (run.status !== "running" && run.status !== "passed" && run.reason
+        && !phases.some((phase) => phase.status === "failed" || phase.status === "error")
+        && !live.items.some((item) => item.status !== "pending")) {
+      blamed = phases.find((phase) => phase.status === "running" || phase.status === "pending") || null;
+    }
+    const phaseRows = phases.map((phase) => {
+      const shown = phase === blamed ? "failed" : phaseStatus(phase);
+      const reason = phase === blamed ? run.reason : phase.reason;
+      return el("li", {
+        className: `check check-phase check-${shown.replace(/ /g, "-")}`,
+        "aria-current": shown === "running" ? "step" : null,
+      },
+        statusBadge(shown), " ", el("span", { className: "check-name", text: phase.name }),
+        reason ? el("span", { className: "reason", text: reason }) : null);
+    });
+    $("checklist").replaceChildren(...phaseRows, ...live.items.map((item) => {
       const shown = itemStatus(item, run);
       return el("li", {
         className: `check check-${shown.replace(/ /g, "-")}`,
         "aria-current": shown === "running" ? "step" : null,
       },
         statusBadge(shown), " ", el("span", { className: "check-name", text: item.name }),
+        item.boards && item.boards.length
+          ? el("span", { className: "check-board", text: item.boards.join(", ") }) : null,
         item.estimated_s !== null && item.estimated_s !== undefined
           ? el("span", { className: "hint check-estimate", text: formatSeconds(item.estimated_s), "aria-label": `estimated runtime ${formatSeconds(item.estimated_s)}` }) : null,
-        item.reason ? el("span", { className: "reason", text: ` — ${item.reason}` }) : null);
+        item.reason ? el("span", { className: "reason", text: item.reason }) : null);
     }));
     if (!live.items.length) {
-      $("checklist").replaceChildren(el("li", {
+      $("checklist").append(el("li", {
         className: "check-note",
         text: "Tests appear here as they start (this run's plan is not in the controller's plans directory).",
       }));
@@ -613,8 +671,7 @@
       estimates.every((value) => value !== null && value !== undefined);
     const finished = run.status !== "running";
     const finishedText = () => {
-      const at = run.finished_at ? new Date(run.finished_at).toLocaleTimeString() : "";
-      return `Finished${at ? ` ${at}` : ""}, took ${formatSeconds(elapsed)}`;
+      return `Took ${formatSeconds(elapsed)}`;
     };
     if (!known) {
       $("live-clock").textContent = finished ? finishedText() : `Elapsed ${formatSeconds(elapsed)}`;

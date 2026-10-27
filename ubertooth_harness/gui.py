@@ -346,6 +346,12 @@ def planned_invocations(
         planned.append({
             "invocation_id": _text(invocation.get("id")),
             "test_name": _text(test_name),
+            # Role -> registered alias of the hardware this invocation uses
+            # (for example {"Ubertooth": "UT_Linux0"}).
+            "resources": {
+                _text(role): _text(alias)
+                for role, alias in (invocation.get("resources") or {}).items()
+            } if isinstance(invocation.get("resources"), Mapping) else {},
             "estimated_s": (
                 _estimate(catalog, test_name, arguments)
                 if isinstance(test_name, str) and isinstance(arguments, Mapping)

@@ -498,7 +498,8 @@ class FailureSummaryTests(ControllerTestCase):
                 {"id": f"00{n}-Exclusive Ubertooth topology",
                  "test_name": "Exclusive Ubertooth topology",
                  "arguments": {"platforms": ["linux"], "exclusive Ubertooth": True,
-                               "capture duration": "5s"}}
+                               "capture duration": "5s"},
+                 "resources": {"Ubertooth": f"UT_{n}"}}
                 for n in (1, 2)
             ]}
             await runner.send("event", run_id="run-1", event=event(
@@ -509,9 +510,11 @@ class FailureSummaryTests(ControllerTestCase):
         # One per board the planner selected, each with its estimate.
         self.assertEqual(
             [{"invocation_id": "001-Exclusive Ubertooth topology",
-              "test_name": "Exclusive Ubertooth topology", "estimated_s": 13.0},
+              "test_name": "Exclusive Ubertooth topology",
+              "resources": {"Ubertooth": "UT_1"}, "estimated_s": 13.0},
              {"invocation_id": "002-Exclusive Ubertooth topology",
-              "test_name": "Exclusive Ubertooth topology", "estimated_s": 13.0}],
+              "test_name": "Exclusive Ubertooth topology",
+              "resources": {"Ubertooth": "UT_2"}, "estimated_s": 13.0}],
             payload["invocations"],
         )
 
