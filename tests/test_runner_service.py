@@ -167,7 +167,7 @@ class RunnerFixture:
 def run_request(request_id="r1", **overrides):
     fields = dict(
         request_id=request_id, ref="HEAD", commit=None, plan="local",
-        suite="fast", tests=[], build=False,
+        suite="fast", tests=[], build=False, flash_build=True,
     )
     fields.update(overrides)
     return encode_controller_message("run", **fields)
@@ -190,7 +190,12 @@ class ProtocolTests(unittest.TestCase):
             "not json": "not json",
             "array": "[]",
             "unknown version": json.dumps({**good, "version": 99}),
-            "previous version": json.dumps({**good, "version": 1}),
+            "previous version": json.dumps({**good, "version": 2}),
+            "version 1": json.dumps({**good, "version": 1}),
+            "missing flash_build": json.dumps(
+                {k: v for k, v in good.items() if k != "flash_build"}
+            ),
+            "string flash_build": json.dumps({**good, "flash_build": "yes"}),
             "string version": json.dumps({**good, "version": "1"}),
             "missing version": json.dumps({k: v for k, v in good.items() if k != "version"}),
             "unknown type": json.dumps({**good, "type": "deploy"}),
@@ -451,6 +456,41 @@ class RunnerServiceTests(unittest.IsolatedAsyncioTestCase):
             # No run started, so nothing was written for it.
             self.assertFalse(self.fixture.output.exists())
         self.assertIn("builds disabled", self.logs[0])
+
+    async def test_flash_build_maps_to_the_run_suite_options(self):
+        # (build, flash_build) -> the build options run-suite gets (#135).
+        libbtbb = self.fixture.root / "libbtbb"
+        libbtbb.mkdir()
+        started = []
+
+        async def fake_exec(*argv, **_kwargs):
+            started.append(argv)
+            raise OSError("not started in this test")
+
+        cases = (
+            ((True, True), ["--build"]),
+            ((True, False), ["--build", "--no-flash-build"]),
+            ((False, True), []),
+            ((False, False), []),
+        )
+        with patch(
+            "ubertooth_harness.runner_service.asyncio.create_subprocess_exec", fake_exec
+        ):
+            async with StubController() as controller, self.running(
+                controller, libbtbb_source=libbtbb, libbtbb_ref="abc1234",
+            ):
+                await controller.next("register")
+                for index, ((build, flash), expected) in enumerate(cases):
+                    with self.subTest(build=build, flash_build=flash):
+                        await controller.send(run_request(
+                            request_id=f"r{index}", build=build, flash_build=flash,
+                        ))
+                        await controller.next("run_rejected")
+                        options = [
+                            item for item in started[-1]
+                            if item in ("--build", "--no-flash-build")
+                        ]
+                        self.assertEqual(expected, options)
 
     async def test_startup_log_names_the_libbtbb_builds_use(self):
         libbtbb = self.fixture.root / "libbtbb"

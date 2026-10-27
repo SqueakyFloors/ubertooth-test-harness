@@ -388,8 +388,9 @@ def omitted_line(details: Mapping) -> str:
     )
 
 
-# Tail key for build command output, which has no invocation.
+# Tail keys for build and build-flash command output, which have no invocation.
 _BUILD_TAIL = "\0build"
+_FLASH_TAIL = "\0flash"
 
 
 def _tail_key(details: Mapping) -> str:
@@ -397,6 +398,8 @@ def _tail_key(details: Mapping) -> str:
     invocation = _text(details.get("invocation_id"))
     if not invocation and details.get("phase") == "build":
         return _BUILD_TAIL
+    if not invocation and details.get("phase") == "flash":
+        return _FLASH_TAIL
     return invocation
 
 
@@ -435,19 +438,21 @@ def failure_summary(run: Mapping, events: Sequence[Mapping]) -> list[dict]:
                 if rest.strip():
                     tail.append(rest[:500])
                 tail.append(omitted_line(details))
-        elif kind in ("build_finished", "preflight_finished") and status not in (
-            "passed", "skipped"
-        ):
+        elif kind in (
+            "build_finished", "build_flash_finished", "preflight_finished"
+        ) and status not in ("passed", "skipped"):
             log = []
-            if kind == "build_finished":
-                rest = partials.pop(_BUILD_TAIL, "")
+            key = {"build_finished": _BUILD_TAIL, "build_flash_finished": _FLASH_TAIL}.get(kind)
+            if key:
+                rest = partials.pop(key, "")
                 if rest.strip():
                     tails.setdefault(
-                        _BUILD_TAIL, collections.deque(maxlen=FAILURE_LOG_LINES)
+                        key, collections.deque(maxlen=FAILURE_LOG_LINES)
                     ).append(rest[:500])
-                log = list(tails.get(_BUILD_TAIL, ()))
+                log = list(tails.get(key, ()))
+            step = "flash" if kind == "build_flash_finished" else kind.removesuffix("_finished")
             failures.append({
-                "step": kind.removesuffix("_finished"), "status": _text(status),
+                "step": step, "status": _text(status),
                 "reason": _text(details.get("reason")), "log": log,
             })
         elif kind == "test_finished" and status not in ("passed", "skipped", "not_applicable"):

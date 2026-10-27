@@ -18,6 +18,22 @@ class PreflightError(ValueError):
     """Mandatory preflight cannot be planned or validated."""
 
 
+# The revision a board reports, for the firmware identity checks' reasons.
+_FIRMWARE_REVISION = {
+    "Firmware version": re.compile(r"Firmware version:\s+(\S+)"),
+    "Firmware compile info": re.compile(r"\bubertooth\s+(\S+)\s+\("),
+}
+# Fixes for a board whose firmware is not the run's revision, by run kind.
+FLASH_FIX = "flash it with this build (the default when building)"
+BUILD_AND_FLASH_FIX = (
+    "build and flash it with this ref (run-suite --build; Build in the GUI)"
+)
+NO_FLASH_FIX = (
+    "flash it with this build (the default when building: leave out "
+    "--no-flash-build, or tick Flash the firmware to the boards first in the GUI)"
+)
+
+
 @dataclass(frozen=True)
 class PreflightCheck:
     check_id: str
@@ -32,6 +48,8 @@ class PreflightCheck:
     # Guard-only boards: the firmware API must be no older than the host
     # tools' (ubertooth-btle would stop older firmware). Newer is fine.
     minimum_api: int | None = None
+    # How to fix a firmware revision mismatch; FLASH_FIX when empty.
+    fix: str = ""
 
     def result_failure(self, result: CommandResult) -> str:
         if result.timed_out:
@@ -44,6 +62,14 @@ class PreflightCheck:
         for pattern in self.expected_patterns:
             if not re.search(pattern, output):
                 target = self.resource_alias or self.host
+                found = _FIRMWARE_REVISION.get(self.name)
+                match = found.search(output) if found else None
+                if match:
+                    # Name both revisions and how to fix it (#135).
+                    return (
+                        f"{self.name}: {target} runs {match.group(1)}, the tools "
+                        f"are {self.expected_revision}: {self.fix or FLASH_FIX}"
+                    )
                 return f"{self.name}: identity mismatch for {target}"
         if self.minimum_api is not None:
             api = firmware_api(output)
@@ -115,6 +141,25 @@ class PreflightPolicy:
                 established.add(alias)
         return established
 
+    def boards_needing_firmware(self, invocations) -> tuple[str, ...]:
+        """Ubertooths whose firmware revision preflight requires, in run order.
+
+        These are the boards a building run flashes with its own firmware
+        first (cli.py, the default with --build). Guard-only boards are left
+        out: preflight only requires their firmware API to be no older than
+        the host tools', not the resolved revision. Boards a firmware-writing
+        test establishes itself are left out too.
+        """
+        established = self._firmware_established_by_suite(invocations)
+        found: list[str] = []
+        for invocation in invocations:
+            for role, alias in invocation.resources.items():
+                if role.startswith(GUARD_ROLE_PREFIX) or alias in established:
+                    continue
+                if alias not in found and self.registry.get(alias).type == "Ubertooth":
+                    found.append(alias)
+        return tuple(found)
+
     @staticmethod
     def _pattern(text: str) -> str:
         return re.escape(text)
@@ -123,7 +168,11 @@ class PreflightPolicy:
         self,
         invocations: Sequence[TestInvocation],
         manifest: RunManifest,
+        *,
+        firmware_fix: str = "",
     ) -> tuple[PreflightCheck, ...]:
+        """The run's preflight checks; ``firmware_fix`` says how to fix a
+        board whose firmware is not the run's revision (FLASH_FIX by default)."""
         if not invocations:
             raise PreflightError("preflight requires at least one invocation")
         if not manifest.matches_invocations(invocations):
@@ -233,6 +282,7 @@ class PreflightPolicy:
                             minimum_api=(
                                 minimum_api if name == "Guard firmware API" else None
                             ),
+                            fix=firmware_fix,
                         )
                     )
         return tuple(checks)
