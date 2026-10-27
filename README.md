@@ -1220,7 +1220,7 @@ word and symbol (colour only reinforces it).
   `/api/refs`), plan and suite (from `/api/plans`, with the suite's tests;
   only runnable plans are offered, and plans of planned tests such as
   `backlog` are named as not runnable), target, and whether to build the ref first; Run starts the whole suite.
-- **Live run:** the suite's tests as a checklist that ticks from the run's
+- **Live run:** the suite's tests as a test list that ticks from the run's
   events (✓ passed, ✗ failed, … running, ○ pending or not run; always text
   plus symbol), the current stage (building, preflight, tests), elapsed time,
   a Cancel button, and the last 200 log lines in a scrolling console panel. A countdown is shown only when
@@ -1243,8 +1243,8 @@ word and symbol (colour only reinforces it).
   so the countdown counts every board. Build and preflight time are not included: the countdown starts with
   the first test. Otherwise the view shows elapsed time and says why. The
   view is linkable as `/ui/#run=<run_id>`.
-- **History:** every run, newest first, with started/finished times, ref,
-  plan/suite, target and status, a link to its `report.md`, and for a run
+- **History:** every run, newest first, with started/finished times, branch or tag with the commit it
+  resolved to, plan/suite, target and status (the run ID in the row's tooltip), a link to its `report.md`, and for a run
   that did not pass a failure summary (each failed phase or test with its
   reason and last output lines, then the run's own reason).
 

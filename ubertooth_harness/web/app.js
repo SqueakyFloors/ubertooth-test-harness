@@ -676,10 +676,10 @@
           onclick: () => showFailures(run.run_id),
         }));
       }
-      return el("tr", {},
+      // The run ID is long; it is in the row's tooltip and the Watch label.
+      return el("tr", { title: `Run ${run.run_id}` },
         el("td", { className: "time" }, timeElement(run.created_at)),
         el("td", { className: "time" }, timeElement(run.finished_at)),
-        el("td", {}, el("code", { text: run.run_id })),
         el("td", { text: refLabel(run) }),
         el("td", { text: `${run.plan ?? "–"} / ${run.suite ?? "–"}` }),
         el("td", { text: targetName(run.target) }),
