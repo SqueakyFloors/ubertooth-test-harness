@@ -1213,8 +1213,8 @@ word and symbol (colour only reinforces it).
   run with a Watch button, and an **Attached equipment** box. That box groups
   equipment by kind; today it holds the Ubertooths (the devices under test),
   one small box each with its USB serial and a status dot with text (green: on
-  USB in the runner's last report; yellow: unknown while the runner is
-  offline), or why the runner could not list them. USB hubs and Bluetooth test
+  USB when the runner registered, with that time, since the runner lists its
+  boards only then; yellow: unknown while the runner is offline), or why the runner could not list them. USB hubs and Bluetooth test
   devices will join it as their own groups.
 - **Run setup:** git ref (default branch, branches and tags from
   `/api/refs`), plan and suite (from `/api/plans`, with the suite's tests;

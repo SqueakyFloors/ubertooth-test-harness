@@ -81,13 +81,18 @@
     return el("time", { datetime: String(iso), text: shown });
   }
 
+  // Compact duration: only the non-zero parts, no leading zeros
+  // (4 -> "4s", 130 -> "2m 10s", 3900 -> "1h 5m"); 0 -> "0s".
   function formatSeconds(total) {
     const seconds = Math.max(0, Math.round(total));
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
     const s = seconds % 60;
-    const pad = (n) => String(n).padStart(2, "0");
-    return h ? `${h}h ${pad(m)}m ${pad(s)}s` : `${m}m ${pad(s)}s`;
+    const parts = [];
+    if (h) parts.push(`${h}h`);
+    if (m) parts.push(`${m}m`);
+    if (s || !parts.length) parts.push(`${s}s`);
+    return parts.join(" ");
   }
 
   async function api(method, path, body) {
@@ -129,8 +134,14 @@
     } else if (!serials.length) {
       boards = [el("p", { className: "hint", text: "No Ubertooth attached." })];
     } else {
-      // On USB as of the runner's last report; unknown while it is offline.
-      const state = target.status === "online" ? ["ok", "on USB"] : ["warn", "unknown (runner offline)"];
+      // The runner lists its boards only when it registers, so say when;
+      // unknown while it is offline.
+      const when = target.registered_at
+        ? new Date(target.registered_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+        : "";
+      const state = target.status === "online"
+        ? ["ok", when ? `on USB at registration, ${when}` : "on USB at registration"]
+        : ["warn", "unknown (runner offline)"];
       boards = [el("ul", { className: "devices" }, ...serials.map((serial, index) =>
         el("li", { className: "device" },
           el("div", { className: "device-head" },
@@ -567,7 +578,7 @@
       },
         statusBadge(shown), " ", el("span", { className: "check-name", text: item.name }),
         item.estimated_s !== null && item.estimated_s !== undefined
-          ? el("span", { className: "hint check-estimate", text: ` (about ${formatSeconds(item.estimated_s)})` }) : null,
+          ? el("span", { className: "hint check-estimate", text: `~${formatSeconds(item.estimated_s)}`, title: "estimated duration" }) : null,
         item.reason ? el("span", { className: "reason", text: ` — ${item.reason}` }) : null);
     }));
     if (!live.items.length) {
@@ -606,7 +617,7 @@
       return;
     }
     const total = estimates.reduce((sum, value) => sum + value, 0);
-    $("live-estimate").textContent = `Estimate ${formatSeconds(total)} from the catalog's per-test estimates; build and preflight are not included.`;
+    $("live-estimate").textContent = `Estimate ~${formatSeconds(total)} from the catalog's per-test estimates; build and preflight not included`;
     const testsStart = live.testsStarted ? Date.parse(live.testsStarted) : NaN;
     const testsElapsed = Number.isNaN(testsStart) ? null : Math.max(0, (end - testsStart) / 1000);
     if (run.status !== "running") {
@@ -614,7 +625,7 @@
     } else if (testsElapsed === null) {
       $("live-clock").textContent = `Countdown starts with the first test (elapsed ${formatSeconds(elapsed)})`;
     } else if (testsElapsed <= total) {
-      $("live-clock").textContent = `About ${formatSeconds(total - testsElapsed)} remaining (elapsed ${formatSeconds(elapsed)})`;
+      $("live-clock").textContent = `~${formatSeconds(total - testsElapsed)} remaining (elapsed ${formatSeconds(elapsed)})`;
     } else {
       $("live-clock").textContent = `Over the estimate by ${formatSeconds(testsElapsed - total)} (elapsed ${formatSeconds(elapsed)})`;
     }
