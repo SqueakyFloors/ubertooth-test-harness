@@ -340,10 +340,10 @@ button.primary:disabled:hover { background: var(--primary); }
 }
 .estimate-label { font-size: 0.8rem; font-weight: 650; color: var(--muted);
   text-transform: uppercase; letter-spacing: 0.04em; }
-.estimate-value { font-size: 1.35rem; font-weight: 700; font-variant-numeric: tabular-nums;
+.estimate-value { font-size: 0.8rem; font-weight: 700; color: var(--fg); font-variant-numeric: tabular-nums;
   grid-column: 2; grid-row: 1; justify-self: start; }
 .estimate-note { grid-column: 1 / -1; font-size: 0.82rem; color: var(--muted); }
-.estimate-unknown .estimate-value { font-size: 1rem; color: var(--muted); }
+.estimate-unknown .estimate-value { color: var(--muted); }
 
 .field-check { display: flex; align-items: center; gap: 0.5rem; }
 .field-check input { width: 1.05rem; height: 1.05rem; margin: 0; accent-color: var(--primary); }
