@@ -1257,7 +1257,10 @@ word and symbol (colour only reinforces it).
   card. A run first waits for its boards when another session holds them
   (the runner passes `--wait-for-boards`, 30 minutes by default; set it with
   the runner's `--wait-for-boards MINUTES`), and a failure in any of these
-  steps is shown on its row.
+  steps is shown on its row. Under each step's name a **Transcript** button
+  (greyed until the step starts) opens that step's commands and output above
+  the full transcript. The test list keeps the running step near its top;
+  scrolling it yourself pauses that until the next step starts.
 
 Every HTTP response carries `Content-Security-Policy: default-src 'self';
 script-src 'self'; style-src 'self'; connect-src 'self' ws://<host>;

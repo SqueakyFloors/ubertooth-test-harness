@@ -504,7 +504,11 @@
   // One test's transcript: each command sent, its output as it arrives
   // (stderr marked), and how it ended. Keyed by invocation ID.
   function recordTranscript(live, kind, status, details) {
-    const id = details.invocation_id;
+    // Tests by invocation ID; build and preflight output (no invocation ID)
+    // under "phase:build" / "phase:preflight" while that step runs.
+    const phaseKey = kind.startsWith("build") || live.stage === "building" ? "phase:build"
+      : kind.startsWith("preflight") || live.stage === "preflight" ? "phase:preflight" : null;
+    const id = details.invocation_id || phaseKey;
     if (!id) return;
     const key = String(id);
     if (!live.transcripts.has(key)) live.transcripts.set(key, []);
@@ -532,7 +536,9 @@
       const extra = details.timed_out ? ", timed out" : details.cancelled ? ", cancelled" : "";
       lines.push({ kind: status === "passed" || status === "stopped" ? "result" : "result-bad",
         text: `→ exit ${rc}${took}${extra} (${status})` });
-    } else if (kind === "test_finished") {
+    } else if (kind === "build_step_started") {
+      lines.push({ kind: "note", text: `+++ ${details.step_name ?? details.step_id ?? ""} +++` });
+    } else if (kind === "test_finished" || kind === "build_finished" || kind === "preflight_finished") {
       flush("stdout"); flush("stderr");
       lines.push({ kind: status === "passed" ? "result" : "result-bad",
         text: `=== ${status}${details.reason ? `: ${details.reason}` : ""} ===` });
@@ -545,7 +551,9 @@
   function followCurrent(live) {
     const box = $("checklist-scroll");
     const current = box.querySelector('[aria-current="step"]');
-    $("follow-current").hidden = live.follow !== false || !current;
+    // Following resumes by itself when the next step starts.
+    const step = current ? current.textContent : null;
+    if (step !== live.followedStep) { live.followedStep = step; live.follow = true; }
     if (live.follow === false || !current) return;
     const top = Math.max(0, current.offsetTop - box.offsetTop - current.offsetHeight);
     if (Math.abs(box.scrollTop - top) > 2) {
@@ -568,7 +576,8 @@
     if (!id) return;
     const item = live.items.find((entry) => entry.invocation_id === id) ||
       [...live.byInvocation.entries()].filter(([key]) => key === id).map(([, value]) => value)[0];
-    $("transcript-title").textContent = `Transcript: ${item ? item.name : id}`;
+    const phase = (live.phases || []).find((entry) => `phase:${entry.key}` === id);
+    $("transcript-title").textContent = `Transcript: ${phase ? phase.name : item ? item.name : id}`;
     const lines = live.transcripts.get(id) || [];
     const node = $("transcript");
     const atBottom = node.scrollTop + node.clientHeight >= node.scrollHeight - 4;
@@ -743,48 +752,52 @@
         && !live.items.some((item) => item.status !== "pending")) {
       blamed = phases.find((phase) => phase.status === "running" || phase.status === "pending") || null;
     }
+    // A small "Transcript" button under each step's name opens its commands
+    // and output above the log; greyed until the step has output.
+    const transcriptButton = (tid, enabled, label) => el("button", {
+      type: "button", className: "transcript-toggle", text: "Transcript",
+      disabled: !enabled,
+      "aria-expanded": enabled ? (live.shown === tid ? "true" : "false") : null,
+      "aria-label": `Transcript of ${label}`,
+      title: enabled ? null : "Available once this step starts",
+      onclick: enabled ? () => showTranscript(tid) : null,
+    });
+    const nameCell = (label, button) => el("div", { className: "check-title" },
+      el("span", { className: "check-name", text: label }), button);
+    const estimateCell = (seconds) => el("span", {
+      className: "hint check-estimate",
+      text: seconds !== null && seconds !== undefined ? formatSeconds(seconds) : "",
+      "aria-label": seconds !== null && seconds !== undefined ? `estimated runtime ${formatSeconds(seconds)}` : null,
+    });
     const phaseRows = phases.map((phase) => {
       const shown = phase === blamed ? "failed" : phaseStatus(phase);
       const reason = phase === blamed ? run.reason : phase.reason;
+      const tid = `phase:${phase.key}`;
+      const open = live.shown === tid;
       return el("li", {
-        className: `check check-phase check-${shown.replace(/ /g, "-")}`,
+        className: `check check-phase check-${shown.replace(/ /g, "-")}${open ? " check-open" : ""}`,
         "aria-current": shown === "running" ? "step" : null,
       },
-        statusBadge(shown), " ", el("span", { className: "check-name", text: phase.name }),
-        el("span", { className: "check-board" }), el("span", { className: "hint check-estimate" }),
+        statusBadge(shown),
+        nameCell(phase.name, phase.key === "boards" ? null
+          : transcriptButton(tid, live.transcripts.has(tid), phase.name)),
+        estimateCell(null),
         reason ? el("span", { className: "reason", text: sentence(reason) }) : null);
     });
     $("checklist").replaceChildren(...phaseRows, ...live.items.map((item) => {
       const shown = itemStatus(item, run);
       const known = item.invocation_id
         || [...live.byInvocation.entries()].find(([, value]) => value === item)?.[0] || null;
-      // A transcript exists once the test has started; until then the row
-      // is shown greyed and does nothing.
       const started = item.status !== "pending";
       const id = known && started ? known : null;
       const open = id && live.shown === id;
       return el("li", {
-        className: `check check-${shown.replace(/ /g, "-")}${id ? " check-clickable" : " check-locked"}${open ? " check-open" : ""}`,
+        className: `check check-${shown.replace(/ /g, "-")}${started ? "" : " check-locked"}${open ? " check-open" : ""}`,
         "aria-current": shown === "running" ? "step" : null,
-        // Click (or Enter/Space) to show this test's transcript above the log.
-        tabindex: id ? "0" : null, role: id ? "button" : null,
-        "aria-expanded": id ? (open ? "true" : "false") : null,
-        "aria-disabled": id ? null : "true",
-        title: id ? "Show this test's commands and output" : "The transcript is available once this test starts",
-        onclick: id ? () => showTranscript(id) : null,
-        onkeydown: id ? (event) => {
-          if (event.key === "Enter" || event.key === " ") { event.preventDefault(); showTranscript(id); }
-        } : null,
       },
-        statusBadge(shown), " ", el("span", { className: "check-name", text: item.name }),
-        // Fixed columns, filled or empty, so every row lines up.
-        el("span", { className: "check-board", text: item.boards && item.boards.length ? item.boards.join(", ") : "" }),
-        el("span", {
-          className: "hint check-estimate",
-          text: item.estimated_s !== null && item.estimated_s !== undefined ? formatSeconds(item.estimated_s) : "",
-          "aria-label": item.estimated_s !== null && item.estimated_s !== undefined
-            ? `estimated runtime ${formatSeconds(item.estimated_s)}` : null,
-        }),
+        statusBadge(shown),
+        nameCell(item.name, transcriptButton(id || `pending:${item.name}`, Boolean(id), item.name)),
+        estimateCell(item.estimated_s),
         item.reason ? el("span", { className: "reason", text: sentence(item.reason) }) : null);
     }));
     if (!live.items.length) {
@@ -1024,19 +1037,13 @@
     // Only the user's own scrolling (wheel, touch, drag, keys) stops the
     // list following the running test; scrolls the page makes do not.
     const stopFollowing = () => {
-      if (state.live && state.live.follow !== false) {
-        state.live.follow = false;
-        $("follow-current").hidden = false;
-      }
+      if (state.live) state.live.follow = false;
     };
     for (const type of ["wheel", "touchmove", "mousedown"]) {
       $("checklist-scroll").addEventListener(type, stopFollowing, { passive: true });
     }
     $("checklist-scroll").addEventListener("keydown", (event) => {
       if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) stopFollowing();
-    });
-    $("follow-current").addEventListener("click", () => {
-      if (state.live) { state.live.follow = true; renderLive(); }
     });
     $("transcript-close").addEventListener("click", () => {
       if (state.live) { state.live.shown = null; renderLive(); }

@@ -414,7 +414,7 @@ button.primary:disabled:hover { background: var(--primary); }
    there is one, takes a full line below. */
 .check, .checklist-head {
   display: grid; align-items: center; gap: 0.25rem 0.5rem;
-  grid-template-columns: 1.6rem 7.5rem minmax(0, 1fr) 6.5rem 4rem;
+  grid-template-columns: 1.6rem 7.5rem minmax(0, 1fr) 4rem;
 }
 .check {
   counter-increment: check;
@@ -569,7 +569,6 @@ th[aria-sort="descending"] button.sort::after { content: " ▼"; font-size: 0.7e
   border: 1px solid var(--line); border-radius: var(--radius-small); padding: 0.25rem;
 }
 @media (min-width: 60rem) { .checklist-scroll { height: 32rem; } }
-.follow-current { margin-top: 0.4rem; }
 
 .icon-button {
   min-height: 1.8rem; min-width: 1.8rem; padding: 0; font-size: 1.1rem; line-height: 1;
@@ -592,3 +591,9 @@ th[aria-sort="descending"] button.sort::after { content: " ▼"; font-size: 0.7e
 
 /* An empty pill as wide as the others, for a step the run never reached. */
 .check .status { min-width: 6.5rem; }
+
+.check-title { display: grid; justify-items: start; gap: 0.15rem; min-width: 0; }
+.transcript-toggle {
+  min-height: 0; padding: 0.05rem 0.5rem; font-size: 0.72rem; font-weight: 600;
+}
+.transcript-toggle[aria-expanded="true"] { background: var(--primary); border-color: var(--primary); color: var(--primary-fg); }
