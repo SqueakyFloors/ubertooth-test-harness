@@ -511,6 +511,9 @@ class FailureSummaryTests(ControllerTestCase):
         status, payload, _ = await self.http("GET", "/api/targets/Host_A")
         self.assertEqual(200, status)
         self.assertEqual({serial.lower(): "UT_Linux0"}, payload["target"]["board_aliases"])
+        # Kept across a controller restart, before any new run.
+        self.assertEqual({"Host_A": {serial.lower(): "UT_Linux0"}},
+                         self.controller._load_board_names())
 
     async def test_run_detail_lists_the_planned_invocations(self):
         async with FakeRunner(self.port) as runner:

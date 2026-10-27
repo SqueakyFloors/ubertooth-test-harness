@@ -360,9 +360,34 @@ class Controller:
         self._pending_runs: dict[str, _Pending] = {}
         self._pending_cancels: dict[str, _Pending] = {}
         self._subscribers: set[_Subscriber] = set()
+        # host -> {serial: alias}, kept across restarts so the Targets card
+        # names boards before the next run's plan arrives.
+        self._board_names_path = self.results_dir.parent / "board-names.json"
+        self._board_names = self._load_board_names()
         self._load_runs()
 
     # ----- results store ---------------------------------------------------
+
+    def _load_board_names(self) -> dict:
+        try:
+            data = json.loads(self._board_names_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {
+            str(host)[:64]: {str(k)[:64]: str(v)[:64] for k, v in names.items()}
+            for host, names in data.items() if isinstance(names, dict)
+        }
+
+    def _save_board_names(self) -> None:
+        temporary = self._board_names_path.with_suffix(".json.tmp")
+        try:
+            temporary.write_text(json.dumps(self._board_names, indent=2, sort_keys=True),
+                                 encoding="utf-8")
+            os.replace(temporary, self._board_names_path)
+        except OSError as error:
+            self.log(f"warning: cannot save board names: {error}")
 
     def _load_runs(self) -> None:
         for directory in sorted(self.results_dir.iterdir()):
@@ -457,8 +482,10 @@ class Controller:
                 serial = identity.get("serial") if isinstance(identity, dict) else None
                 if isinstance(alias, str) and isinstance(serial, str) and alias and serial:
                     learned[serial.lower()[:64]] = alias[:64]
-        if learned and learned != target.board_aliases:
+        if learned and {**target.board_aliases, **learned} != target.board_aliases:
             target.board_aliases = {**target.board_aliases, **learned}
+            self._board_names[target.host] = dict(target.board_aliases)
+            self._save_board_names()
             self._publish_target(target)
 
     def _append_event(self, run: Run, event: dict) -> None:
@@ -683,7 +710,7 @@ class Controller:
             protocol_errors=old.protocol_errors if old else 0,
             last_protocol_error=old.last_protocol_error if old else None,
             last_runner_protocol_error=old.last_runner_protocol_error if old else None,
-            board_aliases=dict(old.board_aliases) if old else {},
+            board_aliases=dict(old.board_aliases) if old else dict(self._board_names.get(host, {})),
         )
         self.targets[host] = target
         self._links[host] = link
