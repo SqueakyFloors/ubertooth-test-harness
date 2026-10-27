@@ -79,10 +79,11 @@
   }
 
   function statusBadge(status) {
-    // A step a finished run never reached shows no pill (blank cell; screen
-    // readers still hear it).
+    // A step a finished run never reached keeps its pill, empty (screen
+    // readers still hear "not reached").
     if (status === "not reached") {
-      return el("span", { className: "status-blank" },
+      return el("span", { className: "status status-not-reached" },
+        el("span", { "aria-hidden": "true", text: "\u00a0" }),
         el("span", { className: "visually-hidden", text: "not reached" }));
     }
     const known = STATUS_TEXT[status];

@@ -589,3 +589,6 @@ th[aria-sort="descending"] button.sort::after { content: " ▼"; font-size: 0.7e
 .panel-history .table-wrap::-webkit-scrollbar-track { background: transparent; }
 .log { scrollbar-color: #57606a transparent; }
 .checklist-scroll, .panel-history .table-wrap { scrollbar-color: var(--line-strong) transparent; }
+
+/* An empty pill as wide as the others, for a step the run never reached. */
+.check .status { min-width: 6.5rem; }
