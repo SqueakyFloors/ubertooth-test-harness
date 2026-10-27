@@ -355,6 +355,11 @@ def _parser() -> argparse.ArgumentParser:
     runner.add_argument(
         "--heartbeat-interval", type=float, default=10.0, metavar="SECONDS",
     )
+    runner.add_argument(
+        "--wait-for-boards", type=_minutes, default=30.0, metavar="MINUTES",
+        help="how long each run waits for boards another session holds "
+        "(default 30; 0 refuses at once)",
+    )
 
     controller = subparsers.add_parser(
         "controller",
@@ -453,6 +458,7 @@ def _runner(args: argparse.Namespace) -> int:
         libbtbb_ref=args.libbtbb_ref,
         allow_power_changes=args.allow_power_changes,
         heartbeat_interval_s=args.heartbeat_interval,
+        wait_for_boards_minutes=args.wait_for_boards,
     ))
     host = FileResourceRegistry.load(service.config.hardware).get(args.host)
     if host.type != "Host":

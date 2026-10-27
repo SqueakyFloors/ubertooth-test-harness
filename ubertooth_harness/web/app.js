@@ -18,13 +18,18 @@
     error: ["✗", "error"],
     lost: ["?", "lost"],
     "not run": ["○", "not run"],
+    "not reached": ["○", "not reached"],
     "did not finish": ["✗", "did not finish"],
+    "not requested": ["–", "not requested"],
     online: ["●", "online"],
     offline: ["○", "offline"],
     busy: ["◆", "busy"],
   };
 
   const state = {
+    historySort: { key: "created_at", dir: -1 },  // dir 1 ascending, -1 descending
+    openFailures: null,       // run ID whose failure summary row is open
+    failureNodes: new Map(),  // run ID -> rendered failure summary
     targets: new Map(),
     runs: new Map(),
     plans: [],
@@ -37,6 +42,24 @@
   };
 
   const $ = (id) => document.getElementById(id);
+
+  // Messages and reasons are shown in sentence case ("error: x" -> "Error: x");
+  // the text is otherwise as the tool or runner wrote it.
+  function sentence(text) {
+    const value = String(text ?? "");
+    return value ? value[0].toUpperCase() + value.slice(1) : value;
+  }
+
+  // Display name of a target: its registered ID with spaces for underscores
+  // (Host_Linux -> "Host Linux"); the ID itself is unchanged everywhere else.
+  function targetName(host) {
+    return String(host ?? "–").replace(/_/g, " ");
+  }
+
+  function targetTitle(target) {
+    const name = targetName(target.host);
+    return target.hostname ? `${name} (${target.hostname})` : name;
+  }
 
   // Build an element; children are nodes or strings (as text).
   function el(tag, attributes, ...children) {
@@ -56,6 +79,13 @@
   }
 
   function statusBadge(status) {
+    // A step a finished run never reached keeps its pill, empty (screen
+    // readers still hear "not reached").
+    if (status === "not reached") {
+      return el("span", { className: "status status-not-reached" },
+        el("span", { "aria-hidden": "true", text: "\u00a0" }),
+        el("span", { className: "visually-hidden", text: "not reached" }));
+    }
     const known = STATUS_TEXT[status];
     const [icon, label] = known || ["•", String(status || "unknown")];
     const key = known ? status.replace(/ /g, "-") : "unknown";
@@ -70,13 +100,18 @@
     return el("time", { datetime: String(iso), text: shown });
   }
 
+  // Compact duration: only the non-zero parts, no leading zeros
+  // (4 -> "4s", 130 -> "2m 10s", 3900 -> "1h 5m"); 0 -> "0s".
   function formatSeconds(total) {
     const seconds = Math.max(0, Math.round(total));
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
     const s = seconds % 60;
-    const pad = (n) => String(n).padStart(2, "0");
-    return h ? `${h}h ${pad(m)}m ${pad(s)}s` : `${m}m ${pad(s)}s`;
+    const parts = [];
+    if (h) parts.push(`${h}h`);
+    if (m) parts.push(`${m}m`);
+    if (s || !parts.length) parts.push(`${s}s`);
+    return parts.join(" ");
   }
 
   async function api(method, path, body) {
@@ -106,6 +141,44 @@
 
   // ----- targets -----------------------------------------------------------
 
+  // One small box per piece of equipment the target reports, grouped by kind.
+  // Ubertooths (the devices under test) first; hubs and Bluetooth devices
+  // join here once the runner reports them.
+  function attachedEquipment(target) {
+    const serials = target.ubertooth_serials;
+    let boards;
+    if (!Array.isArray(serials)) {
+      boards = [el("p", { className: "hint",
+        text: `Unknown: ${target.enumeration_error || "the runner could not list its USB devices"}` })];
+    } else if (!serials.length) {
+      boards = [el("p", { className: "hint", text: "No Ubertooth attached." })];
+    } else {
+      // The runner lists its boards only when it registers, so say when;
+      // unknown while it is offline.
+      const when = target.registered_at
+        ? new Date(target.registered_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+        : "";
+      const state = target.status === "online"
+        ? ["ok", when ? `Detected on USB ${when}` : "Detected on USB"]
+        : ["warn", "Unknown (runner offline)"];
+      // Named by the alias the runs use (learned from the latest run's plan);
+      // until a run has started, by "Ubertooth" and the serial below.
+      const aliases = target.board_aliases || {};
+      boards = [el("ul", { className: "devices" }, ...serials.map((serial) =>
+        el("li", { className: "device" },
+          el("div", { className: "device-head" },
+            el("span", { className: `dot dot-${state[0]}`, "aria-hidden": "true" }),
+            el("span", { className: "device-name",
+              text: aliases[String(serial).toLowerCase()] ? targetName(aliases[String(serial).toLowerCase()]) : "Ubertooth" }),
+            el("span", { className: "device-state", text: state[1] })),
+          el("code", { className: "device-serial", title: "USB serial number", text: serial }))))];
+    }
+    return el("section", { className: "equipment", "aria-label": `Attached equipment on ${targetName(target.host)}` },
+      el("h4", { text: "Attached equipment" }),
+      el("div", { className: "equipment-group" },
+        el("h5", { text: "Devices under test" }), ...boards));
+  }
+
   function renderTargets() {
     const list = $("targets");
     const targets = [...state.targets.values()].sort((a, b) => a.host.localeCompare(b.host));
@@ -114,9 +187,6 @@
       const os = target.os || {};
       const osText = [os.system, os.macos_version || os.distribution, os.release, os.architecture]
         .filter(Boolean).join(" ");
-      const serials = Array.isArray(target.ubertooth_serials)
-        ? (target.ubertooth_serials.length ? target.ubertooth_serials.join(", ") : "none attached")
-        : `unknown (${target.enumeration_error || "enumeration unavailable"})`;
       const active = target.active_run_id
         ? el("span", {}, el("code", { text: target.active_run_id }), " ",
           el("button", {
@@ -127,16 +197,15 @@
         : "none";
       return el("li", {},
         el("article", { className: "card target-card", "aria-labelledby": `target-${target.host}` },
-          el("h3", { id: `target-${target.host}`, text: target.host }),
+          el("h3", { id: `target-${target.host}`, text: targetTitle(target) }),
           el("dl", { className: "summary summary-compact" },
             el("dt", { text: "Status" }), el("dd", { className: "badges" }, statusBadge(target.status),
               target.active_run_id ? statusBadge("busy") : null),
-            el("dt", { text: "Host name" }), el("dd", { text: target.hostname }),
             el("dt", { text: "OS" }), el("dd", { text: osText || "unknown" }),
             el("dt", { text: "Python" }), el("dd", { text: target.python }),
-            el("dt", { text: "Ubertooth serials" }), el("dd", { text: serials }),
             el("dt", { text: "Last seen" }), el("dd", {}, timeElement(target.last_seen_at)),
-            el("dt", { text: "Active run" }), el("dd", {}, active))));
+            el("dt", { text: "Active run" }), el("dd", {}, active)),
+          attachedEquipment(target)));
     }));
     renderTargetSelect();
   }
@@ -152,7 +221,7 @@
     select.replaceChildren(...targets.map((target) => {
       const notes = [target.status];
       if (target.active_run_id) notes.push("busy");
-      return el("option", { value: target.host, text: `${target.host} (${notes.join(", ")})` });
+      return el("option", { value: target.host, text: `${targetName(target.host)} (${notes.join(", ")})` });
     }));
     if (targets.some((target) => target.host === current)) select.value = current;
   }
@@ -172,7 +241,10 @@
     status.textContent = "Loading refs…";
     try {
       const data = await api("GET", "/api/refs");
-      const groups = { default: "Default branch", branch: "Branches", tag: "Tags" };
+      // Branches first (main at the top, as the controller orders them),
+      // then tags; the remote's HEAD is the same commit as its default branch
+      // and is listed last.
+      const groups = { branch: "Branches", tag: "Tags", default: "Remote HEAD" };
       const current = select.value;
       // One entry per listed ref, keyed by kind and name, so a branch and a
       // tag of the same name are separate choices; each sends its own
@@ -191,7 +263,7 @@
       const preferred = [current, "branch:main", "branch:master", "default:HEAD"]
         .find((value) => value && state.refOptions.has(value));
       if (preferred) select.value = preferred;
-      status.textContent = `${data.refs.length} refs from ${data.repository}, listed ${data.fetched_at}.`;
+      status.textContent = `${data.refs.length} refs from ${data.repository}, listed ${data.fetched_at}`;
     } catch (error) {
       state.refOptions = new Map();
       select.replaceChildren(el("option", { value: "", text: "(refs unavailable)" }));
@@ -246,19 +318,25 @@
 
   function renderSuiteTests() {
     const suite = findSuite($("plan").value, $("suite").value);
-    $("suite-tests").textContent = suite
-      ? `${suite.tests.map((test) => test.name).join(", ")}. ${estimateText(suite)}`
-      : "";
+    $("suite-tests").textContent = suite ? suite.tests.map((test) => test.name).join(", ") : "";
+    const box = $("suite-estimate");
+    box.hidden = !suite;
+    if (!suite) return;
+    const known = suite.estimated_s !== null && suite.estimated_s !== undefined;
+    box.classList.toggle("estimate-unknown", !known);
+    $("suite-estimate-value").textContent = known ? formatSeconds(suite.estimated_s) : "no estimate";
+    $("suite-estimate-note").textContent = estimateText(suite);
   }
 
+  // The note under the estimate box; an indicator, so no closing period.
   function estimateText(suite) {
     if (suite.estimated_s !== null && suite.estimated_s !== undefined) {
       const perBoard = suite.per_board_tests
-        ? ` ${suite.per_board_tests} test(s) run once per selected Ubertooth and are counted once here; the live countdown counts every board the run selects.`
+        ? `; ${suite.per_board_tests} test(s) run once per selected Ubertooth and are counted once here (the live countdown counts every board)`
         : "";
-      return `Estimated test time ${formatSeconds(suite.estimated_s)} (from the catalog's per-test estimates; build and preflight not included).${perBoard}`;
+      return `From the catalog's per-test estimates; build and preflight not included${perBoard}`;
     }
-    return `No time estimate: ${suite.unestimated_tests} of ${suite.tests.length} tests have no estimated duration, so the live view shows elapsed time only.`;
+    return `${suite.unestimated_tests} of ${suite.tests.length} tests have no estimated duration, so the live view shows elapsed time only`;
   }
 
   async function submitRun(event) {
@@ -308,14 +386,20 @@
       run_id: runId, seen: new Set(), events: [], items: [],
       byInvocation: new Map(), log: [], partial: "", stage: "waiting",
       invocations: null,
+      // invocation ID -> transcript lines ({kind, text}) of that test.
+      transcripts: new Map(), partials: new Map(),
+      shown: null,  // invocation ID whose transcript is open
     };
   }
 
   const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
-  async function selectRun(runId, scroll = true) {
+  // past: opened from History (a grey "Past run" card). A run started here or
+  // followed from its target stays a "Live run" card after it ends.
+  async function selectRun(runId, scroll = true, past = false) {
     if (!RUN_ID.test(String(runId))) return;
     state.selected = runId;
+    state.selectedPast = past;
     // A link to this view: /ui/#run=<run_id>.
     window.history.replaceState(null, "", `#run=${runId}`);
     state.live = newLive(runId);
@@ -338,6 +422,13 @@
     if (scroll) $("live-heading").scrollIntoView({ block: "start" });
   }
 
+  // The boards an invocation uses, e.g. "UT Linux0" or "sender: UT Linux0".
+  function boardLabels(resources) {
+    if (!resources || typeof resources !== "object") return [];
+    return Object.entries(resources).map(([role, alias]) =>
+      role === "Ubertooth" ? targetName(alias) : `${role}: ${targetName(alias)}`);
+  }
+
   function rebuildChecklist() {
     const live = state.live;
     if (!live) return;
@@ -353,6 +444,7 @@
       live.items = live.invocations.map((invocation) => ({
         name: invocation.test_name, invocation_id: invocation.invocation_id,
         estimated_s: invocation.estimated_s, status: "pending", reason: "",
+        boards: boardLabels(invocation.resources),
       }));
     } else {
       live.items = tests.map((test) => ({
@@ -368,6 +460,15 @@
     live.log = [];
     live.partial = "";
     live.stage = "waiting";
+    // Phases before the tests, shown above them; status follows their events.
+    const runInfo = state.runs.get(live.run_id);
+    // "Boards" is the wait for boards another session holds: the runner
+    // leases them before the run's first record, so it passes on that record.
+    live.phases = [
+      { key: "boards", name: "Boards", status: "running", reason: "Waiting for the run's boards (another session may hold them)" },
+      { key: "build", name: "Build", status: runInfo && runInfo.build === false ? "not requested" : "pending", reason: "" },
+      { key: "preflight", name: "Preflight", status: "pending", reason: "" },
+    ];
     // The estimate covers tests only, so the countdown starts with the first test.
     live.testsStarted = null;
     for (const record of events) addEvent(live.run_id, record, false);
@@ -400,6 +501,91 @@
     }
   }
 
+  // One test's transcript: each command sent, its output as it arrives
+  // (stderr marked), and how it ended. Keyed by invocation ID.
+  function recordTranscript(live, kind, status, details) {
+    // Tests by invocation ID; build and preflight output (no invocation ID)
+    // under "phase:build" / "phase:preflight" while that step runs.
+    const phaseKey = kind.startsWith("build") || live.stage === "building" ? "phase:build"
+      : kind.startsWith("preflight") || live.stage === "preflight" ? "phase:preflight" : null;
+    const id = details.invocation_id || phaseKey;
+    if (!id) return;
+    const key = String(id);
+    if (!live.transcripts.has(key)) live.transcripts.set(key, []);
+    const lines = live.transcripts.get(key);
+    const flush = (stream) => {
+      const pkey = `${key}\u0000${stream}`;
+      const rest = live.partials.get(pkey);
+      if (rest) { lines.push({ kind: stream, text: rest }); live.partials.delete(pkey); }
+    };
+    if (kind === "command_started") {
+      const argv = Array.isArray(details.argv) ? details.argv.map(String).join(" ") : "";
+      lines.push({ kind: "command", text: `$ ${argv}` });
+    } else if (kind === "command_output") {
+      const stream = details.stream === "stderr" ? "stderr" : "stdout";
+      const pkey = `${key}\u0000${stream}`;
+      const parts = ((live.partials.get(pkey) || "") + String(details.text ?? "")).split("\n");
+      live.partials.set(pkey, parts.pop());
+      for (const text of parts) lines.push({ kind: stream, text });
+    } else if (kind === "command_output_omitted") {
+      lines.push({ kind: "note", text: "… output left out here (the full output is in the run's output/ directory)" });
+    } else if (kind === "command_finished") {
+      flush("stdout"); flush("stderr");
+      const rc = details.returncode === null || details.returncode === undefined ? "–" : details.returncode;
+      const took = typeof details.duration_s === "number" ? `, ${details.duration_s.toFixed(2)} s` : "";
+      const extra = details.timed_out ? ", timed out" : details.cancelled ? ", cancelled" : "";
+      lines.push({ kind: status === "passed" || status === "stopped" ? "result" : "result-bad",
+        text: `→ exit ${rc}${took}${extra} (${status})` });
+    } else if (kind === "build_step_started") {
+      lines.push({ kind: "note", text: `+++ ${details.step_name ?? details.step_id ?? ""} +++` });
+    } else if (kind === "test_finished" || kind === "build_finished" || kind === "preflight_finished") {
+      flush("stdout"); flush("stderr");
+      lines.push({ kind: status === "passed" ? "result" : "result-bad",
+        text: `=== ${status}${details.reason ? `: ${details.reason}` : ""} ===` });
+    }
+    if (lines.length > 4000) lines.splice(0, lines.length - 4000);
+  }
+
+  // Keep the running step near the top of the test list, unless the user
+  // has scrolled the list themselves ("Follow the current test" resumes).
+  function followCurrent(live) {
+    const box = $("checklist-scroll");
+    const current = box.querySelector('[aria-current="step"]');
+    // Following resumes by itself when the next step starts.
+    const step = current ? current.textContent : null;
+    if (step !== live.followedStep) { live.followedStep = step; live.follow = true; }
+    if (live.follow === false || !current) return;
+    const top = Math.max(0, current.offsetTop - box.offsetTop - current.offsetHeight);
+    if (Math.abs(box.scrollTop - top) > 2) {
+      box.scrollTop = top;
+    }
+  }
+
+  function showTranscript(id) {
+    const live = state.live;
+    if (!live) return;
+    live.shown = live.shown === id ? null : id;
+    renderLive();
+    if (live.shown) $("transcript").focus();
+  }
+
+  function renderTranscript(live) {
+    const box = $("transcript-box");
+    const id = live.shown;
+    box.hidden = !id;
+    if (!id) return;
+    const item = live.items.find((entry) => entry.invocation_id === id) ||
+      [...live.byInvocation.entries()].filter(([key]) => key === id).map(([, value]) => value)[0];
+    const phase = (live.phases || []).find((entry) => `phase:${entry.key}` === id);
+    $("transcript-title").textContent = `Transcript: ${phase ? phase.name : item ? item.name : id}`;
+    const lines = live.transcripts.get(id) || [];
+    const node = $("transcript");
+    const atBottom = node.scrollTop + node.clientHeight >= node.scrollHeight - 4;
+    node.replaceChildren(...(lines.length ? lines : [{ kind: "note", text: "Nothing recorded yet" }])
+      .map((line) => el("span", { className: `t-${line.kind}`, text: `${line.text}\n` })));
+    if (atBottom) node.scrollTop = node.scrollHeight;
+  }
+
   function addEvent(runId, record, render = true) {
     const live = state.live;
     if (!live || live.run_id !== runId || !record || typeof record !== "object") return;
@@ -409,6 +595,7 @@
     const details = record.details && typeof record.details === "object" ? record.details : {};
     const kind = String(record.event_type);
     const status = String(record.status || "");
+    recordTranscript(live, kind, status, details);
     if (kind === "command_output") {
       const text = live.partial + String(details.text ?? "");
       const lines = text.split("\n");
@@ -425,6 +612,15 @@
         for (const value of Object.values(counts)) if (typeof value === "number") count += value;
       }
       pushLog(`[... ${count} output lines left out; full output in ${String(details.output_file ?? "")} ...]`);
+    }
+    const boardsPhase = (live.phases || []).find((entry) => entry.key === "boards");
+    if (boardsPhase && boardsPhase.status === "running") {
+      boardsPhase.status = "passed";
+      boardsPhase.reason = "";
+    }
+    if (kind === "build_started" || kind === "preflight_started") {
+      const phase = (live.phases || []).find((entry) => `${entry.key}_started` === kind);
+      if (phase) phase.status = "running";
     }
     if (kind === "build_started") live.stage = "building";
     else if (kind === "preflight_started") live.stage = "preflight";
@@ -480,6 +676,8 @@
     } else if (kind === "build_step_started") {
       pushLog(`+++ ${details.step_name ?? details.step_id ?? ""} +++`);
     } else if (kind === "build_finished" || kind === "preflight_finished") {
+      const phase = (live.phases || []).find((entry) => `${entry.key}_finished` === kind);
+      if (phase) { phase.status = status || "passed"; phase.reason = String(details.reason || ""); }
       pushLog(`=== ${kind.replace("_finished", "").toUpperCase()}: ${status}${details.reason ? ": " + details.reason : ""} ===`);
     } else if (kind === "run_started") {
       pushLog(`=== RUN ${record.run_id}: ${details.plan_name ?? ""} / ${details.suite ?? ""} on ${details.host ?? ""} ===`);
@@ -489,49 +687,127 @@
     if (render) renderLive();
   }
 
+  // A run has ended only once it has a final status; until then a test that
+  // has not started is "pending", and only after the end "not reached".
+  const FINAL = new Set(["passed", "failed", "error", "canceled", "lost"]);
+  function runEnded(run) {
+    return Boolean(run) && FINAL.has(run.status);
+  }
+
   function itemStatus(item, run) {
-    if (!run || run.status === "running") return item.status;
-    if (item.status === "pending") return "not run";
+    if (!runEnded(run)) return item.status;
+    if (item.status === "pending") return "not reached";
     if (item.status === "running") return "did not finish";
     return item.status;
+  }
+
+  // Every board the run's plan uses (from its manifest), or why it is unknown.
+  function runBoards(live) {
+    if (!Array.isArray(live.invocations)) return "Known once the run's plan arrives";
+    const aliases = new Set();
+    for (const invocation of live.invocations) {
+      for (const alias of Object.values(invocation.resources || {})) aliases.add(targetName(alias));
+    }
+    return aliases.size ? [...aliases].sort().join(", ") : "None (host only)";
   }
 
   function renderLive() {
     const live = state.live;
     if (!live) return;
     const run = state.runs.get(live.run_id) || { run_id: live.run_id, status: "running" };
-    const fields = [
-      ["Run", el("code", { text: run.run_id })],
-      ["Status", statusBadge(run.status)],
-      ["Stage", live.stage],
-      ["Ref", refLabel(run)],
-      ["Plan / suite", `${run.plan ?? "–"} / ${run.suite ?? "–"}`],
-      ["Target", run.target ?? "–"],
-      ["Started", timeElement(run.created_at)],
-      ["Finished", timeElement(run.finished_at)],
+    // A run opened from History is a past run (grey card); one started or
+    // followed here stays "Live run" when it ends.
+    const isLive = !state.selectedPast;
+    $("live-heading").textContent = isLive ? "Live run" : "Past run";
+    $("live-heading").closest(".panel").classList.toggle("panel-past", !isLive);
+    // Column groups across the top of the card; each group stacks its
+    // label/value pairs vertically. "–" until a value is known.
+    const groups = [
+      [["Run", el("code", { text: run.run_id })],
+        ["Started", timeElement(run.created_at)], ["Finished", timeElement(run.finished_at)]],
+      [["Status", statusBadge(run.status)], ["Stage", live.stage]],
+      [["Ref", refLabel(run)],
+        ["Plan / suite", `${run.plan ?? "–"} / ${run.suite ?? "–"}`],
+        ["Target", run.target ? targetName(run.target) : "–"]],
+      [["Boards", runBoards(live)]],
     ];
-    if (run.reason) fields.push(["Reason", run.reason]);
-    $("live-summary").replaceChildren(...fields.flatMap(([term, value]) =>
-      [el("dt", { text: term }), el("dd", {}, value)]));
-    $("cancel-button").hidden = run.status !== "running";
+    const items = groups.map((pairs) => el("div", { className: "summary-item" },
+      ...pairs.flatMap(([term, value]) => [el("dt", { text: term }), el("dd", {}, value)])));
+    if (run.reason) {
+      items.push(el("div", { className: "summary-item summary-item-wide" },
+        el("dt", { text: "Reason" }), el("dd", {}, sentence(run.reason))));
+    }
+    $("live-summary").replaceChildren(...items);
+    $("cancel-button").hidden = runEnded(run);
 
-    $("checklist").replaceChildren(...live.items.map((item) => {
-      const shown = itemStatus(item, run);
+    // A phase still pending or running when the run ended did not finish.
+    const phaseStatus = (phase) => (!runEnded(run) ? phase.status
+      : phase.status === "pending" ? "not reached" : phase.status === "running" ? "did not finish" : phase.status);
+    // A run that ended in a phase with no failure of its own (for example a
+    // ref that did not resolve) shows the run's reason on that phase.
+    const phases = live.phases || [];
+    let blamed = null;
+    if (runEnded(run) && run.status !== "passed" && run.reason
+        && !phases.some((phase) => phase.status === "failed" || phase.status === "error")
+        && !live.items.some((item) => item.status !== "pending")) {
+      blamed = phases.find((phase) => phase.status === "running" || phase.status === "pending") || null;
+    }
+    // A small "Transcript" button under each step's name opens its commands
+    // and output above the log; greyed until the step has output.
+    const transcriptButton = (tid, enabled, label) => el("button", {
+      type: "button", className: "transcript-toggle", text: "Transcript",
+      disabled: !enabled,
+      "aria-expanded": enabled ? (live.shown === tid ? "true" : "false") : null,
+      "aria-label": `Transcript of ${label}`,
+      title: enabled ? null : "Available once this step starts",
+      onclick: enabled ? () => showTranscript(tid) : null,
+    });
+    const nameCell = (label, button) => el("div", { className: "check-title" },
+      el("span", { className: "check-name", text: label }), button);
+    const estimateCell = (seconds) => el("span", {
+      className: "hint check-estimate",
+      text: seconds !== null && seconds !== undefined ? formatSeconds(seconds) : "",
+      "aria-label": seconds !== null && seconds !== undefined ? `estimated runtime ${formatSeconds(seconds)}` : null,
+    });
+    const phaseRows = phases.map((phase) => {
+      const shown = phase === blamed ? "failed" : phaseStatus(phase);
+      const reason = phase === blamed ? run.reason : phase.reason;
+      const tid = `phase:${phase.key}`;
+      const open = live.shown === tid;
       return el("li", {
-        className: `check check-${shown.replace(/ /g, "-")}`,
+        className: `check check-phase check-${shown.replace(/ /g, "-")}${open ? " check-open" : ""}`,
         "aria-current": shown === "running" ? "step" : null,
       },
-        statusBadge(shown), " ", el("span", { className: "check-name", text: item.name }),
-        item.estimated_s !== null && item.estimated_s !== undefined
-          ? el("span", { className: "hint check-estimate", text: ` (about ${formatSeconds(item.estimated_s)})` }) : null,
-        item.reason ? el("span", { className: "reason", text: ` — ${item.reason}` }) : null);
+        statusBadge(shown),
+        nameCell(phase.name, phase.key === "boards" ? null
+          : transcriptButton(tid, live.transcripts.has(tid), phase.name)),
+        estimateCell(null),
+        reason ? el("span", { className: "reason", text: sentence(reason) }) : null);
+    });
+    $("checklist").replaceChildren(...phaseRows, ...live.items.map((item) => {
+      const shown = itemStatus(item, run);
+      const known = item.invocation_id
+        || [...live.byInvocation.entries()].find(([, value]) => value === item)?.[0] || null;
+      const started = item.status !== "pending";
+      const id = known && started ? known : null;
+      const open = id && live.shown === id;
+      return el("li", {
+        className: `check check-${shown.replace(/ /g, "-")}${started ? "" : " check-locked"}${open ? " check-open" : ""}`,
+        "aria-current": shown === "running" ? "step" : null,
+      },
+        statusBadge(shown),
+        nameCell(item.name, transcriptButton(id || `pending:${item.name}`, Boolean(id), item.name)),
+        estimateCell(item.estimated_s),
+        item.reason ? el("span", { className: "reason", text: sentence(item.reason) }) : null);
     }));
     if (!live.items.length) {
-      $("checklist").replaceChildren(el("li", {
+      $("checklist").append(el("li", {
         className: "check-note",
         text: "Tests appear here as they start (this run's plan is not in the controller's plans directory).",
       }));
     }
+    followCurrent(live);
+    renderTranscript(live);
     const logNode = $("log");
     const lines = live.partial ? [...live.log, live.partial] : live.log;
     logNode.textContent = lines.join("\n");
@@ -553,24 +829,28 @@
     const estimates = live.items.map((item) => item.estimated_s);
     const known = live.planned && estimates.length > 0 &&
       estimates.every((value) => value !== null && value !== undefined);
+    const finished = runEnded(run);
+    const finishedText = () => {
+      return `Took ${formatSeconds(elapsed)}`;
+    };
     if (!known) {
-      $("live-clock").textContent = `Elapsed ${formatSeconds(elapsed)}`;
+      $("live-clock").textContent = finished ? finishedText() : `Elapsed ${formatSeconds(elapsed)}`;
       const missing = estimates.filter((value) => value === null || value === undefined).length;
       $("live-estimate").textContent = live.planned
-        ? `No countdown: ${missing} of ${estimates.length} tests have no estimated duration, so only elapsed time is shown.`
-        : "No countdown: this run's plan is unknown here, so only elapsed time is shown.";
+        ? `No countdown: ${missing} of ${estimates.length} tests have no estimated duration, so only elapsed time is shown`
+        : "No countdown: this run's plan is unknown here, so only elapsed time is shown";
       return;
     }
     const total = estimates.reduce((sum, value) => sum + value, 0);
-    $("live-estimate").textContent = `Estimate ${formatSeconds(total)} from the catalog's per-test estimates; build and preflight are not included.`;
+    $("live-estimate").textContent = `Estimate ${formatSeconds(total)} from the catalog's per-test estimates; build and preflight not included`;
     const testsStart = live.testsStarted ? Date.parse(live.testsStarted) : NaN;
     const testsElapsed = Number.isNaN(testsStart) ? null : Math.max(0, (end - testsStart) / 1000);
-    if (run.status !== "running") {
-      $("live-clock").textContent = `Finished after ${formatSeconds(elapsed)}`;
+    if (finished) {
+      $("live-clock").textContent = finishedText();
     } else if (testsElapsed === null) {
-      $("live-clock").textContent = `Countdown starts with the first test (elapsed ${formatSeconds(elapsed)})`;
+      $("live-clock").textContent = `Elapsed ${formatSeconds(elapsed)}`;
     } else if (testsElapsed <= total) {
-      $("live-clock").textContent = `About ${formatSeconds(total - testsElapsed)} remaining (elapsed ${formatSeconds(elapsed)})`;
+      $("live-clock").textContent = `${formatSeconds(total - testsElapsed)} remaining, estimated (elapsed ${formatSeconds(elapsed)})`;
     } else {
       $("live-clock").textContent = `Over the estimate by ${formatSeconds(testsElapsed - total)} (elapsed ${formatSeconds(elapsed)})`;
     }
@@ -599,38 +879,67 @@
   }
 
   function renderHistory() {
-    const runs = [...state.runs.values()].sort((a, b) =>
-      String(b.created_at).localeCompare(String(a.created_at)) || b.run_id.localeCompare(a.run_id));
+    // Sorted by the chosen column (Started, newest first, by default); ties
+    // fall back to newest first. Missing values sort last either way.
+    const { key, dir } = state.historySort;
+    const value = (run) => (key === "ref" ? refLabel(run) : key === "plan"
+      ? `${run.plan ?? ""} / ${run.suite ?? ""}` : String(run[key] ?? ""));
+    const runs = [...state.runs.values()].sort((a, b) => {
+      const va = value(a); const vb = value(b);
+      if (va !== vb) {
+        if (!va) return 1;
+        if (!vb) return -1;
+        return dir * va.localeCompare(vb, undefined, { numeric: true });
+      }
+      return String(b.created_at).localeCompare(String(a.created_at)) || b.run_id.localeCompare(a.run_id);
+    });
+    for (const th of document.querySelectorAll("table.history th[data-sort]")) {
+      th.setAttribute("aria-sort", th.dataset.sort === key ? (dir > 0 ? "ascending" : "descending") : "none");
+    }
+    const label = document.querySelector(`table.history th[data-sort="${key}"] .sort`);
+    $("history-caption").textContent =
+      `Runs, sorted by ${label ? label.textContent : key} (${dir > 0 ? "ascending" : "descending"})`;
     $("history-empty").hidden = runs.length > 0;
     $("history").replaceChildren(...runs.map((run) => {
       const actions = el("td", { className: "actions" },
         el("button", {
-          type: "button", text: "Watch", "aria-label": `Watch run ${run.run_id}`,
-          onclick: () => selectRun(run.run_id),
+          type: "button", text: "View", "aria-label": `View run ${run.run_id}`,
+          onclick: () => selectRun(run.run_id, true, runEnded(run)),
         }));
       if (run.report) {
+        // Rendered in a new tab by report.html; the raw file is linked there.
         actions.append(" ", el("a", {
           className: "button-link",
-          href: `${runPath(run.run_id)}/report.md`, text: "report.md",
-          "aria-label": `report.md of run ${run.run_id}`,
+          href: `report.html?run=${encodeURIComponent(run.run_id)}`, text: "Report",
+          target: "_blank", rel: "noopener",
+          "aria-label": `Report of run ${run.run_id} (opens in a new tab)`,
         }));
       }
-      if (run.status !== "running" && run.status !== "passed") {
+      const open = state.openFailures === run.run_id;
+      if (runEnded(run) && run.status !== "passed") {
         actions.append(" ", el("button", {
-          type: "button", text: "Failures", "aria-label": `Failure summary of run ${run.run_id}`,
-          onclick: () => showFailures(run.run_id),
+          type: "button", text: open ? "Hide failures" : "Failures",
+          "aria-expanded": open ? "true" : "false",
+          "aria-controls": `failures-${run.run_id}`,
+          "aria-label": `${open ? "Hide the" : "Show the"} failure summary of run ${run.run_id}`,
+          onclick: () => toggleFailures(run.run_id),
         }));
       }
-      return el("tr", {},
+      // The run ID is long; it is in the row's tooltip and the Watch label.
+      const row = el("tr", { title: `Run ${run.run_id}` },
         el("td", { className: "time" }, timeElement(run.created_at)),
         el("td", { className: "time" }, timeElement(run.finished_at)),
-        el("td", {}, el("code", { text: run.run_id })),
         el("td", { text: refLabel(run) }),
         el("td", { text: `${run.plan ?? "–"} / ${run.suite ?? "–"}` }),
-        el("td", { text: run.target }),
+        el("td", { text: targetName(run.target) }),
         el("td", {}, statusBadge(run.status)),
         actions);
-    }));
+      if (!open) return [row];
+      // The failure summary opens in a row of its own right under the run.
+      const cell = el("td", { colSpan: "7", className: "failures-cell" });
+      cell.append(state.failureNodes.get(run.run_id) || el("p", { className: "hint", text: "Loading…" }));
+      return [row, el("tr", { id: `failures-${run.run_id}`, className: "failures-row" }, cell)];
+    }).flat());
   }
 
   async function loadRuns() {
@@ -644,33 +953,31 @@
     }
   }
 
-  async function showFailures(runId) {
-    const box = $("failures");
-    const list = $("failures-list");
-    box.hidden = false;
-    $("failures-heading").textContent = `Failure summary: ${runId}`;
-    list.replaceChildren(el("li", { text: "Loading…" }));
+  async function toggleFailures(runId) {
+    if (state.openFailures === runId) {
+      state.openFailures = null;
+      renderHistory();
+      return;
+    }
+    state.openFailures = runId;
+    state.failureNodes.delete(runId);
+    renderHistory();
+    let node;
     try {
       const data = await api("GET", runPath(runId));
-      const run = data.run;
-      $("failures-run").replaceChildren(
-        el("dt", { text: "Target" }), el("dd", { text: run.target }),
-        el("dt", { text: "Ref" }), el("dd", { text: refLabel(run) }),
-        el("dt", { text: "Plan / suite" }), el("dd", { text: `${run.plan ?? "–"} / ${run.suite ?? "–"}` }),
-        el("dt", { text: "Status" }), el("dd", {}, statusBadge(run.status)));
-      if (!data.failures.length) {
-        list.replaceChildren(el("li", { text: "No failed step recorded." }));
-      } else {
-        list.replaceChildren(...data.failures.map((failure) => el("li", { className: "failure" },
-          statusBadge(failure.status), " ", el("strong", { text: failure.step }),
-          failure.reason ? el("span", { text: `: ${failure.reason}` }) : null,
-          failure.log && failure.log.length
-            ? el("pre", { className: "log", text: failure.log.join("\n") }) : null)));
-      }
+      node = !data.failures.length
+        ? el("p", { className: "hint", text: "No failed step recorded" })
+        : el("ul", { className: "failures" }, ...data.failures.map((failure) =>
+          el("li", { className: "failure" },
+            statusBadge(failure.status), " ", el("strong", { text: failure.step }),
+            failure.reason ? el("span", { className: "reason", text: sentence(failure.reason) }) : null,
+            failure.log && failure.log.length
+              ? el("pre", { className: "log failure-log", text: failure.log.join("\n") }) : null)));
     } catch (error) {
-      list.replaceChildren(el("li", { text: `Cannot load the run: ${error.message}` }));
+      node = el("p", { className: "hint", text: `Cannot load the run: ${error.message}` });
     }
-    $("failures-heading").focus();
+    state.failureNodes.set(runId, node);
+    if (state.openFailures === runId) renderHistory();
   }
 
   // ----- live socket -------------------------------------------------------
@@ -682,9 +989,9 @@
     socket.addEventListener("open", () => {
       state.retry = 1000;
       $("connection").className = "conn conn-up";
-      $("connection").textContent = "Connected to the controller (live updates on).";
+      $("connection").textContent = "Connected to the controller (live updates on)";
       loadRuns();
-      if (state.selected) selectRun(state.selected, false);
+      if (state.selected) selectRun(state.selected, false, state.selectedPast);
     });
     socket.addEventListener("message", (message) => {
       let data;
@@ -709,7 +1016,7 @@
       const wait = state.retry;
       state.retry = Math.min(state.retry * 2, 30000);
       $("connection").className = "conn conn-down";
-      $("connection").textContent = `Disconnected from the controller; retrying in ${Math.round(wait / 1000)} s.`;
+      $("connection").textContent = `Disconnected from the controller; retrying in ${Math.round(wait / 1000)} s`;
       window.setTimeout(connect, wait);
     });
   }
@@ -727,6 +1034,32 @@
     if (linked && RUN_ID.test(linked[1])) state.selected = linked[1];
     connect();
     window.setInterval(renderClock, 1000);
+    // Only the user's own scrolling (wheel, touch, drag, keys) stops the
+    // list following the running test; scrolls the page makes do not.
+    const stopFollowing = () => {
+      if (state.live) state.live.follow = false;
+    };
+    for (const type of ["wheel", "touchmove", "mousedown"]) {
+      $("checklist-scroll").addEventListener(type, stopFollowing, { passive: true });
+    }
+    $("checklist-scroll").addEventListener("keydown", (event) => {
+      if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) stopFollowing();
+    });
+    $("transcript-close").addEventListener("click", () => {
+      if (state.live) { state.live.shown = null; renderLive(); }
+    });
+    // Click a column header to sort by it; click again to reverse.
+    for (const th of document.querySelectorAll("table.history th[data-sort]")) {
+      th.querySelector(".sort").addEventListener("click", () => {
+        const sortKey = th.dataset.sort;
+        const current = state.historySort;
+        const times = sortKey === "created_at" || sortKey === "finished_at";
+        state.historySort = current.key === sortKey
+          ? { key: sortKey, dir: -current.dir }
+          : { key: sortKey, dir: times ? -1 : 1 };
+        renderHistory();
+      });
+    }
   }
 
   document.addEventListener("DOMContentLoaded", start);

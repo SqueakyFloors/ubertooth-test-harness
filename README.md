@@ -47,7 +47,7 @@ it through an SSH tunnel; nothing is exposed on the network.
 
 4. **Run something:** in Run setup pick a git ref (for example `main`), a plan
    (`host` needs no board and is a safe first run), the target, keep "Build the
-   ref on the target first" ticked, and press Run. The Live run card ticks off
+   selected commit's host tools on the target first" ticked, and press Run. The Live run card ticks off
    each test; History keeps every run with its `report.md`.
 
 If it does not connect:
@@ -1207,15 +1207,20 @@ word and symbol (colour only reinforces it).
 
 ![The web GUI with one target, a live run and its history](docs/gui.png)
 
-- **Targets:** one card per registered target: host, host name, OS, Python,
-  Ubertooth serials (or why they are unknown), online/offline (plus busy
-  while it runs), last seen, and
-  the active run with a Watch button.
+- **Targets:** one card per registered target, titled with its name
+  (underscores shown as spaces) and the machine's host name in brackets:
+  online/offline (plus busy while it runs), OS, Python, last seen, the active
+  run with a Watch button, and an **Attached equipment** box. That box groups
+  equipment by kind; today it holds "Devices under test" (the Ubertooths),
+  one small box each with its USB serial and a status dot with text (green: "Detected on
+  USB" with the time the runner last listed its boards, which it does when it
+  registers; nothing has talked to the board yet; yellow: unknown while the runner is offline), or why the runner could not list them. USB hubs and Bluetooth test
+  devices will join it as their own groups.
 - **Run setup:** git ref (default branch, branches and tags from
   `/api/refs`), plan and suite (from `/api/plans`, with the suite's tests;
   only runnable plans are offered, and plans of planned tests such as
   `backlog` are named as not runnable), target, and whether to build the ref first; Run starts the whole suite.
-- **Live run:** the suite's tests as a checklist that ticks from the run's
+- **Live run:** the suite's tests as a test list that ticks from the run's
   events (✓ passed, ✗ failed, … running, ○ pending or not run; always text
   plus symbol), the current stage (building, preflight, tests), elapsed time,
   a Cancel button, and the last 200 log lines in a scrolling console panel. A countdown is shown only when
@@ -1238,10 +1243,24 @@ word and symbol (colour only reinforces it).
   so the countdown counts every board. Build and preflight time are not included: the countdown starts with
   the first test. Otherwise the view shows elapsed time and says why. The
   view is linkable as `/ui/#run=<run_id>`.
-- **History:** every run, newest first, with started/finished times, ref,
-  plan/suite, target and status, a link to its `report.md`, and for a run
-  that did not pass a failure summary (each failed phase or test with its
-  reason and last output lines, then the run's own reason).
+- **History:** every run (newest first; click a column header to sort by
+  it, again to reverse), with started/finished times, branch or tag with the
+  commit it resolved to, plan/suite, target and status (the run ID in the
+  row's tooltip). About ten rows show at once; the rest scroll under a fixed
+  header. **View** opens the run in the run card as a grey **Past run** (a
+  run started or followed from its target stays **Live run** when it ends).
+  **Report** opens `report.md` rendered in a new tab (`/ui/report.html`,
+  which links the raw file). **Failures**, for a run that did not pass,
+  opens its failure summary in a row right under it (each failed phase or
+  test with its reason and last output lines, then the run's own reason).
+- **Boards, Build and Preflight** rows come before the tests in the run
+  card. A run first waits for its boards when another session holds them
+  (the runner passes `--wait-for-boards`, 30 minutes by default; set it with
+  the runner's `--wait-for-boards MINUTES`), and a failure in any of these
+  steps is shown on its row. Under each step's name a **Transcript** button
+  (greyed until the step starts) opens that step's commands and output above
+  the full transcript. The test list keeps the running step near its top;
+  scrolling it yourself pauses that until the next step starts.
 
 Every HTTP response carries `Content-Security-Policy: default-src 'self';
 script-src 'self'; style-src 'self'; connect-src 'self' ws://<host>;

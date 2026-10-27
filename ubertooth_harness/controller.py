@@ -183,6 +183,9 @@ class Target:
     protocol_errors: int = 0
     last_protocol_error: str | None = None
     last_runner_protocol_error: str | None = None
+    # Serial -> registered alias (e.g. "UT_Linux0"), learned from the
+    # manifest of this target's latest run; empty until a run has started.
+    board_aliases: dict = dataclasses.field(default_factory=dict)
 
     def view(self) -> dict:
         data = dataclasses.asdict(self)
@@ -357,9 +360,34 @@ class Controller:
         self._pending_runs: dict[str, _Pending] = {}
         self._pending_cancels: dict[str, _Pending] = {}
         self._subscribers: set[_Subscriber] = set()
+        # host -> {serial: alias}, kept across restarts so the Targets card
+        # names boards before the next run's plan arrives.
+        self._board_names_path = self.results_dir.parent / "board-names.json"
+        self._board_names = self._load_board_names()
         self._load_runs()
 
     # ----- results store ---------------------------------------------------
+
+    def _load_board_names(self) -> dict:
+        try:
+            data = json.loads(self._board_names_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {
+            str(host)[:64]: {str(k)[:64]: str(v)[:64] for k, v in names.items()}
+            for host, names in data.items() if isinstance(names, dict)
+        }
+
+    def _save_board_names(self) -> None:
+        temporary = self._board_names_path.with_suffix(".json.tmp")
+        try:
+            temporary.write_text(json.dumps(self._board_names, indent=2, sort_keys=True),
+                                 encoding="utf-8")
+            os.replace(temporary, self._board_names_path)
+        except OSError as error:
+            self.log(f"warning: cannot save board names: {error}")
 
     def _load_runs(self) -> None:
         for directory in sorted(self.results_dir.iterdir()):
@@ -428,6 +456,37 @@ class Controller:
             json.dumps(run.record(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
         os.replace(temporary, run.directory / RUN_RECORD)
+
+    def _learn_board_aliases(self, target: Target, event: dict) -> None:
+        """Record which registered alias names each board serial, from a manifest.
+
+        The runner's registration lists serials only; its run manifest maps
+        each invocation's roles to aliases and their serials. Names are shown,
+        never trusted: malformed entries are skipped.
+        """
+        details = event.get("details")
+        manifest = details.get("manifest") if isinstance(details, dict) else None
+        invocations = manifest.get("invocations") if isinstance(manifest, dict) else None
+        if not isinstance(invocations, list):
+            return
+        learned = {}
+        for invocation in invocations:
+            if not isinstance(invocation, dict):
+                continue
+            resources = invocation.get("resources")
+            identities = invocation.get("resource_identities")
+            if not isinstance(resources, dict) or not isinstance(identities, dict):
+                continue
+            for role, alias in resources.items():
+                identity = identities.get(role)
+                serial = identity.get("serial") if isinstance(identity, dict) else None
+                if isinstance(alias, str) and isinstance(serial, str) and alias and serial:
+                    learned[serial.lower()[:64]] = alias[:64]
+        if learned and {**target.board_aliases, **learned} != target.board_aliases:
+            target.board_aliases = {**target.board_aliases, **learned}
+            self._board_names[target.host] = dict(target.board_aliases)
+            self._save_board_names()
+            self._publish_target(target)
 
     def _append_event(self, run: Run, event: dict) -> None:
         run.directory.mkdir(parents=True, exist_ok=True)
@@ -651,6 +710,7 @@ class Controller:
             protocol_errors=old.protocol_errors if old else 0,
             last_protocol_error=old.last_protocol_error if old else None,
             last_runner_protocol_error=old.last_runner_protocol_error if old else None,
+            board_aliases=dict(old.board_aliases) if old else dict(self._board_names.get(host, {})),
         )
         self.targets[host] = target
         self._links[host] = link
@@ -807,6 +867,8 @@ class Controller:
                 run.duplicate_events += 1  # replay after a reconnect
                 return
             self._append_event(run, event)
+            if event["event_type"] == "manifest":
+                self._learn_board_aliases(target, event)
             run.seen.add(sequence)
             run.last_event_sequence = sequence
             run.last_event_type = event["event_type"]

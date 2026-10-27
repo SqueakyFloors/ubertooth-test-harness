@@ -40,6 +40,7 @@ from ubertooth_harness.protocol import (
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PLANS_DIR = REPOSITORY_ROOT / "testplans"
 DEFAULT_HEARTBEAT_INTERVAL_S = 10.0
+DEFAULT_WAIT_FOR_BOARDS_MINUTES = 30.0
 DEFAULT_INITIAL_BACKOFF_S = 0.5
 DEFAULT_MAX_BACKOFF_S = 30.0
 _CONNECT_TIMEOUT_S = 10.0
@@ -138,6 +139,9 @@ class RunnerConfig:
     libbtbb_ref: str | None = None
     allow_power_changes: bool = False
     heartbeat_interval_s: float = DEFAULT_HEARTBEAT_INTERVAL_S
+    # Minutes a run waits for boards someone else holds (shared benches),
+    # passed to run-suite --wait-for-boards; 0 refuses at once.
+    wait_for_boards_minutes: float = DEFAULT_WAIT_FOR_BOARDS_MINUTES
     initial_backoff_s: float = DEFAULT_INITIAL_BACKOFF_S
     max_backoff_s: float = DEFAULT_MAX_BACKOFF_S
     # Extra environment for the run-suite child (tests put fake tools on PATH).
@@ -408,6 +412,7 @@ class RunnerService:
             f"--ubertooth-ref={message['commit'] or message['ref']}",
             f"--run-id={run_id}",
             f"--output={self.config.output}",
+            f"--wait-for-boards={self.config.wait_for_boards_minutes:g}",
         ]
         if message["commit"] and message["commit"] != message["ref"]:
             # Recorded next to the commit in the manifest and report.
