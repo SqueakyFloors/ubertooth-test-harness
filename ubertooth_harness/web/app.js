@@ -835,7 +835,7 @@
     if (finished) {
       $("live-clock").textContent = finishedText();
     } else if (testsElapsed === null) {
-      $("live-clock").textContent = `Countdown starts with the first test (elapsed ${formatSeconds(elapsed)})`;
+      $("live-clock").textContent = `Elapsed ${formatSeconds(elapsed)}`;
     } else if (testsElapsed <= total) {
       $("live-clock").textContent = `${formatSeconds(total - testsElapsed)} remaining, estimated (elapsed ${formatSeconds(elapsed)})`;
     } else {

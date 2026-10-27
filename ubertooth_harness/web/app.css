@@ -379,7 +379,6 @@ button.primary:disabled:hover { background: var(--primary); }
 @media (min-width: 48rem) {
   .live-overview { grid-template-columns: minmax(0, 1fr) minmax(12rem, 16rem); }
   .live-overview .live-time { grid-column: 2; grid-row: 1; }
-  .live-overview .live-actions { grid-column: 2; grid-row: 2; justify-content: flex-end; }
   .live-overview .summary { grid-column: 1; grid-row: 1 / span 2; }
 }
 /* Checklist and log tail side by side, the log wider. */
@@ -396,10 +395,11 @@ button.primary:disabled:hover { background: var(--primary); }
   background: var(--surface-2); border: 1px solid var(--line);
 }
 .clock {
-  font-size: 1.2rem; font-weight: 650; margin: 0;
+  font-size: 1rem; font-weight: 650; margin: 0;
   font-variant-numeric: tabular-nums;
 }
-.live-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; }
+.live-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; margin-top: 0.5rem; }
+.live-actions:has(#cancel-button[hidden]):has(#cancel-status:empty) { display: none; }
 .live-actions .hint { margin: 0; }
 
 .checklist-head {
