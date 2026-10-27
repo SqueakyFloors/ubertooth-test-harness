@@ -42,6 +42,13 @@
 
   const $ = (id) => document.getElementById(id);
 
+  // Messages and reasons are shown in sentence case ("error: x" -> "Error: x");
+  // the text is otherwise as the tool or runner wrote it.
+  function sentence(text) {
+    const value = String(text ?? "");
+    return value ? value[0].toUpperCase() + value.slice(1) : value;
+  }
+
   // Display name of a target: its registered ID with spaces for underscores
   // (Host_Linux -> "Host Linux"); the ID itself is unchanged everywhere else.
   function targetName(host) {
@@ -144,8 +151,8 @@
         ? new Date(target.registered_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
         : "";
       const state = target.status === "online"
-        ? ["ok", when ? `detected on USB ${when}` : "detected on USB"]
-        : ["warn", "unknown (runner offline)"];
+        ? ["ok", when ? `Detected on USB ${when}` : "Detected on USB"]
+        : ["warn", "Unknown (runner offline)"];
       // Named by the alias the runs use (learned from the latest run's plan);
       // until a run has started, by "Ubertooth" and the serial below.
       const aliases = target.board_aliases || {};
@@ -447,7 +454,7 @@
     // "Boards" is the wait for boards another session holds: the runner
     // leases them before the run's first record, so it passes on that record.
     live.phases = [
-      { key: "boards", name: "Boards", status: "running", reason: "waiting for the run's boards (another session may hold them)" },
+      { key: "boards", name: "Boards", status: "running", reason: "Waiting for the run's boards (another session may hold them)" },
       { key: "build", name: "Build", status: runInfo && runInfo.build === false ? "not requested" : "pending", reason: "" },
       { key: "preflight", name: "Preflight", status: "pending", reason: "" },
     ];
@@ -669,12 +676,12 @@
 
   // Every board the run's plan uses (from its manifest), or why it is unknown.
   function runBoards(live) {
-    if (!Array.isArray(live.invocations)) return "known once the run's plan arrives";
+    if (!Array.isArray(live.invocations)) return "Known once the run's plan arrives";
     const aliases = new Set();
     for (const invocation of live.invocations) {
       for (const alias of Object.values(invocation.resources || {})) aliases.add(targetName(alias));
     }
-    return aliases.size ? [...aliases].sort().join(", ") : "none (host only)";
+    return aliases.size ? [...aliases].sort().join(", ") : "None (host only)";
   }
 
   function renderLive() {
@@ -701,7 +708,7 @@
       ...pairs.flatMap(([term, value]) => [el("dt", { text: term }), el("dd", {}, value)])));
     if (run.reason) {
       items.push(el("div", { className: "summary-item summary-item-wide" },
-        el("dt", { text: "Reason" }), el("dd", {}, run.reason)));
+        el("dt", { text: "Reason" }), el("dd", {}, sentence(run.reason))));
     }
     $("live-summary").replaceChildren(...items);
     $("cancel-button").hidden = run.status !== "running";
@@ -726,7 +733,7 @@
         "aria-current": shown === "running" ? "step" : null,
       },
         statusBadge(shown), " ", el("span", { className: "check-name", text: phase.name }),
-        reason ? el("span", { className: "reason", text: reason }) : null);
+        reason ? el("span", { className: "reason", text: sentence(reason) }) : null);
     });
     $("checklist").replaceChildren(...phaseRows, ...live.items.map((item) => {
       const shown = itemStatus(item, run);
@@ -750,7 +757,7 @@
           ? el("span", { className: "check-board", text: item.boards.join(", ") }) : null,
         item.estimated_s !== null && item.estimated_s !== undefined
           ? el("span", { className: "hint check-estimate", text: formatSeconds(item.estimated_s), "aria-label": `estimated runtime ${formatSeconds(item.estimated_s)}` }) : null,
-        item.reason ? el("span", { className: "reason", text: item.reason }) : null);
+        item.reason ? el("span", { className: "reason", text: sentence(item.reason) }) : null);
     }));
     if (!live.items.length) {
       $("checklist").append(el("li", {
@@ -922,7 +929,7 @@
         : el("ul", { className: "failures" }, ...data.failures.map((failure) =>
           el("li", { className: "failure" },
             statusBadge(failure.status), " ", el("strong", { text: failure.step }),
-            failure.reason ? el("span", { className: "reason", text: failure.reason }) : null,
+            failure.reason ? el("span", { className: "reason", text: sentence(failure.reason) }) : null,
             failure.log && failure.log.length
               ? el("pre", { className: "log failure-log", text: failure.log.join("\n") }) : null)));
     } catch (error) {

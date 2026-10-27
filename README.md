@@ -1212,7 +1212,7 @@ word and symbol (colour only reinforces it).
   online/offline (plus busy while it runs), OS, Python, last seen, the active
   run with a Watch button, and an **Attached equipment** box. That box groups
   equipment by kind; today it holds "Devices under test" (the Ubertooths),
-  one small box each with its USB serial and a status dot with text (green: "detected on
+  one small box each with its USB serial and a status dot with text (green: "Detected on
   USB" with the time the runner last listed its boards, which it does when it
   registers; nothing has talked to the board yet; yellow: unknown while the runner is offline), or why the runner could not list them. USB hubs and Bluetooth test
   devices will join it as their own groups.
