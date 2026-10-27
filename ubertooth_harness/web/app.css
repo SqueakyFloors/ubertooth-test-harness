@@ -462,6 +462,9 @@ button.primary:disabled:hover { background: var(--primary); }
 .table-wrap {
   overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius-small);
 }
+/* History shows about ten runs; the rest scroll under a sticky header. */
+.panel-history .table-wrap { max-height: 32rem; overflow-y: auto; }
+.panel-history thead th { position: sticky; top: 0; z-index: 1; background: var(--surface-2); }
 table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
 caption {
   caption-side: top; text-align: left; color: var(--muted); font-size: 0.85rem;
@@ -504,3 +507,28 @@ td.actions button, td.actions .button-link {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0;
 }
+
+/* Sortable column headers: the header is a plain button; an arrow marks the
+   sorted column and its direction (aria-sort says the same to readers). */
+th button.sort {
+  all: unset; cursor: pointer; font: inherit; color: inherit;
+  text-transform: inherit; letter-spacing: inherit;
+}
+th button.sort:focus-visible { outline: 2px solid var(--focus, var(--primary)); outline-offset: 2px; }
+th[aria-sort="ascending"] button.sort::after { content: " ▲"; font-size: 0.7em; }
+th[aria-sort="descending"] button.sort::after { content: " ▼"; font-size: 0.7em; }
+
+/* The failure summary row under a history row. */
+.failures-row > td { background: var(--surface-2); padding: 0.6rem 0.9rem 0.8rem; }
+.failures { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
+.failure { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.35rem 0.5rem; }
+.failure .reason { color: var(--bad-fg); }
+.failure-log { flex-basis: 100%; height: auto; max-height: 12rem; resize: vertical; }
+
+/* Run report page. */
+.report-page { max-width: 72rem; margin: 0 auto; padding: 1rem; }
+.report-links { display: flex; gap: 0.5rem; margin: 0; }
+.report-body h2 { margin-top: 1.5rem; }
+.report-body .table-wrap { margin: 0.5rem 0 1rem; }
+.report-body td, .report-body th { vertical-align: top; overflow-wrap: anywhere; }
+.report-code { height: auto; max-height: 40rem; }

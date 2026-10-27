@@ -26,6 +26,9 @@
   };
 
   const state = {
+    historySort: { key: "created_at", dir: -1 },  // dir 1 ascending, -1 descending
+    openFailures: null,       // run ID whose failure summary row is open
+    failureNodes: new Map(),  // run ID -> rendered failure summary
     targets: new Map(),
     runs: new Map(),
     plans: [],
@@ -141,20 +144,24 @@
         ? new Date(target.registered_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
         : "";
       const state = target.status === "online"
-        ? ["ok", when ? `on USB at registration, ${when}` : "on USB at registration"]
+        ? ["ok", when ? `detected on USB ${when}` : "detected on USB"]
         : ["warn", "unknown (runner offline)"];
-      boards = [el("ul", { className: "devices" }, ...serials.map((serial, index) =>
+      // Named by the alias the runs use (learned from the latest run's plan);
+      // until a run has started, by "Ubertooth" and the serial below.
+      const aliases = target.board_aliases || {};
+      boards = [el("ul", { className: "devices" }, ...serials.map((serial) =>
         el("li", { className: "device" },
           el("div", { className: "device-head" },
             el("span", { className: `dot dot-${state[0]}`, "aria-hidden": "true" }),
-            el("span", { className: "device-name", text: `Ubertooth ${index + 1}` }),
+            el("span", { className: "device-name",
+              text: aliases[String(serial).toLowerCase()] ? targetName(aliases[String(serial).toLowerCase()]) : "Ubertooth" }),
             el("span", { className: "device-state", text: state[1] })),
           el("code", { className: "device-serial", title: "USB serial number", text: serial }))))];
     }
     return el("section", { className: "equipment", "aria-label": `Attached equipment on ${targetName(target.host)}` },
       el("h4", { text: "Attached equipment" }),
       el("div", { className: "equipment-group" },
-        el("h5", { text: "Ubertooths (devices under test)" }), ...boards));
+        el("h5", { text: "Devices under test" }), ...boards));
   }
 
   function renderTargets() {
@@ -366,9 +373,12 @@
 
   const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
-  async function selectRun(runId, scroll = true) {
+  // past: opened from History (a grey "Past run" card). A run started here or
+  // followed from its target stays a "Live run" card after it ends.
+  async function selectRun(runId, scroll = true, past = false) {
     if (!RUN_ID.test(String(runId))) return;
     state.selected = runId;
+    state.selectedPast = past;
     // A link to this view: /ui/#run=<run_id>.
     window.history.replaceState(null, "", `#run=${runId}`);
     state.live = newLive(runId);
@@ -431,7 +441,10 @@
     live.stage = "waiting";
     // Phases before the tests, shown above them; status follows their events.
     const runInfo = state.runs.get(live.run_id);
+    // "Boards" is the wait for boards another session holds: the runner
+    // leases them before the run's first record, so it passes on that record.
     live.phases = [
+      { key: "boards", name: "Boards", status: "running", reason: "waiting for the run's boards (another session may hold them)" },
       { key: "build", name: "Build", status: runInfo && runInfo.build === false ? "not requested" : "pending", reason: "" },
       { key: "preflight", name: "Preflight", status: "pending", reason: "" },
     ];
@@ -492,6 +505,11 @@
         for (const value of Object.values(counts)) if (typeof value === "number") count += value;
       }
       pushLog(`[... ${count} output lines left out; full output in ${String(details.output_file ?? "")} ...]`);
+    }
+    const boardsPhase = (live.phases || []).find((entry) => entry.key === "boards");
+    if (boardsPhase && boardsPhase.status === "running") {
+      boardsPhase.status = "passed";
+      boardsPhase.reason = "";
     }
     if (kind === "build_started" || kind === "preflight_started") {
       const phase = (live.phases || []).find((entry) => `${entry.key}_started` === kind);
@@ -583,8 +601,9 @@
     const live = state.live;
     if (!live) return;
     const run = state.runs.get(live.run_id) || { run_id: live.run_id, status: "running" };
-    // A running run is live; any other is a past run, shown on a grey card.
-    const isLive = run.status === "running";
+    // A run opened from History is a past run (grey card); one started or
+    // followed here stays "Live run" when it ends.
+    const isLive = !state.selectedPast;
     $("live-heading").textContent = isLive ? "Live run" : "Past run";
     $("live-heading").closest(".panel").classList.toggle("panel-past", !isLive);
     // Column groups across the top of the card; each group stacks its
@@ -719,30 +738,54 @@
   }
 
   function renderHistory() {
-    const runs = [...state.runs.values()].sort((a, b) =>
-      String(b.created_at).localeCompare(String(a.created_at)) || b.run_id.localeCompare(a.run_id));
+    // Sorted by the chosen column (Started, newest first, by default); ties
+    // fall back to newest first. Missing values sort last either way.
+    const { key, dir } = state.historySort;
+    const value = (run) => (key === "ref" ? refLabel(run) : key === "plan"
+      ? `${run.plan ?? ""} / ${run.suite ?? ""}` : String(run[key] ?? ""));
+    const runs = [...state.runs.values()].sort((a, b) => {
+      const va = value(a); const vb = value(b);
+      if (va !== vb) {
+        if (!va) return 1;
+        if (!vb) return -1;
+        return dir * va.localeCompare(vb, undefined, { numeric: true });
+      }
+      return String(b.created_at).localeCompare(String(a.created_at)) || b.run_id.localeCompare(a.run_id);
+    });
+    for (const th of document.querySelectorAll("table.history th[data-sort]")) {
+      th.setAttribute("aria-sort", th.dataset.sort === key ? (dir > 0 ? "ascending" : "descending") : "none");
+    }
+    const label = document.querySelector(`table.history th[data-sort="${key}"] .sort`);
+    $("history-caption").textContent =
+      `Runs, sorted by ${label ? label.textContent : key} (${dir > 0 ? "ascending" : "descending"})`;
     $("history-empty").hidden = runs.length > 0;
     $("history").replaceChildren(...runs.map((run) => {
       const actions = el("td", { className: "actions" },
         el("button", {
           type: "button", text: "View", "aria-label": `View run ${run.run_id}`,
-          onclick: () => selectRun(run.run_id),
+          onclick: () => selectRun(run.run_id, true, run.status !== "running"),
         }));
       if (run.report) {
+        // Rendered in a new tab by report.html; the raw file is linked there.
         actions.append(" ", el("a", {
           className: "button-link",
-          href: `${runPath(run.run_id)}/report.md`, text: "report.md",
-          "aria-label": `report.md of run ${run.run_id}`,
+          href: `report.html?run=${encodeURIComponent(run.run_id)}`, text: "Report",
+          target: "_blank", rel: "noopener",
+          "aria-label": `Report of run ${run.run_id} (opens in a new tab)`,
         }));
       }
+      const open = state.openFailures === run.run_id;
       if (run.status !== "running" && run.status !== "passed") {
         actions.append(" ", el("button", {
-          type: "button", text: "Failures", "aria-label": `Failure summary of run ${run.run_id}`,
-          onclick: () => showFailures(run.run_id),
+          type: "button", text: open ? "Hide failures" : "Failures",
+          "aria-expanded": open ? "true" : "false",
+          "aria-controls": `failures-${run.run_id}`,
+          "aria-label": `${open ? "Hide the" : "Show the"} failure summary of run ${run.run_id}`,
+          onclick: () => toggleFailures(run.run_id),
         }));
       }
       // The run ID is long; it is in the row's tooltip and the Watch label.
-      return el("tr", { title: `Run ${run.run_id}` },
+      const row = el("tr", { title: `Run ${run.run_id}` },
         el("td", { className: "time" }, timeElement(run.created_at)),
         el("td", { className: "time" }, timeElement(run.finished_at)),
         el("td", { text: refLabel(run) }),
@@ -750,7 +793,12 @@
         el("td", { text: targetName(run.target) }),
         el("td", {}, statusBadge(run.status)),
         actions);
-    }));
+      if (!open) return [row];
+      // The failure summary opens in a row of its own right under the run.
+      const cell = el("td", { colSpan: "7", className: "failures-cell" });
+      cell.append(state.failureNodes.get(run.run_id) || el("p", { className: "hint", text: "Loading…" }));
+      return [row, el("tr", { id: `failures-${run.run_id}`, className: "failures-row" }, cell)];
+    }).flat());
   }
 
   async function loadRuns() {
@@ -764,33 +812,31 @@
     }
   }
 
-  async function showFailures(runId) {
-    const box = $("failures");
-    const list = $("failures-list");
-    box.hidden = false;
-    $("failures-heading").textContent = `Failure summary: ${runId}`;
-    list.replaceChildren(el("li", { text: "Loading…" }));
+  async function toggleFailures(runId) {
+    if (state.openFailures === runId) {
+      state.openFailures = null;
+      renderHistory();
+      return;
+    }
+    state.openFailures = runId;
+    state.failureNodes.delete(runId);
+    renderHistory();
+    let node;
     try {
       const data = await api("GET", runPath(runId));
-      const run = data.run;
-      $("failures-run").replaceChildren(
-        el("dt", { text: "Target" }), el("dd", { text: targetName(run.target) }),
-        el("dt", { text: "Ref" }), el("dd", { text: refLabel(run) }),
-        el("dt", { text: "Plan / suite" }), el("dd", { text: `${run.plan ?? "–"} / ${run.suite ?? "–"}` }),
-        el("dt", { text: "Status" }), el("dd", {}, statusBadge(run.status)));
-      if (!data.failures.length) {
-        list.replaceChildren(el("li", { text: "No failed step recorded." }));
-      } else {
-        list.replaceChildren(...data.failures.map((failure) => el("li", { className: "failure" },
-          statusBadge(failure.status), " ", el("strong", { text: failure.step }),
-          failure.reason ? el("span", { text: `: ${failure.reason}` }) : null,
-          failure.log && failure.log.length
-            ? el("pre", { className: "log", text: failure.log.join("\n") }) : null)));
-      }
+      node = !data.failures.length
+        ? el("p", { className: "hint", text: "No failed step recorded" })
+        : el("ul", { className: "failures" }, ...data.failures.map((failure) =>
+          el("li", { className: "failure" },
+            statusBadge(failure.status), " ", el("strong", { text: failure.step }),
+            failure.reason ? el("span", { className: "reason", text: failure.reason }) : null,
+            failure.log && failure.log.length
+              ? el("pre", { className: "log failure-log", text: failure.log.join("\n") }) : null)));
     } catch (error) {
-      list.replaceChildren(el("li", { text: `Cannot load the run: ${error.message}` }));
+      node = el("p", { className: "hint", text: `Cannot load the run: ${error.message}` });
     }
-    $("failures-heading").focus();
+    state.failureNodes.set(runId, node);
+    if (state.openFailures === runId) renderHistory();
   }
 
   // ----- live socket -------------------------------------------------------
@@ -804,7 +850,7 @@
       $("connection").className = "conn conn-up";
       $("connection").textContent = "Connected to the controller (live updates on)";
       loadRuns();
-      if (state.selected) selectRun(state.selected, false);
+      if (state.selected) selectRun(state.selected, false, state.selectedPast);
     });
     socket.addEventListener("message", (message) => {
       let data;
@@ -847,6 +893,18 @@
     if (linked && RUN_ID.test(linked[1])) state.selected = linked[1];
     connect();
     window.setInterval(renderClock, 1000);
+    // Click a column header to sort by it; click again to reverse.
+    for (const th of document.querySelectorAll("table.history th[data-sort]")) {
+      th.querySelector(".sort").addEventListener("click", () => {
+        const sortKey = th.dataset.sort;
+        const current = state.historySort;
+        const times = sortKey === "created_at" || sortKey === "finished_at";
+        state.historySort = current.key === sortKey
+          ? { key: sortKey, dir: -current.dir }
+          : { key: sortKey, dir: times ? -1 : 1 };
+        renderHistory();
+      });
+    }
   }
 
   document.addEventListener("DOMContentLoaded", start);

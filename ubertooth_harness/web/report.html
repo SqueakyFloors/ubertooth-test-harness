@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Run report · Ubertooth test harness</title>
+  <link rel="stylesheet" href="app.css">
+  <script src="report.js" defer></script>
+</head>
+<body>
+<header class="app-header">
+  <div class="app-header-inner">
+    <h1>Run report</h1>
+    <p class="report-links">
+      <a id="report-raw" class="button-link" href="#">report.md</a>
+      <a class="button-link" href="./">Back to the harness</a>
+    </p>
+  </div>
+</header>
+<main class="report-page">
+  <p id="report-status" role="status">Loading the report…</p>
+  <article id="report" class="report-body" aria-live="polite"></article>
+</main>
+</body>
+</html>

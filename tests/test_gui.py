@@ -490,6 +490,28 @@ class FailureSummaryTests(ControllerTestCase):
         # No manifest record: the live view lists the plan's tests.
         self.assertIsNone(payload["invocations"])
 
+    async def test_manifest_names_the_targets_boards(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            await self.accepted_run(runner)
+            serial = "0000000000000000000000000000ABCD"
+            manifest = {"invocations": [
+                {"id": "001-Ubertooth identity", "test_name": "Ubertooth identity",
+                 "arguments": {}, "resources": {"Ubertooth": "UT_Linux0"},
+                 "resource_identities": {"Ubertooth": {"serial": serial}}},
+                {"id": "002-bad", "test_name": "x", "arguments": {},
+                 "resources": {"Ubertooth": 7}, "resource_identities": "nope"},
+            ]}
+            await runner.send("event", run_id="run-1", event=event(
+                "run-1", 1, "manifest", "passed", manifest=manifest))
+            await wait_until(lambda: self.controller.targets["Host_A"].board_aliases)
+            # Kept across a re-registration, so the Targets card keeps the names.
+            await runner.register()
+            await wait_until(lambda: self.controller.targets["Host_A"].registered_at)
+        status, payload, _ = await self.http("GET", "/api/targets/Host_A")
+        self.assertEqual(200, status)
+        self.assertEqual({serial.lower(): "UT_Linux0"}, payload["target"]["board_aliases"])
+
     async def test_run_detail_lists_the_planned_invocations(self):
         async with FakeRunner(self.port) as runner:
             await self.registered(runner)
@@ -594,9 +616,12 @@ class PageWiringTests(unittest.TestCase):
     def test_script_wires_to_the_controller_endpoints(self):
         for endpoint in (
             '"/api/refs"', '"/api/plans"', '"/api/runs"', "/api/targets/${",
-            "/ws/live", "/report.md", "/cancel", "`/api/runs/${encodeURIComponent(runId)}`",
+            "/ws/live", "/cancel", "`/api/runs/${encodeURIComponent(runId)}`",
         ):
             self.assertIn(endpoint, self.js)
+        # The report opens rendered in a new tab; report.js fetches report.md.
+        self.assertIn("report.html?run=", self.js)
+        self.assertIn("/report.md", (WEB_DIR / "report.js").read_text(encoding="utf-8"))
         self.assertIn('"Content-Type"] = "application/json"', self.js)
 
     def test_only_runnable_plans_are_offered_to_start(self):

@@ -117,15 +117,15 @@
     <div class="panel-body">
       <div class="table-wrap">
         <table class="history">
-          <caption>Runs, newest first</caption>
+          <caption id="history-caption">Runs, newest first</caption>
           <thead>
             <tr>
-              <th scope="col" class="time">Started</th>
-              <th scope="col" class="time">Finished</th>
-              <th scope="col">Branch or tag (commit)</th>
-              <th scope="col">Plan / suite</th>
-              <th scope="col">Target</th>
-              <th scope="col">Status</th>
+              <th scope="col" class="time" data-sort="created_at" aria-sort="descending"><button type="button" class="sort">Started</button></th>
+              <th scope="col" class="time" data-sort="finished_at"><button type="button" class="sort">Finished</button></th>
+              <th scope="col" data-sort="ref"><button type="button" class="sort">Branch or tag (commit)</button></th>
+              <th scope="col" data-sort="plan"><button type="button" class="sort">Plan / suite</button></th>
+              <th scope="col" data-sort="target"><button type="button" class="sort">Target</button></th>
+              <th scope="col" data-sort="status"><button type="button" class="sort">Status</button></th>
               <th scope="col" class="actions">Actions</th>
             </tr>
           </thead>
@@ -133,11 +133,6 @@
         </table>
       </div>
       <p id="history-empty" class="empty">No runs yet.</p>
-      <div id="failures" class="subpanel" hidden>
-        <h3 id="failures-heading" tabindex="-1">Failure summary</h3>
-        <dl id="failures-run" class="summary"></dl>
-        <ul id="failures-list" class="failures"></ul>
-      </div>
     </div>
   </section>
 </main>

@@ -1211,10 +1211,10 @@ word and symbol (colour only reinforces it).
   (underscores shown as spaces) and the machine's host name in brackets:
   online/offline (plus busy while it runs), OS, Python, last seen, the active
   run with a Watch button, and an **Attached equipment** box. That box groups
-  equipment by kind; today it holds the Ubertooths (the devices under test),
-  one small box each with its USB serial and a status dot with text (green: on
-  USB when the runner registered, with that time, since the runner lists its
-  boards only then; yellow: unknown while the runner is offline), or why the runner could not list them. USB hubs and Bluetooth test
+  equipment by kind; today it holds "Devices under test" (the Ubertooths),
+  one small box each with its USB serial and a status dot with text (green: "detected on
+  USB" with the time the runner last listed its boards, which it does when it
+  registers; nothing has talked to the board yet; yellow: unknown while the runner is offline), or why the runner could not list them. USB hubs and Bluetooth test
   devices will join it as their own groups.
 - **Run setup:** git ref (default branch, branches and tags from
   `/api/refs`), plan and suite (from `/api/plans`, with the suite's tests;
@@ -1243,10 +1243,21 @@ word and symbol (colour only reinforces it).
   so the countdown counts every board. Build and preflight time are not included: the countdown starts with
   the first test. Otherwise the view shows elapsed time and says why. The
   view is linkable as `/ui/#run=<run_id>`.
-- **History:** every run, newest first, with started/finished times, branch or tag with the commit it
-  resolved to, plan/suite, target and status (the run ID in the row's tooltip), a link to its `report.md`, and for a run
-  that did not pass a failure summary (each failed phase or test with its
-  reason and last output lines, then the run's own reason).
+- **History:** every run (newest first; click a column header to sort by
+  it, again to reverse), with started/finished times, branch or tag with the
+  commit it resolved to, plan/suite, target and status (the run ID in the
+  row's tooltip). About ten rows show at once; the rest scroll under a fixed
+  header. **View** opens the run in the run card as a grey **Past run** (a
+  run started or followed from its target stays **Live run** when it ends).
+  **Report** opens `report.md` rendered in a new tab (`/ui/report.html`,
+  which links the raw file). **Failures**, for a run that did not pass,
+  opens its failure summary in a row right under it (each failed phase or
+  test with its reason and last output lines, then the run's own reason).
+- **Boards, Build and Preflight** rows come before the tests in the run
+  card. A run first waits for its boards when another session holds them
+  (the runner passes `--wait-for-boards`, 30 minutes by default; set it with
+  the runner's `--wait-for-boards MINUTES`), and a failure in any of these
+  steps is shown on its row.
 
 Every HTTP response carries `Content-Security-Policy: default-src 'self';
 script-src 'self'; style-src 'self'; connect-src 'self' ws://<host>;

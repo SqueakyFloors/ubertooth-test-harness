@@ -37,6 +37,8 @@ ASSETS: Mapping[str, str] = {
     "index.html": "text/html; charset=utf-8",
     "app.js": "text/javascript; charset=utf-8",
     "app.css": "text/css; charset=utf-8",
+    "report.html": "text/html; charset=utf-8",
+    "report.js": "text/javascript; charset=utf-8",
 }
 REFS_TTL_S = 60.0
 REFS_FAILURE_TTL_S = 5.0
