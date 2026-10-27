@@ -87,6 +87,9 @@ _INTERFACE_REFUSAL = (
     r"\A(?![\s\S]*Traceback)(?![\s\S]*(?m:^(?:dlt|arg|value) \{))",
 )
 _USAGE = r"(?m)^Usage: \S*btle-extcap\S* --extcap-interfaces \| "
+# Since fork 12211ce (#406) a described error is not followed by the usage
+# text; only -h and a bare command print it.
+_NO_USAGE = r"\A(?![\s\S]*(?m:^Usage: ))"
 
 # --extcap-dlts and --extcap-config open no board, so any serial will do.
 _INTERFACE = "--extcap-interface=ubertooth" + "0123456789abcdef" * 2
@@ -157,7 +160,7 @@ def python_tool_cases(arguments, _resources, _resource_identities):
         _case(
             "extcap-unknown-option", "btle-extcap rejects an unknown option",
             "extcap", ("--extcap-bogus",),
-            (r"(?m)^error: option --extcap-bogus not recognized$", _USAGE),
+            (r"(?m)^error: option --extcap-bogus not recognized$", _NO_USAGE),
             returncodes=(1,),
         ),
         # --extcap-version, which Wireshark adds to its calls, in each form
@@ -184,7 +187,7 @@ def python_tool_cases(arguments, _resources, _resource_identities):
             _case(
                 f"extcap-refuses-{option}", f"btle-extcap refuses --{option}",
                 "extcap", (_INTERFACE, f"--{option}=x", "--extcap-config"),
-                (rf"(?m)^error: option --{option} not recognized$", _USAGE,
+                (rf"(?m)^error: option --{option} not recognized$", _NO_USAGE,
                  r"\A(?![\s\S]*(?m:^(?:arg|value) \{))"),
                 returncodes=(1,),
             )
@@ -204,7 +207,7 @@ def python_tool_cases(arguments, _resources, _resource_identities):
             "extcap", ("-h", "extra"),
             (r"(?m)^error: unexpected argument 'extra'$",), returncodes=(1,),
         ),
-        # Strict: fails at d04f79e (SqueakyFloors/ubertooth#362). A stand-in
+        # Failed at d04f79e (SqueakyFloors/ubertooth#362, fixed in 779f4f7). A stand-in
         # ubertooth-util fails as a libusb failure does; the listing must
         # fail too and pass its message on.
         _case(

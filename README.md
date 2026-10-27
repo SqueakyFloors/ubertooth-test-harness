@@ -145,12 +145,50 @@ unique downstream port for each powered resource. The generic controller
 contract snapshots power, data, VBUS voltage, and VBUS current. A simulated
 driver supports development and restoration tests without hardware.
 
-The [BrainStem](https://acroname.com/software/brainstem-development-kit) adapter is lazy and optional: no package dependency is installed
-until the arriving hub and exact distributable version are validated. It
-connects to one configured controller serial, reads the serial back, checks
-every API error and write readback, and refuses all real power/data changes
-unless armed (`run-suite --allow-power-changes`). Ports are restored
-to their original state after success or failure.
+The Acroname driver (`acroname BrainStem USBHub3+`) is validated on the Linux
+lab host with a USBHub3+ (model 19, firmware `0x28000000`) and BrainStem
+2.12.5. BrainStem is Acroname's proprietary Python API (Acroname BrainStem SDK
+license; its wheel bundles the native library for Linux x86_64/aarch64,
+macOS, and Windows), so it is not in [`requirements.txt`](requirements.txt). Install it into the
+harness environment only on a host with a hub:
+
+```sh
+python3 bootstrap.py --with-acroname
+```
+
+That installs [`requirements-acroname.txt`](requirements-acroname.txt) in pip's hash-checking mode
+(`brainstem==2.12.5` and its `cffi`/`pycparser` dependencies, each pinned with
+its files' sha256). Without it the driver fails closed with `BrainStem Python
+API is not installed`. The driver imports BrainStem lazily, connects over USB
+to the one configured controller serial (a hub with another serial is not
+found), reads the serial and model back, and addresses downstream ports 0-7
+through the hub's `usb` entity: `getPortState` gives power (bit 0) and USB 2.0
+and 3.0 data (bits 1 and 3, reported and switched as a pair), `getPortVoltage`
+and `getPortCurrent` give VBUS in microvolts and microamps. Every BrainStem
+error code fails the call, every write is read back (a stale readback fails),
+and ports outside 0-7 are refused before the hub is asked. Real power/data
+changes are refused unless armed (`run-suite --allow-power-changes`). Ports
+are restored to their original power and data state after success, failure,
+or cancellation. The hub keeps answering on its control link while every
+downstream port is off.
+
+Measured on the lab hub: a board leaves USB enumeration 0.06-0.22 s after its
+port is switched off; VBUS is below 0.1 V about 0.55 s after switch-off with a
+board attached; a board re-enumerates 0.37-0.59 s after power-on and answers
+`ubertooth-util -v` about 0.02 s later. The isolation defaults (5 s removal,
+10 s return, 1 s settle; [`enumeration.py`](ubertooth_harness/enumeration.py)) leave ample headroom.
+
+`ubertooth-harness power --hardware hardware.yaml <controller>` reads every
+port of a registered controller (power, data, VBUS, current, and the board
+mapped to it) without changing anything:
+
+```text
+Hub_Linux1 (acroname BrainStem USBHub3+), firmware 0x28000000
+port 0: power on  data on  VBUS  5.11 V   81.9 mA  UT_Linux2
+port 1: power on  data on  VBUS  5.11 V   85.8 mA  UT_Linux3
+...
+port 4: power on  data on  VBUS  5.12 V    0.0 mA
+```
 
 The StarTech managed hub driver (`startech managed USB hub`) is validated on
 the Linux lab host. It talks to the hub's built-in serial management controller
@@ -180,8 +218,10 @@ it, the run fails before anything executes. A host with only the selected
 board registered switches nothing and needs no flag (see the read-only check
 below). Each controller is built from its registry `driver` (`startech
 managed USB hub` or Acroname BrainStem), so one run can mix switch types.
-Only the StarTech path has been validated on hardware; the Acroname path is unit-tested with simulated controllers until its
-hardware validation ([#8](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/8)). The simulated driver is for unit tests only and is
+Both the StarTech and the Acroname paths are validated on hardware (the
+Acroname one with `testplans/exclusive.yaml`, three other boards switched off
+per invocation, and a cancellation that restored every port,
+[#2](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/2)). The simulated driver is for unit tests only and is
 refused unless a test injects its own enumerator. Serials come from the
 registry identity (32 hex digits; placeholders are rejected). Enumeration
 verification is Linux-only; other platforms fail closed. Before the run
@@ -226,8 +266,11 @@ while the board is still off). StarTech: send `GP` to read the 8-hex-digit mask 
 first, bit 0 = port 1), OR in the bits for those ports, and send `SP` + the
 password padded to 8 characters + the new mask, each CR-terminated. For
 example, with the factory password `pass`, if `GP` returns `09000000` (ports 1
-and 4 set) and port 3 must come back, send `SPpass    0D000000`. Acroname:
-enable the port's power through BrainStem. A run with power isolation
+and 4 set) and port 3 must come back, send `SPpass    0D000000`. Acroname
+(with BrainStem installed): `.venv/bin/python -c 'import brainstem;
+h = brainstem.stem.USBHub3p(); h.discoverAndConnect(brainstem.link.Spec.USB,
+SERIAL); h.usb.setPowerEnable(PORT); h.disconnect()'`, then check it with
+`ubertooth-harness power`. A run with power isolation
 (StarTech or Acroname) holds the [host lock](#sharing-boards-leases) for the
 whole run, so no other harness command switches power or writes firmware on
 that host meanwhile.
@@ -263,8 +306,15 @@ python -m ubertooth_harness run-suite \
   --build --output runs
 ```
 
-On fork main the test fails: the sender never gets a reply, so its `-m`
-still says `no range test result yet` at the 10 s deadline ([ubertooth#26](https://github.com/SqueakyFloors/ubertooth/issues/26)).
+On current fork main the test passes: the sender gets a clean round trip and
+`-m` reports request and reply PA levels and copy numbers (fixed by
+[ubertooth#601](https://github.com/SqueakyFloors/ubertooth/pull/601); before
+it the reply read back as zeros, [ubertooth#483](https://github.com/SqueakyFloors/ubertooth/issues/483),
+and earlier still no reply came at all, [ubertooth#26](https://github.com/SqueakyFloors/ubertooth/issues/26)).
+On the lab bench (two boards a few centimetres apart, PA 0) 9 of 10 runs pass
+with PA level 0 and copy numbers 0-6; about one run in ten the firmware takes
+a CRC-OK packet that is not a copy of its request and `-m` reports `invalid
+range test: mismatch on byte 0`, so the test fails ([ubertooth#677](https://github.com/SqueakyFloors/ubertooth/issues/677)).
 Since fork `0684c11` ([ubertooth#445](https://github.com/SqueakyFloors/ubertooth/pull/445)) both boards keep answering USB while the
 modes run and `-S` stops the repeater, so the run cleans up and needs no power
 cycle. Before `0684c11` the repeater answered no USB request once started, the
@@ -444,17 +494,17 @@ python -m ubertooth_harness run-suite \
 | `Spectrum analyzer` | one full-band sweep (`duration` long): every frequency 2402-2480 reported, none outside, int8 RSSI, and nothing but samples on stdout (`Ubertooth stopped` is on stderr, fork #326) | adds narrow, single, and top-of-band ranges, `-g`, `-G`, `-v`, and `-d` (binary file checked by `specandump.py`); `-d -x.bin` writes the file `-x.bin`, not stdout (fork #231, fixed in 053363a); on Linux, `-d /dev/full` says `error: writing samples failed` once and exits 1 by itself (fork #326; not applicable on macOS); ranges after a different range report no stale samples (fork #173, fixed in 20bcf11); stopping a bounded run with `-S` turns the preset LEDs off and resets channel 2441 MHz and squelch -120, PA kept (fork #191, fixed in aa4f620) |
 | `Spectrum RSSI sanity` | fast plan, one bounded full-band `ubertooth-specan` sweep (`duration` long) that must also pass the Spectrum analyzer sweep checks: every frequency's lowest reading (its noise floor) is -115 to -80 dBm (up to 5 of the 79 may stay above -80 dBm, a continuous emitter), the mean reading is negative (below -54 dBm), and there are at least three distinct readings. The tool prints the CC2400 RSSI register, dBm + 54 (specan-ui adds -54). Needs no signal source | no comprehensive profile |
 | `Classic Bluetooth receive` | `ubertooth-rx -z -t N` survey (exits 0 by itself, N = `duration` in whole seconds, no earlier than N-0.5 s, survey lines are piconet addresses); `-t N -r` PCAPNG with link type 255; `ubertooth-afh -t N` with no piconet in range says no packet arrived and exits 2 after about N s, printing no map (fork #187, 3b22c95) | adds `-t N` without `-z`; `-c 39` (every packet on channel 39); `-s` (the default sweep, no notice) and `-s -c 39` (the channel wins; fork #361); `-e 0` and `-e 4` (no packet over the limit); `-q` PCAP (link type 255); repeated `-r` (first wins, extra file never created); `-d` (68-byte BR records, checked by `rxdump.py`); `afh -t N -e 2` (same exit 2); `afh -r` one map line per second; `afh` with an unknown `-U` exits 1 (fork #185, fixed in 219a5b0) |
-| `Raw receive` | `ubertooth-dump -d` (68-byte records) and `-b -d` (401-byte bitstream records), checked by `rxdump.py` with at least 50 records per second; `ubertooth-ego -r -c 2440` runs until stopped | adds `dump -l`, `-l -c`, `-c -l` (the last modulation wins, read back from CC2400 MDMCTRL with `ubertooth-debug`); `ego -l 1`, `-l 48`, `-a 630f9ffe`; `ego -a zz` rejected; strict: five rounds of `dump -d` after `btle -n -A37` and `btle -n -A37 -q` after that dump, every stream bounded with SIGTERM, hold no packet from the previous mode, with the per-iteration stale count recorded (`stalecheck.py`; fork #318) |
+| `Raw receive` | `ubertooth-dump -d` (68-byte records) and `-b -d` (401-byte bitstream records), checked by `rxdump.py` with at least 50 records per second; `ubertooth-ego -r -c 2440` runs until stopped | adds `dump -l`, `-l -c`, `-c -l` (the last modulation wins, read back from CC2400 MDMCTRL with `ubertooth-debug`); `ego -l 1`, `-l 48`, `-a 630f9ffe`; `ego -a zz` rejected; five rounds of `dump -d` after `btle -n -A37` and `btle -n -A37 -q` after that dump, every stream bounded with SIGTERM, hold no packet from the previous mode, with the per-iteration stale count recorded (`stalecheck.py`; fork #318, fixed in 9e31dd5) |
 | `Refused command lines` | no Ubertooth; `host` and `fast` plans, and CI: every file option (`btle -r -q -c`, `follow -r -q -d`, `rx -r -q -d`, `dump -d`, `specan -d`, `dfu -s -u`) refused by a stray word, `-h`, and a bad later value (`dump`: `-U` without its value) creates no file, leaves an existing one unchanged, and leaves no other file; the refusal comes before any board lookup (every `-h` exits 0, `btle` since fork e4f1dc5, `follow` and `dfu` since 12211ce, and still creates nothing); the extra-file note is on stderr (`btle -n -q - -q`: `warning: ignoring extra capture file` since fork e4f1dc5; `rx -r -r`, `follow -q -q`: `Ignoring extra capture file`); a stray word on `ubertooth-scan` and `ubertooth-follow` (no file) is refused naming it (one argument rule); follow and scan cases are Linux only (BlueZ), not applicable on macOS | adds `scan` and `follow` with `-h stray` (refused, no usage), a bare `-`, and `-- -x`, and the checks after the option loop (`btle -f -n`, `-a -a<address>`, `-r -`; `rx -z -l`, `-u` without `-l`; `specan -l` above `-u`), `-d` twice with `-h`, `specan -d` in a missing directory (one `error: <file>: No such file or directory` line, exit 1), and `dfu -u` with a missing `-s` input or a bad `-d` image (no temporary file), and `dfu -s <file.bin> -d <bad image>` (no `.dfu` created or replaced; fork #286, fixed in f2e06fa) |
 | `Util mode refusals` | no Ubertooth; `host` and `fast` plans, and CI: `ubertooth-util -i` with each of `-q -n -e -t -x -I`, in both orders (12 commands), refused with exit 1 and `error: options <modes in the fork's order> cannot be combined; give only one of -q -n -e -t -x -I -i`; `-z` and `-z-60` with `-i`, in both orders, refused with `error: -z cannot be combined with -i`; `-f` and `-f -i` refused with `error: unrecognized option '-f'` (fork `db5649b` removed `-f`); never the `no board is selected` note | adds `-x -i -q`, `-i -i -x`, `-z -x -i` (the mode refusal first), `-x -i stray` (the stray word first); `-N -i` and `-i -N` print the count `0`, then `-i` finds no board, exit 1 (since `db5649b` `-N` runs the rest of the command); `-U all -i` gives the `-U all` refusal alone |
 | `DFU image checks` | no Ubertooth; `host` and `fast` plans, and CI: the seven bad images of `DFU images` (wrong CRC, truncated, no suffix, text, no `UFD`, wrong vendor, wrong product), made from a synthetic image, are refused by `-d <image> -r` with the image check's message and exit 1 before any board lookup, the directory unchanged; the synthetic image passes the check and reaches the lookup; `-s` suffixes a binary exactly as the harness computes, accepts a read-only `.bin`, and refuses a `.dfu` and a suffixed `.bin` (nothing written); `-s` of the test build's binary gives the build's `.dfu` byte for byte when the run has a firmware build, else not applicable | adds `-d` of an empty file, 15 bytes, a suffix with no firmware, a suffix length (200) larger than the file, DFU version 2.0, no revision marker, a directory and a missing file (all refused before the lookup), DFU 1.1 and the `ffff:ffff` wildcard (accepted), `-s` of a missing `.bin` and of a `.bin` with a wrong-CRC suffix; how `-s` puts `<file>.dfu` in place (fork f2e06fa): an input it cannot read (a directory) leaves an existing `.dfu` alone (fork #305), only `<file>.dfu` is added (no temporary file left), an earlier `.dfu` is replaced with its mode kept, a `.dfu` symlink is replaced and its target left alone, a read-only directory refuses the signing (`Permission denied`, nothing changed; skipped as root), and `-s` with an accepted `-d ... -r` writes the `.dfu` before the board lookup fails |
-| `Python tools` | no Ubertooth; `host` and `fast` plans, and CI: `ubertooth-specan-ui -h` without a display shows its argparse usage (`-U`, `-l`, `-u`, `--wifi`, `--padding`), not applicable without `--build --with-python`, skipped when that Python lacks numpy/qtpy/Qt; `btle-extcap.py -h` exits 0 and names the real options; `--extcap-dlts` lists DLT 256 (`DLT_BLUETOOTH_LE_LL_WITH_PHDR`); `--extcap-config` lists the `--channel` selector with 37 (default), 38, 39 | adds the older `ubertooth0` interface (accepted), `--extcap-dlts` with no interface and `--extcap-config` with a non-Ubertooth interface (`must be ubertooth<serial>`, exit 1), `--capture` without `--fifo` (exit 1), an unknown option (`error: option --extcap-bogus not recognized`, usage, exit 1); Wireshark's `--extcap-version` as `=4.2.0`, as the next word and with no value (ignored), `--extcap-reload-option`, `--extcap-control-in`, `--extcap-control-out` and `--extcap-config-option-name` refused as unknown options, a stray word refused (`error: unexpected argument 'extra'`, exit 1) also with `-h`, `--capture --channel=40` refused before `ubertooth-btle` runs (fork #342); strict: `--extcap-interfaces` with a stand-in `ubertooth-util` that fails exits 1 and passes its message on (fork #362) |
+| `Python tools` | no Ubertooth; `host` and `fast` plans, and CI: `ubertooth-specan-ui -h` without a display shows its argparse usage (`-U`, `-l`, `-u`, `--wifi`, `--padding`), not applicable without `--build --with-python`, skipped when that Python lacks numpy/qtpy/Qt; `btle-extcap.py -h` exits 0 and names the real options; `--extcap-dlts` lists DLT 256 (`DLT_BLUETOOTH_LE_LL_WITH_PHDR`); `--extcap-config` lists the `--channel` selector with 37 (default), 38, 39 | adds the older `ubertooth0` interface (accepted), `--extcap-dlts` with no interface and `--extcap-config` with a non-Ubertooth interface (`must be ubertooth<serial>`, exit 1), `--capture` without `--fifo` (exit 1), an unknown option (`error: option --extcap-bogus not recognized`, no usage text since fork 12211ce, exit 1); Wireshark's `--extcap-version` as `=4.2.0`, as the next word and with no value (ignored), `--extcap-reload-option`, `--extcap-control-in`, `--extcap-control-out` and `--extcap-config-option-name` refused as unknown options, a stray word refused (`error: unexpected argument 'extra'`, exit 1) also with `-h`, `--capture --channel=40` refused before `ubertooth-btle` runs (fork #342); `--extcap-interfaces` with a stand-in `ubertooth-util` that fails exits 1 and passes its message on (fork #362, fixed in 779f4f7) |
 | `BLE extcap interfaces` | `btle-extcap.py --extcap-interfaces` lists one `ubertooth<serial>` interface (display `Ubertooth One <serial>`) per attached board, each registered board's serial among them, guards unchanged; the same listing with `--extcap-version=4.2.0`, as Wireshark calls it (fork #297) | adds `--extcap-version 4.4.1` (the next-word form) and a stray word (refused, no listing) |
 | `BLE extcap capture` | `btle-extcap.py --capture --extcap-interface=ubertooth<serial> --fifo=<fifo>` for `duration`, stopped with SIGTERM: it runs `ubertooth-btle -f -U <serial> -q <fifo> -A 37`, the FIFO carries a PCAP header for link type 256 (`DLT_BLUETOOTH_LE_LL_WITH_PHDR`) and whole records (at most 32 MiB; more fails), advertising records are on RF channel 0, the script exits 0, no process is left, channel, squelch and LEDs are restored | adds `--channel=37`, `38`, `39` (`-A <channel>`, advertising records on RF channel 0, 12, 39); a serial no board has (`ubertooth0badc0de...`: `ubertooth-btle`'s `no Ubertooth found` error and its non-zero exit) and `--channel=40` (refused with exit 1 before `ubertooth-btle` runs; fork #334, fixed in d04f79e); `--extcap-capture-filter` (the capture runs, with a `warning:` that the filter is not applied); a capture ended by closing the FIFO after the first record, as Wireshark also does (the script exits 0 by itself, no process left; skipped when no advertising traffic is in range) |
 | `Raw receive replay` | no Ubertooth; `host` and `fast` plans, and CI: `ubertooth-rx -i` on a synthetic fixture (`rxreplay.py`, built from the spec encoding, never a real capture) prints exactly the fixture's LAP/error/channel lines and skips the decoy records; `-l <LAP>` derives the UAP (CLK6 0); `-r` PCAPNG and `-q` PCAP with link type 255 and one packet per line; `-s` gives the same lines with no notice and `-h` lists it as the default sweep (fork #361); `-d` into a missing directory exits 1 with one `error: <file>: No such file or directory` line, no usage and no packet line, and the directory holds only the unchanged fixture (fork 5ac22a8) | adds `-z` (both piconets, one with its UAP); `-l` of an ID-only LAP (no UAP); `-l -u` with the right UAP (confirmed, hop reversal) and a wrong one (nothing confirmed); `-e 0` drops the one-error access code; `-d` writes the packet records back byte for byte (and passes `rxdump.py`); `-l -q` captures one LAP; empty file exit 0; missing file exit 1 (`error: <file>: No such file or directory`); lines carry the recorded systime (fork #202); `-i <directory>` and a cut last record are reported, exit 1 (fork #203; both fixed in a55ac89); `-i -u` without `-l` refused before the input is used (fork #236, fixed in 57469f2; the bare `-u` is in Argument validation, under a lease) |
 | `Ubertooth util modes` | `-I` blinks every LED (sampled at jittered intervals until both phases appear, at most 60 samples or 10 s including a read in flight), `-q120` (-120 dBm) lights every LED; each returns at once, its start line on stderr (`-I`: one `note: the board is blinking; stop it with ubertooth-util -U <serial> -S ...` line; fork #326), keeps channel and PA, and `-S` ends it with the idle reset (LEDs off, 2441 MHz, squelch -120, PA kept); originals are restored; `-m` after `-r` says `no range test result yet` (fork #190) | adds `-q20` and bare `-q` (-85 dBm) running until `-S`, `-I` ending `-q` and `-q` ending `-I` (the new mode starts at 2441 MHz), `-s -I`. A failed LED read (fork #213) is retried once and the retry recorded; two in a row fail the case |
 | `Multi-board selection` | needs two or more registered boards on the host (a one-board host skips it): `-U all -s` and `-s` without `-U` list every registered board and only those; `-N` counts them; each `-U<index>` opens the board the listing names at that index | adds `-U all -vVspb` and `-vVspb` without `-U` (five lines per board), `-C` without `-U` refused; `-U<n>` past the last board is refused with `no Ubertooth at index` (fork #188, fixed in 0c7e9c0) |
-| `Two-device range test` | no `coverage` argument; `range` plan; two registered boards on one host (`sender`, `responder`; the same board in both roles is refused), `allow RF transmission: true`: both boards reset (so neither has an old result) and set to 2410 MHz, `-e` on the responder, which must then answer USB with its RX LED on and still be at 2410 MHz before `-n` on the sender (so a failure tells a wedged repeater from a wedged sender), then the sender's `-m` is read until a result appears (10 s deadline) and must give request and reply PA levels at most `maximum PA level` (0-7, default 7; the plan sets 3) and copy numbers 0-15; a mismatch fails, naming the field that differs; the sender is idle afterwards (LEDs off, back to 2441 MHz: the idle reset ran); the responder still answers USB with its RX LED on, keeps no result, and `-S` stops it (LEDs off, back to 2441 MHz); channel, PA, squelch, LEDs and CRC of both boards restored, other registered boards guarded. Fails on fork main: no result (fork #26) | no comprehensive profile |
+| `Two-device range test` | no `coverage` argument; `range` plan; two registered boards on one host (`sender`, `responder`; the same board in both roles is refused), `allow RF transmission: true`: both boards reset (so neither has an old result) and set to 2410 MHz, `-e` on the responder, which must then answer USB with its RX LED on and still be at 2410 MHz before `-n` on the sender (so a failure tells a wedged repeater from a wedged sender), then the sender's `-m` is read until a result appears (10 s deadline) and must give request and reply PA levels at most `maximum PA level` (0-7, default 7; the plan sets 3) and copy numbers 0-15; a mismatch fails, naming the field that differs; the sender is idle afterwards (LEDs off, back to 2441 MHz: the idle reset ran); the responder still answers USB with its RX LED on, keeps no result, and `-S` stops it (LEDs off, back to 2441 MHz); channel, PA, squelch, LEDs and CRC of both boards restored, other registered boards guarded. Passes on fork main since fork #601 (fork #26, #483), about 9 runs in 10 on a bench pair; the rest fail with `mismatch on byte 0` (fork #677) | no comprehensive profile |
 | `DFU images` | writes the selected board's firmware; slow plan (not fast): `-d <test image> -r`, then `-u -r` reads back the image padded with 0xff; `-s` on the image without its suffix gives the build's `.dfu` | `firmware` plan (not release): adds `-s` refusing a `.dfu`; seven bad images (wrong CRC, truncated, no suffix, text, no `UFD`, wrong vendor, wrong product) refused before a device is opened (fork #198, #199, fixed in e8edd15), the board still in its application with the same flash (read back); `-s` refuses a suffixed `.bin` and accepts a read-only one (fork #200, fixed in 9d710fe). At 6fee30c `-d <image> -r` exits 1 after a good flash (fork #267, fixed in 89d9197), so the write cases fail there |
 | `BLE mode conflicts` | no `coverage` argument; release plan | every combination of `ubertooth-btle -f -n -p` must be rejected before sniffing |
 | `Ubertooth util conflicts` | no `coverage` argument; requires `allow RF transmission: true`; release plan | every pair of `-q -n -e -t -x -I` must be rejected with the fork's `error: options ... cannot be combined` before a mode starts |
@@ -1336,6 +1386,7 @@ runner (`After=`/`Wants=` the controller) dials
 | `--libbtbb-ref REF` | libbtbb commit the runner builds (default: the fork's pin, see below) |
 | `--no-libbtbb` | no libbtbb: the runner cannot build and refuses runs with Build checked |
 | `--allow-power-changes` | passed to the runner |
+| `--with-acroname` | bootstrap with the Acroname BrainStem API (`python3 bootstrap.py --with-acroname`), for a USBHub3+ power controller |
 | `--port N` | controller port on `127.0.0.1` (default 8765) |
 | `--no-start` | write the units (and daemon-reload) only |
 | `--uninstall` | stop, disable and remove the two units only; the venv and results stay |

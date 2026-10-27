@@ -24,6 +24,7 @@ suites:
         Bluetooth adapter: required
         Ubertooth: default
 
+    # The lab hub can switch board power now (#2); the test is #141.
     - Reset into invalid application:
         Ubertooth: default
         USB power controller: required

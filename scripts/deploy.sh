@@ -40,6 +40,8 @@
 #   --no-libbtbb              no libbtbb: the runner cannot build, and refuses
 #                             runs that ask for a build
 #   --allow-power-changes     passed to the runner (lets runs switch USB power)
+#   --with-acroname           bootstrap with the Acroname BrainStem API, for a
+#                             USBHub3+ power controller (proprietary; opt-in)
 #   --no-start                write the units (and daemon-reload) only
 #   --force                   restart even while a run is active (it is
 #                             cancelled); without it, deploy refuses
@@ -68,6 +70,7 @@ libbtbb_source=
 libbtbb_ref=
 no_libbtbb=0
 allow_power_changes=0
+with_acroname=0
 no_start=0
 force=0
 uninstall=0
@@ -93,6 +96,7 @@ while [ "$#" -gt 0 ]; do
         --libbtbb-ref) need_value "$@"; libbtbb_ref=$2; shift ;;
         --no-libbtbb) no_libbtbb=1 ;;
         --allow-power-changes) allow_power_changes=1 ;;
+        --with-acroname) with_acroname=1 ;;
         --no-start) no_start=1 ;;
         --force) force=1 ;;
         --uninstall) uninstall=1 ;;
@@ -233,7 +237,11 @@ if [ "$no_start" = 0 ] && [ "$dry_run" = 0 ] && ! systemctl --user show-environm
 fi
 
 say "checkout $ROOT (commit $commit)"
-run python3 "$ROOT/bootstrap.py"
+if [ "$with_acroname" = 1 ]; then
+    run python3 "$ROOT/bootstrap.py" --with-acroname
+else
+    run python3 "$ROOT/bootstrap.py"
+fi
 if [ ! -x "$python" ]; then
     if [ "$dry_run" = 1 ]; then
         say "warning: $python does not exist yet"

@@ -24,8 +24,7 @@ suites:
         hosts: each
         coverage: comprehensive
 
-    # No Ubertooth. Strict extcap-interfaces-util-fails fails until fork #362
-    # is fixed.
+    # No Ubertooth.
     - Python tools:
         hosts: each
         coverage: comprehensive
@@ -77,7 +76,6 @@ suites:
         Ubertooth: default
         allow RF transmission: true
 
-    # Strict stale-packets-across-mode-change fails until fork #318 is fixed.
     - Raw receive:
         hosts: each
         Ubertooth: default
