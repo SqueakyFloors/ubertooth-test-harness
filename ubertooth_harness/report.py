@@ -26,7 +26,7 @@ LEGEND = (
     "Tags: `[C]` command sent, `[O]` stdout, `[E]` stderr, `[R]` command result, "
     "`[S]` state step, `[I]` power isolation, `[M]` harness record. "
     "`+++` opens a step and `---` closes it; `===` marks the run, build, "
-    "preflight, and each test."
+    "flash, preflight, and each test."
 )
 
 
@@ -117,6 +117,9 @@ class _Run:
             details = event.get("details", {})
             if event["event_type"] == "check_started":
                 identities.append(details.get("resource_identity", {}))
+            elif event["event_type"] == "build_flash_started":
+                for board in details.get("boards", []):
+                    add(board.get("serial"))
             elif event["event_type"] == "flash_run_started":
                 add(details.get("serial"))
                 for serial in (*details.get("serials", []), *details.get("guard_serials", [])):
@@ -216,6 +219,7 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
         rows.append(("Built tools report", build.get("host_version", "")))
     else:
         rows.append(("Built", "no (installed tools)"))
+    rows.append(("Flash", _flash_row(run, bool(build))))
     capabilities = run.capabilities
     if capabilities:
         tools = capabilities.get("bluez_tools")
@@ -303,6 +307,37 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
             "; ".join(f"{a['name']} sha256 {a['sha256'][:12]}" for a in artifacts),
         ))
     return rows
+
+
+def _flash_row(run: _Run, built: bool) -> str:
+    """Whether the run flashed its boards with its own build first (#135)."""
+    finished = next(
+        (e for e in run.events if e["event_type"] == "build_flash_finished"), None
+    )
+    if finished is None:
+        started = any(e["event_type"] == "build_flash_started" for e in run.events)
+        if started:
+            return "**did not finish**"
+        return "no (the run does not build)" if not built else "no"
+    details = finished.get("details", {})
+    status = finished.get("status", "")
+    if status == "skipped":
+        return f"no ({details.get('reason', '')})"
+    boards = "; ".join(
+        f"{item.get('resource')} "
+        + (f"written, was {item.get('before') or 'unreadable'}, now {item.get('after') or 'unknown'}"
+           if item.get("written") else f"already ran {item.get('after')}")
+        for item in details.get("boards", [])
+    )
+    text = f"with the build's firmware {details.get('expected_revision', '')}: {boards}"
+    started = next(
+        (e for e in run.events if e["event_type"] == "build_flash_started"), {}
+    )
+    if started.get("details", {}).get("host_lock"):
+        text += " (host lock held while writing)"
+    if status != "passed":
+        return f"**{status}**: {details.get('reason', '')}; {text}"
+    return f"yes, verified before preflight; {text}"
 
 
 def _known(value) -> str:
@@ -504,6 +539,19 @@ def _transcript(run: _Run) -> list[str]:
         elif kind == "build_finished":
             close_build_step(event)
             line(event, f"=== BUILD EXIT: {status}{_reason(details)} ===")
+        elif kind == "build_flash_started":
+            line(event, f"=== FLASH: {len(details.get('boards', []))} board(s) with the "
+                        f"build's firmware {details.get('expected_revision', '')} ===")
+        elif kind == "build_flash_board_started":
+            line(event, f"+++ flash {details.get('resource')} ({details.get('serial')}) +++")
+        elif kind == "build_flash_board_finished":
+            line(event, f"--- flash {details.get('resource')} EXIT: {status}, read back "
+                        f"{details.get('after') or 'nothing'}{_reason(details)} ---")
+        elif kind == "build_flash_finished":
+            if status == "skipped":
+                line(event, f"[M] flash before preflight skipped{_reason(details)}")
+            else:
+                line(event, f"=== FLASH EXIT: {status}{_reason(details)} ===")
         elif kind == "preflight_started":
             line(event, "=== PREFLIGHT ===")
         elif kind == "preflight_finished":

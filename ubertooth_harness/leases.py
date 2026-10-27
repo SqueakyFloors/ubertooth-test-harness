@@ -225,6 +225,23 @@ class LeaseSet:
             except OSError:
                 pass
 
+    def release_host_lock(self) -> bool:
+        """Drop the host lock early, keeping the boards; True if it was held.
+
+        Releasing is always safe for the lock order (nothing is taken after
+        it); a run that flashed its boards first gives the lock back once the
+        writes are done, unless it switches power or writes firmware later.
+        """
+        for lease in list(self.leases):
+            if lease.board == HOST_LOCK:
+                self.leases.remove(lease)
+                LeaseSet([lease]).release()
+                return True
+        return False
+
+    def holds_host_lock(self) -> bool:
+        return any(lease.board == HOST_LOCK for lease in self.leases)
+
     def to_manifest(self) -> list[dict]:
         return [lease.to_dict() for lease in self.leases]
 

@@ -2,7 +2,7 @@
 
 Every message is one JSON object in one WebSocket text frame:
 
-    {"version": 2, "type": "<type>", ...fields}
+    {"version": 3, "type": "<type>", ...fields}
 
 Each type has an exact field set. Decoding is strict: a message that is not a
 JSON object, has an unknown version or type, lacks a field, carries an extra
@@ -22,8 +22,8 @@ from typing import Any, Callable, Mapping
 
 
 # Version 2 added ``commit`` to the run message (version 1 runners resolved
-# the ref name in their own checkout).
-PROTOCOL_VERSION = 2
+# the ref name in their own checkout); version 3 added ``flash_build``.
+PROTOCOL_VERSION = 3
 # Bounds what the runner accepts from the controller. Outbound events may be
 # larger (the manifest record is bounded at 1 MiB).
 MAX_INBOUND_MESSAGE_BYTES = 64 * 1024
@@ -137,7 +137,8 @@ CONTROLLER_MESSAGES: Mapping[str, Mapping[str, Validator]] = {
     # then resolves ``ref`` in its own checkout. ``plan`` names
     # <plans dir>/<plan>.yaml; ``tests`` selects exact test names (empty: the
     # whole suite); ``build`` builds the resolved commits into the run
-    # directory first.
+    # directory first; ``flash_build`` (meaningful only with ``build``) then
+    # flashes the run's boards with that build's firmware before preflight.
     "run": {
         "request_id": _identifier,
         "ref": _git_ref,
@@ -146,6 +147,7 @@ CONTROLLER_MESSAGES: Mapping[str, Mapping[str, Validator]] = {
         "suite": _name,
         "tests": _test_names,
         "build": _boolean,
+        "flash_build": _boolean,
     },
     # Cooperatively cancel the active run.
     "cancel": {
