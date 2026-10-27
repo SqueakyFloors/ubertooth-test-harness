@@ -3,18 +3,18 @@
 from dataclasses import asdict, dataclass
 import hashlib
 from pathlib import Path
-import re
 import time
 from typing import Callable, Mapping
 
 from ubertooth_harness.cancellation import CancellationToken
 from ubertooth_harness.events import EventPublisher
 from ubertooth_harness.executor import CommandExecutor, CommandResult
+from ubertooth_harness.patterns import FIRMWARE_REVISION_RE
 from ubertooth_harness.plan import FlashStep
 from ubertooth_harness.rawlog import record_output
 
 
-_VERSION_RE = re.compile(r"Firmware version:\s+(?P<revision>\S+)\s+\(API:")
+_VERSION_RE = FIRMWARE_REVISION_RE
 
 
 class HarnessError(RuntimeError):

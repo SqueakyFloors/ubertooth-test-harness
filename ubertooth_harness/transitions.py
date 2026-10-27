@@ -1608,7 +1608,8 @@ def host_api_version(source) -> int:
 
 GUARD_FIRMWARE_KEY = "firmware"
 GUARD_FIRMWARE_PATTERN = (
-    r"Firmware version:\s+(?P<value>\S+\s+\(API:[0-9a-fA-F]+\.[0-9a-fA-F]+\))"
+    # The image name, if any, is part of the value, so a change of image shows.
+    r"Firmware version:\s+(?P<value>(?:\S+\s+)?\S+\s+\(API:[0-9a-fA-F]+\.[0-9a-fA-F]+\))"
 )
 _GUARD_API_RE = re.compile(r"\(API:(?P<major>[0-9a-fA-F]+)\.(?P<minor>[0-9a-fA-F]+)\)")
 # Same shape the preflight compile-info check requires.

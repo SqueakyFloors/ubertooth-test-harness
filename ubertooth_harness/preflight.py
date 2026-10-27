@@ -8,6 +8,7 @@ from typing import Mapping, Sequence
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.cases import GUARD_ROLE_PREFIX
 from ubertooth_harness.manifest import ManifestError, RunManifest
+from ubertooth_harness.patterns import FIRMWARE_IMAGE
 from ubertooth_harness.planner import TestInvocation
 from ubertooth_harness.resources import ResourceRegistry
 from ubertooth_harness.stateful import StateCaseError
@@ -183,7 +184,7 @@ class PreflightPolicy:
                     (
                         "Firmware version",
                         common + ("-v",),
-                        (rf"Firmware version:\s+{self._pattern(expected)}(?:\s|\()",),
+                        (rf"Firmware version:\s+{FIRMWARE_IMAGE}{self._pattern(expected)}(?:\s|\()",),
                     ),
                     (
                         "Firmware compile info",
