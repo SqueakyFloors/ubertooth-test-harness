@@ -18,6 +18,7 @@
     error: ["✗", "error"],
     lost: ["?", "lost"],
     "not run": ["○", "not run"],
+    "not reached": ["○", "not reached"],
     "did not finish": ["✗", "did not finish"],
     "not requested": ["–", "not requested"],
     online: ["●", "online"],
@@ -667,9 +668,16 @@
     if (render) renderLive();
   }
 
+  // A run has ended only once it has a final status; until then a test that
+  // has not started is "pending", and only after the end "not reached".
+  const FINAL = new Set(["passed", "failed", "error", "canceled", "lost"]);
+  function runEnded(run) {
+    return Boolean(run) && FINAL.has(run.status);
+  }
+
   function itemStatus(item, run) {
-    if (!run || run.status === "running") return item.status;
-    if (item.status === "pending") return "not run";
+    if (!runEnded(run)) return item.status;
+    if (item.status === "pending") return "not reached";
     if (item.status === "running") return "did not finish";
     return item.status;
   }
@@ -711,16 +719,16 @@
         el("dt", { text: "Reason" }), el("dd", {}, sentence(run.reason))));
     }
     $("live-summary").replaceChildren(...items);
-    $("cancel-button").hidden = run.status !== "running";
+    $("cancel-button").hidden = runEnded(run);
 
     // A phase still pending or running when the run ended did not finish.
-    const phaseStatus = (phase) => (run.status === "running" ? phase.status
-      : phase.status === "pending" ? "not run" : phase.status === "running" ? "did not finish" : phase.status);
+    const phaseStatus = (phase) => (!runEnded(run) ? phase.status
+      : phase.status === "pending" ? "not reached" : phase.status === "running" ? "did not finish" : phase.status);
     // A run that ended in a phase with no failure of its own (for example a
     // ref that did not resolve) shows the run's reason on that phase.
     const phases = live.phases || [];
     let blamed = null;
-    if (run.status !== "running" && run.status !== "passed" && run.reason
+    if (runEnded(run) && run.status !== "passed" && run.reason
         && !phases.some((phase) => phase.status === "failed" || phase.status === "error")
         && !live.items.some((item) => item.status !== "pending")) {
       blamed = phases.find((phase) => phase.status === "running" || phase.status === "pending") || null;
@@ -788,7 +796,7 @@
     const estimates = live.items.map((item) => item.estimated_s);
     const known = live.planned && estimates.length > 0 &&
       estimates.every((value) => value !== null && value !== undefined);
-    const finished = run.status !== "running";
+    const finished = runEnded(run);
     const finishedText = () => {
       return `Took ${formatSeconds(elapsed)}`;
     };
@@ -863,7 +871,7 @@
       const actions = el("td", { className: "actions" },
         el("button", {
           type: "button", text: "View", "aria-label": `View run ${run.run_id}`,
-          onclick: () => selectRun(run.run_id, true, run.status !== "running"),
+          onclick: () => selectRun(run.run_id, true, runEnded(run)),
         }));
       if (run.report) {
         // Rendered in a new tab by report.html; the raw file is linked there.
@@ -875,7 +883,7 @@
         }));
       }
       const open = state.openFailures === run.run_id;
-      if (run.status !== "running" && run.status !== "passed") {
+      if (runEnded(run) && run.status !== "passed") {
         actions.append(" ", el("button", {
           type: "button", text: open ? "Hide failures" : "Failures",
           "aria-expanded": open ? "true" : "false",

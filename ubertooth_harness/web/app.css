@@ -201,7 +201,9 @@ code { overflow-wrap: anywhere; }
 .status {
   display: inline-flex; align-items: center; gap: 0.3rem;
   padding: 0.05rem 0.6rem; border-radius: 999px; border: 1px solid var(--neutral-line);
-  font-size: 0.8rem; font-weight: 600; line-height: 1.5; white-space: nowrap;
+  /* Upper case, a little smaller and spaced, so pills keep their size. */
+  font-size: 0.72rem; font-weight: 650; line-height: 1.65; white-space: nowrap;
+  text-transform: uppercase; letter-spacing: 0.04em;
   color: var(--neutral-fg); background: var(--neutral-bg);
 }
 .status-passed, .status-online {
@@ -216,7 +218,7 @@ code { overflow-wrap: anywhere; }
 .status-busy {
   color: var(--info-fg); background: var(--info-bg); border-color: var(--info-line);
 }
-.status-pending, .status-not-run, .status-offline, .status-skipped, .status-not-requested,
+.status-pending, .status-not-run, .status-not-reached, .status-offline, .status-skipped, .status-not-requested,
 .status-not-applicable, .status-canceled, .status-unknown {
   color: var(--neutral-fg); background: var(--neutral-bg); border-color: var(--neutral-line);
 }
