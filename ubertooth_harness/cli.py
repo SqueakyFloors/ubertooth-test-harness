@@ -890,9 +890,10 @@ def _power_command(args: argparse.Namespace) -> int:
         controller = controller_from_resource(resource, allow_real_changes=False)
         ports = controller_ports(resource)
         mapped = {
-            int(board.power["port"]): board.alias
+            board.power["port"]: board.alias
             for board in registry.resources.values()
             if board.power.get("controller") == resource.alias
+            and isinstance(board.power.get("port"), int)
         }
         controller.connect()
         try:

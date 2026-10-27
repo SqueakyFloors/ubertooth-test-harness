@@ -223,6 +223,14 @@ class AcronamePowerControllerTests(unittest.TestCase):
             acroname(hub).connect()
         self.assertTrue(hub.disconnected)
 
+    def test_a_raising_connect_still_disconnects(self):
+        hub = FakeHub(0x12345678)
+        hub.discoverAndConnect = mock.Mock(side_effect=OSError("libusb gone"))
+
+        with self.assertRaisesRegex(OSError, "libusb gone"):
+            acroname(hub).connect()
+        self.assertTrue(hub.disconnected)
+
     def test_rejects_wrong_controller_identity(self):
         hub = FakeHub(0x87654321)
 

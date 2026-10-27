@@ -182,7 +182,9 @@ board attached; a board re-enumerates 0.37-0.59 s after power-on and answers
 
 `ubertooth-harness power --hardware hardware.yaml <controller>` reads every
 port of a registered controller (power, data, VBUS, current, and the board
-mapped to it) without changing anything; `--json` gives the same as JSON:
+mapped to it) without changing anything; `--json` gives the same as JSON. It
+takes no lease or host lock, so while a run holds the hub it may fail to
+connect (nothing is switched either way):
 
 ```text
 Hub_Linux1 (acroname BrainStem USBHub3+), firmware 0x28000000
@@ -269,10 +271,17 @@ first, bit 0 = port 1), OR in the bits for those ports, and send `SP` + the
 password padded to 8 characters + the new mask, each CR-terminated. For
 example, with the factory password `pass`, if `GP` returns `09000000` (ports 1
 and 4 set) and port 3 must come back, send `SPpass    0D000000`. Acroname
-(with BrainStem installed): `.venv/bin/python -c 'import brainstem;
-h = brainstem.stem.USBHub3p(); h.discoverAndConnect(brainstem.link.Spec.USB,
-SERIAL); h.usb.setPowerEnable(PORT); h.disconnect()'`, then check it with
-`ubertooth-harness power`. A run with power isolation
+(with BrainStem installed), holding the board's lease and the host lock so no
+run switches power or flashes meanwhile:
+
+```sh
+python -m ubertooth_harness lease --hardware hardware.yaml --host-lock UT_Linux1 -- \
+  .venv/bin/python -c 'import brainstem; h = brainstem.stem.USBHub3p();
+assert h.discoverAndConnect(brainstem.link.Spec.USB, SERIAL) == 0;
+assert h.usb.setPowerEnable(PORT) == 0; h.disconnect()'
+```
+
+then check it with `ubertooth-harness power`. A run with power isolation
 (StarTech or Acroname) holds the [host lock](#sharing-boards-leases) for the
 whole run, so no other harness command switches power or writes firmware on
 that host meanwhile.

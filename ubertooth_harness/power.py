@@ -172,6 +172,14 @@ class SimulatedPowerController:
         return self._states[_validate_port(port)].power_enabled
 
 
+def _quiet_disconnect(hub) -> None:
+    """Disconnect after a failure without hiding the failure itself."""
+    try:
+        hub.disconnect()
+    except Exception:  # noqa: BLE001 - the original error is the one to report
+        pass
+
+
 class AcronameUSBHub3pController:
     """BrainStem USBHub3+ adapter; real state changes are unarmed by default.
 
@@ -239,11 +247,15 @@ class AcronameUSBHub3pController:
             return
         self._load_api()
         hub = self._module_factory()
-        result = hub.discoverAndConnect(
-            self._usb_transport, self.serial_number
-        )
+        try:
+            result = hub.discoverAndConnect(
+                self._usb_transport, self.serial_number
+            )
+        except BaseException:
+            _quiet_disconnect(hub)  # a failed connect may leave a partial link
+            raise
         if result != self._no_error:
-            hub.disconnect()  # a failed connect may leave a partial link
+            _quiet_disconnect(hub)
             raise PowerControllerError(
                 f"unable to connect to USBHub3+ serial "
                 f"0x{self.serial_number:08x}: error {result}"
@@ -268,8 +280,8 @@ class AcronameUSBHub3pController:
             version = int(self._result_value(
                 hub.system.getVersion(), "controller firmware version"
             ))
-        except Exception:
-            hub.disconnect()
+        except BaseException:
+            _quiet_disconnect(hub)
             raise
         self.firmware_version = f"0x{version:08x}"
         self._hub = hub
@@ -309,10 +321,10 @@ class AcronameUSBHub3pController:
         port = _validate_port(port)
         requested = bool(enabled)
         usb = self._usb()
-        switch = {
-            ("power", True): usb.setPowerEnable, ("power", False): usb.setPowerDisable,
-            ("data", True): usb.setDataEnable, ("data", False): usb.setDataDisable,
-        }[(what, requested)]
+        if what == "power":
+            switch = usb.setPowerEnable if requested else usb.setPowerDisable
+        else:
+            switch = usb.setDataEnable if requested else usb.setDataDisable
         result = switch(port)
         if result != self._no_error:
             raise PowerControllerError(
