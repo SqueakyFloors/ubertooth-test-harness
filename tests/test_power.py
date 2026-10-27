@@ -227,7 +227,7 @@ class AcronamePowerControllerTests(unittest.TestCase):
         hub = FakeHub(0x12345678)
         hub.discoverAndConnect = mock.Mock(side_effect=OSError("libusb gone"))
 
-        with self.assertRaisesRegex(OSError, "libusb gone"):
+        with self.assertRaisesRegex(PowerControllerError, "0x12345678: libusb gone"):
             acroname(hub).connect()
         self.assertTrue(hub.disconnected)
 

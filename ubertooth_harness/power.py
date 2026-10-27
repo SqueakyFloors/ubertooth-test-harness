@@ -251,8 +251,14 @@ class AcronameUSBHub3pController:
             result = hub.discoverAndConnect(
                 self._usb_transport, self.serial_number
             )
-        except BaseException:
+        except Exception as error:
             _quiet_disconnect(hub)  # a failed connect may leave a partial link
+            raise PowerControllerError(
+                f"unable to connect to USBHub3+ serial "
+                f"0x{self.serial_number:08x}: {error}"
+            ) from error
+        except BaseException:
+            _quiet_disconnect(hub)
             raise
         if result != self._no_error:
             _quiet_disconnect(hub)

@@ -272,7 +272,9 @@ password padded to 8 characters + the new mask, each CR-terminated. For
 example, with the factory password `pass`, if `GP` returns `09000000` (ports 1
 and 4 set) and port 3 must come back, send `SPpass    0D000000`. Acroname
 (with BrainStem installed), holding the board's lease and the host lock so no
-run switches power or flashes meanwhile:
+run switches power or flashes meanwhile; replace `SERIAL` with the hub's
+registered serial (for example `0x1234ABCD`) and `PORT` with the port number
+from `isolation_applied`:
 
 ```sh
 python -m ubertooth_harness lease --hardware hardware.yaml --host-lock UT_Linux1 -- \

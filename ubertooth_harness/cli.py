@@ -900,7 +900,10 @@ def _power_command(args: argparse.Namespace) -> int:
             states = snapshot_ports(controller, ports)
             firmware = getattr(controller, "firmware_version", None)
         finally:
-            controller.close()
+            try:
+                controller.close()
+            except Exception:  # noqa: BLE001 - a read error above is the one to report
+                pass
     except PowerControllerError as error:
         raise HarnessError(f"power controller {resource.alias}: {error}") from error
     rows = [
