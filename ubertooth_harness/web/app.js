@@ -590,13 +590,13 @@
     // Column groups across the top of the card; each group stacks its
     // label/value pairs vertically. "–" until a value is known.
     const groups = [
-      [["Run", el("code", { text: run.run_id })]],
+      [["Run", el("code", { text: run.run_id })],
+        ["Started", timeElement(run.created_at)], ["Finished", timeElement(run.finished_at)]],
       [["Status", statusBadge(run.status)], ["Stage", live.stage]],
       [["Ref", refLabel(run)],
         ["Plan / suite", `${run.plan ?? "–"} / ${run.suite ?? "–"}`],
         ["Target", run.target ? targetName(run.target) : "–"]],
       [["Boards", runBoards(live)]],
-      [["Started", timeElement(run.created_at)], ["Finished", timeElement(run.finished_at)]],
     ];
     const items = groups.map((pairs) => el("div", { className: "summary-item" },
       ...pairs.flatMap(([term, value]) => [el("dt", { text: term }), el("dd", {}, value)])));
