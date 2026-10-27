@@ -741,6 +741,7 @@
         "aria-current": shown === "running" ? "step" : null,
       },
         statusBadge(shown), " ", el("span", { className: "check-name", text: phase.name }),
+        el("span", { className: "check-board" }), el("span", { className: "hint check-estimate" }),
         reason ? el("span", { className: "reason", text: sentence(reason) }) : null);
     });
     $("checklist").replaceChildren(...phaseRows, ...live.items.map((item) => {
@@ -761,10 +762,14 @@
         } : null,
       },
         statusBadge(shown), " ", el("span", { className: "check-name", text: item.name }),
-        item.boards && item.boards.length
-          ? el("span", { className: "check-board", text: item.boards.join(", ") }) : null,
-        item.estimated_s !== null && item.estimated_s !== undefined
-          ? el("span", { className: "hint check-estimate", text: formatSeconds(item.estimated_s), "aria-label": `estimated runtime ${formatSeconds(item.estimated_s)}` }) : null,
+        // Fixed columns, filled or empty, so every row lines up.
+        el("span", { className: "check-board", text: item.boards && item.boards.length ? item.boards.join(", ") : "" }),
+        el("span", {
+          className: "hint check-estimate",
+          text: item.estimated_s !== null && item.estimated_s !== undefined ? formatSeconds(item.estimated_s) : "",
+          "aria-label": item.estimated_s !== null && item.estimated_s !== undefined
+            ? `estimated runtime ${formatSeconds(item.estimated_s)}` : null,
+        }),
         item.reason ? el("span", { className: "reason", text: sentence(item.reason) }) : null);
     }));
     if (!live.items.length) {

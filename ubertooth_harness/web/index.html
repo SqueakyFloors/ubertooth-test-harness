@@ -97,7 +97,7 @@
         <div class="live-checklist">
           <h3 id="checklist-heading" class="visually-hidden">Test list</h3>
           <div class="checklist-head" aria-hidden="true">
-            <span>Test</span><span>Est. runtime</span>
+            <span class="head-test">Test</span><span class="head-board">Board</span><span class="head-estimate">Est. runtime</span>
           </div>
           <div id="checklist-scroll" class="checklist-scroll">
             <ol id="checklist" class="checklist" aria-labelledby="checklist-heading"
@@ -108,12 +108,12 @@
         <div class="live-log">
           <section id="transcript-box" class="transcript-box" hidden aria-labelledby="transcript-title">
             <div class="transcript-head">
+              <button type="button" id="transcript-close" class="icon-button" aria-label="Close the test transcript" title="Close">×</button>
               <h3 id="transcript-title">Transcript</h3>
-              <button type="button" id="transcript-close" aria-label="Close the transcript">Close</button>
             </div>
             <pre id="transcript" class="log transcript" tabindex="-1"></pre>
           </section>
-          <h3 id="log-heading" class="visually-hidden">Log tail</h3>
+          <h3 id="log-heading" class="log-heading">Full transcript</h3>
           <pre id="log" class="log" tabindex="0" aria-labelledby="log-heading"></pre>
         </div>
       </div>
