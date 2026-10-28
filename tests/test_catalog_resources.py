@@ -37,8 +37,8 @@ resources:
   DK_Linux0:
     type: nRF52840 DK
     attached to: Host_Linux
-    roles: [central]
-    identity: {jlink serial: "000123456789"}
+    roles: [advertiser, central]
+    identity: {jlink serial: "000123456789", BLE address: "C0:00:00:00:00:02"}
     capabilities: [BLE central, DLE]
   Hub_Linux0:
     type: USB power controller

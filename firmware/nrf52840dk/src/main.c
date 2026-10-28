@@ -106,14 +106,14 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 			"\"address\":\"%s\",\"address_type\":\"random static\"",
 			utdk_role_name(active_role), UTDK_FW_VERSION,
 			bt_ready ? "true" : "false", address);
-	if (used > 0 && used < sizeof(line)) {
+	if (used > 0 && (size_t)used < sizeof(line)) {
 		/* Every role reports the advertiser's fields, so one status
 		 * shape serves them all; the connection fields follow.
 		 */
 		adv_status(line + used, sizeof(line) - used);
 		used += strlen(line + used);
 	}
-	if (used > 0 && used < sizeof(line)) {
+	if (used > 0 && (size_t)used < sizeof(line)) {
 		conn_status(line + used, sizeof(line) - used);
 	}
 	shell_print(sh, "%s}", line);

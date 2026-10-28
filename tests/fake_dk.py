@@ -148,7 +148,7 @@ class FakeFirmware:
             if not self.connected:
                 return ["ERR no connection to update"]
             self.update_ms = int(args[0])
-            self.interval_units = round(int(args[0]) * 0.8)
+            self.interval_units = nrfdk.conn_units(int(args[0]))
             self.updates += 1
             return ["OK"]
         if self.conn_on:
@@ -181,7 +181,8 @@ class FakeFirmware:
         self.tx_octets = 251 if self.dle else 27
         self.rx_octets = self.tx_octets
         interval = self.autoupdate_ms or self.conn_interval
-        self.interval_units = round(interval * 0.8)
+        # The firmware truncates; so does nrfdk.conn_units().
+        self.interval_units = nrfdk.conn_units(interval)
         if self.autoupdate_ms:
             self.update_ms = self.autoupdate_ms
             self.updates += 1

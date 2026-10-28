@@ -49,7 +49,7 @@ from typing import Callable, Sequence
 
 # The firmware version the harness expects (firmware/nrf52840dk/src/roles.h
 # UTDK_FW_VERSION; tests/test_nrfdk.py keeps them in step).
-FIRMWARE_VERSION = "utdk-1.1.0"
+FIRMWARE_VERSION = "utdk-1.1.1"
 # nrfutil and its device command, as installed and validated on the lab host.
 NRFUTIL_VERSION = "8.2.1"
 NRFUTIL_DEVICE_VERSION = "2.23.0"
@@ -95,8 +95,16 @@ ROLES = ("advertiser", "central", "peripheral")
 # Connection interval, in the firmware's range (Bluetooth Core 7.5 ms-4 s).
 CONN_INTERVAL_MIN_MS = 8
 CONN_INTERVAL_MAX_MS = 4000
-# A connection interval in the CONNECT_IND is in 1.25 ms units.
-CONN_UNITS_PER_MS = 0.8
+
+def conn_units(interval_ms: int) -> int:
+    """``interval_ms`` as the 1.25 ms units a CONNECT_IND carries.
+
+    The firmware computes this with integer arithmetic
+    (``interval_ms * 4 / 5`` in connection.c), so this truncates too: for
+    11 ms both give 8 units, and rounding here would expect 9 and fail every
+    interval that is not a multiple of 5 ms.
+    """
+    return int(interval_ms) * 4 // 5
 # The data length the pair asks for with `conn dle on`.
 DATA_LENGTH_MAX = 251
 # Time for the central to connect, write, and for status to settle.
@@ -479,7 +487,9 @@ def ensure(dk: Dk, image: Path | None, address: str | None, out=None,
             if image is None:
                 raise NrfDkError(
                     f"J-Link {dk.serial} does not run {version} ({reason}); pass "
-                    "--artifact \"nRF52840 advertiser=PATH\" with the image to flash")
+                    '--artifact "nRF52840 advertiser=PATH" with the image to '
+                    "flash (one image holds every role, so the label is the "
+                    "same whichever role is wanted)")
             check_image(image, version)
             check_nrfutil(dk.run)
             find_probe(dk.serial, dk.run)
@@ -645,9 +655,9 @@ def central(dk: Dk, peer: str, interval_ms: int, dle: bool = True,
     commands.append("conn start")
     # The connection interval the CONNECT_IND asks for, and the one an
     # automatic update moves to; either is right once the link is up.
-    intervals = {round(interval * CONN_UNITS_PER_MS)}
+    intervals = {conn_units(interval)}
     if autoupdate_ms:
-        intervals.add(round(_conn_interval(autoupdate_ms) * CONN_UNITS_PER_MS))
+        intervals.add(conn_units(_conn_interval(autoupdate_ms)))
     shell = _open(dk)
     try:
         for command in commands:
@@ -692,7 +702,7 @@ def central(dk: Dk, peer: str, interval_ms: int, dle: bool = True,
 def update(dk: Dk, interval_ms: int, out=None) -> dict:
     """Ask for a connection parameter update to ``interval_ms``."""
     interval = _conn_interval(interval_ms)
-    expected_units = round(interval * CONN_UNITS_PER_MS)
+    expected_units = conn_units(interval)
     shell = _open(dk)
     try:
         shell.command(f"conn update {interval}")
@@ -724,6 +734,10 @@ def status_command(dk: Dk, out=None) -> dict:
         shell.close()
     print(json.dumps(status, sort_keys=True), file=out)
     _report(status, out)
+    if all(key in status for key in _CONNECTION_KEYS):
+        # Firmware with the connection roles: report the link as well, so a
+        # caller can check what the pair did without parsing the JSON.
+        _report_connection(status, out)
     return status
 
 

@@ -68,8 +68,12 @@ def _validate_dk(resource) -> None:
         raise RegistryError(
             f"nRF52840 DK {alias} roles must be one or more of {', '.join(DK_ROLES)}"
         )
-    if "advertiser" in roles and address is None:
-        raise RegistryError(f"nRF52840 DK {alias} advertiser requires a 'BLE address'")
+    # Every role is identified by its address in a capture, and the central
+    # connects to the peripheral's, so all three need one.
+    if address is None:
+        raise RegistryError(
+            f"nRF52840 DK {alias} requires a 'BLE address' (the address its "
+            "status reports)")
 
 
 @dataclass(frozen=True)
@@ -324,6 +328,7 @@ class FileResourceRegistry:
                 raise RegistryError(
                     f"default {alias} is not a {resource_type} attached to {host}"
                 )
+            self._declares_role(self.get(alias), role)
             return (alias,)
         if selector == "each":
             if not eligible:
@@ -336,7 +341,24 @@ class FileResourceRegistry:
             raise RegistryError(
                 f"resource {selector} is not a {resource_type} attached to {host}"
             )
+        self._declares_role(resource, role)
         return (selector,)
+
+    @staticmethod
+    def _declares_role(resource, role: str | None) -> None:
+        """A resource that declares roles may only be bound to one of them.
+
+        A resource with no roles (an Ubertooth) is bound by type alone, so
+        nothing is checked; a DK registered as the peripheral must not be
+        handed to a test that wants an advertiser, which would otherwise show
+        up only as a capture that holds nothing.
+        """
+        if role is None or not resource.roles or role in resource.roles:
+            return
+        raise RegistryError(
+            f"resource {resource.alias} declares the role(s) "
+            f"{', '.join(resource.roles)}, not {role}"
+        )
 
     def reconcile(self, host: str, discovered: Sequence[Mapping]) -> Reconciliation:
         self.get(host)

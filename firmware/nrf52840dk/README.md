@@ -17,7 +17,7 @@ the new one, so a board can be handed from one test to another without
 reflashing. The boot role is the advertiser, so a board that was reset or
 power-cycled is in a known state.
 
-Firmware version: `utdk-1.1.0` (`UTDK_FW_VERSION` in `src/roles.h`; the
+Firmware version: `utdk-1.1.1` (`UTDK_FW_VERSION` in `src/roles.h`; the
 harness pins the same string in `ubertooth_harness/nrfdk.py` and flashes a
 board that reports anything else).
 
@@ -76,7 +76,7 @@ The shell is on uart0, which is the J-Link's first virtual COM port (VCOM0;
 115200 baud, 8N1, no flow control. It prints no prompt, no echo and no
 colours. Send one command line ended by CR; the board answers with zero or
 more data lines, then exactly one line `OK` or `ERR <reason>`. Any other line
-(the boot banner `*** Booting nRF Connect SDK ...`, `utdk: utdk-1.1.0 ready`)
+(the boot banner `*** Booting nRF Connect SDK ...`, `utdk: utdk-1.1.1 ready`)
 is not a response.
 
 | Command | Answer |
@@ -117,7 +117,7 @@ instead; `nrfdk.py` treats both as a refusal.
 for example a central with a live connection:
 
 ```json
-{"role":"central","fw":"utdk-1.1.0","bt":true,"address":"C0:7D:CD:95:52:86","address_type":"random static","adv":false,"running":false,"type":"nonconn","chmap":"all","interval_ms":100,"payload":"","counter":0,"starts":0,"connections":0,"last_err":0,"conn_on":true,"connected":true,"peer":"C1:92:EC:E7:71:BC","conn_interval_ms":30,"update_ms":60,"dle":true,"interval_units":48,"latency":0,"timeout_units":400,"tx_octets":251,"rx_octets":251,"mtu":247,"phy":"1M","payload_len":244,"period_ms":100,"cycle_ms":4000,"autoupdate_ms":60,"writes":74,"write_errors":4,"received":0,"updates":3,"connects":3,"disconnects":2,"conn_err":0}
+{"role":"central","fw":"utdk-1.1.1","bt":true,"address":"C0:7D:CD:95:52:86","address_type":"random static","adv":false,"running":false,"type":"nonconn","chmap":"all","interval_ms":100,"payload":"","counter":0,"starts":0,"connections":0,"last_err":0,"conn_on":true,"connected":true,"peer":"C1:92:EC:E7:71:BC","conn_interval_ms":30,"update_ms":60,"dle":true,"interval_units":48,"latency":0,"timeout_units":400,"tx_octets":251,"rx_octets":251,"mtu":247,"phy":"1M","payload_len":244,"period_ms":100,"cycle_ms":4000,"autoupdate_ms":60,"writes":74,"write_errors":4,"received":0,"updates":3,"connects":3,"disconnects":2,"conn_err":0}
 ```
 
 - `address`: the identity address, a static random address derived from

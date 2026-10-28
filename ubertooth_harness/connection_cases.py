@@ -49,7 +49,6 @@ from ubertooth_harness.advertiser_cases import (
 )
 from ubertooth_harness.receive_cases import seconds_arg
 from ubertooth_harness.stateful import (
-    CAPTURE_DIR_KEY,
     StateCase,
     StateCaseError,
     Step,
@@ -85,7 +84,6 @@ CHECK_TIMEOUT_S = 30.0
 # Settling and status reads after the capture.
 STATUS_TIMEOUT_S = 30.0
 
-_NRFDK = str(Path(nrfdk.__file__).resolve())
 _CONNCAPTURE = str(Path(conncapture.__file__).resolve())
 
 
@@ -187,7 +185,7 @@ def _capture_case(serial, central, peripheral, seconds, *, case_id, name,
                   option_check=False):
     """One followed connection: the pair runs, ubertooth-btle -f captures it."""
     option, file_name = capture
-    interval_units = round(interval_ms * nrfdk.CONN_UNITS_PER_MS)
+    interval_units = nrfdk.conn_units(interval_ms)
 
     def check(context):
         argv = [sys.executable, _CONNCAPTURE, _capture_path(file_name)(context),

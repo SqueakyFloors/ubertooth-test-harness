@@ -127,8 +127,13 @@ class ConnectInd:
         )
 
 
-def connect_ind_bodies(records) -> list[bytes]:
-    """Each CONNECT_IND record from its access address on (header and LLData)."""
+def connect_ind_bodies(records, central: str | None = None,
+                       peripheral: str | None = None) -> list[bytes]:
+    """Each CONNECT_IND record from its access address on (header and LLData).
+
+    With ``central`` and ``peripheral`` only the connections between those
+    two addresses are returned.
+    """
     bodies = []
     for record in records:
         if len(record) < LE_PHDR_LEN + 4 + 2 + CONNECT_IND_LEN:
@@ -138,6 +143,11 @@ def connect_ind_bodies(records) -> list[bytes]:
             continue
         header = body[4:6]
         if header[0] & 0x0F != CONNECT_IND or header[1] & 0x3F != CONNECT_IND_LEN:
+            continue
+        pdu = body[6:6 + CONNECT_IND_LEN]
+        if central is not None and format_address(pdu[0:6]) != central.upper():
+            continue
+        if peripheral is not None and format_address(pdu[6:12]) != peripheral.upper():
             continue
         bodies.append(bytes(body[:6 + CONNECT_IND_LEN]))
     return bodies
@@ -316,7 +326,9 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
         result.problems.append(
             f"{result.long_packets} packet(s) of {min_data_length} bytes or more, "
             f"fewer than {long_packets} (longest {result.longest})")
-    bodies = connect_ind_bodies(records)
+    # Only our pair's CONNECT_IND, so another device in range cannot decide
+    # what the recorded option is compared against.
+    bodies = connect_ind_bodies(records, central=central, peripheral=peripheral)
     if bodies:
         result.connection_info = classify_connection_info(
             connection_info_option(data), bodies[0])

@@ -20,7 +20,7 @@
  * when a board reports anything else, so bump it with every change to the
  * firmware's behaviour or protocol.
  */
-#define UTDK_FW_VERSION "utdk-1.1.0"
+#define UTDK_FW_VERSION "utdk-1.1.1"
 
 /* Payload magic and format: see README.md, "Advertising payload". */
 #define UTDK_COMPANY_ID 0xFFFF

@@ -57,6 +57,11 @@
 /* How long a connection lasts when the central cycles, in ms. */
 #define CYCLE_MIN_MS 1000
 #define CYCLE_MAX_MS 600000
+/* Leaving the role waits for the link to come down: one connection event at
+ * the longest interval the shell accepts, plus the terminate exchange.
+ */
+#define LEAVE_WAIT_STEP K_MSEC(100)
+#define LEAVE_WAIT_STEPS 60
 
 /* One service with one write-only characteristic. The UUIDs are this
  * firmware's own; nothing else uses them.
@@ -400,11 +405,14 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	k_sem_give(&connected_sem);
 }
 
+/*
+ * Always release the link, whatever role is active now: a `role` command can
+ * switch away while the disconnect is still in flight, and skipping this
+ * would leak the reference and leave `status` reporting a connection that
+ * has gone, with no way back except a reset.
+ */
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
-	if (!role_is_connection()) {
-		return;
-	}
 	(void)k_work_cancel_delayable(&write_work);
 	(void)k_work_cancel_delayable(&cycle_work);
 	(void)k_work_cancel_delayable(&autoupdate_work);
@@ -424,11 +432,20 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
  */
 static void recycled(void)
 {
-	if (!role_is_connection() || !cn.on) {
+	bool on, cycling;
+
+	if (!role_is_connection()) {
+		return;
+	}
+	k_mutex_lock(&lock, K_FOREVER);
+	on = cn.on;
+	cycling = cn.cycle_ms != 0;
+	k_mutex_unlock(&lock);
+	if (!on) {
 		return;
 	}
 	if (utdk_role() == UTDK_ROLE_CENTRAL) {
-		if (cn.cycle_ms) {
+		if (cycling) {
 			k_work_reschedule(&reconnect_work, RECONNECT_GAP);
 		}
 	} else {
@@ -555,6 +572,8 @@ int conn_init(void)
 
 void conn_leave(void)
 {
+	bool waiting;
+
 	(void)k_work_cancel_delayable(&write_work);
 	k_mutex_lock(&lock, K_FOREVER);
 	stop_locked();
@@ -565,12 +584,17 @@ void conn_leave(void)
 	cn.period_ms = PERIOD_DEFAULT_MS;
 	cn.cycle_ms = 0;
 	cn.autoupdate_ms = 0;
+	waiting = cn.conn != NULL;
 	k_mutex_unlock(&lock);
-	/* Give the disconnect time to complete, so the next role starts from
-	 * no link rather than racing the teardown.
+	/* Wait for the disconnect to complete, so the next role starts from no
+	 * link rather than racing the teardown. One connection event plus the
+	 * terminate exchange, at the longest interval the shell accepts.
 	 */
-	if (cn.conn != NULL) {
-		k_sleep(K_MSEC(200));
+	for (int i = 0; waiting && i < LEAVE_WAIT_STEPS; i++) {
+		k_sleep(LEAVE_WAIT_STEP);
+		k_mutex_lock(&lock, K_FOREVER);
+		waiting = cn.conn != NULL;
+		k_mutex_unlock(&lock);
 	}
 }
 

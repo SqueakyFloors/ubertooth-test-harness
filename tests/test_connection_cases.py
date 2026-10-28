@@ -5,7 +5,7 @@ import unittest
 from ubertooth_harness import conncapture, leases, nrfdk
 from ubertooth_harness.advertiser_cases import FIRMWARE_LABEL
 from ubertooth_harness.catalog import CatalogError, builtin_catalog
-from ubertooth_harness.connection_cases import known_connection_cases
+from ubertooth_harness.connection_cases import WRITE_BYTES, known_connection_cases
 from ubertooth_harness.plan import load_plan
 from ubertooth_harness.planner import PlanCompiler
 from ubertooth_harness.resources import FileResourceRegistry, RegistryError
@@ -233,6 +233,22 @@ class RegistryTests(unittest.TestCase):
     def test_the_firmware_version_matches_the_sources(self):
         header = (ROOT / "firmware" / "nrf52840dk" / "src" / "roles.h").read_text()
         self.assertIn(f'#define UTDK_FW_VERSION "{nrfdk.FIRMWARE_VERSION}"', header)
+
+    def test_the_pinned_firmware_numbers_match_the_sources(self):
+        """A firmware change to any of these must not quietly fail every run."""
+        source = (ROOT / "firmware" / "nrf52840dk" / "src" / "connection.c").read_text()
+        for define, value in (
+            # conncapture expects this supervision timeout in a CONNECT_IND.
+            ("TIMEOUT_UNITS", conncapture.DEFAULT_TIMEOUT_UNITS),
+            # The connection interval conversion nrfdk.conn_units() repeats.
+            ("UNITS_PER_MS", "4 / 5"),
+            # Bytes per write, which fills a 251-byte link-layer packet.
+            ("PAYLOAD_MAX", "(CONFIG_BT_L2CAP_TX_MTU - 3)"),
+        ):
+            self.assertIn(f"#define {define} {value}", source)
+        config = (ROOT / "firmware" / "nrf52840dk" / "prj.conf").read_text()
+        self.assertIn(f"CONFIG_BT_CTLR_DATA_LENGTH_MAX={nrfdk.DATA_LENGTH_MAX}", config)
+        self.assertIn(f"CONFIG_BT_L2CAP_TX_MTU={WRITE_BYTES + 3}", config)
 
 
 if __name__ == "__main__":

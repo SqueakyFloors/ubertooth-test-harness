@@ -151,7 +151,7 @@ class RegistryTests(unittest.TestCase):
         for old, new, reason in (
             ('jlink serial: "001050000001"', "jlink serial: abc", "jlink serial"),
             ("roles: [advertiser]", "roles: [sniffer]", "roles must be"),
-            ('      BLE address: "C3:11:22:33:44:55"\n', "", "advertiser requires"),
+            ('      BLE address: "C3:11:22:33:44:55"\n', "", "requires a 'BLE address'"),
             ('BLE address: "C3:11:22:33:44:55"', 'BLE address: "C3-11"', "must look like"),
             ('jlink serial: "001050000001"', 'jlink serial: "001050000001"\n'
              "      probe serial: x", "unknown key"),
