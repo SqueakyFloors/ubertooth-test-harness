@@ -128,10 +128,14 @@ def _ensure_case(dk: Mapping) -> StateCase:
     )
 
 
-def _dk_idle(dk: Mapping) -> Step:
-    return Step("advertiser-idle", "Stop the advertiser and restore its boot settings",
+def _dk_idle(dk: Mapping, step_id: str = "advertiser-idle") -> Step:
+    """Release a DK: back to the advertiser role, idle, with boot settings.
+
+    ``step_id`` names it, because a case with two DKs has two of these.
+    """
+    return Step(step_id, f"Leave J-Link {dk['serial']} idle in the advertiser role",
                 _dk(dk, "idle"), timeout_s=DK_TIMEOUT_S,
-                output_patterns=(r"(?m)^advertising: off ",))
+                output_patterns=(r"(?m)^advertising: off ", r"(?m)^role: advertiser$"))
 
 
 def _capture_path(name):

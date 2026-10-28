@@ -79,7 +79,12 @@ _STATUS_KEYS = {
     "role": str, "fw": str, "bt": bool, "address": str, "adv": bool,
     "running": bool, "type": str, "chmap": str, "interval_ms": int,
     "payload": str, "counter": int,
-    # The connection roles (firmware README, "Shell protocol").
+}
+# The connection roles' fields (firmware README, "Shell protocol"). Firmware
+# older than the connection roles has none of them, and `ensure` has to be
+# able to read its version to flash it, so they are required only when the
+# status carries them at all.
+_CONNECTION_KEYS = {
     "conn_on": bool, "connected": bool, "peer": str, "conn_interval_ms": int,
     "dle": bool, "interval_units": int, "latency": int, "timeout_units": int,
     "tx_octets": int, "rx_octets": int, "mtu": int, "phy": str,
@@ -365,10 +370,22 @@ def parse_status(line: str) -> dict:
         raise NrfDkError(f"status is not JSON: {line[:80]!r}") from error
     if not isinstance(status, dict):
         raise NrfDkError("status is not a JSON object")
-    for key, kind in _STATUS_KEYS.items():
+    required = dict(_STATUS_KEYS)
+    if any(key in status for key in _CONNECTION_KEYS):
+        required.update(_CONNECTION_KEYS)
+    for key, kind in required.items():
         value = status.get(key)
         if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
             raise NrfDkError(f"status has no valid '{key}'")
+    return status
+
+
+def require_connection_fields(status: dict) -> dict:
+    """The status must come from firmware that has the connection roles."""
+    if not all(key in status for key in _CONNECTION_KEYS):
+        raise NrfDkError(
+            f"this firmware's status has no connection fields; the connection "
+            f"roles need {FIRMWARE_VERSION} (it reports {status.get('fw', '?')})")
     return status
 
 
@@ -543,7 +560,7 @@ def idle(dk: Dk, out=None) -> dict:
     try:
         shell.command("role advertiser")
         shell.command("adv defaults")
-        status = shell.status()
+        status = require_connection_fields(shell.status())
     finally:
         shell.close()
     wrong = []
@@ -590,7 +607,7 @@ def peripheral(dk: Dk, dle: bool = True, out=None) -> dict:
         for command in ("role peripheral",
                         f"conn dle {'on' if dle else 'off'}", "conn start"):
             shell.command(command)
-        status = shell.status()
+        status = require_connection_fields(shell.status())
     finally:
         shell.close()
     if status["role"] != "peripheral" or not status["conn_on"]:
@@ -642,7 +659,7 @@ def central(dk: Dk, peer: str, interval_ms: int, dle: bool = True,
         # is one of the states this waits out.
         deadline = time.monotonic() + CONNECT_TIMEOUT_S
         while True:
-            status = shell.status()
+            status = require_connection_fields(shell.status())
             wrong = []
             if status["role"] != "central":
                 wrong.append(f"role {status['role']}")
@@ -682,7 +699,7 @@ def update(dk: Dk, interval_ms: int, out=None) -> dict:
         # The update takes effect a few connection events later.
         deadline = time.monotonic() + CONNECT_TIMEOUT_S
         while True:
-            status = shell.status()
+            status = require_connection_fields(shell.status())
             if status["interval_units"] == expected_units:
                 break
             if time.monotonic() >= deadline:

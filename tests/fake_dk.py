@@ -17,7 +17,12 @@ class FakeFirmware:
         self.commands = []
         self.silent = False
         self.refuse = {}
+        self.role = "advertiser"
+        # Statuses to report a short data length before the real one, so a
+        # caller that waits for the connection to settle can be exercised.
+        self.slow_data_length = 0
         self.defaults()
+        self.conn_defaults()
         self.counter = 7
 
     def defaults(self):
@@ -27,14 +32,54 @@ class FakeFirmware:
         self.interval = 100
         self.payload = ""
 
+    def conn_defaults(self):
+        self.conn_on = False
+        self.connected = False
+        self.peer = ""
+        self.conn_interval = 30
+        self.update_ms = 0
+        self.dle = True
+        self.interval_units = 0
+        self.latency = 0
+        self.timeout_units = 0
+        self.tx_octets = 0
+        self.rx_octets = 0
+        self.mtu = 0
+        self.phy = "none"
+        self.payload_len = 244
+        self.period_ms = 100
+        self.cycle_ms = 0
+        self.autoupdate_ms = 0
+        self.writes = 0
+        self.received = 0
+        self.updates = 0
+        self.connects = 0
+        self.disconnects = 0
+
     def status(self):
+        tx = self.tx_octets
+        if self.connected and self.slow_data_length > 0:
+            # The data length update has not landed yet.
+            self.slow_data_length -= 1
+            tx = 27
         return {
-            "role": "advertiser", "fw": self.version, "bt": True,
+            "role": self.role, "fw": self.version, "bt": True,
             "address": self.address, "address_type": "random static",
             "adv": self.adv, "running": self.adv, "type": self.type,
             "chmap": self.chmap, "interval_ms": self.interval,
             "payload": self.payload, "counter": self.counter, "starts": 0,
             "connections": 0, "last_err": 0,
+            "conn_on": self.conn_on, "connected": self.connected,
+            "peer": self.peer, "conn_interval_ms": self.conn_interval,
+            "update_ms": self.update_ms, "dle": self.dle,
+            "interval_units": self.interval_units, "latency": self.latency,
+            "timeout_units": self.timeout_units, "tx_octets": tx,
+            "rx_octets": self.rx_octets, "mtu": self.mtu, "phy": self.phy,
+            "payload_len": self.payload_len, "period_ms": self.period_ms,
+            "cycle_ms": self.cycle_ms, "autoupdate_ms": self.autoupdate_ms,
+            "writes": self.writes, "write_errors": 0, "received": self.received,
+            "updates": self.updates, "connects": self.connects,
+            "disconnects": self.disconnects, "conn_err": 0,
         }
 
     def handle(self, line: str) -> list[str]:
@@ -46,6 +91,10 @@ class FakeFirmware:
         words = line.split()
         if words == ["status"]:
             return [json.dumps(self.status(), separators=(",", ":")), "OK"]
+        if words[:1] == ["role"] and len(words) == 2:
+            return self._role(words[1])
+        if words[:1] == ["conn"]:
+            return self._conn(words[1:])
         if words[:1] != ["adv"] or len(words) < 2:
             return [f"{line}: command not found"]
         command, args = words[1], words[2:]
@@ -67,6 +116,77 @@ class FakeFirmware:
         else:
             return ["ERR bad command"]
         return ["OK"]
+
+    def _role(self, wanted):
+        if wanted not in nrfdk.ROLES:
+            return ["ERR role must be advertiser, central or peripheral"]
+        self.conn_defaults()
+        self.defaults()
+        self.role = wanted
+        return ["OK"]
+
+    def _conn(self, words):
+        if self.role == "advertiser":
+            return [f"ERR role is advertiser; run 'role central' or 'role peripheral'"]
+        if not words:
+            return ["ERR usage: conn <peer|interval|dle|payload|period|cycle|"
+                    "autoupdate|start|stop|update|defaults>"]
+        command, args = words[0], words[1:]
+        if command == "start":
+            self.conn_on = True
+            if self.role == "central":
+                self._connect()
+            return ["OK"]
+        if command == "stop":
+            self.conn_on = False
+            self.connected = False
+            return ["OK"]
+        if command == "defaults":
+            self.conn_defaults()
+            return ["OK"]
+        if command == "update" and args:
+            if not self.connected:
+                return ["ERR no connection to update"]
+            self.update_ms = int(args[0])
+            self.interval_units = round(int(args[0]) * 0.8)
+            self.updates += 1
+            return ["OK"]
+        if self.conn_on:
+            return ["ERR stop the connection before changing settings"]
+        if command == "peer" and args:
+            self.peer = args[0]
+        elif command == "interval" and args:
+            self.conn_interval = int(args[0])
+        elif command == "dle" and args:
+            self.dle = args[0] == "on"
+        elif command == "payload" and args:
+            self.payload_len = int(args[0])
+        elif command == "period" and args:
+            self.period_ms = int(args[0])
+        elif command == "cycle" and args:
+            self.cycle_ms = 0 if args[0] == "off" else int(args[0])
+        elif command == "autoupdate" and args:
+            self.autoupdate_ms = 0 if args[0] == "off" else int(args[0])
+        else:
+            return [f"ERR unknown conn command '{command}'"]
+        return ["OK"]
+
+    def _connect(self):
+        self.connected = True
+        self.connects += 1
+        self.phy = "1M"
+        self.mtu = 247
+        self.latency = 0
+        self.timeout_units = 400
+        self.tx_octets = 251 if self.dle else 27
+        self.rx_octets = self.tx_octets
+        interval = self.autoupdate_ms or self.conn_interval
+        self.interval_units = round(interval * 0.8)
+        if self.autoupdate_ms:
+            self.update_ms = self.autoupdate_ms
+            self.updates += 1
+        self.writes += 10
+        self.received += 10 * self.payload_len
 
 
 class FakePort:

@@ -146,7 +146,8 @@ def _ready_case(central: Mapping, peripheral: Mapping) -> StateCase:
             _ensure_step("ensure-peripheral", peripheral, PERIPHERAL_ROLE),
             _ensure_step("ensure-central", central, CENTRAL_ROLE),
         ),
-        (_dk_idle(peripheral), _dk_idle(central)),
+        (_dk_idle(peripheral, "peripheral-idle"),
+         _dk_idle(central, "central-idle")),
         expected_state=(f"both DKs run {nrfdk.FIRMWARE_VERSION}, idle, in the "
                         "advertiser role"),
         optional_artifacts=(FIRMWARE_LABEL,),
@@ -209,7 +210,9 @@ def _capture_case(serial, central, peripheral, seconds, *, case_id, name,
     )
     return StateCase(
         case_id, name, steps,
-        (_dk_idle(central), _dk_idle(peripheral)) + _cleanup(serial, MODE_RESET_SETTINGS),
+        (_dk_idle(central, "central-idle"),
+         _dk_idle(peripheral, "peripheral-idle"))
+        + _cleanup(serial, MODE_RESET_SETTINGS),
         expected_state=(
             f"a CONNECT_IND at {interval_units} units with {MIN_DATA_PACKETS}+ "
             "packets on its access address; both DKs idle; channel, squelch, and "

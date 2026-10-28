@@ -228,8 +228,10 @@ class OperationTests(unittest.TestCase):
 
     def test_ensure_without_an_image_fails_closed(self):
         board = Board(FakeFirmware(version="utdk-0.9.0"))
-        with self.assertRaisesRegex(nrfdk.NrfDkError, r"does not run utdk-1\.0\.0 \(it runs "
-                                    r"utdk-0\.9\.0\); pass --artifact"):
+        with self.assertRaisesRegex(
+                nrfdk.NrfDkError,
+                rf"does not run {re.escape(nrfdk.FIRMWARE_VERSION)} \(it runs "
+                r"utdk-0\.9\.0\); pass --artifact"):
             self.run_quiet(nrfdk.ensure, board.dk, None, None)
 
     def test_ensure_refuses_an_image_without_the_version(self):
@@ -375,6 +377,119 @@ class CommandLineTests(unittest.TestCase):
                                     "--port", "/dev/no-such-port")
         self.assertEqual((1, "error: /dev/no-such-port does not exist: is J-Link 1050000001 "
                           "attached?\n"), (code, err))
+
+
+class RoleTests(unittest.TestCase):
+    """Switching roles, and the central and peripheral operations."""
+
+    def run_quiet(self, function, *args, **kwargs):
+        out = io.StringIO()
+        result = function(*args, out=out, **kwargs)
+        return result, out.getvalue()
+
+    def test_role_switches_and_reports_the_new_role(self):
+        board = Board()
+        board.firmware.adv = True
+
+        status, out = self.run_quiet(nrfdk.role, board.dk, "central")
+
+        self.assertEqual("central", status["role"])
+        self.assertIn("role: central\n", out)
+        # Switching leaves the previous role idle.
+        self.assertFalse(status["adv"])
+
+    def test_an_unknown_role_is_refused_before_the_board_is_opened(self):
+        board = Board()
+        with self.assertRaisesRegex(nrfdk.NrfDkError, "role must be advertiser"):
+            nrfdk.role(board.dk, "sniffer")
+        self.assertEqual([], board.firmware.commands)
+
+    def test_idle_releases_a_board_in_any_role(self):
+        board = Board()
+        self.run_quiet(nrfdk.peripheral, board.dk)
+        self.assertTrue(board.firmware.conn_on)
+
+        status, out = self.run_quiet(nrfdk.idle, board.dk)
+
+        self.assertEqual("advertiser", status["role"])
+        self.assertFalse(status["conn_on"] or status["connected"] or status["adv"])
+        self.assertIn("role: advertiser\n", out)
+        self.assertIn("role advertiser", board.firmware.commands)
+
+    def test_peripheral_advertises_connectable(self):
+        board = Board()
+
+        status, out = self.run_quiet(nrfdk.peripheral, board.dk)
+
+        self.assertEqual(("peripheral", True), (status["role"], status["conn_on"]))
+        self.assertEqual(["role peripheral", "conn dle on", "conn start"],
+                         [c for c in board.firmware.commands if c != "status"])
+        self.assertIn("connection: down peer none", out)
+
+    def test_central_connects_and_reports_the_negotiated_link(self):
+        board = Board()
+
+        status, out = self.run_quiet(
+            nrfdk.central, board.dk, "c1:92:ec:e7:71:bc", 30, True, 244, 100, 4000, 60)
+
+        self.assertEqual(("central", True), (status["role"], status["connected"]))
+        self.assertEqual("C1:92:EC:E7:71:BC", status["peer"])
+        self.assertEqual(48, status["interval_units"])  # the update's 60 ms
+        self.assertEqual(nrfdk.DATA_LENGTH_MAX, status["tx_octets"])
+        self.assertIn("conn peer C1:92:EC:E7:71:BC", board.firmware.commands)
+        self.assertIn("conn cycle 4000", board.firmware.commands)
+        self.assertIn("conn autoupdate 60", board.firmware.commands)
+        self.assertIn(f"data length: tx {nrfdk.DATA_LENGTH_MAX} rx "
+                      f"{nrfdk.DATA_LENGTH_MAX} octets mtu 247 phy 1M\n", out)
+
+    def test_central_waits_for_the_data_length_to_settle(self):
+        board = Board()
+        board.firmware.slow_data_length = 3
+
+        status, _out = self.run_quiet(nrfdk.central, board.dk, "C1:92:EC:E7:71:BC", 30)
+
+        self.assertEqual(nrfdk.DATA_LENGTH_MAX, status["tx_octets"])
+
+    def test_central_fails_with_what_the_connection_is_not(self):
+        board = Board()
+        board.firmware.slow_data_length = 10**6
+        # Long enough for the shell to answer, short enough to give up at once.
+        nrfdk.CONNECT_TIMEOUT_S, saved = 0.5, nrfdk.CONNECT_TIMEOUT_S
+        try:
+            with self.assertRaisesRegex(nrfdk.NrfDkError, r"tx 27 octets, asked 251"):
+                self.run_quiet(nrfdk.central, board.dk, "C1:92:EC:E7:71:BC", 30)
+        finally:
+            nrfdk.CONNECT_TIMEOUT_S = saved
+
+    def test_an_out_of_range_interval_is_refused_before_the_board_is_opened(self):
+        board = Board()
+        for interval in (0, 4001):
+            with self.assertRaisesRegex(nrfdk.NrfDkError, "connection interval must be"):
+                nrfdk.central(board.dk, "C1:92:EC:E7:71:BC", interval)
+        self.assertEqual([], board.firmware.commands)
+
+    def test_update_waits_for_the_new_interval(self):
+        board = Board()
+        self.run_quiet(nrfdk.central, board.dk, "C1:92:EC:E7:71:BC", 30)
+
+        status, out = self.run_quiet(nrfdk.update, board.dk, 100)
+
+        self.assertEqual(80, status["interval_units"])
+        self.assertIn("conn update 100", board.firmware.commands)
+        self.assertIn("interval 80 units (100 ms)", out)
+
+    def test_firmware_without_the_connection_fields_is_named(self):
+        board = Board(FakeFirmware(version="utdk-0.9.0"))
+        # Old firmware answers only the advertiser's fields.
+        board.firmware.status = lambda: {
+            "role": "advertiser", "fw": "utdk-0.9.0", "bt": True,
+            "address": board.firmware.address, "address_type": "random static",
+            "adv": False, "running": False, "type": "nonconn", "chmap": "all",
+            "interval_ms": 100, "payload": "", "counter": 0,
+        }
+        with self.assertRaisesRegex(nrfdk.NrfDkError,
+                                    "no connection fields.*utdk-0.9.0"):
+            self.run_quiet(nrfdk.idle, board.dk)
 
 
 if __name__ == "__main__":
