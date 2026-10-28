@@ -27,7 +27,9 @@ suites:
         central: default
         peripheral: default
         coverage: smoke
-        duration: 12s
+        # The capture must span one of the central's reconnections and not
+        # two: 5 s < duration < 10 s (connection_cases.CYCLE_MS).
+        duration: 8s
         interval: 30
         update: 60
 
@@ -47,6 +49,6 @@ suites:
         central: default
         peripheral: default
         coverage: comprehensive
-        duration: 12s
+        duration: 8s
         interval: 30
         update: 60

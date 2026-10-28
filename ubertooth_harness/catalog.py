@@ -147,6 +147,22 @@ def _connection_interval(value):
     return value
 
 
+def _check_connection_duration(arguments) -> None:
+    """The capture must span exactly one of the central's reconnections.
+
+    One, so it holds a CONNECT_IND and the connection after it; not two,
+    because ubertooth-btle -f gives up when the connection it follows ends
+    (connection_cases.CYCLE_MS says why).
+    """
+    cycle_s = connection_cases.CYCLE_MS / 1000.0
+    seconds = receive_cases.seconds_arg(arguments)
+    if not cycle_s < seconds < 2 * cycle_s:
+        raise CatalogError(
+            f"duration must be longer than {cycle_s:g}s and shorter than "
+            f"{2 * cycle_s:g}s, so the capture holds one of the central's "
+            "reconnections and not two")
+
+
 def _payload_tag(value):
     # The advertiser firmware's payload tag: up to 12 bytes, or none.
     text = str(value).lower() if isinstance(value, (str, int)) else None
@@ -1024,6 +1040,7 @@ def builtin_catalog() -> TestCatalog:
                 "Ubertooth": "Ubertooth", "central": "nRF52840 DK",
                 "peripheral": "nRF52840 DK",
             }),
+            check_arguments=_check_connection_duration,
             command_builder=connection_cases.known_connection_cases,
             continue_on_case_failure=True,
             guards_other_ubertooths=True,

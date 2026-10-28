@@ -5,7 +5,11 @@ import unittest
 from ubertooth_harness import conncapture, leases, nrfdk
 from ubertooth_harness.advertiser_cases import FIRMWARE_LABEL
 from ubertooth_harness.catalog import CatalogError, builtin_catalog
-from ubertooth_harness.connection_cases import WRITE_BYTES, known_connection_cases
+from ubertooth_harness.connection_cases import (
+    CYCLE_MS,
+    WRITE_BYTES,
+    known_connection_cases,
+)
 from ubertooth_harness.plan import load_plan
 from ubertooth_harness.planner import PlanCompiler
 from ubertooth_harness.resources import FileResourceRegistry, RegistryError
@@ -52,7 +56,7 @@ resources:
 
 
 def arguments(coverage="smoke", **extra):
-    raw = {"coverage": coverage, "duration": "12s", **extra}
+    raw = {"coverage": coverage, "duration": "8s", **extra}
     return builtin_catalog().get("Capture known BLE connection").normalize_arguments(raw)
 
 
@@ -101,14 +105,14 @@ class CaseTests(unittest.TestCase):
         self.assertEqual(
             ["central", "--jlink", "1050000001", "--peer", PERIPHERAL,
              "--interval", "50", "--dle", "on", "--payload", "244",
-             "--period", "100", "--cycle", "4000", "--autoupdate", "200"],
+             "--period", "100", "--cycle", str(CYCLE_MS), "--autoupdate", "200"],
             list(steps["central-start"].resolve_argv(context)[2:]))
         self.assertEqual(
             ("ubertooth-btle", "-U", SERIAL, "-f", "-r",
              "/run/captures/x/capture.pcapng"),
             steps["capture"].resolve_argv(context))
         self.assertTrue(steps["capture"].continuous)
-        self.assertEqual(12.0, steps["capture"].timeout_s)
+        self.assertEqual(8.0, steps["capture"].timeout_s)
         self.assertEqual(
             ["/run/captures/x/capture.pcapng", "--central", CENTRAL,
              "--peripheral", PERIPHERAL,
@@ -190,6 +194,13 @@ class CaseTests(unittest.TestCase):
         for name, value in (("interval", 7), ("interval", 4001), ("update", 0)):
             with self.assertRaises(CatalogError):
                 arguments(**{name: value})
+
+    def test_the_duration_must_span_one_reconnection(self):
+        cycle = CYCLE_MS // 1000
+        arguments(duration=f"{cycle + 1}s")
+        for seconds in (cycle, 2 * cycle, 1):
+            with self.assertRaisesRegex(CatalogError, "one of the central's"):
+                arguments(duration=f"{seconds}s")
 
 
 class RegistryTests(unittest.TestCase):

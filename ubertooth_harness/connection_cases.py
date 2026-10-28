@@ -66,9 +66,15 @@ from ubertooth_harness.transitions import (
 TEST_NAME = "Capture known BLE connection"
 CENTRAL_ROLE = "central"
 PERIPHERAL_ROLE = "peripheral"
-# How long each connection lasts before the central makes a new one. Short
-# enough that a capture of a few seconds holds a whole connection.
-CYCLE_MS = 4000
+# How long each connection lasts before the central makes a new one.
+#
+# The capture window has to span exactly one of those boundaries: one, so it
+# holds a CONNECT_IND and the connection that follows it; not two, because
+# `ubertooth-btle -f` gives up when the connection it follows ends (it stops
+# polling and exits 1 with a USB timeout, SqueakyFloors/ubertooth#751). With
+# the central started just before the capture, that means
+# CYCLE_MS < duration < 2 * CYCLE_MS; `check_arguments` enforces it.
+CYCLE_MS = 5000
 # Bytes per write and how often: 244 bytes of ATT payload fill a 251-byte
 # link-layer packet, which only Data Length Extension allows.
 WRITE_BYTES = 244
