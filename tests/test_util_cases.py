@@ -662,15 +662,20 @@ class MultiBench:
     - ``unregistered``: extra serials on the bus that the registry lacks.
     - ``index_map``: board opened for each -U<index> (default identity).
     - ``listing_drops_last``: the listing omits the last board.
+    - ``unreadable``: indices the listing cannot open, which get
+      ``unavailable, <reason>`` where each query's value would be.
     """
 
+    UNAVAILABLE = "unavailable, in use by another program"
+
     def __init__(self, serials, *, past_end=None, unregistered=(), index_map=None,
-                 listing_drops_last=False):
+                 listing_drops_last=False, unreadable=()):
         self.order = list(serials) + list(unregistered)
         self.boards = {s: FakeUbertooth(serial=s, crc="1") for s in self.order}
         self.past_end = past_end
         self.index_map = index_map
         self.listing_drops_last = listing_drops_last
+        self.unreadable = set(unreadable)
         self.commands = []
 
     @staticmethod
@@ -695,6 +700,14 @@ class MultiBench:
         listed = self.order[:-1] if self.listing_drops_last else self.order
         lines = []
         for index, serial in enumerate(listed):
+            if index in self.unreadable:
+                # One line per query, so a reader filtering for one of them
+                # still sees this board.
+                for query in requested:
+                    label = LABELS[query]
+                    prefix = f"{label} ({index})" if label else f"{index}"
+                    lines.append(f"{prefix}: {self.UNAVAILABLE}")
+                continue
             for query in requested:
                 for line in self._report(serial, query):
                     # The report's label moves into the listing's, which
@@ -894,6 +907,16 @@ class MultiBoardCaseTests(unittest.TestCase):
             MultiBench((A, B), index_map={0: 1, 1: 0}),
             ("index-selects-listed-board",),
             "expected serial selected by -U0",
+        )
+
+    def test_a_board_the_listing_cannot_open_fails_and_names_it(self):
+        # The run has to say which board went unread, not report its stand-in
+        # value as a serial.
+        self.assert_smoke_fails(
+            MultiBench((A, B), unreadable={1}),
+            ("all-lists-every-registered-serial",
+             "no-selector-lists-every-registered-serial", "index-selects-listed-board"),
+            "board 1 could not be opened",
         )
 
 

@@ -29,9 +29,11 @@ bluetooth_rxtx):
   came from (SqueakyFloors/ubertooth#610). Compile info has no label of its
   own and keeps the bare ``<index>: <value>`` form. A board that could not be
   opened gets ``unavailable, <reason>`` as the value of every query asked of
-  it, and a query that failed on a board that did open gets ``read failed``;
-  either way the ``error:`` line goes to stderr, the other boards are still
-  listed, and the exit status is 1. ``-U<index>`` opens the board at that
+  it. A query that failed on a board that did open gets ``read failed``,
+  unless that report has a diagnosis of its own (an unknown board ID, say),
+  which it prints in the value's place instead. Either way the ``error:``
+  line goes to stderr, the other boards are still listed, and the exit status
+  is 1. ``-U<index>`` opens the board at that
   index of the same order, and an index with no board is refused with
   "no Ubertooth at index"
   (fork 0c7e9c0, SqueakyFloors/ubertooth#188). Any other option without
@@ -710,7 +712,6 @@ _UNAVAILABLE = "unavailable, "
 _READ_FAILED = "read failed"
 _SERIAL_RE = r"[0-9a-f]{32}"
 _SERIAL_LABEL = "Serial No"
-IDENTITY_QUERIES = ("-v", "-V", "-s", "-p", "-b")
 # Report lines per board for -vVspb, in ubertooth-util's report order: the
 # query, its name here, the label it is listed under ("" where the report has
 # none), and the line it must match. This is the one place the harness states
@@ -726,6 +727,7 @@ _BLOCK_PATTERNS = (
 # The label each identity query is listed under, in report order.
 LISTING_LABELS = tuple((query, label)
                        for query, _name, label, _pattern in _BLOCK_PATTERNS)
+IDENTITY_QUERIES = tuple(query for query, _label in LISTING_LABELS)
 
 
 def _listing(stdout):
@@ -867,7 +869,7 @@ def multi_board_cases(arguments, _resources, resource_identities):
             output_check=serials,
             observe=Observation(
                 _index_key(index),
-                rf"(?m)^Serial No \({index}\): (?P<value>{_SERIAL_RE})$"),
+                rf"(?m)^{_SERIAL_LABEL} \({index}\): (?P<value>{_SERIAL_RE})$"),
         ))
     for index in range(count):
         index_steps.append(Step(
