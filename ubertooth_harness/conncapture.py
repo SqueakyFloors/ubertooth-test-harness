@@ -4,7 +4,8 @@ Run as a script by the Capture known BLE connection cases::
 
     python conncapture.py FILE --central ADDR --peripheral ADDR
         --interval-units N --latency N --timeout-units N
-        [--min-data-packets N --min-data-length N --long-packets N]
+        [--min-data-packets N --min-valid-packets N
+         --min-data-length N --long-packets N]
         [--connection-info-option]
 
 FILE is PCAP or PCAPNG as ``ubertooth-btle -q`` and ``-r`` write it; the
@@ -20,7 +21,10 @@ The checks:
   the harness set up, so a wrong one means the DKs or the decode are wrong);
 - the access address and CRC init each CONNECT_IND hands out, and at least
   ``--min-data-packets`` data-channel packets carrying one of them, so the
-  capture really followed a connection;
+  capture really followed a connection, of which at least
+  ``--min-valid-packets`` have a correct CRC, so the access address and CRC
+  init really decode the connection (a sniffer that is not the connection's
+  peer catches only a fraction of the traffic intact);
 - at least ``--long-packets`` of those data packets at least
   ``--min-data-length`` bytes long, which is what Data Length Extension is
   for: without it the link layer would cap the payload at 27 bytes;
@@ -266,6 +270,7 @@ class Result:
 
 def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
           latency: int, timeout_units: int, min_data_packets: int = 0,
+          min_valid_packets: int = 0,
           min_data_length: int = DEFAULT_DATA_LENGTH + 1,
           long_packets: int = 0,
           connection_info_wrong: bool = False) -> tuple[str, Result]:
@@ -320,10 +325,14 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
     result.valid_packets = len(valid)
     result.longest = max(valid) if valid else 0
     result.long_packets = sum(1 for length in valid if length >= min_data_length)
-    if len(valid) < min_data_packets:
+    if len(packets) < min_data_packets:
         result.problems.append(
-            f"{len(valid)} packet(s) on the connection's access address with a "
-            f"correct CRC, fewer than {min_data_packets} ({len(packets)} in all)")
+            f"{len(packets)} packet(s) on the connection's access address, fewer "
+            f"than {min_data_packets}")
+    if len(valid) < min_valid_packets:
+        result.problems.append(
+            f"{len(valid)} packet(s) with a correct CRC, fewer than "
+            f"{min_valid_packets} (of {len(packets)} on the access address)")
     if result.long_packets < long_packets:
         result.problems.append(
             f"{result.long_packets} packet(s) of {min_data_length} bytes or more, "
@@ -354,6 +363,7 @@ def main(argv=None) -> int:
     parser.add_argument("--latency", required=True, type=int)
     parser.add_argument("--timeout-units", required=True, type=int)
     parser.add_argument("--min-data-packets", type=int, default=0)
+    parser.add_argument("--min-valid-packets", type=int, default=0)
     parser.add_argument("--min-data-length", type=int, default=DEFAULT_DATA_LENGTH + 1)
     parser.add_argument("--long-packets", type=int, default=0)
     parser.add_argument("--connection-info-option", action="store_true",
@@ -369,6 +379,7 @@ def main(argv=None) -> int:
         data, central=args.central, peripheral=args.peripheral,
         interval_units=args.interval_units, latency=args.latency,
         timeout_units=args.timeout_units, min_data_packets=args.min_data_packets,
+        min_valid_packets=args.min_valid_packets,
         min_data_length=args.min_data_length, long_packets=args.long_packets,
         connection_info_wrong=args.connection_info_option,
     )

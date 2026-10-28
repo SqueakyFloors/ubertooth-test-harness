@@ -123,7 +123,8 @@ class CaseTests(unittest.TestCase):
              # 50 ms is 40 units of 1.25 ms.
              "--interval-units", "40", "--latency", "0",
              "--timeout-units", str(conncapture.DEFAULT_TIMEOUT_UNITS),
-             "--min-data-packets", "5", "--min-data-length", "28",
+             "--min-data-packets", "5", "--min-valid-packets", "1",
+             "--min-data-length", "28",
              "--long-packets", "1"],
             list(steps["check-capture"].resolve_argv(context)[2:]))
 

@@ -93,6 +93,8 @@ LONG_PACKET_BYTES = 28
 # expected counts; the central writes every WRITE_PERIOD_MS to give the
 # receiver enough chances.
 MIN_DATA_PACKETS = 5
+# ...of which at least this many must decode with a correct CRC.
+MIN_VALID_PACKETS = 1
 MIN_LONG_PACKETS = 1
 CHECK_TIMEOUT_S = 30.0
 # Settling and status reads after the capture.
@@ -209,6 +211,7 @@ def _capture_case(serial, central, peripheral, seconds, *, case_id, name,
                 "--latency", "0",
                 "--timeout-units", str(conncapture.DEFAULT_TIMEOUT_UNITS),
                 "--min-data-packets", str(MIN_DATA_PACKETS),
+                "--min-valid-packets", str(MIN_VALID_PACKETS),
                 "--min-data-length", str(LONG_PACKET_BYTES),
                 "--long-packets", str(MIN_LONG_PACKETS)]
         if option_check:

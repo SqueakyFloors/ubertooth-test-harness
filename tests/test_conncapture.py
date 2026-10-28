@@ -141,6 +141,7 @@ class CheckTests(unittest.TestCase):
                    + [connect_ind(data=lldata(access=other, crc_init=0x123456))]
                    + [data_packet(251, access=other, crc_init=0x123456)] * 2)
         _header, result = self.check(pcap(records), min_data_packets=4,
+                                     min_valid_packets=4,
                                      long_packets=4)
         self.assertEqual([], result.problems)
         self.assertEqual((2, 4), (result.connect_inds, result.valid_packets))
@@ -152,17 +153,19 @@ class CheckTests(unittest.TestCase):
 
     def test_corrupt_data_packets_do_not_count_as_long(self):
         records = [connect_ind()] + [data_packet(251, corrupt=True)] * 3
-        _header, result = self.check(pcap(records), min_data_packets=1, long_packets=1)
+        _header, result = self.check(pcap(records), min_data_packets=1,
+                                     min_valid_packets=1, long_packets=1)
         self.assertEqual((3, 0), (result.data_packets, result.valid_packets))
         text = "\n".join(result.problems)
-        self.assertIn("0 packet(s) on the connection's access address with a correct "
-                      "CRC, fewer than 1 (3 in all)", text)
+        self.assertIn("0 packet(s) with a correct CRC, fewer than 1 "
+                      "(of 3 on the access address)", text)
         self.assertIn("0 packet(s) of 28 bytes or more, fewer than 1", text)
 
     def test_packets_of_another_connection_are_not_counted(self):
         records = [connect_ind(), data_packet(251, access=0x11223344)]
         _header, result = self.check(pcap(records), min_data_packets=1)
-        self.assertIn("0 packet(s) on the connection's access address", result.problems[0])
+        self.assertIn("0 packet(s) on the connection's access address",
+                      result.problems[0])
 
     def test_short_packets_alone_fail_the_long_packet_floor(self):
         records = [connect_ind()] + [data_packet(27)] * 5
