@@ -169,6 +169,11 @@ def _finish_failed_run(publisher, output_dir: Path, reason: str) -> None:
         write_report(output_dir)
 
 
+# --libbtbb-ref value meaning "the LIBBTBB_REF the Ubertooth commit's
+# install.sh sets" (resolved per run, from the commit being built).
+FORK_PIN = "fork-pin"
+
+
 def _resolve_sources(args: argparse.Namespace):
     if bool(args.libbtbb_source) != bool(args.libbtbb_ref):
         raise ManifestError(
@@ -182,8 +187,23 @@ def _resolve_sources(args: argparse.Namespace):
         )
     ]
     if args.libbtbb_source:
+        libbtbb_ref = args.libbtbb_ref
+        if libbtbb_ref == FORK_PIN:
+            # The libbtbb the Ubertooth commit under test pins in its own
+            # install.sh, so a pin bump on the fork never leaves a long-lived
+            # runner building against an older libbtbb.
+            try:
+                pin = libbtbbpin.fork_pin_at(sources[0].source_path, sources[0].commit)
+            except RuntimeError as error:
+                raise ManifestError(f"--libbtbb-ref {FORK_PIN}: {error}") from None
+            if pin is None:
+                raise ManifestError(
+                    f"--libbtbb-ref {FORK_PIN}: install.sh at Ubertooth "
+                    f"{sources[0].short_commit} has no LIBBTBB_REF; pass a libbtbb ref"
+                )
+            libbtbb_ref = pin.ref
         sources.append(
-            resolver.resolve("libbtbb", args.libbtbb_source, args.libbtbb_ref)
+            resolver.resolve("libbtbb", args.libbtbb_source, libbtbb_ref)
         )
     return tuple(sources)
 
