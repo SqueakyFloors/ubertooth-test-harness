@@ -5,9 +5,72 @@ import re
 
 FIRMWARE_PATTERN = r"Firmware version:\s+\S+"
 COMPILE_INFO_PATTERN = r"\bubertooth\s+\S+\s+\("
+
+# `ubertooth-util -v` names the image the build came from when the firmware
+# carries an info block ("Firmware version: bluetooth_rxtx git-1c7f06d6
+# (API:1.35)"), and leaves it out when it does not ("Firmware version:
+# 2020-12-R1 (API:1.07)"). Both forms are accepted everywhere the harness
+# reads a revision off a board.
+IMAGE_NAME_PATTERN = r"(?:\S+\s+)?"
+FIRMWARE_VERSION_RE = re.compile(
+    rf"Firmware version:\s+{IMAGE_NAME_PATTERN}(?P<revision>\S+)\s+\(API:"
+)
 PART_ID_PATTERN = r"Part ID:\s+[0-9A-Fa-f]+"
 BOARD_ID_PATTERN = r"Board ID Number:\s+\d+"
 
 
 def serial_pattern(serial: str) -> str:
     return rf"Serial No:\s+{re.escape(serial.lower())}(?:\s|$)"
+
+
+# Git abbreviates a commit to as many hex digits as it needs for the hash to
+# be unique in that clone, and it never uses fewer than this many.
+GIT_SHORT_HASH_MIN = 7
+
+_GIT_HASH_REVISION = re.compile(rf"\Agit-([0-9a-f]{{{GIT_SHORT_HASH_MIN},40}})\Z")
+
+
+def revision_pattern(expected: str) -> str:
+    """Regex matching a revision string that names the same commit as ``expected``.
+
+    The same commit can be stamped with abbreviations of different lengths:
+    a board flashed from one clone reports ``git-1c7f06d6`` while the host
+    tools built from another report ``git-1c7f06d``. Both name the same
+    commit, so the pattern accepts a reported hash when it is a prefix of the
+    expected hash, or the expected hash is a prefix of it. Either way the
+    shorter one must be at least GIT_SHORT_HASH_MIN digits long.
+
+    A revision that is not a plain git hash (a tag, or a hash carrying the
+    ``*`` marker a modified source adds) is matched exactly. The caller
+    supplies what must follow, so a ``*`` marker on the reported revision
+    still fails to match.
+    """
+    match = _GIT_HASH_REVISION.match(expected)
+    if match is None:
+        return re.escape(expected)
+    digits = match.group(1)
+    # A longer abbreviation of the same commit, then every shorter one.
+    alternatives = [digits + "[0-9a-f]*"]
+    alternatives += [
+        digits[:length]
+        for length in range(len(digits) - 1, GIT_SHORT_HASH_MIN - 1, -1)
+    ]
+    return "git-(?:" + "|".join(alternatives) + ")"
+
+
+def firmware_version_pattern(expected: str) -> str:
+    """`ubertooth-util -v` output for firmware built from ``expected``."""
+    return (
+        rf"Firmware version:\s+{IMAGE_NAME_PATTERN}"
+        rf"{revision_pattern(expected)}(?:\s|\()"
+    )
+
+
+def compile_info_pattern(expected: str) -> str:
+    """`ubertooth-util -V` output for firmware built from ``expected``.
+
+    The image name the firmware reports comes before the build string
+    (`bluetooth_rxtx: ubertooth git-1c7f06d6 (...)`), so the pattern starts
+    at the build string itself.
+    """
+    return rf"\bubertooth\s+{revision_pattern(expected)}\s+\("

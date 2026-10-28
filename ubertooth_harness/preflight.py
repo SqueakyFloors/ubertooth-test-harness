@@ -12,6 +12,11 @@ from ubertooth_harness.cases import GUARD_ROLE_PREFIX
 from ubertooth_harness.manifest import ManifestError, RunManifest
 from ubertooth_harness.planner import TestInvocation
 from ubertooth_harness import nrfdk
+from ubertooth_harness.patterns import (
+    compile_info_pattern,
+    firmware_version_pattern,
+    revision_pattern,
+)
 from ubertooth_harness.resources import NRF52840_DK, ResourceRegistry
 from ubertooth_harness.stateful import StateCaseError
 from ubertooth_harness.transitions import firmware_api, format_api, host_api_version
@@ -47,7 +52,12 @@ class PreflightCheck:
         for pattern in self.expected_patterns:
             if not re.search(pattern, output):
                 target = self.resource_alias or self.host
-                return f"{self.name}: identity mismatch for {target}"
+                # Name the pattern: the reason line is often all an operator
+                # sees, and "mismatch" alone does not say what was expected.
+                return (
+                    f"{self.name}: identity mismatch for {target}: "
+                    f"output does not match {pattern}"
+                )
         if self.minimum_api is not None:
             api = firmware_api(output)
             if api is None or api < self.minimum_api:
@@ -69,11 +79,11 @@ def host_version_patterns(ubertooth, libbtbb=None) -> tuple[str, ...]:
     A trailing `*` (modified source) does not match.
     """
     patterns = (
-        rf"libubertooth\s+\S+\s+\({re.escape(ubertooth.expected_revision)}\)",
+        rf"libubertooth\s+\S+\s+\({revision_pattern(ubertooth.expected_revision)}\)",
     )
     if libbtbb is not None:
         patterns += (
-            rf"libbtbb\s+\S+\s+\({re.escape(libbtbb.expected_revision)}\)",
+            rf"libbtbb\s+\S+\s+\({revision_pattern(libbtbb.expected_revision)}\)",
         )
     return patterns
 
@@ -216,12 +226,12 @@ class PreflightPolicy:
                     (
                         "Firmware version",
                         common + ("-v",),
-                        (rf"Firmware version:\s+{self._pattern(expected)}(?:\s|\()",),
+                        (firmware_version_pattern(expected),),
                     ),
                     (
                         "Firmware compile info",
                         common + ("-V",),
-                        (rf"\bubertooth\s+{self._pattern(expected)}\s+\(",),
+                        (compile_info_pattern(expected),),
                     ),
                     (
                         "Device serial",
