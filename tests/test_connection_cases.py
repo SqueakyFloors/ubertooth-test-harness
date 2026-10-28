@@ -6,6 +6,7 @@ from ubertooth_harness import conncapture, leases, nrfdk
 from ubertooth_harness.advertiser_cases import FIRMWARE_LABEL
 from ubertooth_harness.catalog import CatalogError, builtin_catalog
 from ubertooth_harness.connection_cases import (
+    ADV_CHANNEL,
     CYCLE_MS,
     WRITE_BYTES,
     known_connection_cases,
@@ -100,7 +101,8 @@ class CaseTests(unittest.TestCase):
         steps = {step.step_id: step for step in case.steps}
         context = {CAPTURE_DIR_KEY: "/run/captures/x"}
         self.assertEqual(
-            ["peripheral", "--jlink", "1050000002", "--dle", "on"],
+            ["peripheral", "--jlink", "1050000002", "--dle", "on",
+             "--chmap", str(ADV_CHANNEL)],
             list(steps["peripheral-start"].resolve_argv(context)[2:]))
         self.assertEqual(
             ["central", "--jlink", "1050000001", "--peer", PERIPHERAL,
@@ -108,7 +110,7 @@ class CaseTests(unittest.TestCase):
              "--period", "100", "--cycle", str(CYCLE_MS), "--autoupdate", "200"],
             list(steps["central-start"].resolve_argv(context)[2:]))
         self.assertEqual(
-            ("ubertooth-btle", "-U", SERIAL, "-f", "-r",
+            ("ubertooth-btle", "-U", SERIAL, "-f", f"-A{ADV_CHANNEL}", "-r",
              "/run/captures/x/capture.pcapng"),
             steps["capture"].resolve_argv(context))
         self.assertTrue(steps["capture"].continuous)
@@ -155,8 +157,8 @@ class CaseTests(unittest.TestCase):
         cases = {case.case_id: case for case in known_connection_cases(
             arguments("comprehensive"), {}, IDENTITIES)}
         steps = {step.step_id: step for step in cases["follow-pcap"].steps}
-        self.assertEqual(("ubertooth-btle", "-U", SERIAL, "-f", "-q",
-                          "/c/capture.pcap"),
+        self.assertEqual(("ubertooth-btle", "-U", SERIAL, "-f",
+                          f"-A{ADV_CHANNEL}", "-q", "/c/capture.pcap"),
                          steps["capture"].resolve_argv({CAPTURE_DIR_KEY: "/c"}))
 
     def test_registered_ports_are_passed(self):

@@ -79,6 +79,10 @@ CYCLE_MS = 5000
 # link-layer packet, which only Data Length Extension allows.
 WRITE_BYTES = 244
 WRITE_PERIOD_MS = 100
+# The advertising channel the peripheral uses and the Ubertooth listens on.
+# The central connects on the channel it hears the peripheral on, so pinning
+# both to one channel is what puts the CONNECT_IND in the capture.
+ADV_CHANNEL = 37
 # Without Data Length Extension the payload stops at 27 bytes, so a packet
 # longer than that proves the extension took effect on air.
 LONG_PACKET_BYTES = 28
@@ -210,8 +214,11 @@ def _capture_case(serial, central, peripheral, seconds, *, case_id, name,
     steps = (
         _stop(serial, "establish-idle", "Establish idle before reading"),
         *_read_originals(serial, MODE_RESET_SETTINGS),
-        Step("peripheral-start", "Peripheral advertises connectable",
-             _dk(peripheral, "peripheral", "--dle", "on"), timeout_s=DK_TIMEOUT_S,
+        Step("peripheral-start",
+             f"Peripheral advertises connectable on channel {ADV_CHANNEL}",
+             _dk(peripheral, "peripheral", "--dle", "on", "--chmap",
+                 str(ADV_CHANNEL)),
+             timeout_s=DK_TIMEOUT_S,
              mutates=True, output_patterns=(r"(?m)^role: peripheral$",)),
         Step("central-start",
              f"Central connects at {interval_ms} ms, then asks for {update_ms} ms",
@@ -225,8 +232,8 @@ def _capture_case(serial, central, peripheral, seconds, *, case_id, name,
                  rf"(?m)^data length: tx {nrfdk.DATA_LENGTH_MAX} rx "
                  rf"{nrfdk.DATA_LENGTH_MAX} octets mtu \d+ phy 1M$",
              )),
-        Step("capture", f"ubertooth-btle -f {option} for {seconds}s",
-             lambda context: _btle(serial, "-f", option,
+        Step("capture", f"ubertooth-btle -f -A{ADV_CHANNEL} {option} for {seconds}s",
+             lambda context: _btle(serial, "-f", f"-A{ADV_CHANNEL}", option,
                                    _capture_path(file_name)(context)),
              timeout_s=float(seconds), mutates=True, continuous=True),
         _stop(serial),

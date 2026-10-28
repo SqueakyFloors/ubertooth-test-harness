@@ -48,6 +48,7 @@ class FakeFirmware:
         self.phy = "none"
         self.payload_len = 244
         self.period_ms = 100
+        self.conn_chmap = "37"
         self.cycle_ms = 0
         self.autoupdate_ms = 0
         self.writes = 0
@@ -76,7 +77,8 @@ class FakeFirmware:
             "timeout_units": self.timeout_units, "tx_octets": tx,
             "rx_octets": self.rx_octets, "mtu": self.mtu, "phy": self.phy,
             "payload_len": self.payload_len, "period_ms": self.period_ms,
-            "cycle_ms": self.cycle_ms, "autoupdate_ms": self.autoupdate_ms,
+            "conn_chmap": self.conn_chmap, "cycle_ms": self.cycle_ms,
+            "autoupdate_ms": self.autoupdate_ms,
             "writes": self.writes, "write_errors": 0, "received": self.received,
             "updates": self.updates, "connects": self.connects,
             "disconnects": self.disconnects, "conn_err": 0,
@@ -163,6 +165,8 @@ class FakeFirmware:
             self.payload_len = int(args[0])
         elif command == "period" and args:
             self.period_ms = int(args[0])
+        elif command == "chmap" and args:
+            self.conn_chmap = args[0]
         elif command == "cycle" and args:
             self.cycle_ms = 0 if args[0] == "off" else int(args[0])
         elif command == "autoupdate" and args:

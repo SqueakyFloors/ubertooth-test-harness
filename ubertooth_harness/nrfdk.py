@@ -12,6 +12,7 @@ port (VCOM0, the DK's uart0). Run as a script by the advertiser cases::
     python nrfdk.py advertise  --jlink SERIAL [--port PATH] --chmap 37|38|39|all
                                --interval MS --payload HEX|none [--type nonconn|conn]
     python nrfdk.py peripheral --jlink SERIAL [--dle on|off]
+                               [--chmap 37|38|39|all]
     python nrfdk.py central    --jlink SERIAL --peer ADDR --interval MS
                                [--dle on|off] [--payload BYTES] [--period MS]
                                [--cycle MS] [--autoupdate MS]
@@ -49,7 +50,7 @@ from typing import Callable, Sequence
 
 # The firmware version the harness expects (firmware/nrf52840dk/src/roles.h
 # UTDK_FW_VERSION; tests/test_nrfdk.py keeps them in step).
-FIRMWARE_VERSION = "utdk-1.1.1"
+FIRMWARE_VERSION = "utdk-1.2.0"
 # nrfutil and its device command, as installed and validated on the lab host.
 NRFUTIL_VERSION = "8.2.1"
 NRFUTIL_DEVICE_VERSION = "2.23.0"
@@ -88,7 +89,7 @@ _CONNECTION_KEYS = {
     "conn_on": bool, "connected": bool, "peer": str, "conn_interval_ms": int,
     "dle": bool, "interval_units": int, "latency": int, "timeout_units": int,
     "tx_octets": int, "rx_octets": int, "mtu": int, "phy": str,
-    "cycle_ms": int, "autoupdate_ms": int,
+    "conn_chmap": str, "cycle_ms": int, "autoupdate_ms": int,
     "writes": int, "received": int, "updates": int, "connects": int,
 }
 ROLES = ("advertiser", "central", "peripheral")
@@ -609,20 +610,29 @@ def _conn_interval(interval_ms: int) -> int:
     return interval_ms
 
 
-def peripheral(dk: Dk, dle: bool = True, out=None) -> dict:
-    """Take the peripheral role and advertise connectable, waiting to be connected."""
+def peripheral(dk: Dk, dle: bool = True, chmap: str = "37", out=None) -> dict:
+    """Take the peripheral role and advertise connectable, waiting to be connected.
+
+    ``chmap`` is the advertising channel (or channels) it uses. The central
+    connects on the channel it hears the peripheral on, so one channel puts
+    the CONNECT_IND where a receiver is listening.
+    """
+    if chmap not in CHMAP_BITS:
+        raise NrfDkError("channel map must be 37, 38, 39 or all")
     shell = _open(dk)
     try:
         # `role` already leaves both roles idle with their boot settings.
-        for command in ("role peripheral",
+        for command in ("role peripheral", f"conn chmap {chmap}",
                         f"conn dle {'on' if dle else 'off'}", "conn start"):
             shell.command(command)
         status = require_connection_fields(shell.status())
     finally:
         shell.close()
-    if status["role"] != "peripheral" or not status["conn_on"]:
+    if (status["role"] != "peripheral" or not status["conn_on"]
+            or status["conn_chmap"] != chmap):
         raise NrfDkError(f"J-Link {dk.serial} is not advertising as a peripheral "
-                         f"(role {status['role']}, started {status['conn_on']})")
+                         f"(role {status['role']}, started {status['conn_on']}, "
+                         f"channels {status['conn_chmap']})")
     _report(status, out)
     _report_connection(status, out)
     return status
@@ -762,6 +772,8 @@ def main(argv: Sequence[str] | None = None, run: Runner = run_tool) -> int:
     commands["role"].add_argument("--role", required=True, choices=ROLES)
     for name in ("peripheral", "central"):
         commands[name].add_argument("--dle", default="on", choices=("on", "off"))
+    commands["peripheral"].add_argument("--chmap", default="37",
+                                        choices=sorted(CHMAP_BITS))
     central_parser = commands["central"]
     central_parser.add_argument("--peer", required=True, help="the peripheral's address")
     central_parser.add_argument("--interval", required=True, type=int, help="ms")
@@ -788,7 +800,7 @@ def main(argv: Sequence[str] | None = None, run: Runner = run_tool) -> int:
         elif args.command == "role":
             role(dk, args.role)
         elif args.command == "peripheral":
-            peripheral(dk, args.dle == "on")
+            peripheral(dk, args.dle == "on", args.chmap)
         elif args.command == "central":
             central(dk, args.peer, args.interval, args.dle == "on", args.payload,
                     args.period, args.cycle, args.autoupdate)

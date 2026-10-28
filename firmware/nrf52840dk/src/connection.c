@@ -92,6 +92,11 @@ static struct {
 	uint32_t cycle_ms;
 	/* The interval the central asks for once connected (0 = no update). */
 	uint32_t autoupdate_ms;
+	/* Advertising channels the peripheral uses. The central connects on
+	 * the channel it hears the peripheral on, so one channel puts the
+	 * CONNECT_IND where a receiver is listening.
+	 */
+	uint8_t chmap;
 	bool dle;              /* ask for 251-byte data length */
 	uint16_t payload_len;
 	uint32_t period_ms;
@@ -106,6 +111,7 @@ static struct {
 	.dle = true,
 	.payload_len = PAYLOAD_DEFAULT,
 	.period_ms = PERIOD_DEFAULT_MS,
+	.chmap = UTDK_CHAN_37,
 };
 
 static uint8_t payload[PAYLOAD_MAX];
@@ -510,10 +516,21 @@ static int start_peripheral_locked(void)
 	static uint8_t mfg[UTDK_MFG_FIXED_LEN + UTDK_TAG_MAX];
 	static uint8_t flags = BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR;
 	static struct bt_data ad[2];
-	size_t len = utdk_mfg_payload(mfg, UTDK_CHAN_ALL, 0, NULL, 0);
+	size_t len = utdk_mfg_payload(mfg, cn.chmap, 0, NULL, 0);
+	uint32_t options = BT_LE_ADV_OPT_CONN | BT_LE_ADV_OPT_USE_IDENTITY;
+
+	if (!(cn.chmap & UTDK_CHAN_37)) {
+		options |= BT_LE_ADV_OPT_DISABLE_CHAN_37;
+	}
+	if (!(cn.chmap & UTDK_CHAN_38)) {
+		options |= BT_LE_ADV_OPT_DISABLE_CHAN_38;
+	}
+	if (!(cn.chmap & UTDK_CHAN_39)) {
+		options |= BT_LE_ADV_OPT_DISABLE_CHAN_39;
+	}
+
 	const struct bt_le_adv_param param = BT_LE_ADV_PARAM_INIT(
-		BT_LE_ADV_OPT_CONN | BT_LE_ADV_OPT_USE_IDENTITY,
-		BT_GAP_ADV_FAST_INT_MIN_2, BT_GAP_ADV_FAST_INT_MAX_2, NULL);
+		options, BT_GAP_ADV_FAST_INT_MIN_2, BT_GAP_ADV_FAST_INT_MAX_2, NULL);
 
 	ad[0].type = BT_DATA_FLAGS;
 	ad[0].data_len = 1;
@@ -584,6 +601,7 @@ void conn_leave(void)
 	cn.period_ms = PERIOD_DEFAULT_MS;
 	cn.cycle_ms = 0;
 	cn.autoupdate_ms = 0;
+	cn.chmap = UTDK_CHAN_37;
 	waiting = cn.conn != NULL;
 	k_mutex_unlock(&lock);
 	/* Wait for the disconnect to complete, so the next role starts from no
@@ -612,6 +630,20 @@ static const char *phy_name(uint8_t phy)
 	}
 }
 
+static const char *conn_chmap_name(uint8_t chmap)
+{
+	switch (chmap) {
+	case UTDK_CHAN_37:
+		return "37";
+	case UTDK_CHAN_38:
+		return "38";
+	case UTDK_CHAN_39:
+		return "39";
+	default:
+		return "all";
+	}
+}
+
 void conn_status(char *buf, size_t len)
 {
 	char peer[BT_ADDR_LE_STR_LEN] = "";
@@ -628,7 +660,8 @@ void conn_status(char *buf, size_t len)
 		 "\"conn_interval_ms\":%u,\"update_ms\":%u,\"dle\":%s,"
 		 "\"interval_units\":%u,\"latency\":%u,\"timeout_units\":%u,"
 		 "\"tx_octets\":%u,\"rx_octets\":%u,\"mtu\":%u,\"phy\":\"%s\","
-		 "\"payload_len\":%u,\"period_ms\":%u,\"cycle_ms\":%u,"
+		 "\"payload_len\":%u,\"period_ms\":%u,\"conn_chmap\":\"%s\","
+		 "\"cycle_ms\":%u,"
 		 "\"autoupdate_ms\":%u,\"writes\":%u,"
 		 "\"write_errors\":%u,\"received\":%u,\"updates\":%u,"
 		 "\"connects\":%u,\"disconnects\":%u,\"conn_err\":%d",
@@ -636,7 +669,8 @@ void conn_status(char *buf, size_t len)
 		 cn.interval_ms, cn.update_ms, cn.dle ? "true" : "false",
 		 cn.interval_units, cn.latency, cn.timeout_units,
 		 cn.tx_octets, cn.rx_octets, cn.mtu, phy_name(cn.phy),
-		 cn.payload_len, cn.period_ms, cn.cycle_ms, cn.autoupdate_ms,
+		 cn.payload_len, cn.period_ms, conn_chmap_name(cn.chmap),
+		 cn.cycle_ms, cn.autoupdate_ms,
 		 cn.writes, cn.write_errors,
 		 cn.received, cn.updates, cn.connects, cn.disconnects,
 		 cn.last_err);
@@ -817,6 +851,32 @@ static int cmd_period(const struct shell *sh, size_t argc, char **argv)
 	return utdk_ok(sh);
 }
 
+static int cmd_chmap(const struct shell *sh, size_t argc, char **argv)
+{
+	uint8_t chmap;
+	int err = require_idle(sh);
+
+	ARG_UNUSED(argc);
+	if (err) {
+		return err;
+	}
+	if (strcmp(argv[1], "37") == 0) {
+		chmap = UTDK_CHAN_37;
+	} else if (strcmp(argv[1], "38") == 0) {
+		chmap = UTDK_CHAN_38;
+	} else if (strcmp(argv[1], "39") == 0) {
+		chmap = UTDK_CHAN_39;
+	} else if (strcmp(argv[1], "all") == 0) {
+		chmap = UTDK_CHAN_ALL;
+	} else {
+		return utdk_err(sh, "channel map must be 37, 38, 39 or all");
+	}
+	k_mutex_lock(&lock, K_FOREVER);
+	cn.chmap = chmap;
+	k_mutex_unlock(&lock);
+	return utdk_ok(sh);
+}
+
 static int cmd_cycle(const struct shell *sh, size_t argc, char **argv)
 {
 	unsigned long value = 0;
@@ -989,6 +1049,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(conn_cmds,
 	SHELL_CMD_ARG(payload, NULL, "<bytes> Bytes per write", cmd_payload, 2, 0),
 	SHELL_CMD_ARG(period, NULL, "<ms> Time between writes, 10-10000", cmd_period,
 		      2, 0),
+	SHELL_CMD_ARG(chmap, NULL, "<37|38|39|all> The peripheral's advertising channels",
+		      cmd_chmap, 2, 0),
 	SHELL_CMD_ARG(cycle, NULL, "<ms|off> Drop and remake the link this often",
 		      cmd_cycle, 2, 0),
 	SHELL_CMD_ARG(autoupdate, NULL, "<ms|off> Interval to ask for once connected",

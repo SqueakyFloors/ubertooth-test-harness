@@ -422,7 +422,8 @@ class RoleTests(unittest.TestCase):
         status, out = self.run_quiet(nrfdk.peripheral, board.dk)
 
         self.assertEqual(("peripheral", True), (status["role"], status["conn_on"]))
-        self.assertEqual(["role peripheral", "conn dle on", "conn start"],
+        self.assertEqual(["role peripheral", "conn chmap 37", "conn dle on",
+                          "conn start"],
                          [c for c in board.firmware.commands if c != "status"])
         self.assertIn("connection: down peer none", out)
 

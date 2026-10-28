@@ -17,7 +17,7 @@ the new one, so a board can be handed from one test to another without
 reflashing. The boot role is the advertiser, so a board that was reset or
 power-cycled is in a known state.
 
-Firmware version: `utdk-1.1.1` (`UTDK_FW_VERSION` in `src/roles.h`; the
+Firmware version: `utdk-1.2.0` (`UTDK_FW_VERSION` in `src/roles.h`; the
 harness pins the same string in `ubertooth_harness/nrfdk.py` and flashes a
 board that reports anything else).
 
@@ -76,7 +76,7 @@ The shell is on uart0, which is the J-Link's first virtual COM port (VCOM0;
 115200 baud, 8N1, no flow control. It prints no prompt, no echo and no
 colours. Send one command line ended by CR; the board answers with zero or
 more data lines, then exactly one line `OK` or `ERR <reason>`. Any other line
-(the boot banner `*** Booting nRF Connect SDK ...`, `utdk: utdk-1.1.1 ready`)
+(the boot banner `*** Booting nRF Connect SDK ...`, `utdk: utdk-1.2.0 ready`)
 is not a response.
 
 | Command | Answer |
@@ -93,6 +93,7 @@ is not a response.
 | `adv defaults` | stop, and restore every boot setting |
 | `conn peer <address>` | the peripheral the central connects to |
 | `conn interval <ms>` | connection interval, 8-4000 ms (default 30) |
+| `conn chmap <37\|38\|39\|all>` | the peripheral's advertising channels (default 37) |
 | `conn dle <on\|off>` | ask for a 251-byte data length (default on) |
 | `conn payload <bytes>` | bytes per write, 1-244 (default 244) |
 | `conn period <ms>` | time between writes, 10-10000 ms (default 100) |
@@ -117,7 +118,7 @@ instead; `nrfdk.py` treats both as a refusal.
 for example a central with a live connection:
 
 ```json
-{"role":"central","fw":"utdk-1.1.1","bt":true,"address":"C0:7D:CD:95:52:86","address_type":"random static","adv":false,"running":false,"type":"nonconn","chmap":"all","interval_ms":100,"payload":"","counter":0,"starts":0,"connections":0,"last_err":0,"conn_on":true,"connected":true,"peer":"C1:92:EC:E7:71:BC","conn_interval_ms":30,"update_ms":60,"dle":true,"interval_units":48,"latency":0,"timeout_units":400,"tx_octets":251,"rx_octets":251,"mtu":247,"phy":"1M","payload_len":244,"period_ms":100,"cycle_ms":4000,"autoupdate_ms":60,"writes":74,"write_errors":4,"received":0,"updates":3,"connects":3,"disconnects":2,"conn_err":0}
+{"role":"central","fw":"utdk-1.2.0","bt":true,"address":"C0:7D:CD:95:52:86","address_type":"random static","adv":false,"running":false,"type":"nonconn","chmap":"all","interval_ms":100,"payload":"","counter":0,"starts":0,"connections":0,"last_err":0,"conn_on":true,"connected":true,"peer":"C1:92:EC:E7:71:BC","conn_interval_ms":30,"update_ms":60,"dle":true,"interval_units":48,"latency":0,"timeout_units":400,"tx_octets":251,"rx_octets":251,"mtu":247,"phy":"1M","payload_len":244,"period_ms":100,"cycle_ms":4000,"autoupdate_ms":60,"writes":74,"write_errors":4,"received":0,"updates":3,"connects":3,"disconnects":2,"conn_err":0}
 ```
 
 - `address`: the identity address, a static random address derived from
@@ -158,6 +159,12 @@ exchanges the ATT MTU, finds the peripheral's one characteristic by UUID, and
 writes `conn payload` bytes to it every `conn period` ms with Write Without
 Response, which puts the whole payload in one link-layer packet. Only the 1M
 PHY is built in, so a connection can never move off it.
+
+The central connects on the channel it hears the peripheral on, so the
+peripheral advertises on one channel (`conn chmap`, 37 by default): that is
+what puts the CONNECT_IND on the channel a receiver is listening to. With all
+three channels the connection still works, but a single-channel receiver sees
+the CONNECT_IND only when it happens to land on its channel.
 
 With `conn cycle <ms>` the central drops the link after that long and
 connects again a moment later, and the peripheral advertises again by itself.
