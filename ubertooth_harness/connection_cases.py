@@ -171,14 +171,16 @@ def _ready_case(central: Mapping, peripheral: Mapping) -> StateCase:
 _TRAFFIC = re.compile(
     r"(?m)^traffic: writes (?P<writes>\d+) received \d+ bytes "
     r"updates (?P<updates>\d+) connects (?P<connects>\d+)$")
+_UPDATE = re.compile(r"(?m)^update: asked (?P<ms>\d+) ms \(\d+ units\)$")
 
 
 def _central_did_the_work(update_ms: int):
-    """The central must have connected, written, and had an update accepted.
+    """The central must have connected, written, and updated to ``update_ms``.
 
     Without this the case would pass on a DK that connected and sent nothing,
-    or that never asked for the connection parameter update: the capture
-    checks the CONNECT_IND, which is written before any update.
+    or that never asked for the connection parameter update, or that had a
+    different interval accepted: the capture checks the CONNECT_IND, which is
+    written before any update.
     """
     def check(stdout: str) -> str:
         match = _TRAFFIC.search(stdout)
@@ -192,6 +194,12 @@ def _central_did_the_work(update_ms: int):
         if counts["updates"] < 1:
             return (f"the central's {update_ms} ms connection parameter update "
                     "was never accepted")
+        asked = _UPDATE.search(stdout)
+        if asked is None:
+            return "the central reported no update line"
+        if int(asked["ms"]) != update_ms:
+            return (f"the central's accepted update was {asked['ms']} ms, not the "
+                    f"{update_ms} ms it was told to ask for")
         return ""
     return check
 

@@ -478,6 +478,16 @@ class RoleTests(unittest.TestCase):
         self.assertEqual(80, status["interval_units"])
         self.assertIn("conn update 100", board.firmware.commands)
         self.assertIn("interval 80 units (100 ms)", out)
+        self.assertIn("update: asked 100 ms (80 units)\n", out)
+
+    def test_leaving_a_role_forgets_the_peer(self):
+        board = Board()
+        self.run_quiet(nrfdk.central, board.dk, "C1:92:EC:E7:71:BC", 30)
+
+        status, _out = self.run_quiet(nrfdk.idle, board.dk)
+
+        # A later `conn start` must not open a link to the last test's peer.
+        self.assertEqual("", status["peer"])
 
     def test_firmware_without_the_connection_fields_is_named(self):
         board = Board(FakeFirmware(version="utdk-0.9.0"))

@@ -131,16 +131,20 @@ class CaseTests(unittest.TestCase):
     def test_the_central_must_have_connected_written_and_updated(self):
         case = known_connection_cases(arguments(), {}, IDENTITIES)[1]
         check = {step.step_id: step for step in case.steps}["central-report"].output_check
-        good = ("role: central\n"
-                "traffic: writes 74 received 18300 bytes updates 3 connects 3\n")
-        self.assertEqual("", check(good))
-        for line, reason in (
+        traffic = "traffic: writes 74 received 18300 bytes updates 3 connects 3\n"
+        update = f"update: asked {arguments()['update']} ms (48 units)\n"
+        self.assertEqual("", check("role: central\n" + traffic + update))
+        for text, reason in (
             ("traffic: writes 0 received 0 bytes updates 1 connects 1", "wrote nothing"),
             ("traffic: writes 5 received 5 bytes updates 0 connects 1", "never accepted"),
             ("traffic: writes 0 received 0 bytes updates 0 connects 0", "no connection"),
             ("role: central", "no traffic line"),
+            (traffic, "no update line"),
+            # An update was accepted, but not the one that was asked for.
+            (traffic + "update: asked 100 ms (80 units)\n",
+             "accepted update was 100 ms, not the 60 ms"),
         ):
-            self.assertIn(reason, check(line))
+            self.assertIn(reason, check(text))
 
     def test_both_tests_hold_the_host_lock_because_they_flash_a_dk(self):
         catalog = builtin_catalog()

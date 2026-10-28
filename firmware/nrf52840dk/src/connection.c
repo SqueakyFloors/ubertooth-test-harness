@@ -602,6 +602,11 @@ void conn_leave(void)
 	cn.cycle_ms = 0;
 	cn.autoupdate_ms = 0;
 	cn.chmap = UTDK_CHAN_37;
+	/* Forget the peer too: leaving the role must not leave a `conn start`
+	 * able to open a link to whatever the last test connected to.
+	 */
+	cn.have_peer = false;
+	memset(&cn.peer, 0, sizeof(cn.peer));
 	waiting = cn.conn != NULL;
 	k_mutex_unlock(&lock);
 	/* Wait for the disconnect to complete, so the next role starts from no

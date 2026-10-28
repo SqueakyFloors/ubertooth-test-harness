@@ -50,7 +50,7 @@ from typing import Callable, Sequence
 
 # The firmware version the harness expects (firmware/nrf52840dk/src/roles.h
 # UTDK_FW_VERSION; tests/test_nrfdk.py keeps them in step).
-FIRMWARE_VERSION = "utdk-1.2.0"
+FIRMWARE_VERSION = "utdk-1.2.1"
 # nrfutil and its device command, as installed and validated on the lab host.
 NRFUTIL_VERSION = "8.2.1"
 NRFUTIL_DEVICE_VERSION = "2.23.0"
@@ -449,6 +449,8 @@ def _report_connection(status: dict, out) -> None:
           f"timeout {status['timeout_units']} units", file=out)
     print(f"data length: tx {status['tx_octets']} rx {status['rx_octets']} "
           f"octets mtu {status['mtu']} phy {status['phy']}", file=out)
+    print(f"update: asked {status['update_ms']} ms "
+          f"({conn_units(status['update_ms'])} units)", file=out)
     print(f"traffic: writes {status['writes']} received {status['received']} bytes "
           f"updates {status['updates']} connects {status['connects']}", file=out)
 
