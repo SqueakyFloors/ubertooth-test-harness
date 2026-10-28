@@ -74,7 +74,7 @@ version (or nothing), then checks the version and the address again.
 The shell is on uart0, which is the J-Link's first virtual COM port (VCOM0;
 `/dev/serial/by-id/usb-SEGGER_J-Link_<12-digit serial>-if00` on Linux),
 115200 baud, 8N1, no flow control. It prints no prompt, no echo and no
-colours. Send one command line ended by CR; the board answers with zero or
+colors. Send one command line ended by CR; the board answers with zero or
 more data lines, then exactly one line `OK` or `ERR <reason>`. Any other line
 (the boot banner `*** Booting nRF Connect SDK ...`, `utdk: utdk-1.2.1 ready`)
 is not a response.

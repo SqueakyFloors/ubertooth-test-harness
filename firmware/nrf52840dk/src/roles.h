@@ -18,7 +18,7 @@
  * Firmware version reported by `status`. The harness pins it
  * (ubertooth_harness/nrfdk.py FIRMWARE_VERSION) and flashes the planned image
  * when a board reports anything else, so bump it with every change to the
- * firmware's behaviour or protocol.
+ * firmware's behavior or protocol.
  */
 #define UTDK_FW_VERSION "utdk-1.2.1"
 

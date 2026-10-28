@@ -197,10 +197,10 @@ class ConnectionInfoOptionTests(unittest.TestCase):
         return conncapture.classify_connection_info(
             conncapture.connection_info_option(data), self.body)
 
-    def test_the_shift_is_recognised(self):
+    def test_the_shift_is_recognized(self):
         self.assertEqual(conncapture.SHIFTED, self.classify(self.body[:34]))
 
-    def test_the_fixed_option_is_recognised(self):
+    def test_the_fixed_option_is_recognized(self):
         self.assertEqual(conncapture.CORRECT, self.classify(self.body[6:6 + 34]))
 
     def test_anything_else_is_named(self):
