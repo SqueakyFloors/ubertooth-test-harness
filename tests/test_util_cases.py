@@ -646,8 +646,8 @@ class LedBlinkSamplerTests(unittest.TestCase):
 # Fake: several boards on one host, with -U all, no -U, and -U<index>
 
 
-LABELS = {"-s": "Serial No: ", "-v": "Firmware version: ", "-p": "Part ID: ",
-          "-b": "Board ID Number: ", "-V": ""}
+LABELS = {"-s": "Serial No", "-v": "Firmware version", "-p": "Part ID",
+          "-b": "Board ID Number", "-V": ""}
 IDENTITY = set(LABELS)
 
 
@@ -696,9 +696,16 @@ class MultiBench:
         for index, serial in enumerate(listed):
             for query in requested:
                 for line in self._report(serial, query):
-                    if len(requested) == 1 and LABELS[query]:
-                        line = line.removeprefix(LABELS[query])
-                    lines.append(f"{index}: {line}")
+                    # The report's label moves into the listing's, which
+                    # carries the index. Compile info has no label of its
+                    # own, and neither does a line that does not start with
+                    # one, so those keep the bare index prefix.
+                    label = LABELS[query]
+                    if label and line.startswith(f"{label}: "):
+                        value = line.removeprefix(f"{label}: ")
+                        lines.append(f"{label} ({index}): {value}")
+                    else:
+                        lines.append(f"{index}: {line}")
         return "".join(line + "\n" for line in lines)
 
     def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
@@ -791,13 +798,34 @@ class MultiBoardCaseTests(unittest.TestCase):
         self.assertEqual(("ubertooth-util", "-U2"), past.steps[0].resolve_argv({}))
 
     def test_listing_checks(self):
+        def listed(*serials):
+            return "".join(f"Serial No ({i}): {s}\n"
+                           for i, s in enumerate(serials))
+
         check = util_cases.serial_listing_check((A, B))
-        self.assertEqual("", check(f"0: {B}\n1: {A}\n"))
-        self.assertIn("not exactly", check(f"0: {A}\n"))
-        self.assertIn("unregistered", check(f"0: {A}\n1: {B}\n2: {C}\n"))
-        self.assertIn("not 0..1 in order", check(f"1: {A}\n0: {B}\n"))
-        self.assertIn("not '<index>: <value>'", check(f"Serial No: {A}\n"))
-        self.assertIn("not exactly", check(f"0: {A}\n1: {A}\n"))
+        self.assertEqual("", check(listed(B, A)))
+        self.assertIn("not exactly", check(listed(A)))
+        self.assertIn("unregistered", check(listed(A, B, C)))
+        self.assertIn("not 0..1 in order",
+                      check(f"Serial No (1): {A}\nSerial No (0): {B}\n"))
+        self.assertIn("is not", check(f"Serial No: {A}\n"))
+        self.assertIn("not exactly", check(listed(A, A)))
+        # A board the tool could not read is named, not counted as a serial,
+        # whether the board never opened or the query itself failed on it.
+        self.assertIn(
+            "board 1 could not be opened",
+            check(f"Serial No (0): {A}\n"
+                  "Serial No (1): unavailable, in use by another program\n"),
+        )
+        self.assertIn(
+            "board 1 query read failed",
+            check(f"Serial No (0): {A}\nSerial No (1): read failed\n"),
+        )
+        # The unlabelled -V form names the query in the value instead.
+        self.assertIn(
+            "board 0 query read failed",
+            util_cases.identity_listing_check((A,))("0: compile info read failed\n"),
+        )
 
     def test_smoke_passes_on_fork_main_and_guards_hold(self):
         bench = MultiBench((A, B))

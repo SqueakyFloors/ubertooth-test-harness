@@ -24,9 +24,16 @@ bluetooth_rxtx):
   two-board range test (firmware/bluetooth_rxtx/cc2400_rangetest.c); see
   "Two-device range test" below.
 - ``-U all -<queries>`` and read-only identity queries without ``-U`` (with
-  more than one board) print ``<index>: <line>`` for every attached board in
-  enumeration order; ``-U<index>`` opens the board at that index of the same
-  order, and an index with no board is refused with "no Ubertooth at index"
+  more than one board) print ``<label> (<index>): <value>`` for every attached
+  board in enumeration order, so every line says what it is and which board it
+  came from (SqueakyFloors/ubertooth#610). Compile info has no label of its
+  own and keeps the bare ``<index>: <value>`` form. A board that could not be
+  opened gets ``unavailable, <reason>`` as the value of every query asked of
+  it, and a query that failed on a board that did open gets ``read failed``;
+  either way the ``error:`` line goes to stderr, the other boards are still
+  listed, and the exit status is 1. ``-U<index>`` opens the board at that
+  index of the same order, and an index with no board is refused with
+  "no Ubertooth at index"
   (fork 0c7e9c0, SqueakyFloors/ubertooth#188). Any other option without
   ``-U`` refuses to pick a board.
 
@@ -690,7 +697,15 @@ def range_test_cases(arguments, _resources, resource_identities):
 # Every command is read-only (identity queries, -N, or a refused option), so
 # the guard boards are only read; the guard checks prove it.
 
-_LISTING_LINE = re.compile(r"^(?P<index>\d+): (?P<text>.*)$")
+# A listed line carries its report label and the board's index: "Firmware
+# version (0): git-abc (API:1.37)". Compile info has no label of its own, so
+# it keeps the bare "0: <value>" form.
+_LABELLED_LINE = re.compile(r"^(?P<label>[A-Za-z][^(]*?) \((?P<index>\d+)\): (?P<text>.*)$")
+_BARE_LINE = re.compile(r"^(?P<index>\d+): (?P<text>.*)$")
+# Values that stand in for a reading rather than carry one: a board the tool
+# could not open at all, and a query whose read failed on a board it did open.
+_UNAVAILABLE = "unavailable, "
+_READ_FAILED = "read failed"
 _SERIAL_RE = r"[0-9a-f]{32}"
 IDENTITY_QUERIES = ("-v", "-V", "-s", "-p", "-b")
 # Report lines per board for -vVspb, in ubertooth-util's report order.
@@ -704,13 +719,26 @@ _BLOCK_PATTERNS = (
 
 
 def _listing(stdout):
-    """(index, text) per line, or a reason when a line is not a listing line."""
+    """(index, line) per listed line, each line put back into the form a
+    single board prints, so one set of patterns covers both. Returns a reason
+    instead when a line is not a listing line, or when a line stands in for a
+    reading the tool could not take."""
     entries = []
     for line in stdout.splitlines():
-        match = _LISTING_LINE.match(line)
-        if match is None:
-            return None, f"line is not '<index>: <value>': {line!r}"
-        entries.append((int(match["index"]), match["text"]))
+        match = _LABELLED_LINE.match(line)
+        if match is not None:
+            text = f"{match['label']}: {match['text']}"
+        else:
+            match = _BARE_LINE.match(line)
+            if match is None:
+                return None, ("line is not '<label> (<index>): <value>' or "
+                              f"'<index>: <value>': {line!r}")
+            text = match["text"]
+        if match["text"].startswith(_UNAVAILABLE):
+            return None, f"board {match['index']} could not be opened: {line!r}"
+        if match["text"].endswith(_READ_FAILED):
+            return None, f"board {match['index']} query read failed: {line!r}"
+        entries.append((int(match["index"]), text))
     return entries, ""
 
 
@@ -735,7 +763,9 @@ def serial_listing_check(registered):
         indexes = [index for index, _text in entries]
         if indexes != list(range(len(entries))):
             return f"indices {indexes} are not 0..{len(entries) - 1} in order"
-        return _same_boards(registered, [text for _index, text in entries])
+        return _same_boards(registered,
+                            [text.removeprefix("Serial No: ")
+                             for _index, text in entries])
     return check
 
 
@@ -811,8 +841,9 @@ def multi_board_cases(arguments, _resources, resource_identities):
             f"list-index-{index}", f"-U all -s names the board at index {index}",
             ("ubertooth-util", "-U", "all", "-s"),
             output_check=serials,
-            observe=Observation(_index_key(index),
-                                rf"(?m)^{index}: (?P<value>{_SERIAL_RE})$"),
+            observe=Observation(
+                _index_key(index),
+                rf"(?m)^Serial No \({index}\): (?P<value>{_SERIAL_RE})$"),
         ))
     for index in range(count):
         index_steps.append(Step(
@@ -828,14 +859,16 @@ def multi_board_cases(arguments, _resources, resource_identities):
             "-U all -s lists every registered board and only those",
             (_listing_step("list", "-U all -s", ("ubertooth-util", "-U", "all", "-s"),
                            serials),),
-            "one '<index>: <serial>' line per registered board, indices in order",
+            "one 'Serial No (<index>): <serial>' line per registered board, "
+            "indices in order",
         ),
         _multi_case(
             serial, "no-selector-lists-every-registered-serial",
             "-s without -U lists every registered board and only those",
             (_listing_step("list", "-s without -U", ("ubertooth-util", "-s"),
                            serials),),
-            "one '<index>: <serial>' line per registered board, indices in order",
+            "one 'Serial No (<index>): <serial>' line per registered board, "
+            "indices in order",
         ),
         _multi_case(
             serial, "index-selects-listed-board",
@@ -855,14 +888,14 @@ def multi_board_cases(arguments, _resources, resource_identities):
                 (_listing_step("list", f"-U all -{every}",
                                ("ubertooth-util", "-U", "all", f"-{every}"),
                                identities),),
-                "five prefixed report lines per registered board, in index order",
+                "five labelled report lines per registered board, in index order",
             ),
             _multi_case(
                 serial, "no-selector-lists-every-identity-query",
                 f"-{every} without -U reports every query for every board",
                 (_listing_step("list", f"-{every} without -U",
                                ("ubertooth-util", f"-{every}"), identities),),
-                "five prefixed report lines per registered board, in index order",
+                "five labelled report lines per registered board, in index order",
             ),
             _multi_case(
                 serial, "no-selector-other-option-refused",
