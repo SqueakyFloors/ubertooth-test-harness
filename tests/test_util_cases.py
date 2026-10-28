@@ -810,6 +810,11 @@ class MultiBoardCaseTests(unittest.TestCase):
                       check(f"Serial No (1): {A}\nSerial No (0): {B}\n"))
         self.assertIn("is not", check(f"Serial No: {A}\n"))
         self.assertIn("not exactly", check(listed(A, A)))
+        # The old unlabelled listing is a regression, not an accepted form:
+        # only a query the tool has no label for keeps the bare prefix.
+        self.assertIn("not 'Serial No'", check(f"0: {B}\n1: {A}\n"))
+        self.assertIn("not 'Serial No'",
+                      check(f"Part ID (0): {B}\nPart ID (1): {A}\n"))
         # A board the tool could not read is named, not counted as a serial,
         # whether the board never opened or the query itself failed on it.
         self.assertIn(
@@ -822,10 +827,16 @@ class MultiBoardCaseTests(unittest.TestCase):
             check(f"Serial No (0): {A}\nSerial No (1): read failed\n"),
         )
         # The unlabelled -V form names the query in the value instead.
-        self.assertIn(
-            "board 0 query read failed",
-            util_cases.identity_listing_check((A,))("0: compile info read failed\n"),
-        )
+        identity = util_cases.identity_listing_check((A,))
+        self.assertIn("board 0 query read failed",
+                      identity("0: compile info read failed\n"))
+        # An unlabelled board ID line is a regression, even though -V's is not.
+        block = (f"0: 1\n"
+                 f"Firmware version (0): bluetooth_rxtx git-x (API:1.37)\n"
+                 f"0: bluetooth_rxtx git-x (API:1.37)\n"
+                 f"Part ID (0): 1234abcd\n"
+                 f"Serial No (0): {A}\n")
+        self.assertIn("not 'Board ID Number'", identity(block))
 
     def test_smoke_passes_on_fork_main_and_guards_hold(self):
         bench = MultiBench((A, B))
