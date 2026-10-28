@@ -119,6 +119,25 @@ class CaseTests(unittest.TestCase):
              "--long-packets", "1"],
             list(steps["check-capture"].resolve_argv(context)[2:]))
 
+    def test_the_central_must_have_connected_written_and_updated(self):
+        case = known_connection_cases(arguments(), {}, IDENTITIES)[1]
+        check = {step.step_id: step for step in case.steps}["central-report"].output_check
+        good = ("role: central\n"
+                "traffic: writes 74 received 18300 bytes updates 3 connects 3\n")
+        self.assertEqual("", check(good))
+        for line, reason in (
+            ("traffic: writes 0 received 0 bytes updates 1 connects 1", "wrote nothing"),
+            ("traffic: writes 5 received 5 bytes updates 0 connects 1", "never accepted"),
+            ("traffic: writes 0 received 0 bytes updates 0 connects 0", "no connection"),
+            ("role: central", "no traffic line"),
+        ):
+            self.assertIn(reason, check(line))
+
+    def test_both_tests_hold_the_host_lock_because_they_flash_a_dk(self):
+        catalog = builtin_catalog()
+        for name in ("Capture known BLE advertiser", "Capture known BLE connection"):
+            self.assertTrue(catalog.get(name).writes_firmware, name)
+
     def test_the_libbtbb_case_asks_for_the_option_check(self):
         cases = {case.case_id: case for case in known_connection_cases(
             arguments("comprehensive"), {}, IDENTITIES)}

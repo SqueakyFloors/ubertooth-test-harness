@@ -34,6 +34,7 @@ boot settings, and restores the Ubertooth's channel, squelch, and LEDs.
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import sys
 from typing import Mapping
 
@@ -49,7 +50,6 @@ from ubertooth_harness.advertiser_cases import (
 from ubertooth_harness.receive_cases import seconds_arg
 from ubertooth_harness.stateful import (
     CAPTURE_DIR_KEY,
-    Observation,
     StateCase,
     StateCaseError,
     Step,
@@ -154,6 +154,34 @@ def _ready_case(central: Mapping, peripheral: Mapping) -> StateCase:
     )
 
 
+_TRAFFIC = re.compile(
+    r"(?m)^traffic: writes (?P<writes>\d+) received \d+ bytes "
+    r"updates (?P<updates>\d+) connects (?P<connects>\d+)$")
+
+
+def _central_did_the_work(update_ms: int):
+    """The central must have connected, written, and had an update accepted.
+
+    Without this the case would pass on a DK that connected and sent nothing,
+    or that never asked for the connection parameter update: the capture
+    checks the CONNECT_IND, which is written before any update.
+    """
+    def check(stdout: str) -> str:
+        match = _TRAFFIC.search(stdout)
+        if match is None:
+            return "the central reported no traffic line"
+        counts = {name: int(value) for name, value in match.groupdict().items()}
+        if counts["connects"] < 1:
+            return "the central made no connection"
+        if counts["writes"] < 1:
+            return "the central wrote nothing on the connection"
+        if counts["updates"] < 1:
+            return (f"the central's {update_ms} ms connection parameter update "
+                    "was never accepted")
+        return ""
+    return check
+
+
 def _capture_case(serial, central, peripheral, seconds, *, case_id, name,
                   interval_ms, update_ms, capture=("-r", "capture.pcapng"),
                   option_check=False):
@@ -201,9 +229,7 @@ def _capture_case(serial, central, peripheral, seconds, *, case_id, name,
         Step("central-report", "What the central did while the capture ran",
              _dk(central, "status"), timeout_s=DK_TIMEOUT_S,
              output_patterns=(r"(?m)^role: central$",),
-             observe=Observation("central connects",
-                                 r"(?m)^traffic: writes \d+ received \d+ bytes "
-                                 r"updates (?P<value>\d+) connects \d+$")),
+             output_check=_central_did_the_work(update_ms)),
         Step("check-capture", "The capture holds the connection the DKs made",
              check, timeout_s=CHECK_TIMEOUT_S,
              output_patterns=(r"(?m)^capture checks passed$",)),

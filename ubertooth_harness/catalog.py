@@ -1002,6 +1002,9 @@ def builtin_catalog() -> TestCatalog:
             command_builder=advertiser_cases.known_advertiser_cases,
             continue_on_case_failure=True,
             guards_other_ubertooths=True,
+            # Its first case flashes the DK when the board runs another
+            # firmware version, so the run holds the host lock.
+            writes_firmware=True,
         ),
         TestDefinition(
             "Capture known BLE connection",
@@ -1024,6 +1027,9 @@ def builtin_catalog() -> TestCatalog:
             command_builder=connection_cases.known_connection_cases,
             continue_on_case_failure=True,
             guards_other_ubertooths=True,
+            # Its first case flashes a DK when the board runs another
+            # firmware version, so the run holds the host lock.
+            writes_firmware=True,
         ),
         TestDefinition(
             "CLI usage smoke",
