@@ -101,7 +101,7 @@ class ResourceRegistry(Protocol):
         """Return one registered resource."""
 
     def resolve_hardware(
-        self, host: str, resource_type: str, selector: str
+        self, host: str, resource_type: str, selector: str, role: str | None = None
     ) -> tuple[str, ...]:
         """Resolve default, each, or explicit hardware deterministically."""
 
@@ -181,11 +181,15 @@ class FileResourceRegistry:
                 identities[key] = resource.alias
 
         for host in self.hosts():
-            for resource_type, alias in host.defaults.items():
+            for key, alias in host.defaults.items():
                 target = self.get(alias)
-                if target.type != resource_type:
+                # A default is named either by resource type or by the role a
+                # test binds it to; a role default must be a resource that
+                # declares that role.
+                if target.type != key and key not in target.roles:
                     raise RegistryError(
-                        f"default {alias} type does not match {resource_type}"
+                        f"default {alias} is neither a {key} nor declares the "
+                        f"{key} role"
                     )
                 if target.attached_to != host.alias:
                     raise RegistryError(
@@ -292,7 +296,7 @@ class FileResourceRegistry:
         return aliases
 
     def resolve_hardware(
-        self, host: str, resource_type: str, selector: str
+        self, host: str, resource_type: str, selector: str, role: str | None = None
     ) -> tuple[str, ...]:
         host_resource = self.get(host)
         if host_resource.type != "Host":
@@ -305,9 +309,21 @@ class FileResourceRegistry:
             )
         )
         if selector == "default":
-            alias = host_resource.defaults.get(resource_type)
+            # A test that binds several resources of one type (the connection
+            # pair's central and peripheral) needs a default per role, so the
+            # host may name one by role as well as by type.
+            alias = host_resource.defaults.get(role) if role else None
             if alias is None:
-                raise RegistryError(f"host {host} has no default {resource_type}")
+                alias = host_resource.defaults.get(resource_type)
+            if alias is None:
+                raise RegistryError(
+                    f"host {host} has no default {resource_type}"
+                    + (f" for the {role} role" if role else "")
+                )
+            if alias not in eligible:
+                raise RegistryError(
+                    f"default {alias} is not a {resource_type} attached to {host}"
+                )
             return (alias,)
         if selector == "each":
             if not eligible:

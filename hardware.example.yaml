@@ -5,7 +5,11 @@ resources:
     roles: [controller, test target]
     defaults:
       Ubertooth: UT_Linux0
+      # Role-named defaults pick which DK takes which role; the plain type
+      # default is the advertiser.
       nRF52840 DK: DK_Linux0
+      central: DK_Linux1
+      peripheral: DK_Linux2
 
   Host_Mac:
     type: Host
@@ -56,13 +60,30 @@ resources:
       controller: Hub_Linux1
       port: 4
 
-  # Planned: the connection pair (central and peripheral, #87).
+  # The connection pair: these two connect to each other while the Ubertooth
+  # follows them. Both need a BLE address, because the central connects to
+  # the peripheral's and the capture is checked against both.
   DK_Linux1:
     type: nRF52840 DK
     attached to: Host_Linux
     roles: [central]
     identity:
       jlink serial: "000123456790"
+      BLE address: "C0:00:00:00:00:02"
+    power:
+      controller: Hub_Linux1
+      port: 5
+
+  DK_Linux2:
+    type: nRF52840 DK
+    attached to: Host_Linux
+    roles: [peripheral]
+    identity:
+      jlink serial: "000123456791"
+      BLE address: "C0:00:00:00:00:03"
+    power:
+      controller: Hub_Linux1
+      port: 6
 
   # StarTech managed hub: switched through its built-in FTDI management
   # controller, which sits on downstream port 4; only ports 1-3 are DUT ports.

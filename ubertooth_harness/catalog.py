@@ -16,8 +16,9 @@ from ubertooth_harness.patterns import (
 )
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
-    advertiser_cases, dfu_cases, dfu_host_cases, python_cases, receive_cases,
-    refusal_cases, tool_cases, transitions, util_cases, util_refusal_cases,
+    advertiser_cases, connection_cases, dfu_cases, dfu_host_cases, python_cases,
+    receive_cases, refusal_cases, tool_cases, transitions, util_cases,
+    util_refusal_cases,
 )
 
 
@@ -135,6 +136,14 @@ def _advertising_interval(value):
     if (not isinstance(value, int) or isinstance(value, bool)
             or not 20 <= value <= 10240):
         raise CatalogError("must be an advertising interval of 20-10240 ms")
+    return value
+
+
+def _connection_interval(value):
+    # The role firmware's range (Bluetooth Core: 7.5 ms to 4 s).
+    if (not isinstance(value, int) or isinstance(value, bool)
+            or not 8 <= value <= 4000):
+        raise CatalogError("must be a connection interval of 8-4000 ms")
     return value
 
 
@@ -689,6 +698,10 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "Capture known BLE advertiser": _profiles(
         Estimate(25.0, per_duration=5), Estimate(70.0, per_duration=16)
     ),
+    # ESTIMATE_PENDING_HW
+    "Capture known BLE connection": _profiles(
+        Estimate(30.0, per_duration=2), Estimate(60.0, per_duration=4)
+    ),
 })
 
 
@@ -987,6 +1000,28 @@ def builtin_catalog() -> TestCatalog:
             }),
             MappingProxyType({"Ubertooth": "Ubertooth", "advertiser": "nRF52840 DK"}),
             command_builder=advertiser_cases.known_advertiser_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+        ),
+        TestDefinition(
+            "Capture known BLE connection",
+            "ubertooth-btle -f follows a connection between two registered "
+            "nRF52840 DKs and the capture holds the CONNECT_IND parameters the "
+            "central asked for, with packets longer than a link without Data "
+            "Length Extension allows",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH,
+                "central": ArgumentRule(_selector, default="default"),
+                "peripheral": ArgumentRule(_selector, default="default"),
+                "coverage": COVERAGE, "duration": DURATION,
+                "interval": ArgumentRule(_connection_interval, default=30),
+                "update": ArgumentRule(_connection_interval, default=60),
+            }),
+            MappingProxyType({
+                "Ubertooth": "Ubertooth", "central": "nRF52840 DK",
+                "peripheral": "nRF52840 DK",
+            }),
+            command_builder=connection_cases.known_connection_cases,
             continue_on_case_failure=True,
             guards_other_ubertooths=True,
         ),

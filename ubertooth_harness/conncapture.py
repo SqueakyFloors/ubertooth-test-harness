@@ -5,6 +5,7 @@ Run as a script by the Capture known BLE connection cases::
     python conncapture.py FILE --central ADDR --peripheral ADDR
         --interval-units N --latency N --timeout-units N
         [--min-data-packets N --min-data-length N --long-packets N]
+        [--connection-info-option]
 
 FILE is PCAP or PCAPNG as ``ubertooth-btle -q`` and ``-r`` write it; the
 records are read by advcapture.py.
@@ -21,7 +22,11 @@ The checks:
   so the capture really followed the connection;
 - at least ``--long-packets`` of those data packets at least
   ``--min-data-length`` bytes long, which is what Data Length Extension is
-  for: without it the link layer would cap the payload at 27 bytes.
+  for: without it the link layer would cap the payload at 27 bytes;
+- with ``--connection-info-option``, that the connection parameters libbtbb
+  records as a PCAPNG interface option are still copied 6 bytes early
+  (SqueakyFloors/libbtbb#21). That is the opposite of a wish: the check
+  pins a known bug so it fails when the bug is fixed.
 
 Only the two DKs' own addresses and counts are printed, never another
 device's address or data. Each failure is a ``FAIL:`` line and exit status
@@ -32,14 +37,21 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field
+from pathlib import Path
 import struct
 import sys
 
-from ubertooth_harness.advcapture import (
+if __package__ in (None, ""):
+    # Run as a script: make the package importable for advcapture's reader.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from ubertooth_harness.advcapture import (  # noqa: E402
     ADV_ACCESS_ADDRESS,
     LE_PHDR_LEN,
     CaptureError,
     LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR,
+    _PCAPNG_IDB,
+    _PCAPNG_SHB,
     crc24,
     format_address,
     read_records,
@@ -48,6 +60,15 @@ from ubertooth_harness.advcapture import (
 CONNECT_IND = 0x5
 # CONNECT_IND payload: InitA (6), AdvA (6), then LLData (22).
 CONNECT_IND_LEN = 34
+# The supervision timeout the role firmware asks for, in 10 ms units
+# (firmware/nrf52840dk/src/connection.c TIMEOUT_UNITS).
+DEFAULT_TIMEOUT_UNITS = 400
+# libbtbb records the connection parameters as an interface option of the
+# PCAPNG it writes: this code, then 8 bytes of timestamp and 34 of PDU
+# (lib/src/pcapng-bt.c, PCAPNG_LE_LL_CONNECTION_INFO).
+CONNECTION_INFO_OPTION = 0xD380
+CONNECTION_INFO_NS_LEN = 8
+_PCAPNG_IDB_HEADER = 8 + 2 + 2 + 4  # block type, length, link type, reserved, snaplen
 # Every data channel in the channel map: 37 bits set.
 ALL_DATA_CHANNELS = (1 << 37) - 1
 # Bluetooth Core: the hop increment is 5 to 16.
@@ -105,6 +126,22 @@ class ConnectInd:
         )
 
 
+def connect_ind_bodies(records) -> list[bytes]:
+    """Each CONNECT_IND record from its access address on (header and LLData)."""
+    bodies = []
+    for record in records:
+        if len(record) < LE_PHDR_LEN + 4 + 2 + CONNECT_IND_LEN:
+            continue
+        body = record[LE_PHDR_LEN:]
+        if struct.unpack("<I", body[:4])[0] != ADV_ACCESS_ADDRESS:
+            continue
+        header = body[4:6]
+        if header[0] & 0x0F != CONNECT_IND or header[1] & 0x3F != CONNECT_IND_LEN:
+            continue
+        bodies.append(bytes(body[:6 + CONNECT_IND_LEN]))
+    return bodies
+
+
 def connect_inds(records) -> list[ConnectInd]:
     """Every CONNECT_IND in the records, in capture order."""
     found = []
@@ -152,6 +189,55 @@ def data_packets(records, access_address: int, crc_init: int) -> list[tuple[int,
     return found
 
 
+SHIFTED = "shifted by 6 bytes (libbtbb#21)"
+
+
+def connection_info_option(data: bytes) -> bytes | None:
+    """The 34 PDU bytes libbtbb records in the PCAPNG's interface option.
+
+    None when the file is not PCAPNG or carries no such option. The option's
+    own length field is not trusted: libbtbb sets it to the whole option's
+    size including the header, so the payload is read by position.
+    """
+    if len(data) < 12 or struct.unpack("<I", data[:4])[0] != _PCAPNG_SHB:
+        return None
+    offset = 0
+    while offset + 12 <= len(data):
+        block_type, length = struct.unpack("<II", data[offset:offset + 8])
+        if length < 12 or length % 4 or offset + length > len(data):
+            return None
+        if block_type == _PCAPNG_IDB:
+            body = data[offset + 8:offset + length - 4]
+            at = _PCAPNG_IDB_HEADER - 8  # options start after the fixed fields
+            while at + 4 <= len(body):
+                code, option_length = struct.unpack("<HH", body[at:at + 4])
+                if code == CONNECTION_INFO_OPTION:
+                    start = at + 4 + CONNECTION_INFO_NS_LEN
+                    pdu = body[start:start + CONNECT_IND_LEN]
+                    return bytes(pdu) if len(pdu) == CONNECT_IND_LEN else None
+                if code == 0:  # end of options
+                    break
+                at += 4 + 4 * ((option_length + 3) // 4)
+        offset += length
+    return None
+
+
+def classify_connection_info(option: bytes | None, connect_ind_body: bytes) -> str:
+    """How libbtbb's recorded option relates to the CONNECT_IND on the air.
+
+    ``connect_ind_body`` is the packet from its access address on, as the
+    capture record holds it: access address (4), PDU header (2), then the 34
+    bytes of LLData the option is meant to carry.
+    """
+    if option is None:
+        return "absent"
+    if option == connect_ind_body[6:6 + CONNECT_IND_LEN]:
+        return "correct"
+    if option == connect_ind_body[0:CONNECT_IND_LEN]:
+        return SHIFTED
+    return "neither the PDU nor the 6-byte shift"
+
+
 @dataclass
 class Result:
     records: int = 0
@@ -161,13 +247,15 @@ class Result:
     long_packets: int = 0
     longest: int = 0
     connection: ConnectInd | None = None
+    connection_info: str = "not looked for"
     problems: list = field(default_factory=list)
 
 
 def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
           latency: int, timeout_units: int, min_data_packets: int = 0,
           min_data_length: int = DEFAULT_DATA_LENGTH + 1,
-          long_packets: int = 0) -> tuple[str, Result]:
+          long_packets: int = 0,
+          connection_info_shifted: bool = False) -> tuple[str, Result]:
     result = Result()
     try:
         file_format, link_type, records = read_records(data)
@@ -225,6 +313,17 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
         result.problems.append(
             f"{result.long_packets} packet(s) of {min_data_length} bytes or more, "
             f"fewer than {long_packets} (longest {result.longest})")
+    bodies = connect_ind_bodies(records)
+    if bodies:
+        result.connection_info = classify_connection_info(
+            connection_info_option(data), bodies[0])
+    if connection_info_shifted and result.connection_info != SHIFTED:
+        # The case exists to catch the fix: once libbtbb records the right
+        # bytes, this is where someone turns it into a real check.
+        result.problems.append(
+            f"the PCAPNG connection information option is '{result.connection_info}', "
+            f"not '{SHIFTED}'; if libbtbb#21 is fixed, check the parameters here "
+            "instead of pinning the bug")
     return header, result
 
 
@@ -240,6 +339,8 @@ def main(argv=None) -> int:
     parser.add_argument("--min-data-packets", type=int, default=0)
     parser.add_argument("--min-data-length", type=int, default=DEFAULT_DATA_LENGTH + 1)
     parser.add_argument("--long-packets", type=int, default=0)
+    parser.add_argument("--connection-info-option", action="store_true",
+                        help="require libbtbb's recorded option to still be wrong")
     args = parser.parse_args(argv)
     try:
         with open(args.file, "rb") as stream:
@@ -252,6 +353,7 @@ def main(argv=None) -> int:
         interval_units=args.interval_units, latency=args.latency,
         timeout_units=args.timeout_units, min_data_packets=args.min_data_packets,
         min_data_length=args.min_data_length, long_packets=args.long_packets,
+        connection_info_shifted=args.connection_info_option,
     )
     print(f"capture: {header}, {result.records} records")
     print(f"connect_ind: {result.connect_inds}")
@@ -266,6 +368,7 @@ def main(argv=None) -> int:
     print(f"data packets: {result.data_packets} ({result.valid_packets} with a "
           f"correct CRC, {result.long_packets} of {args.min_data_length} bytes or "
           f"more, longest {result.longest})")
+    print(f"connection info option: {result.connection_info}")
     for problem in result.problems:
         print(f"FAIL: {problem}")
     if result.problems:

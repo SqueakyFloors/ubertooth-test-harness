@@ -626,31 +626,47 @@ def central(dk: Dk, peer: str, interval_ms: int, dle: bool = True,
         commands.append(
             f"conn autoupdate {_conn_interval(autoupdate_ms) if autoupdate_ms else 'off'}")
     commands.append("conn start")
+    # The connection interval the CONNECT_IND asks for, and the one an
+    # automatic update moves to; either is right once the link is up.
+    intervals = {round(interval * CONN_UNITS_PER_MS)}
+    if autoupdate_ms:
+        intervals.add(round(_conn_interval(autoupdate_ms) * CONN_UNITS_PER_MS))
     shell = _open(dk)
     try:
         for command in commands:
             shell.command(command, CONNECT_TIMEOUT_S if command == "conn start"
                           else COMMAND_TIMEOUT_S)
-        status = shell.status()
+        # The data length, PHY and MTU are settled a few connection events
+        # after the link comes up, so wait for the whole state, not just the
+        # link. With `conn cycle` a reconnection may be in progress, which
+        # is one of the states this waits out.
+        deadline = time.monotonic() + CONNECT_TIMEOUT_S
+        while True:
+            status = shell.status()
+            wrong = []
+            if status["role"] != "central":
+                wrong.append(f"role {status['role']}")
+            if not status["connected"]:
+                wrong.append("not connected")
+            if status["peer"] != address:
+                wrong.append(f"peer {status['peer'] or 'none'}")
+            if status["interval_units"] not in intervals:
+                wrong.append(f"interval {status['interval_units']} units, asked "
+                             + " or ".join(str(units) for units in sorted(intervals)))
+            if status["phy"] != "1M":
+                wrong.append(f"phy {status['phy']}")
+            if dle and status["tx_octets"] != DATA_LENGTH_MAX:
+                wrong.append(f"tx {status['tx_octets']} octets, asked "
+                             f"{DATA_LENGTH_MAX}")
+            if not wrong:
+                break
+            if time.monotonic() >= deadline:
+                raise NrfDkError(f"the connection is not what was asked for "
+                                 f"{CONNECT_TIMEOUT_S:g}s after starting: "
+                                 + ", ".join(wrong))
+            time.sleep(0.2)
     finally:
         shell.close()
-    wrong = []
-    if status["role"] != "central":
-        wrong.append(f"role {status['role']}")
-    if not status["connected"]:
-        wrong.append("not connected")
-    if status["peer"] != address:
-        wrong.append(f"peer {status['peer'] or 'none'}")
-    expected_units = round(interval * CONN_UNITS_PER_MS)
-    if status["interval_units"] != expected_units and not autoupdate_ms:
-        wrong.append(f"interval {status['interval_units']} units, asked "
-                     f"{expected_units}")
-    if status["phy"] != "1M":
-        wrong.append(f"phy {status['phy']}")
-    if dle and status["tx_octets"] != DATA_LENGTH_MAX:
-        wrong.append(f"tx {status['tx_octets']} octets, asked {DATA_LENGTH_MAX}")
-    if wrong:
-        raise NrfDkError("the connection is not what was asked for: " + ", ".join(wrong))
     _report(status, out)
     _report_connection(status, out)
     return status

@@ -192,7 +192,7 @@ class PlanCompiler:
                         selector = arguments.get(role, "default")
                         choices.append(
                             self.registry.resolve_hardware(
-                                host, resource_type, selector
+                                host, resource_type, selector, role
                             )
                         )
                     combinations = itertools.product(*choices) if choices else [()]

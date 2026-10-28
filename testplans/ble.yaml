@@ -17,6 +17,20 @@ suites:
         interval: 100
         payload: c0ffee
 
+  # Two more DKs, registered with the central and peripheral roles, connect
+  # on the 1M PHY with Data Length Extension while the Ubertooth follows
+  # them with `ubertooth-btle -f`.
+  connection:
+    - Capture known BLE connection:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        central: default
+        peripheral: default
+        coverage: smoke
+        duration: 12s
+        interval: 30
+        update: 60
+
   ble-comprehensive:
     - Capture known BLE advertiser:
         hosts: [Host_Linux]
@@ -26,3 +40,13 @@ suites:
         duration: 5s
         interval: 100
         payload: c0ffee
+
+    - Capture known BLE connection:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        central: default
+        peripheral: default
+        coverage: comprehensive
+        duration: 12s
+        interval: 30
+        update: 60
