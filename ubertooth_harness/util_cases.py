@@ -711,15 +711,21 @@ _READ_FAILED = "read failed"
 _SERIAL_RE = r"[0-9a-f]{32}"
 _SERIAL_LABEL = "Serial No"
 IDENTITY_QUERIES = ("-v", "-V", "-s", "-p", "-b")
-# Report lines per board for -vVspb, in ubertooth-util's report order, with
-# the label each one is listed under ("" where the report has none).
+# Report lines per board for -vVspb, in ubertooth-util's report order: the
+# query, its name here, the label it is listed under ("" where the report has
+# none), and the line it must match. This is the one place the harness states
+# the tool's report protocol; the tests derive their fake from it rather than
+# repeating it.
 _BLOCK_PATTERNS = (
-    ("board ID", "Board ID Number", BOARD_ID_PATTERN),
-    ("firmware", "Firmware version", FIRMWARE_PATTERN),
-    ("compile info", "", COMPILE_INFO_PATTERN),
-    ("part ID", "Part ID", PART_ID_PATTERN),
-    ("serial", _SERIAL_LABEL, rf"^{_SERIAL_LABEL}: {_SERIAL_RE}$"),
+    ("-b", "board ID", "Board ID Number", BOARD_ID_PATTERN),
+    ("-v", "firmware", "Firmware version", FIRMWARE_PATTERN),
+    ("-V", "compile info", "", COMPILE_INFO_PATTERN),
+    ("-p", "part ID", "Part ID", PART_ID_PATTERN),
+    ("-s", "serial", _SERIAL_LABEL, rf"^{_SERIAL_LABEL}: {_SERIAL_RE}$"),
 )
+# The label each identity query is listed under, in report order.
+LISTING_LABELS = tuple((query, label)
+                       for query, _name, label, _pattern in _BLOCK_PATTERNS)
 
 
 def _listing(stdout):
@@ -795,7 +801,7 @@ def identity_listing_check(registered):
             block = entries[board * per_board:(board + 1) * per_board]
             for entry, expected in zip(block, _BLOCK_PATTERNS):
                 index, label, value = entry
-                name, expected_label, pattern = expected
+                _query, name, expected_label, pattern = expected
                 if index != board:
                     return f"board {board} block has a line for index {index}"
                 if label != expected_label:

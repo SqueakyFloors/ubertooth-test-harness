@@ -646,8 +646,10 @@ class LedBlinkSamplerTests(unittest.TestCase):
 # Fake: several boards on one host, with -U all, no -U, and -U<index>
 
 
-LABELS = {"-s": "Serial No", "-v": "Firmware version", "-p": "Part ID",
-          "-b": "Board ID Number", "-V": ""}
+# The label and report order come from the module under test, so the fake
+# cannot drift into a protocol the checks no longer expect.
+LABELS = dict(util_cases.LISTING_LABELS)
+REPORT_ORDER = [query for query, _label in util_cases.LISTING_LABELS]
 IDENTITY = set(LABELS)
 
 
@@ -689,8 +691,7 @@ class MultiBench:
         return self.boards[serial].run(command, timeout_s=5).stdout.splitlines()
 
     def _listing(self, queries):
-        order = ["-b", "-v", "-V", "-p", "-s"]  # ubertooth-util report order
-        requested = [q for q in order if q in queries]
+        requested = [q for q in REPORT_ORDER if q in queries]
         listed = self.order[:-1] if self.listing_drops_last else self.order
         lines = []
         for index, serial in enumerate(listed):
