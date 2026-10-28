@@ -243,8 +243,8 @@ wrong board after a reboot.
 
 Therefore the target runner MUST identify devices by **serial number**, not index:
 - On register, enumerate attached Ubertooths and record each serial (the
-  no-`-U` multi-device listing prints index→serial; `ubertooth-util -U<n> -s`
-  reads one serial).
+  no-`-U` multi-device listing prints one `Serial No (<index>): <serial>`
+  line per board; `ubertooth-util -U<n> -s` reads one serial).
 - Test steps and the device cards reference devices by **serial**; the target runner
   resolves serial→current `-U` index at run time, re-resolving each session.
 - For the range test, the plan names the two devices by serial so "repeater"
