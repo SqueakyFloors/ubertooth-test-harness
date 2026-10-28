@@ -430,4 +430,13 @@ SHELL_STATIC_SUBCMD_SET_CREATE(adv_cmds,
 		      0),
 	SHELL_SUBCMD_SET_END);
 
-SHELL_CMD_REGISTER(adv, &adv_cmds, "Advertiser control", NULL);
+/* `adv` alone or with an unknown subcommand: an ERR line, not the help. */
+static int cmd_adv(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc < 2) {
+		return utdk_err(sh, "usage: adv <start|stop|chmap|interval|payload|type|defaults>");
+	}
+	return utdk_err(sh, "unknown adv command '%s'", argv[1]);
+}
+
+SHELL_CMD_ARG_REGISTER(adv, &adv_cmds, "Advertiser control", cmd_adv, 1, 1);

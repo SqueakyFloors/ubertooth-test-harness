@@ -35,17 +35,18 @@ nrfutil install sdk-manager
 nrfutil sdk-manager install v3.4.1 --install-dir ~/ncs
 ```
 
-Then build from this directory:
+Then build from the SDK workspace, pointing `-s` at this directory:
 
 ```sh
+cd ~/ncs/v3.4.1
 nrfutil sdk-manager toolchain launch --ncs-version v3.4.1 --install-dir ~/ncs -- \
   west build --no-sysbuild -b nrf52840dk/nrf52840 -d /tmp/utdk-build \
-  -s firmware/nrf52840dk -- -DZEPHYR_BASE=$HOME/ncs/v3.4.1/zephyr
+  -s /path/to/ubertooth-test-harness/firmware/nrf52840dk
 ```
 
-Run `west build` from inside the SDK workspace (`~/ncs/v3.4.1`) or pass
-`ZEPHYR_BASE` as above. The image is `/tmp/utdk-build/zephyr/zephyr.hex`.
-Builds go outside the repository; nothing under `firmware/` is generated.
+The image is `/tmp/utdk-build/zephyr/zephyr.hex` (about 130 KB of flash,
+27 KB of RAM). Builds go outside the repository; nothing under `firmware/`
+is generated.
 
 ## Flash
 
@@ -83,7 +84,11 @@ is not a response.
 | `adv defaults` | stop, and restore every boot setting |
 
 A setting changed while advertising restarts advertising with it. Bad values
-answer `ERR` and change nothing. `status`, for example:
+answer `ERR` and change nothing. `adv` alone or with an unknown subcommand answers
+`ERR`. A command with the wrong number of words, or an unknown top-level
+command, gets Zephyr's own `<command>: wrong parameter count` or
+`<command>: command not found` line instead; `nrfdk.py` treats both as a
+refusal. `status`, for example:
 
 ```json
 {"role":"advertiser","fw":"utdk-1.0.0","bt":true,"address":"C3:11:22:33:44:55","address_type":"random static","adv":true,"running":true,"type":"nonconn","chmap":"37","interval_ms":100,"payload":"c0ffee","counter":12,"starts":1,"connections":0,"last_err":0}

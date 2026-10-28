@@ -64,6 +64,7 @@ POLL_S = 0.05
 _LINUX_BY_ID = "/dev/serial/by-id/usb-SEGGER_J-Link_{serial:012d}-if00"
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _ADDRESS = re.compile(r"^[0-9A-F]{2}(?::[0-9A-F]{2}){5}$")
+_SHELL_ERROR = re.compile(r": (?:command not found|wrong parameter count)$")
 _STATUS_KEYS = {
     "role": str, "fw": str, "bt": bool, "address": str, "adv": bool,
     "running": bool, "type": str, "chmap": str, "interval_ms": int,
@@ -303,6 +304,9 @@ class Shell:
                 return data
             if line.startswith("ERR"):
                 raise NrfDkError(f"'{text}' refused: {line[3:].strip() or 'ERR'}")
+            if _SHELL_ERROR.search(line):
+                # Zephyr's shell answers these itself, with no OK or ERR.
+                raise NrfDkError(f"'{text}' refused by the shell: {line}")
             if line:
                 data.append(line)
         raise NrfDkError(f"no answer to '{text}' within {timeout:g}s"

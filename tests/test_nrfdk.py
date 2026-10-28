@@ -76,6 +76,17 @@ class ShellTests(unittest.TestCase):
         with self.assertRaisesRegex(nrfdk.NrfDkError, "channel map must be"):
             shell.command("adv chmap 40")
 
+    def test_zephyr_shell_errors_raise_without_waiting(self):
+        for reply in (b"bogus: command not found\r\n", b"chmap: wrong parameter count\r\n"):
+            class Port(FakePort):
+                def write(self, data, reply=reply):
+                    self.pending += reply
+                    return len(data)
+
+            shell = nrfdk.Shell(Port(FakeFirmware()), clock=FakeClock())
+            with self.assertRaisesRegex(nrfdk.NrfDkError, "refused by the shell"):
+                shell.command("bogus")
+
     def test_no_answer_times_out(self):
         firmware = FakeFirmware()
         firmware.silent = True

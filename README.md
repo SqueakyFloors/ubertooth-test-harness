@@ -455,6 +455,7 @@ python -m ubertooth_harness run-suite \
 | `Ubertooth util modes` | `-I` blinks every LED (sampled at jittered intervals until both phases appear, at most 60 samples or 10 s including a read in flight), `-q120` (-120 dBm) lights every LED; each returns at once, its start line on stderr (`-I`: one `note: the board is blinking; stop it with ubertooth-util -U <serial> -S ...` line; fork #326), keeps channel and PA, and `-S` ends it with the idle reset (LEDs off, 2441 MHz, squelch -120, PA kept); originals are restored; `-m` after `-r` says `no range test result yet` (fork #190) | adds `-q20` and bare `-q` (-85 dBm) running until `-S`, `-I` ending `-q` and `-q` ending `-I` (the new mode starts at 2441 MHz), `-s -I`. A failed LED read (fork #213) is retried once and the retry recorded; two in a row fail the case |
 | `Multi-board selection` | needs two or more registered boards on the host (a one-board host skips it): `-U all -s` and `-s` without `-U` list every registered board and only those, each line labelled with the board's index in it (`Serial No (0): <serial>`, fork #610); `-N` counts them; each `-U<index>` opens the board the listing names at that index | adds `-U all -vVspb` and `-vVspb` without `-U` (five lines per board), `-C` without `-U` refused; `-U<n>` past the last board is refused with `no Ubertooth at index` (fork #188, fixed in 0c7e9c0) |
 | `Two-device range test` | no `coverage` argument; `range` plan; two registered boards on one host (`sender`, `responder`; the same board in both roles is refused), `allow RF transmission: true`: both boards reset (so neither has an old result) and set to 2410 MHz, `-e` on the responder, which must then answer USB with its RX LED on and still be at 2410 MHz before `-n` on the sender (so a failure tells a wedged repeater from a wedged sender), then the sender's `-m` is read until a result appears (10 s deadline) and must give request and reply PA levels at most `maximum PA level` (0-7, default 7; the plan sets 3) and copy numbers 0-15; a mismatch fails, naming the field that differs; the sender is idle afterwards (LEDs off, back to 2441 MHz: the idle reset ran); the responder still answers USB with its RX LED on, keeps no result, and `-S` stops it (LEDs off, back to 2441 MHz); channel, PA, squelch, LEDs and CRC of both boards restored, other registered boards guarded. Fails on fork main: no result (fork #26) | no comprehensive profile |
+| `Capture known BLE advertiser` | `ble` plan; an Ubertooth and an nRF52840 DK with the `advertiser` role on one host (see [BLE test devices](#ble-test-devices-nrf52840-dk)): the DK is flashed with `firmware/nrf52840dk` when it reports another version, and must report its registered address; for each of channels 37, 38 and 39 the DK advertises (`ADV_NONCONN_IND`, `interval`, `payload` tag) on that channel only and `ubertooth-btle -n -A<channel> -q` captures for `duration`: at least a fifth of its advertising events and no more than its interval allows, every one on that channel's RF channel, CRC right, from its address, with the harness payload (magic, channel map, tag) and a counter between the DK's counters before and after; `-n -A37` while it advertises on 38 holds none of its packets; `-f -A37 -r` (PCAPNG) holds them too; the DK is stopped and returned to its boot settings, the Ubertooth's channel, squelch and LEDs restored, other registered boards guarded | adds every listen/advertise channel pair that must hold nothing, `-f -A38`/`-A39`, `ADV_IND`, advertising on all three channels, a 1000 ms interval (packet bound), and no tag |
 | `DFU images` | writes the selected board's firmware; slow plan (not fast): `-d <test image> -r`, then `-u -r` reads back the image padded with 0xff; `-s` on the image without its suffix gives the build's `.dfu` | `firmware` plan (not release): adds `-s` refusing a `.dfu`; seven bad images (wrong CRC, truncated, no suffix, text, no `UFD`, wrong vendor, wrong product) refused before a device is opened (fork #198, #199, fixed in e8edd15), the board still in its application with the same flash (read back); `-s` refuses a suffixed `.bin` and accepts a read-only one (fork #200, fixed in 9d710fe). At 6fee30c `-d <image> -r` exits 1 after a good flash (fork #267, fixed in 89d9197), so the write cases fail there |
 | `BLE mode conflicts` | no `coverage` argument; release plan | every combination of `ubertooth-btle -f -n -p` must be rejected before sniffing |
 | `Ubertooth util conflicts` | no `coverage` argument; requires `allow RF transmission: true`; release plan | every pair of `-q -n -e -t -x -I` must be rejected with the fork's `error: options ... cannot be combined` before a mode starts |
@@ -738,6 +739,54 @@ Any mismatch prevents the first `test_started` event. This local slice verifies
 artifacts that are already installed. Building and installing the resolved ref
 on local/remote targets remains a later preparation phase; preflight cannot be
 skipped to compensate for a missing installation.
+
+## BLE test devices (nRF52840 DK)
+
+Tests that need a real Bluetooth LE peer use Nordic nRF52840 DKs (PCA10056)
+running the harness's own firmware, [`firmware/nrf52840dk`](firmware/nrf52840dk/README.md)
+(build, flash, shell protocol, pinned SDK and tool versions). Register each
+one as an `nRF52840 DK` resource with its J-Link serial, its role, and, for
+the `advertiser` role, the BLE address its `status` reports
+([`hardware.example.yaml`](hardware.example.yaml)):
+
+```yaml
+DK_Linux0:
+  type: nRF52840 DK
+  attached to: Host_Linux
+  roles: [advertiser]
+  identity:
+    jlink serial: "000123456789"
+    BLE address: "C0:00:00:00:00:01"
+```
+
+`ubertooth_harness/nrfdk.py` drives a DK: it checks the pinned `nrfutil`
+(8.2.1) and `nrfutil device` (2.23.0), flashes by J-Link serial, and talks to
+the shell on VCOM0 (`/dev/serial/by-id/usb-SEGGER_J-Link_<serial>-if00` on
+Linux; `serial device` in the identity overrides it). Every command fails
+closed with an `error:` line. `Capture known BLE advertiser`
+([`testplans/ble.yaml`](testplans/ble.yaml)) flashes the DK only when it
+reports another firmware version, from the image given as
+`--artifact "nRF52840 advertiser=PATH/zephyr.hex"`:
+
+```sh
+python -m ubertooth_harness run-suite \
+  --plan testplans/ble.yaml --suite ble \
+  --hardware hardware.yaml --host Host_Linux \
+  --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
+  --artifact "nRF52840 advertiser=/tmp/utdk-build/zephyr/zephyr.hex" \
+  --output runs
+```
+
+The DK transmits at normal BLE power; the Ubertooth only receives.
+
+A DK is leased like an Ubertooth (`ubertooth-harness boards` and `lease`
+list it), keyed by its J-Link serial (`nrf52840dk-<serial>.lock` in the
+lease directory). A lab that also guards boards with its own per-board lock
+files must hold the DK's lock file around the run until the harness takes
+external board locks ([#123](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/123)),
+for example `flock -w 1800 <lab lock dir>/board-<J-Link serial>.lock python
+-m ubertooth_harness run-suite ...`. Hold such a lock only for the run, so
+other users of the DK get their turn.
 
 ## Sharing boards: leases
 
