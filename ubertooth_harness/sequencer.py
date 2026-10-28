@@ -209,7 +209,8 @@ class NamedTestSequencer:
         """
         by_label = {image_label(item.name): item for item in manifest.artifacts}
         context = {}
-        for label in case.artifacts:
+        optional = tuple(label for label in case.optional_artifacts if label in by_label)
+        for label in case.artifacts + optional:
             identity = by_label.get(label)
             if identity is None:
                 raise HarnessError(
@@ -571,7 +572,7 @@ class NamedTestSequencer:
             },
         )
         context: dict[str, str] = {}
-        if case.artifacts:
+        if case.artifacts or case.optional_artifacts:
             # Checked when the run was planned; hashed again here. Nothing
             # has run yet, so a refusal leaves the device as it was.
             try:
@@ -925,7 +926,7 @@ class NamedTestSequencer:
                     for board in planned_guards[invocation.invocation_id]
                 )
             for case in planned_cases[invocation.invocation_id]:
-                if isinstance(case, StateCase) and case.artifacts:
+                if isinstance(case, StateCase) and (case.artifacts or case.optional_artifacts):
                     try:
                         self._case_artifacts(case, manifest)
                     except HarnessError as error:
