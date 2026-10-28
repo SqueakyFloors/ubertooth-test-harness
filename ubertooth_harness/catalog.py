@@ -151,7 +151,7 @@ def _check_connection_duration(arguments) -> None:
     """The capture must span exactly one of the central's reconnections.
 
     One, so it holds a CONNECT_IND and the connection after it; not two,
-    because ubertooth-btle -f gives up when the connection it follows ends
+    because a longer capture has been seen to die partway through
     (connection_cases.CYCLE_MS says why).
     """
     cycle_s = connection_cases.CYCLE_MS / 1000.0
