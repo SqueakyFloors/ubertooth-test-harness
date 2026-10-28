@@ -14,6 +14,7 @@ port (VCOM0, the DK's uart0). Run as a script by the advertiser cases::
     python nrfdk.py peripheral --jlink SERIAL [--dle on|off]
     python nrfdk.py central    --jlink SERIAL --peer ADDR --interval MS
                                [--dle on|off] [--payload BYTES] [--period MS]
+                               [--cycle MS] [--autoupdate MS]
     python nrfdk.py update     --jlink SERIAL --interval MS
     python nrfdk.py stop       --jlink SERIAL [--port PATH]
     python nrfdk.py idle       --jlink SERIAL [--port PATH]
@@ -82,6 +83,7 @@ _STATUS_KEYS = {
     "conn_on": bool, "connected": bool, "peer": str, "conn_interval_ms": int,
     "dle": bool, "interval_units": int, "latency": int, "timeout_units": int,
     "tx_octets": int, "rx_octets": int, "mtu": int, "phy": str,
+    "cycle_ms": int, "autoupdate_ms": int,
     "writes": int, "received": int, "updates": int, "connects": int,
 }
 ROLES = ("advertiser", "central", "peripheral")
@@ -600,8 +602,15 @@ def peripheral(dk: Dk, dle: bool = True, out=None) -> dict:
 
 
 def central(dk: Dk, peer: str, interval_ms: int, dle: bool = True,
-            payload: int | None = None, period_ms: int | None = None, out=None) -> dict:
-    """Take the central role and connect to ``peer`` at ``interval_ms``."""
+            payload: int | None = None, period_ms: int | None = None,
+            cycle_ms: int | None = None, autoupdate_ms: int | None = None,
+            out=None) -> dict:
+    """Take the central role and connect to ``peer`` at ``interval_ms``.
+
+    With ``cycle_ms`` the link is dropped and made again that often, so a
+    capture started at any moment sees a whole connection; ``autoupdate_ms``
+    asks for a connection parameter update once each link is up.
+    """
     address = normalize_address(peer)
     interval = _conn_interval(interval_ms)
     commands = ["role central", f"conn peer {address}",
@@ -611,6 +620,11 @@ def central(dk: Dk, peer: str, interval_ms: int, dle: bool = True,
         commands.append(f"conn payload {payload}")
     if period_ms is not None:
         commands.append(f"conn period {period_ms}")
+    if cycle_ms is not None:
+        commands.append(f"conn cycle {cycle_ms if cycle_ms else 'off'}")
+    if autoupdate_ms is not None:
+        commands.append(
+            f"conn autoupdate {_conn_interval(autoupdate_ms) if autoupdate_ms else 'off'}")
     commands.append("conn start")
     shell = _open(dk)
     try:
@@ -628,7 +642,7 @@ def central(dk: Dk, peer: str, interval_ms: int, dle: bool = True,
     if status["peer"] != address:
         wrong.append(f"peer {status['peer'] or 'none'}")
     expected_units = round(interval * CONN_UNITS_PER_MS)
-    if status["interval_units"] != expected_units:
+    if status["interval_units"] != expected_units and not autoupdate_ms:
         wrong.append(f"interval {status['interval_units']} units, asked "
                      f"{expected_units}")
     if status["phy"] != "1M":
@@ -706,6 +720,10 @@ def main(argv: Sequence[str] | None = None, run: Runner = run_tool) -> int:
     central_parser.add_argument("--interval", required=True, type=int, help="ms")
     central_parser.add_argument("--payload", type=int, help="bytes per write")
     central_parser.add_argument("--period", type=int, help="ms between writes")
+    central_parser.add_argument("--cycle", type=int,
+                                help="ms a connection lasts before the next (0: one)")
+    central_parser.add_argument("--autoupdate", type=int,
+                                help="ms interval to ask for once connected (0: none)")
     commands["update"].add_argument("--interval", required=True, type=int, help="ms")
     args = parser.parse_args(argv)
     try:
@@ -726,7 +744,7 @@ def main(argv: Sequence[str] | None = None, run: Runner = run_tool) -> int:
             peripheral(dk, args.dle == "on")
         elif args.command == "central":
             central(dk, args.peer, args.interval, args.dle == "on", args.payload,
-                    args.period)
+                    args.period, args.cycle, args.autoupdate)
         elif args.command == "update":
             update(dk, args.interval)
         else:

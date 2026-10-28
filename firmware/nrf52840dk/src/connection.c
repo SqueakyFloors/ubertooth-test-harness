@@ -50,6 +50,13 @@
 #define CONNECT_TIMEOUT_MS 5000
 /* MTU exchange, PHY, data length and discovery before the first write. */
 #define SETUP_DELAY K_MSEC(700)
+/* Once that is done, how long before the automatic parameter update. */
+#define AUTOUPDATE_DELAY K_MSEC(1200)
+/* How long the central waits before connecting again, when it cycles. */
+#define RECONNECT_GAP K_MSEC(300)
+/* How long a connection lasts when the central cycles, in ms. */
+#define CYCLE_MIN_MS 1000
+#define CYCLE_MAX_MS 600000
 
 /* One service with one write-only characteristic. The UUIDs are this
  * firmware's own; nothing else uses them.
@@ -72,6 +79,14 @@ static struct {
 	bt_addr_le_t peer;
 	uint32_t interval_ms;  /* asked for in the CONNECT_IND */
 	uint32_t update_ms;    /* the last parameter update asked for */
+	/* The central drops the link after this long and connects again, so a
+	 * capture started at any time sees a whole connection: CONNECT_IND,
+	 * the data length exchange, the parameter update and the data. 0 keeps
+	 * one connection up.
+	 */
+	uint32_t cycle_ms;
+	/* The interval the central asks for once connected (0 = no update). */
+	uint32_t autoupdate_ms;
 	bool dle;              /* ask for 251-byte data length */
 	uint16_t payload_len;
 	uint32_t period_ms;
@@ -92,8 +107,16 @@ static uint8_t payload[PAYLOAD_MAX];
 
 static void setup(struct k_work *work);
 static void write_tick(struct k_work *work);
+static void cycle_tick(struct k_work *work);
+static void reconnect(struct k_work *work);
+static void autoupdate(struct k_work *work);
+static void readvertise(struct k_work *work);
 static K_WORK_DEFINE(setup_work, setup);
 static K_WORK_DELAYABLE_DEFINE(write_work, write_tick);
+static K_WORK_DELAYABLE_DEFINE(cycle_work, cycle_tick);
+static K_WORK_DELAYABLE_DEFINE(reconnect_work, reconnect);
+static K_WORK_DELAYABLE_DEFINE(autoupdate_work, autoupdate);
+static K_WORK_DEFINE(readvertise_work, readvertise);
 
 static bool role_is_connection(void)
 {
@@ -249,6 +272,78 @@ static void write_tick(struct k_work *work)
 	k_work_reschedule(&write_work, K_MSEC(cn.period_ms));
 }
 
+/* The central's connection has lasted long enough: drop it, and the
+ * disconnect schedules the next one.
+ */
+static void cycle_tick(struct k_work *work)
+{
+	struct bt_conn *conn;
+
+	ARG_UNUSED(work);
+	k_mutex_lock(&lock, K_FOREVER);
+	conn = cn.conn ? bt_conn_ref(cn.conn) : NULL;
+	k_mutex_unlock(&lock);
+	if (conn != NULL) {
+		(void)bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		bt_conn_unref(conn);
+	}
+}
+
+static int start_central_locked(void);
+
+static void reconnect(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	k_mutex_lock(&lock, K_FOREVER);
+	if (cn.on && cn.conn == NULL && utdk_role() == UTDK_ROLE_CENTRAL) {
+		(void)start_central_locked();
+	}
+	k_mutex_unlock(&lock);
+}
+
+static void autoupdate(struct k_work *work)
+{
+	struct bt_conn *conn;
+	uint16_t units;
+	int err;
+
+	ARG_UNUSED(work);
+	k_mutex_lock(&lock, K_FOREVER);
+	conn = (cn.autoupdate_ms && cn.conn) ? bt_conn_ref(cn.conn) : NULL;
+	units = cn.autoupdate_ms * UNITS_PER_MS;
+	k_mutex_unlock(&lock);
+	if (conn == NULL) {
+		return;
+	}
+
+	const struct bt_le_conn_param param =
+		BT_LE_CONN_PARAM_INIT(units, units, 0, TIMEOUT_UNITS);
+
+	err = bt_conn_le_param_update(conn, &param);
+	bt_conn_unref(conn);
+	k_mutex_lock(&lock, K_FOREVER);
+	cn.last_err = err;
+	if (!err) {
+		cn.update_ms = cn.autoupdate_ms;
+	}
+	k_mutex_unlock(&lock);
+}
+
+static int start_peripheral_locked(void);
+
+/* The peripheral advertises again after a connection ends, so the central
+ * can reconnect without the harness touching it.
+ */
+static void readvertise(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	k_mutex_lock(&lock, K_FOREVER);
+	if (cn.on && cn.conn == NULL && utdk_role() == UTDK_ROLE_PERIPHERAL) {
+		(void)start_peripheral_locked();
+	}
+	k_mutex_unlock(&lock);
+}
+
 static void read_info(struct bt_conn *conn)
 {
 	struct bt_conn_info info;
@@ -294,6 +389,12 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	cn.handle = 0;
 	cn.mtu = bt_gatt_get_mtu(conn);
 	read_info(conn);
+	if (cn.cycle_ms) {
+		k_work_reschedule(&cycle_work, K_MSEC(cn.cycle_ms));
+	}
+	if (cn.autoupdate_ms && utdk_role() == UTDK_ROLE_CENTRAL) {
+		k_work_reschedule(&autoupdate_work, AUTOUPDATE_DELAY);
+	}
 	k_mutex_unlock(&lock);
 	k_work_submit(&setup_work);
 	k_sem_give(&connected_sem);
@@ -305,6 +406,8 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 		return;
 	}
 	(void)k_work_cancel_delayable(&write_work);
+	(void)k_work_cancel_delayable(&cycle_work);
+	(void)k_work_cancel_delayable(&autoupdate_work);
 	k_mutex_lock(&lock, K_FOREVER);
 	cn.disconnects++;
 	cn.last_err = -reason;
@@ -314,6 +417,23 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 		cn.conn = NULL;
 	}
 	k_mutex_unlock(&lock);
+}
+
+/* The connection object is free again: the central connects once more, the
+ * peripheral advertises again.
+ */
+static void recycled(void)
+{
+	if (!role_is_connection() || !cn.on) {
+		return;
+	}
+	if (utdk_role() == UTDK_ROLE_CENTRAL) {
+		if (cn.cycle_ms) {
+			k_work_reschedule(&reconnect_work, RECONNECT_GAP);
+		}
+	} else {
+		k_work_submit(&readvertise_work);
+	}
 }
 
 static void param_updated(struct bt_conn *conn, uint16_t interval, uint16_t latency,
@@ -358,6 +478,7 @@ static void phy_updated(struct bt_conn *conn, struct bt_conn_le_phy_info *info)
 BT_CONN_CB_DEFINE(connection_callbacks) = {
 	.connected = connected,
 	.disconnected = disconnected,
+	.recycled = recycled,
 	.le_param_updated = param_updated,
 	.le_data_len_updated = data_len_updated,
 	.le_phy_updated = phy_updated,
@@ -414,6 +535,10 @@ static void stop_locked(void)
 
 	cn.on = false;
 	cn.handle = 0;
+	/* Clear the schedules first, so nothing starts the role again. */
+	(void)k_work_cancel_delayable(&cycle_work);
+	(void)k_work_cancel_delayable(&reconnect_work);
+	(void)k_work_cancel_delayable(&autoupdate_work);
 	if (utdk_role() == UTDK_ROLE_PERIPHERAL) {
 		(void)bt_le_adv_stop();
 	}
@@ -438,6 +563,8 @@ void conn_leave(void)
 	cn.dle = true;
 	cn.payload_len = PAYLOAD_DEFAULT;
 	cn.period_ms = PERIOD_DEFAULT_MS;
+	cn.cycle_ms = 0;
+	cn.autoupdate_ms = 0;
 	k_mutex_unlock(&lock);
 	/* Give the disconnect time to complete, so the next role starts from
 	 * no link rather than racing the teardown.
@@ -477,14 +604,16 @@ void conn_status(char *buf, size_t len)
 		 "\"conn_interval_ms\":%u,\"update_ms\":%u,\"dle\":%s,"
 		 "\"interval_units\":%u,\"latency\":%u,\"timeout_units\":%u,"
 		 "\"tx_octets\":%u,\"rx_octets\":%u,\"mtu\":%u,\"phy\":\"%s\","
-		 "\"payload_len\":%u,\"period_ms\":%u,\"writes\":%u,"
+		 "\"payload_len\":%u,\"period_ms\":%u,\"cycle_ms\":%u,"
+		 "\"autoupdate_ms\":%u,\"writes\":%u,"
 		 "\"write_errors\":%u,\"received\":%u,\"updates\":%u,"
 		 "\"connects\":%u,\"disconnects\":%u,\"conn_err\":%d",
 		 cn.on ? "true" : "false", cn.conn ? "true" : "false", peer,
 		 cn.interval_ms, cn.update_ms, cn.dle ? "true" : "false",
 		 cn.interval_units, cn.latency, cn.timeout_units,
 		 cn.tx_octets, cn.rx_octets, cn.mtu, phy_name(cn.phy),
-		 cn.payload_len, cn.period_ms, cn.writes, cn.write_errors,
+		 cn.payload_len, cn.period_ms, cn.cycle_ms, cn.autoupdate_ms,
+		 cn.writes, cn.write_errors,
 		 cn.received, cn.updates, cn.connects, cn.disconnects,
 		 cn.last_err);
 	k_mutex_unlock(&lock);
@@ -664,6 +793,48 @@ static int cmd_period(const struct shell *sh, size_t argc, char **argv)
 	return utdk_ok(sh);
 }
 
+static int cmd_cycle(const struct shell *sh, size_t argc, char **argv)
+{
+	unsigned long value = 0;
+	int err = require_idle(sh);
+
+	ARG_UNUSED(argc);
+	if (err) {
+		return err;
+	}
+	if (strcmp(argv[1], "off") != 0 &&
+	    (number(argv[1], &value) != 0 || value < CYCLE_MIN_MS ||
+	     value > CYCLE_MAX_MS)) {
+		return utdk_err(sh, "cycle must be off or %d-%d ms", CYCLE_MIN_MS,
+				CYCLE_MAX_MS);
+	}
+	k_mutex_lock(&lock, K_FOREVER);
+	cn.cycle_ms = value;
+	k_mutex_unlock(&lock);
+	return utdk_ok(sh);
+}
+
+static int cmd_autoupdate(const struct shell *sh, size_t argc, char **argv)
+{
+	unsigned long value = 0;
+	int err = require_idle(sh);
+
+	ARG_UNUSED(argc);
+	if (err) {
+		return err;
+	}
+	if (strcmp(argv[1], "off") != 0 &&
+	    (number(argv[1], &value) != 0 || value < INTERVAL_MIN_MS ||
+	     value > INTERVAL_MAX_MS)) {
+		return utdk_err(sh, "autoupdate must be off or an interval of %d-%d ms",
+				INTERVAL_MIN_MS, INTERVAL_MAX_MS);
+	}
+	k_mutex_lock(&lock, K_FOREVER);
+	cn.autoupdate_ms = value;
+	k_mutex_unlock(&lock);
+	return utdk_ok(sh);
+}
+
 static int cmd_start(const struct shell *sh, size_t argc, char **argv)
 {
 	bool central;
@@ -794,6 +965,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(conn_cmds,
 	SHELL_CMD_ARG(payload, NULL, "<bytes> Bytes per write", cmd_payload, 2, 0),
 	SHELL_CMD_ARG(period, NULL, "<ms> Time between writes, 10-10000", cmd_period,
 		      2, 0),
+	SHELL_CMD_ARG(cycle, NULL, "<ms|off> Drop and remake the link this often",
+		      cmd_cycle, 2, 0),
+	SHELL_CMD_ARG(autoupdate, NULL, "<ms|off> Interval to ask for once connected",
+		      cmd_autoupdate, 2, 0),
 	SHELL_CMD_ARG(start, NULL, "Connect (central) or advertise (peripheral)",
 		      cmd_start, 1, 0),
 	SHELL_CMD_ARG(stop, NULL, "Disconnect and stop", cmd_stop, 1, 0),
@@ -807,8 +982,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(conn_cmds,
 static int cmd_conn(const struct shell *sh, size_t argc, char **argv)
 {
 	if (argc < 2) {
-		return utdk_err(sh, "usage: conn <peer|interval|dle|payload|period|start|"
-				"stop|update|defaults>");
+		return utdk_err(sh, "usage: conn <peer|interval|dle|payload|period|cycle|"
+				"autoupdate|start|stop|update|defaults>");
 	}
 	return utdk_err(sh, "unknown conn command '%s'", argv[1]);
 }
