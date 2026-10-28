@@ -8,6 +8,7 @@ from ubertooth_harness.catalog import CatalogError, builtin_catalog
 from ubertooth_harness.connection_cases import (
     ADV_CHANNEL,
     CYCLE_MS,
+    WRITE_PERIOD_MS,
     WRITE_BYTES,
     known_connection_cases,
 )
@@ -107,7 +108,8 @@ class CaseTests(unittest.TestCase):
         self.assertEqual(
             ["central", "--jlink", "1050000001", "--peer", PERIPHERAL,
              "--interval", "50", "--dle", "on", "--payload", "244",
-             "--period", "100", "--cycle", str(CYCLE_MS), "--autoupdate", "200"],
+             "--period", str(WRITE_PERIOD_MS), "--cycle", str(CYCLE_MS),
+             "--autoupdate", "200"],
             list(steps["central-start"].resolve_argv(context)[2:]))
         self.assertEqual(
             ("ubertooth-btle", "-U", SERIAL, "-f", f"-A{ADV_CHANNEL}", "-r",

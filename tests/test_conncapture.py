@@ -193,7 +193,7 @@ class ConnectionInfoOptionTests(unittest.TestCase):
         self.assertEqual(conncapture.SHIFTED, self.classify(self.body[:34]))
 
     def test_the_fixed_option_is_recognised(self):
-        self.assertEqual("correct", self.classify(self.body[6:6 + 34]))
+        self.assertEqual(conncapture.CORRECT, self.classify(self.body[6:6 + 34]))
 
     def test_anything_else_is_named(self):
         self.assertEqual("neither the PDU nor the 6-byte shift",
@@ -204,24 +204,25 @@ class ConnectionInfoOptionTests(unittest.TestCase):
             self.assertIsNone(conncapture.connection_info_option(data))
         self.assertEqual("absent", conncapture.classify_connection_info(None, self.body))
 
-    def test_the_check_passes_while_the_bug_is_present(self):
-        data = pcapng_with_option([self.record] + [data_packet(251)] * 3,
-                                  self.body[:34])
-        _header, result = conncapture.check(
-            data, central=CENTRAL, peripheral=PERIPHERAL,
-            interval_units=INTERVAL_UNITS, latency=0, timeout_units=TIMEOUT_UNITS,
-            min_data_packets=1, long_packets=1, connection_info_shifted=True)
-        self.assertEqual([], result.problems)
-        self.assertEqual(conncapture.SHIFTED, result.connection_info)
+    def test_the_check_passes_while_the_option_is_not_the_connect_ind(self):
+        # Whatever libbtbb records today, it is not the CONNECT_IND's bytes.
+        for option in (self.body[:34], bytes(34)):
+            data = pcapng_with_option([self.record] + [data_packet(251)] * 3,
+                                      option)
+            _header, result = conncapture.check(
+                data, central=CENTRAL, peripheral=PERIPHERAL,
+                interval_units=INTERVAL_UNITS, latency=0,
+                timeout_units=TIMEOUT_UNITS, min_data_packets=1,
+                long_packets=1, connection_info_wrong=True)
+            self.assertEqual([], result.problems)
 
     def test_the_check_fails_once_libbtbb_is_fixed(self):
         data = pcapng_with_option([self.record], self.body[6:6 + 34])
         _header, result = conncapture.check(
             data, central=CENTRAL, peripheral=PERIPHERAL,
             interval_units=INTERVAL_UNITS, latency=0, timeout_units=TIMEOUT_UNITS,
-            connection_info_shifted=True)
-        self.assertIn("is 'correct'", result.problems[0])
-        self.assertIn("libbtbb#21", result.problems[0])
+            connection_info_wrong=True)
+        self.assertIn("libbtbb#21 is fixed", result.problems[0])
 
 
 class MainTests(unittest.TestCase):

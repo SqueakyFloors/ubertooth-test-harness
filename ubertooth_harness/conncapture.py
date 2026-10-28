@@ -25,9 +25,10 @@ The checks:
   ``--min-data-length`` bytes long, which is what Data Length Extension is
   for: without it the link layer would cap the payload at 27 bytes;
 - with ``--connection-info-option``, that the connection parameters libbtbb
-  records as a PCAPNG interface option are still copied 6 bytes early
-  (SqueakyFloors/libbtbb#21). That is the opposite of a wish: the check
-  pins a known bug so it fails when the bug is fixed.
+  records as a PCAPNG interface option are still not the CONNECT_IND's own
+  bytes (SqueakyFloors/libbtbb#21 copies them 6 bytes early). That is the
+  opposite of a wish: the check pins a known bug so that it fails, and can
+  become a real check, once libbtbb records the right bytes.
 
 Only the two DKs' own addresses and counts are printed, never another
 device's address or data. Each failure is a ``FAIL:`` line and exit status
@@ -200,6 +201,7 @@ def data_packets(records, access_address: int, crc_init: int) -> list[tuple[int,
     return found
 
 
+CORRECT = "the CONNECT_IND's own bytes"
 SHIFTED = "shifted by 6 bytes (libbtbb#21)"
 
 
@@ -243,7 +245,7 @@ def classify_connection_info(option: bytes | None, connect_ind_body: bytes) -> s
     if option is None:
         return "absent"
     if option == connect_ind_body[6:6 + CONNECT_IND_LEN]:
-        return "correct"
+        return CORRECT
     if option == connect_ind_body[0:CONNECT_IND_LEN]:
         return SHIFTED
     return "neither the PDU nor the 6-byte shift"
@@ -266,7 +268,7 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
           latency: int, timeout_units: int, min_data_packets: int = 0,
           min_data_length: int = DEFAULT_DATA_LENGTH + 1,
           long_packets: int = 0,
-          connection_info_shifted: bool = False) -> tuple[str, Result]:
+          connection_info_wrong: bool = False) -> tuple[str, Result]:
     result = Result()
     try:
         file_format, link_type, records = read_records(data)
@@ -332,13 +334,13 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
     if bodies:
         result.connection_info = classify_connection_info(
             connection_info_option(data), bodies[0])
-    if connection_info_shifted and result.connection_info != SHIFTED:
+    if connection_info_wrong and result.connection_info == CORRECT:
         # The case exists to catch the fix: once libbtbb records the right
         # bytes, this is where someone turns it into a real check.
         result.problems.append(
-            f"the PCAPNG connection information option is '{result.connection_info}', "
-            f"not '{SHIFTED}'; if libbtbb#21 is fixed, check the parameters here "
-            "instead of pinning the bug")
+            "the PCAPNG connection information option now holds the CONNECT_IND's "
+            "own bytes, so libbtbb#21 is fixed: check the parameters here instead "
+            "of pinning the bug")
     return header, result
 
 
@@ -355,7 +357,7 @@ def main(argv=None) -> int:
     parser.add_argument("--min-data-length", type=int, default=DEFAULT_DATA_LENGTH + 1)
     parser.add_argument("--long-packets", type=int, default=0)
     parser.add_argument("--connection-info-option", action="store_true",
-                        help="require libbtbb's recorded option to still be wrong")
+                        help="require libbtbb's recorded option to still not be the CONNECT_IND's bytes")
     args = parser.parse_args(argv)
     try:
         with open(args.file, "rb") as stream:
@@ -368,7 +370,7 @@ def main(argv=None) -> int:
         interval_units=args.interval_units, latency=args.latency,
         timeout_units=args.timeout_units, min_data_packets=args.min_data_packets,
         min_data_length=args.min_data_length, long_packets=args.long_packets,
-        connection_info_shifted=args.connection_info_option,
+        connection_info_wrong=args.connection_info_option,
     )
     print(f"capture: {header}, {result.records} records")
     print(f"connect_ind: {result.connect_inds}")

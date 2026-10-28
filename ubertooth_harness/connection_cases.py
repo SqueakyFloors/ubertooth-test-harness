@@ -78,7 +78,7 @@ CYCLE_MS = 5000
 # Bytes per write and how often: 244 bytes of ATT payload fill a 251-byte
 # link-layer packet, which only Data Length Extension allows.
 WRITE_BYTES = 244
-WRITE_PERIOD_MS = 100
+WRITE_PERIOD_MS = 50
 # The advertising channel the peripheral uses and the Ubertooth listens on.
 # The central connects on the channel it hears the peripheral on, so pinning
 # both to one channel is what puts the CONNECT_IND in the capture.
@@ -86,8 +86,12 @@ ADV_CHANNEL = 37
 # Without Data Length Extension the payload stops at 27 bytes, so a packet
 # longer than that proves the extension took effect on air.
 LONG_PACKET_BYTES = 28
-# What a capture must hold. The Ubertooth catches part of a connection, so
-# these are floors a working follow clears easily, not expected counts.
+# What a capture must hold. The Ubertooth catches part of a connection and
+# only a fraction of what it catches passes the CRC: of the 18 packets of one
+# followed connection on the bench (run 20261028T163546Z) two were intact,
+# one of them a full 251 bytes. These are floors a working follow clears, not
+# expected counts; the central writes every WRITE_PERIOD_MS to give the
+# receiver enough chances.
 MIN_DATA_PACKETS = 5
 MIN_LONG_PACKETS = 1
 CHECK_TIMEOUT_S = 30.0
