@@ -33,6 +33,45 @@ def is_stable_serial_device(path) -> bool:
     )
 
 
+NRF52840_DK = "nRF52840 DK"
+# Roles the DK role firmware (firmware/nrf52840dk) can take; only the
+# advertiser is implemented so far, the connection pair is planned (#87).
+DK_ROLES = ("advertiser", "central", "peripheral")
+_DK_IDENTITY_KEYS = ("jlink serial", "BLE address", "serial device")
+_JLINK_SERIAL = re.compile(r"^[0-9]{6,12}$")
+_BLE_ADDRESS = re.compile(r"^[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}$")
+
+
+def _validate_dk(resource) -> None:
+    """An nRF52840 DK: J-Link serial, optional BLE address and VCOM0 path."""
+    alias = resource.alias
+    unknown = sorted(set(resource.identity) - set(_DK_IDENTITY_KEYS))
+    if unknown:
+        raise RegistryError(
+            f"nRF52840 DK {alias} identity has unknown key(s) {', '.join(unknown)}; "
+            f"use {', '.join(_DK_IDENTITY_KEYS)}"
+        )
+    if not _JLINK_SERIAL.fullmatch(resource.identity.get("jlink serial", "")):
+        raise RegistryError(
+            f"nRF52840 DK {alias} requires a 'jlink serial' identity (6-12 digits)"
+        )
+    address = resource.identity.get("BLE address")
+    if address is not None and not _BLE_ADDRESS.fullmatch(address):
+        raise RegistryError(
+            f"nRF52840 DK {alias} BLE address must look like C0:11:22:33:44:55"
+        )
+    device = resource.identity.get("serial device")
+    if device is not None and not device.startswith("/dev/"):
+        raise RegistryError(f"nRF52840 DK {alias} serial device must be a /dev path")
+    roles = set(resource.roles)
+    if not roles or not roles <= set(DK_ROLES):
+        raise RegistryError(
+            f"nRF52840 DK {alias} roles must be one or more of {', '.join(DK_ROLES)}"
+        )
+    if "advertiser" in roles and address is None:
+        raise RegistryError(f"nRF52840 DK {alias} advertiser requires a 'BLE address'")
+
+
 @dataclass(frozen=True)
 class Resource:
     alias: str
@@ -152,6 +191,9 @@ class FileResourceRegistry:
                     raise RegistryError(
                         f"default {alias} is not attached to {host.alias}"
                     )
+        for resource in self.resources.values():
+            if resource.type == NRF52840_DK:
+                _validate_dk(resource)
         used_power_ports = {}
         for resource in self.resources.values():
             if (

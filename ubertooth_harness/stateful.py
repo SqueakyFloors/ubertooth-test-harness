@@ -272,6 +272,11 @@ class StateCase:
     # and the Ubertooth source's expected revision as
     # context[EXPECTED_REVISION_KEY]; a run without them is refused.
     artifacts: tuple[str, ...] = ()
+    # Labels of artifacts the steps use when the run has them (for example
+    # an image to flash only when a board runs something else); each one
+    # present is hashed and recorded like ``artifacts``, a missing one is
+    # left out of the context.
+    optional_artifacts: tuple[str, ...] = ()
     # What the case needs from the host (hostneeds.py); a host without it
     # leaves the case out before the run, as not applicable. A case that
     # needs the firmware build lists "test_build" in artifacts too.

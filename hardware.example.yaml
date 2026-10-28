@@ -5,6 +5,7 @@ resources:
     roles: [controller, test target]
     defaults:
       Ubertooth: UT_Linux0
+      nRF52840 DK: DK_Linux0
 
   Host_Mac:
     type: Host
@@ -37,20 +38,31 @@ resources:
     identity:
       serial: REPLACE_WITH_MAC_UBERTOOTH_SERIAL
 
+  # nRF52840 DKs (PCA10056) running the harness role firmware
+  # (firmware/nrf52840dk). Identify each by its on-board J-Link serial, as
+  # `nrfutil device list` prints it (quote it to keep leading zeros). The
+  # advertiser's BLE address is the static random address its `status`
+  # reports (derived from the chip's FICR, stable per board). VCOM0 is found
+  # by J-Link serial (/dev/serial/by-id on Linux); set `serial device` to
+  # override it. `power` maps the DK's interface USB to a hub port.
   DK_Linux0:
     type: nRF52840 DK
     attached to: Host_Linux
+    roles: [advertiser]
     identity:
-      probe serial: REPLACE_WITH_PROBE_SERIAL
-      BLE address: REPLACE_WITH_ADVERTISING_MAC
-    capabilities: [BLE advertiser, BLE central, DLE]
+      jlink serial: "000123456789"
+      BLE address: "C0:00:00:00:00:01"
+    power:
+      controller: Hub_Linux1
+      port: 4
 
+  # Planned: the connection pair (central and peripheral, #87).
   DK_Linux1:
     type: nRF52840 DK
     attached to: Host_Linux
+    roles: [central]
     identity:
-      probe serial: REPLACE_WITH_SECOND_PROBE_SERIAL
-    capabilities: [BLE peripheral, DLE]
+      jlink serial: "000123456790"
 
   # StarTech managed hub: switched through its built-in FTDI management
   # controller, which sits on downstream port 4; only ports 1-3 are DUT ports.

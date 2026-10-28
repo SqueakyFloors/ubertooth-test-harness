@@ -16,8 +16,8 @@ from ubertooth_harness.patterns import (
 )
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
-    dfu_cases, dfu_host_cases, python_cases, receive_cases, refusal_cases, tool_cases,
-    transitions, util_cases, util_refusal_cases,
+    advertiser_cases, dfu_cases, dfu_host_cases, python_cases, receive_cases,
+    refusal_cases, tool_cases, transitions, util_cases, util_refusal_cases,
 )
 
 
@@ -128,6 +128,24 @@ def _pa_level(value):
     if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 7:
         raise CatalogError("must be a PA level 0-7")
     return value
+
+
+def _advertising_interval(value):
+    # Bluetooth Core: legacy advertising interval 20 ms to 10.24 s.
+    if (not isinstance(value, int) or isinstance(value, bool)
+            or not 20 <= value <= 10240):
+        raise CatalogError("must be an advertising interval of 20-10240 ms")
+    return value
+
+
+def _payload_tag(value):
+    # The advertiser firmware's payload tag: up to 12 bytes, or none.
+    text = str(value).lower() if isinstance(value, (str, int)) else None
+    if text == "none":
+        return ""
+    if text is None or not re.fullmatch(r"(?:[0-9a-f]{2}){1,12}", text):
+        raise CatalogError("must be 1-12 bytes of hex, or none")
+    return text
 
 
 def _coverage(value):
@@ -667,6 +685,10 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # 0684c11 it took about 69 s: the wedged boards made every cleanup
     # command time out.
     "Two-device range test": _default(Estimate(10.0)),
+    # ESTIMATE_PENDING_HW
+    "Capture known BLE advertiser": _profiles(
+        Estimate(25.0, per_duration=5), Estimate(70.0, per_duration=16)
+    ),
 })
 
 
@@ -952,6 +974,23 @@ def builtin_catalog() -> TestCatalog:
             guards_other_ubertooths=True,
         ),
         TestDefinition(
+            "Capture known BLE advertiser",
+            "ubertooth-btle -n and -f capture a registered nRF52840 DK advertiser "
+            "on the channel it advertises on, with its payload, in PCAP and "
+            "PCAPNG, and none of its packets on another channel",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH,
+                "advertiser": ArgumentRule(_selector, default="default"),
+                "coverage": COVERAGE, "duration": DURATION,
+                "interval": ArgumentRule(_advertising_interval, default=100),
+                "payload": ArgumentRule(_payload_tag, default="c0ffee"),
+            }),
+            MappingProxyType({"Ubertooth": "Ubertooth", "advertiser": "nRF52840 DK"}),
+            command_builder=advertiser_cases.known_advertiser_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+        ),
+        TestDefinition(
             "CLI usage smoke",
             "Exercise host tool usage paths",
             MappingProxyType({"hosts": HOSTS}),
@@ -1052,10 +1091,6 @@ def builtin_catalog() -> TestCatalog:
     ]
     definitions.extend(
         [
-            _device_test(
-                "Capture known BLE advertiser", "Capture a registered BLE advertiser",
-                extra={"advertiser": ArgumentRule(_required_text, required=True)},
-            ),
             _device_test(
                 "Capture eero setup beacon", "Trigger and capture an eero setup beacon",
                 extra={"eero": ArgumentRule(_required_text, required=True)},

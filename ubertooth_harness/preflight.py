@@ -1,7 +1,9 @@
 """Mandatory preflight checks derived from immutable run/resource identity."""
 
 from dataclasses import dataclass
+from pathlib import Path
 import re
+import sys
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
@@ -9,7 +11,8 @@ from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.cases import GUARD_ROLE_PREFIX
 from ubertooth_harness.manifest import ManifestError, RunManifest
 from ubertooth_harness.planner import TestInvocation
-from ubertooth_harness.resources import ResourceRegistry
+from ubertooth_harness import nrfdk
+from ubertooth_harness.resources import NRF52840_DK, ResourceRegistry
 from ubertooth_harness.stateful import StateCaseError
 from ubertooth_harness.transitions import firmware_api, format_api, host_api_version
 
@@ -73,6 +76,28 @@ def host_version_patterns(ubertooth, libbtbb=None) -> tuple[str, ...]:
             rf"libbtbb\s+\S+\s+\({re.escape(libbtbb.expected_revision)}\)",
         )
     return patterns
+
+
+_NRFDK = str(Path(nrfdk.__file__).resolve())
+
+
+def _dk_check(sequence: int, host: str, resource, expected_revision: str) -> PreflightCheck:
+    """nrfdk.py identify: pinned nrfutil, the probe attached, VCOM0 present."""
+    serial = str(int(resource.identity["jlink serial"]))
+    argv = (sys.executable, _NRFDK, "identify", "--jlink", serial)
+    if resource.identity.get("serial device"):
+        argv += ("--port", resource.identity["serial device"])
+    return PreflightCheck(
+        check_id=f"preflight-{sequence:03d}-nrf52840-dk-probe",
+        name="nRF52840 DK probe",
+        host=host,
+        resource_alias=resource.alias,
+        resource_identity=MappingProxyType(dict(resource.identity)),
+        argv=argv,
+        expected_patterns=(rf"(?m)^J-Link serial: {serial}$",),
+        expected_revision=expected_revision,
+        timeout_s=nrfdk.TOOL_TIMEOUT_S * 3,
+    )
 
 
 class PreflightPolicy:
@@ -168,6 +193,14 @@ class PreflightPolicy:
                 )
             for alias in invocation.resources.values():
                 resource = self.registry.get(alias)
+                if resource.type == NRF52840_DK and alias not in seen_ubertooths:
+                    # Its probe and VCOM0 port; the test itself flashes and
+                    # verifies the role firmware (advertiser_cases.py).
+                    seen_ubertooths.add(alias)
+                    sequence += 1
+                    checks.append(_dk_check(sequence, invocation.host, resource,
+                                            ubertooth_source.expected_revision))
+                    continue
                 if resource.type != "Ubertooth" or alias in seen_ubertooths:
                     continue
                 seen_ubertooths.add(alias)
