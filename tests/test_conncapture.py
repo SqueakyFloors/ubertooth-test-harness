@@ -96,6 +96,11 @@ class ConnectIndTests(unittest.TestCase):
         self.assertEqual([], conncapture.connect_inds([data_packet()]))
         self.assertEqual([], conncapture.connect_inds([b"short"]))
 
+    def test_a_corrupted_connect_ind_is_not_read(self):
+        # Its parameters are what the checks compare, so a flipped bit in
+        # them must not pass for the connection that was asked for.
+        self.assertEqual([], conncapture.connect_inds([connect_ind(corrupt=True)]))
+
 
 class CheckTests(unittest.TestCase):
     def check(self, data, **options):
@@ -206,6 +211,14 @@ class ConnectionInfoOptionTests(unittest.TestCase):
         for data in (pcap([self.record]), pcapng([self.record])):
             self.assertIsNone(conncapture.connection_info_option(data))
         self.assertEqual("absent", conncapture.classify_connection_info(None, self.body))
+
+    def test_a_missing_option_fails_the_pin_as_a_regression(self):
+        _header, result = conncapture.check(
+            pcapng([self.record]), central=CENTRAL, peripheral=PERIPHERAL,
+            interval_units=INTERVAL_UNITS, latency=0, timeout_units=TIMEOUT_UNITS,
+            connection_info_wrong=True)
+        self.assertEqual(conncapture.ABSENT, result.connection_info)
+        self.assertIn("no connection information option at all", result.problems[0])
 
     def test_the_check_passes_while_the_option_is_not_the_connect_ind(self):
         # Whatever libbtbb records today, it is not the CONNECT_IND's bytes.

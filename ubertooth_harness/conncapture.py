@@ -28,11 +28,13 @@ The checks:
 - at least ``--long-packets`` of those data packets at least
   ``--min-data-length`` bytes long, which is what Data Length Extension is
   for: without it the link layer would cap the payload at 27 bytes;
-- with ``--connection-info-option``, that the connection parameters libbtbb
-  records as a PCAPNG interface option are still not the CONNECT_IND's own
-  bytes (SqueakyFloors/libbtbb#21 copies them 6 bytes early). That is the
-  opposite of a wish: the check pins a known bug so that it fails, and can
-  become a real check, once libbtbb records the right bytes.
+- with ``--connection-info-option``, that libbtbb recorded a connection
+  information option in the PCAPNG and that it is still not the
+  CONNECT_IND's own bytes (SqueakyFloors/libbtbb#21 copies them 6 bytes
+  early; on the bench they are neither the PDU nor that shift, so the check
+  pins what can be seen rather than the exact wrong layout). That is the
+  opposite of a wish: it fails, and can become a real check, once libbtbb
+  records the right bytes -- and it also fails if the option disappears.
 
 Only the two DKs' own addresses and counts are printed, never another
 device's address or data. Each failure is a ``FAIL:`` line and exit status
@@ -150,6 +152,11 @@ def connect_ind_bodies(records, central: str | None = None,
         if header[0] & 0x0F != CONNECT_IND or header[1] & 0x3F != CONNECT_IND_LEN:
             continue
         pdu = body[6:6 + CONNECT_IND_LEN]
+        # The advertising CRC, so a corrupted packet is not read as one.
+        if (len(body) < 6 + CONNECT_IND_LEN + 3
+                or body[6 + CONNECT_IND_LEN:9 + CONNECT_IND_LEN]
+                != crc24(header + pdu).to_bytes(3, "little")):
+            continue
         if central is not None and format_address(pdu[0:6]) != central.upper():
             continue
         if peripheral is not None and format_address(pdu[6:12]) != peripheral.upper():
@@ -159,25 +166,14 @@ def connect_ind_bodies(records, central: str | None = None,
 
 
 def connect_inds(records) -> list[ConnectInd]:
-    """Every CONNECT_IND in the records, in capture order."""
-    found = []
-    for record in records:
-        if len(record) < LE_PHDR_LEN + 4 + 2 + CONNECT_IND_LEN:
-            continue
-        body = record[LE_PHDR_LEN:]
-        if struct.unpack("<I", body[:4])[0] != ADV_ACCESS_ADDRESS:
-            continue
-        header = body[4:6]
-        if header[0] & 0x0F != CONNECT_IND:
-            continue
-        length = header[1] & 0x3F
-        if length != CONNECT_IND_LEN or len(body) < 6 + length:
-            continue
-        try:
-            found.append(ConnectInd.parse(body[6:6 + length]))
-        except ConnectIndError:
-            continue
-    return found
+    """Every CONNECT_IND in the records, in capture order.
+
+    Only packets whose CRC is right, so a corrupted one cannot pass for the
+    connection the harness asked for: its parameters are exactly what the
+    checks compare, and a flipped bit in them must not look like a pass.
+    """
+    return [ConnectInd.parse(body[6:6 + CONNECT_IND_LEN])
+            for body in connect_ind_bodies(records)]
 
 
 def data_packets(records, access_address: int, crc_init: int) -> list[tuple[int, bool]]:
@@ -205,6 +201,7 @@ def data_packets(records, access_address: int, crc_init: int) -> list[tuple[int,
     return found
 
 
+ABSENT = "absent"
 CORRECT = "the CONNECT_IND's own bytes"
 SHIFTED = "shifted by 6 bytes (libbtbb#21)"
 
@@ -247,7 +244,7 @@ def classify_connection_info(option: bytes | None, connect_ind_body: bytes) -> s
     bytes of LLData the option is meant to carry.
     """
     if option is None:
-        return "absent"
+        return ABSENT
     if option == connect_ind_body[6:6 + CONNECT_IND_LEN]:
         return CORRECT
     if option == connect_ind_body[0:CONNECT_IND_LEN]:
@@ -343,13 +340,21 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
     if bodies:
         result.connection_info = classify_connection_info(
             connection_info_option(data), bodies[0])
-    if connection_info_wrong and result.connection_info == CORRECT:
+    if connection_info_wrong:
         # The case exists to catch the fix: once libbtbb records the right
-        # bytes, this is where someone turns it into a real check.
-        result.problems.append(
-            "the PCAPNG connection information option now holds the CONNECT_IND's "
-            "own bytes, so libbtbb#21 is fixed: check the parameters here instead "
-            "of pinning the bug")
+        # bytes, this is where someone turns it into a real check. An option
+        # that is missing altogether is a separate regression, so it fails
+        # here too rather than passing as "still wrong".
+        if result.connection_info == CORRECT:
+            result.problems.append(
+                "the PCAPNG connection information option now holds the "
+                "CONNECT_IND's own bytes, so libbtbb#21 is fixed: check the "
+                "parameters here instead of pinning the bug")
+        elif result.connection_info == ABSENT:
+            result.problems.append(
+                "the PCAPNG carries no connection information option at all; "
+                "libbtbb#21 is about its contents being wrong, not about it "
+                "being missing")
     return header, result
 
 

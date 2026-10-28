@@ -34,8 +34,8 @@ def is_stable_serial_device(path) -> bool:
 
 
 NRF52840_DK = "nRF52840 DK"
-# Roles the DK role firmware (firmware/nrf52840dk) can take; only the
-# advertiser is implemented so far, the connection pair is planned (#87).
+# Roles the DK role firmware (firmware/nrf52840dk) can take. One image holds
+# all three and `role <name>` switches between them.
 DK_ROLES = ("advertiser", "central", "peripheral")
 _DK_IDENTITY_KEYS = ("jlink serial", "BLE address", "serial device")
 _JLINK_SERIAL = re.compile(r"^[0-9]{6,12}$")
