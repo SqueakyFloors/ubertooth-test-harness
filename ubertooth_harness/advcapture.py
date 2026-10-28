@@ -66,20 +66,25 @@ class CaptureError(ValueError):
     """The file is not a whole PCAP/PCAPNG capture of link type 256."""
 
 
-def _reverse_byte(value: int) -> int:
-    return int(f"{value & 0xFF:08b}"[::-1], 2)
+def _reverse24(value: int) -> int:
+    return int(f"{value & 0xFFFFFF:024b}"[::-1], 2)
 
 
 def crc24(data: bytes, init: int = ADV_CRC_INIT) -> int:
     """The LE link-layer CRC (Core Vol 6 Part B 3.1.1) over PDU header and PDU.
 
-    Computed as libbtbb's btle_calc_crc does: a right-shifting register
-    holding the bit-reversed init, fed least significant bit first. The
+    A right-shifting register holding the init with all 24 bits reversed (the
+    Ubertooth firmware's `rbit`), fed least significant bit first. The
     result's three bytes, least significant first, are the CRC bytes as a
     capture stores them.
+
+    Reversing all 24 bits and reversing each byte give the same register for
+    the advertising init 0x555555, so only a connection's own CRC init tells
+    them apart: of the 18 data packets of a followed connection on the bench
+    (run 20261028T163546Z), the whole-24-bit reversal validated some and the
+    per-byte reversal none.
     """
-    state = (_reverse_byte(init) | _reverse_byte(init >> 8) << 8
-             | _reverse_byte(init >> 16) << 16)
+    state = _reverse24(init)
     for byte in data:
         for _bit in range(8):
             feedback = (state ^ byte) & 1
