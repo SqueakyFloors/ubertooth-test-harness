@@ -91,7 +91,10 @@ void utdk_address(char *out, size_t len)
 
 static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 {
-	char line[448];
+	/* One JSON line for every role's fields: the shell thread is the only
+	 * caller, so one static buffer serves and keeps it off the stack.
+	 */
+	static char line[1024];
 	char address[18];
 	int used;
 
