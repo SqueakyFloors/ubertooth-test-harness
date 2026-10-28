@@ -2,14 +2,22 @@
 
 Firmware for the Nordic nRF52840 DK (PCA10056) boards the harness uses as
 Bluetooth LE test devices. The Ubertooth stays receive-only; these boards do
-the transmitting. One app holds every role; today it is the **advertiser**
-for `Capture known BLE advertiser`
-([#86](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/86)).
-The connection pair (central and peripheral,
-[#87](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/87)) is
-planned as further roles of the same app and shell (see [Extending](#extending)).
+the transmitting.
 
-Firmware version: `utdk-1.0.0` (`UTDK_FW_VERSION` in `src/roles.h`; the
+One image holds three roles, and one command switches between them:
+
+| Role | What it does | Test |
+|---|---|---|
+| `advertiser` (the boot role) | legacy advertising from a fixed address on chosen channels | `Capture known BLE advertiser` ([#86](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/86)) |
+| `central` | connects to the peripheral on the 1M PHY at a set interval, raises the data length to 251 bytes, sends a counter payload, asks for a connection parameter update | `Capture known BLE connection` ([#87](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/87)) |
+| `peripheral` | advertises connectable and accepts the central's connection | the same |
+
+`role <name>` leaves the previous role idle with its boot settings and takes
+the new one, so a board can be handed from one test to another without
+reflashing. The boot role is the advertiser, so a board that was reset or
+power-cycled is in a known state.
+
+Firmware version: `utdk-1.1.0` (`UTDK_FW_VERSION` in `src/roles.h`; the
 harness pins the same string in `ubertooth_harness/nrfdk.py` and flashes a
 board that reports anything else).
 
@@ -68,13 +76,14 @@ The shell is on uart0, which is the J-Link's first virtual COM port (VCOM0;
 115200 baud, 8N1, no flow control. It prints no prompt, no echo and no
 colours. Send one command line ended by CR; the board answers with zero or
 more data lines, then exactly one line `OK` or `ERR <reason>`. Any other line
-(the boot banner `*** Booting nRF Connect SDK ...`, `utdk: utdk-1.0.0 ready`)
+(the boot banner `*** Booting nRF Connect SDK ...`, `utdk: utdk-1.1.0 ready`)
 is not a response.
 
 | Command | Answer |
 |---|---|
 | `status` | one JSON line, then `OK` |
 | `version` | the firmware version, then `OK` |
+| `role <advertiser\|central\|peripheral>` | leave both roles idle, then take this one |
 | `adv start` | start advertising with the current settings |
 | `adv stop` | stop advertising |
 | `adv chmap <37\|38\|39\|all>` | advertising channels |
@@ -82,16 +91,33 @@ is not a response.
 | `adv payload <hex\|none>` | payload tag, up to 12 bytes (default none) |
 | `adv type <nonconn\|conn>` | `ADV_NONCONN_IND` (default) or `ADV_IND` |
 | `adv defaults` | stop, and restore every boot setting |
+| `conn peer <address>` | the peripheral the central connects to |
+| `conn interval <ms>` | connection interval, 8-4000 ms (default 30) |
+| `conn dle <on\|off>` | ask for a 251-byte data length (default on) |
+| `conn payload <bytes>` | bytes per write, 1-244 (default 244) |
+| `conn period <ms>` | time between writes, 10-10000 ms (default 100) |
+| `conn cycle <ms\|off>` | drop the link after this long and make a new one (default off) |
+| `conn autoupdate <ms\|off>` | interval to ask for once connected (default off) |
+| `conn start` | central: connect; peripheral: advertise connectable |
+| `conn stop` | disconnect and stop |
+| `conn update <ms>` | ask for a connection parameter update now |
+| `conn defaults` | stop, and restore every boot setting |
 
-A setting changed while advertising restarts advertising with it. Bad values
-answer `ERR` and change nothing. `adv` alone or with an unknown subcommand answers
-`ERR`. A command with the wrong number of words, or an unknown top-level
-command, gets Zephyr's own `<command>: wrong parameter count` or
-`<command>: command not found` line instead; `nrfdk.py` treats both as a
-refusal. `status`, for example:
+A setting changed while advertising restarts advertising with it. A `conn`
+setting may only change while the connection role is stopped, so the
+parameters a capture shows are the ones that were asked for. Bad values
+answer `ERR` and change nothing. `adv` or `conn` alone, or with an unknown
+subcommand, answers `ERR`; a `conn` command while the role is the advertiser
+answers `ERR` and says which `role` command to run. A command with the wrong
+number of words, or an unknown top-level command, gets Zephyr's own
+`<command>: wrong parameter count` or `<command>: command not found` line
+instead; `nrfdk.py` treats both as a refusal.
+
+`status` reports every role's fields on one line, whichever role is running,
+for example a central with a live connection:
 
 ```json
-{"role":"advertiser","fw":"utdk-1.0.0","bt":true,"address":"C3:11:22:33:44:55","address_type":"random static","adv":true,"running":true,"type":"nonconn","chmap":"37","interval_ms":100,"payload":"c0ffee","counter":12,"starts":1,"connections":0,"last_err":0}
+{"role":"central","fw":"utdk-1.1.0","bt":true,"address":"C0:7D:CD:95:52:86","address_type":"random static","adv":false,"running":false,"type":"nonconn","chmap":"all","interval_ms":100,"payload":"","counter":0,"starts":0,"connections":0,"last_err":0,"conn_on":true,"connected":true,"peer":"C1:92:EC:E7:71:BC","conn_interval_ms":30,"update_ms":60,"dle":true,"interval_units":48,"latency":0,"timeout_units":400,"tx_octets":251,"rx_octets":251,"mtu":247,"phy":"1M","payload_len":244,"period_ms":100,"cycle_ms":4000,"autoupdate_ms":60,"writes":74,"write_errors":4,"received":0,"updates":3,"connects":3,"disconnects":2,"conn_err":0}
 ```
 
 - `address`: the identity address, a static random address derived from
@@ -99,14 +125,46 @@ refusal. `status`, for example:
   Register it as the DK's `BLE address`.
 - `adv`: advertising was asked for; `running`: the controller is
   advertising now (false for a moment after a connection to `ADV_IND`).
+  Both describe the advertiser role only; the peripheral role's connectable
+  advertising is reported as `conn_on`.
 - `counter`: the payload counter (below); `starts`: advertising starts
   since boot; `connections`: connections accepted to `ADV_IND` (each is
   dropped at once and advertising starts again); `last_err`: the last
   Bluetooth API error (0 is none).
+- `conn_on`: the connection role was started; `connected`: the link is up
+  now. `interval_units`, `latency` and `timeout_units` are the connection
+  parameters in use, in the units the air interface uses (1.25 ms and
+  10 ms), so a capture can be compared with them directly;
+  `conn_interval_ms` is what the central asks for in the CONNECT_IND and
+  `update_ms` the last update it asked for.
+- `tx_octets` and `rx_octets`: the negotiated data length, 251 with the
+  extension and 27 without; `mtu`: the ATT MTU after the exchange; `phy`:
+  `1M`, the only PHY built in.
+- `writes` and `write_errors` count the central's writes (a write can be
+  refused when buffers are full as a link is coming down); `received` is
+  the bytes the peripheral's characteristic got; `updates`, `connects`
+  and `disconnects` count parameter updates and links.
 
 The board does not count advertising events: the counter steps once a
 second while advertising, so a capture's counters show which second of the
 run each packet came from.
+
+## The connection pair
+
+The central connects straight to the peripheral's identity address, so
+nothing scans and the CONNECT_IND carries exactly the parameters asked for.
+Once the link is up the central raises the data length to 251 bytes,
+exchanges the ATT MTU, finds the peripheral's one characteristic by UUID, and
+writes `conn payload` bytes to it every `conn period` ms with Write Without
+Response, which puts the whole payload in one link-layer packet. Only the 1M
+PHY is built in, so a connection can never move off it.
+
+With `conn cycle <ms>` the central drops the link after that long and
+connects again a moment later, and the peripheral advertises again by itself.
+A capture started at any moment then holds a whole connection: the
+CONNECT_IND, the data length exchange, the parameter update
+(`conn autoupdate`) and the data. That is what lets the harness run one
+command at a time and still catch a connection being made.
 
 ## Advertising payload
 
@@ -131,12 +189,13 @@ AdvData is two AD structures:
 
 ## Extending
 
-The connection pair (#87) adds `central` and `peripheral` roles to this app:
-a `role <advertiser|central|peripheral>` command, a `conn ...` command group
-(interval, data length extension, start/stop), and their fields in
-`status`, whose `role` already names the running role. The protocol stays
+A new role adds its own source file with a `<role>_status()` and a
+`<role>_leave()`, a command group of its own, and a name in `enum utdk_role`
+(`src/roles.h`). `main.c` dispatches `role` and `status`; the protocol stays
 line-based with the same `OK`/`ERR` endings, and `nrfdk.py` keeps one shell
-driver for every role.
+driver for every role. A role that keeps a connection must check
+`utdk_role()` in the shared Bluetooth callbacks, as `advertiser.c` and
+`connection.c` do, because those callbacks are global.
 
 ## License
 
