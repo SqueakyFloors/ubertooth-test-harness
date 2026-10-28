@@ -28,9 +28,6 @@
 /* The payload counter steps once a second while advertising. */
 #define COUNTER_PERIOD K_SECONDS(1)
 
-/* Company ID (2), magic (4), format (1), channel map (1), counter (4), tag. */
-#define MFG_FIXED_LEN 12
-
 static K_MUTEX_DEFINE(lock);
 
 static struct {
@@ -50,7 +47,7 @@ static struct {
 	.interval_ms = INTERVAL_DEFAULT_MS,
 };
 
-static uint8_t mfg[MFG_FIXED_LEN + UTDK_TAG_MAX];
+static uint8_t mfg[UTDK_MFG_FIXED_LEN + UTDK_TAG_MAX];
 static uint8_t flags_nonconn = BT_LE_AD_NO_BREDR;
 static uint8_t flags_conn = BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR;
 static struct bt_data ad[2];
@@ -62,18 +59,13 @@ static K_WORK_DEFINE(restart_work, restart);
 
 static void build_ad(void)
 {
-	sys_put_le16(UTDK_COMPANY_ID, &mfg[0]);
-	memcpy(&mfg[2], UTDK_MAGIC, 4);
-	mfg[6] = UTDK_FORMAT;
-	mfg[7] = st.chmap;
-	sys_put_le32(st.counter, &mfg[8]);
-	memcpy(&mfg[MFG_FIXED_LEN], st.tag, st.tag_len);
+	size_t len = utdk_mfg_payload(mfg, st.chmap, st.counter, st.tag, st.tag_len);
 
 	ad[0].type = BT_DATA_FLAGS;
 	ad[0].data_len = 1;
 	ad[0].data = st.connectable ? &flags_conn : &flags_nonconn;
 	ad[1].type = BT_DATA_MANUFACTURER_DATA;
-	ad[1].data_len = MFG_FIXED_LEN + st.tag_len;
+	ad[1].data_len = len;
 	ad[1].data = mfg;
 }
 
@@ -156,7 +148,8 @@ static void restart(struct k_work *work)
 
 static void connected(struct bt_conn *conn, uint8_t err)
 {
-	if (err) {
+	/* The callbacks are global; the connection roles keep their links. */
+	if (err || utdk_role() != UTDK_ROLE_ADVERTISER) {
 		return;
 	}
 	k_mutex_lock(&lock, K_FOREVER);
@@ -169,6 +162,9 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
 static void recycled(void)
 {
+	if (utdk_role() != UTDK_ROLE_ADVERTISER) {
+		return;
+	}
 	k_work_submit(&restart_work);
 }
 
@@ -407,6 +403,14 @@ static void set_defaults(void *arg)
 	st.chmap = UTDK_CHAN_ALL;
 	st.interval_ms = INTERVAL_DEFAULT_MS;
 	st.tag_len = 0;
+}
+
+void adv_leave(void)
+{
+	k_mutex_lock(&lock, K_FOREVER);
+	(void)stop_locked();
+	set_defaults(NULL);
+	k_mutex_unlock(&lock);
 }
 
 static int cmd_defaults(const struct shell *sh, size_t argc, char **argv)

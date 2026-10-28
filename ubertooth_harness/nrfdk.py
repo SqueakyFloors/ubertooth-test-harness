@@ -39,7 +39,7 @@ from typing import Callable, Sequence
 
 # The firmware version the harness expects (firmware/nrf52840dk/src/roles.h
 # UTDK_FW_VERSION; tests/test_nrfdk.py keeps them in step).
-FIRMWARE_VERSION = "utdk-1.0.0"
+FIRMWARE_VERSION = "utdk-1.1.0"
 # nrfutil and its device command, as installed and validated on the lab host.
 NRFUTIL_VERSION = "8.2.1"
 NRFUTIL_DEVICE_VERSION = "2.23.0"
