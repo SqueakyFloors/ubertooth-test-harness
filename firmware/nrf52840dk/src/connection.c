@@ -256,7 +256,10 @@ static void read_info(struct bt_conn *conn)
 	if (bt_conn_get_info(conn, &info) != 0 || info.type != BT_CONN_TYPE_LE) {
 		return;
 	}
-	cn.interval_units = info.le.interval;
+	/* interval_us replaces the deprecated interval field; the connection
+	 * interval on air is in 1.25 ms units, which is what a capture shows.
+	 */
+	cn.interval_units = info.le.interval_us / 1250;
 	cn.latency = info.le.latency;
 	cn.timeout_units = info.le.timeout;
 	if (info.le.data_len != NULL) {

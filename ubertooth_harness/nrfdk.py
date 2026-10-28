@@ -5,13 +5,22 @@ the shell protocol). This module flashes it by J-Link serial with a pinned
 ``nrfutil device`` and talks to its shell on the J-Link's first virtual COM
 port (VCOM0, the DK's uart0). Run as a script by the advertiser cases::
 
-    python nrfdk.py identify  --jlink SERIAL [--port PATH]
-    python nrfdk.py ensure    --jlink SERIAL [--port PATH] [--hex IMAGE] [--address ADDR]
-    python nrfdk.py advertise --jlink SERIAL [--port PATH] --chmap 37|38|39|all
-                              --interval MS --payload HEX|none [--type nonconn|conn]
-    python nrfdk.py stop      --jlink SERIAL [--port PATH]
-    python nrfdk.py idle      --jlink SERIAL [--port PATH]
-    python nrfdk.py status    --jlink SERIAL [--port PATH]
+    python nrfdk.py identify   --jlink SERIAL [--port PATH]
+    python nrfdk.py ensure     --jlink SERIAL [--port PATH] [--hex IMAGE]
+                               [--address ADDR] [--role ROLE]
+    python nrfdk.py role       --jlink SERIAL --role advertiser|central|peripheral
+    python nrfdk.py advertise  --jlink SERIAL [--port PATH] --chmap 37|38|39|all
+                               --interval MS --payload HEX|none [--type nonconn|conn]
+    python nrfdk.py peripheral --jlink SERIAL [--dle on|off]
+    python nrfdk.py central    --jlink SERIAL --peer ADDR --interval MS
+                               [--dle on|off] [--payload BYTES] [--period MS]
+    python nrfdk.py update     --jlink SERIAL --interval MS
+    python nrfdk.py stop       --jlink SERIAL [--port PATH]
+    python nrfdk.py idle       --jlink SERIAL [--port PATH]
+    python nrfdk.py status     --jlink SERIAL [--port PATH]
+
+``idle`` is the release command: it leaves the board in the advertiser role
+with every setting back to its boot value, whatever it was doing.
 
 Every command fails closed: a wrong tool version, a probe that is not
 attached, a shell that does not answer within its timeout, an ``ERR`` reply,
@@ -69,7 +78,22 @@ _STATUS_KEYS = {
     "role": str, "fw": str, "bt": bool, "address": str, "adv": bool,
     "running": bool, "type": str, "chmap": str, "interval_ms": int,
     "payload": str, "counter": int,
+    # The connection roles (firmware README, "Shell protocol").
+    "conn_on": bool, "connected": bool, "peer": str, "conn_interval_ms": int,
+    "dle": bool, "interval_units": int, "latency": int, "timeout_units": int,
+    "tx_octets": int, "rx_octets": int, "mtu": int, "phy": str,
+    "writes": int, "received": int, "updates": int, "connects": int,
 }
+ROLES = ("advertiser", "central", "peripheral")
+# Connection interval, in the firmware's range (Bluetooth Core 7.5 ms-4 s).
+CONN_INTERVAL_MIN_MS = 8
+CONN_INTERVAL_MAX_MS = 4000
+# A connection interval in the CONNECT_IND is in 1.25 ms units.
+CONN_UNITS_PER_MS = 0.8
+# The data length the pair asks for with `conn dle on`.
+DATA_LENGTH_MAX = 251
+# Time for the central to connect, write, and for status to settle.
+CONNECT_TIMEOUT_S = 10.0
 
 
 class NrfDkError(RuntimeError):
@@ -389,6 +413,18 @@ def _report(status: dict, out) -> None:
     print(f"counter: {status['counter']}", file=out)
 
 
+def _report_connection(status: dict, out) -> None:
+    out = out or sys.stdout
+    print(f"connection: {'up' if status['connected'] else 'down'} peer "
+          f"{status['peer'] or 'none'} interval {status['interval_units']} units "
+          f"({status['interval_units'] * 1.25:g} ms) latency {status['latency']} "
+          f"timeout {status['timeout_units']} units", file=out)
+    print(f"data length: tx {status['tx_octets']} rx {status['rx_octets']} "
+          f"octets mtu {status['mtu']} phy {status['phy']}", file=out)
+    print(f"traffic: writes {status['writes']} received {status['received']} bytes "
+          f"updates {status['updates']} connects {status['connects']}", file=out)
+
+
 def identify(dk: Dk, out=None) -> None:
     check_nrfutil(dk.run)
     device = find_probe(dk.serial, dk.run)
@@ -402,8 +438,15 @@ def identify(dk: Dk, out=None) -> None:
 
 
 def ensure(dk: Dk, image: Path | None, address: str | None, out=None,
-           version: str = FIRMWARE_VERSION) -> dict:
-    """The board runs ``version`` (flashing ``image`` if not), idle, at ``address``."""
+           version: str = FIRMWARE_VERSION, wanted_role: str = "advertiser") -> dict:
+    """The board runs ``version`` (flashing ``image`` if not), idle, at ``address``.
+
+    It is left in ``wanted_role``, idle: an image is flashed only when the
+    board reports another firmware version, so a run never writes an image it
+    cannot then verify.
+    """
+    if wanted_role not in ROLES:
+        raise NrfDkError("role must be " + ", ".join(ROLES))
     status = None
     shell = _open(dk)
     try:
@@ -429,12 +472,14 @@ def ensure(dk: Dk, image: Path | None, address: str | None, out=None,
             if status["fw"] != version:
                 raise NrfDkError(f"after flashing, J-Link {dk.serial} reports "
                                  f"{status['fw']}, not {version}")
+        shell.command(f"role {wanted_role}")
         shell.command("adv defaults")
         status = shell.status()
     finally:
         shell.close()
-    if status["role"] != "advertiser":
-        raise NrfDkError(f"J-Link {dk.serial} role is {status['role']}, not advertiser")
+    if status["role"] != wanted_role:
+        raise NrfDkError(f"J-Link {dk.serial} role is {status['role']}, "
+                         f"not {wanted_role}")
     if address is not None and status["address"] != normalize_address(address):
         raise NrfDkError(f"J-Link {dk.serial} advertises from {status['address']}, the "
                          f"registry says {normalize_address(address)}")
@@ -485,6 +530,145 @@ def stop(dk: Dk, out=None, defaults: bool = False) -> dict:
     return status
 
 
+def idle(dk: Dk, out=None) -> dict:
+    """Leave the board idle whatever role it is in: the release command.
+
+    ``role advertiser`` leaves both the advertiser and the connection role
+    idle and restores their boot settings, so one command releases a DK
+    without the caller having to know what it was doing.
+    """
+    shell = _open(dk)
+    try:
+        shell.command("role advertiser")
+        shell.command("adv defaults")
+        status = shell.status()
+    finally:
+        shell.close()
+    wrong = []
+    if status["role"] != "advertiser":
+        wrong.append(f"role {status['role']}")
+    if status["adv"] or status["running"]:
+        wrong.append("still advertising")
+    if status["conn_on"] or status["connected"]:
+        wrong.append("still connected")
+    if wrong:
+        raise NrfDkError("the DK did not go idle: " + ", ".join(wrong))
+    _report(status, out)
+    return status
+
+
+def role(dk: Dk, wanted: str, out=None) -> dict:
+    """Switch the board to ``wanted``, leaving the previous role idle."""
+    if wanted not in ROLES:
+        raise NrfDkError("role must be " + ", ".join(ROLES))
+    shell = _open(dk)
+    try:
+        shell.command(f"role {wanted}")
+        status = shell.status()
+    finally:
+        shell.close()
+    if status["role"] != wanted:
+        raise NrfDkError(f"J-Link {dk.serial} reports role {status['role']}, not {wanted}")
+    _report(status, out)
+    return status
+
+
+def _conn_interval(interval_ms: int) -> int:
+    if not CONN_INTERVAL_MIN_MS <= interval_ms <= CONN_INTERVAL_MAX_MS:
+        raise NrfDkError(f"connection interval must be {CONN_INTERVAL_MIN_MS}-"
+                         f"{CONN_INTERVAL_MAX_MS} ms")
+    return interval_ms
+
+
+def peripheral(dk: Dk, dle: bool = True, out=None) -> dict:
+    """Take the peripheral role and advertise connectable, waiting to be connected."""
+    shell = _open(dk)
+    try:
+        # `role` already leaves both roles idle with their boot settings.
+        for command in ("role peripheral",
+                        f"conn dle {'on' if dle else 'off'}", "conn start"):
+            shell.command(command)
+        status = shell.status()
+    finally:
+        shell.close()
+    if status["role"] != "peripheral" or not status["conn_on"]:
+        raise NrfDkError(f"J-Link {dk.serial} is not advertising as a peripheral "
+                         f"(role {status['role']}, started {status['conn_on']})")
+    _report(status, out)
+    _report_connection(status, out)
+    return status
+
+
+def central(dk: Dk, peer: str, interval_ms: int, dle: bool = True,
+            payload: int | None = None, period_ms: int | None = None, out=None) -> dict:
+    """Take the central role and connect to ``peer`` at ``interval_ms``."""
+    address = normalize_address(peer)
+    interval = _conn_interval(interval_ms)
+    commands = ["role central", f"conn peer {address}",
+                f"conn interval {interval}",
+                f"conn dle {'on' if dle else 'off'}"]
+    if payload is not None:
+        commands.append(f"conn payload {payload}")
+    if period_ms is not None:
+        commands.append(f"conn period {period_ms}")
+    commands.append("conn start")
+    shell = _open(dk)
+    try:
+        for command in commands:
+            shell.command(command, CONNECT_TIMEOUT_S if command == "conn start"
+                          else COMMAND_TIMEOUT_S)
+        status = shell.status()
+    finally:
+        shell.close()
+    wrong = []
+    if status["role"] != "central":
+        wrong.append(f"role {status['role']}")
+    if not status["connected"]:
+        wrong.append("not connected")
+    if status["peer"] != address:
+        wrong.append(f"peer {status['peer'] or 'none'}")
+    expected_units = round(interval * CONN_UNITS_PER_MS)
+    if status["interval_units"] != expected_units:
+        wrong.append(f"interval {status['interval_units']} units, asked "
+                     f"{expected_units}")
+    if status["phy"] != "1M":
+        wrong.append(f"phy {status['phy']}")
+    if dle and status["tx_octets"] != DATA_LENGTH_MAX:
+        wrong.append(f"tx {status['tx_octets']} octets, asked {DATA_LENGTH_MAX}")
+    if wrong:
+        raise NrfDkError("the connection is not what was asked for: " + ", ".join(wrong))
+    _report(status, out)
+    _report_connection(status, out)
+    return status
+
+
+def update(dk: Dk, interval_ms: int, out=None) -> dict:
+    """Ask for a connection parameter update to ``interval_ms``."""
+    interval = _conn_interval(interval_ms)
+    expected_units = round(interval * CONN_UNITS_PER_MS)
+    shell = _open(dk)
+    try:
+        shell.command(f"conn update {interval}")
+        # The update takes effect a few connection events later.
+        deadline = time.monotonic() + CONNECT_TIMEOUT_S
+        while True:
+            status = shell.status()
+            if status["interval_units"] == expected_units:
+                break
+            if time.monotonic() >= deadline:
+                raise NrfDkError(
+                    f"the connection interval is still {status['interval_units']} "
+                    f"units {CONNECT_TIMEOUT_S:g}s after asking for {expected_units}")
+            time.sleep(0.2)
+    finally:
+        shell.close()
+    if not status["connected"]:
+        raise NrfDkError("the connection dropped during the parameter update")
+    _report(status, out)
+    _report_connection(status, out)
+    return status
+
+
 def status_command(dk: Dk, out=None) -> dict:
     shell = _open(dk)
     try:
@@ -500,29 +684,51 @@ def main(argv: Sequence[str] | None = None, run: Runner = run_tool) -> int:
     parser = argparse.ArgumentParser(prog="nrfdk.py", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     commands = {}
-    for name in ("identify", "ensure", "advertise", "stop", "idle", "status"):
+    for name in ("identify", "ensure", "advertise", "stop", "idle", "status", "role",
+                 "peripheral", "central", "update"):
         command = sub.add_parser(name)
         command.add_argument("--jlink", required=True, help="J-Link serial")
         command.add_argument("--port", help="VCOM0 path (default: by J-Link serial)")
         commands[name] = command
     commands["ensure"].add_argument("--hex", type=Path, help="image to flash if needed")
     commands["ensure"].add_argument("--address", help="expected BLE address")
+    commands["ensure"].add_argument("--role", default="advertiser", choices=ROLES)
     advertise_parser = commands["advertise"]
     advertise_parser.add_argument("--chmap", required=True, choices=sorted(CHMAP_BITS))
     advertise_parser.add_argument("--interval", required=True, type=int, help="ms")
     advertise_parser.add_argument("--payload", required=True, help="tag hex, or none")
     advertise_parser.add_argument("--type", default="nonconn", choices=("nonconn", "conn"))
+    commands["role"].add_argument("--role", required=True, choices=ROLES)
+    for name in ("peripheral", "central"):
+        commands[name].add_argument("--dle", default="on", choices=("on", "off"))
+    central_parser = commands["central"]
+    central_parser.add_argument("--peer", required=True, help="the peripheral's address")
+    central_parser.add_argument("--interval", required=True, type=int, help="ms")
+    central_parser.add_argument("--payload", type=int, help="bytes per write")
+    central_parser.add_argument("--period", type=int, help="ms between writes")
+    commands["update"].add_argument("--interval", required=True, type=int, help="ms")
     args = parser.parse_args(argv)
     try:
         dk = resolve(args.jlink, args.port, run)
         if args.command == "identify":
             identify(dk)
         elif args.command == "ensure":
-            ensure(dk, args.hex, args.address)
+            ensure(dk, args.hex, args.address, wanted_role=args.role)
         elif args.command == "advertise":
             advertise(dk, args.chmap, args.interval, args.payload, args.type)
-        elif args.command in ("stop", "idle"):
-            stop(dk, defaults=args.command == "idle")
+        elif args.command == "stop":
+            stop(dk)
+        elif args.command == "idle":
+            idle(dk)
+        elif args.command == "role":
+            role(dk, args.role)
+        elif args.command == "peripheral":
+            peripheral(dk, args.dle == "on")
+        elif args.command == "central":
+            central(dk, args.peer, args.interval, args.dle == "on", args.payload,
+                    args.period)
+        elif args.command == "update":
+            update(dk, args.interval)
         else:
             status_command(dk)
     except NrfDkError as error:
