@@ -12,14 +12,15 @@ records are read by advcapture.py.
 
 The checks:
 
-- exactly one CONNECT_IND between the two addresses, with the connection
-  interval, peripheral latency and supervision timeout the central was told
-  to ask for, a hop increment of 5-16, and all 37 data channels in its
-  channel map (every value a capture must show for the link the harness set
-  up, so a wrong one means the DKs or the decode are wrong);
-- the access address and CRC init the CONNECT_IND hands out, and at least
-  ``--min-data-packets`` data-channel packets carrying that access address,
-  so the capture really followed the connection;
+- at least one CONNECT_IND between the two addresses (the pair remakes the
+  link on a schedule, so a capture may hold several), each with the
+  connection interval, peripheral latency and supervision timeout the
+  central was told to ask for, a hop increment of 5-16, and all 37 data
+  channels in its channel map (every value a capture must show for the link
+  the harness set up, so a wrong one means the DKs or the decode are wrong);
+- the access address and CRC init each CONNECT_IND hands out, and at least
+  ``--min-data-packets`` data-channel packets carrying one of them, so the
+  capture really followed a connection;
 - at least ``--long-packets`` of those data packets at least
   ``--min-data-length`` bytes long, which is what Data Length Extension is
   for: without it the link layer would cap the payload at 27 bytes;
@@ -279,27 +280,29 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
         result.problems.append(
             f"no CONNECT_IND from {central} to {peripheral}")
         return header, result
-    if len(ours) > 1:
-        result.problems.append(
-            f"{len(ours)} CONNECT_INDs from {central} to {peripheral}, not one")
-    connection = ours[0]
-    result.connection = connection
-    for name, found, expected in (
-        ("connection interval", connection.interval, interval_units),
-        ("peripheral latency", connection.latency, latency),
-        ("supervision timeout", connection.timeout, timeout_units),
-    ):
-        if found != expected:
-            result.problems.append(
-                f"CONNECT_IND {name} {found}, not {expected}")
-    if not HOP_MIN <= connection.hop <= HOP_MAX:
-        result.problems.append(
-            f"CONNECT_IND hop increment {connection.hop}, not {HOP_MIN}-{HOP_MAX}")
-    if connection.channel_map != ALL_DATA_CHANNELS:
-        result.problems.append(
-            f"CONNECT_IND channel map {connection.channel_map:#011x}, not every "
-            f"data channel ({ALL_DATA_CHANNELS:#011x})")
-    packets = data_packets(records, connection.access_address, connection.crc_init)
+    # The pair remakes the link on a schedule, so a capture may hold several
+    # connections. Every one of them must carry the parameters asked for.
+    result.connection = ours[0]
+    wrong = {}
+    for connection in ours:
+        for name, found, expected in (
+            ("connection interval", connection.interval, interval_units),
+            ("peripheral latency", connection.latency, latency),
+            ("supervision timeout", connection.timeout, timeout_units),
+        ):
+            if found != expected:
+                wrong[f"CONNECT_IND {name} {found}, not {expected}"] = True
+        if not HOP_MIN <= connection.hop <= HOP_MAX:
+            wrong[f"CONNECT_IND hop increment {connection.hop}, not "
+                  f"{HOP_MIN}-{HOP_MAX}"] = True
+        if connection.channel_map != ALL_DATA_CHANNELS:
+            wrong[f"CONNECT_IND channel map {connection.channel_map:#011x}, not "
+                  f"every data channel ({ALL_DATA_CHANNELS:#011x})"] = True
+    result.problems.extend(wrong)
+    packets = []
+    for connection in ours:
+        packets += data_packets(records, connection.access_address,
+                                connection.crc_init)
     valid = [length for length, crc_ok in packets if crc_ok]
     result.data_packets = len(packets)
     result.valid_packets = len(valid)

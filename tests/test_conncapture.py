@@ -133,9 +133,22 @@ class CheckTests(unittest.TestCase):
         self.assertEqual([f"no CONNECT_IND from {CENTRAL} to {PERIPHERAL}"],
                          result.problems)
 
-    def test_two_connect_inds_are_refused(self):
-        _header, result = self.check(pcap([connect_ind(), connect_ind()]))
-        self.assertIn("2 CONNECT_INDs", result.problems[0])
+    def test_several_connections_in_one_capture_all_count(self):
+        # The pair remakes the link, so each connection has its own access
+        # address; packets from both are counted and both are checked.
+        other = 0x11223344
+        records = ([connect_ind()] + [data_packet(251)] * 2
+                   + [connect_ind(data=lldata(access=other, crc_init=0x123456))]
+                   + [data_packet(251, access=other, crc_init=0x123456)] * 2)
+        _header, result = self.check(pcap(records), min_data_packets=4,
+                                     long_packets=4)
+        self.assertEqual([], result.problems)
+        self.assertEqual((2, 4), (result.connect_inds, result.valid_packets))
+
+    def test_a_wrong_parameter_in_a_later_connection_fails(self):
+        records = [connect_ind(), connect_ind(data=lldata(interval=48))]
+        _header, result = self.check(pcap(records))
+        self.assertIn("connection interval 48, not 24", "\n".join(result.problems))
 
     def test_corrupt_data_packets_do_not_count_as_long(self):
         records = [connect_ind()] + [data_packet(251, corrupt=True)] * 3
