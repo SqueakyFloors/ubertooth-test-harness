@@ -312,7 +312,17 @@ def _stamp(fd: int, record: Mapping | None) -> None:
 
 
 def _try_lock(path: Path, mode: int, *, flags: int = os.O_RDWR) -> int | None:
-    fd = os.open(path, flags | os.O_CREAT, 0o644)
+    # A lock file is read by whoever waits for it, so it is 0644 whatever the
+    # umask says; an existing file keeps the mode it has.
+    try:
+        fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        fd = os.open(path, flags)
+    else:
+        try:
+            os.fchmod(fd, 0o644)
+        except OSError:
+            pass
     try:
         fcntl.flock(fd, mode | fcntl.LOCK_NB)
     except OSError as error:
@@ -388,7 +398,10 @@ def acquire(
     if external_template:
         for board in by_serial:
             path = external_lock_path(external_template, board)
-            if os.path.abspath(path) == os.path.abspath(root / f"{board.key}.lock"):
+            own = root / f"{board.key}.lock"
+            # realpath, so a symlink to the lease file is caught too: the
+            # second flock of one file in one process conflicts with itself.
+            if os.path.realpath(path) == os.path.realpath(own):
                 raise LeaseError(
                     f"external board lock {path} is the harness's own lease file; "
                     "point the template at the lab's lock files"
@@ -412,9 +425,17 @@ def acquire(
                 where = path.parent if external else root
                 # An external file may belong to another user: read access
                 # is enough for flock, and it is never written.
-                fd = _try_lock(
-                    path, fcntl.LOCK_EX, flags=os.O_RDONLY if external else os.O_RDWR
-                )
+                try:
+                    fd = _try_lock(
+                        path, fcntl.LOCK_EX, flags=os.O_RDONLY if external else os.O_RDWR
+                    )
+                except PermissionError as error:
+                    # Waiting cannot fix this, so say which board and file.
+                    raise LeaseError(
+                        f"{board.alias}: its external board lock {path} cannot be "
+                        f"opened for reading ({error.strerror}); the harness needs "
+                        "read access to the lab's lock file"
+                    ) from error
                 if fd is None:
                     busy = (board, path, external)
                     break
@@ -477,11 +498,15 @@ def board_states(
                 held = _probe(external, flags=os.O_RDONLY)
                 problem = ""
             except OSError as error:  # e.g. another user's unreadable file
-                held, problem = False, str(error)
+                # Unknown is not free: a run would refuse this board, so the
+                # listing must not call it free either.
+                held, problem = True, str(error)
             state["external"] = {
                 "lock": str(external),
                 "held": held,
-                "holder": read_external_holder(external) if held else "",
+                "holder": (
+                    read_external_holder(external) if held and not problem else ""
+                ),
             }
             if problem:
                 state["external"]["error"] = problem

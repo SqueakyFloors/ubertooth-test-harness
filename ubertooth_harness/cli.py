@@ -117,7 +117,8 @@ def _add_external_lock_option(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--external-board-lock", metavar="TEMPLATE",
         help="also hold each board's own lock file from another tool on this "
-        "host: an absolute path with {serial} (the full 32-hex serial), e.g. "
+        "host: an absolute path with {serial} (the board's lock key: an "
+        "Ubertooth's full 32-hex serial), e.g. "
         "'/var/lock/board-{serial}.lock'; default "
         f"${board_leases.EXTERNAL_LOCK_ENV}; '' turns it off",
     )
@@ -886,11 +887,20 @@ def _boards_command(args: argparse.Namespace) -> int:
             since = board_leases.held_for(holder)
             detail = board_leases.describe_holder(holder)
             print(f"{state['resource']:<12} held  {detail}" + (f" (for {since})" if since else ""))
+            if external.get("held") and not external.get("error"):
+                # Two parties hold the board; name the other one too.
+                print(f"{'':<12} and   " + board_leases.describe_external(
+                    Path(external["lock"]), external.get("holder", "")
+                ))
         elif external.get("held"):
-            detail = board_leases.describe_external(
-                Path(external["lock"]), external.get("holder", "")
-            )
-            print(f"{state['resource']:<12} held  {detail}")
+            if external.get("error"):
+                print(f"{state['resource']:<12} held  outside the harness: "
+                      f"{external['lock']} (cannot be read, so taken as held)")
+            else:
+                detail = board_leases.describe_external(
+                    Path(external["lock"]), external.get("holder", "")
+                )
+                print(f"{state['resource']:<12} held  {detail}")
         elif state["held"]:
             print(f"{state['resource']:<12} held  {board_leases.describe_holder({})}")
         else:

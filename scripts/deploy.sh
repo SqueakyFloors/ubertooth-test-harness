@@ -43,7 +43,7 @@
 #   --external-board-lock TEMPLATE
 #                             passed to the runner: every run also holds each
 #                             board's own lock file from other tools on this
-#                             host, TEMPLATE with {serial} (the full serial),
+#                             host, TEMPLATE with {serial} (the lock key),
 #                             e.g. /var/lock/board-{serial}.lock; absolute or
 #                             starting with ~/
 #   --no-start                write the units (and daemon-reload) only

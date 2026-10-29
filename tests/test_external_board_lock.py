@@ -278,6 +278,40 @@ class ExternalLockTests(_Fixture):
         self.assertIn("does not exist", str(caught.exception))
         self.assertFalse((self.root / "no-such-dir").exists())
 
+    def test_a_created_file_is_0644_whatever_the_umask_is(self):
+        # A tight umask must not make the lab's own scripts unable to read
+        # (or lock) the file the harness created for them.
+        previous = os.umask(0o077)
+        try:
+            self.acquire([A]).release()
+        finally:
+            os.umask(previous)
+        self.assertEqual(0o644, stat.S_IMODE(self.ext(A).stat().st_mode))
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads every file")
+    def test_an_unopenable_external_file_stops_the_command_at_once(self):
+        self.ext(A).write_text("")
+        self.ext(A).chmod(0o000)
+        started = time.monotonic()
+        with self.assertRaises(leases.LeaseError) as caught:
+            self.acquire([A], wait_s=600.0)
+        self.assertLess(time.monotonic() - started, 30.0)  # it does not wait
+        message = str(caught.exception)
+        self.assertIn("UT_0", message)
+        self.assertIn(str(self.ext(A)), message)
+        self.assertIn("read access", message)
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads every file")
+    def test_boards_takes_an_unopenable_external_file_as_held(self):
+        self.ext(A).write_text("")
+        self.ext(A).chmod(0o000)
+        state = leases.board_states(
+            [A], directory=self.lease_dir, external_template=self.template
+        )[0]
+        self.assertTrue(state["held"])
+        self.assertTrue(state["external"]["held"])
+        self.assertIn("Permission denied", state["external"]["error"])
+
     def test_an_existing_mode_is_kept_and_a_read_only_file_is_still_locked(self):
         self.ext(A).write_text("")
         self.ext(A).chmod(0o444)

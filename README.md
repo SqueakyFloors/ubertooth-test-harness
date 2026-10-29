@@ -808,11 +808,12 @@ The DKs transmit at normal BLE power; the Ubertooth only receives.
 A DK is leased like an Ubertooth (`ubertooth-harness boards` and `lease`
 list it), keyed by its J-Link serial (`nrf52840dk-<serial>.lock` in the
 lease directory). A lab that also guards boards with its own per-board lock
-files must hold the DK's lock file around the run until the harness takes
-external board locks ([#123](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/123)),
-for example `flock -w 1800 <lab lock dir>/board-<J-Link serial>.lock python
--m ubertooth_harness run-suite ...`. Hold such a lock only for the run, so
-other users of the DK get their turn.
+files can hand the harness their path with `--external-board-lock`, and every
+lease then takes the DK's file too (see [External board
+locks](#external-board-locks)); the DK's file is the one named after its lock
+key, `board-nrf52840dk-<J-Link serial without leading zeros>.lock` for the
+template `<lab lock dir>/board-{serial}.lock`. Hold such a lock only for the
+run, so other users of the DK get their turn.
 
 ## Sharing boards: leases
 
@@ -881,8 +882,10 @@ ubertooth-harness lease --external-board-lock '/var/lock/board-{serial}.lock' \
 ```
 
 The template is an absolute path (or starts with `~/`) with exactly one
-`{serial}`, replaced by the board's full 32-hex-digit serial in lowercase,
-and no other brace; `--external-board-lock` overrides the variable and
+`{serial}`, replaced by the board's lock key, the same key its lease file
+uses: an Ubertooth's full 32-hex-digit serial in lowercase, or
+`nrf52840dk-<J-Link serial without leading zeros>` for a DK. No other brace;
+`--external-board-lock` overrides the variable and
 `--external-board-lock ''` turns it off for one command. Unset, nothing
 changes. Each external lock is an exclusive `flock` on that file, taken in
 the same all-or-nothing attempt as the leases and dropped by the kernel when
@@ -895,15 +898,24 @@ lock is held fails the run (or waits, with `--wait-for-boards`) with
 line of the file if it holds any text (any format; a JSON object is
 described like a lease's holder). `boards` shows such a board as `held
 outside the harness: <path>`, and the run report lists the external locks
-the run held. `runner` passes the option to every run it starts
-(`deploy.sh --external-board-lock`).
+the run held. A file the harness cannot open for reading (another user's
+0600 file, say) stops the command at once, naming the board and the file:
+waiting would not help. `boards` takes such a board as held, since unknown
+is not free. `runner` passes the option to every run it starts
+(`deploy.sh --external-board-lock`, which is how a deployed runner gets it:
+the generated units carry no environment, so the variable alone does not
+reach it).
 
 Full lock order, one hierarchy for every command: the external board locks
 in serial order, then the host lock, then the board leases in serial order.
 A lab wrapper that takes a board's own lock file and then runs
 `ubertooth-harness lease` (which may take the host lock, then the leases)
 follows the same order, so the two cannot deadlock; the harness also never
-blocks while holding a lock. Do not set the template for a command that such
+blocks while holding a lock, so it cannot be half of a cycle whatever another
+tool does. A wrapper that takes the harness lease first and only then blocks
+on the board's own file inverts the order: nothing deadlocks, but the harness
+spins until its deadline, so take the board file first. Do not set the
+template for a command that such
 a wrapper runs: the wrapper already holds those files, so the command would
 find them busy and refuse (it fails, it does not hang). Use
 `--external-board-lock ''` there, or drop the wrapper and let the harness
