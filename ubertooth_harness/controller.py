@@ -439,6 +439,10 @@ class Controller:
         directory = (self.results_dir / run_id).resolve()
         if directory.parent != self.results_dir:
             raise _Violation(f"run_id {run_id!r} is not a flat directory name")
+        if directory == self.estimates.path or directory.name.startswith("."):
+            # The learned durations live beside the run directories; a run
+            # must not take that name (a generated run ID never does).
+            raise _Violation(f"run_id {run_id!r} is reserved")
         return directory
 
     def _persist(self, run: Run) -> None:

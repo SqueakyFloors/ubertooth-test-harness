@@ -127,9 +127,9 @@ class Learned:
 
     seconds: float
     samples: int
-    # True when the value was scaled from samples at another duration.
+    # True when the value came from the test's per-unit rate rather than
+    # from this key's own median.
     scaled: bool = False
-    source: str = LEARNED
 
 
 def _duration_units(arguments: Mapping) -> tuple[str, float] | None:

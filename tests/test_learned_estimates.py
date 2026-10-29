@@ -235,7 +235,6 @@ class MedianTests(StoreTestCase):
         learned = self.store.lookup(key)
         self.assertEqual(12.0, learned.seconds)
         self.assertEqual(3, learned.samples)
-        self.assertEqual("learned", learned.source)
         self.assertFalse(learned.scaled)
 
     def test_the_median_ignores_one_slow_run(self):
@@ -768,6 +767,19 @@ class ControllerLearningTests(ControllerTestCase):
         await self.start_controller()
         self.assertEqual(0, await self.controller.learn_pending())
         self.assertEqual([10.0], self.samples())
+
+    async def test_a_run_cannot_take_the_name_of_the_store(self):
+        # A generated run ID never collides, but nothing stops a runner
+        # from reporting one, and a directory of that name would sit where
+        # the learned durations are kept.
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner, active=STORE_FILE)
+            await runner.send("run_finished", request_id="req-1",
+                              run_id=STORE_FILE, status="passed", exit_code=0,
+                              run_directory="/absent")
+            await wait_until(lambda: any("reserved" in line for line in self.logs))
+        self.assertNotIn(STORE_FILE, self.controller.runs)
+        self.assertFalse((self.results / STORE_FILE).is_dir())
 
     async def test_a_run_still_running_is_not_learned_at_startup(self):
         # Its runner may still be running it; the end report, or a target
