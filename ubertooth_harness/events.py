@@ -150,10 +150,10 @@ class TerminalEventSink:
                 for board in details.get("boards", [])
                 if board.get("resets")
             )
-            self.stream.write(
-                "\n[watchdog] boards that reset themselves: "
-                + (counts or "none") + "\n"
-            )
+            if counts:
+                self.stream.write(
+                    f"\n[watchdog] boards that reset themselves: {counts}\n"
+                )
         elif event.event_type == "manifest":
             self.stream.write("\n[manifest recorded]\n")
         elif event.event_type == "not_applicable":

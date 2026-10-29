@@ -95,6 +95,26 @@ def _full_reason(error: BaseException) -> str:
     return "; ".join(parts)
 
 
+def _bounded_warnings(warnings: Sequence[str]) -> list[str]:
+    """Watchdog warnings, cut to fit the event size limit.
+
+    Each warning is also in its own watchdog record, so the test record keeps
+    the first few and says how many more there were.
+    """
+    kept: list[str] = []
+    used = 0
+    for position, warning in enumerate(warnings):
+        used += len(warning)
+        if used > _MAX_REASON_CHARS:
+            left = len(warnings) - position
+            kept.append(
+                f"... and {left} more, each in its own watchdog record"
+            )
+            break
+        kept.append(warning)
+    return kept
+
+
 def _bounded_reason(text: str, marker: str) -> str:
     """Keep reasons inside the event size limit, naming where the rest is."""
     if len(text) <= _MAX_REASON_CHARS:
@@ -1499,8 +1519,9 @@ class NamedTestSequencer:
                             "skipped_cases": skipped_cases,
                             "not_applicable_cases": len(omitted),
                             # Reported, not failed: a board that reset itself
-                            # came back by itself (watchdog.py).
-                            "warnings": watchdog_warnings,
+                            # came back by itself (watchdog.py). Bounded like
+                            # every other text on this record.
+                            "warnings": _bounded_warnings(watchdog_warnings),
                             # False: the device was verified back in its known
                             # state, so later tests still run.
                             "stops_run": stop_run,
@@ -1526,7 +1547,7 @@ class NamedTestSequencer:
                         "failed_guard_checks": 0,
                         "skipped_cases": skipped_cases,
                         "not_applicable_cases": len(omitted),
-                        "warnings": watchdog_warnings,
+                        "warnings": _bounded_warnings(watchdog_warnings),
                     },
                 )
 

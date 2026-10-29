@@ -654,11 +654,17 @@ note, not a warning.
 
 Both counters are since power-on, so cutting power to a board starts them
 again; so does flashing firmware that does not recognize the record it finds.
-A count below the baseline's is read as that restart: the board is
-re-baselined where it restarted, with a note naming both causes, and only
-resets after it are counted. The count stops at 255, which the warning says
-beside a reset it counted. The radio-wait counts are since boot rather than
-since power-on, so every reboot starts them again.
+A count below the baseline's, or a boot cause that gained `power-on` or
+`brown-out`, is read as that restart: the board is re-baselined where it
+restarted, with a note naming the causes, and only resets after it are
+counted. Both counts stop at 255; a board already there is noted at the
+baseline, because a reset can then no longer change the count. The radio-wait
+counts are since boot rather than since power-on, so every reboot starts them
+again.
+
+A reset is attributed to the test after which it was first read. A board no
+test binds is read at the baseline and at the end of the run, so a reset on it
+belongs to the run rather than to a test.
 
 A read during a test covers only the boards that test binds: another test's
 board may be switched off by this one's power isolation, and its resets are
@@ -667,11 +673,17 @@ not this test's to count. The baseline and the run-end read cover every board.
 Two things fail:
 
 - A board that does not answer on USB: gone from the bus, or on it and
-  refusing to be opened, which is how a board looks for a moment after the
-  watchdog has reset it. The read is retried three times over about five
-  seconds (once only when the run has been cancelled). A board that never
+  refusing the read, which is how a board looks for a moment after the
+  watchdog has reset it (`libusb -9` until the host notices it came back).
+  The read is retried three times over about five seconds. A board that never
   answers fails its test and stops the run, because nothing can use it again;
-  one that does not answer at the baseline stops the run before any test.
+  one that does not answer at the baseline stops the run before any test. A
+  board that has already given the run a record cannot be one whose firmware
+  lacks the request, so any later read of it that brings back no whole record
+  is one of these, not "not reported". While a run is being cancelled a board
+  is read once and a board that does not answer is recorded without failing:
+  stopping the run is what was asked for, and the board may have gone as part
+  of it.
 - A test whose plan sets `max_watchdog_resets: <n>` and whose boards reset
   themselves more than `n` times. Nothing else makes the count pass or fail,
   and there is no limit by default. This is for stability runs (the release
@@ -683,10 +695,10 @@ Capture transfer errors and radio waits that gave up are recorded as notes
 with no warning: each transfer error costs the packet that was arriving, and a
 radio wait that gave up means what that mode captured may be incomplete.
 
-Firmware without the request (2020-12-R1, for example) answers nothing to read
-and the board reads as "watchdog not reported", which is neither a warning nor
-a failure. Host tools older than the ones that added the last two lines report
-the rest without them.
+Firmware without the request (2020-12-R1, for example) refuses it, and a board
+that has given the run no record reads as "watchdog not reported", in the
+tool's own words, which is neither a warning nor a failure. Host tools older
+than the ones that added the last two lines report the rest without them.
 
 For each board that reset itself, the run's record and `report.md` carry a
 ready-to-file fork issue (board, firmware and host commits, mode, wait, test,

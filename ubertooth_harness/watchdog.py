@@ -140,6 +140,7 @@ _UNREACHABLE = re.compile(
     r"|could not .*the board is no longer attached"
     r"|.*\bis in use by another program\b"
     r"|claiming the USB interface of\b"
+    r"|the Ubertooth did not answer in time\b"
     r")"
 )
 
@@ -279,6 +280,12 @@ _STALLED = re.compile(r"(?m)^error: could not read the watchdog record: (?P<why>
 _ERROR_LINE = re.compile(r"(?m)^(?:error|warning): (?P<text>.+?)\s*$")
 
 
+def _first_error(output: str) -> str:
+    """The first error or warning line of a read, in the tool's own words."""
+    first = _ERROR_LINE.search(output or "")
+    return first["text"] if first is not None else "nothing"
+
+
 def _not_reported_reason(output: str) -> str:
     """Why a board that answered printed no record, in its own words.
 
@@ -313,7 +320,6 @@ class WatchdogChange:
     # did not recognize the record it found. Everything counted is new.
     restarted: bool = False
     new_resets: int = 0
-    at_cap: bool = False
     new_fault: str = ""
     gained_watchdog_cause: bool = False
     # The board's supply dipped far enough to reset it. Not a warning of its
@@ -360,8 +366,15 @@ def compare(baseline: WatchdogRecord | None, current: WatchdogRecord) -> Watchdo
     if fault and baseline is not None and not restarted and fault == baseline.fault:
         fault = ""
     # The radio waits are since boot, not since power-on, so every reboot
-    # clears them: after one, what the board holds is all new.
-    rebooted = restarted or baseline is None or current.boots != baseline.boots
+    # clears them: after one, what the board holds is all new. The boot count
+    # stops at its limit like the reset count, so once it is there a reboot
+    # cannot be seen and every read is taken as a fresh boot.
+    rebooted = (
+        restarted
+        or baseline is None
+        or current.boots != baseline.boots
+        or current.boots >= RESET_CAP
+    )
     waits = {}
     for name, value in (current.radio_waits or {}).items():
         base = (baseline.radio_waits or {}).get(name) if baseline else None
@@ -371,7 +384,6 @@ def compare(baseline: WatchdogRecord | None, current: WatchdogRecord) -> Watchdo
     return WatchdogChange(
         restarted=restarted,
         new_resets=_rose(current.resets, baseline.resets if baseline else None, restarted),
-        at_cap=current.resets >= RESET_CAP,
         new_fault=fault,
         gained_watchdog_cause=(
             "watchdog" in current.causes
@@ -409,13 +421,6 @@ def warnings_for(
             f"{label} reset itself {times} {during}{where}. The firmware's "
             "watchdog brought the board back; what stopped answering is worth "
             "an issue on the fork."
-        )
-    if change.at_cap and change.reset_itself:
-        # Said only beside a reset this run counted: a board sitting at the
-        # limit from before the run would otherwise say it at every read.
-        lines.append(
-            f"{label} is at the firmware's limit of {RESET_CAP} recorded resets, "
-            "so there may have been more than the count says."
         )
     if change.new_fault:
         lines.append(
@@ -631,11 +636,14 @@ class BoardRead:
     notes: tuple[str, ...] = ()
     reason: str = ""
     output: str = ""
+    # Whether an unreachable board fails the run. False while the run is being
+    # canceled, and for a board already reported lost.
+    fails: bool = True
 
     @property
     def status(self) -> str:
         if self.state == ABSENT:
-            return "failed"
+            return "failed" if self.fails else "canceled"
         if self.warnings:
             return "warning"
         return "passed"
@@ -722,6 +730,7 @@ class WatchdogMonitor:
         self._resets: dict[str, int] = {board.serial: 0 for board in self.boards}
         self._state: dict[str, str] = {}
         self._issues: dict[str, ForkIssue] = {}
+        self._lost: set[str] = set()
         # Per test: what its mid-test reads found, and how many of them there
         # have been (each read needs a command ID of its own).
         self._pending: dict[str, tuple[tuple[str, ...], tuple[str, ...], int]] = {}
@@ -743,8 +752,15 @@ class WatchdogMonitor:
     # ----- one board -------------------------------------------------------
 
     def _read(self, board: MonitoredBoard, stage: str, owner: Mapping, tag: str) -> BoardRead:
-        """Read one board, waiting out the recovery window if it has gone."""
-        tries = 1 if self.cancelled() else self.recovery_tries
+        """Read one board, waiting out the recovery window if it has gone.
+
+        One try, with no window, while the run is being canceled or for a
+        board the run has already given up on: neither is waiting for.
+        """
+        tries = (
+            1 if self.cancelled() or board.serial in self._lost
+            else self.recovery_tries
+        )
         for attempt in range(1, tries + 1):
             result = self.run_command(
                 command_id=f"{tag}-{board.serial}-{attempt}",
@@ -754,22 +770,40 @@ class WatchdogMonitor:
             )
             output = result.stdout + result.stderr
             record = parse_report(output)
-            # A command killed at its deadline is not a read, even when the
-            # record it printed first parsed: `-w` reads the record and then
-            # the radio waits, so a board that printed one and stalled on the
-            # other is a board in trouble.
-            if record is not None and not result.timed_out:
+            # A whole read, or nothing. `-w` reads the record and then the
+            # radio waits, so a command that printed the record and then
+            # failed, or was killed at its deadline, is a board in trouble
+            # rather than a board read.
+            if record is not None and result.returncode == 0 and not result.timed_out:
                 return self._compared(board, stage, record, output)
-            if not result.timed_out and not board_unreachable(output):
-                # The board answered and the record did not: firmware without
-                # the request (2020-12-R1, for example), or a refused read.
-                return BoardRead(
-                    board, NOT_REPORTED, stage,
-                    reason=f"{board.label}: {_not_reported_reason(output)}",
-                    output=output,
-                )
-            if attempt < tries:
-                self.sleep(self.recovery_pause_s)
+            if self._answered_before(board) or board_unreachable(output) \
+                    or result.timed_out:
+                # Worth another try. A board that has already given this run a
+                # record cannot be one whose firmware has no such request, so
+                # whatever stopped this read is the kind the window exists
+                # for: the board re-enumerating after its own reset, and every
+                # request to it refused until the host notices.
+                if attempt < tries:
+                    self.sleep(self.recovery_pause_s)
+                continue
+            # The board answered and the record did not, and it has given this
+            # run no record before: firmware without the request.
+            return BoardRead(
+                board, NOT_REPORTED, stage,
+                reason=f"{board.label}: {_not_reported_reason(output)}",
+                output=output,
+            )
+        if self.cancelled():
+            # Stopping the run is what the operator asked for, and a board may
+            # have gone as part of it; the read is recorded, not failed.
+            return BoardRead(
+                board, ABSENT, stage,
+                reason=(
+                    f"{board.label} did not answer its watchdog read while the "
+                    "run was being canceled"
+                ),
+                output=output, fails=False,
+            )
         return BoardRead(
             board, ABSENT, stage,
             reason=(
@@ -778,10 +812,14 @@ class WatchdogMonitor:
                 f"{(tries - 1) * self.recovery_pause_s:g}s, so the run cannot "
                 "read its watchdog record or use the board again; it has left "
                 "the bus, something else is holding it, or its reads do not "
-                "finish"
+                f"finish. The last read said: {_first_error(output)}"
             ),
             output=output,
         )
+
+    def _answered_before(self, board: MonitoredBoard) -> bool:
+        """Has this board given the run a watchdog record already?"""
+        return board.serial in self._baseline
 
     def _compared(
         self, board: MonitoredBoard, stage: str, record: WatchdogRecord, output: str
@@ -793,7 +831,7 @@ class WatchdogMonitor:
             # it is a note and not this run's count. A read whose board has no
             # baseline becomes one, rather than counting the board's whole
             # since-power-on total as this run's.
-            change = WatchdogChange(at_cap=record.resets >= RESET_CAP)
+            change = WatchdogChange()
             warnings: tuple[str, ...] = ()
             notes = tuple(self._baseline_notes(board, record, stage))
         else:
@@ -847,6 +885,14 @@ class WatchdogMonitor:
             )
         if record.armed is False:
             notes.append(f"{board.label} reports its watchdog is not armed.")
+        if record.resets >= RESET_CAP:
+            # Said here, once: the counter is pinned, so no later read of this
+            # board can see it rise and there is nothing to warn about later.
+            notes.append(
+                f"{board.label} is at the firmware's limit of {RESET_CAP} "
+                "recorded resets, so a reset during this run will not change "
+                "the count."
+            )
         return notes
 
     # ----- rounds of reads -------------------------------------------------
@@ -863,7 +909,12 @@ class WatchdogMonitor:
             notes.extend(read.notes)
             resets += read.change.new_resets
             if read.state == ABSENT:
-                failures.append(read.reason)
+                # Reported once: a board the run has already given up on is
+                # read again at the end, and says so there without being
+                # named a second time as the reason the run failed.
+                if read.fails and board.serial not in self._lost:
+                    failures.append(read.reason)
+                self._lost.add(board.serial)
             elif read.state == NOT_REPORTED:
                 notes.append(read.reason)
             self.publisher.emit(EVENT, read.status, read.details())

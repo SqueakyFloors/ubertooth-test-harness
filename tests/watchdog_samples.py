@@ -45,9 +45,24 @@ CLAIM_FAILED = (
     "(libusb -5)\n"
 )
 
-# A board that has left the bus mid-request.
+# A board that has left the bus, seen by the read that noticed it had: this
+# wording comes from libubertooth's own check that the board is gone.
 BOARD_LEFT = (
     "error: could not read the watchdog record: the board is no longer attached\n"
+    "error: watchdog state read failed\n"
+)
+
+# The board was opened and the request did not finish. The first is the shared
+# wording for a control read that timed out; the second is what a libusb error
+# with no wording of its own prints. Both leave the record unread while the
+# board is still selected, which is how a board looks in the moment after the
+# watchdog has reset it.
+READ_TIMED_OUT = (
+    "error: the Ubertooth did not answer in time (libusb -7)\n"
+    "error: watchdog state read failed\n"
+)
+READ_FAILED = (
+    "libUSB Error: No such device (it may have been disconnected): (-4)\n"
     "error: watchdog state read failed\n"
 )
 
@@ -96,3 +111,14 @@ def report(
         )
         lines.append(f"Radio waits that gave up since boot: {counts}")
     return "\n".join(lines) + "\n"
+
+
+# `-w` makes two control reads: the record, then the radio waits. The record
+# printed and the second read failed, so the command exits non-zero with a
+# whole record on standard output.
+RECORD_THEN_FAILED = FULL.replace(
+    "Radio waits that gave up since boot: synthesizer lock 0, unlock 0, "
+    "oscillator 0, state machine 0, packet bytes 0\n",
+    "error: the Ubertooth did not answer in time (libusb -7)\n"
+    "error: radio wait timeouts read failed\n",
+)
