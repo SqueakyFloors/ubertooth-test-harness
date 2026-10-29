@@ -345,6 +345,8 @@ class MedianTests(StoreTestCase):
         other = {"coverage": "comprehensive", "duration": "6s"}
         learned = self.store.lookup_test(
             builtin_catalog(), "Raw receive", other, HOST)
+        # The rate rests on every duration of this test, this one included
+        # once it has a sample or two of its own.
         # (73 - 9) / 3 = 21.33 per second, so 9 + 6 x 21.33.
         self.assertEqual(137.0, learned.seconds)
         self.assertEqual(3, learned.samples)
@@ -354,6 +356,19 @@ class MedianTests(StoreTestCase):
         exact = self.store.lookup_test(builtin_catalog(), "Raw receive", other, HOST)
         self.assertEqual(131.0, exact.seconds)
         self.assertFalse(exact.scaled)
+
+    def test_a_rate_counts_this_durations_own_samples_too(self):
+        # Two 6 s runs and one 3 s run: too few at 6 s for a median, so the
+        # rate of all three stands in, and the count says three.
+        catalog = builtin_catalog()
+        other = {"coverage": "comprehensive", "duration": "6s"}
+        self.learn(passed_records("Raw receive", other, [129.0, 131.0]))
+        self.learn(passed_records("Raw receive", RAW_RECEIVE, [69.0]))
+        learned = self.store.lookup_test(catalog, "Raw receive", other, HOST)
+        # Rates of (129 - 9)/6, (131 - 9)/6 and (69 - 9)/3: a median of 20.
+        self.assertEqual(129.0, learned.seconds)
+        self.assertEqual(3, learned.samples)
+        self.assertTrue(learned.scaled)
 
     def test_nothing_is_scaled_without_units_or_without_samples(self):
         catalog = builtin_catalog()

@@ -1378,10 +1378,11 @@ capture are not mixed. The last 10 samples of each key are kept, and at most
 1000 keys (when it is full, the key with the fewest samples makes room), so
 the file stays small. The estimate is the samples' median once there are at
 least 3: a median ignores the one run that waited on a busy board. Until a
-key has 3 samples of its own, a rate learned at another duration of the same
-test is used (the samples, less the catalog's fixed part, divided by their own
-units), so a test timed at 3 s also estimates a 6 s run; that value is marked
-`estimate_scaled`, because its sample count is of the other durations.
+key has 3 samples of its own, the rate learned across every duration of the
+same test stands in (each sample, less the catalog's fixed part, divided by its
+own units), so a test timed at 3 s also estimates a 6 s run. That value is
+marked `estimate_scaled`, and its `estimate_samples` counts every sample the
+rate rests on, at the duration asked for and at the others.
 Failing that, the catalog estimate stands. A sample more than ten times off
 the current median is dropped as an outlier, but only once the median itself
 rests on 3 samples, so one odd early run cannot lock out the good ones that

@@ -273,10 +273,11 @@ def estimate_fields(
     ``estimated_s`` is the best estimate, ``catalog_estimated_s`` always the
     hand-calibrated one, and ``estimate_source``/``estimate_samples`` say
     where the value came from (``learned`` with its sample count, ``catalog``,
-    or ``none`` when neither knows). ``estimate_scaled`` marks a learned value
-    that was scaled from the same test's samples at other durations, where
-    ``estimate_samples`` counts those samples rather than runs of this exact
-    duration. Without a target host (the plan listing with no ``?target=``)
+    or ``none`` when neither knows). ``estimate_scaled`` marks a value
+    computed from the test's per-unit rate rather than from this duration's
+    own median; ``estimate_samples`` is then every sample that rate rests
+    on, at this duration and at the others. Without a target host (the plan
+    listing with no ``?target=``)
     nothing is learned and the catalog value stands, so a client that ignores
     the new fields sees exactly what it did before.
     """

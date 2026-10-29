@@ -748,10 +748,11 @@ firmware would be a key of its own; a runner the controller dispatches builds
 host tools only.
 
 **Estimate:** the median of the key's last 10 samples once there are 3, so one
-run that queued behind a busy board does not move it. With fewer, the rate
-learned at the other durations of the same test is scaled to this one (each
-sample less the catalog's fixed part, divided by its own units) and marked
-`estimate_scaled`; failing that, the caller falls back to the catalog
+run that queued behind a busy board does not move it. With fewer, the rate learned
+across every duration of the same test is scaled to this one (each sample less
+the catalog's fixed part, divided by its own units) and marked
+`estimate_scaled`, with `estimate_samples` counting every sample that rate
+rests on; failing that, the caller falls back to the catalog
 estimate. A sample more than ten times off the current median is dropped, but
 only once the median rests on 3 samples, so one odd early run cannot lock out
 the good ones; three dropped in a row that agree with each other mean the test

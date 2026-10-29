@@ -425,8 +425,10 @@ class EstimateStore:
             return Learned(round(statistics.median(samples), 1), len(samples))
         if key.units is None or key.units[1] <= 0:
             return None
-        # Too few samples at this duration: use the rate learned at the
-        # other durations of the same test, above the catalog's fixed part.
+        # Too few samples at this duration: use the rate learned across
+        # every duration of the same test, above the catalog's fixed part.
+        # This duration's own one or two samples count towards that rate;
+        # they are the closest evidence there is.
         # A sample shorter than that fixed part contradicts it and can say
         # nothing about the rate, so it is left out rather than counted as
         # no time at all.
