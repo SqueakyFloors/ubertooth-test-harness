@@ -674,10 +674,12 @@ pins / reset-hold) that cannot be done remotely. Characterize this at the rack
 before relying on reset-into-new-image for unattended runs.
 
 **Version flags (how the harness identifies builds):**
-- `ubertooth-util -H` / `--host-version` — host tools (libubertooth) version +
-  git hash; no device needed.
-- `ubertooth-util -v` — firmware revision (from device).
-- `ubertooth-util -V` — firmware compile info (from device).
+- `ubertooth-util -V` — the whole version report: the host tools (libubertooth
+  and libbtbb) version and git hash on its `Host tools version:` line, which
+  needs no device, then the firmware version and build of each attached board.
+  Forks before the one `-V` answer (ubertooth#813) answered the host line on
+  `-H` instead, which preflight falls back to.
+- `ubertooth-util -v` — firmware revision alone (from device).
 
 ---
 

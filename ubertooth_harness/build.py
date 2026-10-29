@@ -16,7 +16,7 @@ from typing import Callable, Mapping, Sequence
 from ubertooth_harness.cancellation import CancellationToken
 from ubertooth_harness.executor import CommandExecutor, CommandResult
 from ubertooth_harness.manifest import FileIdentity, SourceRevision
-from ubertooth_harness.preflight import host_version_patterns
+from ubertooth_harness.preflight import HOST_VERSION_LABEL, host_version_patterns
 from ubertooth_harness.pytools import PYTHON_ENV, PYTHON_TOOLS_ENV
 from ubertooth_harness.rawlog import record_output
 from ubertooth_harness.events import EventPublisher
@@ -50,6 +50,9 @@ class BuildCommand:
     # because the projects' version stamps run `git status` in the current
     # directory, not the source directory.
     cwd: Path | None = None
+    # The same question on the option an older fork commit answers it on, run
+    # only when `argv` does not answer (verify-host-version below).
+    fallback_argv: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -317,8 +320,9 @@ def plan_build(
         BuildCommand(
             "verify-host-version",
             "Built host tools report the resolved revision",
-            (str(prefix / "bin" / "ubertooth-util"), "-H"),
+            (str(prefix / "bin" / "ubertooth-util"), "-V"),
             timeout_s=30.0,
+            fallback_argv=(str(prefix / "bin" / "ubertooth-util"), "-H"),
         )
     )
     return BuildPlan(
@@ -333,6 +337,14 @@ _VERSION_COMMANDS = (
     ("pkg-config", ("pkg-config", "--version")),
     ("libusb-1.0", ("pkg-config", "--modversion", "libusb-1.0")),
 )
+
+
+def _host_version_matches(plan: BuildPlan, text: str) -> bool:
+    """Does `text` carry the host version line of the plan's resolved sources?"""
+    return all(
+        re.search(pattern, text)
+        for pattern in host_version_patterns(plan.ubertooth, plan.libbtbb)
+    )
 
 
 def _first_line(result: CommandResult) -> str:
@@ -464,35 +476,51 @@ class Builder:
         records = []
         toolchain = self.toolchain(plan)
         host_version = ""
-        for command in plan.commands:
-            self.publisher.emit(
-                "build_step_started", "running",
-                {"step_id": command.step_id, "step_name": command.name},
-            )
-            result = self._run(
-                command.argv, command.timeout_s, command.step_id, command.cwd
-            )
+
+        def run_step(command: BuildCommand, argv, step_id: str) -> CommandResult:
+            result = self._run(argv, command.timeout_s, step_id, command.cwd)
             records.append({
-                "step_id": command.step_id,
-                "argv": list(command.argv),
+                "step_id": step_id,
+                "argv": list(argv),
                 "cwd": str(command.cwd) if command.cwd else None,
                 "returncode": result.returncode,
                 "duration_s": round(result.duration_s, 3),
             })
             if result.cancelled:
                 raise BuildError(f"build canceled: {self.cancellation.reason}")
+            return result
+
+        for command in plan.commands:
+            self.publisher.emit(
+                "build_step_started", "running",
+                {"step_id": command.step_id, "step_name": command.name},
+            )
+            result = run_step(command, command.argv, command.step_id)
+            if command.step_id == "verify-host-version":
+                host_version = (result.stdout + result.stderr).strip()
+                if command.fallback_argv and HOST_VERSION_LABEL not in host_version:
+                    # Nothing answered under the label, so this commit of the
+                    # fork answers the host version on the older option: ask
+                    # that one. A version under the label that is not the
+                    # resolved one is a failure, reported below.
+                    result = run_step(command, command.fallback_argv,
+                                      f"{command.step_id}-fallback")
+                    host_version = (result.stdout + result.stderr).strip()
+                # `-V` goes on to read any attached board and exits 1 if one
+                # cannot be read -- busy, or held by another run. The built
+                # tools' own version is what this step checks, so the line
+                # decides it and the exit status does not.
+                if _host_version_matches(plan, host_version):
+                    continue
             if result.timed_out or result.returncode != 0:
                 reason = "timed out" if result.timed_out else f"exited {result.returncode}"
                 raise BuildError(f"{command.name} {reason}")
-            if command.step_id == "verify-host-version":
-                host_version = (result.stdout + result.stderr).strip()
-        for pattern in host_version_patterns(plan.ubertooth, plan.libbtbb):
-            if not re.search(pattern, host_version):
-                raise BuildError(
-                    f"built ubertooth-util reports {host_version!r}, expected "
-                    f"{plan.ubertooth.expected_revision} and "
-                    f"{plan.libbtbb.expected_revision}"
-                )
+        if not _host_version_matches(plan, host_version):
+            raise BuildError(
+                f"built ubertooth-util reports {host_version!r}, expected "
+                f"{plan.ubertooth.expected_revision} and "
+                f"{plan.libbtbb.expected_revision}"
+            )
         expected_tools = required_tools(plan)
         missing = [tool for tool in expected_tools if not (plan.bin_dir / tool).is_file()]
         if missing:

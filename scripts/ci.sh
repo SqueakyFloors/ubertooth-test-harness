@@ -104,7 +104,7 @@ run_build() {
         --libbtbb-source "$bb" --libbtbb-ref "${LIBBTBB_REF:-$LIBBTBB_PIN}" \
         --with-python --output "$WORK/build" > "$WORK/build.json"
     cat "$WORK/build.json"
-    "$WORK/build/prefix/bin/ubertooth-util" -H
+    "$WORK/build/prefix/bin/ubertooth-util" -V
     test -z "$(git -C "$ut" status --porcelain)"
 
     step "host-only tests with the built tools (no Ubertooth)"

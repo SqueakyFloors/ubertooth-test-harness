@@ -299,9 +299,8 @@ The host surface runs help/parser checks for all eleven always-built
 executables and retains each tool's result. It also runs `-h` on the BlueZ-only
 `ubertooth-scan` and `ubertooth-follow`, which are not applicable (left out
 before the run, see [Host requirements](#host-requirements)) where they are not
-built, and checks the host version line from `ubertooth-util
---host-version` and from `-V` on `ubertooth-rx`, `ubertooth-tx`, and
-`ubertooth-afh`. `Ubertooth count` checks that `ubertooth-util -N` equals the
+built, and checks the host version line of `-V` on `ubertooth-util`,
+`ubertooth-rx`, `ubertooth-tx`, and `ubertooth-afh`. `Ubertooth count` checks that `ubertooth-util -N` equals the
 registered Ubertooths on the host (the selected board plus its guards), so an
 unregistered or missing board fails it. Because it uses guards, the fast and
 release plans need every registered board attached and readable, like the
@@ -350,7 +349,8 @@ application firmware. Each combination must be refused, exit 1, with the fork's
 message before any board lookup (no switch note), so a regression that accepted
 one would find no board instead of stranding it. `-f` (DFU), removed in fork
 `db5649b`, must be refused as an unknown option. The
-cleanup step runs `ubertooth-util -H`, which opens no device.
+cleanup step runs `ubertooth-util -V`, whose host version line needs no
+board.
 
 `DFU image checks` runs `ubertooth-dfu -d <image> -r` and `-s` the same way,
 with the same skip. `-d` checks the whole image before it opens a device, so
@@ -436,7 +436,7 @@ python -m ubertooth_harness run-suite \
 | Test | `smoke` (fast plan) | `comprehensive` (release plan) |
 |------|---------------------|--------------------------------|
 | `Ubertooth util compositions` | `-v -V` and every read-only report in one command | adds every other compatible read-only pair and repeated `-U` (last wins) |
-| `Argument validation` | one rejected argument per tool (`util -c2401`, `btle -x33`, `ego -l0`, `ducky -A36`, `rx -u` without `-l`, `specan -l 2401`, and a stray word for `afh`, `debug`, `dfu`, `dump`, `tx`) | every rejected argument in `REJECTIONS` (64): out-of-range, non-numeric, or partly numeric `util -c -C -a -z -l -d -q` values, attached or as the next word (`-q` takes 20-120, so `-q19`, `-q121`, and `-q183` are refused), `util -z` with `-I`, `-q`, or `-x`, `-U all` with a setter or mode, bad advertising index, bad MAC/BD address, `-x33`, `-l0`/`-l49`, survey with an address, `specan` bad or reversed range, `btle -a zzzz` and `-v 2`; a stray word on every built tool (fork's one argument rule: after a set or a mode, a bare `-`, after `--`, a next word that is not a value such as `util -a 7x`) refused with `error: unexpected argument`; each must exit 1 with the tool's own error, start no mode, and leave channel, squelch, LEDs, PA, and CRC unchanged |
+| `Argument validation` | one rejected argument per tool (`util -c2401`, `btle -x33`, `ego -l0`, `ducky -A36`, `rx -u` without `-l`, `specan -l 2401`, and a stray word for `afh`, `debug`, `dfu`, `dump`, `tx`) | every rejected argument in `REJECTIONS` (64): out-of-range, non-numeric, or partly numeric `util -c -C -a -z -l -d -q` values, attached or as the next word (`-q` takes 20-120, so `-q19`, `-q121`, and `-q183` are refused), `util -z` with `-I`, `-q`, or `-x`, `-U all` with a setter or mode, bad advertising index, bad MAC/BD address, `-x33`, `-l0`/`-l49`, survey with an address, `specan` bad or reversed range, `btle -a zzzz` and `-k 2`; a stray word on every built tool (fork's one argument rule: after a set or a mode, a bare `-`, after `--`, a next word that is not a value such as `util -a 7x`) refused with `error: unexpected argument`; each must exit 1 with the tool's own error, start no mode, and leave channel, squelch, LEDs, PA, and CRC unchanged |
 | `Radio setting transitions` | channel, PA level, squelch across an idle stop and an active-mode stop; `-c 2426` (value as the next word) and `-a0` (PA level 0) read back; setters (`-z <n>` too), `-S` and `-r` print nothing on stdout, their progress lines on stderr (fork #326) | adds USR LED; repeated `-c`, `-C`, `-a`, `-z`, `-l`, `-d` (last wins); mixed `-c`/`-C` in both orders; `-C`, `-a`, `-z`, `-l`, `-d` values and `-a 0` as the next word, and `-c -a -z -d -l` next-word values in one command, each read back; `-a9 -v` refused with exit 1 before the report; full reset `-r` from PA 0 returns boot defaults; a set and a read of the same value in one command (`-c<MHz> -c`, `-c -c<MHz>`, `-a<level> -a`, `-l<state> -l`, `-d<state> -d`) sets it and reports the new value (fork #228, fixed in 5b45b3e) |
 | `BLE CRC transitions` | CRC enabled during `-n` and `-f` on channel 37; one `-n` capture per format (`-r` PCAPNG, `-q` PCAP, `-c` PPI) | both CRC values x both modes x channels 37/38/39; both CRC values x both modes x each capture format; repeated `-v` (last wins); `-v 1` and `-v 0` as the next word; repeated capture files `-r -r`, `-q -c`, `-c -q` (first wins, extra file never created); `-r` with `-q` and with `-c` (separate handles, both written) |
 | `BLE settings` | set and read back the access address, attached and as the next word (`-a <address>`); set, mask, and clear the follow target | adds `ubertooth-util -r` resets the access address to 8e89bed6; `-x0`/`-x32`; `-a -v` reports both and `-azzzz` is rejected (fork #171, fixed in 09e9a46); stopping a bounded receive-only `-p` run resets LEDs, channel, and squelch (PA kept) |
@@ -706,8 +706,9 @@ its packages are used). The installed `ubertooth-specan-ui` and
 manifest records its path and version. specan-ui itself needs numpy, qtpy, and
 a Qt binding (PyQt5/6 or PySide2/6) in that interpreter. `--with-firmware`
 also builds `bluetooth_rxtx.dfu` with the built `ubertooth-dfu`; the image is
-hashed into the manifest, not flashed. The built `ubertooth-util -H` must
-report both resolved revisions, without a modified-source `*`.
+hashed into the manifest, not flashed. The built `ubertooth-util -V` must
+report both resolved revisions on its `Host tools version:` line, without a
+modified-source `*`.
 
 The manifest records the toolchain (CMake, C compiler, pkg-config, libusb,
 BlueZ on Linux, the ARM compiler when building firmware, and the Python with
@@ -955,8 +956,8 @@ lines open and close the run, build, preflight, and each test:
 ```text
 00:00:10.438     === PREFLIGHT ===
 00:00:10.439     +++ Host version +++
-00:00:10.439 [C] ubertooth-util -H
-00:00:10.465 [R] ubertooth-util exit 0 in 0.025s; [O] libubertooth 1.1 (git-be97109), libbtbb 1.0 (git-84ab41f)
+00:00:10.439 [C] ubertooth-util -V
+00:00:10.465 [R] ubertooth-util exit 0 in 0.025s; [O] Host tools version: libubertooth 1.1 (git-be97109), libbtbb 1.0 (git-84ab41f)
 00:00:10.465     --- Host version EXIT: passed ---
 00:00:10.466     === PREFLIGHT EXIT: passed ===
 00:00:10.466     === TEST 002-Host CLI surface: Host CLI surface on Host_Mac ===

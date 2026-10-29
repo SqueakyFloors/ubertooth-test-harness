@@ -405,8 +405,12 @@ def _device_test(name, description, argv=None, extra=None):
     )
 
 
-# print_version() in libubertooth: "libubertooth <ver> (<rev>), libbtbb <ver> (<rev>)".
-_HOST_VERSION_PATTERN = r"libubertooth \S+ \(\S+\), libbtbb \S+ \(\S+\)"
+# ubertooth_print_host_version() in libubertooth, the first line of every
+# tool's -V answer. Anchored to its label, so a board's firmware lines under
+# it cannot stand in for it.
+_HOST_VERSION_PATTERN = (
+    r"(?m)^Host tools version: libubertooth \S+ \(\S+\), libbtbb \S+ \(\S+\)$"
+)
 
 
 def _host_cli_surface_cases(_arguments, _resources, _resource_identities):
@@ -448,16 +452,8 @@ def _host_cli_surface_cases(_arguments, _resources, _resource_identities):
         )
         for tool in BLUEZ_TOOLS
     )
-    # Host-tools version, no device needed: the long -H form and -V on the
-    # tools that have it.
-    cases.append(
-        CommandCase(
-            "ubertooth-util-host-version-long",
-            "ubertooth-util --host-version",
-            ("ubertooth-util", "--host-version"),
-            (_HOST_VERSION_PATTERN,),
-        )
-    )
+    # The host-tools line of -V, which every tool prints before it looks for
+    # a board, so these need none.
     cases.extend(
         CommandCase(
             f"{tool}-version",
@@ -465,7 +461,8 @@ def _host_cli_surface_cases(_arguments, _resources, _resource_identities):
             (tool, "-V"),
             (_HOST_VERSION_PATTERN,),
         )
-        for tool in ("ubertooth-rx", "ubertooth-tx", "ubertooth-afh")
+        for tool in ("ubertooth-util", "ubertooth-rx", "ubertooth-tx",
+                     "ubertooth-afh")
     )
     return tuple(cases)
 
@@ -743,8 +740,8 @@ def builtin_catalog() -> TestCatalog:
             "Host tools version and git identity",
             MappingProxyType({"hosts": HOSTS}),
             MappingProxyType({}),
-            ("ubertooth-util", "-H"),
-            output_pattern=r"libubertooth\s+\S+\s+\(\S+\)",
+            ("ubertooth-util", "-V"),
+            output_pattern=_HOST_VERSION_PATTERN,
         ),
         TestDefinition(
             "Help smoke",

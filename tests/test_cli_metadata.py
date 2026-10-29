@@ -10,7 +10,7 @@ from ubertooth_harness.planner import TestInvocation
 from ubertooth_harness.sequencer import NamedTestSequencer
 from tests.test_sequencer import CollectSink, run_contract
 
-VERSION = "libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
+VERSION = "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
 
 
 class SurfaceTools:
@@ -38,7 +38,7 @@ class SurfaceTools:
                 command, 127, "",
                 f"unable to start command: [Errno 13] Permission denied: '{tool}'\n",
                 0.0, False)
-        if command[1:] in (("-H",), ("--host-version",), ("-V",)):
+        if command[1:] == ("-V",):
             text = "garbage\n" if tool in self.broken else VERSION
             return CommandResult(command, 0, text, "", 0.01, False)
         if command[1:] == ("-h",):
@@ -80,9 +80,8 @@ class HostCliSurfaceTests(unittest.TestCase):
     def test_version_cases_and_optional_bluez_help(self):
         cases = builtin_catalog().get("Host CLI surface").command_cases({}, {}, {})
         by_id = {case.case_id: case for case in cases}
-        self.assertEqual(("ubertooth-util", "--host-version"),
-                         by_id["ubertooth-util-host-version-long"].argv)
-        for tool in ("ubertooth-rx", "ubertooth-tx", "ubertooth-afh"):
+        for tool in ("ubertooth-util", "ubertooth-rx", "ubertooth-tx",
+                     "ubertooth-afh"):
             self.assertEqual((tool, "-V"), by_id[f"{tool}-version"].argv)
             self.assertTrue(re.search(by_id[f"{tool}-version"].output_patterns[0], VERSION))
         for tool in ("ubertooth-scan", "ubertooth-follow"):

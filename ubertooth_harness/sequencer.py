@@ -1050,6 +1050,20 @@ class NamedTestSequencer:
                 output_dir=output_dir,
             )
             failure = check.result_failure(result)
+            if failure and check.needs_fallback(result):
+                # The command left the question unanswered, so this fork
+                # commit answers it on the older option: ask that one, and
+                # its result is the check's.
+                result = self._run_command(
+                    publisher,
+                    token,
+                    command_id=f"{check.check_id}-command-2",
+                    argv=check.fallback_argv,
+                    timeout_s=check.timeout_s,
+                    owner={"phase": "preflight", "check_id": check.check_id},
+                    output_dir=output_dir,
+                )
+                failure = check.result_failure(result)
             if failure:
                 status = "canceled" if result.cancelled else "failed"
                 publisher.emit(

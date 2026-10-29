@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from ubertooth_harness.events import RunEvent
@@ -26,7 +27,7 @@ class FakeExecutor:
 
     def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
         self.commands.append(tuple(argv))
-        output = "libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
+        output = "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
         if self.fail_after is not None and len(self.commands) > self.fail_after:
             output = "wrong output"
         if on_output:
@@ -37,7 +38,7 @@ class FakeExecutor:
 class IdentityExecutor(FakeExecutor):
     def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
         command = tuple(argv)
-        if command == ("ubertooth-util", "-H"):
+        if command == ("ubertooth-util", "-V"):
             return super().run(
                 argv,
                 timeout_s=timeout_s,
@@ -99,7 +100,7 @@ def run_contract(directory: Path, invocation):
         invocation.host,
         None,
         {},
-        ("ubertooth-util", "-H"),
+        ("ubertooth-util", "-V"),
         (r"libubertooth\s+\S+\s+\(git\-test\)",),
         "git-test",
     )
@@ -132,7 +133,7 @@ class SequencerTests(unittest.TestCase):
 
             self.assertTrue(summary.passed)
             self.assertEqual(
-                [("ubertooth-util", "-H"), ("ubertooth-util", "-H")],
+                [("ubertooth-util", "-V"), ("ubertooth-util", "-V")],
                 executor.commands,
             )
             self.assertEqual(
@@ -171,18 +172,18 @@ class SequencerTests(unittest.TestCase):
             self.assertEqual(["report.md", "run.jsonl"], produced)
             report = (root / "report.md").read_text()
             self.assertIn("=== TEST 001-Host version: Host version on Host_Mac ===", report)
-            self.assertIn("[C] ubertooth-util -H", report)
+            self.assertIn("[C] ubertooth-util -V", report)
             transcript = report.split("```text\n", 1)[1].split("```", 1)[0].splitlines()
             for line in transcript:
                 self.assertRegex(
                     line, r"^\d\d:\d\d:\d\d\.\d{3} "
                 )
-            commands = [i for i, line in enumerate(transcript) if " [C] ubertooth-util -H" in line]
+            commands = [i for i, line in enumerate(transcript) if " [C] ubertooth-util -V" in line]
             self.assertEqual(2, len(commands))  # preflight and the test
             for index in commands:
                 result = transcript[index + 1]
                 self.assertIn(" exit 0 in ", result)
-                self.assertIn("[O] libubertooth 1.1 (git-test)", result)
+                self.assertIn("[O] Host tools version: libubertooth 1.1 (git-test)", result)
 
     def test_grouped_readback_reports_case_failure_and_continues(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -219,6 +220,56 @@ class SequencerTests(unittest.TestCase):
             self.assertEqual("failed", test_checks[3].status)
             self.assertEqual("passed", test_checks[-1].status)
             self.assertEqual("-vVspb", executor.commands[-1][-1])
+
+    def test_an_unanswered_preflight_check_asks_its_fallback(self):
+        """A fork commit that answers the host version on the older option."""
+        class OlderFork:
+            def __init__(self):
+                self.commands = []
+
+            def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
+                command = tuple(argv)
+                self.commands.append(command)
+                if command[-1] == "-V":
+                    message = "error: unrecognized option '-V'\n"
+                    if on_output:
+                        on_output("stderr", message)
+                    return CommandResult(command, 1, "", message, 0.01, False)
+                output = ("ubertooth-util - usage\n" if command[-1] == "-h" else
+                          "Host tools version: libubertooth 1.1 (git-test), "
+                          "libbtbb 1.0 (git-btbb)\n")
+                if on_output:
+                    on_output("stdout", output)
+                return CommandResult(command, 0, output, "", 0.01, False)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executor = OlderFork()
+            sink = CollectSink()
+            # "Help smoke", so the test after preflight asks -h: the point
+            # here is the preflight check, not the test.
+            invocation = TestInvocation(
+                "001-Help smoke", "Help smoke", "Host_Mac", {}, {}
+            )
+            manifest, (check,) = run_contract(root, invocation)
+            check = replace(check, fallback_argv=("ubertooth-util", "-H"),
+                            fallback_when_missing="Host tools version:")
+
+            summary = NamedTestSequencer(executor, event_sink=sink).run(
+                (invocation,), root, run_id="named-run", manifest=manifest,
+                preflight_checks=(check,),
+            )
+
+            self.assertTrue(summary.passed, summary.failure_reason)
+            self.assertEqual(
+                [("ubertooth-util", "-V"), ("ubertooth-util", "-H")],
+                executor.commands[:2],
+            )
+            commands = [e.details["command_id"] for e in sink.events
+                        if e.event_type == "command_started"
+                        and e.details.get("phase") == "preflight"]
+            self.assertEqual(["preflight-001-host-version-command-1",
+                              "preflight-001-host-version-command-2"], commands)
 
     def test_stops_on_catalog_result_validation_failure(self):
         with tempfile.TemporaryDirectory() as directory:

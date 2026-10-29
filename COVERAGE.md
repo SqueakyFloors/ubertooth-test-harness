@@ -31,12 +31,13 @@ may name them; `validate-plan` fails on any other plan that does.
 
 Harness-wide checks that use the CLIs:
 
-- **Preflight** (every run): `ubertooth-util -H` must match the resolved host
-  sources. For each selected board, `ubertooth-util -U <serial>` runs `-v`
+- **Preflight** (every run): the `Host tools version:` line of
+  `ubertooth-util -V` must match the resolved host sources; forks before the
+  one `-V` answer (ubertooth#813) are asked `-H` instead. For each selected board, `ubertooth-util -U <serial>` runs `-v`
   (firmware revision and API), `-V`, and `-s`.
 - **Guards** (stateful tests): every other registered board on the host is read
   before and after the test, with queries only: `ubertooth-util -v -V -C -a -z -d`
-  and then `ubertooth-btle -v`. The `ubertooth-btle -v` read is skipped unless
+  and then `ubertooth-btle -k`. The `ubertooth-btle -k` read is skipped unless
   the board's firmware API is at least the host API.
 - **Flash reliability** (`slow` plan): repeated `ubertooth-dfu -U <serial> -d <image> -r`.
   Each flash is verified with `ubertooth-util -v`.
@@ -72,7 +73,7 @@ Harness-wide checks that use the CLIs:
   ([#100](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/100)).
   Optional values as the next word are covered where they can be read back
   without RF: `ubertooth-util -c -C -a -z -l -d` (Radio setting transitions),
-  `ubertooth-btle -v` (BLE CRC transitions) and `-a` (BLE settings).
+  `ubertooth-btle -k` (BLE CRC transitions) and `-a` (BLE settings).
   `ubertooth-util -q <n>` and `ubertooth-ducky -q <uuid>` are not: the LED
   specan threshold cannot be read back, and ducky `-q` transmits.
 
@@ -81,12 +82,11 @@ Harness-wide checks that use the CLIs:
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
 | `-h` | help | Covered | Host CLI surface (fast, release): exit 0 and tool name in the output |
-| `-H`, `--host-version` | host tools version | Covered | `-H` in preflight on every run; `--host-version` in Host CLI surface (fast, release) |
 | `-U<index\|serial>` | select device | Covered | Every device test selects by serial. Repeated `-U` (index 99, then serial) is last-wins (util compositions, comprehensive). Multi-board selection (smoke): each `-U<index>` opens the board that index names in `-U all -s`. Comprehensive: an index past the last board is refused with exit 1 and `no Ubertooth at index <n> (<n> attached)` (it opened another device before `0c7e9c0`, [ubertooth#188](https://github.com/SqueakyFloors/ubertooth/issues/188)) |
 | `-U all` | identity queries for every board | Covered | Multi-board selection (smoke): `-U all -s` lists every registered board, and only those, with indices in order; comprehensive: `-U all -vVspb` gives five lines per board. Each line carries the label the single-board report prints with the board's index in it, `Serial No (0): <serial>`, since fork [#610](https://github.com/SqueakyFloors/ubertooth/issues/610); the build string `-V` reports has no label of its own and keeps the bare `0: <value>` prefix. Rejected with a setter or mode: Argument validation (comprehensive). Since fork `d9c63d9` `-U all` with no query is refused with `error: -U all needs one of the read-only queries -b, -v, -V, -p or -s to list`, and `-U all -N` alone prints the count and exits 0 (it was refused): Not covered |
 | `-N` | count devices | Covered | Ubertooth count (fast, release): equals the registered boards on the host. With `-i` it prints the count and the command carries on (fork `db5649b`; it dropped the mode before, [ubertooth#332](https://github.com/SqueakyFloors/ubertooth/issues/332)): `-N -i` and `-i -N` print `0`, then `-i` finds no board, exit 1: Util mode refusals (comprehensive) |
 | `-v` | firmware revision | Covered | Ubertooth identity (fast, release), preflight, util compositions (smoke) |
-| `-V` | compile info | Covered | Ubertooth identity, preflight, util compositions (smoke) |
+| `-V` | version report | Covered | Host version and Host CLI surface (fast, release): the `Host tools version:` line, which needs no board. Its `Firmware build:` line in Ubertooth identity, preflight, util compositions (smoke). Preflight falls back to `-H` on forks before the one `-V` answer ([ubertooth#813](https://github.com/SqueakyFloors/ubertooth/issues/813)) |
 | `-s` | MCU serial | Covered | Ubertooth identity, preflight, cleanup identity check |
 | `-p` | part ID | Covered | Ubertooth identity, util compositions (smoke) |
 | `-b` | board ID | Covered | Ubertooth identity, util compositions (smoke) |
@@ -142,7 +142,7 @@ Combinations to test:
 | `-q<file>` | PCAP (LE_LL_WITH_PHDR) | Covered | As `-r`: pcap with link type 256. Refused command lines (smoke): as `-r`; `-n -q - -q <file>` prints `warning: ignoring extra capture file` (wording since fork `e4f1dc5`) on stderr, not into the stdout capture, and never creates the file. Comprehensive adds `-a -a<address>`. Capture known BLE advertiser (`ble` plan): PCAP packet content decoded and checked against the advertiser |
 | `-c<file>` | PCAP (PPI) | Covered | As `-r`: pcap with link type 192. Refused command lines (smoke): as `-r`; comprehensive adds `-c <file> -r -` |
 | `-A<37-39>` | advertising channel | Covered | 37 in smoke; 37, 38, and 39 in comprehensive. `-A36`/`-A40` rejected: Argument validation (comprehensive). Capture known BLE advertiser (`ble` plan): with a real advertiser on each channel, `-A` picks only that channel's packets |
-| `-v[01]` | get/set CRC check | Covered | Get, set, and applied by a mode (smoke); `-v0`, `-v 1` and `-v 0` as the next word, and repeated `-v` (comprehensive). `-v 2` rejected and `-v stray` refused: Argument validation (comprehensive) |
+| `-k[01]` | get/set CRC check | Covered | Get, set, and applied by a mode (smoke); `-k0`, `-k 1` and `-k 0` as the next word, and repeated `-k` (comprehensive). `-k 2` rejected and `-k stray` refused: Argument validation (comprehensive). The option moved from `-v` in [ubertooth#813](https://github.com/SqueakyFloors/ubertooth/issues/813); the deprecated `-v` alias is not covered |
 | `-x<0-32>` | allowed access-address errors | Partial | `-x33` rejected (Argument validation); `-x0`/`-x32` accepted (BLE settings, comprehensive). The effect on capture needs traffic |
 
 Combinations to test:
@@ -376,7 +376,7 @@ and fail until the fix is on the commit under test.
 | [#160](https://github.com/SqueakyFloors/ubertooth/issues/160) | docs | PA boot/reset default (7) undocumented | Fixed on main (`4ed4a1d`) | Radio setting transitions checks 7 |
 | [#161](https://github.com/SqueakyFloors/ubertooth/issues/161) | ubertooth-util | `-a0` queried instead of setting level 0 | Fixed on main (`4ed4a1d`) | Radio setting transitions: `-a0` (smoke), `-a 0`, reset from PA 0 (comprehensive) |
 | [#164](https://github.com/SqueakyFloors/ubertooth/issues/164) | ubertooth-debug | Exit status was the register's low byte | Fixed (`89afc1c`, #170) | Debug registers (comprehensive) |
-| [#171](https://github.com/SqueakyFloors/ubertooth/issues/171) | ubertooth-btle | Bad `-a` value sets garbage; `-a` skips `-v` and a later set | Fixed (`09e9a46`, #178) | BLE settings (comprehensive) |
+| [#171](https://github.com/SqueakyFloors/ubertooth/issues/171) | ubertooth-btle | Bad `-a` value sets garbage; `-a` skips the CRC read and a later set | Fixed (`09e9a46`, #178) | BLE settings (comprehensive) |
 | [#172](https://github.com/SqueakyFloors/ubertooth/issues/172) | ubertooth-util | Non-numeric and out-of-range values accepted (`-z`, `-l`, `-d`, `-C`, `-q`) | Fixed (`658730c`, #177) | Argument validation (comprehensive) |
 | [#173](https://github.com/SqueakyFloors/ubertooth/issues/173) | ubertooth-specan | A run first reports one stale packet from the previous range | Fixed (`20bcf11`, #180) | Spectrum analyzer (comprehensive) |
 | [#185](https://github.com/SqueakyFloors/ubertooth/issues/185) | ubertooth-afh | Segmentation fault when the selected board is not found | Fixed (`219a5b0`, #196) | Classic Bluetooth receive (comprehensive) |
@@ -441,7 +441,7 @@ A test that fails cleanly (device verified restored, guards unchanged) no longer
 Ordered by value/effort:
 
 1. Done (#27): host-side argument rejections across util, btle, ego, ducky, rx, specan (`Argument validation`). Still open: `ubertooth-dump -c -l` (last-wins, not a rejection) and `ubertooth-rx -e5`.
-2. Done (#28): `--host-version`, `-N`, `-V` on rx/tx/afh, BlueZ tool help.
+2. Done (#28): the host version line, `-N`, `-V` on util/rx/tx/afh, BlueZ tool help.
 Next, harness work:
 
 - Done (#5, #25): `-a0` sets PA 0, next-word values, and stray words on every tool. Done (#34): `-z` with a mode and the `#172` rejections.

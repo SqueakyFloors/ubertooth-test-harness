@@ -1,6 +1,7 @@
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -55,7 +56,7 @@ class FakeBuildExecutor:
             required_tools(plan) if installed_tools is None else installed_tools
         )
         self.host_version = host_version or (
-            "libubertooth 1.1 (git-aaaaaaa), libbtbb 1.0 (git-bbbbbbb)\n"
+            "Host tools version: libubertooth 1.1 (git-aaaaaaa), libbtbb 1.0 (git-bbbbbbb)\n"
         )
         self.fail_step = fail_step
         self.missing_library = missing_library
@@ -90,6 +91,32 @@ class FakeBuildExecutor:
                 on_output("stdout", self.host_version)
             return CommandResult(command, 0, self.host_version, "", 0.01, False)
         return CommandResult(command, 0, "", "", 0.01, False)
+
+
+class OlderForkBuildExecutor(FakeBuildExecutor):
+    """Built tools from a fork commit that answers the host version on -H.
+
+    `-V` there is the board's compile info, so with no board attached it
+    reports nothing about the host and exits 1.
+    """
+
+    def run(self, argv, *, timeout_s, cancellation=None, on_output=None, cwd=None):
+        command = tuple(argv)
+        verify = next(c for c in self.plan.commands
+                      if c.step_id == "verify-host-version")
+        if command == verify.argv:
+            self.calls.append((command, cwd))
+            message = "error: unrecognized option '-V'\n"
+            if on_output:
+                on_output("stderr", message)
+            return CommandResult(command, 1, "", message, 0.01, False)
+        if command == verify.fallback_argv:
+            self.calls.append((command, cwd))
+            if on_output:
+                on_output("stdout", self.host_version)
+            return CommandResult(command, 0, self.host_version, "", 0.01, False)
+        return super().run(argv, timeout_s=timeout_s, cancellation=cancellation,
+                           on_output=on_output, cwd=cwd)
 
 
 class BuildPlanTests(unittest.TestCase):
@@ -202,7 +229,7 @@ class BuilderTests(unittest.TestCase):
             self.assertIn("    === BUILD ===", report)
             self.assertIn("    +++ Configure Ubertooth host tools +++", report)
             self.assertIn("[C] cmake -S", report)
-            self.assertIn("libubertooth 1.1 (git-aaaaaaa)", result.host_version)
+            self.assertIn("Host tools version: libubertooth 1.1 (git-aaaaaaa)", result.host_version)
             manifest = result.to_manifest()
             self.assertEqual(len(plan.commands), len(manifest["commands"]))
             host_configure = next(c for c in plan.commands if c.step_id == "host-configure")
@@ -223,14 +250,69 @@ class BuilderTests(unittest.TestCase):
 
     def test_built_tools_must_report_the_resolved_revision(self):
         for reported in (
-            "libubertooth 1.1 (git-ccccccc), libbtbb 1.0 (git-bbbbbbb)\n",
-            "libubertooth 1.1 (git-aaaaaaa*), libbtbb 1.0 (git-bbbbbbb)\n",
-            "libubertooth 1.1 (git-aaaaaaa), libbtbb 1.0 (git-ddddddd)\n",
+            "Host tools version: libubertooth 1.1 (git-ccccccc), libbtbb 1.0 (git-bbbbbbb)\n",
+            "Host tools version: libubertooth 1.1 (git-aaaaaaa*), libbtbb 1.0 (git-bbbbbbb)\n",
+            "Host tools version: libubertooth 1.1 (git-aaaaaaa), libbtbb 1.0 (git-ddddddd)\n",
         ):
             with tempfile.TemporaryDirectory() as work, self.subTest(reported=reported):
                 plan = make_plan(work)
                 with self.assertRaisesRegex(BuildError, "expected"):
                     Builder(FakeBuildExecutor(plan, host_version=reported), publisher_in(work), run_dir=work).run(plan)
+
+    def test_tools_that_do_not_know_V_are_asked_H(self):
+        with tempfile.TemporaryDirectory() as work:
+            plan = make_plan(work)
+            executor = OlderForkBuildExecutor(plan)
+
+            result = Builder(executor, publisher_in(work), run_dir=work).run(plan)
+
+            self.assertIn("libubertooth 1.1 (git-aaaaaaa)", result.host_version)
+            commands = [c for c, _cwd in executor.calls
+                        if c[0].endswith("ubertooth-util")]
+            self.assertEqual([("-V",), ("-H",)], [c[1:] for c in commands])
+            steps = [item["step_id"] for item in result.commands]
+            self.assertEqual(["verify-host-version", "verify-host-version-fallback"],
+                             steps[-2:])
+
+    def test_a_reported_revision_is_not_asked_again_on_H(self):
+        # The label is there, so -V answered: the wrong revision is the
+        # build's problem, not a reason to try the older option.
+        with tempfile.TemporaryDirectory() as work:
+            plan = make_plan(work)
+            executor = FakeBuildExecutor(
+                plan,
+                host_version=("Host tools version: libubertooth 1.1 (git-ccccccc), "
+                              "libbtbb 1.0 (git-bbbbbbb)\n"),
+            )
+
+            with self.assertRaisesRegex(BuildError, "expected"):
+                Builder(executor, publisher_in(work), run_dir=work).run(plan)
+
+            self.assertNotIn(
+                "-H", [c[-1] for c, _cwd in executor.calls],
+            )
+
+    def test_a_board_that_cannot_be_read_does_not_fail_the_build(self):
+        # -V prints the host version first, then reads every attached board
+        # and exits 1 if one cannot be read -- a board this build does not
+        # need. The version line is what the step checks.
+        with tempfile.TemporaryDirectory() as work:
+            plan = make_plan(work)
+
+            class BusyBoard(FakeBuildExecutor):
+                def run(self, argv, **kwargs):
+                    result = super().run(argv, **kwargs)
+                    if tuple(argv)[-1] == "-V":
+                        return replace(
+                            result, returncode=1,
+                            stdout=result.stdout + "Firmware version: unavailable, "
+                                   "in use by another program\n",
+                        )
+                    return result
+
+            result = Builder(BusyBoard(plan), publisher_in(work), run_dir=work).run(plan)
+
+            self.assertIn("libubertooth 1.1 (git-aaaaaaa)", result.host_version)
 
     def test_every_catalog_tool_must_come_from_the_prefix(self):
         with tempfile.TemporaryDirectory() as work:
