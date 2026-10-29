@@ -284,7 +284,7 @@ python -m ubertooth_harness run-suite \
   --hardware hardware.yaml --host Host_Linux \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
   --libbtbb-source /path/to/libbtbb \
-  --libbtbb-ref b32cf5adde496548057fdf6ea7c852378ad7411a \
+  --libbtbb-ref 2fd0d391d99e9b0620146f63f439c1ec74f79861 \
   --build --output runs
 ```
 
@@ -347,7 +347,7 @@ python -m ubertooth_harness run-suite --plan testplans/host.yaml --suite host \
   --hardware host-only.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
   --libbtbb-source /path/to/libbtbb \
-  --libbtbb-ref b32cf5adde496548057fdf6ea7c852378ad7411a \
+  --libbtbb-ref 2fd0d391d99e9b0620146f63f439c1ec74f79861 \
   --build --output runs
 ```
 
@@ -668,7 +668,7 @@ python -m ubertooth_harness run-suite --plan testplans/fast.yaml --suite fast \
   --hardware hardware.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref feature/my-change \
   --libbtbb-source /path/to/libbtbb \
-  --libbtbb-ref b32cf5adde496548057fdf6ea7c852378ad7411a \
+  --libbtbb-ref 2fd0d391d99e9b0620146f63f439c1ec74f79861 \
   --build [--with-firmware] [--with-python[=PYTHON]] --output runs
 ```
 
@@ -694,6 +694,23 @@ and `run-suite` steps then record it without printing it again
 can be deliberate.
 Only libbtbb's C library is installed and linked (`-DENABLE_PYTHON=OFF` skips
 its Python tools): the Ubertooth tools need nothing else from it.
+
+`--libbtbb-ref fork-pin` builds that pin instead of naming a commit: the run
+reads `LIBBTBB_REF` from `install.sh` at the Ubertooth commit it resolved and
+builds exactly that libbtbb, so each commit is tested against the libbtbb it
+asks for. The run prints the commit it took (`note: libbtbb ref 'fork-pin'
+is ...`) and records it in the manifest as that commit, named `fork-pin`, so
+report.md shows `` `fork-pin` at `<commit>` ``. It is refused, naming the
+Ubertooth commit, the problem, and both ways to name a libbtbb ref instead
+(the option, or a redeploy of the runner), when that commit has no
+`install.sh` or sets no `LIBBTBB_REF` (an older fork commit), when the pin is
+built from a shell variable, and when it is a name that can move rather than
+a commit, since `fork-pin` is a promise of one exact commit. Every run
+resolves it, build or not, because the libbtbb a run records is checked
+against the tools' own version line. This is what a long-lived runner is
+deployed with, so a pin bump on the fork reaches it without a redeploy;
+`scripts/ci.sh` keeps naming the commit, since comparing it with the fork's
+is the point of its check.
 
 `--libbtbb-ref` can still name any ref, with one limit: the harness passes no
 `-DCMAKE_POLICY_VERSION_MINIMUM`, so a libbtbb declaring
@@ -744,7 +761,10 @@ ref may name a branch, tag, or commit; the CLI resolves it without switching the
 checkout and records the full immutable commit plus the repository and short
 build revision. Dirty or untracked source content is rejected. Supply
 `--libbtbb-source` and `--libbtbb-ref` together when validating an exact
-companion build. When `--ubertooth-ref` is a commit chosen by name elsewhere
+companion build; `--libbtbb-ref fork-pin` takes that commit from the
+Ubertooth commit's own `install.sh` (see [Building the resolved
+revision](#building-the-resolved-revision)). When `--ubertooth-ref` is a
+commit chosen by name elsewhere
 (the target runner passes the commit the controller listed),
 `--ubertooth-ref-name NAME` records that branch or tag name next to it in the
 manifest (`ref_name`) and report.md; it is never resolved. Repeat `--artifact NAME=PATH` to hash build products into the
@@ -1151,7 +1171,7 @@ python -m ubertooth_harness runner \
   --hardware hardware.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth \
   [--libbtbb-source /path/to/libbtbb \
-   --libbtbb-ref b32cf5adde496548057fdf6ea7c852378ad7411a] \
+   --libbtbb-ref 2fd0d391d99e9b0620146f63f439c1ec74f79861] \
   [--plans-dir testplans] [--allow-power-changes] \
   --output runs
 ```
@@ -1182,10 +1202,14 @@ working tree, `HEAD` and local branches stay as they are, and a dirty
 checkout is still refused first. If the fetch fails, or the remote does not
 have the commit either, the run ends with `run_error` naming the ref, the
 remote and why. The `--libbtbb-ref` commit is fetched into
-`--libbtbb-source` the same way. A runner started without
+`--libbtbb-source` the same way. `--libbtbb-ref` is passed to every run as
+given, so `fork-pin` (what `scripts/deploy.sh` sets by default, see [Building
+the resolved revision](#building-the-resolved-revision)) makes each run build
+the libbtbb its own Ubertooth commit pins. A runner started without
 `--libbtbb-source`/`--libbtbb-ref` cannot build: it says so in its log at
 startup (`builds disabled: ...`; with them, `builds enabled: libbtbb REF from
-DIR`), and answers a `run` with `build` set with `run_rejected` and that
+DIR`, or `fork-pin (the LIBBTBB_REF of each commit it builds)`), and answers a
+`run` with `build` set with `run_rejected` and that
 reason, which the GUI shows as "Not started: runner rejected the run: ...",
 instead of starting a run that fails at once. The runner starts `run-suite` in this harness
 environment with a new run ID, answers `run_accepted`, and forwards every
@@ -1433,7 +1457,7 @@ runner (`After=`/`Wants=` the controller) dials
 | `--plans-dir DIR` | plans for the GUI and the runner (default `testplans/`) |
 | `--ubertooth-repo URL` | repository whose refs the GUI offers (default the public fork) |
 | `--libbtbb-source DIR` | libbtbb checkout the runner builds from (default: deploy's own clone of the [libbtbb fork](https://github.com/SqueakyFloors/libbtbb), see below) |
-| `--libbtbb-ref REF` | libbtbb commit the runner builds (default: the fork's pin, see below) |
+| `--libbtbb-ref REF` | libbtbb commit the runner builds (default `fork-pin`: the pin of each Ubertooth commit it builds, see below) |
 | `--no-libbtbb` | no libbtbb: the runner cannot build and refuses runs with Build checked |
 | `--allow-power-changes` | passed to the runner |
 | `--port N` | controller port on `127.0.0.1` (default 8765) |
@@ -1450,15 +1474,14 @@ time and fetches it (branches and tags) on every later deploy; a path there
 that is not a git clone is refused, and a failed clone stops the deploy
 before any unit is written (pass `--libbtbb-source` or `--no-libbtbb`). A
 `--libbtbb-source` you name is used as it is, never cloned or fetched by
-deploy. Without `--libbtbb-ref`, deploy fetches `main` into the
-`--ubertooth-source` checkout's `origin/main` and uses the literal
-`LIBBTBB_REF` commit its `install.sh` sets there, the libbtbb the fork is
-built against; when that cannot be read it falls back to the harness's own
-copy of the pin (`LIBBTBB_PIN` in `scripts/ci.sh`, see [Building the resolved
-revision](#building-the-resolved-revision)). Either way it prints which ref it
-chose and where from. Each clone or fetch is limited to 60 s and never
-prompts for credentials. `--no-libbtbb` deploys a runner without libbtbb,
-which refuses Build runs up front with a clear reason.
+deploy. Without `--libbtbb-ref`, the runner gets `fork-pin`, so every run
+builds the libbtbb the Ubertooth commit it was asked for pins in its own
+`install.sh` (see [Building the resolved
+revision](#building-the-resolved-revision)): deploy reads no pin itself, and a
+pin bump on the fork reaches the runner with no redeploy. Name a commit with
+`--libbtbb-ref` to hold every run to one libbtbb instead. Each clone or fetch
+is limited to 60 s and never prompts for credentials. `--no-libbtbb` deploys a
+runner without libbtbb, which refuses Build runs up front with a clear reason.
 
 Rerunning with the same options changes nothing. A unit is rewritten, and its
 service restarted, only when its content changes; the units record the
