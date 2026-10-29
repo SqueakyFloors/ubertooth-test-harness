@@ -754,8 +754,8 @@ sample less the catalog's fixed part, divided by its own units) and marked
 `estimate_scaled`; failing that, the caller falls back to the catalog
 estimate. A sample more than ten times off the current median is dropped, but
 only once the median rests on 3 samples, so one odd early run cannot lock out
-the good ones; three in a row that far off mean the test itself now takes that
-long, and the window starts again. A measured zero is never a sample, and the
+the good ones; three dropped in a row that agree with each other mean the test
+itself now takes that long, and they become the window. A measured zero is never a sample, and the
 store keeps at most 1000 keys.
 
 `GET /api/plans?target=HOST` and a run's `invocations` return the value with

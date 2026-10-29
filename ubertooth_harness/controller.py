@@ -918,12 +918,18 @@ class Controller:
                 return 0
             # Nothing awaits from here, so a cancellation cannot land
             # between the file and the record of what is in it.
+            if kept and not updated.save():
+                # The file could not be written (save logs why), so neither
+                # the samples nor the claim stand: another attempt may get
+                # them, and a restart finds the run still unlearned.
+                run.learned_durations = False
+                return 0
             self.estimates = updated
             try:
-                if kept:
-                    updated.save()  # logs its own failure, never raises
                 self._persist(run)
             except OSError as error:
+                # The samples are in estimates.json but the run is not
+                # marked: a later startup may count this one run twice.
                 self.log(f"run {run.run_id}: learned durations, but {error}")
         if kept:
             self.log(f"run {run.run_id}: learned {kept} duration sample(s)")

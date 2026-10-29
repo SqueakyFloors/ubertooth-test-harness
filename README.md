@@ -1385,7 +1385,9 @@ units), so a test timed at 3 s also estimates a 6 s run; that value is marked
 Failing that, the catalog estimate stands. A sample more than ten times off
 the current median is dropped as an outlier, but only once the median itself
 rests on 3 samples, so one odd early run cannot lock out the good ones that
-follow.
+follow. Three dropped samples in a row that agree with each other are not
+outliers at all: the test now takes that long, and those readings become the
+window.
 
 `GET /api/plans?target=HOST` and the `invocations` of `GET /api/runs/{run_id}`
 report the value with `estimate_source`, `estimate_samples` and

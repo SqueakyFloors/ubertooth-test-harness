@@ -258,15 +258,23 @@ class MedianTests(StoreTestCase):
         key = self.samples([10.0, 11.0, 12.0])
         for value in (500.0, 505.0):
             self.assertFalse(self.store.add(key, value))
-        # Three in a row that far off are not outliers: the test itself now
-        # takes that long, so the stale window makes way.
+        # Three in a row that agree are not outliers: the test itself now
+        # takes that long, and those readings are the new window.
         self.assertTrue(self.store.add(key, 510.0))
-        self.assertEqual([510.0], self.store.samples(key))
-        self.assertIsNone(self.store.lookup(key))
-        for value in (505.0, 515.0):
-            self.assertTrue(self.store.add(key, value))
-        self.assertEqual(510.0, self.store.lookup(key).seconds)
+        self.assertEqual([500.0, 505.0, 510.0], self.store.samples(key))
+        self.assertEqual(505.0, self.store.lookup(key).seconds)
         self.assertTrue(any("not 11s; starting again" in line for line in self.logs))
+
+    def test_rejected_samples_that_disagree_stay_outliers(self):
+        key = self.samples([10.0, 11.0, 12.0])
+        # Wild readings on both sides say nothing about a new duration.
+        for value in (500.0, 0.2, 480.0, 0.3, 510.0):
+            self.assertFalse(self.store.add(key, value))
+        self.assertEqual([10.0, 11.0, 12.0], self.store.samples(key))
+        self.assertEqual(11.0, self.store.lookup(key).seconds)
+        # Two that agree after them are still not enough on their own.
+        self.assertFalse(self.store.add(key, 505.0))
+        self.assertTrue(self.store.add(key, 500.0))
 
     def test_ten_times_the_median_is_still_a_sample(self):
         # The bound is a factor of ten, so a run that took eleven seconds
@@ -774,6 +782,12 @@ class ControllerLearningTests(ControllerTestCase):
         self.assertFalse(run.learned_durations)
         self.assertEqual([], self.samples())
         self.assertFalse((self.results / STORE_FILE).exists())
+        # A store that cannot be written keeps neither the samples nor the
+        # claim, so the run can be learned from later instead.
+        with patch.object(EstimateStore, "save", return_value=False):
+            self.assertEqual(0, await self.controller.learn(run))
+        self.assertFalse(run.learned_durations)
+        self.assertEqual([], self.samples())
         # A record that cannot be written is reported, not raised.
         with patch.object(self.controller, "_persist",
                           side_effect=OSError("read-only file system")):

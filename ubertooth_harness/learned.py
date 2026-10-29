@@ -30,9 +30,9 @@ run; failing that, the caller falls back to the catalog estimate. A sample
 more than ``OUTLIER_FACTOR`` times off the current median is dropped, but
 only once the median itself rests on ``MIN_SAMPLES`` samples, so one odd
 early run cannot lock out the good ones that follow. And when that many
-samples in a row are that far off, the test's own duration has changed (a
-slower host, new firmware, a changed step): the window is cleared and
-learned again, so no key stays stuck on a value the test no longer takes.
+dropped samples in a row agree with each other, the test's own duration has
+changed (a slower host, new firmware, a changed step): those readings become
+the window, so no key stays stuck on a value the test no longer takes.
 """
 
 import dataclasses
@@ -216,10 +216,10 @@ class EstimateStore:
         self.outlier_factor = outlier_factor
         self.max_keys = max_keys
         self._samples: dict[Key, list[float]] = {}
-        # Samples dropped in a row as outliers, per key: enough of them in a
-        # row mean the test's duration has changed, not that the samples are
-        # wrong. Not persisted; a restart only asks for one more sample.
-        self._rejected: dict[Key, int] = {}
+        # Samples dropped in a row as outliers, per key: enough of them that
+        # agree mean the test's duration has changed, not that the samples
+        # are wrong. Not persisted; a restart only asks for them again.
+        self._rejected: dict[Key, list[float]] = {}
         self.outliers = 0
         self.updated_at: str | None = None
 
@@ -305,8 +305,12 @@ class EstimateStore:
             ],
         }
 
-    def save(self) -> None:
-        """Replace the file atomically; a failure is logged, never raised."""
+    def save(self) -> bool:
+        """Replace the file atomically; a failure is logged, never raised.
+
+        False when nothing was written, so a caller that is about to record
+        what the file holds can leave the work for another attempt instead.
+        """
         self.updated_at = datetime.datetime.now(
             datetime.timezone.utc
         ).isoformat(timespec="seconds")
@@ -325,6 +329,8 @@ class EstimateStore:
                 temporary.unlink(missing_ok=True)
             except OSError:
                 pass
+            return False
+        return True
 
     # ----- samples ---------------------------------------------------------
 
@@ -337,7 +343,7 @@ class EstimateStore:
             max_keys=self.max_keys,
         )
         other._samples = {key: list(values) for key, values in self._samples.items()}
-        other._rejected = dict(self._rejected)
+        other._rejected = {key: list(values) for key, values in self._rejected.items()}
         other.outliers = self.outliers
         other.updated_at = self.updated_at
         return other
@@ -362,23 +368,32 @@ class EstimateStore:
                 value > median * self.outlier_factor
                 or value * self.outlier_factor < median
             ):
-                self.outliers += 1
-                rejected = self._rejected.get(key, 0) + 1
-                self._rejected[key] = rejected
-                if rejected < self.min_samples:
+                rejected = self._rejected.setdefault(key, [])
+                rejected.append(value)
+                del rejected[: -self.min_samples]
+                # Enough rejected samples that agree with each other mean
+                # the test itself now takes that long (a slower host, new
+                # firmware, a changed step), not that the samples are wrong.
+                # Readings that disagree are still just outliers.
+                if (
+                    len(rejected) < self.min_samples
+                    or max(rejected) > min(rejected) * self.outlier_factor
+                ):
+                    self.outliers += 1
                     self.log(
                         f"estimates: dropped a {value:g}s outlier for "
                         f"{key.stage} {key.name or key.host} (median {median:g}s)"
                     )
                     return False
-                # Not an outlier after all: the test itself now takes that
-                # long (a slower host, new firmware, a changed step), so
-                # the old window is stale and this sample starts a new one.
                 self.log(
                     f"estimates: {key.stage} {key.name or key.host} now takes "
                     f"about {value:g}s, not {median:g}s; starting again"
                 )
-                samples.clear()
+                # Those readings are the evidence of the new duration, so
+                # they become the window rather than being thrown away.
+                samples[:] = rejected
+                self._rejected.pop(key, None)
+                return True
         self._rejected.pop(key, None)
         samples.append(value)
         del samples[: -self.max_samples]
