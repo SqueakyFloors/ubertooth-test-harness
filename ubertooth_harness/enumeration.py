@@ -144,16 +144,17 @@ def ubertooth_serials_from_ioreg(output: bytes) -> frozenset[str]:
         node = pending.pop()
         if not isinstance(node, dict):
             continue
-        children = node.get("IORegistryEntryChildren")
-        if isinstance(children, list):
-            pending.extend(children)
         # An interface entry repeats its device's ids, so counting it would
         # report the board twice (and a serial-less board, which is named by
-        # where it is, twice under two names).
+        # where it is, twice under two names). Nothing below an interface is a
+        # device either, so that whole subtree is left alone.
         if "bInterfaceNumber" in node or "Interface" in str(
             node.get("IOObjectClass", "")
         ):
             continue
+        children = node.get("IORegistryEntryChildren")
+        if isinstance(children, list):
+            pending.extend(children)
         # A property of an unexpected type is treated as not an Ubertooth.
         # This feeds the runner's board listing, which is read by people;
         # power isolation, which must fail closed, reads sysfs on Linux.

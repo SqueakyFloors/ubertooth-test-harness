@@ -1616,9 +1616,16 @@ nothing but the SSH port it relays to.
 The agent connects with `-J`, so the jump host must allow that; it has no
 `--two-hop` equivalent (see **From a laptop** above for what that option is
 for). It also passes `-o RemoteCommand=none`, so a host alias whose ssh
-configuration runs a command still works, and it refuses to deploy at all
-when that configuration adds a forward of its own for this host, which the
-agent would open alongside the intended one.
+configuration runs a command still works.
+
+Since that configuration is also read by the agent, deploy resolves it first
+with `ssh -G`, which connects to nothing, and refuses to install anything if
+it finds a `LocalForward`, `RemoteForward` or `DynamicForward` of its own for
+this host (the agent would open that too, and it may bind where the network
+can reach it), or if it throws the agent's own forward away with
+`ClearAllForwardings` (which would leave a tunnel forwarding nothing). Keep
+the harness host's stanza to what the connection needs: `HostName`, `User`,
+`IdentityFile`, `ProxyJump`.
 
 The host, jump host and port can come from `--controller-host`,
 `--controller-jump` and `--port`, from `HARNESS_HOST`, `HARNESS_JUMP` and

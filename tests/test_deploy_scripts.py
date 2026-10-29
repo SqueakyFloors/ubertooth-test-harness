@@ -59,12 +59,27 @@ FAKES = {
         [ "${FAKE_LOGINCTL_EXIT:-0}" = 0 ] || exit "$FAKE_LOGINCTL_EXIT"
         echo "Linger=${FAKE_LINGER:-no}"
         """),
-    # Only `ssh -G` (config lookup) runs in dry-run tests; real tunnels use
-    # FAKE_SSH. $FAKE_SSH_FORWARDS stands in for forwards an ssh config adds.
+    # Only `ssh -G` (resolving the configuration, which connects to nothing)
+    # runs in these tests; real tunnels use FAKE_SSH. It echoes the -L it was
+    # given the way `ssh -G` prints it, unless $FAKE_SSH_NO_FORWARD is set (as
+    # ClearAllForwardings would leave it); $FAKE_SSH_FORWARDS adds lines an
+    # ssh configuration would contribute.
     "ssh": (
         '#!/bin/sh\n[ "$1" = -G ] || exit 99\n'
         '[ -z "${FAKE_SSH_G_EXIT:-}" ] || exit "$FAKE_SSH_G_EXIT"\n'
         'printf "hostname %s\\nuser alice\\n" "$2"\n'
+        'if [ -z "${FAKE_SSH_NO_FORWARD:-}" ]; then\n'
+        '    prev=\n'
+        '    for arg; do\n'
+        '        if [ "$prev" = -L ]; then\n'
+        '            bind=${arg%%:*}; rest=${arg#*:}\n'
+        '            lport=${rest%%:*}; rest=${rest#*:}\n'
+        '            printf "localforward [%s]:%s [%s]:%s\\n" \\\n'
+        '                "$bind" "$lport" "${rest%%:*}" "${rest#*:}"\n'
+        '        fi\n'
+        '        prev=$arg\n'
+        '    done\n'
+        'fi\n'
         '[ -z "${FAKE_SSH_FORWARDS:-}" ] || printf "%s\\n" "$FAKE_SSH_FORWARDS"\n'
     ),
     "uname": '#!/bin/sh\necho "${FAKE_UNAME:-Linux}"\n',
@@ -165,6 +180,10 @@ class FakeLab:
             "FAKE_LOG": str(self.log),
             "FAKE_GIT_LOG": str(self.git_log),
             "LANG": "C",
+            # deploy.sh pins the system ssh by path, for the tunnel agent and
+            # for the configuration check that reads the same binary's
+            # configuration. The tests point both at the fake.
+            "UBERTOOTH_HARNESS_SSH": str(self.bin / "ssh"),
             # harness-open has no built-in host; these stand in for the lab.
             "HARNESS_HOST": LAB_HOST,
             "HARNESS_JUMP": JUMP_HOST,
@@ -322,7 +341,7 @@ class DeployTest(unittest.TestCase):
         self.busy_controller()
         result = self.lab.deploy("--port", "9999")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("the installed runner uses port 8765", result.stdout)
+        self.assertIn("the installed runner is this host on port 8765", result.stdout)
         self.assertIn("active runs Host_Linux:run-7", result.stderr)
 
     def test_no_user_manager_changes_nothing(self):
@@ -663,7 +682,7 @@ class MacDeployTest(unittest.TestCase):
         ], runner["ProgramArguments"])
         self.assertEqual(TUNNEL_LABEL, tunnel["Label"])
         self.assertEqual([
-            "/usr/bin/ssh", "-N",
+            str(self.lab.bin / "ssh"), "-N",  # /usr/bin/ssh without the fake
             "-o", "BatchMode=yes",
             "-o", "ExitOnForwardFailure=yes",
             # The only access control, so not left to the user's ssh config.
@@ -905,7 +924,7 @@ class MacDeployTest(unittest.TestCase):
         self.busy_controller("Host_Mac:run-7")
         result = self.lab.mac_deploy("--port", "9999")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("the installed runner uses port 8765", result.stdout)
+        self.assertIn("the installed runner is Host_Mac on port 8765", result.stdout)
         self.assertIn("active runs Host_Mac:run-7", result.stderr)
         self.assertIn("python - 8765 Host_Mac", self.lab.commands())
 
@@ -923,11 +942,21 @@ class MacDeployTest(unittest.TestCase):
                 self.assertIn("adds forwards of its own", result.stderr)
                 self.assertIn(forwards, result.stderr)
                 self.assertEqual(_tree(self.lab.home), {})
-        # The agent's own forward is not one of them, in either printed form.
-        for ours in ("localforward [127.0.0.1]:8765 [127.0.0.1]:8765",
-                     "localforward 127.0.0.1:8765 127.0.0.1:8765"):
-            with self.subTest(ours=ours):
-                self.assertOk(self.lab.mac_deploy(FAKE_SSH_FORWARDS=ours))
+        # Even a forward the configuration spells exactly like the agent's,
+        # which ssh would then try to bind twice and exit over.
+        result = self.lab.mac_deploy(
+            FAKE_SSH_FORWARDS="localforward [127.0.0.1]:8765 [127.0.0.1]:8765")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("adds forwards of its own", result.stderr)
+
+    def test_an_ssh_config_that_drops_the_forward_is_refused(self):
+        # ClearAllForwardings in the user's configuration clears the agent's
+        # own -L as well, which would leave a tunnel forwarding nothing.
+        result = self.lab.mac_deploy(FAKE_SSH_NO_FORWARD="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("throws the tunnel's own forward away", result.stderr)
+        self.assertIn("ClearAllForwardings", result.stderr)
+        self.assertEqual(_tree(self.lab.home), {})
 
     def test_a_controller_that_does_not_answer_is_called_out(self):
         # On a Mac the question goes through the tunnel, which launchd may be
@@ -1343,6 +1372,12 @@ class ScriptLintTest(unittest.TestCase):
                 ["bash", "-n", str(script)], capture_output=True, text=True, check=False
             )
             self.assertEqual(result.returncode, 0, f"{script.name}: {result.stderr}")
+
+    def test_the_tunnel_uses_the_system_ssh_by_default(self):
+        # The tests point SSH at a fake, so pin the default here: the agent
+        # must not run whatever ssh comes first on a PATH.
+        self.assertIn("SSH=${UBERTOOTH_HARNESS_SSH:-/usr/bin/ssh}",
+                      DEPLOY.read_text(encoding="utf-8"))
 
     def test_git_is_bounded_without_timeout(self):
         # macOS has no timeout(1), so deploy must bound its clone and fetch

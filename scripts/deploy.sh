@@ -83,6 +83,10 @@ RUNNER_STOP_S=180
 # A LaunchAgent inherits almost no environment, and a run that builds needs
 # cmake, pkg-config and libusb from whichever Homebrew prefix this Mac uses.
 AGENT_PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+# The tunnel agent runs the system ssh by its full path, not whatever comes
+# first on a PATH, and the configuration check below must read that same
+# binary's configuration. The override is for this project's tests.
+SSH=${UBERTOOTH_HARNESS_SSH:-/usr/bin/ssh}
 
 port=8765
 port_option=0
@@ -343,28 +347,30 @@ check_path --hardware "$hardware" -f
 check_path --plans-dir "$plans_dir" -d
 [ "$manage_libbtbb" = 1 ] || [ -z "$libbtbb_source" ] || check_path --libbtbb-source "$libbtbb_source" -d
 
+forward_lines() {
+    # The forwarding lines of a resolved configuration, however this ssh
+    # spells them. Nothing is connected to: -G only resolves and prints.
+    "$SSH" -G "$@" 2>/dev/null | grep -E '^(local|remote|dynamic)forward ' || true
+}
+
 check_inherited_forwards() {
-    local resolved extra line
-    if ! resolved=$(ssh -G "${tunnel_argv[@]:1}" 2>/dev/null); then
+    local inherited mine
+    if ! "$SSH" -G "${tunnel_argv[@]:1}" >/dev/null 2>&1; then
         say "warning: could not read the SSH configuration for $controller_host"
-        say "  (ssh -G failed), so the tunnel agent may not connect either."
+        say "  ($SSH -G failed), so the tunnel agent may not connect either."
         return
     fi
-    extra=
-    while IFS= read -r line; do
-        case $line in
-            # The agent's own forward, in either format ssh prints it.
-            "localforward [127.0.0.1]:$port [127.0.0.1]:$port") ;;
-            "localforward 127.0.0.1:$port 127.0.0.1:$port") ;;
-            localforward*|remoteforward*|dynamicforward*)
-                extra="$extra  $line
-" ;;
-        esac
-    done <<EOF
-$resolved
-EOF
-    [ -z "$extra" ] || die "the SSH configuration adds forwards of its own for $controller_host, which the tunnel agent would open too:
-$extra  One of these could bind a port on this Mac, or on $controller_host, that the network can reach. Move them out of the stanza that matches $controller_host, or give the harness its own Host alias."
+    # What the configuration alone asks for. Counting instead of matching the
+    # printed forward keeps this free of any assumption about the format.
+    inherited=$(forward_lines "${tunnel_options[@]}" "${tunnel_target[@]}")
+    [ -z "$inherited" ] || die "the SSH configuration adds forwards of its own for $controller_host, which the tunnel agent would open too:
+$(printf '%s\n' "$inherited" | sed 's/^/  /')
+  One of these could bind a port on this Mac, or on $controller_host, that the network can reach. Move them out of the stanza that matches $controller_host, or give the harness its own Host alias."
+    # With the agent's own -L there must be exactly one more. There is not if
+    # the configuration sets ClearAllForwardings, which clears command-line
+    # forwards too, leaving an agent that connects and forwards nothing.
+    mine=$(forward_lines "${tunnel_argv[@]:1}" | grep -c .) || true
+    [ "$mine" = 1 ] || die "the SSH configuration for $controller_host throws the tunnel's own forward away (ClearAllForwardings, most likely), so the agent would connect and forward nothing. Take it out of the stanza that matches $controller_host, or give the harness its own Host alias."
 }
 
 # Loopback at both ends: the forward binds only this machine's loopback and
@@ -375,13 +381,15 @@ $extra  One of these could bind a port on this Mac, or on $controller_host, that
 # whatever the user's ssh configuration says.
 # RemoteCommand=none: a host alias whose ssh configuration sets a remote
 # command cannot be given -N, and the agent would exit on every respawn.
-tunnel_argv=(/usr/bin/ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes
-             -o StrictHostKeyChecking=yes -o ControlPath=none
-             -o RemoteCommand=none
-             -o ServerAliveInterval=30 -o ServerAliveCountMax=3
-             -L "127.0.0.1:$port:127.0.0.1:$port")
-[ -z "$controller_jump" ] || tunnel_argv+=(-J "$controller_jump")
-tunnel_argv+=("$controller_host")
+tunnel_options=(-N -o BatchMode=yes -o ExitOnForwardFailure=yes
+                -o StrictHostKeyChecking=yes -o ControlPath=none
+                -o RemoteCommand=none
+                -o ServerAliveInterval=30 -o ServerAliveCountMax=3)
+tunnel_target=()
+[ -z "$controller_jump" ] || tunnel_target+=(-J "$controller_jump")
+tunnel_target+=("$controller_host")
+tunnel_argv=("$SSH" "${tunnel_options[@]}"
+             -L "127.0.0.1:$port:127.0.0.1:$port" "${tunnel_target[@]}")
 # Before anything is created: the agent's ssh reads this user's SSH
 # configuration, where a stanza matching the controller host can add forwards
 # of its own, and one of those could bind a port on this Mac that the network
@@ -630,35 +638,53 @@ if [ "$platform" = macos ]; then
        unit_changes "$TUNNEL_LABEL.plist" "$tunnel_agent"; then
         restart_needed=1
     fi
-    # Only this Mac's runner is restarted, so only its runs are at stake.
-    busy_filter=$runner_host
 else
     if unit_changes "$CONTROLLER_UNIT" "$controller_unit" ||
        unit_changes "$RUNNER_UNIT" "$runner_unit"; then
         restart_needed=1
     fi
-    busy_filter=
 fi
-# The port the installed runner uses, which is not the requested one when
-# --port changes. The running controller answers there, so that is the port
-# to ask about active runs; asking the new one would find nothing and restart
-# the runner under an active run.
-running_port() {
+# The command line of the runner this machine already has installed, one
+# argument per line; nothing when none is installed. The run that may be
+# active belongs to that runner, not to the one this deploy would write, so
+# the controller port and registry host to ask about come from here: with a
+# changed --port or --runner-host, the requested ones would find nothing.
+installed_runner_argv() {
     local path=$unit_dir/$1
     [ -f "$path" ] || return 0
-    sed -n 's|.*ws://127\.0\.0\.1:\([0-9]\{1,5\}\)/ws/runner.*|\1|p' "$path" | head -n 1
+    if [ "$platform" = macos ]; then
+        sed -n 's|.*<string>\(.*\)</string>.*|\1|p' "$path"
+    else
+        sed -n 's|^ExecStart=||p' "$path" | tr ' ' '\n'
+    fi
 }
 
 if [ "$no_start" = 0 ] && [ "$restart_needed" = 1 ]; then
     if [ "$platform" = macos ]; then
-        busy_port=$(running_port "$RUNNER_LABEL.plist")
+        installed=$(installed_runner_argv "$RUNNER_LABEL.plist")
     else
-        busy_port=$(running_port "$RUNNER_UNIT")
+        installed=$(installed_runner_argv "$RUNNER_UNIT")
     fi
-    if [ -z "$busy_port" ]; then
-        busy_port=$port
-    elif [ "$busy_port" != "$port" ]; then
-        say "note: the installed runner uses port $busy_port; asking that controller about active runs"
+else
+    installed=
+fi
+# Nothing installed means nothing is running from here, so there is no run to
+# protect and no controller to ask.
+if [ -n "$installed" ]; then
+    busy_port=$(printf '%s\n' "$installed" |
+        sed -n 's|^ws://127\.0\.0\.1:\([0-9]\{1,5\}\)/ws/runner$|\1|p' | head -n 1)
+    [ -n "$busy_port" ] || busy_port=$port
+    # On macOS only this Mac's runner restarts, so only its own target's runs
+    # are at stake; on Linux the controller restarts with it, which would
+    # cancel the run of any target, so every target counts.
+    busy_filter=
+    if [ "$platform" = macos ]; then
+        busy_filter=$(printf '%s\n' "$installed" | awk '/^--host$/ {getline; print; exit}')
+        [ -n "$busy_filter" ] || busy_filter=$runner_host
+    fi
+    if [ "$busy_port" != "$port" ] ||
+       { [ -n "$busy_filter" ] && [ "$busy_filter" != "$runner_host" ]; }; then
+        say "note: the installed runner is ${busy_filter:-this host} on port $busy_port; asking that controller about active runs"
     fi
     busy=$(active_runs "$busy_port" "$busy_filter")
     if [ "$busy" = unreachable ]; then
