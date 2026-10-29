@@ -39,6 +39,12 @@ _HEX = re.compile(r"[0-9a-fA-F]{7,40}")
 SHOWN_ENV = "UBERTOOTH_HARNESS_LIBBTBB_PIN_SHOWN"
 EVENT = "libbtbb_pin"
 
+# The --libbtbb-ref value meaning "the LIBBTBB_REF the Ubertooth commit under
+# test sets in its own install.sh", resolved per run from that commit
+# (cli._fork_pin_ref). A long-lived runner then builds each commit against the
+# libbtbb it asks for, so a pin bump on the fork needs no redeploy (#139).
+FORK_PIN = "fork-pin"
+
 
 class PinUnreadable(RuntimeError):
     """install.sh names a libbtbb pin this module cannot compare."""
@@ -68,8 +74,7 @@ def parse_install_sh(text: str) -> ForkPin | None:
         return None
     if "$" in ref:
         raise PinUnreadable(
-            f"LIBBTBB_REF in install.sh is not a literal commit ({ref}); "
-            "it cannot be compared"
+            f"LIBBTBB_REF in install.sh is not a literal commit ({ref})"
         )
     return ForkPin(url=found.get("LIBBTBB_URL"), ref=ref)
 
@@ -79,11 +84,15 @@ def fork_pin_at(source: Path | str, ref: str) -> ForkPin | None:
 
     None covers a commit without install.sh or without the pin (fork commits
     from before the pin landed); git errors other than a missing path, and a
-    pin that is not a literal ref, raise RuntimeError.
+    pin that is not a literal ref, raise RuntimeError. Git runs under
+    ``LC_ALL=C``, since a missing path is told from a failure by its wording.
     """
     result = subprocess.run(
         ["git", "-C", str(source), "show", f"{ref}:install.sh"],
         capture_output=True, text=True, check=False,
+        # A missing path is told from a git failure by git's own wording, so
+        # the message must not be translated.
+        env={**os.environ, "LC_ALL": "C"},
     )
     if result.returncode != 0:
         if "does not exist" in result.stderr or "exists on disk, but not in" in result.stderr:
@@ -92,6 +101,11 @@ def fork_pin_at(source: Path | str, ref: str) -> ForkPin | None:
             f"cannot read install.sh at {ref} in {source}: {result.stderr.strip()}"
         )
     return parse_install_sh(result.stdout)
+
+
+def is_commit(ref: str) -> bool:
+    """Whether ``ref`` is a hexadecimal commit, not a name that can move."""
+    return bool(_HEX.fullmatch(ref))
 
 
 def _same_commit(a: str, b: str) -> bool:
