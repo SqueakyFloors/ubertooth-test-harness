@@ -11,6 +11,7 @@ import datetime
 import json
 from pathlib import Path
 import tempfile
+import threading
 from types import MappingProxyType
 import unittest
 from unittest.mock import patch
@@ -34,9 +35,13 @@ from ubertooth_harness.learned import (
 from ubertooth_harness.plan import load_plan
 
 try:
-    from test_controller import ControllerTestCase, FakeRunner, wait_until
+    from test_controller import (
+        TIMEOUT_S, ControllerTestCase, FakeRunner, wait_until,
+    )
 except ImportError:  # run as tests.test_learned_estimates
-    from tests.test_controller import ControllerTestCase, FakeRunner, wait_until
+    from tests.test_controller import (
+        TIMEOUT_S, ControllerTestCase, FakeRunner, wait_until,
+    )
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 BASE = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
@@ -244,6 +249,24 @@ class MedianTests(StoreTestCase):
         self.assertEqual([10.0, 11.0, 12.0], self.store.samples(key))
         self.assertEqual(2, self.store.outliers)
         self.assertTrue(any("outlier" in line for line in self.logs))
+        # A good sample in between means the next odd one is an outlier
+        # again, not the start of a new window.
+        self.assertTrue(self.store.add(key, 11.5))
+        self.assertFalse(self.store.add(key, 500.0))
+
+    def test_a_test_that_really_got_slower_is_learned_again(self):
+        key = self.samples([10.0, 11.0, 12.0])
+        for value in (500.0, 505.0):
+            self.assertFalse(self.store.add(key, value))
+        # Three in a row that far off are not outliers: the test itself now
+        # takes that long, so the stale window makes way.
+        self.assertTrue(self.store.add(key, 510.0))
+        self.assertEqual([510.0], self.store.samples(key))
+        self.assertIsNone(self.store.lookup(key))
+        for value in (505.0, 515.0):
+            self.assertTrue(self.store.add(key, value))
+        self.assertEqual(510.0, self.store.lookup(key).seconds)
+        self.assertTrue(any("not 11s; starting again" in line for line in self.logs))
 
     def test_ten_times_the_median_is_still_a_sample(self):
         # The bound is a factor of ten, so a run that took eleven seconds
@@ -695,6 +718,68 @@ class ControllerLearningTests(ControllerTestCase):
         await self.start_controller()
         self.assertEqual(0, await self.controller.learn_pending())
         self.assertEqual([10.0], self.samples())
+
+    async def test_a_run_the_runner_no_longer_has_teaches_what_it_recorded(self):
+        # The runner restarts; its run is lost, and what passed in it took
+        # as long as its records say.
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            await self.accepted_run(runner)
+            for index, item in enumerate(
+                passed_records("Argument validation", VALIDATION, [10.0]), 1
+            ):
+                await runner.send("event", run_id="run-1",
+                                  event={**item, "run_id": "run-1", "sequence": index})
+            await wait_until(
+                lambda: len(self.controller.read_events(
+                    self.controller.runs["run-1"])) == 2)
+        async with FakeRunner(self.port) as restarted:
+            await self.registered(restarted)
+            await wait_until(lambda: self.controller.runs["run-1"].status == "lost")
+            await wait_until(lambda: len(self.samples()) == 1)
+        self.assertEqual([10.0], self.samples())
+
+    async def test_a_cancelled_or_failed_learn_leaves_the_run_for_later(self):
+        run = self.controller.runs.get("run-1")
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            await self.accepted_run(runner)
+            for index, item in enumerate(
+                passed_records("Argument validation", VALIDATION, [10.0]), 1
+            ):
+                await runner.send("event", run_id="run-1",
+                                  event={**item, "run_id": "run-1", "sequence": index})
+            await wait_until(
+                lambda: len(self.controller.read_events(
+                    self.controller.runs["run-1"])) == 2)
+        run = self.controller.runs["run-1"]
+        run.status, run.finished_at = "passed", "now"
+        # Cancelled while the records are read: nothing learned, nothing
+        # written, and the run is still waiting to be learned from.
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        read_events = self.controller.read_events
+
+        def blocked(target):
+            gate.wait(TIMEOUT_S)
+            return read_events(target)
+
+        with patch.object(self.controller, "read_events", blocked):
+            task = asyncio.create_task(self.controller.learn(run))
+            await asyncio.sleep(0.05)
+            task.cancel()
+            gate.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertFalse(run.learned_durations)
+        self.assertEqual([], self.samples())
+        self.assertFalse((self.results / STORE_FILE).exists())
+        # A record that cannot be written is reported, not raised.
+        with patch.object(self.controller, "_persist",
+                          side_effect=OSError("read-only file system")):
+            self.assertEqual(1, await self.controller.learn(run))
+        self.assertEqual([10.0], self.samples())
+        self.assertTrue(any("read-only file system" in line for line in self.logs))
 
     async def test_a_run_that_ended_in_an_error_teaches_too(self):
         async with FakeRunner(self.port) as runner:

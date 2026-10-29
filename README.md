@@ -1334,7 +1334,7 @@ Endpoints (JSON unless noted; `GET /` lists them):
 |---|---|
 | `GET /ui/` | the web GUI (HTML, `app.js`, `app.css`) |
 | `GET /api/refs` | `{"repository", "refs": [{"name", "kind", "commit"}], "fetched_at"}` from `git ls-remote` (`kind` is `default`, `branch` or `tag`); 503 if it cannot be listed |
-| `GET /api/plans[?target=HOST]` | every `<plan>.yaml` in `--plans-dir` with its suites, test names, per-test `estimated_s` (one invocation with the step's arguments, else null) and `per_board` (runs once per selected board), the suite total when every test has one, `per_board_tests`, and `runnable` (the plan's `runnable` flag; false for plans of planned tests and for a plan that does not load); a plan that does not load is listed with its `error`. With a `target`, `estimated_s` is what that host's own runs measured when enough of them did; `catalog_estimated_s`, `estimate_source` (`learned`, `catalog` or `none`), `estimate_samples` and `estimate_scaled` say which, and `stages` lists the build, preflight and flash durations learned for it (see [Learned durations](#learned-durations)). Without one, nothing is learned and the catalog estimate stands. A `target` that is not a host name is refused with 422 |
+| `GET /api/plans[?target=HOST]` | every `<plan>.yaml` in `--plans-dir` with its suites, test names, per-test `estimated_s` (one invocation with the step's arguments, else null) and `per_board` (runs once per selected board), the suite total when every test has one, `per_board_tests`, and `runnable` (the plan's `runnable` flag; false for plans of planned tests and for a plan that does not load); a plan that does not load is listed with its `error`. With a `target`, `estimated_s` is what that host's own runs measured when enough of them did; `catalog_estimated_s`, `estimate_source` (`learned`, `catalog` or `none`), `estimate_samples` and `estimate_scaled` say which, and `stages` lists the build, preflight and flash durations learned for it (see [Learned durations](#learned-durations)). Without one, nothing is learned and the catalog estimate stands. A `target` whose name is not a host name is refused with 422; a name no target has registered is answered with the catalog estimates and nothing learned |
 | `GET /api/targets`, `GET /api/targets/{host}` | registry: host, hostname, OS, Python, Ubertooth serials, last heartbeat, `online`/`offline`, connected, active run |
 | `POST /api/targets/{host}/runs` | start a run with the protocol `run` fields: `{"ref", "commit": null, "plan", "suite", "tests": [], "build": false}` (`commit`, optional, is the full commit the caller saw listed for `ref`); 201 with the run (including the `commit` sent to the runner), 409 busy, offline, rejected by the runner, or `ref` moved away from `commit`, 422 invalid, a ref not in `/api/refs` (full commit IDs are accepted), or a name listing several commits, 504 no answer |
 | `GET /api/runs[?target=HOST]` | runs, newest first |
@@ -1364,8 +1364,11 @@ test, which ends early or late for reasons that say nothing about how long
 the test takes. A run that failed still teaches what its passing tests took.
 Each run is counted once (`learned_durations` in its `run.json`), so a runner
 that reports the end again after a dropped connection does not double its
-samples; runs stored before this existed, and runs that end as `lost` (the
-runner never reported their end), are not mined.
+samples, and a run whose learning did not finish (the controller stopped in
+between) is taken when the controller next starts. A run that ends as `lost`,
+because its runner no longer has it, is mined for what its records do hold.
+Runs stored before any of this existed are left alone, so the store fills from
+the runs that follow rather than from everything on disk at once.
 
 A sample is keyed by the stage, the test name, the target host (a Linux host
 and a Mac differ, as do two Linux hosts), the coverage profile, and the value

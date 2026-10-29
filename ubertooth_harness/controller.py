@@ -883,8 +883,9 @@ class Controller:
 
         Reads only the controller's own copy of run.jsonl. Every sample is
         one test invocation (or stage) that passed, so a run that failed
-        still teaches what its passing tests took. Never raises: a learning
-        failure costs the countdown accuracy, nothing else.
+        still teaches what its passing tests took. Only a cancellation
+        leaves this method by raising: a learning failure costs the
+        countdown accuracy, nothing else.
 
         At most once per run, recorded in run.json: a runner whose connection
         drops as it reports the end reports it again after reconnecting, and
@@ -900,19 +901,30 @@ class Controller:
             run.learned_durations = True
             try:
                 events = await asyncio.to_thread(self.read_events, run)
-                # Learned into a copy and swapped in here, so a lookup
-                # serving an API request never reads a half-updated store.
+                # Learned into a copy, which the worker thread does not
+                # save: nothing is written until the claim, the store and
+                # the file change together below, so a cancellation here
+                # leaves no samples behind.
                 updated = self.estimates.copy()
                 kept = await asyncio.to_thread(
-                    updated.learn_from_run, events, host=run.target
+                    updated.learn_from_run, events, host=run.target, save=False
                 )
-                self.estimates = updated
-            except Exception as error:  # noqa: BLE001 - the run result stands
+            except BaseException as error:  # noqa: BLE001 - the run result stands
                 # Not learned after all: leave the run for another attempt.
                 run.learned_durations = False
+                if isinstance(error, asyncio.CancelledError):
+                    raise
                 self.log(f"run {run.run_id}: could not learn durations: {error}")
                 return 0
-        self._persist(run)
+            # Nothing awaits from here, so a cancellation cannot land
+            # between the file and the record of what is in it.
+            self.estimates = updated
+            try:
+                if kept:
+                    updated.save()  # logs its own failure, never raises
+                self._persist(run)
+            except OSError as error:
+                self.log(f"run {run.run_id}: learned durations, but {error}")
         if kept:
             self.log(f"run {run.run_id}: learned {kept} duration sample(s)")
         return kept
@@ -933,7 +945,10 @@ class Controller:
 
     async def monitor(self) -> None:
         """Mark targets offline after missed heartbeats; expire stale requests."""
-        await self.learn_pending()
+        try:
+            await self.learn_pending()
+        except Exception as error:  # noqa: BLE001 - the watchdog must run
+            self.log(f"could not learn from stored runs: {error}")
         while True:
             await asyncio.sleep(self.monitor_interval_s)
             self.check_heartbeats()

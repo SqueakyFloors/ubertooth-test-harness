@@ -29,7 +29,10 @@ divided by their own units), so a test timed at 3 s still estimates a 6 s
 run; failing that, the caller falls back to the catalog estimate. A sample
 more than ``OUTLIER_FACTOR`` times off the current median is dropped, but
 only once the median itself rests on ``MIN_SAMPLES`` samples, so one odd
-early run cannot lock out the good ones that follow.
+early run cannot lock out the good ones that follow. And when that many
+samples in a row are that far off, the test's own duration has changed (a
+slower host, new firmware, a changed step): the window is cleared and
+learned again, so no key stays stuck on a value the test no longer takes.
 """
 
 import dataclasses
@@ -213,6 +216,10 @@ class EstimateStore:
         self.outlier_factor = outlier_factor
         self.max_keys = max_keys
         self._samples: dict[Key, list[float]] = {}
+        # Samples dropped in a row as outliers, per key: enough of them in a
+        # row mean the test's duration has changed, not that the samples are
+        # wrong. Not persisted; a restart only asks for one more sample.
+        self._rejected: dict[Key, int] = {}
         self.outliers = 0
         self.updated_at: str | None = None
 
@@ -226,6 +233,7 @@ class EstimateStore:
 
     def read(self) -> None:
         self._samples = {}
+        self._rejected = {}
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except FileNotFoundError:
@@ -329,6 +337,7 @@ class EstimateStore:
             max_keys=self.max_keys,
         )
         other._samples = {key: list(values) for key, values in self._samples.items()}
+        other._rejected = dict(self._rejected)
         other.outliers = self.outliers
         other.updated_at = self.updated_at
         return other
@@ -354,11 +363,23 @@ class EstimateStore:
                 or value * self.outlier_factor < median
             ):
                 self.outliers += 1
+                rejected = self._rejected.get(key, 0) + 1
+                self._rejected[key] = rejected
+                if rejected < self.min_samples:
+                    self.log(
+                        f"estimates: dropped a {value:g}s outlier for "
+                        f"{key.stage} {key.name or key.host} (median {median:g}s)"
+                    )
+                    return False
+                # Not an outlier after all: the test itself now takes that
+                # long (a slower host, new firmware, a changed step), so
+                # the old window is stale and this sample starts a new one.
                 self.log(
-                    f"estimates: dropped a {value:g}s outlier for "
-                    f"{key.stage} {key.name or key.host} (median {median:g}s)"
+                    f"estimates: {key.stage} {key.name or key.host} now takes "
+                    f"about {value:g}s, not {median:g}s; starting again"
                 )
-                return False
+                samples.clear()
+        self._rejected.pop(key, None)
         samples.append(value)
         del samples[: -self.max_samples]
         return True
@@ -374,6 +395,7 @@ class EstimateStore:
                 key=lambda item: (len(self._samples[item[1]]), item[0]),
             )
             del self._samples[key]
+            self._rejected.pop(key, None)
             self.log(
                 f"estimates: {self.path.name} is full at {self.max_keys} keys; "
                 f"dropped {key.stage} {key.name or key.host}"
@@ -523,15 +545,19 @@ class EstimateStore:
                 if seconds is None:
                     continue
                 if stage == BUILD_STAGE:
-                    key = Key(BUILD_STAGE, "", host, _build_profile(opened[1]))
-                else:
-                    checks = _count_units(
-                        PREFLIGHT_UNITS,
-                        details.get("requested_checks")
-                        or opened[1].get("requested_checks"),
+                    kept += self.add(
+                        Key(BUILD_STAGE, "", host, _build_profile(opened[1])), seconds
                     )
-                    key = Key(PREFLIGHT_STAGE, "", host, "", checks)
-                kept += self.add(key, seconds)
+                    continue
+                checks = _count_units(
+                    PREFLIGHT_UNITS,
+                    details.get("requested_checks")
+                    or opened[1].get("requested_checks"),
+                )
+                # Preflight is only ever looked up for a number of checks,
+                # so a sample without one could never be read back.
+                if checks is not None:
+                    kept += self.add(Key(PREFLIGHT_STAGE, "", host, "", checks), seconds)
             elif kind == "flash_run_finished" and status == "passed":
                 # The flash runner times itself, so no bracketing record is
                 # needed: its summary carries the duration and the flashes.
