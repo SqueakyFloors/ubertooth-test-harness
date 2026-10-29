@@ -704,7 +704,9 @@ by the REST API and `/ws/live`.
   unestimated test shows elapsed time and says so. Estimates are per
   invocation; once the run's manifest record arrives, the checklist is its
   planned invocations on the target (`invocations` in `GET /api/runs/{id}`),
-  so `Ubertooth: each` counts every selected board.
+  so `Ubertooth: each` counts every selected board, and each invocation's
+  estimate is the one learned on that target (4a) when its runs have measured
+  it.
 - **History:** every run with ref, plan/suite, target, status,
   started/finished, a `report.md` link, and the failure summary from
   `GET /api/runs/{id}` (per failed phase or test: reason and last output
@@ -717,6 +719,49 @@ response carries a strict CSP (`default-src 'self'`, no inline script,
 `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer`, controller and
 runner strings are rendered with `textContent` only, and static files are
 served from memory by exact name.
+
+### 4a. Learned durations
+
+Implemented: `ubertooth_harness/learned.py`, used by the controller.
+
+The catalog's estimates are hand-calibrated on one machine, so the countdown
+drifts everywhere else. The controller learns the real durations from the runs
+it already stores. When a run ends it reads that run's `run.jsonl` and keeps
+
+- the wall time between `test_started` and `test_finished` of every invocation
+  that **passed**,
+- the build and preflight stages (`build_started`/`build_finished`,
+  `preflight_started`/`preflight_finished`) when they passed, and
+- each flash run's own `duration_s` when it passed,
+
+in `<results dir>/estimates.json`, replaced atomically. Nothing comes from
+the runner beyond the events it already sends, and a failed, skipped,
+cancelled or not-applicable test is never a sample: it ends early or late for
+reasons that say nothing about the test's duration. A run that failed still
+teaches what its passing tests took.
+
+**Key:** stage, test name, target host (an invocation's own host wins over
+the run's target), coverage profile, and the value of the scaling argument —
+`duration`, `capture duration`, `flashes`, or preflight's number of checks —
+so a 5 s capture and a 30 s capture are separate. A build with firmware is a
+key of its own.
+
+**Estimate:** the median of the key's last 10 samples once there are 3, so one
+run that queued behind a busy board does not move it. With fewer, the rate
+learned at the other durations of the same test is scaled to this one (each
+sample less the catalog's fixed part, divided by its own units); failing that,
+the caller falls back to the catalog estimate. A sample more than ten times
+off the current median is dropped, but only once the median rests on 3
+samples, so one odd early run cannot lock out the good ones.
+
+`GET /api/plans?target=HOST` and a run's `invocations` return the value with
+`estimate_source` (`learned`, `catalog`, `none`) and `estimate_samples`
+beside the unchanged `estimated_s`, plus `catalog_estimated_s`; learned build,
+preflight and flash durations come back as `stages`. Learning runs on a copy
+of the store in a worker thread and is swapped in when it finishes, so an API
+lookup never reads a half-updated store, and a learning failure costs the
+countdown accuracy and nothing else. Marking a learned estimate in the GUI
+("4s, from 10 runs") is the remaining step of issue #137.
 
 ---
 

@@ -52,11 +52,14 @@ from ubertooth_harness.gui import (
     GitRefSource,
     RefListError,
     failure_summary,
+    learned_stages,
     list_plans,
     load_assets,
     planned_invocations,
+    run_stage_estimates,
     security_headers,
 )
+from ubertooth_harness.learned import STORE_FILE, EstimateStore
 from ubertooth_harness.report import write_report
 from ubertooth_harness.protocol import (
     MAX_RUNNER_MESSAGE_BYTES,
@@ -348,6 +351,9 @@ class Controller:
         # Lists the refs a run may name; None refuses every run.
         self.ref_source = ref_source
         self.plans_dir = Path(plans_dir).expanduser()
+        # Durations learned from the runs stored here, kept beside them.
+        self.estimates = EstimateStore.load(self.results_dir / STORE_FILE, log=log)
+        self._learning = asyncio.Lock()
         # The listening port; the request guard rejects everything until set.
         self.port: int | None = None
         self.targets: dict[str, Target] = {}
@@ -848,9 +854,37 @@ class Controller:
                 self._publish_target(target)
             self._publish_run(run)
             self.log(f"run {run.run_id} on {target.host}: {run.status}")
+            await self.learn(run)
         elif kind == "protocol_error":
             target.last_runner_protocol_error = message["reason"]
             self.log(f"{target.host} rejected a controller message: {message['reason']}")
+
+    # ----- learned durations -----------------------------------------------
+
+    async def learn(self, run: Run) -> int:
+        """Take this finished run's clean durations into the estimate store.
+
+        Reads only the controller's own copy of run.jsonl. Every sample is
+        one test invocation (or stage) that passed, so a run that failed
+        still teaches what its passing tests took. Never raises: a learning
+        failure costs the countdown accuracy, nothing else.
+        """
+        try:
+            async with self._learning:
+                events = await asyncio.to_thread(self.read_events, run)
+                # Learned into a copy and swapped in here, so a lookup
+                # serving an API request never reads a half-updated store.
+                updated = self.estimates.copy()
+                kept = await asyncio.to_thread(
+                    updated.learn_from_run, events, host=run.target
+                )
+                self.estimates = updated
+        except Exception as error:  # noqa: BLE001 - the run result stands
+            self.log(f"run {run.run_id}: could not learn durations: {error}")
+            return 0
+        if kept:
+            self.log(f"run {run.run_id}: learned {kept} duration sample(s)")
+        return kept
 
     async def monitor(self) -> None:
         """Mark targets offline after missed heartbeats; expire stale requests."""
@@ -1175,12 +1209,18 @@ ENDPOINTS = {
     "GET /": "this summary (a browser asking for HTML is sent to /ui/)",
     "GET /ui/": "web GUI",
     "GET /api/refs": "branches and tags of the Ubertooth repository (git ls-remote)",
-    "GET /api/plans": "test plans with suites, tests and duration estimates",
+    "GET /api/plans": (
+        "test plans with suites, tests and duration estimates "
+        "(?target=HOST uses the durations learned on that target)"
+    ),
     "GET /api/targets": "registered targets",
     "GET /api/targets/{host}": "one target",
     "POST /api/targets/{host}/runs": "start a run: {ref, commit, plan, suite, tests, build}",
     "GET /api/runs": "runs, newest first (?target=HOST)",
-    "GET /api/runs/{run_id}": "one run with its events, failure summary and planned invocations",
+    "GET /api/runs/{run_id}": (
+        "one run with its events, failure summary, planned invocations and "
+        "learned stage estimates"
+    ),
     "GET /api/runs/{run_id}/report.md": "the run's report",
     "POST /api/runs/{run_id}/cancel": "cancel an active run: {reason}",
     "WS /ws/live": "live target and run updates (?run_id=ID adds that run's events)",
@@ -1252,9 +1292,19 @@ def create_app(controller: Controller):
         return await controller.list_refs()
 
     @app.get("/api/plans")
-    async def get_plans():
-        plans = await asyncio.to_thread(list_plans, controller.plans_dir)
-        return {"plans": plans}
+    async def get_plans(target: str | None = None):
+        # With a target, each test's estimate is what that host's own
+        # finished runs measured; the stages it has learned come with it.
+        if target is not None and not valid_identifier(target):
+            raise ControllerError("target must be a registry host name", 422)
+        estimates = controller.estimates
+        plans = await asyncio.to_thread(
+            list_plans, controller.plans_dir, estimates=estimates, target=target
+        )
+        return {
+            "plans": plans, "target": target,
+            "stages": learned_stages(estimates, target),
+        }
 
     @app.get("/api/targets")
     async def list_targets():
@@ -1289,9 +1339,13 @@ def create_app(controller: Controller):
         run = controller.get_run(run_id)
         events = await asyncio.to_thread(controller.read_events, run)
         view = run.view()
+        estimates = controller.estimates
         return {
             "run": view, "events": events, "failures": failure_summary(view, events),
-            "invocations": planned_invocations(events),
+            "invocations": planned_invocations(events, estimates=estimates),
+            "stages": run_stage_estimates(
+                estimates, events, run.target, build=run.build
+            ),
         }
 
     @app.get("/api/runs/{run_id}/report.md")

@@ -24,6 +24,16 @@ import time
 from typing import Awaitable, Callable, Mapping, Sequence
 
 from ubertooth_harness.catalog import CatalogError, TestCatalog, builtin_catalog
+from ubertooth_harness.learned import (
+    BUILD_STAGE,
+    CATALOG,
+    LEARNED,
+    PREFLIGHT_STAGE,
+    PREFLIGHT_UNITS,
+    RUN_STAGES,
+    UNKNOWN,
+    EstimateStore,
+)
 from ubertooth_harness.manifest import ManifestError, _safe_repository
 from ubertooth_harness.plan import PlanError, TestStep, load_plan
 from ubertooth_harness.protocol import _git_ref, _name
@@ -237,21 +247,51 @@ class GitRefSource:
 # ----- plans ---------------------------------------------------------------
 
 
-def step_estimate_s(step: TestStep, catalog: TestCatalog | None = None) -> float | None:
-    """Seconds one invocation of a step is expected to run (catalog estimate).
+def _estimate(catalog: TestCatalog, test_name, arguments) -> float | None:
+    """The catalog's seconds for one invocation, or None.
 
     None for a test the catalog does not know, arguments it refuses, or a
     test with neither an estimate nor a duration argument.
     """
-    return _estimate(catalog or builtin_catalog(), step.test_name, step.arguments)
-
-
-def _estimate(catalog: TestCatalog, test_name, arguments) -> float | None:
     try:
         definition = catalog.get(test_name)
         return definition.estimated_seconds(definition.normalize_arguments(arguments))
     except (CatalogError, TypeError, ValueError):
         return None
+
+
+def estimate_fields(
+    catalog: TestCatalog,
+    test_name,
+    arguments,
+    *,
+    estimates: EstimateStore | None = None,
+    host: str | None = None,
+) -> dict:
+    """One invocation's estimate: the learned one when there is one.
+
+    ``estimated_s`` is the best estimate, ``catalog_estimated_s`` always the
+    hand-calibrated one, and ``estimate_source``/``estimate_samples`` say
+    where the value came from (``learned`` with its sample count, ``catalog``,
+    or ``none`` when neither knows). Without a target host (the plan listing
+    with no ``?target=``) nothing is learned and the catalog value stands, so
+    a client that ignores the new fields sees exactly what it did before.
+    """
+    catalog_s = _estimate(catalog, test_name, arguments)
+    learned = (
+        estimates.lookup_test(catalog, test_name, arguments, host)
+        if estimates is not None and host else None
+    )
+    if learned is not None:
+        return {
+            "estimated_s": learned.seconds, "catalog_estimated_s": catalog_s,
+            "estimate_source": LEARNED, "estimate_samples": learned.samples,
+        }
+    return {
+        "estimated_s": catalog_s, "catalog_estimated_s": catalog_s,
+        "estimate_source": CATALOG if catalog_s is not None else UNKNOWN,
+        "estimate_samples": 0,
+    }
 
 
 def _per_board(catalog: TestCatalog, step: TestStep) -> bool:
@@ -263,7 +303,12 @@ def _per_board(catalog: TestCatalog, step: TestStep) -> bool:
     return any(step.arguments.get(role) == "each" for role in roles)
 
 
-def list_plans(plans_dir: Path) -> list[dict]:
+def list_plans(
+    plans_dir: Path,
+    *,
+    estimates: EstimateStore | None = None,
+    target: str | None = None,
+) -> list[dict]:
     """Every ``<name>.yaml`` plan with its suites, tests and estimates.
 
     A plan that does not load is listed with its error and no suites.
@@ -272,6 +317,10 @@ def list_plans(plans_dir: Path) -> list[dict]:
     Estimates are per invocation: a ``per_board`` test runs once for every
     board it selects on the target, which only the run's plan (its manifest)
     counts; see planned_invocations.
+
+    With a ``target`` host, each test's ``estimated_s`` is what that host's
+    own finished runs measured, when enough of them did (see
+    ``estimate_fields``); without one it is the catalog estimate, as before.
     """
     plans = []
     try:
@@ -293,21 +342,22 @@ def list_plans(plans_dir: Path) -> list[dict]:
             tests = [
                 {
                     "name": step.test_name,
-                    "estimated_s": step_estimate_s(step, catalog),
+                    **estimate_fields(catalog, step.test_name, step.arguments,
+                                      estimates=estimates, host=target),
                     "per_board": _per_board(catalog, step),
                 }
                 for step in steps
             ]
-            estimates = [test["estimated_s"] for test in tests]
+            seconds = [test["estimated_s"] for test in tests]
             suites.append({
                 "name": suite,
                 "tests": tests,
                 # Only when every test has one; build and preflight excluded.
                 "estimated_s": (
-                    round(sum(estimates), 1)
-                    if estimates and None not in estimates else None
+                    round(sum(seconds), 1)
+                    if seconds and None not in seconds else None
                 ),
-                "unestimated_tests": estimates.count(None),
+                "unestimated_tests": seconds.count(None),
                 "per_board_tests": sum(test["per_board"] for test in tests),
             })
         plans.append({"name": path.stem, "title": plan.name, "error": None,
@@ -315,8 +365,27 @@ def list_plans(plans_dir: Path) -> list[dict]:
     return plans
 
 
+def _manifest_details(events: Sequence[Mapping]) -> Mapping:
+    """The details of the run's ``manifest`` record ({} until it arrives)."""
+    details: Mapping = {}
+    for event in events:
+        if isinstance(event, Mapping) and event.get("event_type") == "manifest":
+            found = event.get("details")
+            if isinstance(found, Mapping):
+                details = found
+    return details
+
+
+def _manifest(events: Sequence[Mapping]) -> Mapping | None:
+    manifest = _manifest_details(events).get("manifest")
+    return manifest if isinstance(manifest, Mapping) else None
+
+
 def planned_invocations(
-    events: Sequence[Mapping], catalog: TestCatalog | None = None
+    events: Sequence[Mapping],
+    catalog: TestCatalog | None = None,
+    *,
+    estimates: EstimateStore | None = None,
 ) -> list[dict] | None:
     """The run's invocations on its target, in order, each with its estimate.
 
@@ -324,14 +393,13 @@ def planned_invocations(
     planner compiled for the target host: one invocation per selected board
     for ``Ubertooth: each``. None until that record arrives (or if it is
     malformed); the live view then lists the plan's tests instead.
+
+    Each invocation names its own host, so with an ``estimates`` store the
+    estimate is what that host's finished runs measured for the same test,
+    coverage and duration (``estimate_fields``).
     """
-    manifest = None
-    for event in events:
-        if isinstance(event, Mapping) and event.get("event_type") == "manifest":
-            details = event.get("details")
-            if isinstance(details, Mapping):
-                manifest = details.get("manifest")
-    if not isinstance(manifest, Mapping):
+    manifest = _manifest(events)
+    if manifest is None:
         return None
     invocations = manifest.get("invocations")
     if not isinstance(invocations, list):
@@ -341,18 +409,66 @@ def planned_invocations(
     for invocation in invocations:
         if not isinstance(invocation, Mapping):
             return None
-        test_name = invocation.get("test_name")
-        arguments = invocation.get("arguments")
+        host = invocation.get("host")
         planned.append({
             "invocation_id": _text(invocation.get("id")),
-            "test_name": _text(test_name),
-            "estimated_s": (
-                _estimate(catalog, test_name, arguments)
-                if isinstance(test_name, str) and isinstance(arguments, Mapping)
-                else None
+            "test_name": _text(invocation.get("test_name")),
+            **estimate_fields(
+                catalog, invocation.get("test_name"), invocation.get("arguments"),
+                estimates=estimates,
+                host=host if isinstance(host, str) else None,
             ),
         })
     return planned
+
+
+def run_stage_estimates(
+    estimates: EstimateStore | None,
+    events: Sequence[Mapping],
+    host: str | None,
+    *,
+    build: bool = False,
+) -> list[dict]:
+    """What the run's build and preflight are expected to take, if known.
+
+    Only learned: neither stage has a catalog estimate, so a target that has
+    not finished a run of its own gets an empty list. Preflight scales with
+    its number of checks, which the run's manifest record gives; a build is
+    listed as soon as the run requests one.
+    """
+    if estimates is None or not host:
+        return []
+    checks = _manifest_details(events).get("requested_preflight_checks")
+    if isinstance(checks, bool) or not isinstance(checks, int) or checks <= 0:
+        checks = None
+    wanted: list[tuple[str, str, object]] = []
+    if build:
+        # The runner builds host tools only, so the firmware variant is not
+        # asked for here; a stored one is still listed by /api/plans.
+        wanted.append((BUILD_STAGE, "host tools", None))
+    if checks is not None:
+        wanted.append((PREFLIGHT_STAGE, "", {"argument": PREFLIGHT_UNITS,
+                                             "value": checks}))
+    stages = []
+    for stage, profile, units in wanted:
+        learned = estimates.lookup_stage(stage, host, profile=profile, units=units)
+        if learned is None:
+            continue
+        stages.append({
+            "stage": stage, "profile": profile, "units": units,
+            "estimated_s": learned.seconds, "estimate_source": LEARNED,
+            "estimate_samples": learned.samples,
+        })
+    return stages
+
+
+def learned_stages(
+    estimates: EstimateStore | None, host: str | None
+) -> list[dict]:
+    """Every build, preflight and flash duration learned for one host."""
+    if estimates is None or not host:
+        return []
+    return estimates.entries(host=host, stages=RUN_STAGES)
 
 
 # ----- failure summary -----------------------------------------------------
