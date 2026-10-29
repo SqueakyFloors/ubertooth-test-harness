@@ -54,6 +54,7 @@ import json
 import os
 import re
 import socket
+import stat
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -311,18 +312,46 @@ def _stamp(fd: int, record: Mapping | None) -> None:
         os.pwrite(fd, data, 0)
 
 
+def _file_identity(path: Path) -> tuple[int, int, int] | None:
+    """(mode, device, inode) of path, or None when it does not exist yet."""
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return (info.st_mode, info.st_dev, info.st_ino)
+
+
+def _released(held: list, message: str) -> "LeaseError":
+    """Drop what this attempt already holds, then give the error to raise.
+
+    Taking locks is all or nothing, so nothing may stay locked when the
+    attempt gives up.
+    """
+    LeaseSet(list(held)).release()
+    held.clear()
+    return LeaseError(message)
+
+
 def _try_lock(path: Path, mode: int, *, flags: int = os.O_RDWR) -> int | None:
     # A lock file is read by whoever waits for it, so it is 0644 whatever the
-    # umask says; an existing file keeps the mode it has.
-    try:
-        fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o644)
-    except FileExistsError:
-        fd = os.open(path, flags)
-    else:
+    # umask says; an existing file keeps the mode it has. Another process can
+    # create or remove the file between the two opens, so try a few times.
+    for _attempt in range(5):
+        try:
+            fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            try:
+                fd = os.open(path, flags)
+            except FileNotFoundError:
+                continue  # it was removed again; create it
+            break
         try:
             os.fchmod(fd, 0o644)
         except OSError:
             pass
+        break
+    else:
+        fd = os.open(path, flags | os.O_CREAT, 0o644)
     try:
         fcntl.flock(fd, mode | fcntl.LOCK_NB)
     except OSError as error:
@@ -420,26 +449,57 @@ def acquire(
         held: list[Lease] = []
         busy: tuple[Board, Path, bool] | None = None
         where = root
+        files: dict[tuple[int, int], Path] = {}
         try:
             for board, path, external in ordered:
                 where = path.parent if external else root
+                existing = _file_identity(path)
+                if existing is not None:
+                    if external and not stat.S_ISREG(existing[0]):
+                        raise _released(
+                            held,
+                            f"{board.alias}: its external board lock {path} is not "
+                            "a regular file; point the template at the lab's lock "
+                            "files",
+                        )
+                    # flock is per open file description, so two paths that
+                    # are one file (a symlink, a hard link, one path twice)
+                    # would make the process wait for its own lock.
+                    if existing[1:] in files:
+                        raise _released(
+                            held,
+                            f"{board.alias}: its lock file {path} is the same file "
+                            f"as {files[existing[1:]]}; every board needs its own "
+                            "lock file",
+                        )
                 # An external file may belong to another user: read access
                 # is enough for flock, and it is never written.
                 try:
                     fd = _try_lock(
-                        path, fcntl.LOCK_EX, flags=os.O_RDONLY if external else os.O_RDWR
+                        path, fcntl.LOCK_EX,
+                        # O_NONBLOCK: a lab path that is a FIFO must not make
+                        # the open itself wait forever. The check below then
+                        # refuses anything that is not a regular file.
+                        flags=(
+                            os.O_RDONLY | os.O_NONBLOCK if external else os.O_RDWR
+                        ),
                     )
                 except PermissionError as error:
+                    if not external:
+                        raise
                     # Waiting cannot fix this, so say which board and file.
-                    raise LeaseError(
+                    raise _released(
+                        held,
                         f"{board.alias}: its external board lock {path} cannot be "
                         f"opened for reading ({error.strerror}); the harness needs "
-                        "read access to the lab's lock file"
+                        "read access to the lab's lock file",
                     ) from error
                 if fd is None:
                     busy = (board, path, external)
                     break
                 held.append(Lease(board, path, fd, holder, external=external))
+                info = os.fstat(fd)
+                files[(info.st_dev, info.st_ino)] = path
                 if not external:
                     _stamp(fd, dict(holder, resource=board.alias))
         except OSError as error:

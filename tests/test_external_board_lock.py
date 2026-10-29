@@ -288,6 +288,44 @@ class ExternalLockTests(_Fixture):
             os.umask(previous)
         self.assertEqual(0o644, stat.S_IMODE(self.ext(A).stat().st_mode))
 
+    def test_a_path_that_is_not_a_regular_file_is_refused(self):
+        # A FIFO would make the open itself wait forever.
+        os.mkfifo(self.ext(A))
+        with self.assertRaises(leases.LeaseError) as caught:
+            self.acquire([A])
+        self.assertIn("is not a regular file", str(caught.exception))
+
+    def test_two_paths_that_are_one_file_are_refused(self):
+        # A hard link to another board's file: flock is per open file
+        # description, so the process would wait for its own lock.
+        self.ext(A).write_text("")
+        os.link(self.ext(A), self.ext(B))
+        with self.assertRaises(leases.LeaseError) as caught:
+            self.acquire([A, B])
+        self.assertIn("same file", str(caught.exception))
+        self.assertFalse(_locked_elsewhere(self.ext(A)))  # nothing left held
+
+    def test_an_external_lock_hard_linked_to_a_lease_file_is_refused(self):
+        self.lease_dir.mkdir(parents=True, exist_ok=True)
+        own = self.lease_dir / f"{A.key}.lock"
+        own.write_text("")
+        os.link(own, self.ext(A))
+        with self.assertRaises(leases.LeaseError) as caught:
+            self.acquire([A])
+        self.assertIn("same file", str(caught.exception))
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads every file")
+    def test_an_unreadable_lease_file_is_not_called_an_external_lock(self):
+        self.lease_dir.mkdir(parents=True, exist_ok=True)
+        own = self.lease_dir / f"{A.key}.lock"
+        own.write_text("")
+        own.chmod(0o000)
+        with self.assertRaises(leases.LeaseError) as caught:
+            self.acquire([A])
+        self.assertIn("cannot lease boards in", str(caught.exception))
+        self.assertNotIn("external board lock", str(caught.exception))
+        self.assertFalse(_locked_elsewhere(self.ext(A)))  # nothing left held
+
     @unittest.skipIf(os.geteuid() == 0, "root reads every file")
     def test_an_unopenable_external_file_stops_the_command_at_once(self):
         self.ext(A).write_text("")
