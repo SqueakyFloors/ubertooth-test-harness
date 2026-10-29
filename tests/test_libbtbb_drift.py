@@ -276,6 +276,9 @@ class ForkPinRefTests(unittest.TestCase):
         self.first, self.second = (
             self._commit(self.libbtbb, "lell.c", text) for text in ("one\n", "two\n")
         )
+        # A branch and a tag that both resolve here, so a pin naming one is
+        # refused for being a name, not for being unresolvable.
+        _git(self.libbtbb, "tag", "v1.0")
         self.fork = root / "ubertooth"
         self.fork.mkdir()
         _git(self.fork, "init", "-q", "-b", "main")
@@ -329,18 +332,24 @@ class ForkPinRefTests(unittest.TestCase):
             with self.subTest(ubertooth=commit[:7]):
                 with self.assertRaises(cli.ManifestError) as raised:
                     self._resolve(commit)
-                message = str(raised.exception)
-                self.assertIn("--libbtbb-ref fork-pin", message)
-                self.assertIn(f"Ubertooth {commit[:7]}", message)
-                self.assertIn("sets no LIBBTBB_REF", message)
-                self.assertIn("name a libbtbb commit", message)
+                self._assertRefusal(raised.exception, commit,
+                                    "sets no LIBBTBB_REF")
 
     def test_a_pin_that_is_not_a_commit_says_so(self):
         variable = self._commit(self.fork, "install.sh", 'LIBBTBB_REF="${REF}"\n')
         with self.assertRaises(cli.ManifestError) as raised:
             self._resolve(variable)
-        self.assertIn("--libbtbb-ref fork-pin", str(raised.exception))
-        self.assertIn("not a literal commit", str(raised.exception))
+        self._assertRefusal(raised.exception, variable, "not a literal commit")
+
+    def _assertRefusal(self, error, ubertooth_commit: str, problem: str) -> None:
+        """Every refusal names the option, the commit, the problem, and both
+        ways to name a libbtbb ref instead."""
+        message = str(error)
+        self.assertIn("--libbtbb-ref fork-pin", message)
+        self.assertIn(f"Ubertooth {ubertooth_commit[:7]}", message)
+        self.assertIn(problem, message)
+        self.assertIn("name a libbtbb ref with --libbtbb-ref", message)
+        self.assertIn("redeploy the runner", message)
 
     def test_a_pin_that_can_move_is_refused_not_resolved(self):
         # fork-pin is a promise of one exact commit, so a branch or tag name
@@ -348,12 +357,14 @@ class ForkPinRefTests(unittest.TestCase):
         for name in ("master", "v1.0"):
             with self.subTest(pin=name):
                 moving = self._commit(self.fork, "install.sh", _install_sh(name))
+                self.assertIsNotNone(
+                    _git(self.libbtbb, "rev-parse", "--verify", f"{name}^{{commit}}"),
+                    "the name must resolve, so the refusal is about the name",
+                )
                 with self.assertRaises(cli.ManifestError) as raised:
                     self._resolve(moving)
-                message = str(raised.exception)
-                self.assertIn("--libbtbb-ref fork-pin", message)
-                self.assertIn(f"sets LIBBTBB_REF={name}", message)
-                self.assertIn("not a commit", message)
+                self._assertRefusal(raised.exception, moving,
+                                    f"sets LIBBTBB_REF={name}, which is not a commit")
 
     def test_a_pin_the_libbtbb_checkout_lacks_is_reported(self):
         missing = self._commit(self.fork, "install.sh", _install_sh("b" * 40))

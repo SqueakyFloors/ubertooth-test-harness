@@ -74,8 +74,7 @@ def parse_install_sh(text: str) -> ForkPin | None:
         return None
     if "$" in ref:
         raise PinUnreadable(
-            f"LIBBTBB_REF in install.sh is not a literal commit ({ref}); "
-            "it cannot be compared"
+            f"LIBBTBB_REF in install.sh is not a literal commit ({ref})"
         )
     return ForkPin(url=found.get("LIBBTBB_URL"), ref=ref)
 
@@ -85,11 +84,15 @@ def fork_pin_at(source: Path | str, ref: str) -> ForkPin | None:
 
     None covers a commit without install.sh or without the pin (fork commits
     from before the pin landed); git errors other than a missing path, and a
-    pin that is not a literal ref, raise RuntimeError.
+    pin that is not a literal ref, raise RuntimeError. Git runs under
+    ``LC_ALL=C``, since a missing path is told from a failure by its wording.
     """
     result = subprocess.run(
         ["git", "-C", str(source), "show", f"{ref}:install.sh"],
         capture_output=True, text=True, check=False,
+        # A missing path is told from a git failure by git's own wording, so
+        # the message must not be translated.
+        env={**os.environ, "LC_ALL": "C"},
     )
     if result.returncode != 0:
         if "does not exist" in result.stderr or "exists on disk, but not in" in result.stderr:

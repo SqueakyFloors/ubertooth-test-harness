@@ -676,10 +676,11 @@ builds exactly that libbtbb, so each commit is tested against the libbtbb it
 asks for. The run prints the commit it took (`note: libbtbb ref 'fork-pin'
 is ...`) and records it in the manifest as that commit, named `fork-pin`, so
 report.md shows `` `fork-pin` at `<commit>` ``. It is refused, naming the
-Ubertooth commit and asking for a libbtbb ref instead, when that commit has
-no `install.sh` or sets no `LIBBTBB_REF` (an older fork commit), when the pin
-is built from a shell variable, and when it is a name that can move rather
-than a commit, since `fork-pin` is a promise of one exact commit. Every run
+Ubertooth commit, the problem, and both ways to name a libbtbb ref instead
+(the option, or a redeploy of the runner), when that commit has no
+`install.sh` or sets no `LIBBTBB_REF` (an older fork commit), when the pin is
+built from a shell variable, and when it is a name that can move rather than
+a commit, since `fork-pin` is a promise of one exact commit. Every run
 resolves it, build or not, because the libbtbb a run records is checked
 against the tools' own version line. This is what a long-lived runner is
 deployed with, so a pin bump on the fork reaches it without a redeploy;
