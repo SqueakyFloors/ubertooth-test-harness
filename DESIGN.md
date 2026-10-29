@@ -750,8 +750,10 @@ controller of its own: it writes two launchd LaunchAgents to
 `com.ubertooth-harness.tunnel`, and loads them with `launchctl bootstrap
 gui/$UID`. The tunnel is `ssh -N -o BatchMode=yes -L
 127.0.0.1:PORT:127.0.0.1:PORT [-J JUMP] HOST`, so the Mac runner dials a
-loopback controller as any other runner does; the SSH key is the access
-control and the Mac opens no listener. Both agents have `RunAtLoad` and
+loopback controller as any other runner does; the key that forward uses is the
+access control, and the Mac is not reachable from the network (the forward
+binds its loopback, so local users there can reach the controller, the same
+trust boundary as `ssh -R` to a target). Both agents have `RunAtLoad` and
 `KeepAlive` and log under the harness data directory; the runner's
 `ExitTimeOut` leaves time to cancel a run and restore its boards. The tunnel's
 host, jump host and port come from the options, the environment, or the

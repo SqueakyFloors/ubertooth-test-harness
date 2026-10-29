@@ -1546,10 +1546,13 @@ on the lab host is easier than a tunnel; it needs no harness changes.
 Tests that need macOS run on a Mac with its own Ubertooths, and the plans,
 history and GUI stay in the one controller on the Linux host. That controller
 binds `127.0.0.1` and has no authentication, so the Mac reaches it through an
-SSH local forward that launchd keeps up: the SSH key is the access control,
-and nothing on the Mac listens for the network. Run `deploy.sh` there as the
-user who is logged in to the Mac's desktop, with a `hardware.yaml` that
-registers that host and its boards:
+SSH local forward that launchd keeps up: the key that forward uses is the
+access control, and nothing on the Mac is reachable from the network. The
+forward does bind the Mac's own loopback, so every local user and process
+there can drive the controller through it, exactly as the `ssh -R` case in
+[Controller](#controller) describes; run it only on a Mac whose local users
+you trust. Run `deploy.sh` there as the user who is logged in to the Mac's
+desktop, with a `hardware.yaml` that registers that host and its boards:
 
 ```sh
 scripts/deploy.sh --runner-host Host_Mac --ubertooth-source ~/ubertooth \
@@ -1562,7 +1565,9 @@ them with `launchctl bootstrap gui/$(id -u)`. Both have `RunAtLoad` and
 `KeepAlive`, so launchd starts them at login and restarts them whenever they
 exit (no faster than every 10 s), and both write to
 `${XDG_DATA_HOME:-~/.local/share}/ubertooth-harness/logs/` as `runner.log`,
-`runner.err.log`, `tunnel.log` and `tunnel.err.log`. The runner's
+`runner.err.log`, `tunnel.log` and `tunnel.err.log` (nothing rotates those
+files, and a tunnel that cannot connect writes a line every 10 s, so look
+there first when a target does not come online). The runner's
 `ExitTimeOut` is 180 s, so a stop can cancel an active run and restore its
 boards before launchd kills it. A LaunchAgent inherits almost no environment,
 so each gets a `PATH` of `/opt/homebrew/bin:/usr/local/bin` and the system
