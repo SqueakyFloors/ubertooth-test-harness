@@ -11,6 +11,7 @@ from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
     COMPILE_INFO_PATTERN,
     FIRMWARE_PATTERN,
+    HOST_VERSION_TIMEOUT_S,
     PART_ID_PATTERN,
     serial_pattern,
 )
@@ -465,6 +466,7 @@ def _host_cli_surface_cases(_arguments, _resources, _resource_identities):
             f"{tool} -V",
             (tool, "-V"),
             (_HOST_VERSION_PATTERN,),
+            timeout_s=HOST_VERSION_TIMEOUT_S,
             expected_returncodes=HOST_VERSION_RETURNCODES,
         )
         for tool in ("ubertooth-util", "ubertooth-rx", "ubertooth-tx",
@@ -747,6 +749,7 @@ def builtin_catalog() -> TestCatalog:
             MappingProxyType({"hosts": HOSTS}),
             MappingProxyType({}),
             ("ubertooth-util", "-V"),
+            timeout_s=HOST_VERSION_TIMEOUT_S,
             output_pattern=_HOST_VERSION_PATTERN,
             expected_returncodes=HOST_VERSION_RETURNCODES,
         ),

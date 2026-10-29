@@ -3,6 +3,7 @@ import re
 import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 
@@ -519,6 +520,15 @@ class HostVersionCheckTests(unittest.TestCase):
         result = self.result(self.OLD_V_ANSWER, returncode=1)
 
         self.assertTrue(self.check().needs_fallback(result))
+
+    def test_a_command_killed_at_its_deadline_is_not_asked_again(self):
+        # The older `-V` reads a board, so it can hang on one; answering the
+        # host version on `-H` afterwards would hide that.
+        timed_out = replace(self.result("", returncode=124), timed_out=True)
+
+        check = self.check()
+        self.assertFalse(check.needs_fallback(timed_out))
+        self.assertIn("timed out", check.result_failure(timed_out))
 
     def test_a_wrong_revision_is_reported_rather_than_asked_again(self):
         other = self.V_ANSWER.replace("libubertooth 1.1 (git-test)",

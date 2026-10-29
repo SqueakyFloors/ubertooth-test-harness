@@ -33,7 +33,8 @@ Harness-wide checks that use the CLIs:
 
 - **Preflight** (every run): the `Host tools version:` line of
   `ubertooth-util -V` must match the resolved host sources; forks before the
-  one `-V` answer (ubertooth#813) are asked `-H` instead. For each selected board, `ubertooth-util -U <serial>` runs `-v`
+  one `-V` answer (ubertooth#813) are asked `-H` instead, there and in the
+  build's verify step only: every other check wants this tree's tools. For each selected board, `ubertooth-util -U <serial>` runs `-v`
   (firmware revision and API), `-V`, and `-s`.
 - **Guards** (stateful tests): every other registered board on the host is read
   before and after the test, with queries only: `ubertooth-util -v -V -C -a -z -d`
@@ -132,7 +133,7 @@ Combinations to test:
 | `-f` | follow connections | Covered | BLE CRC transitions (smoke: CRC on, channel 37; comprehensive: every CRC value × channel and capture format). Exclusive topology runs it without `-U`. Following a real connection is not checked (needs a peer) |
 | `-n` | advertisements only | Covered | BLE CRC transitions and capture cases (smoke, comprehensive). Packet content is not checked. Raw receive (comprehensive): `-n -A37 -q` after a `dump -d` captures no basic-rate packet (every packet on RF channel 0; [ubertooth#318](https://github.com/SqueakyFloors/ubertooth/issues/318)) |
 | `-p` | promiscuous | Partial | BLE settings (comprehensive): a bounded receive-only run, then `-S`, resets LEDs, channel 2441 MHz, and squelch -120 (PA kept); access address and CRC are restored afterwards. BLE mode conflicts (release). Following a connection needs a peer |
-| `-a[addr]` | get/set access address | Covered | BLE settings (smoke: set/read back, attached and as the next word; comprehensive: reset by `util -r`, `-a -v` reports both, and `-azzzz` is refused with no change; [ubertooth#171](https://github.com/SqueakyFloors/ubertooth/issues/171), fixed in `09e9a46`). `-a zzzz` rejected and `-a -` refused as a stray: Argument validation (comprehensive) |
+| `-a[addr]` | get/set access address | Covered | BLE settings (smoke: set/read back, attached and as the next word; comprehensive: reset by `util -r`, `-a -k` reports both, and `-azzzz` is refused with no change; [ubertooth#171](https://github.com/SqueakyFloors/ubertooth/issues/171), fixed in `09e9a46`). `-a zzzz` rejected and `-a -` refused as a stray: Argument validation (comprehensive) |
 | `-s<mac>` | faux peripheral mode | Hard | Transmits RF; needs a central peer |
 | `-t<mac[/mask]>`, `-tnone` | set/unset follow target | Partial | Set, masked, and cleared: BLE settings (smoke); malformed MAC rejected: Argument validation. The filter itself needs a peer |
 | `-i` / `-j` | interfere once (`-j` alias) | Hard | Jams a live connection (transmits RF) |
@@ -148,14 +149,14 @@ Combinations to test:
 Combinations to test:
 
 - `-f`, `-n`, `-p`: any two or all three are rejected: Covered (BLE mode conflicts, release).
-- `-v[01]` applied after the mode starts, overriding an opposite preset: Covered (smoke, comprehensive).
-- Repeated `-v` is last-wins: Covered (comprehensive).
+- `-k[01]` applied after the mode starts, overriding an opposite preset: Covered (smoke, comprehensive).
+- Repeated `-k` is last-wins: the case runs (comprehensive) but expects behavior the fork now refuses: [#160](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/160).
 - Repeated capture options are first-wins and the extra file is never created (`-r -r`, `-q -c`, `-c -q`): Covered (comprehensive).
 - `-r` together with `-q` (separate handles): both files written: Covered (comprehensive). `-r` with `-c`: Covered (comprehensive).
 - Capture with each CRC value and mode: Covered (comprehensive).
 - `-i`/`-I` without `-f`/`-p`: refused before any device is opened since fork `e4f1dc5` (fork #377; it was accepted and ignored): Not covered. Hard: with a mode it transmits.
 - `-a`/`-s` with `-f`, `-n` or `-p`: refused before any device is opened since fork `e4f1dc5`: Not covered.
-- `-a`/`-v` get and set without a mode do not start sniffing: Covered (BLE settings); `-a -v` reports both (comprehensive).
+- `-a`/`-k` get and set without a mode do not start sniffing: Covered (BLE settings); `-a -k` reports both (comprehensive).
 - `-A` with `-p` or `-f` after a follow hop: Not covered (needs a peer).
 
 ## ubertooth-debug

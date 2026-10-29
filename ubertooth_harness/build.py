@@ -347,6 +347,19 @@ def _host_version_matches(plan: BuildPlan, text: str) -> bool:
     )
 
 
+def _host_version_line(text: str) -> str:
+    """The one line the version patterns matched.
+
+    What the manifest and the report call the built tools' version, so the
+    firmware lines `-V` prints under it, which belong to whatever board
+    happened to be attached, stay out of that field.
+    """
+    for line in text.splitlines():
+        if line.startswith(HOST_VERSION_LABEL) or line.startswith("libubertooth"):
+            return line
+    return text
+
+
 def _first_line(result: CommandResult) -> str:
     text = (result.stdout or result.stderr).strip()
     return text.splitlines()[0] if text else ""
@@ -498,11 +511,14 @@ class Builder:
             result = run_step(command, command.argv, command.step_id)
             if command.step_id == "verify-host-version":
                 host_version = (result.stdout + result.stderr).strip()
-                if command.fallback_argv and HOST_VERSION_LABEL not in host_version:
+                if (command.fallback_argv and not result.timed_out
+                        and HOST_VERSION_LABEL not in host_version):
                     # Nothing answered under the label, so this commit of the
                     # fork answers the host version on the older option: ask
                     # that one. A version under the label that is not the
-                    # resolved one is a failure, reported below.
+                    # resolved one is a failure, reported below, and so is a
+                    # command killed at its deadline: the fallback answering
+                    # afterwards would hide that the first command hung.
                     result = run_step(command, command.fallback_argv,
                                       f"{command.step_id}-fallback")
                     host_version = (result.stdout + result.stderr).strip()
@@ -513,6 +529,7 @@ class Builder:
                 # its deadline is still a failed step: it answered and then
                 # hung.
                 if _host_version_matches(plan, host_version) and not result.timed_out:
+                    host_version = _host_version_line(host_version)
                     continue
             if result.timed_out or result.returncode != 0:
                 reason = "timed out" if result.timed_out else f"exited {result.returncode}"

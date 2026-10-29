@@ -292,6 +292,46 @@ class BuilderTests(unittest.TestCase):
                 "-H", [c[-1] for c, _cwd in executor.calls],
             )
 
+    def test_a_verify_step_killed_at_its_deadline_fails_without_the_fallback(self):
+        with tempfile.TemporaryDirectory() as work:
+            plan = make_plan(work)
+
+            class Hangs(FakeBuildExecutor):
+                def run(self, argv, **kwargs):
+                    result = super().run(argv, **kwargs)
+                    if tuple(argv)[-1] == "-V":
+                        return replace(result, returncode=124, stdout="",
+                                       timed_out=True)
+                    return result
+
+            executor = Hangs(plan)
+            with self.assertRaisesRegex(BuildError, "timed out"):
+                Builder(executor, publisher_in(work), run_dir=work).run(plan)
+
+            self.assertNotIn("-H", [c[-1] for c, _cwd in executor.calls])
+
+    def test_the_recorded_version_is_the_host_line_alone(self):
+        # -V prints a board's firmware lines under the host line; the
+        # manifest and the report call this field the built tools' version.
+        with tempfile.TemporaryDirectory() as work:
+            plan = make_plan(work)
+            whole = (
+                "Host tools version: libubertooth 1.1 (git-aaaaaaa), "
+                "libbtbb 1.0 (git-bbbbbbb)\n"
+                "libbtbb loaded from: /p/lib/libbtbb.so.1\n"
+                "Firmware version: bluetooth_rxtx git-aaaaaaa (API:1.35)\n"
+                "Firmware build: ubertooth git-aaaaaaa (builder@host) now\n"
+            )
+
+            result = Builder(FakeBuildExecutor(plan, host_version=whole),
+                             publisher_in(work), run_dir=work).run(plan)
+
+            self.assertEqual(
+                "Host tools version: libubertooth 1.1 (git-aaaaaaa), "
+                "libbtbb 1.0 (git-bbbbbbb)",
+                result.host_version,
+            )
+
     def test_a_board_that_cannot_be_read_does_not_fail_the_build(self):
         # -V prints the host version first, then reads every attached board
         # and exits 1 if one cannot be read -- a board this build does not

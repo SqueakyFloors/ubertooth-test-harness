@@ -13,6 +13,7 @@ from ubertooth_harness.manifest import ManifestError, RunManifest
 from ubertooth_harness.planner import TestInvocation
 from ubertooth_harness import nrfdk
 from ubertooth_harness.patterns import (
+    HOST_VERSION_TIMEOUT_S,
     compile_info_pattern,
     firmware_version_pattern,
     revision_pattern,
@@ -89,7 +90,10 @@ class PreflightCheck:
         """Did the command leave the question unanswered, so ask the fallback?"""
         if self.fallback_argv is None or self.fallback_when_missing is None:
             return False
-        if result.cancelled:
+        # A command killed at its deadline, or stopped by the operator, is a
+        # failed check: the fallback answering afterwards would hide that the
+        # first command hung.
+        if result.cancelled or result.timed_out:
             return False
         output = result.stdout + result.stderr
         return re.search(self.fallback_when_missing, output) is None
@@ -253,6 +257,7 @@ class PreflightPolicy:
                         argv=HOST_VERSION_ARGV,
                         expected_patterns=host_patterns,
                         expected_revision=ubertooth_source.expected_revision,
+                        timeout_s=HOST_VERSION_TIMEOUT_S,
                         fallback_argv=HOST_VERSION_FALLBACK_ARGV,
                         fallback_when_missing=re.escape(HOST_VERSION_LABEL),
                         accepted_returncodes=(0, 1),
