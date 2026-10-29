@@ -2,12 +2,18 @@
 
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass, replace
+import datetime
 from pathlib import Path
 import time
 from typing import Mapping, Sequence
 
 from ubertooth_harness.cancellation import CancellationToken
-from ubertooth_harness.catalog import CatalogError, TestCatalog, builtin_catalog
+from ubertooth_harness.catalog import (
+    WATCHDOG_LIMIT_ARGUMENT,
+    CatalogError,
+    TestCatalog,
+    builtin_catalog,
+)
 from ubertooth_harness.events import (
     MANIFEST_MAX_BYTES,
     open_run_publisher,
@@ -39,6 +45,7 @@ from ubertooth_harness.flash import (
     HarnessError,
 )
 from ubertooth_harness.plan import flash_step, image_label
+from ubertooth_harness.watchdog import MonitoredBoard, WatchdogMonitor
 from ubertooth_harness.stateful import (
     CAPTURE_DIR,
     CAPTURE_DIR_KEY,
@@ -68,6 +75,9 @@ class SequencerSummary:
     # neither skipped nor failed. Tests: every case, or the whole test.
     not_applicable_cases: int = 0
     not_applicable_tests: int = 0
+    # Times a board reset itself during the run, as the firmware counts them
+    # (watchdog.py). Reported, not failed.
+    watchdog_resets: int = 0
 
 
 _MAX_REASON_CHARS = 4096
@@ -127,6 +137,7 @@ class NamedTestSequencer:
         clock=time.monotonic,
         isolation: IsolationRuntime | None = None,
         registry=None,
+        watchdog_search=None,
     ):
         self.executor = executor
         self.catalog = catalog or builtin_catalog()
@@ -135,6 +146,10 @@ class NamedTestSequencer:
         self.isolation = isolation
         # Hosts' platforms and other Ubertooths (flash guards) come from here.
         self.registry = registry
+        # How the run looks for an open fork issue about a board's self-reset;
+        # `gh issue list` by default (watchdog.py). Injected by tests, which
+        # must not reach GitHub.
+        self.watchdog_search = watchdog_search
 
     PER_FLASH_TIMEOUT_S = 25.0
 
@@ -798,6 +813,61 @@ class NamedTestSequencer:
         )
         return failure, status
 
+    def _watchdog_monitor(
+        self,
+        invocations,
+        manifest: RunManifest,
+        publisher: EventPublisher,
+        output_dir: Path,
+    ) -> WatchdogMonitor | None:
+        """The run's watchdog monitor, or None when there is nothing to read.
+
+        Every Ubertooth the run binds is read, guards included: the firmware
+        resets any of them that stops answering. None without a registry (the
+        resource types are what say which boards are Ubertooths) or with no
+        Ubertooth bound.
+        """
+        if self.registry is None:
+            return None
+        boards = {}
+        for invocation in invocations:
+            for role, alias in invocation.resources.items():
+                if alias in boards or self.registry.get(alias).type != "Ubertooth":
+                    continue
+                serial = str(
+                    invocation.resource_identities.get(role, {}).get("serial", "")
+                ).lower()
+                if serial:
+                    boards[alias] = MonitoredBoard(alias, serial)
+        if not boards:
+            return None
+        try:
+            source = manifest.source("Ubertooth")
+            firmware, host_version = source.expected_revision, source.commit
+        except ManifestError:
+            firmware, host_version = "", ""
+        return WatchdogMonitor(
+            lambda **arguments: self._run_command(
+                publisher,
+                # Read-only, with hard command deadlines, so it still runs
+                # after cancellation: a board that reset itself is worth
+                # recording whether or not the run was stopped.
+                CancellationToken(),
+                output_dir=output_dir,
+                **arguments,
+            ),
+            publisher,
+            tuple(boards.values()),
+            firmware=firmware,
+            host_version=host_version,
+            clock=self.clock,
+            # Naive UTC, as every harness time is.
+            utc_now=lambda: publisher.utc_now().astimezone(
+                datetime.timezone.utc
+            ).replace(tzinfo=None).isoformat(timespec="seconds"),
+            search=self.watchdog_search,
+        )
+
     def _emergency_cleanup(self, steps, context: Mapping) -> None:
         """Run cleanup commands without events after an internal error.
 
@@ -1107,6 +1177,16 @@ class NamedTestSequencer:
             },
         )
 
+        monitor = (
+            self._watchdog_monitor(invocations, manifest, publisher, output_dir)
+            if status == "running" else None
+        )
+        if monitor is not None:
+            # The baseline every later read is compared with: the firmware's
+            # counters are since power-on, so what they already hold is not
+            # this run's (watchdog.py).
+            monitor.baseline()
+
         if status == "running":
             for invocation in invocations:
                 if token.is_cancelled():
@@ -1114,6 +1194,7 @@ class NamedTestSequencer:
                     failure = f"canceled: {token.reason}"
                     break
                 definition = self.catalog.get(invocation.test_name)
+                watchdog_warnings: list[str] = []
                 publisher.emit(
                     "test_started",
                     "running",
@@ -1204,6 +1285,13 @@ class NamedTestSequencer:
                                 case_failures.append(f"canceled: {token.reason}")
                                 case_statuses.append("canceled")
                                 break
+                            if monitor is not None:
+                                # Between cases, so a long test reports a
+                                # self-reset before it ends; never beside a
+                                # running command.
+                                watchdog_warnings.extend(
+                                    monitor.poll_if_due(invocation).warnings
+                                )
                             guard_pending = bool(guards)
                             case_id = f"{invocation.invocation_id}-{case.case_id}"
                             if isinstance(case, FlashCase):
@@ -1343,6 +1431,20 @@ class NamedTestSequencer:
                     unsafe = True
                     case_failures.append(f"unexpected {type(error).__name__}: {error}")
                     case_statuses.append("failed")
+                if monitor is not None:
+                    # After the power isolation has put every port back, so a
+                    # board switched off during the test is read powered.
+                    watchdog = monitor.after_test(
+                        invocation, invocation.arguments.get(WATCHDOG_LIMIT_ARGUMENT)
+                    )
+                    watchdog_warnings.extend(watchdog.warnings)
+                    if watchdog.failure:
+                        # A board that did not come back cannot be used again;
+                        # a count over the test's limit leaves the device in a
+                        # known state, so later tests still run.
+                        unsafe = unsafe or watchdog.board_lost
+                        case_failures.append(watchdog.failure)
+                        case_statuses.append("failed")
                 if case_failures:
                     status = (
                         "canceled"
@@ -1366,6 +1468,9 @@ class NamedTestSequencer:
                             "failed_guard_checks": failed_guard_checks,
                             "skipped_cases": skipped_cases,
                             "not_applicable_cases": len(omitted),
+                            # Reported, not failed: a board that reset itself
+                            # came back by itself (watchdog.py).
+                            "warnings": watchdog_warnings,
                             # False: the device was verified back in its known
                             # state, so later tests still run.
                             "stops_run": stop_run,
@@ -1391,8 +1496,17 @@ class NamedTestSequencer:
                         "failed_guard_checks": 0,
                         "skipped_cases": skipped_cases,
                         "not_applicable_cases": len(omitted),
+                        "warnings": watchdog_warnings,
                     },
                 )
+
+        if monitor is not None:
+            # The last read of every board, and the run's watchdog summary:
+            # the per-board reset count, and a fork issue to file for each
+            # board that reset itself.
+            ending = monitor.at_run_end()
+            if ending.failure:
+                failed_tests.append(ending.failure)
 
         if status == "running":
             status = (
@@ -1421,6 +1535,7 @@ class NamedTestSequencer:
             skipped_cases=run_skipped_cases,
             not_applicable_cases=sum(1 for item in not_applicable if item.case_id),
             not_applicable_tests=not_applicable_tests,
+            watchdog_resets=monitor.total_resets if monitor is not None else 0,
         )
         publisher.emit("run_finished", status, asdict(summary))
         return summary

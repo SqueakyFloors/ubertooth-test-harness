@@ -629,6 +629,62 @@ idle at boot defaults it cannot see a leaked `-S` or `-r`, or a mode start
 values unchanged, so a guard could be left transmitting without the test
 failing. Modulation, access address, and USB re-enumeration are not read.
 
+### Firmware watchdog
+
+The fork's firmware resets a board that stops servicing USB or whose mode
+stops looping, and keeps the reason in a corner of RAM a reset does not clear.
+`ubertooth-util -U <serial> -w` reads that record. Every run reads it on each
+Ubertooth it binds, guards included: after preflight (the baseline), between
+cases once three minutes have passed since the last read, after each test, and
+once more at the end of the run. The reads are read-only and never run beside
+another command.
+
+A self-reset is the watchdog working, so the run **reports** it. A read whose
+unrequested reset count has risen since the baseline, a new processor fault,
+or a boot after a brown-out becomes a warning on that board and on the test;
+the test still passes. The warning names the mode and the wait the firmware
+recorded, for example "in BLE follow mode, running a control request".
+
+The count, not the boot cause, is the signal. A reset the host asked for
+(`-r`, or `ubertooth-dfu` entering the bootloader) is a watchdog reset as far
+as the microcontroller is concerned, so `Last boot cause: watchdog` turns up
+on a healthy board; the firmware leaves those out of the count. A boot cause
+that gained `watchdog` with no change in the count is therefore recorded as a
+note, not a warning.
+
+Both counters are since power-on, so cutting power to a board starts them
+again. A count below the baseline's is read as that restart: the board is
+re-baselined where it restarted, with a note, and only resets after it are
+counted. The count stops at 255, which the warning says when it is there.
+
+Two things fail:
+
+- A board that does not come back on USB. The read is retried three times over
+  about five seconds; a board that never answers fails its test and stops the
+  run, because nothing can use it again.
+- A test whose plan sets `max_watchdog_resets: <n>` and whose boards reset
+  themselves more than `n` times. Nothing else makes the count pass or fail,
+  and there is no limit by default. This is for stability runs (the release
+  soak, [ubertooth#703](https://github.com/SqueakyFloors/ubertooth/issues/703)).
+  Every test accepts the argument. The boards are still in a known state, so
+  later tests run.
+
+Capture transfer errors and radio waits that gave up are recorded as notes
+with no warning: each transfer error costs the packet that was arriving, and a
+radio wait that gave up means what that mode captured may be incomplete.
+
+Firmware without the request (2020-12-R1, for example) answers nothing to read
+and the board reads as "watchdog not reported", which is neither a warning nor
+a failure. Host tools older than the ones that added the last two lines report
+the rest without them.
+
+For each board that reset itself, the run's record and `report.md` carry a
+ready-to-file fork issue (board, firmware and host commits, mode, wait, test,
+time, and the `-w` output) and the open fork issues a `gh issue list` search
+for the same mode and wait found, so the reset can be commented on an existing
+issue instead. A search that cannot run (no `gh`, not signed in, no network)
+says so, and the issue is still offered.
+
 ## Building the resolved revision
 
 By default a run tests the Ubertooth tools already installed, and preflight
@@ -937,11 +993,17 @@ a BLE capture case ran, and `output/` when a command printed a lot):
   records are `run_started` and `manifest` (sources, plan and registry hashes,
   artifacts, invocations, Python/OS environment, and build toolchain), then
   build commands, preflight, and each test's events, including every command
-  and its output as it arrives. `run_finished` holds the summary.
+  and its output as it arrives. One `watchdog` record per board per read
+  ([Firmware watchdog](#firmware-watchdog)) carries that board's record and
+  what changed, and `watchdog_summary` at the end of the run carries the
+  per-board self-reset count and any fork issue to file. `run_finished` holds
+  the summary, whose `watchdog_resets` is the run's total.
 - `report.md`: compiled from `run.jsonl` when the run ends, including failed or
   canceled runs. It lists the setup (commits, host and platform, toolchain,
   Python, device serials and firmware, artifact hashes) and a results table,
-  then the full transcript.
+  then a Watchdog section when any board was read, then the full transcript.
+  A board that reset itself puts its warning in the test's Reason column too,
+  since the test itself passed.
 
 Each transcript line starts with the time elapsed since the run started
 (`HH:MM:SS.mmm`); the report header gives the run's UTC start time, and
@@ -1331,7 +1393,10 @@ word and symbol (colour only reinforces it).
   assumes about 8 s of power switching. A test with no implementation yet is
   estimated at its `duration` argument, if any. A Linux host, one board, or a
   failing test ends sooner or later, so the countdown is a guide, never a
-  timeout. An estimate is per invocation: `Ubertooth: each` runs the test
+  timeout. Under the clock, a Boards list appears once the run has read a
+  board's firmware watchdog record: each board with the times it has reset
+  itself during this run and the last warning if there was one (see
+  [Firmware watchdog](#firmware-watchdog)). An estimate is per invocation: `Ubertooth: each` runs the test
   once per board the target selects. Run setup counts such a test once and
   says so; once the run's manifest arrives (before preflight) the live
   checklist lists every planned invocation on the target with its estimate,
@@ -1361,7 +1426,7 @@ Endpoints (JSON unless noted; `GET /` lists them):
 | `GET /api/targets`, `GET /api/targets/{host}` | registry: host, hostname, OS, Python, Ubertooth serials, last heartbeat, `online`/`offline`, connected, active run |
 | `POST /api/targets/{host}/runs` | start a run with the protocol `run` fields: `{"ref", "commit": null, "plan", "suite", "tests": [], "build": false}` (`commit`, optional, is the full commit the caller saw listed for `ref`); 201 with the run (including the `commit` sent to the runner), 409 busy, offline, rejected by the runner, or `ref` moved away from `commit`, 422 invalid, a ref not in `/api/refs` (full commit IDs are accepted), or a name listing several commits, 504 no answer |
 | `GET /api/runs[?target=HOST]` | runs, newest first |
-| `GET /api/runs/{run_id}` | status, every event, the failure summary (`failures`), and `invocations`: from the run's manifest, every planned invocation on the target with `invocation_id`, `test_name` and `estimated_s` (null before the manifest record) |
+| `GET /api/runs/{run_id}` | status, every event, the failure summary (`failures`), `watchdog`: each board read with the times it reset itself and its warnings, and `invocations`: from the run's manifest, every planned invocation on the target with `invocation_id`, `test_name` and `estimated_s` (null before the manifest record) |
 | `GET /api/runs/{run_id}/report.md` | the run's report (Markdown) |
 | `POST /api/runs/{run_id}/cancel` | `{"reason": ""}`; 202 once the runner accepts |
 | `WS /ws/live[?run_id=ID]` | browser stream: a `snapshot`, then `target` and `run` updates, plus that run's `event` records; a browser 1000 updates behind is closed with 1013 `live stream overflowed` (reconnect for a new snapshot) |

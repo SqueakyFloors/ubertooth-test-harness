@@ -137,6 +137,19 @@ class TerminalEventSink:
                 self.stream.write(f"[libbtbb pin] {message}\n")
             else:
                 self.stream.write(f"warning: {message}\n")
+        elif event.event_type == "watchdog":
+            for line in details.get("warnings", []):
+                self.stream.write(f"warning: {line}\n")
+            for line in details.get("notes", []):
+                self.stream.write(f"note: {line}\n")
+            if event.status == "failed" and details.get("reason"):
+                self.stream.write(f"error: {details['reason']}\n")
+        elif event.event_type == "watchdog_summary":
+            counts = ", ".join(
+                f"{board.get('resource')}: {board.get('resets', 0)}"
+                for board in details.get("boards", [])
+            )
+            self.stream.write(f"\n[watchdog] boards that reset themselves: {counts}\n")
         elif event.event_type == "manifest":
             self.stream.write("\n[manifest recorded]\n")
         elif event.event_type == "not_applicable":

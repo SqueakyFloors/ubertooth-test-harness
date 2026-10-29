@@ -27,6 +27,10 @@ class CatalogError(ValueError):
     """A test name or argument does not match the catalog."""
 
 
+# The plan argument that turns the firmware's self-reset count into a
+# pass/fail measure for one test (watchdog.py).
+WATCHDOG_LIMIT_ARGUMENT = "max_watchdog_resets"
+
 _MISSING = object()
 _DURATION_RE = re.compile(r"^([1-9][0-9]*)(ms|s|m|h)$")
 
@@ -391,6 +395,12 @@ class TestCatalog:
 
 HOSTS = ArgumentRule(_hosts, default="each")
 UBERTOOTH = ArgumentRule(_selector, default="default")
+# Every test accepts `max_watchdog_resets:` (builtin_catalog adds it), so a
+# stability run can make the firmware's self-reset count a pass/fail measure.
+# It is optional: a step that leaves it out has no limit, and a self-reset is
+# only reported (watchdog.py), so the normalized arguments carry it only when
+# the plan sets it.
+MAX_WATCHDOG_RESETS = ArgumentRule(_nonnegative_integer)
 DURATION = ArgumentRule(_duration, required=True)
 SAMPLE_EVERY = ArgumentRule(_duration, required=True)
 COVERAGE = ArgumentRule(_coverage, required=True)
@@ -1200,6 +1210,16 @@ def builtin_catalog() -> TestCatalog:
         ]
     )
     return TestCatalog(
-        replace(definition, estimates=ESTIMATES.get(definition.name))
+        _accept_watchdog_limit(replace(definition, estimates=ESTIMATES.get(definition.name)))
         for definition in definitions
     )
+
+
+def _accept_watchdog_limit(definition: TestDefinition) -> TestDefinition:
+    """Accept `max_watchdog_resets:` on every test, so a plan can make the
+    firmware's self-reset count a pass/fail measure for any of them."""
+    if WATCHDOG_LIMIT_ARGUMENT in definition.arguments:
+        return definition
+    arguments = dict(definition.arguments)
+    arguments[WATCHDOG_LIMIT_ARGUMENT] = MAX_WATCHDOG_RESETS
+    return replace(definition, arguments=MappingProxyType(arguments))
