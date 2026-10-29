@@ -294,6 +294,12 @@ class ExternalLockTests(_Fixture):
         with self.assertRaises(leases.LeaseError) as caught:
             self.acquire([A])
         self.assertIn("is not a regular file", str(caught.exception))
+        # The listing must not hang on it either.
+        state = leases.board_states(
+            [A], directory=self.lease_dir, external_template=self.template
+        )[0]
+        self.assertTrue(state["held"])
+        self.assertIn("not a regular file", state["external"]["error"])
 
     def test_two_paths_that_are_one_file_are_refused(self):
         # A hard link to another board's file: flock is per open file

@@ -231,6 +231,9 @@ if [ -n "$external_board_lock" ]; then
         *"{"*|*"}"*) die "--external-board-lock must contain {serial} exactly once and no other brace: $external_board_lock" ;;
     esac
     [ "$lock_rest" != "$external_board_lock" ] || die "--external-board-lock must contain {serial}: $external_board_lock"
+    case $external_board_lock in
+        */) die "--external-board-lock must name a file: $external_board_lock" ;;
+    esac
     safe --external-board-lock "$lock_rest"
 fi
 case $libbtbb_ref in -*) die "--libbtbb-ref must not start with -" ;; esac

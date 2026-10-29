@@ -437,6 +437,7 @@ class DeployTest(unittest.TestCase):
             ("/locks/{alias}-{serial}.lock", "exactly once"),
             ("/locks/a b-{serial}.lock", "does not quote"),
             ("/locks/$HOME-{serial}.lock", "does not quote"),
+            ("/locks/{serial}/", "must name a file"),
         ):
             with self.subTest(value):
                 result = self.lab.deploy("--external-board-lock", value)

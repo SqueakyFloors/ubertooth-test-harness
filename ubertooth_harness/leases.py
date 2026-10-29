@@ -498,8 +498,23 @@ def acquire(
                     busy = (board, path, external)
                     break
                 held.append(Lease(board, path, fd, holder, external=external))
+                # The same two checks on the file that was actually opened,
+                # in case the path was replaced in between.
                 info = os.fstat(fd)
-                files[(info.st_dev, info.st_ino)] = path
+                if external and not stat.S_ISREG(info.st_mode):
+                    raise _released(
+                        held,
+                        f"{board.alias}: its external board lock {path} is not a "
+                        "regular file; point the template at the lab's lock files",
+                    )
+                key = (info.st_dev, info.st_ino)
+                if key in files:
+                    raise _released(
+                        held,
+                        f"{board.alias}: its lock file {path} is the same file as "
+                        f"{files[key]}; every board needs its own lock file",
+                    )
+                files[key] = path
                 if not external:
                     _stamp(fd, dict(holder, resource=board.alias))
         except OSError as error:
@@ -555,7 +570,10 @@ def board_states(
         if external_template:
             external = external_lock_path(external_template, board)
             try:
-                held = _probe(external, flags=os.O_RDONLY)
+                # O_NONBLOCK, and a regular-file check: a lab path that is a
+                # FIFO must not make the listing wait forever.
+                held = _probe(external, flags=os.O_RDONLY | os.O_NONBLOCK,
+                              regular_only=True)
                 problem = ""
             except OSError as error:  # e.g. another user's unreadable file
                 # Unknown is not free: a run would refuse this board, so the
@@ -575,10 +593,13 @@ def board_states(
     return states
 
 
-def _probe(path: Path, *, flags: int = os.O_RDWR) -> bool:
+def _probe(path: Path, *, flags: int = os.O_RDWR, regular_only: bool = False) -> bool:
     """True when someone holds path's flock; creates no file that is missing."""
-    if not path.exists():
+    identity = _file_identity(path)
+    if identity is None:
         return False
+    if regular_only and not stat.S_ISREG(identity[0]):
+        raise OSError(errno.EINVAL, "not a regular file", str(path))
     fd = _try_lock(path, fcntl.LOCK_SH, flags=flags)
     if fd is None:
         return True
