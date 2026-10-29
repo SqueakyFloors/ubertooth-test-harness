@@ -200,25 +200,6 @@ else
     unit_dir=$config_home/systemd/user
 fi
 
-# macOS: the tunnel's host, jump host and port, from the options, then the
-# environment, then the private config file scripts/harness-open reads.
-if [ "$platform" = macos ]; then
-    lib=$ROOT/scripts/harness-config.sh
-    [ -f "$lib" ] || die "$lib is missing; run this script from its checkout"
-    # Linted on its own; shellcheck does not need to follow it here.
-    # shellcheck source=/dev/null
-    . "$lib"
-    harness_config_load
-    [ "$controller_host_option" = 1 ] || controller_host=${HARNESS_HOST-}
-    [ "$controller_jump_option" = 1 ] || controller_jump=${HARNESS_JUMP-}
-    [ "$port_option" = 1 ] || port=${HARNESS_PORT:-$port}
-fi
-
-case $port in
-    ''|*[!0-9]*) die "--port must be a number from 1 to 65535" ;;
-esac
-if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then die "--port must be a number from 1 to 65535"; fi
-
 run() {
     if [ "$dry_run" = 1 ]; then
         say "would run: $*"
@@ -288,6 +269,27 @@ if [ "$uninstall" = 1 ]; then
     say "left in place: $ROOT/.venv and $state_dir"
     exit 0
 fi
+
+# After the uninstall branch, which needs neither a host nor a port: removing
+# the agents is what you want when the config file itself is the problem.
+# macOS: the tunnel's host, jump host and port, from the options, then the
+# environment, then the private config file scripts/harness-open reads.
+if [ "$platform" = macos ]; then
+    lib=$ROOT/scripts/harness-config.sh
+    [ -f "$lib" ] || die "$lib is missing; run this script from its checkout"
+    # Linted on its own; shellcheck does not need to follow it here.
+    # shellcheck source=/dev/null
+    . "$lib"
+    harness_config_load
+    [ "$controller_host_option" = 1 ] || controller_host=${HARNESS_HOST-}
+    [ "$controller_jump_option" = 1 ] || controller_jump=${HARNESS_JUMP-}
+    [ "$port_option" = 1 ] || port=${HARNESS_PORT:-$port}
+fi
+
+case $port in
+    ''|*[!0-9]*) die "--port must be a number from 1 to 65535" ;;
+esac
+if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then die "--port must be a number from 1 to 65535"; fi
 
 [ -n "$runner_host" ] || die "--runner-host NAME is required (the Host resource in the registry)"
 [ -n "$ubertooth_source" ] || die "--ubertooth-source DIR is required (the runner's Ubertooth checkout)"
@@ -371,6 +373,10 @@ net_git() {
     fi
     if command -v timeout >/dev/null 2>&1; then
         GIT_TERMINAL_PROMPT=0 timeout "$GIT_TIMEOUT_S" git "$@" </dev/null
+    elif command -v perl >/dev/null 2>&1; then
+        # macOS has no timeout(1); perl's alarm bounds the command the same way.
+        GIT_TERMINAL_PROMPT=0 perl -e 'alarm shift; exec @ARGV' \
+            "$GIT_TIMEOUT_S" git "$@" </dev/null
     else
         GIT_TERMINAL_PROMPT=0 git "$@" </dev/null
     fi
@@ -444,8 +450,12 @@ runner_args=${runner_argv[*]}
 
 # Loopback at both ends: the forward binds only this machine's loopback and
 # reaches only the controller's loopback listener. BatchMode so a missing key
-# or host key fails instead of waiting for an answer nobody can give.
+# or host key fails instead of waiting for an answer nobody can give. This
+# connection is the only thing standing between the controller and the
+# network, so host-key checking is pinned on and connection sharing off,
+# whatever the user's ssh configuration says.
 tunnel_argv=(/usr/bin/ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes
+             -o StrictHostKeyChecking=yes -o ControlPath=none
              -o ServerAliveInterval=30 -o ServerAliveCountMax=3
              -L "127.0.0.1:$port:127.0.0.1:$port")
 [ -z "$controller_jump" ] || tunnel_argv+=(-J "$controller_jump")
@@ -532,11 +542,11 @@ if [ "$platform" = macos ]; then
     tunnel_agent=$(agent_plist "$TUNNEL_LABEL" "$log_dir/tunnel" 20 "${tunnel_argv[@]}")$'\n'
 fi
 
-# Prints the IDs of active runs the controller on this port reports, one
-# "host:run" per line; nothing when no controller answers. With a host name,
-# only that target's runs.
+# Prints the IDs of active runs the controller on $1 reports, one "host:run"
+# per line; nothing when no controller answers. With a host name in $2, only
+# that target's runs.
 active_runs() {
-    "$python" - "$port" "${1-}" <<'PY' 2>/dev/null || true
+    "$python" - "$1" "${2-}" <<'PY' 2>/dev/null || true
 import json, sys, urllib.request
 port, only = sys.argv[1], sys.argv[2]
 try:
@@ -593,8 +603,28 @@ else
     fi
     busy_filter=
 fi
+# The port the installed runner uses, which is not the requested one when
+# --port changes. The running controller answers there, so that is the port
+# to ask about active runs; asking the new one would find nothing and restart
+# the runner under an active run.
+running_port() {
+    local path=$unit_dir/$1
+    [ -f "$path" ] || return 0
+    sed -n 's|.*ws://127\.0\.0\.1:\([0-9]\{1,5\}\)/ws/runner.*|\1|p' "$path" | head -n 1
+}
+
 if [ "$no_start" = 0 ] && [ "$restart_needed" = 1 ]; then
-    busy=$(active_runs "$busy_filter")
+    if [ "$platform" = macos ]; then
+        busy_port=$(running_port "$RUNNER_LABEL.plist")
+    else
+        busy_port=$(running_port "$RUNNER_UNIT")
+    fi
+    if [ -z "$busy_port" ]; then
+        busy_port=$port
+    elif [ "$busy_port" != "$port" ]; then
+        say "note: the installed runner uses port $busy_port; asking that controller about active runs"
+    fi
+    busy=$(active_runs "$busy_port" "$busy_filter")
     if [ -n "$busy" ]; then
         if [ "$force" = 1 ]; then
             say "warning: restarting during active runs (--force): $busy"
@@ -640,14 +670,20 @@ load_agent() {
                 run launchctl bootout "$launchd_domain/$label" ||
                     say "warning: could not unload $label"
             fi
-            run launchctl bootstrap "$launchd_domain" "$unit_dir/$1" ;;
+            bootstrap_agent "$1" "$label" ;;
         *)
             if agent_loaded "$label"; then
                 say "$label is already loaded"
             else
-                run launchctl bootstrap "$launchd_domain" "$unit_dir/$1"
+                bootstrap_agent "$1" "$label"
             fi ;;
     esac
+}
+
+bootstrap_agent() {
+    # $1 plist name, $2 label
+    run launchctl bootstrap "$launchd_domain" "$unit_dir/$1" ||
+        die "launchctl bootstrap $2 failed; its plist is written, so read the reason with: launchctl print $launchd_domain"
 }
 
 url=http://127.0.0.1:$port/ui/

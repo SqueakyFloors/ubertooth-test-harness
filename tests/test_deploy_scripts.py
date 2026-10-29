@@ -72,6 +72,7 @@ FAKES = {
                 *) exit "${FAKE_LAUNCHD_DOMAIN_EXIT:-0}" ;;
             esac
         fi
+        [ "$1" != bootstrap ] || exit "${FAKE_BOOTSTRAP_EXIT:-0}"
         exit 0
         """),
     # macOS reports no automatic login user unless one is set.
@@ -307,6 +308,16 @@ class DeployTest(unittest.TestCase):
         self.assertOk(self.lab.deploy())
         self.busy_controller()
         self.assertOk(self.lab.deploy())
+
+    def test_a_new_port_asks_the_installed_controller_about_runs(self):
+        # The running controller is on the installed unit's port, not the one
+        # this deploy asks for.
+        self.assertOk(self.lab.deploy())
+        self.busy_controller()
+        result = self.lab.deploy("--port", "9999")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("the installed runner uses port 8765", result.stdout)
+        self.assertIn("active runs Host_Linux:run-7", result.stderr)
 
     def test_no_user_manager_changes_nothing(self):
         _write_exe(self.lab.bin / "systemctl", LOGGING_FAKE + "exit 1\n")
@@ -649,6 +660,9 @@ class MacDeployTest(unittest.TestCase):
             "/usr/bin/ssh", "-N",
             "-o", "BatchMode=yes",
             "-o", "ExitOnForwardFailure=yes",
+            # The only access control, so not left to the user's ssh config.
+            "-o", "StrictHostKeyChecking=yes",
+            "-o", "ControlPath=none",
             "-o", "ServerAliveInterval=30",
             "-o", "ServerAliveCountMax=3",
             "-L", "127.0.0.1:8765:127.0.0.1:8765",
@@ -875,6 +889,35 @@ class MacDeployTest(unittest.TestCase):
         self.assertEqual(self.launchctl(), [f"launchctl print {self.domain}"])
         # Only this Mac's runner is restarted, so only its runs are asked for.
         self.assertIn("python - 8765 Host_Mac", self.lab.commands())
+
+    def test_a_new_port_asks_the_installed_runner_s_controller(self):
+        # The controller answers on the port the running tunnel forwards, so a
+        # deploy that changes --port must not conclude from the new port that
+        # nothing is running.
+        self.assertOk(self.lab.mac_deploy())
+        self.busy_controller("Host_Mac:run-7")
+        result = self.lab.mac_deploy("--port", "9999")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("the installed runner uses port 8765", result.stdout)
+        self.assertIn("active runs Host_Mac:run-7", result.stderr)
+        self.assertIn("python - 8765 Host_Mac", self.lab.commands())
+
+    def test_a_failed_bootstrap_says_so(self):
+        result = self.lab.mac_deploy(FAKE_BOOTSTRAP_EXIT="5")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"launchctl bootstrap {TUNNEL_LABEL} failed", result.stderr)
+        self.assertIn(f"launchctl print {self.domain}", result.stderr)
+        # The plist is on disk, so a later deploy retries the bootstrap.
+        self.assertTrue((self.lab.agent_dir / TUNNEL_AGENT).is_file())
+
+    def test_uninstall_works_with_a_broken_config_file(self):
+        self.assertOk(self.lab.mac_deploy())
+        broken = self.lab.root / "broken.conf"
+        broken.write_text("false\n", encoding="utf-8")
+        broken.chmod(0o666)
+        result = self.lab.mac_deploy("--uninstall", HARNESS_OPEN_CONFIG=str(broken))
+        self.assertOk(result)
+        self.assertEqual([], list(self.lab.agent_dir.iterdir()))
 
     def test_force_restarts_during_an_active_run(self):
         self.assertOk(self.lab.mac_deploy(FAKE_COMMIT="a" * 40))
@@ -1258,6 +1301,12 @@ class ScriptLintTest(unittest.TestCase):
                 ["bash", "-n", str(script)], capture_output=True, text=True, check=False
             )
             self.assertEqual(result.returncode, 0, f"{script.name}: {result.stderr}")
+
+    def test_git_is_bounded_without_timeout(self):
+        # macOS has no timeout(1), so deploy must bound its clone and fetch
+        # another way; README promises a limit on both platforms.
+        text = DEPLOY.read_text(encoding="utf-8")
+        self.assertIn("perl -e 'alarm shift; exec @ARGV'", text)
 
     def test_executable_with_strict_mode(self):
         for script in ALL_SCRIPTS:

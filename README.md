@@ -1582,19 +1582,30 @@ The tunnel agent runs
 with `scripts/harness-open`. The GUI is then also on this Mac's
 `http://127.0.0.1:PORT/ui/`.
 
-**The SSH key is the access control, so set it up before deploying.** The
-agent runs `ssh` with `BatchMode=yes`: nothing can answer a prompt, so
+**The key is the access control, so set it up before deploying.** The agent
+runs `ssh` with `BatchMode=yes`: nothing can answer a prompt, so
 
 - the Mac user needs a key the controller host accepts with no passphrase
-  (`ssh-keygen -t ed25519 -f ~/.ssh/harness -N ""`, its public half in that
-  account's `authorized_keys`, and an `IdentityFile ~/.ssh/harness` entry for
-  the host in `~/.ssh/config`), and
+  (`ssh-keygen -t ed25519 -f ~/.ssh/harness -N ""`, and an `IdentityFile
+  ~/.ssh/harness` entry for the host in `~/.ssh/config`), and
 - that host's key must already be in the Mac's `~/.ssh/known_hosts`, so
   connect once by hand first (through the jump host, whose key is needed too).
+  The agent passes `StrictHostKeyChecking=yes`, so an unknown or changed host
+  key stops the tunnel rather than trusting whatever answered.
 
-Everything a key on the controller host can do is what the tunnel grants, so
-prefer a dedicated key. A `command="..."`-restricted key does not work: `ssh`
-needs the port forward, not a command.
+Give that key only the forward, since it needs no passphrase: one line in the
+controller account's `authorized_keys`, with the port the controller uses,
+
+```
+restrict,port-forwarding,permitopen="127.0.0.1:8765",command="/usr/bin/false" ssh-ed25519 AAAA... harness tunnel
+```
+
+`restrict` turns off agent and X11 forwarding and pty allocation,
+`port-forwarding` puts back the one thing the tunnel needs, `permitopen`
+limits it to the controller's own loopback port, and the forced command means
+the key cannot run anything (the agent's `ssh -N` asks for no command, so the
+forward is unaffected). A key without those restrictions is an ordinary login
+to the controller host, which is more than the tunnel needs.
 
 The host, jump host and port can come from `--controller-host`,
 `--controller-jump` and `--port`, from `HARNESS_HOST`, `HARNESS_JUMP` and
@@ -1607,7 +1618,9 @@ file, and deploy stops rather than guessing a host.
 A LaunchAgent runs only while its user is logged in to the Mac's desktop, so
 a test host should log that user in by itself after a reboot: deploy warns
 when the account is not the automatic login user (System Settings > Users &
-Groups > Automatic login). Rerunning changes nothing unless an agent's
+Groups > Automatic login). FileVault turns automatic login off in effect,
+since someone must unlock the disk at boot before any login happens, so a Mac
+that must come back on its own cannot have it on. Rerunning changes nothing unless an agent's
 content changed, in which case that agent is booted out and bootstrapped
 again; a deploy that would restart the runner while *this* Mac's target has
 an active run is refused unless `--force` is given. `--uninstall` boots out
@@ -1653,8 +1666,11 @@ repository), ref validation, and statically that the page wires to the
 expected endpoints and has no HTML injection sinks; there is no browser
 automation. The deploy-script tests run `scripts/deploy.sh`,
 `install-desktop-shortcut.sh` and `harness-open` against a temporary home with
-fake `systemctl`, `loginctl`, `ssh` and browser commands (no systemd or
-network), plus `bash -n` and, when installed, `shellcheck`. Provisioning, soak execution, and radio fixtures remain later
+fake `systemctl`, `loginctl`, `launchctl`, `defaults`, `ssh` and browser
+commands (no systemd, launchd or network), plus `bash -n` and, when installed,
+`shellcheck`. A fake `uname` drives the platform, so the macOS deploy and its
+LaunchAgents are tested on either platform; the agents are parsed back with
+`plistlib`, as launchd would read them. Provisioning, soak execution, and radio fixtures remain later
 slices.
 
 ## Repository boundary

@@ -166,9 +166,12 @@ class SysfsEnumeratorTests(unittest.TestCase):
 
 # tests/data/ioreg-iousb.plist was derived from a real
 # `ioreg -p IOUSB -l -w0 -a` run on a Mac: the tree shape, property names and
-# value types are that machine's, while the device names, vendor/product ids
-# and serials are made up, since this repository is public and no board was
-# attached to record. These are the two Ubertooths in it.
+# value types are that machine's, and the Ubertooth vendor and product ids are
+# the real ones, since that is what the enumerator matches. Everything that
+# identifies a machine or a device is made up: the device and vendor names,
+# the other devices' ids, the bus locations and the serials, because this
+# repository is public and no board was attached to record. These are the two
+# Ubertooths in it.
 IOREG_FIXTURE = Path(__file__).resolve().parent / "data" / "ioreg-iousb.plist"
 FIRST = "a1b2c3d4e5f600112233445566778899"
 SECOND = "99887766554433221100f6e5d4c3b2a1"
@@ -247,18 +250,24 @@ class IoregEnumeratorTests(unittest.TestCase):
 
     def test_an_interface_entry_does_not_become_a_second_board(self):
         # An IOUSBHostInterface repeats its device's ids and serial, so a
-        # parser that counted every node would see a board twice.
-        board = self.device(0x1d50, 0x6002, FIRST)
-        board["IORegistryEntryChildren"] = [{
-            "IOObjectClass": "IOUSBHostInterface",
-            "idVendor": 0x1d50,
-            "idProduct": 0x6002,
-            "bInterfaceNumber": 0,
-            "IORegistryEntryLocation": "0",
-        }]
-        self.assertEqual(
-            frozenset({FIRST}), self.enumerator(output=self.plist([board])).serials()
-        )
+        # parser that counted every node would see a board twice. A serial-less
+        # board would be counted twice under two names, which no amount of
+        # deduplicating by serial would catch, so both the interface number
+        # and the object class are checked.
+        for extra in ({"bInterfaceNumber": 0}, {}):
+            with self.subTest(extra=sorted(extra)):
+                board = self.device(0x1d50, 0x6003)
+                board["IORegistryEntryChildren"] = [{
+                    "IOObjectClass": "IOUSBHostInterface",
+                    "idVendor": 0x1d50,
+                    "idProduct": 0x6003,
+                    "IORegistryEntryLocation": "0",
+                    **extra,
+                }]
+                self.assertEqual(
+                    frozenset({"unidentified:02100000:6003"}),
+                    self.enumerator(output=self.plist([board])).serials(),
+                )
 
     def test_a_serial_less_board_is_named_by_whatever_locates_it(self):
         node = self.device(0x1d50, 0x6003)

@@ -296,7 +296,11 @@ class RunnerService:
             self.connections += 1
             tasks = []
             try:
-                await self._send("register", **self._registration())
+                # Enumeration runs a command (ioreg) on macOS, so it is read
+                # off the event loop: a slow read must not stall heartbeats or
+                # an active run's events.
+                registration = await asyncio.to_thread(self._registration)
+                await self._send("register", **registration)
                 self.log(f"registered with {self.config.controller_url}")
                 tasks.append(asyncio.create_task(self._heartbeat()))
                 if self._run is not None:
