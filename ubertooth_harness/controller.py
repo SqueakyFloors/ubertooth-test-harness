@@ -357,6 +357,8 @@ class Controller:
         # Durations learned from the runs stored here, kept beside them.
         self.estimates = EstimateStore.load(self.results_dir / STORE_FILE, log=log)
         self._learning = asyncio.Lock()
+        # Runs that ended without being learned from (see _load_runs).
+        self._unlearned: list[str] = []
         # The listening port; the request guard rejects everything until set.
         self.port: int | None = None
         self.targets: dict[str, Target] = {}
@@ -385,6 +387,15 @@ class Controller:
             if run.run_id != directory.name:
                 self.log(f"skipping run {directory.name}: run_id mismatch")
                 continue
+            if "learned_durations" not in data:
+                # Stored before durations were learned at all: leave it,
+                # rather than mining every old run on the first startup.
+                run.learned_durations = True
+            elif not run.active and not run.learned_durations:
+                # Terminal but not learned: the controller stopped between
+                # recording the end and learning from it. The monitor picks
+                # it up once the service is serving.
+                self._unlearned.append(run.run_id)
             self._load_events(run)
             self.runs[run.run_id] = run
 
@@ -708,6 +719,9 @@ class Controller:
             self._persist(run)
             self._publish_run(run)
             self.log(f"run {run.run_id} on {target.host}: {LOST} ({run.reason})")
+            # Its records are complete as far as they go, and a test that
+            # passed in them took as long as it says.
+            await self.learn(run)
 
     def _fail_pending(self, host: str, reason: str) -> None:
         for table in (self._pending_runs, self._pending_cancels):
@@ -875,12 +889,16 @@ class Controller:
         At most once per run, recorded in run.json: a runner whose connection
         drops as it reports the end reports it again after reconnecting, and
         counting that run twice would push every other sample out of the
-        window.
+        window. A run that ended without being learned from is picked up by
+        ``learn_pending`` at the next startup.
         """
-        if run.learned_durations:
-            return 0
-        try:
-            async with self._learning:
+        async with self._learning:
+            # Claimed under the lock and before the first await, so two
+            # overlapping reports of one run's end cannot both learn it.
+            if run.learned_durations:
+                return 0
+            run.learned_durations = True
+            try:
                 events = await asyncio.to_thread(self.read_events, run)
                 # Learned into a copy and swapped in here, so a lookup
                 # serving an API request never reads a half-updated store.
@@ -889,17 +907,33 @@ class Controller:
                     updated.learn_from_run, events, host=run.target
                 )
                 self.estimates = updated
-        except Exception as error:  # noqa: BLE001 - the run result stands
-            self.log(f"run {run.run_id}: could not learn durations: {error}")
-            return 0
-        run.learned_durations = True
+            except Exception as error:  # noqa: BLE001 - the run result stands
+                # Not learned after all: leave the run for another attempt.
+                run.learned_durations = False
+                self.log(f"run {run.run_id}: could not learn durations: {error}")
+                return 0
         self._persist(run)
         if kept:
             self.log(f"run {run.run_id}: learned {kept} duration sample(s)")
         return kept
 
+    async def learn_pending(self) -> int:
+        """Learn from stored runs that ended before their durations were taken.
+
+        Learning is recorded per run, so a controller that stopped between
+        a run's end and its samples picks it up here instead of losing them.
+        """
+        kept = 0
+        for run_id in list(self._unlearned):
+            self._unlearned.remove(run_id)
+            run = self.runs.get(run_id)
+            if run is not None and not run.active:
+                kept += await self.learn(run)
+        return kept
+
     async def monitor(self) -> None:
         """Mark targets offline after missed heartbeats; expire stale requests."""
+        await self.learn_pending()
         while True:
             await asyncio.sleep(self.monitor_interval_s)
             self.check_heartbeats()

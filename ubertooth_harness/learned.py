@@ -390,15 +390,19 @@ class EstimateStore:
             return None
         # Too few samples at this duration: use the rate learned at the
         # other durations of the same test, above the catalog's fixed part.
+        # A sample shorter than that fixed part contradicts it and can say
+        # nothing about the rate, so it is left out rather than counted as
+        # no time at all.
         fixed = max(0.0, float(fixed_s))
         rates = [
-            max(0.0, value - fixed) / other.units[1]
+            (value - fixed) / other.units[1]
             for other, values in self._samples.items()
             if other.pool == key.pool
             and other.units is not None
             and other.units[0] == key.units[0]
             and other.units[1] > 0
             for value in values
+            if value > fixed
         ]
         if len(rates) < self.min_samples:
             return None
@@ -531,11 +535,14 @@ class EstimateStore:
             elif kind == "flash_run_finished" and status == "passed":
                 # The flash runner times itself, so no bracketing record is
                 # needed: its summary carries the duration and the flashes.
-                units = _count_units(
-                    "flashes", details.get("requested_flashes"))
-                kept += self.add(
-                    Key(FLASH_STAGE, "", host, "", units), details.get("duration_s")
-                )
+                # Without a usable count there is nothing to key it by, and
+                # pooling runs of two flashes with runs of fifty would be
+                # worse than not learning it.
+                units = _count_units("flashes", details.get("requested_flashes"))
+                if units is not None:
+                    kept += self.add(
+                        Key(FLASH_STAGE, "", host, "", units), details.get("duration_s")
+                    )
         if kept and save:
             self.save()
         return kept

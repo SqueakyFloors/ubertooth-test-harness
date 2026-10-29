@@ -5,6 +5,7 @@ records, and the API tests drive the controller on 127.0.0.1 with a scripted
 protocol-v2 runner, as the other controller tests do.
 """
 
+import asyncio
 from dataclasses import replace
 import datetime
 import json
@@ -292,6 +293,20 @@ class MedianTests(StoreTestCase):
         self.assertEqual([10.0, 11.0, 12.0], store.samples(established))
         self.assertTrue(any("is full" in line for line in self.logs))
 
+    def test_a_sample_below_the_catalogs_fixed_part_does_not_scale(self):
+        # Raw receive: 9 s fixed plus 20 s per second of duration. A 3 s
+        # capture that took 7 s contradicts the fixed part, so it says
+        # nothing about the rate and is left out of the scaling.
+        catalog = builtin_catalog()
+        other = {"coverage": "comprehensive", "duration": "6s"}
+        self.learn(passed_records("Raw receive", RAW_RECEIVE, [7.0, 8.0, 72.0]))
+        self.assertIsNone(self.store.lookup_test(catalog, "Raw receive", other, HOST))
+        self.learn(passed_records("Raw receive", RAW_RECEIVE, [73.0, 74.0]))
+        # Only the three samples above 9 s: (72, 73, 74 - 9) / 3 per second.
+        learned = self.store.lookup_test(catalog, "Raw receive", other, HOST)
+        self.assertEqual(137.0, learned.seconds)
+        self.assertEqual(3, learned.samples)
+
     def test_a_learned_rate_applies_to_another_duration(self):
         # Three comprehensive Raw receive runs at 3 s: 9 s fixed, 20 s per
         # second of duration in the catalog; measured 10 s plus 21 per second.
@@ -349,6 +364,14 @@ class StageTests(StoreTestCase):
         self.learn([record("build_started", "running", 0.0, with_firmware=True),
                     record("build_finished", "passed", 900.0)])
         self.assertEqual("with firmware", self.store.keys()[0].profile)
+
+    def test_a_flash_run_without_a_usable_count_is_not_learned(self):
+        for count in (None, 0, -2, True, "four"):
+            with self.subTest(count):
+                self.assertEqual(0, self.learn([
+                    record("flash_run_finished", "passed", 10.0, duration_s=62.5,
+                           requested_flashes=count)]))
+        self.assertEqual([], self.store.keys())
 
     def test_a_stage_that_did_not_pass_teaches_nothing(self):
         self.assertEqual(0, self.learn([
@@ -612,6 +635,66 @@ class ControllerLearningTests(ControllerTestCase):
             await wait_until(lambda: len(self.samples()) == 1)
         self.assertEqual([10.0], self.samples())
         self.assertEqual([], self.samples("Raw receive", RAW_RECEIVE))
+
+    async def test_two_overlapping_reports_of_one_end_learn_it_once(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            message = await self.accepted_run(runner)
+            for index, item in enumerate(
+                passed_records("Argument validation", VALIDATION, [10.0]), 1
+            ):
+                await runner.send("event", run_id="run-1",
+                                  event={**item, "run_id": "run-1", "sequence": index})
+            await wait_until(
+                lambda: len(self.controller.read_events(
+                    self.controller.runs["run-1"])) == 2)
+            del message
+        run = self.controller.runs["run-1"]
+        run.finished_at, run.status = "now", "passed"
+        # Two ends dispatched at once (a replaced connection finishes the
+        # message it was already handling).
+        kept = await asyncio.gather(self.controller.learn(run),
+                                    self.controller.learn(run))
+        self.assertEqual([1, 0], sorted(kept, reverse=True))
+        self.assertEqual([10.0], self.samples())
+
+    async def test_a_run_that_ended_unlearned_is_picked_up_at_startup(self):
+        # The controller stopped between recording a run's end and taking
+        # its durations; the next one finishes the job.
+        directory = self.results / "run-old"
+        directory.mkdir(parents=True)
+        (directory / "run.json").write_text(json.dumps({
+            "run_id": "run-old", "target": HOST, "status": "passed",
+            "created_at": stamp(0.0), "finished_at": stamp(20.0),
+            "plan": "fast", "suite": "fast", "learned_durations": False,
+        }), encoding="utf-8")
+        (directory / "run.jsonl").write_text("".join(
+            json.dumps({**item, "run_id": "run-old"}) + "\n"
+            for item in passed_records("Argument validation", VALIDATION, [10.0])
+        ), encoding="utf-8")
+        # A run stored before durations were learned at all has no such
+        # field and is left alone.
+        old = self.results / "run-older"
+        old.mkdir(parents=True)
+        (old / "run.json").write_text(json.dumps({
+            "run_id": "run-older", "target": HOST, "status": "passed",
+            "created_at": stamp(0.0), "finished_at": stamp(20.0),
+        }), encoding="utf-8")
+        (old / "run.jsonl").write_text("".join(
+            json.dumps({**item, "run_id": "run-older"}) + "\n"
+            for item in passed_records("Raw receive", RAW_RECEIVE, [70.0])
+        ), encoding="utf-8")
+        await self.server.stop()
+        await self.start_controller()
+        await wait_until(lambda: len(self.samples()) == 1)
+        self.assertEqual([10.0], self.samples())
+        self.assertEqual([], self.samples("Raw receive", RAW_RECEIVE))
+        self.assertTrue(self.controller.runs["run-old"].learned_durations)
+        # Learned once: starting again adds nothing.
+        await self.server.stop()
+        await self.start_controller()
+        self.assertEqual(0, await self.controller.learn_pending())
+        self.assertEqual([10.0], self.samples())
 
     async def test_a_run_that_ended_in_an_error_teaches_too(self):
         async with FakeRunner(self.port) as runner:

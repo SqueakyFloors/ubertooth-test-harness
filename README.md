@@ -1391,6 +1391,12 @@ preflight estimates for that run. The live countdown therefore sharpens by
 itself; Run setup still shows catalog estimates until the GUI asks for a
 target's own, and the "from N runs" label is still to come.
 
+The `stages` of `/api/plans?target=` are informational, one entry per stored
+key: the flash entry there is the time **inside** the `Flash reliability`
+test, which is also learned as that test, so it must not be added to the test
+estimates. A run's own `stages` holds only build and preflight, the two the
+countdown leaves out.
+
 Runner messages are decoded strictly (up to 4 MiB, enough for a 1 MiB
 manifest record); a malformed or out-of-place message is counted on the
 target and ignored, and a first message that is not a valid `register`
