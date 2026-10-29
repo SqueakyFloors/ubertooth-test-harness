@@ -354,7 +354,7 @@ interpreter or `python3`.
 | operand | stray word | Covered | Python tools (comprehensive): `--extcap-dlts extra` gives `error: unexpected argument 'extra'`, exit 1, no DLT line; BLE extcap interfaces (comprehensive): `--extcap-interfaces extra`, no listing ([ubertooth#342](https://github.com/SqueakyFloors/ubertooth/pull/342)) |
 | `--extcap-version[=V]` | Wireshark's version | Covered | BLE extcap interfaces: `--extcap-interfaces --extcap-version=4.2.0`, as Wireshark calls it, gives the same listing (smoke; fork [#297](https://github.com/SqueakyFloors/ubertooth/issues/297), fixed in d04f79e); `--extcap-version 4.4.1` (comprehensive). Python tools (comprehensive): `=4.2.0`, the next-word form and the bare form (first and last) are ignored by `--extcap-dlts`/`--extcap-config` |
 | `--extcap-capture-filter=` | capture filter | Covered | BLE extcap capture (comprehensive): `--extcap-capture-filter "btle.length > 20"`: the capture runs as without it, and `warning: this interface applies no capture filter; ...` is on stderr |
-| `--extcap-interfaces` | list interfaces | Covered | BLE extcap interfaces: exactly one `interface {value=ubertooth<serial>}{display=Ubertooth One <serial>}` line per attached board, and every registered board's serial among them, guards unchanged (fixed in fork [#269](https://github.com/SqueakyFloors/ubertooth/issues/269)). Strict (Python tools, comprehensive, no Ubertooth): with a stand-in `ubertooth-util` that fails as a libusb failure does, the listing exits 1 and passes its message on; at d04f79e it exits 0 with an empty listing and drops the message ([ubertooth#362](https://github.com/SqueakyFloors/ubertooth/issues/362)) |
+| `--extcap-interfaces` | list interfaces | Covered | BLE extcap interfaces: exactly one `interface {value=ubertooth<serial>}{display=Ubertooth One <serial>}` line per attached board, and every registered board's serial among them, guards unchanged (fixed in fork [#269](https://github.com/SqueakyFloors/ubertooth/issues/269)). Python tools (comprehensive, no Ubertooth): with a stand-in `ubertooth-util` that fails as a libusb failure does, the listing exits 1 and passes its message on (fixed in fork `779f4f7`, [ubertooth#362](https://github.com/SqueakyFloors/ubertooth/issues/362); at d04f79e it exited 0 with an empty listing and dropped the message) |
 | `--extcap-dlts` | list DLTs | Covered | Python tools: DLT 256 `DLT_BLUETOOTH_LE_LL_WITH_PHDR`; without an interface: the `must be ubertooth<serial>` error, exit 1 (comprehensive) |
 | `--extcap-config` | config options | Covered | Python tools: `--channel` selector, 37 (default), 38, 39; a non-Ubertooth interface: the `must be ubertooth<serial>` error, exit 1 (comprehensive) |
 | `--capture` | start a capture | Covered | BLE extcap capture: runs `ubertooth-btle -f -U <serial> -q <fifo> -A <channel>`; the harness reads the FIFO as Wireshark would and stops the script with SIGTERM: a PCAP header for link type 256, whole records, at most 32 MiB (a longer stream fails), exit 0, no process left, channel, squelch and LEDs restored, guards unchanged. Comprehensive: exits non-zero when the capture fails, with a serial no board has (`ubertooth-btle`'s `no Ubertooth found with serial matching` and its status) or `--channel=40` (exit 1, no `ubertooth-btle` started, recorded by a shim `ubertooth-btle` first on PATH) (fixed in d04f79e, [ubertooth#334](https://github.com/SqueakyFloors/ubertooth/issues/334)); a capture ended by closing the FIFO (Wireshark's other way to stop), after at least one record, exits 0 by itself once the next packet gets SIGPIPE, no process left; skipped ("no advertising traffic in range") when no record arrives in the capture window |
@@ -365,8 +365,8 @@ interpreter or `python3`.
 ## Fork bugs found by these tests
 
 Open or recently fixed SqueakyFloors/ubertooth issues that harness tests found
-or that strict harness cases check. Strict cases assert the documented behavior
-and fail until the fix is on the commit under test.
+or that harness cases check. A case asserts the documented behavior, so it
+fails until the fix is on the commit under test.
 
 | Fork issue | Tool | Problem | Status | Harness case |
 |---|---|---|---|---|
@@ -414,7 +414,7 @@ and fail until the fix is on the commit under test.
 | [#362](https://github.com/SqueakyFloors/ubertooth/issues/362) | btle-extcap | `--extcap-interfaces` exits 0 with an empty listing when `ubertooth-util` fails, and drops its stderr | Fixed on main (`779f4f7`, #374); passes at `699960b` | Python tools (comprehensive): `extcap-interfaces-util-fails` |
 | [#677](https://github.com/SqueakyFloors/ubertooth/issues/677) | firmware | The range test takes the first CRC-OK packet on the reply channel, so a packet that is not a copy of the request ends about one bench run in ten in `mismatch on byte 0` | Open | Two-device range test |
 
-A test that fails cleanly (device verified restored, guards unchanged) no longer ends the run ([#41](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/41)), so strict cases do not hide later tests.
+A test that fails cleanly (device verified restored, guards unchanged) no longer ends the run ([#41](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/41)), so a case that fails on a known issue does not hide later tests.
 
 ## Hard or impossible to test
 

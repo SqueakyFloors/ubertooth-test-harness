@@ -10,8 +10,9 @@ or no value) and --extcap-capture-filter are accepted and ignored, a capture
 filter with a "warning: " line; the options Wireshark sends only for a feature
 the listing advertises (--extcap-reload-option, --extcap-control-in, ...) are
 refused like any unknown option. A usage error is "error: ..." on stderr, exit
-1: an unknown option is followed by the usage line, a stray word ("error:
-unexpected argument '<word>'") is refused even with -h, and --capture refuses
+1, with no usage line after it since fork 12211ce (the message says what is
+wrong); a stray word ("error: unexpected argument '<word>'") is refused even
+with -h, and --capture refuses
 a channel outside 37-39 before ubertooth-btle runs. A capture that fails exits
 non-zero (ubertooth-btle's status); one ended by SIGTERM or by the reader
 closing the FIFO exits 0. The commands run through pytools.py, which finds

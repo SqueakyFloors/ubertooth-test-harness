@@ -67,8 +67,10 @@ class FakeUSB:
         self.write_error = write_error
         self.ignore_writes = ignore_writes
         self.calls = []
+        self.reads = []
 
     def _read(self, port, value):
+        self.reads.append(port)
         if not 0 <= port < len(self.states):
             return FakeResult(0, INDEX_RANGE_ERROR)
         return FakeResult(value(port), self.read_error)
@@ -259,6 +261,7 @@ class AcronamePowerControllerTests(unittest.TestCase):
             with self.assertRaisesRegex(PowerControllerError, "0-7"):
                 controller.set_power_enabled(port, False)
         self.assertEqual([], hub.usb.calls)
+        self.assertEqual([], hub.usb.reads)
 
     def test_unarmed_is_reported_before_the_connection_is_needed(self):
         with self.assertRaisesRegex(PowerControllerError, "not armed"):
@@ -289,6 +292,7 @@ class AcronamePowerControllerTests(unittest.TestCase):
         with self.assertRaisesRegex(PowerControllerError, "not armed"):
             controller.set_data_enabled(0, False)
         self.assertEqual([], hub.usb.calls)
+        self.assertEqual([], hub.usb.reads)
 
     def test_armed_power_change_keeps_data_and_reads_back(self):
         hub = FakeHub(0x12345678)

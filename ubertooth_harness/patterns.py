@@ -15,6 +15,10 @@ IMAGE_NAME_PATTERN = r"(?:\S+\s+)?"
 FIRMWARE_VERSION_RE = re.compile(
     rf"Firmware version:\s+{IMAGE_NAME_PATTERN}(?P<revision>\S+)\s+\(API:"
 )
+# The preflight identity check is stricter than the reads above: the run's
+# tests need the application image, so a board on another image (btbr, a
+# bench image) is a mismatch even when it was built from the same commit.
+APPLICATION_IMAGE_PATTERN = r"(?:bluetooth_rxtx\s+)?"
 PART_ID_PATTERN = r"Part ID:\s+[0-9A-Fa-f]+"
 BOARD_ID_PATTERN = r"Board ID Number:\s+\d+"
 
@@ -59,9 +63,13 @@ def revision_pattern(expected: str) -> str:
 
 
 def firmware_version_pattern(expected: str) -> str:
-    """`ubertooth-util -v` output for firmware built from ``expected``."""
+    """`ubertooth-util -v` output for the application image built from ``expected``.
+
+    Only the application image the harness tests may be named, so a board on
+    another image does not match.
+    """
     return (
-        rf"Firmware version:\s+{IMAGE_NAME_PATTERN}"
+        rf"Firmware version:\s+{APPLICATION_IMAGE_PATTERN}"
         rf"{revision_pattern(expected)}(?:\s|\()"
     )
 

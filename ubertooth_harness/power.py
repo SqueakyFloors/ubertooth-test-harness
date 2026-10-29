@@ -283,9 +283,16 @@ class AcronameUSBHub3pController:
                         f"controller 0x{self.serial_number:08x} is model "
                         f"{model}, not a USBHub3+ ({self._model})"
                     )
-            version = int(self._result_value(
+            reported = self._result_value(
                 hub.system.getVersion(), "controller firmware version"
-            ))
+            )
+            try:
+                version = int(reported)
+            except (TypeError, ValueError):
+                raise PowerControllerError(
+                    f"controller 0x{self.serial_number:08x} reported an "
+                    f"unreadable firmware version {reported!r}"
+                ) from None
         except BaseException:
             _quiet_disconnect(hub)
             raise
