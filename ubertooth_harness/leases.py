@@ -1,4 +1,5 @@
-"""Host-local board leases, so several agents can share the lab Ubertooths.
+"""Host-local board leases, so several agents can share the lab Ubertooths
+(and the nRF52840 DKs used as BLE test devices, keyed by J-Link serial).
 
 A lease is an exclusive ``flock`` on ``<lease dir>/<serial>.lock``. The kernel
 drops it when the holding process exits, however it exits, so a lease can
@@ -107,6 +108,25 @@ def board_key(alias: str, identity: Mapping) -> str:
     return serial
 
 
+# nRF52840 DKs (BLE test devices) are leased too, by J-Link serial; their
+# keys cannot clash with an Ubertooth's 32 hex digits or the host lock.
+DK_TYPE = "nRF52840 DK"
+LEASED_TYPES = ("Ubertooth", DK_TYPE)
+
+
+def resource_key(resource) -> str:
+    """Lock-file key of a leasable registry resource (Ubertooth or DK)."""
+    if resource.type == DK_TYPE:
+        serial = str(resource.identity.get("jlink serial", "") or "").strip()
+        if not serial.isdigit():
+            raise LeaseError(
+                f"{resource.alias} needs a 'jlink serial' in the hardware registry "
+                f"to be leased; registered '{serial}'"
+            )
+        return f"nrf52840dk-{int(serial)}"
+    return board_key(resource.alias, resource.identity)
+
+
 def _observes_every_board(invocation) -> bool:
     """Tests that read or enumerate every Ubertooth on the host, not only their roles.
 
@@ -124,13 +144,13 @@ def boards_for_invocations(invocations: Iterable, registry) -> tuple[Board, ...]
     for invocation in invocations:
         aliases = [
             alias for alias in invocation.resources.values()
-            if registry.get(alias).type == "Ubertooth"
+            if registry.get(alias).type in LEASED_TYPES
         ]
         aliases += [action.resource_alias for action in invocation.power_isolation]
         if _observes_every_board(invocation):
             aliases += list(registry.resolve_hardware(invocation.host, "Ubertooth", "each"))
         for alias in aliases:
-            board = Board(alias, board_key(alias, registry.get(alias).identity))
+            board = Board(alias, resource_key(registry.get(alias)))
             found.setdefault(board.key, board)
     return tuple(sorted(found.values(), key=lambda b: b.key))
 

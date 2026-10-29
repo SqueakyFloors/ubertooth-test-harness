@@ -892,15 +892,15 @@ def _run_leased(
 
 
 def _registered_boards(registry, host: str | None = None):
-    """(board, None) for each leasable Ubertooth, or (alias, reason) if not."""
+    """(board, None) for each leasable Ubertooth or DK, or (alias, reason) if not."""
     boards = []
     for resource in sorted(registry.resources.values(), key=lambda r: r.alias):
-        if resource.type != "Ubertooth":
+        if resource.type not in board_leases.LEASED_TYPES:
             continue
         if host and resource.attached_to != host:
             continue
         try:
-            key = board_leases.board_key(resource.alias, resource.identity)
+            key = board_leases.resource_key(resource)
         except board_leases.LeaseError as error:
             boards.append((resource.alias, str(error)))
             continue
@@ -956,9 +956,9 @@ def _lease_command(args: argparse.Namespace) -> int:
     boards = []
     for alias in args.boards:
         resource = registry.get(alias)
-        if resource.type != "Ubertooth":
-            raise HarnessError(f"resource {alias} is not an Ubertooth")
-        boards.append(board_leases.Board(alias, board_leases.board_key(alias, resource.identity)))
+        if resource.type not in board_leases.LEASED_TYPES:
+            raise HarnessError(f"resource {alias} is not an Ubertooth or an nRF52840 DK")
+        boards.append(board_leases.Board(alias, board_leases.resource_key(resource)))
     # A manual firmware write (or DFU read-back) must not overlap another
     # command's power changes or writes on this host.
     host_lock = args.host_lock or Path(command[0]).name == "ubertooth-dfu"

@@ -35,6 +35,7 @@ import sys
 
 from ubertooth_harness import dfuimage
 from ubertooth_harness.cases import guard_roles
+from ubertooth_harness.patterns import IMAGE_NAME_PATTERN
 from ubertooth_harness.stateful import (
     CAPTURE_DIR_KEY,
     EXPECTED_REVISION_KEY,
@@ -48,7 +49,9 @@ from ubertooth_harness.transitions import _serial, _util
 
 TEST_IMAGE = "test_build"
 _CHECKER = str(Path(dfuimage.__file__).resolve())
-_REVISION_PATTERN = r"Firmware version:\s+(?P<value>\S+)\s+\(API:"
+_REVISION_PATTERN = (
+    rf"Firmware version:\s+{IMAGE_NAME_PATTERN}(?P<value>\S+)\s+\(API:"
+)
 # ubertooth-dfu logs this stage before it sends the first block.
 _PROGRAMMING = r"firmware programming attempt"
 # ...and this one once the image is accepted, before it opens a device.

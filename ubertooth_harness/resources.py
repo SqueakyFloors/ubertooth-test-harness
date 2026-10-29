@@ -33,6 +33,49 @@ def is_stable_serial_device(path) -> bool:
     )
 
 
+NRF52840_DK = "nRF52840 DK"
+# Roles the DK role firmware (firmware/nrf52840dk) can take. One image holds
+# all three and `role <name>` switches between them.
+DK_ROLES = ("advertiser", "central", "peripheral")
+_DK_IDENTITY_KEYS = ("jlink serial", "BLE address", "serial device")
+_JLINK_SERIAL = re.compile(r"^[0-9]{6,12}$")
+_BLE_ADDRESS = re.compile(r"^[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}$")
+
+
+def _validate_dk(resource) -> None:
+    """An nRF52840 DK: J-Link serial, optional BLE address and VCOM0 path."""
+    alias = resource.alias
+    unknown = sorted(set(resource.identity) - set(_DK_IDENTITY_KEYS))
+    if unknown:
+        raise RegistryError(
+            f"nRF52840 DK {alias} identity has unknown key(s) {', '.join(unknown)}; "
+            f"use {', '.join(_DK_IDENTITY_KEYS)}"
+        )
+    if not _JLINK_SERIAL.fullmatch(resource.identity.get("jlink serial", "")):
+        raise RegistryError(
+            f"nRF52840 DK {alias} requires a 'jlink serial' identity (6-12 digits)"
+        )
+    address = resource.identity.get("BLE address")
+    if address is not None and not _BLE_ADDRESS.fullmatch(address):
+        raise RegistryError(
+            f"nRF52840 DK {alias} BLE address must look like C0:11:22:33:44:55"
+        )
+    device = resource.identity.get("serial device")
+    if device is not None and not device.startswith("/dev/"):
+        raise RegistryError(f"nRF52840 DK {alias} serial device must be a /dev path")
+    roles = set(resource.roles)
+    if not roles or not roles <= set(DK_ROLES):
+        raise RegistryError(
+            f"nRF52840 DK {alias} roles must be one or more of {', '.join(DK_ROLES)}"
+        )
+    # Every role is identified by its address in a capture, and the central
+    # connects to the peripheral's, so all three need one.
+    if address is None:
+        raise RegistryError(
+            f"nRF52840 DK {alias} requires a 'BLE address' (the address its "
+            "status reports)")
+
+
 @dataclass(frozen=True)
 class Resource:
     alias: str
@@ -62,7 +105,7 @@ class ResourceRegistry(Protocol):
         """Return one registered resource."""
 
     def resolve_hardware(
-        self, host: str, resource_type: str, selector: str
+        self, host: str, resource_type: str, selector: str, role: str | None = None
     ) -> tuple[str, ...]:
         """Resolve default, each, or explicit hardware deterministically."""
 
@@ -142,16 +185,23 @@ class FileResourceRegistry:
                 identities[key] = resource.alias
 
         for host in self.hosts():
-            for resource_type, alias in host.defaults.items():
+            for key, alias in host.defaults.items():
                 target = self.get(alias)
-                if target.type != resource_type:
+                # A default is named either by resource type or by the role a
+                # test binds it to; a role default must be a resource that
+                # declares that role.
+                if target.type != key and key not in target.roles:
                     raise RegistryError(
-                        f"default {alias} type does not match {resource_type}"
+                        f"default {alias} is neither a {key} nor declares the "
+                        f"{key} role"
                     )
                 if target.attached_to != host.alias:
                     raise RegistryError(
                         f"default {alias} is not attached to {host.alias}"
                     )
+        for resource in self.resources.values():
+            if resource.type == NRF52840_DK:
+                _validate_dk(resource)
         used_power_ports = {}
         for resource in self.resources.values():
             if (
@@ -250,7 +300,7 @@ class FileResourceRegistry:
         return aliases
 
     def resolve_hardware(
-        self, host: str, resource_type: str, selector: str
+        self, host: str, resource_type: str, selector: str, role: str | None = None
     ) -> tuple[str, ...]:
         host_resource = self.get(host)
         if host_resource.type != "Host":
@@ -263,9 +313,22 @@ class FileResourceRegistry:
             )
         )
         if selector == "default":
-            alias = host_resource.defaults.get(resource_type)
+            # A test that binds several resources of one type (the connection
+            # pair's central and peripheral) needs a default per role, so the
+            # host may name one by role as well as by type.
+            alias = host_resource.defaults.get(role) if role else None
             if alias is None:
-                raise RegistryError(f"host {host} has no default {resource_type}")
+                alias = host_resource.defaults.get(resource_type)
+            if alias is None:
+                raise RegistryError(
+                    f"host {host} has no default {resource_type}"
+                    + (f" for the {role} role" if role else "")
+                )
+            if alias not in eligible:
+                raise RegistryError(
+                    f"default {alias} is not a {resource_type} attached to {host}"
+                )
+            self._declares_role(self.get(alias), role)
             return (alias,)
         if selector == "each":
             if not eligible:
@@ -278,7 +341,24 @@ class FileResourceRegistry:
             raise RegistryError(
                 f"resource {selector} is not a {resource_type} attached to {host}"
             )
+        self._declares_role(resource, role)
         return (selector,)
+
+    @staticmethod
+    def _declares_role(resource, role: str | None) -> None:
+        """A resource that declares roles may only be bound to one of them.
+
+        A resource with no roles (an Ubertooth) is bound by type alone, so
+        nothing is checked; a DK registered as the peripheral must not be
+        handed to a test that wants an advertiser, which would otherwise show
+        up only as a capture that holds nothing.
+        """
+        if role is None or not resource.roles or role in resource.roles:
+            return
+        raise RegistryError(
+            f"resource {resource.alias} declares the role(s) "
+            f"{', '.join(resource.roles)}, not {role}"
+        )
 
     def reconcile(self, host: str, discovered: Sequence[Mapping]) -> Reconciliation:
         self.get(host)

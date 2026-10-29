@@ -4,10 +4,6 @@ plan: Ubertooth backlog
 runnable: false
 suites:
   backlog:
-    - Capture known BLE advertiser:
-        advertiser: required
-        Ubertooth: default
-
     - Capture eero setup beacon:
         eero: required
         Ubertooth: default
@@ -37,7 +33,7 @@ suites:
     - E-GO skateboard capture:
         skateboard: required
 
-    # No known BLE advertiser to monitor yet (hardware needed: #86).
+    # Not implemented yet; the known advertiser (#86) is in the ble plan.
     - BLE monitor:
         hosts: each
         Ubertooth: default
