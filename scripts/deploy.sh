@@ -30,8 +30,15 @@
 #                             CHECKOUT/testplans)
 #   --ubertooth-repo URL      repository whose refs the GUI offers (default:
 #                             the controller's default, the public fork)
-#   --libbtbb-source DIR      passed to the runner
-#   --libbtbb-ref REF         passed to the runner
+#   --libbtbb-source DIR      libbtbb checkout the runner builds from (default:
+#                             a clone of the libbtbb fork that deploy keeps in
+#                             DATA/sources/libbtbb, cloned once, then fetched)
+#   --libbtbb-ref REF         libbtbb commit the runner builds (default: the
+#                             LIBBTBB_REF pin in install.sh on the Ubertooth
+#                             checkout's origin/main, else the harness's own
+#                             pin, LIBBTBB_PIN in scripts/ci.sh)
+#   --no-libbtbb              no libbtbb: the runner cannot build, and refuses
+#                             runs that ask for a build
 #   --allow-power-changes     passed to the runner (lets runs switch USB power)
 #   --external-board-lock TEMPLATE
 #                             passed to the runner: every run also holds each
@@ -53,6 +60,9 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 CONTROLLER_UNIT=ubertooth-harness-controller.service
 RUNNER_UNIT=ubertooth-harness-runner.service
+LIBBTBB_URL=https://github.com/SqueakyFloors/libbtbb.git
+# Hard limit on each clone or fetch deploy makes.
+GIT_TIMEOUT_S=60
 
 port=8765
 runner_host=
@@ -62,6 +72,7 @@ plans_dir=$ROOT/testplans
 ubertooth_repo=
 libbtbb_source=
 libbtbb_ref=
+no_libbtbb=0
 allow_power_changes=0
 external_board_lock=
 no_start=0
@@ -87,6 +98,7 @@ while [ "$#" -gt 0 ]; do
         --ubertooth-repo) need_value "$@"; ubertooth_repo=$2; shift ;;
         --libbtbb-source) need_value "$@"; libbtbb_source=$2; shift ;;
         --libbtbb-ref) need_value "$@"; libbtbb_ref=$2; shift ;;
+        --no-libbtbb) no_libbtbb=1 ;;
         --allow-power-changes) allow_power_changes=1 ;;
         --external-board-lock) need_value "$@"; external_board_lock=$2; shift ;;
         --no-start) no_start=1 ;;
@@ -180,10 +192,19 @@ fi
 
 [ -n "$runner_host" ] || die "--runner-host NAME is required (the Host resource in the registry)"
 [ -n "$ubertooth_source" ] || die "--ubertooth-source DIR is required (the runner's Ubertooth checkout)"
+if [ "$no_libbtbb" = 1 ] && { [ -n "$libbtbb_source" ] || [ -n "$libbtbb_ref" ]; }; then
+    die "--no-libbtbb cannot be combined with --libbtbb-source or --libbtbb-ref"
+fi
 ubertooth_source=$(absolute "$ubertooth_source")
 hardware=$(absolute "$hardware")
 plans_dir=$(absolute "$plans_dir")
 [ -z "$libbtbb_source" ] || libbtbb_source=$(absolute "$libbtbb_source")
+# Deploy keeps its own libbtbb clone unless one is named (or none is wanted).
+manage_libbtbb=0
+if [ "$no_libbtbb" = 0 ] && [ -z "$libbtbb_source" ]; then
+    libbtbb_source=$state_dir/sources/libbtbb
+    manage_libbtbb=1
+fi
 
 safe checkout "$ROOT"
 safe "data directory" "$state_dir"
@@ -228,9 +249,90 @@ check_path() {
 check_path --ubertooth-source "$ubertooth_source" -d
 check_path --hardware "$hardware" -f
 check_path --plans-dir "$plans_dir" -d
-[ -z "$libbtbb_source" ] || check_path --libbtbb-source "$libbtbb_source" -d
+[ "$manage_libbtbb" = 1 ] || [ -z "$libbtbb_source" ] || check_path --libbtbb-source "$libbtbb_source" -d
 
 commit=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)
+
+if [ "$no_start" = 0 ] && [ "$dry_run" = 0 ] && ! systemctl --user show-environment >/dev/null 2>&1; then
+    die "no systemd user manager for $(id -un) (log in as this user over SSH or the desktop, not su/sudo -u); nothing was changed"
+fi
+
+say "checkout $ROOT (commit $commit)"
+run python3 "$ROOT/bootstrap.py"
+if [ ! -x "$python" ]; then
+    if [ "$dry_run" = 1 ]; then
+        say "warning: $python does not exist yet"
+    else
+        die "$python is missing after bootstrap"
+    fi
+fi
+
+# git for a clone or fetch: bounded, never prompting for credentials.
+net_git() {
+    if [ "$dry_run" = 1 ]; then
+        say "would run: git $*"
+        return 0
+    fi
+    if command -v timeout >/dev/null 2>&1; then
+        GIT_TERMINAL_PROMPT=0 timeout "$GIT_TIMEOUT_S" git "$@" </dev/null
+    else
+        GIT_TERMINAL_PROMPT=0 git "$@" </dev/null
+    fi
+}
+
+# The literal LIBBTBB_REF commit install.sh sets on the Ubertooth checkout's
+# origin/main (fetched first); nothing when it cannot be read.
+fork_libbtbb_pin() {
+    local text
+    # Runs inside $(...): everything but the pin goes to stderr.
+    if ! net_git -C "$ubertooth_source" fetch --quiet origin main >&2; then
+        say "warning: could not fetch origin main in $ubertooth_source; reading the pin from what it has" >&2
+    fi
+    text=$(git -C "$ubertooth_source" show origin/main:install.sh 2>/dev/null) || return 0
+    printf '%s\n' "$text" |
+        sed -n "s/^LIBBTBB_REF=[\"']\{0,1\}\([0-9a-fA-F]\{7,40\}\)[\"']\{0,1\}[[:space:]]*\(#.*\)\{0,1\}\$/\1/p" |
+        head -n 1
+}
+
+setup_libbtbb() {
+    if [ "$no_libbtbb" = 1 ]; then
+        say "libbtbb: none (--no-libbtbb); the runner cannot build and refuses runs that ask for a build"
+        return
+    fi
+    if [ "$manage_libbtbb" = 1 ]; then
+        if [ -d "$libbtbb_source/.git" ]; then
+            if net_git -C "$libbtbb_source" fetch --quiet --tags origin; then
+                [ "$dry_run" = 1 ] || say "libbtbb: fetched $libbtbb_source"
+            else
+                say "warning: could not fetch $libbtbb_source; the runner fetches a missing commit itself"
+            fi
+        elif [ -e "$libbtbb_source" ]; then
+            die "$libbtbb_source exists but is not a git clone; move it away, or pass --libbtbb-source DIR or --no-libbtbb"
+        else
+            [ -d "$(dirname "$libbtbb_source")" ] || run mkdir -p "$(dirname "$libbtbb_source")"
+            if ! net_git clone --quiet "$LIBBTBB_URL" "$libbtbb_source"; then
+                rm -rf "$libbtbb_source"
+                die "could not clone $LIBBTBB_URL into $libbtbb_source; pass --libbtbb-source DIR, or --no-libbtbb for a runner that cannot build"
+            fi
+            [ "$dry_run" = 1 ] || say "libbtbb: cloned $LIBBTBB_URL into $libbtbb_source"
+        fi
+    fi
+    if [ -z "$libbtbb_ref" ]; then
+        libbtbb_ref=$(fork_libbtbb_pin)
+        if [ -n "$libbtbb_ref" ]; then
+            say "libbtbb: ref $libbtbb_ref, the LIBBTBB_REF pin in install.sh on origin/main of $ubertooth_source"
+        else
+            libbtbb_ref=$(sed -n 's/^LIBBTBB_PIN=\([0-9a-f]\{40\}\)$/\1/p' "$ROOT/scripts/ci.sh" 2>/dev/null | head -n 1)
+            [ -n "$libbtbb_ref" ] || die "no libbtbb ref: install.sh on origin/main of $ubertooth_source has no literal LIBBTBB_REF and $ROOT/scripts/ci.sh has no LIBBTBB_PIN; pass --libbtbb-ref REF or --no-libbtbb"
+            say "libbtbb: ref $libbtbb_ref, the harness's pin (LIBBTBB_PIN in scripts/ci.sh): no literal LIBBTBB_REF in install.sh on origin/main of $ubertooth_source"
+        fi
+    else
+        say "libbtbb: ref $libbtbb_ref (--libbtbb-ref)"
+    fi
+}
+setup_libbtbb
+safe --libbtbb-source "$libbtbb_source"
+safe --libbtbb-ref "$libbtbb_ref"
 
 controller_args="controller --port $port --results-dir $results_dir --plans-dir $plans_dir"
 [ -z "$ubertooth_repo" ] || controller_args="$controller_args --ubertooth-repo $ubertooth_repo"
@@ -278,20 +380,6 @@ TimeoutStopSec=180
 [Install]
 WantedBy=default.target
 "
-
-if [ "$no_start" = 0 ] && [ "$dry_run" = 0 ] && ! systemctl --user show-environment >/dev/null 2>&1; then
-    die "no systemd user manager for $(id -un) (log in as this user over SSH or the desktop, not su/sudo -u); nothing was changed"
-fi
-
-say "checkout $ROOT (commit $commit)"
-run python3 "$ROOT/bootstrap.py"
-if [ ! -x "$python" ]; then
-    if [ "$dry_run" = 1 ]; then
-        say "warning: $python does not exist yet"
-    else
-        die "$python is missing after bootstrap"
-    fi
-fi
 
 # Prints the IDs of active runs the controller on this port reports; nothing
 # when no controller answers.

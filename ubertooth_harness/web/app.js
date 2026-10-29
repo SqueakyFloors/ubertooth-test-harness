@@ -21,6 +21,7 @@
     "did not finish": ["✗", "did not finish"],
     online: ["●", "online"],
     offline: ["○", "offline"],
+    busy: ["◆", "busy"],
   };
 
   const state = {
@@ -125,10 +126,11 @@
           }))
         : "none";
       return el("li", {},
-        el("article", { className: "card", "aria-labelledby": `target-${target.host}` },
+        el("article", { className: "card target-card", "aria-labelledby": `target-${target.host}` },
           el("h3", { id: `target-${target.host}`, text: target.host }),
-          el("dl", { className: "summary" },
-            el("dt", { text: "Status" }), el("dd", {}, statusBadge(target.status)),
+          el("dl", { className: "summary summary-compact" },
+            el("dt", { text: "Status" }), el("dd", { className: "badges" }, statusBadge(target.status),
+              target.active_run_id ? statusBadge("busy") : null),
             el("dt", { text: "Host name" }), el("dd", { text: target.hostname }),
             el("dt", { text: "OS" }), el("dd", { text: osText || "unknown" }),
             el("dt", { text: "Python" }), el("dd", { text: target.python }),
@@ -288,7 +290,7 @@
       selectRun(data.run.run_id);
     } catch (error) {
       status.textContent = `Not started: ${error.message}`;
-      if (error.status === 409) {
+      if (error.status === 409 && !error.message.startsWith("runner rejected the run")) {
         // The ref may have moved since this page listed it: list the refs
         // again so the next Run sends the current commit.
         await loadRefs();
@@ -515,14 +517,18 @@
 
     $("checklist").replaceChildren(...live.items.map((item) => {
       const shown = itemStatus(item, run);
-      return el("li", { className: `check check-${shown.replace(/ /g, "-")}` },
+      return el("li", {
+        className: `check check-${shown.replace(/ /g, "-")}`,
+        "aria-current": shown === "running" ? "step" : null,
+      },
         statusBadge(shown), " ", el("span", { className: "check-name", text: item.name }),
         item.estimated_s !== null && item.estimated_s !== undefined
-          ? el("span", { className: "hint", text: ` (about ${formatSeconds(item.estimated_s)})` }) : null,
+          ? el("span", { className: "hint check-estimate", text: ` (about ${formatSeconds(item.estimated_s)})` }) : null,
         item.reason ? el("span", { className: "reason", text: ` — ${item.reason}` }) : null);
     }));
     if (!live.items.length) {
       $("checklist").replaceChildren(el("li", {
+        className: "check-note",
         text: "Tests appear here as they start (this run's plan is not in the controller's plans directory).",
       }));
     }
@@ -604,6 +610,7 @@
         }));
       if (run.report) {
         actions.append(" ", el("a", {
+          className: "button-link",
           href: `${runPath(run.run_id)}/report.md`, text: "report.md",
           "aria-label": `report.md of run ${run.run_id}`,
         }));
@@ -615,8 +622,8 @@
         }));
       }
       return el("tr", {},
-        el("td", {}, timeElement(run.created_at)),
-        el("td", {}, timeElement(run.finished_at)),
+        el("td", { className: "time" }, timeElement(run.created_at)),
+        el("td", { className: "time" }, timeElement(run.finished_at)),
         el("td", {}, el("code", { text: run.run_id })),
         el("td", { text: refLabel(run) }),
         el("td", { text: `${run.plan ?? "–"} / ${run.suite ?? "–"}` }),
@@ -654,7 +661,7 @@
       if (!data.failures.length) {
         list.replaceChildren(el("li", { text: "No failed step recorded." }));
       } else {
-        list.replaceChildren(...data.failures.map((failure) => el("li", {},
+        list.replaceChildren(...data.failures.map((failure) => el("li", { className: "failure" },
           statusBadge(failure.status), " ", el("strong", { text: failure.step }),
           failure.reason ? el("span", { text: `: ${failure.reason}` }) : null,
           failure.log && failure.log.length
@@ -674,6 +681,7 @@
     state.socket = socket;
     socket.addEventListener("open", () => {
       state.retry = 1000;
+      $("connection").className = "conn conn-up";
       $("connection").textContent = "Connected to the controller (live updates on).";
       loadRuns();
       if (state.selected) selectRun(state.selected, false);
@@ -700,6 +708,7 @@
     socket.addEventListener("close", () => {
       const wait = state.retry;
       state.retry = Math.min(state.retry * 2, 30000);
+      $("connection").className = "conn conn-down";
       $("connection").textContent = `Disconnected from the controller; retrying in ${Math.round(wait / 1000)} s.`;
       window.setTimeout(connect, wait);
     });

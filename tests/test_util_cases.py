@@ -646,8 +646,10 @@ class LedBlinkSamplerTests(unittest.TestCase):
 # Fake: several boards on one host, with -U all, no -U, and -U<index>
 
 
-LABELS = {"-s": "Serial No: ", "-v": "Firmware version: ", "-p": "Part ID: ",
-          "-b": "Board ID Number: ", "-V": ""}
+# The label and report order come from the module under test, so the fake
+# cannot drift into a protocol the checks no longer expect.
+LABELS = dict(util_cases.LISTING_LABELS)
+REPORT_ORDER = [query for query, _label in util_cases.LISTING_LABELS]
 IDENTITY = set(LABELS)
 
 
@@ -660,15 +662,20 @@ class MultiBench:
     - ``unregistered``: extra serials on the bus that the registry lacks.
     - ``index_map``: board opened for each -U<index> (default identity).
     - ``listing_drops_last``: the listing omits the last board.
+    - ``unreadable``: indices the listing cannot open, which get
+      ``unavailable, <reason>`` where each query's value would be.
     """
 
+    UNAVAILABLE = "unavailable, in use by another program"
+
     def __init__(self, serials, *, past_end=None, unregistered=(), index_map=None,
-                 listing_drops_last=False):
+                 listing_drops_last=False, unreadable=()):
         self.order = list(serials) + list(unregistered)
         self.boards = {s: FakeUbertooth(serial=s, crc="1") for s in self.order}
         self.past_end = past_end
         self.index_map = index_map
         self.listing_drops_last = listing_drops_last
+        self.unreadable = set(unreadable)
         self.commands = []
 
     @staticmethod
@@ -689,16 +696,30 @@ class MultiBench:
         return self.boards[serial].run(command, timeout_s=5).stdout.splitlines()
 
     def _listing(self, queries):
-        order = ["-b", "-v", "-V", "-p", "-s"]  # ubertooth-util report order
-        requested = [q for q in order if q in queries]
+        requested = [q for q in REPORT_ORDER if q in queries]
         listed = self.order[:-1] if self.listing_drops_last else self.order
         lines = []
         for index, serial in enumerate(listed):
+            if index in self.unreadable:
+                # One line per query, so a reader filtering for one of them
+                # still sees this board.
+                for query in requested:
+                    label = LABELS[query]
+                    prefix = f"{label} ({index})" if label else f"{index}"
+                    lines.append(f"{prefix}: {self.UNAVAILABLE}")
+                continue
             for query in requested:
                 for line in self._report(serial, query):
-                    if len(requested) == 1 and LABELS[query]:
-                        line = line.removeprefix(LABELS[query])
-                    lines.append(f"{index}: {line}")
+                    # The report's label moves into the listing's, which
+                    # carries the index. Compile info has no label of its
+                    # own, and neither does a line that does not start with
+                    # one, so those keep the bare index prefix.
+                    label = LABELS[query]
+                    if label and line.startswith(f"{label}: "):
+                        value = line.removeprefix(f"{label}: ")
+                        lines.append(f"{label} ({index}): {value}")
+                    else:
+                        lines.append(f"{index}: {line}")
         return "".join(line + "\n" for line in lines)
 
     def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
@@ -791,13 +812,45 @@ class MultiBoardCaseTests(unittest.TestCase):
         self.assertEqual(("ubertooth-util", "-U2"), past.steps[0].resolve_argv({}))
 
     def test_listing_checks(self):
+        def listed(*serials):
+            return "".join(f"Serial No ({i}): {s}\n"
+                           for i, s in enumerate(serials))
+
         check = util_cases.serial_listing_check((A, B))
-        self.assertEqual("", check(f"0: {B}\n1: {A}\n"))
-        self.assertIn("not exactly", check(f"0: {A}\n"))
-        self.assertIn("unregistered", check(f"0: {A}\n1: {B}\n2: {C}\n"))
-        self.assertIn("not 0..1 in order", check(f"1: {A}\n0: {B}\n"))
-        self.assertIn("not '<index>: <value>'", check(f"Serial No: {A}\n"))
-        self.assertIn("not exactly", check(f"0: {A}\n1: {A}\n"))
+        self.assertEqual("", check(listed(B, A)))
+        self.assertIn("not exactly", check(listed(A)))
+        self.assertIn("unregistered", check(listed(A, B, C)))
+        self.assertIn("not 0..1 in order",
+                      check(f"Serial No (1): {A}\nSerial No (0): {B}\n"))
+        self.assertIn("is not", check(f"Serial No: {A}\n"))
+        self.assertIn("not exactly", check(listed(A, A)))
+        # The old unlabelled listing is a regression, not an accepted form:
+        # only a query the tool has no label for keeps the bare prefix.
+        self.assertIn("not 'Serial No'", check(f"0: {B}\n1: {A}\n"))
+        self.assertIn("not 'Serial No'",
+                      check(f"Part ID (0): {B}\nPart ID (1): {A}\n"))
+        # A board the tool could not read is named, not counted as a serial,
+        # whether the board never opened or the query itself failed on it.
+        self.assertIn(
+            "board 1 could not be opened",
+            check(f"Serial No (0): {A}\n"
+                  "Serial No (1): unavailable, in use by another program\n"),
+        )
+        self.assertIn(
+            "board 1 query read failed",
+            check(f"Serial No (0): {A}\nSerial No (1): read failed\n"),
+        )
+        # The unlabelled -V form names the query in the value instead.
+        identity = util_cases.identity_listing_check((A,))
+        self.assertIn("board 0 query read failed",
+                      identity("0: compile info read failed\n"))
+        # An unlabelled board ID line is a regression, even though -V's is not.
+        block = (f"0: 1\n"
+                 f"Firmware version (0): bluetooth_rxtx git-x (API:1.37)\n"
+                 f"0: bluetooth_rxtx git-x (API:1.37)\n"
+                 f"Part ID (0): 1234abcd\n"
+                 f"Serial No (0): {A}\n")
+        self.assertIn("not 'Board ID Number'", identity(block))
 
     def test_smoke_passes_on_fork_main_and_guards_hold(self):
         bench = MultiBench((A, B))
@@ -854,6 +907,16 @@ class MultiBoardCaseTests(unittest.TestCase):
             MultiBench((A, B), index_map={0: 1, 1: 0}),
             ("index-selects-listed-board",),
             "expected serial selected by -U0",
+        )
+
+    def test_a_board_the_listing_cannot_open_fails_and_names_it(self):
+        # The run has to say which board went unread, not report its stand-in
+        # value as a serial.
+        self.assert_smoke_fails(
+            MultiBench((A, B), unreadable={1}),
+            ("all-lists-every-registered-serial",
+             "no-selector-lists-every-registered-serial", "index-selects-listed-board"),
+            "board 1 could not be opened",
         )
 
 

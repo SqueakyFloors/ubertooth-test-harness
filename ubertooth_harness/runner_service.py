@@ -46,6 +46,11 @@ DEFAULT_MAX_BACKOFF_S = 30.0
 _CONNECT_TIMEOUT_S = 10.0
 _TAIL_POLL_S = 0.05
 _STDERR_TAIL_LINES = 20
+_NO_BUILD = (
+    "this runner has no libbtbb, so it cannot build; restart it with "
+    "--libbtbb-source and --libbtbb-ref (scripts/deploy.sh sets them up by "
+    "default), or run without Build"
+)
 
 
 class RunnerConfigError(ValueError):
@@ -210,6 +215,19 @@ class RunnerService:
 
     # ----- lifecycle -------------------------------------------------------
 
+    @property
+    def can_build(self) -> bool:
+        """A run with build set needs a libbtbb source and ref."""
+        return self.config.libbtbb_source is not None
+
+    def build_status(self) -> str:
+        if self.can_build:
+            return (
+                f"builds enabled: libbtbb {self.config.libbtbb_ref} from "
+                f"{self.config.libbtbb_source}"
+            )
+        return f"builds disabled: {_NO_BUILD}"
+
     def request_stop(self) -> None:
         """Stop reconnecting; cancel an active run and wait for it to end."""
         self._stop.set()
@@ -219,6 +237,7 @@ class RunnerService:
             asyncio.ensure_future(self._connection.close())
 
     async def run_forever(self) -> None:
+        self.log(self.build_status())
         backoff = self.config.initial_backoff_s
         while not self._stop.is_set():
             registered = False
@@ -373,6 +392,13 @@ class RunnerService:
             await self._send(
                 "run_rejected", request_id=request_id,
                 reason=f"busy: run {self._run.run_id} is active",
+            )
+            return
+        if message["build"] and not self.can_build:
+            # Refused up front: run-suite would fail inside the run with
+            # "--build requires --libbtbb-source and --libbtbb-ref".
+            await self._send(
+                "run_rejected", request_id=request_id, reason=_NO_BUILD,
             )
             return
         plan = (self.config.plans_dir / f"{message['plan']}.yaml").resolve()

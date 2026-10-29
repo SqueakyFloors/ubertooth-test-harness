@@ -52,8 +52,31 @@ FAKES = {
     # Only `ssh -G` (config lookup) runs in dry-run tests; real tunnels use FAKE_SSH.
     "ssh": '#!/bin/sh\n[ "$1" = -G ] || exit 99\nprintf "hostname %s\\nuser alice\\n" "$2"\n',
     "uname": '#!/bin/sh\necho "${FAKE_UNAME:-Linux}"\n',
-    "git": '#!/bin/sh\n[ -n "${FAKE_COMMIT:-}" ] || exit 128\necho "$FAKE_COMMIT"\n',
+    "git": textwrap.dedent("""\
+        #!/bin/sh
+        # Logs "git <args>" to $FAKE_GIT_LOG. clone makes DIR/.git, fetch
+        # exits $FAKE_GIT_FETCH_EXIT, show prints $FAKE_INSTALL_SH, and
+        # anything else (rev-parse HEAD) prints $FAKE_COMMIT.
+        printf '%s\\n' "git $*" >> "$FAKE_GIT_LOG"
+        case " $* " in
+            *" clone "*)
+                [ "${FAKE_GIT_CLONE_EXIT:-0}" = 0 ] || exit "$FAKE_GIT_CLONE_EXIT"
+                for last; do :; done
+                mkdir -p "$last/.git" && echo "ref: refs/heads/main" > "$last/.git/HEAD"
+                exit 0 ;;
+            *" fetch "*) exit "${FAKE_GIT_FETCH_EXIT:-0}" ;;
+            *" show "*)
+                [ -n "${FAKE_INSTALL_SH:-}" ] || { echo "fatal: invalid object name" >&2; exit 128; }
+                cat "$FAKE_INSTALL_SH"; exit 0 ;;
+        esac
+        [ -n "${FAKE_COMMIT:-}" ] || exit 128
+        echo "$FAKE_COMMIT"
+        """),
 }
+# The harness's own libbtbb pin, deploy's fallback (scripts/ci.sh).
+HARNESS_PIN = re.search(
+    r"^LIBBTBB_PIN=([0-9a-f]{40})$", (SCRIPTS / "ci.sh").read_text(encoding="utf-8"), re.M
+).group(1)
 
 
 def _write_exe(path: Path, text: str) -> None:
@@ -85,6 +108,8 @@ class FakeLab:
         self.bin = self.root / "bin"
         self.log = self.root / "commands.log"
         self.log.touch()
+        self.git_log = self.root / "git.log"
+        self.git_log.touch()
         for name, text in FAKES.items():
             _write_exe(self.bin / name, text)
         # The checkout deploy.sh installs from is the one it lives in.
@@ -92,6 +117,8 @@ class FakeLab:
         (self.checkout / "scripts").mkdir(parents=True)
         for script in ALL_SCRIPTS:
             shutil.copy2(script, self.checkout / "scripts" / script.name)
+        # deploy.sh reads the harness's libbtbb pin from here.
+        shutil.copy2(SCRIPTS / "ci.sh", self.checkout / "scripts" / "ci.sh")
         (self.checkout / "bootstrap.py").write_text("# fake\n", encoding="utf-8")
         _write_exe(self.checkout / ".venv" / "bin" / "python", "#!/bin/sh\n")
         (self.checkout / "testplans").mkdir()
@@ -102,6 +129,7 @@ class FakeLab:
             "HOME": str(self.home),
             "PATH": f"{self.bin}:/usr/bin:/bin",
             "FAKE_LOG": str(self.log),
+            "FAKE_GIT_LOG": str(self.git_log),
             "LANG": "C",
             # harness-open has no built-in host; these stand in for the lab.
             "HARNESS_HOST": LAB_HOST,
@@ -140,8 +168,18 @@ class FakeLab:
     def commands(self) -> list[str]:
         return self.log.read_text(encoding="utf-8").splitlines()
 
+    def git_commands(self) -> list[str]:
+        """git invocations other than reading the checkout's commit."""
+        return [line for line in self.git_log.read_text(encoding="utf-8").splitlines()
+                if not line.endswith(" rev-parse HEAD")]
+
+    @property
+    def libbtbb(self) -> Path:
+        return self.data_dir / "sources" / "libbtbb"
+
     def clear_log(self) -> None:
         self.log.write_text("", encoding="utf-8")
+        self.git_log.write_text("", encoding="utf-8")
 
 
 class DeployTest(unittest.TestCase):
@@ -169,7 +207,8 @@ class DeployTest(unittest.TestCase):
             f"--hardware {self.lab.checkout}/hardware.yaml --host Host_Linux "
             f"--ubertooth-source {self.lab.ubertooth} "
             f"--plans-dir {self.lab.checkout}/testplans "
-            f"--output {self.lab.data_dir}/runner/runs\n",
+            f"--output {self.lab.data_dir}/runner/runs "
+            f"--libbtbb-source {self.lab.libbtbb} --libbtbb-ref {HARNESS_PIN}\n",
             runner,
         )
         for unit in (controller, runner):
@@ -283,6 +322,95 @@ class DeployTest(unittest.TestCase):
         self.assertIn(" --ubertooth-repo https://example.org/ubertooth.git\n", controller)
         self.assertIn(" --controller ws://127.0.0.1:9123/ws/runner ", runner)
         self.assertIn(f" --libbtbb-source {libbtbb} --libbtbb-ref master", runner)
+        # A named libbtbb is the operator's: deploy neither clones nor fetches it.
+        self.assertFalse([c for c in self.lab.git_commands() if c.startswith(f"git -C {libbtbb}")])
+        self.assertFalse([c for c in self.lab.git_commands() if " clone " in c])
+
+    def runner_unit(self) -> str:
+        return (self.lab.unit_dir / RUNNER_UNIT).read_text(encoding="utf-8")
+
+    def test_default_libbtbb_is_cloned_once_then_fetched(self):
+        result = self.lab.deploy()
+        self.assertOk(result)
+        libbtbb = self.lab.libbtbb
+        self.assertTrue((libbtbb / ".git").is_dir())
+        self.assertIn(f"git clone --quiet https://github.com/SqueakyFloors/libbtbb.git {libbtbb}",
+                      self.lab.git_commands())
+        self.assertIn(f"libbtbb: cloned https://github.com/SqueakyFloors/libbtbb.git into {libbtbb}",
+                      result.stdout)
+        # No install.sh pin to read here, so the harness's own pin, said so.
+        self.assertIn(f"libbtbb: ref {HARNESS_PIN}, the harness's pin", result.stdout)
+        self.assertIn(f" --libbtbb-source {libbtbb} --libbtbb-ref {HARNESS_PIN}\n",
+                      self.runner_unit())
+        before = _tree(self.lab.home)
+        self.lab.clear_log()
+        result = self.lab.deploy()
+        self.assertOk(result)
+        self.assertEqual(_tree(self.lab.home), before)
+        self.assertIn(f"{RUNNER_UNIT} unchanged", result.stdout)
+        git = self.lab.git_commands()
+        self.assertFalse([c for c in git if " clone " in c])
+        self.assertIn(f"git -C {libbtbb} fetch --quiet --tags origin", git)
+
+    def test_libbtbb_ref_defaults_to_the_fork_install_sh_pin(self):
+        install = self.lab.root / "install.sh"
+        install.write_text(
+            "#!/bin/sh\nLIBBTBB_URL=https://github.com/SqueakyFloors/libbtbb.git\n"
+            "LIBBTBB_REF=\"0123456789abcdef0123456789abcdef01234567\"  # fork #320\n"
+            "case $1 in --libbtbb-ref) LIBBTBB_REF=\"${2:-}\" ;; esac\n",
+            encoding="utf-8",
+        )
+        result = self.lab.deploy(FAKE_INSTALL_SH=str(install))
+        self.assertOk(result)
+        pin = "0123456789abcdef0123456789abcdef01234567"
+        self.assertIn(f" --libbtbb-ref {pin}\n", self.runner_unit())
+        self.assertIn(f"libbtbb: ref {pin}, the LIBBTBB_REF pin in install.sh on origin/main",
+                      result.stdout)
+        git = self.lab.git_commands()
+        self.assertIn(f"git -C {self.lab.ubertooth} fetch --quiet origin main", git)
+        self.assertIn(f"git -C {self.lab.ubertooth} show origin/main:install.sh", git)
+
+    def test_named_libbtbb_source_gets_the_pin_as_its_ref(self):
+        libbtbb = self.lab.root / "my-libbtbb"
+        libbtbb.mkdir()
+        self.assertOk(self.lab.deploy("--libbtbb-source", str(libbtbb)))
+        self.assertIn(f" --libbtbb-source {libbtbb} --libbtbb-ref {HARNESS_PIN}\n",
+                      self.runner_unit())
+        self.assertFalse(self.lab.libbtbb.exists())
+
+    def test_no_libbtbb_deploys_a_runner_that_cannot_build(self):
+        result = self.lab.deploy("--no-libbtbb")
+        self.assertOk(result)
+        self.assertNotIn("--libbtbb", self.runner_unit())
+        self.assertIn("libbtbb: none (--no-libbtbb)", result.stdout)
+        self.assertEqual([], self.lab.git_commands())
+        self.assertFalse(self.lab.libbtbb.exists())
+        result = self.lab.deploy("--no-libbtbb", "--libbtbb-ref", "master")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--no-libbtbb cannot be combined", result.stderr)
+
+    def test_libbtbb_clone_failure_stops_before_any_unit(self):
+        result = self.lab.deploy(FAKE_GIT_CLONE_EXIT="128")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("could not clone https://github.com/SqueakyFloors/libbtbb.git", result.stderr)
+        self.assertIn("--no-libbtbb", result.stderr)
+        self.assertFalse((self.lab.unit_dir / RUNNER_UNIT).exists())
+        self.assertFalse(self.lab.libbtbb.exists())
+
+    def test_libbtbb_fetch_failure_is_a_warning(self):
+        self.assertOk(self.lab.deploy())
+        result = self.lab.deploy(FAKE_GIT_FETCH_EXIT="1")
+        self.assertOk(result)
+        self.assertIn(f"warning: could not fetch {self.lab.libbtbb}", result.stdout)
+        self.assertIn(f" --libbtbb-ref {HARNESS_PIN}\n", self.runner_unit())
+
+    def test_libbtbb_path_that_is_not_a_clone_is_refused(self):
+        self.lab.libbtbb.mkdir(parents=True)
+        (self.lab.libbtbb / "notes.txt").write_text("mine\n", encoding="utf-8")
+        result = self.lab.deploy()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("exists but is not a git clone", result.stderr)
+        self.assertEqual("mine\n", (self.lab.libbtbb / "notes.txt").read_text(encoding="utf-8"))
 
     def test_external_board_lock_is_passed_to_the_runner(self):
         result = self.lab.deploy("--dry-run", "--external-board-lock", "~/locks/board-{serial}.lock")
@@ -337,6 +465,15 @@ class DeployTest(unittest.TestCase):
         self.assertIn("--controller ws://127.0.0.1:8765/ws/runner", result.stdout)
         self.assertIn(f"would run: python3 {self.lab.checkout}/bootstrap.py", result.stdout)
         self.assertIn(f"would run: systemctl --user restart {CONTROLLER_UNIT}", result.stdout)
+        self.assertIn("would run: git clone --quiet https://github.com/SqueakyFloors/libbtbb.git "
+                      f"{self.lab.libbtbb}", result.stdout)
+        self.assertIn(f"--libbtbb-source {self.lab.libbtbb} --libbtbb-ref {HARNESS_PIN}",
+                      result.stdout)
+        # Dry run reads the pin but neither clones nor fetches.
+        self.assertEqual(
+            [f"git -C {self.lab.ubertooth} show origin/main:install.sh"],
+            self.lab.git_commands(),
+        )
 
     def test_no_start_writes_units_only(self):
         result = self.lab.deploy("--no-start")
