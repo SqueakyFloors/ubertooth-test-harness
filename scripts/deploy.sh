@@ -288,17 +288,27 @@ if [ "$platform" = macos ]; then
     config_values=$(
         # Linted on its own; shellcheck does not need to follow it here.
         # shellcheck source=/dev/null
-        . "$lib"
-        harness_config_load
-        printf '%s\n%s\n%s\n%s\n' "${HARNESS_HOST-}" "${HARNESS_JUMP-}" \
-            "${HARNESS_PORT-}" "$HARNESS_CONFIG_FILE"
+        . "$lib" >&2
+        # That file is read like a shell profile and may print; its output
+        # belongs on stderr, not in the values below.
+        harness_config_load >&2
+        printf 'cfg_host=%s\ncfg_jump=%s\ncfg_port=%s\ncfg_file=%s\n' \
+            "${HARNESS_HOST-}" "${HARNESS_JUMP-}" "${HARNESS_PORT-}" \
+            "$HARNESS_CONFIG_FILE"
     )
-    {
-        IFS= read -r config_host
-        IFS= read -r config_jump
-        IFS= read -r config_port
-        IFS= read -r config_file
-    } <<EOF
+    config_host=
+    config_jump=
+    config_port=
+    config_file=
+    # Named, so that a value with a newline in it cannot shift the others.
+    while IFS= read -r line; do
+        case $line in
+            cfg_host=*) config_host=${line#cfg_host=} ;;
+            cfg_jump=*) config_jump=${line#cfg_jump=} ;;
+            cfg_port=*) config_port=${line#cfg_port=} ;;
+            cfg_file=*) config_file=${line#cfg_file=} ;;
+        esac
+    done <<EOF
 $config_values
 EOF
     [ "$controller_host_option" = 1 ] || controller_host=$config_host
@@ -648,17 +658,21 @@ unit_changes() {
     local path=$unit_dir/$1
     ! { [ -f "$path" ] && printf '%s' "$2" | cmp -s - "$path"; }
 }
-restart_needed=0
+# Which active runs a restart would cancel: the runner's own, or, when the
+# controller restarts with it, every target's. A changed tunnel agent cancels
+# nothing, since the runner keeps its run going and replays its events when
+# the controller comes back.
+restart_runner=0
+restart_every_target=0
 if [ "$platform" = macos ]; then
-    if unit_changes "$RUNNER_LABEL.plist" "$runner_agent" ||
-       unit_changes "$TUNNEL_LABEL.plist" "$tunnel_agent"; then
-        restart_needed=1
-    fi
+    ! unit_changes "$RUNNER_LABEL.plist" "$runner_agent" || restart_runner=1
 else
-    if unit_changes "$CONTROLLER_UNIT" "$controller_unit" ||
-       unit_changes "$RUNNER_UNIT" "$runner_unit"; then
-        restart_needed=1
-    fi
+    ! unit_changes "$RUNNER_UNIT" "$runner_unit" || restart_runner=1
+    ! unit_changes "$CONTROLLER_UNIT" "$controller_unit" || restart_every_target=1
+fi
+restart_needed=0
+if [ "$restart_runner" = 1 ] || [ "$restart_every_target" = 1 ]; then
+    restart_needed=1
 fi
 # The command line of the runner this machine already has installed, one
 # argument per line; nothing when none is installed. The run that may be
@@ -690,17 +704,18 @@ if [ -n "$installed" ]; then
     busy_port=$(printf '%s\n' "$installed" |
         sed -n 's|^ws://127\.0\.0\.1:\([0-9]\{1,5\}\)/ws/runner$|\1|p' | head -n 1)
     [ -n "$busy_port" ] || busy_port=$port
-    # On macOS only this Mac's runner restarts, so only its own target's runs
-    # are at stake; on Linux the controller restarts with it, which would
-    # cancel the run of any target, so every target counts.
+    # Only the runner restarting is this target's own business; a controller
+    # restart would cancel a run on any target, so then nothing is filtered.
     busy_filter=
-    if [ "$platform" = macos ]; then
+    if [ "$restart_every_target" = 0 ]; then
         busy_filter=$(printf '%s\n' "$installed" | awk '/^--host$/ {getline; print; exit}')
         [ -n "$busy_filter" ] || busy_filter=$runner_host
     fi
-    if [ "$busy_port" != "$port" ] ||
-       { [ -n "$busy_filter" ] && [ "$busy_filter" != "$runner_host" ]; }; then
-        say "note: the installed runner is ${busy_filter:-this host} on port $busy_port; asking that controller about active runs"
+    if [ "$busy_port" != "$port" ]; then
+        say "note: the installed runner uses port $busy_port; asking that controller about active runs"
+    fi
+    if [ -n "$busy_filter" ] && [ "$busy_filter" != "$runner_host" ]; then
+        say "note: the installed runner is registered as $busy_filter; asking about that target"
     fi
     busy=$(active_runs "$busy_port" "$busy_filter")
     if [ "$busy" = unreachable ]; then
@@ -774,6 +789,8 @@ url=http://127.0.0.1:$port/ui/
 if [ "$no_start" = 1 ]; then
     if [ "$platform" = macos ]; then
         say "agents written, not started (--no-start). Load them with:"
+        say "  launchctl bootout $launchd_domain/$TUNNEL_LABEL   # each, if it is loaded already"
+        say "  launchctl bootout $launchd_domain/$RUNNER_LABEL"
         say "  launchctl bootstrap $launchd_domain $unit_dir/$TUNNEL_LABEL.plist $unit_dir/$RUNNER_LABEL.plist"
     else
         [ -z "$changed_units" ] || run systemctl --user daemon-reload

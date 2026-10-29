@@ -1643,7 +1643,9 @@ since someone must unlock the disk at boot before any login happens, so a Mac
 that must come back on its own cannot have it on. Rerunning changes nothing unless an agent's
 content changed, in which case that agent is booted out and bootstrapped
 again; a deploy that would restart the runner while *this* Mac's target has
-an active run is refused unless `--force` is given. `--uninstall` boots out
+an active run is refused unless `--force` is given. A change to the tunnel
+alone restarts nothing else and is never refused: the runner keeps its run
+going while the controller is away and replays its events when it is back. `--uninstall` boots out
 both agents and removes the two plists. Deploy needs the GUI login domain
 (`launchctl print gui/$(id -u)`); over SSH with nobody logged in, use
 `--no-start` and load the agents from a Terminal on the Mac.

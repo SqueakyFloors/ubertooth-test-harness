@@ -306,8 +306,12 @@ class DeployTest(unittest.TestCase):
 
     def busy_controller(self):
         """Make the venv python report an active run, as the controller would."""
-        _write_exe(self.lab.checkout / ".venv" / "bin" / "python",
-                   "#!/bin/sh\ncat >/dev/null\necho Host_Linux:run-7\n")
+        _write_exe(
+            self.lab.checkout / ".venv" / "bin" / "python",
+            "#!/bin/sh\ncat >/dev/null\n"
+            'printf "python %s\\n" "$*" >> "$FAKE_LOG"\n'
+            "echo Host_Linux:run-7\n",
+        )
 
     def test_refuses_to_restart_during_an_active_run(self):
         self.assertOk(self.lab.deploy(FAKE_COMMIT="a" * 40))
@@ -341,7 +345,7 @@ class DeployTest(unittest.TestCase):
         self.busy_controller()
         result = self.lab.deploy("--port", "9999")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("the installed runner is this host on port 8765", result.stdout)
+        self.assertIn("the installed runner uses port 8765", result.stdout)
         self.assertIn("active runs Host_Linux:run-7", result.stderr)
 
     def test_no_user_manager_changes_nothing(self):
@@ -380,12 +384,25 @@ class DeployTest(unittest.TestCase):
 
     def test_runner_option_change_restarts_only_the_runner(self):
         self.assertOk(self.lab.deploy())
+        self.busy_controller()
         self.lab.clear_log()
-        self.assertOk(self.lab.deploy("--allow-power-changes"))
+        self.assertOk(self.lab.deploy("--allow-power-changes", "--force"))
         runner = (self.lab.unit_dir / RUNNER_UNIT).read_text(encoding="utf-8")
         self.assertIn(" --allow-power-changes\n", runner)
         self.assertNotIn(f"systemctl --user restart {CONTROLLER_UNIT}", self.lab.commands())
         self.assertIn(f"systemctl --user restart {RUNNER_UNIT}", self.lab.commands())
+        # Only the runner restarts, so only its own target's runs are asked
+        # about; a run on another target would not be disturbed.
+        self.assertIn("python - 8765 Host_Linux", self.lab.commands())
+
+    def test_a_controller_change_asks_about_every_target(self):
+        self.assertOk(self.lab.deploy())
+        self.busy_controller()
+        self.lab.clear_log()
+        result = self.lab.deploy("--ubertooth-repo", "https://example.org/u.git")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("active runs Host_Linux:run-7", result.stderr)
+        self.assertIn("python - 8765 ", self.lab.commands())
 
     def test_port_and_pass_through_options(self):
         libbtbb = self.lab.root / "libbtbb"
@@ -830,6 +847,38 @@ class MacDeployTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("active runs Host_Mac:run-7", result.stderr)
 
+    def test_a_config_file_that_prints_does_not_shift_the_settings(self):
+        # It is read like a shell profile, so it may print; that output must
+        # not be mistaken for one of the values it sets.
+        config = self.lab.root / "chatty.conf"
+        config.write_text(
+            "echo loading my harness settings\nHARNESS_HOST=conf-host.example\n"
+            "HARNESS_JUMP=conf-jump.example\nHARNESS_PORT=9000\n",
+            encoding="utf-8",
+        )
+        result = self.lab.mac_deploy(
+            HARNESS_HOST=None, HARNESS_JUMP=None, HARNESS_OPEN_CONFIG=str(config),
+        )
+        self.assertOk(result)
+        tunnel = self.parsed(TUNNEL_AGENT)["ProgramArguments"]
+        self.assertEqual(
+            ["-L", "127.0.0.1:9000:127.0.0.1:9000", "-J", "conf-jump.example",
+             "conf-host.example"],
+            tunnel[-5:],
+        )
+        self.assertIn("loading my harness settings", result.stderr)
+
+    def test_a_tunnel_only_change_cancels_no_run(self):
+        # The runner keeps its run going across a tunnel restart and replays
+        # its events, so there is nothing to refuse, and nothing to ask.
+        self.assertOk(self.lab.mac_deploy())
+        self.busy_controller("Host_Mac:run-7")
+        self.lab.clear_log()
+        result = self.lab.mac_deploy("--controller-jump", "")
+        self.assertOk(result)
+        self.assertIn(f"{RUNNER_AGENT} unchanged", result.stdout)
+        self.assertFalse([c for c in self.lab.commands() if c.startswith("python -")])
+
     def test_a_config_file_others_can_write_is_refused(self):
         config = self.lab.root / "writable.conf"
         config.write_text("HARNESS_HOST=conf-host.example\n", encoding="utf-8")
@@ -946,7 +995,7 @@ class MacDeployTest(unittest.TestCase):
         self.busy_controller("Host_Mac:run-7")
         result = self.lab.mac_deploy("--port", "9999")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("the installed runner is Host_Mac on port 8765", result.stdout)
+        self.assertIn("the installed runner uses port 8765", result.stdout)
         self.assertIn("active runs Host_Mac:run-7", result.stderr)
         self.assertIn("python - 8765 Host_Mac", self.lab.commands())
 
