@@ -35,6 +35,16 @@ error: watchdog state read failed
 # The board is not on the bus.
 BOARD_GONE = "error: no Ubertooth found with serial {serial}\n"
 
+# On the bus and refusing to be opened, which is how a board looks for a
+# moment after the watchdog has reset it. Captured wording from the lab host.
+BOARD_BUSY = (
+    "error: Ubertooth device {serial} is in use by another program (libusb -6)\n"
+)
+CLAIM_FAILED = (
+    "error: claiming the USB interface of Ubertooth device {serial} failed "
+    "(libusb -5)\n"
+)
+
 # A board that has left the bus mid-request.
 BOARD_LEFT = (
     "error: could not read the watchdog record: the board is no longer attached\n"

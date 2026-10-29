@@ -122,14 +122,24 @@ class ParseTests(unittest.TestCase):
         self.assertIsNone(parse_report(samples.FIRMWARE_TOO_OLD))
         self.assertIsNone(parse_report(samples.BOARD_GONE.format(serial=SERIAL)))
 
-    def test_only_a_board_off_the_bus_is_read_as_gone(self):
-        self.assertTrue(watchdog.board_is_gone(
-            samples.BOARD_GONE.format(serial=SERIAL)))
-        self.assertTrue(watchdog.board_is_gone(samples.BOARD_LEFT))
-        self.assertTrue(watchdog.board_is_gone("error: no Ubertooth devices found\n"))
-        # Firmware without the request is not a board that has gone.
-        self.assertFalse(watchdog.board_is_gone(samples.FIRMWARE_TOO_OLD))
-        self.assertFalse(watchdog.board_is_gone(samples.FULL))
+    def test_a_board_the_read_could_not_reach_at_all(self):
+        for text in (
+            samples.BOARD_GONE.format(serial=SERIAL),
+            samples.BOARD_LEFT,
+            "error: no Ubertooth devices found\n",
+            # On the bus and refusing to be opened, which is how a board looks
+            # for a moment after the watchdog has reset it.
+            samples.BOARD_BUSY.format(serial=SERIAL),
+            samples.CLAIM_FAILED.format(serial=SERIAL),
+            "error: Ubertooth device 0 is not answering\n",
+        ):
+            self.assertTrue(watchdog.board_unreachable(text), text)
+        # Firmware that answered and has no such request is not that.
+        self.assertFalse(watchdog.board_unreachable(samples.FIRMWARE_TOO_OLD))
+        self.assertFalse(watchdog.board_unreachable(samples.FULL))
+        # The phrase must be a line of its own, not quoted anywhere.
+        self.assertFalse(watchdog.board_unreachable(
+            "Now in idle mode, the board is no longer attached was the reason\n"))
 
 
 class CompareTests(unittest.TestCase):
@@ -196,15 +206,21 @@ class CompareTests(unittest.TestCase):
             for line in warnings_for("UT", current, change, "during the test")
         ))
 
-    def test_the_counter_stopping_at_its_limit_is_said_so(self):
+    def test_the_counter_stopping_at_its_limit_is_said_so_beside_a_reset(self):
         current = parse_report(samples.report(resets=255, boots=300, cause="watchdog"))
 
-        change = compare(parse_report(samples.report(resets=255, boots=299)), current)
+        # A board already at the limit says nothing on its own: it would say
+        # it at every read of the run.
+        pinned = compare(parse_report(samples.report(resets=255, boots=299)), current)
+        self.assertTrue(pinned.at_cap)
+        self.assertEqual(0, pinned.new_resets)
+        self.assertEqual([], warnings_for("UT", current, pinned, "during the test"))
 
-        self.assertTrue(change.at_cap)
-        self.assertEqual(0, change.new_resets)
-        (warning,) = warnings_for("UT", current, change, "during the test")
-        self.assertIn("at the firmware's limit of 255 recorded resets", warning)
+        reached = compare(parse_report(samples.report(resets=254, boots=299)), current)
+        self.assertEqual(1, reached.new_resets)
+        warnings = warnings_for("UT", current, reached, "during the test")
+        self.assertIn("reset itself once", warnings[0])
+        self.assertIn("at the firmware's limit of 255 recorded resets", warnings[1])
 
     def test_a_new_processor_fault_warns_and_the_same_one_does_not(self):
         fault = "status 0x00000082, the access was at 0x4000c008"
@@ -223,18 +239,37 @@ class CompareTests(unittest.TestCase):
         self.assertEqual([], warnings_for("UT", faulted, again, "during the test"))
 
     def test_a_brown_out_boot_warns_that_the_supply_dipped(self):
-        change = compare(
-            parse_report(samples.report()),
-            parse_report(samples.report(cause="brown-out", boots=2)),
-        )
+        current = parse_report(samples.report(cause="brown-out", boots=2))
+
+        change = compare(parse_report(samples.report()), current)
 
         self.assertTrue(change.gained_brown_out)
         self.assertTrue(any(
             "supply dipped" in line
-            for line in warnings_for(
-                "UT", parse_report(samples.report(cause="brown-out")), change,
-                "during the test")
+            for line in warnings_for("UT", current, change, "during the test")
         ))
+
+    def test_a_brown_out_after_a_power_cycle_says_nothing(self):
+        # The part sets the brown-out flag on an ordinary power-up too, so a
+        # deliberate power cycle (a test's isolation, a re-plug) must not warn.
+        current = parse_report(samples.report(cause="power-on+brown-out", boots=1))
+
+        change = compare(parse_report(samples.report(boots=4, resets=1)), current)
+
+        self.assertTrue(change.restarted)
+        self.assertFalse(change.gained_brown_out)
+        self.assertEqual([], warnings_for("UT", current, change, "during the test"))
+
+    def test_radio_waits_start_again_at_every_boot_not_only_a_power_cycle(self):
+        # They live in ordinary RAM, so any reset clears them; the boot count
+        # rising is how the read sees that.
+        baseline = parse_report(samples.report(boots=1, radio_waits=(7, 0, 0, 0, 0)))
+        current = parse_report(samples.report(boots=2, radio_waits=(2, 0, 0, 0, 0)))
+
+        change = compare(baseline, current)
+
+        self.assertFalse(change.restarted)
+        self.assertEqual({"fs_lock": 2}, dict(change.new_radio_waits))
 
     def test_transfer_errors_and_radio_waits_are_notes_only(self):
         baseline = parse_report(samples.report(transfer_errors=0, radio_waits=(0,) * 5))
@@ -348,9 +383,11 @@ class FakeCommands:
     def __init__(self, outputs):
         self.outputs = {serial: list(texts) for serial, texts in outputs.items()}
         self.argv = []
+        self.ids = []
 
     def __call__(self, *, command_id, argv, timeout_s, owner):
         self.argv.append(tuple(argv))
+        self.ids.append(command_id)
         serial = argv[argv.index("-U") + 1]
         texts = self.outputs[serial]
         text = texts.pop(0) if len(texts) > 1 else texts[0]
@@ -391,12 +428,12 @@ def invocation(limit=None):
 
 class MonitorTests(unittest.TestCase):
 
-    def monitor(self, outputs, **options):
+    def monitor(self, outputs, boards=(BOARD,), **options):
         commands = FakeCommands(outputs)
         publisher = Publisher()
         clock = Clock()
         monitor = WatchdogMonitor(
-            commands, publisher, (BOARD,), clock=clock, sleep=clock.sleep,
+            commands, publisher, boards, clock=clock, sleep=clock.sleep,
             firmware="git-test", utc_now=lambda: "2026-10-29T20:00:00",
             **{
                 "search": lambda issue: watchdog.DuplicateSearch(issue.search_terms),
@@ -501,11 +538,91 @@ class MonitorTests(unittest.TestCase):
         outcome = monitor.after_test(invocation())
 
         self.assertTrue(outcome.board_lost)
-        self.assertIn("did not come back on USB", outcome.failure)
+        self.assertIn("did not answer on USB", outcome.failure)
         self.assertEqual(watchdog.RECOVERY_TRIES, len(commands.argv))
         self.assertEqual(
             (watchdog.RECOVERY_TRIES - 1) * watchdog.RECOVERY_PAUSE_S, clock.now)
         self.assertEqual("failed", publisher.events[-1][1])
+
+    def test_a_board_absent_at_the_baseline_fails_before_any_test(self):
+        monitor, _commands, _publisher, _clock = self.monitor(
+            {SERIAL: [samples.BOARD_GONE.format(serial=SERIAL)]})
+
+        outcome = monitor.baseline()
+
+        self.assertTrue(outcome.board_lost)
+        self.assertIn("did not answer on USB", outcome.failure)
+
+    def test_a_board_that_refuses_to_be_opened_is_retried_not_called_old(self):
+        # The board is on the bus and refusing requests, which is how it looks
+        # for a moment after the watchdog has reset it.
+        monitor, commands, _publisher, _clock = self.monitor({SERIAL: [
+            samples.BOARD_BUSY.format(serial=SERIAL),
+            samples.CLAIM_FAILED.format(serial=SERIAL),
+            samples.report(resets=1, boots=2, cause="watchdog"),
+        ]})
+
+        outcome = monitor.after_test(invocation())
+
+        self.assertEqual("", outcome.failure)
+        self.assertEqual(3, len(commands.argv))
+        self.assertEqual(1, outcome.resets)
+
+    def test_a_cancelled_run_does_not_wait_for_a_board_that_has_gone(self):
+        monitor, commands, _publisher, clock = self.monitor(
+            {SERIAL: [samples.BOARD_GONE.format(serial=SERIAL)]},
+            cancelled=lambda: True,
+        )
+
+        outcome = monitor.after_test(invocation())
+
+        self.assertTrue(outcome.board_lost)
+        self.assertEqual(1, len(commands.argv))
+        self.assertEqual(0.0, clock.now)
+
+    def test_a_read_outside_the_baseline_that_reports_nothing_says_so(self):
+        # A board reflashed mid-run to firmware without the request.
+        monitor, _commands, publisher, _clock = self.monitor({SERIAL: [
+            samples.report(), samples.FIRMWARE_TOO_OLD,
+        ]})
+        monitor.baseline()
+
+        outcome = monitor.after_test(invocation())
+
+        self.assertEqual("", outcome.failure)
+        (note,) = outcome.notes
+        self.assertIn("watchdog not reported by this firmware", note)
+        self.assertEqual("not reported", publisher.events[-1][2]["state"])
+
+    def test_a_round_during_a_test_reads_only_that_test_s_boards(self):
+        # Another test's board may be powered off by this one's isolation, and
+        # its resets are not this test's to count.
+        other = MonitoredBoard("UT_Linux1", "b" * 32)
+        monitor, commands, _publisher, _clock = self.monitor(
+            {SERIAL: [samples.report()], other.serial: [samples.report()]},
+            boards=(BOARD, other),
+        )
+        monitor.baseline()
+        self.assertEqual(2, len(commands.argv))
+
+        monitor.after_test(invocation())
+
+        self.assertEqual(
+            [SERIAL], [argv[2] for argv in commands.argv[2:]])
+
+    def test_each_mid_test_read_gets_a_command_id_of_its_own(self):
+        monitor, commands, _publisher, clock = self.monitor(
+            {SERIAL: [samples.report()]}, interval_s=10.0)
+        monitor.baseline()
+        for _ in range(3):
+            clock.now += 11.0
+            monitor.poll_if_due(invocation())
+
+        self.assertEqual(
+            ["watchdog-baseline", "001-Soak-watchdog-during-1",
+             "001-Soak-watchdog-during-2", "001-Soak-watchdog-during-3"],
+            [command_id.rsplit(f"-{SERIAL}-", 1)[0] for command_id in commands.ids],
+        )
 
     def test_a_board_that_comes_back_inside_the_window_is_only_read_again(self):
         monitor, commands, _publisher, _clock = self.monitor({SERIAL: [
@@ -537,10 +654,14 @@ class MonitorTests(unittest.TestCase):
             watchdog.DURING_TEST,
             [e for e in publisher.events if e[0] == "watchdog"][-1][2]["stage"],
         )
-        # What the mid-test read found is reported with the test.
+        # What the mid-test read found is reported with the test, once: the
+        # read after the test carries it, and the same reset is not counted
+        # again.
         after = monitor.after_test(invocation())
         self.assertEqual(during.warnings, after.warnings)
+        self.assertEqual(1, len(after.warnings))
         self.assertEqual(1, after.resets)
+        self.assertEqual(1, monitor.total_resets)
 
     def test_the_run_summary_offers_an_issue_with_its_duplicate_search(self):
         searched = []
@@ -719,6 +840,40 @@ class RunRecordTests(unittest.TestCase):
         self.assertNotIn("board self-resets", report)
         self.assertNotIn("Issue to file", report)
         self.assertEqual(0, watchdog_boards(events)[0]["resets"])
+
+    def test_a_mid_test_reset_is_in_the_test_record_once(self):
+        summary, events, report, _executor = self.run_suite(
+            [samples.report(resets=0, boots=1), samples.FULL, samples.FULL],
+        )
+
+        finished = next(e for e in events if e["event_type"] == "test_finished")
+        self.assertEqual(1, len(finished["details"]["warnings"]))
+        # Once in the Watchdog section's warning list; the results table and
+        # the transcript are the other two places it belongs.
+        section = report.split("## Watchdog", 1)[1].split("## Transcript", 1)[0]
+        self.assertEqual(
+            1, section.count("reset itself 3 times during the test; the last was"))
+        self.assertEqual(3, summary.watchdog_resets)
+
+    def test_a_board_lost_at_the_run_end_fails_the_run_as_itself(self):
+        summary, events, report, _executor = self.run_suite(
+            [samples.report(), samples.report(), samples.BOARD_GONE.format(serial=SERIAL)],
+        )
+
+        self.assertFalse(summary.passed)
+        self.assertEqual("failed", summary.status)
+        self.assertIn("did not answer on USB", summary.failure_reason)
+        # Not reported as a failed test: no test was running.
+        self.assertNotIn("more failed test", summary.failure_reason)
+        self.assertEqual(
+            "passed",
+            next(e for e in events if e["event_type"] == "test_finished")["status"],
+        )
+        self.assertEqual(
+            "failed",
+            next(e for e in events if e["event_type"] == "watchdog_summary")["status"],
+        )
+        self.assertIn("did not answer on USB", report)
 
     def test_a_test_over_its_limit_fails_and_names_the_limit(self):
         summary, events, report, _executor = self.run_suite(

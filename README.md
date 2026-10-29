@@ -653,15 +653,25 @@ that gained `watchdog` with no change in the count is therefore recorded as a
 note, not a warning.
 
 Both counters are since power-on, so cutting power to a board starts them
-again. A count below the baseline's is read as that restart: the board is
-re-baselined where it restarted, with a note, and only resets after it are
-counted. The count stops at 255, which the warning says when it is there.
+again; so does flashing firmware that does not recognize the record it finds.
+A count below the baseline's is read as that restart: the board is
+re-baselined where it restarted, with a note naming both causes, and only
+resets after it are counted. The count stops at 255, which the warning says
+beside a reset it counted. The radio-wait counts are since boot rather than
+since power-on, so every reboot starts them again.
+
+A read during a test covers only the boards that test binds: another test's
+board may be switched off by this one's power isolation, and its resets are
+not this test's to count. The baseline and the run-end read cover every board.
 
 Two things fail:
 
-- A board that does not come back on USB. The read is retried three times over
-  about five seconds; a board that never answers fails its test and stops the
-  run, because nothing can use it again.
+- A board that does not answer on USB: gone from the bus, or on it and
+  refusing to be opened, which is how a board looks for a moment after the
+  watchdog has reset it. The read is retried three times over about five
+  seconds (once only when the run has been cancelled). A board that never
+  answers fails its test and stops the run, because nothing can use it again;
+  one that does not answer at the baseline stops the run before any test.
 - A test whose plan sets `max_watchdog_resets: <n>` and whose boards reset
   themselves more than `n` times. Nothing else makes the count pass or fail,
   and there is no limit by default. This is for stability runs (the release
