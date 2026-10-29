@@ -300,7 +300,9 @@ if [ "$platform" = macos ]; then
     config_jump=
     config_port=
     config_file=
-    # Named, so that a value with a newline in it cannot shift the others.
+    # Named, so that a line this file printed cannot shift the values. A
+    # value with a newline in it is still cut there, but these are a host
+    # name, a host name and a port, each checked below.
     while IFS= read -r line; do
         case $line in
             cfg_host=*) config_host=${line#cfg_host=} ;;
@@ -658,10 +660,10 @@ unit_changes() {
     local path=$unit_dir/$1
     ! { [ -f "$path" ] && printf '%s' "$2" | cmp -s - "$path"; }
 }
-# Which active runs a restart would cancel: the runner's own, or, when the
-# controller restarts with it, every target's. A changed tunnel agent cancels
-# nothing, since the runner keeps its run going and replays its events when
-# the controller comes back.
+# Which active runs a restart puts at risk: the runner's own, and every
+# target's when the controller restarts with it. A changed tunnel agent puts
+# none at risk, since the runner keeps its run going while the controller is
+# away and replays its events when it is back.
 restart_runner=0
 restart_every_target=0
 if [ "$platform" = macos ]; then
