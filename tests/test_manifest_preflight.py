@@ -536,7 +536,7 @@ class RevisionAbbreviationTests(unittest.TestCase):
 
         self.assertEqual("", check.result_failure(result))
 
-    def test_a_mismatch_reason_names_the_pattern_that_failed(self):
+    def test_a_mismatch_reason_says_what_was_expected(self):
         check = PreflightCheck(
             check_id="preflight-002-firmware-version",
             name="Firmware version",
@@ -557,6 +557,22 @@ class RevisionAbbreviationTests(unittest.TestCase):
         )
 
         reason = check.result_failure(result)
+
+        # A readable revision is named along with the one the tools expect.
+        self.assertIn("UT_Linux0 runs git-1c7f06d6", reason)
+        self.assertIn("git-other", reason)
+
+        # Output with no revision in it falls back to naming the pattern.
+        unreadable = CommandResult(
+            argv=check.argv,
+            returncode=0,
+            stdout="Firmware version: unknown\n",
+            stderr="",
+            duration_s=0.05,
+            timed_out=False,
+        )
+
+        reason = check.result_failure(unreadable)
 
         self.assertIn("identity mismatch for UT_Linux0", reason)
         self.assertIn("git\\-other", reason)

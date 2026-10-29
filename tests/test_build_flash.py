@@ -295,7 +295,11 @@ class MismatchReasonTests(unittest.TestCase):
     def test_unreadable_output_keeps_the_generic_reason(self):
         check = self.check("Device serial", ("ubertooth-util", "-s"), r"Serial No:\s+abc")
         result = CommandResult(("x",), 0, "Serial No: def\n", "", 0.0, False)
-        self.assertEqual("Device serial: identity mismatch for UT_Linux0", check.result_failure(result))
+        self.assertEqual(
+            "Device serial: identity mismatch for UT_Linux0: "
+            r"output does not match Serial No:\s+abc",
+            check.result_failure(result),
+        )
 
 
 class RunSuiteFlashTests(unittest.TestCase):

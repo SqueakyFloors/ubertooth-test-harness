@@ -13,6 +13,7 @@ from ubertooth_harness.manifest import ManifestError, RunManifest
 from ubertooth_harness.planner import TestInvocation
 from ubertooth_harness import nrfdk
 from ubertooth_harness.patterns import (
+    FIRMWARE_VERSION_RE,
     compile_info_pattern,
     firmware_version_pattern,
     revision_pattern,
@@ -27,8 +28,10 @@ class PreflightError(ValueError):
 
 
 # The revision a board reports, for the firmware identity checks' reasons.
+# `-v` may name the image ahead of the revision, so the revision is the word
+# before `(API:`, not the first word after the label.
 _FIRMWARE_REVISION = {
-    "Firmware version": re.compile(r"Firmware version:\s+(\S+)"),
+    "Firmware version": FIRMWARE_VERSION_RE,
     "Firmware compile info": re.compile(r"\bubertooth\s+(\S+)\s+\("),
 }
 # Fixes for a board whose firmware is not the run's revision, by run kind.
