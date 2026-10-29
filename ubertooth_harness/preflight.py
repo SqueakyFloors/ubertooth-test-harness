@@ -110,24 +110,29 @@ HOST_VERSION_FALLBACK_ARGV = ("ubertooth-util", "-H")
 # not a reason to ask the older option.
 HOST_VERSION_LABEL = "Host tools version:"
 
-# The labelled line the host version is on. Anchoring to it keeps a board's
-# firmware lines, which `-V` prints under it, out of the match.
-_HOST_VERSION_LINE = rf"(?m)^{HOST_VERSION_LABEL}.*"
+# The start of the line the host version is on: `libubertooth` at the start
+# of a line, under the label or, on fork commits before the labels (fork
+# 201c3c49), on its own. Anchoring there keeps the firmware lines `-V` prints
+# under it out of the match, since one of them names the same revision
+# ("Firmware build: ubertooth git-... (builder@host) ...").
+_HOST_VERSION_LINE_START = rf"(?m)^(?:{HOST_VERSION_LABEL} )?libubertooth"
 
 
 def host_version_patterns(ubertooth, libbtbb=None) -> tuple[str, ...]:
     """Patterns the host tools' version line must match for the resolved sources.
 
-    The line is what `ubertooth-util -V` prints first (`-H` on older fork
-    commits). A trailing `*` (modified source) does not match.
+    The line is what `ubertooth-util -V` prints first, and what `-H` printed
+    on older fork commits, with or without its label. A trailing `*`
+    (modified source) does not match.
     """
     patterns = (
-        rf"{_HOST_VERSION_LINE}\blibubertooth\s+\S+\s+"
+        rf"{_HOST_VERSION_LINE_START}\s+\S+\s+"
         rf"\({revision_pattern(ubertooth.expected_revision)}\)",
     )
     if libbtbb is not None:
+        # Both versions are on that one line, libbtbb's second.
         patterns += (
-            rf"{_HOST_VERSION_LINE}\blibbtbb\s+\S+\s+"
+            rf"{_HOST_VERSION_LINE_START}\b.*\blibbtbb\s+\S+\s+"
             rf"\({revision_pattern(libbtbb.expected_revision)}\)",
         )
     return patterns

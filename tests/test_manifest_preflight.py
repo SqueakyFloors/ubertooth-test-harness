@@ -455,6 +455,9 @@ class HostVersionCheckTests(unittest.TestCase):
         "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
         "libbtbb loaded from: /usr/local/lib/libbtbb.so.1\n"
     )
+    # -H before the fork labelled its version lines (fork 201c3c49): the same
+    # two versions, on a line of their own.
+    UNLABELLED_H_ANSWER = "libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
     # What -V was on those commits: the board's build string, nothing about
     # the host, and with no board attached it fails.
     OLD_V_ANSWER = "ubertooth git-test (builder@host) Mon Oct 27 11:22:33 2025\n"
@@ -498,13 +501,19 @@ class HostVersionCheckTests(unittest.TestCase):
             self.assertEqual(("ubertooth-util", "-V"), checks[0].argv)
             self.assertEqual(("ubertooth-util", "-H"), checks[0].fallback_argv)
 
-    def test_both_answers_pass_and_neither_needs_the_fallback(self):
+    def test_every_shape_of_the_answer_passes(self):
+        check = self.check()
+        for output in (self.V_ANSWER, self.H_ANSWER, self.UNLABELLED_H_ANSWER):
+            with self.subTest(output=output.splitlines()[0]):
+                self.assertEqual("", check.result_failure(self.result(output)))
+
+    def test_a_labelled_answer_does_not_ask_the_older_option(self):
+        # The unlabelled line is left out: it only ever arrives as the
+        # fallback's own answer, which is not asked again.
         check = self.check()
         for output in (self.V_ANSWER, self.H_ANSWER):
             with self.subTest(output=output.splitlines()[0]):
-                result = self.result(output)
-                self.assertEqual("", check.result_failure(result))
-                self.assertFalse(check.needs_fallback(result))
+                self.assertFalse(check.needs_fallback(self.result(output)))
 
     def test_an_answer_about_no_host_asks_the_older_option(self):
         result = self.result(self.OLD_V_ANSWER, returncode=1)
