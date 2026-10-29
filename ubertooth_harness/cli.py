@@ -86,7 +86,7 @@ def _add_build_options(parser: argparse.ArgumentParser, *, optional: bool) -> No
         action="store_true",
         help="also build bluetooth_rxtx firmware (needs arm-none-eabi-gcc) and "
         "record the image; run-suite --build builds it anyway when it flashes "
-        "the boards (the default, see --no-flash-build)",
+        "the boards, which it does unless its --no-flash-build is given",
     )
     parser.add_argument(
         "--with-python",

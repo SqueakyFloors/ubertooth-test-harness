@@ -10,6 +10,7 @@ from ubertooth_harness.cancellation import CancellationToken
 from ubertooth_harness.events import EventPublisher
 from ubertooth_harness.executor import CommandExecutor, CommandResult
 from ubertooth_harness.patterns import FIRMWARE_VERSION_RE as _VERSION_RE
+from ubertooth_harness.patterns import same_revision
 from ubertooth_harness.plan import FlashStep
 from ubertooth_harness.rawlog import record_output
 
@@ -779,7 +780,7 @@ class BuildFlasher:
             )
             before = FlashReliabilityRunner._revision(result) if result.returncode == 0 else None
             record["before"] = before or ""
-            if before == expected_revision:
+            if before is not None and same_revision(expected_revision, before):
                 record["after"] = before
                 board_done("skipped", f"already runs {expected_revision}; not written")
                 continue
@@ -789,8 +790,11 @@ class BuildFlasher:
                 return stop(f"canceled: {token.reason or 'cancellation requested'}")
             if FlashReliabilityRunner._sha256(image) != sha256:
                 return stop(f"firmware image changed before flashing {name}: {image}")
+            # A write that runs out of time is killed part-way, which leaves
+            # the board in its bootloader, so a write only starts with its
+            # whole budget left.
             budget = remaining(BUILD_FLASH_WRITE_TIMEOUT_S)
-            if budget <= 0:
+            if budget < BUILD_FLASH_WRITE_TIMEOUT_S:
                 return stop(f"deadline of {total:g}s reached before flashing {name}")
             write = commands._execute_command(
                 publisher, f"build-flash-{index}-write", "build_firmware_flash",
@@ -826,7 +830,7 @@ class BuildFlasher:
                     f"{name} did not report its firmware revision after the write "
                     f"({BUILD_FLASH_VERIFY_ATTEMPTS} reads)"
                 )
-            if actual != expected_revision:
+            if not same_revision(expected_revision, actual):
                 return stop(
                     f"{name} runs {actual} after the write, expected {expected_revision}"
                 )

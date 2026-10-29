@@ -336,7 +336,10 @@ def _flash_row(run: _Run, built: bool) -> str:
     if started.get("details", {}).get("host_lock"):
         text += " (host lock held while writing)"
     if status != "passed":
-        return f"**{status}**: {details.get('reason', '')}; {text}"
+        reason = details.get("reason", "")
+        # The reason often starts with the status word; do not say it twice.
+        reason = reason.removeprefix(f"{status}: ")
+        return f"**{status}**: {reason}; {text}"
     return f"yes, verified before preflight; {text}"
 
 

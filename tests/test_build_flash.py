@@ -178,6 +178,19 @@ class BuildFlasherTests(unittest.TestCase):
         self.assertEqual(("git-new", "git-new"), (results[0]["before"], results[0]["after"]))
         self.assertFalse([c for c in executor.commands if c[0] == "ubertooth-dfu"])
 
+    def test_another_abbreviation_of_the_same_commit_is_the_same_build(self):
+        # The board and the build can stamp one commit with hashes of
+        # different lengths, which is not a reason to write or to fail.
+        executor = FakeBoards("git-1c7f06d6", {SERIAL_A: "git-1c7f06d6"})
+        results = BuildFlasher(
+            executor, clock=self.clock, sleep=self.clock.sleep
+        ).run(
+            [BuildFlashBoard("UT_0", SERIAL_A)], self.image, "git-1c7f06d",
+            self.publisher, output_dir=self.run_dir,
+        )
+        self.assertEqual("skipped", results[0]["status"])
+        self.assertFalse([c for c in executor.commands if c[0] == "ubertooth-dfu"])
+
     def test_a_failed_write_stops_before_the_next_board(self):
         executor = FakeBoards("git-new", {SERIAL_A: OLD, SERIAL_B: OLD})
         executor.fail_write.add(SERIAL_A)

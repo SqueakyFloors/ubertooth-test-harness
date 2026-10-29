@@ -409,7 +409,7 @@ run.
 |---|---|---|
 | BlueZ (`ubertooth-scan`, `ubertooth-follow`) | `Host CLI surface` scan and follow `-h`; every `follow` and `scan` case of `Refused command lines` | macOS (no BlueZ): Linux only; on Linux, a run that uses installed tools without them on `PATH` (a Linux `--build` configures with `REQUIRE_ALL=ON` and fails unless both are in the run prefix, so its cases are required) |
 | Python tools build | `Python tools` `ubertooth-specan-ui -h` | the run has no `--build --with-python` |
-| firmware build | `DFU image checks` `sign-test-build` | the run has no `--build --with-firmware` and no `--artifact "test build=PATH"` |
+| firmware build | `DFU image checks` `sign-test-build` | the run has no `--build --with-firmware` and no `--artifact "test build=PATH"` (a `--build` run that flashes its boards builds the firmware anyway, so the case applies there) |
 | platform | plan entries with `platforms:` (Flash reliability, Exclusive Ubertooth topology, MAC polling soak; the `exclusive` and `mac-polling` plans list Linux only) | the host's platform is not listed |
 
 Runtime skips remain only for what running the command alone can tell: a
@@ -909,7 +909,9 @@ the host lock, `<lease dir>/host-power.lock`, the same kind of `flock` lease
 (released by the kernel when the holder exits, so it never goes stale): a
 `run-suite` with power isolation (StarTech or Acroname) or an exclusive
 Ubertooth check, `Flash reliability`, or `DFU images` holds it for the whole
-run, and `lease` holds it for its command with `--host-lock`, or always when
+run, a `--build` run that flashes its boards with its own build holds it for
+the flash stage (so two such runs on one host no longer start at the same
+time), and `lease` holds it for its command with `--host-lock`, or always when
 the command is `ubertooth-dfu`. A second such command on the host fails at
 once, before any build or device command, and names the holder (owner, run,
 command, pid, and since when); `--wait-for-boards` waits for it as for a

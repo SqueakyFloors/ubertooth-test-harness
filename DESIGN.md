@@ -424,7 +424,10 @@ writes must never overlap isolation changes, so a run that isolates power
 (StarTech or Acroname), checks an exclusive Ubertooth, or writes firmware
 (`Flash reliability`, `DFU images`) holds the per-host lock
 `<lease dir>/host-power.lock` (an `flock` lease, like a board's, recorded in
-the manifest) from before preflight until it ends ([#4](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/4)). A second
+the manifest) from before preflight until it ends ([#4](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/4)).
+A run that flashes its boards with its own build takes the same lock for the
+flash stage alone, which is over before the manifest is written, so that hold
+is in the report's flash section rather than the manifest's leases. A second
 such command on the host fails at once and names the holder. The host lock is
 taken first, then the board leases in serial order, all or nothing and
 without blocking while any lock is held, so lock order cannot deadlock (see
