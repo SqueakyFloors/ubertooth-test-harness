@@ -244,6 +244,7 @@ class TestDefinition:
     argv: tuple[str, ...] | None = None
     timeout_s: float = 5.0
     output_pattern: str | None = None
+    expected_returncodes: tuple[int, ...] = (0,)
     command_builder: Callable | None = None
     continue_on_case_failure: bool = False
     # The test writes the firmware it then verifies, so preflight does not
@@ -341,6 +342,7 @@ class TestDefinition:
                 command,
                 patterns,
                 self.timeout_s,
+                expected_returncodes=self.expected_returncodes,
             ),
         )
 
@@ -354,7 +356,7 @@ class TestDefinition:
             return f"{self.name}: command timed out"
         if result.cancelled:
             return f"{self.name}: command canceled"
-        if result.returncode != 0:
+        if result.returncode not in self.expected_returncodes:
             return f"{self.name}: command exited {result.returncode}"
         if self.output_pattern and not re.search(
             self.output_pattern, result.stdout + result.stderr
@@ -411,6 +413,11 @@ def _device_test(name, description, argv=None, extra=None):
 _HOST_VERSION_PATTERN = (
     r"(?m)^Host tools version: libubertooth \S+ \(\S+\), libbtbb \S+ \(\S+\)$"
 )
+# That line needs no board, but the command goes on to read every attached
+# one and exits 1 if any cannot be read -- in use by another program, or not
+# answering -- which may be a board this run does not use. The line is what
+# these cases check, as it is in preflight (preflight.py).
+HOST_VERSION_RETURNCODES = (0, 1)
 
 
 def _host_cli_surface_cases(_arguments, _resources, _resource_identities):
@@ -452,14 +459,13 @@ def _host_cli_surface_cases(_arguments, _resources, _resource_identities):
         )
         for tool in BLUEZ_TOOLS
     )
-    # The host-tools line of -V, which every tool prints before it looks for
-    # a board, so these need none.
     cases.extend(
         CommandCase(
             f"{tool}-version",
             f"{tool} -V",
             (tool, "-V"),
             (_HOST_VERSION_PATTERN,),
+            expected_returncodes=HOST_VERSION_RETURNCODES,
         )
         for tool in ("ubertooth-util", "ubertooth-rx", "ubertooth-tx",
                      "ubertooth-afh")
@@ -742,6 +748,7 @@ def builtin_catalog() -> TestCatalog:
             MappingProxyType({}),
             ("ubertooth-util", "-V"),
             output_pattern=_HOST_VERSION_PATTERN,
+            expected_returncodes=HOST_VERSION_RETURNCODES,
         ),
         TestDefinition(
             "Help smoke",

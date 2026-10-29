@@ -103,6 +103,9 @@ def run_contract(directory: Path, invocation):
         ("ubertooth-util", "-V"),
         (r"libubertooth\s+\S+\s+\(git\-test\)",),
         "git-test",
+        # As PreflightPolicy builds it: -V reads every attached board after
+        # the host line and exits 1 if one cannot be read.
+        accepted_returncodes=(0, 1),
     )
     return manifest, (check,)
 

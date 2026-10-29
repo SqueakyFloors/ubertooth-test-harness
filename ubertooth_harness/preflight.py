@@ -115,7 +115,9 @@ HOST_VERSION_LABEL = "Host tools version:"
 # 201c3c49), on its own. Anchoring there keeps the firmware lines `-V` prints
 # under it out of the match, since one of them names the same revision
 # ("Firmware build: ubertooth git-... (builder@host) ...").
-_HOST_VERSION_LINE_START = rf"(?m)^(?:{HOST_VERSION_LABEL} )?libubertooth"
+_HOST_VERSION_LINE_START = (
+    rf"(?m)^(?:{re.escape(HOST_VERSION_LABEL)} )?libubertooth"
+)
 
 
 def host_version_patterns(ubertooth, libbtbb=None) -> tuple[str, ...]:
@@ -125,14 +127,16 @@ def host_version_patterns(ubertooth, libbtbb=None) -> tuple[str, ...]:
     on older fork commits, with or without its label. A trailing `*`
     (modified source) does not match.
     """
+    # Spaces and tabs, not \s, so a match cannot run past the end of that
+    # line onto the version of something else.
     patterns = (
-        rf"{_HOST_VERSION_LINE_START}\s+\S+\s+"
+        rf"{_HOST_VERSION_LINE_START}[ \t]+\S+[ \t]+"
         rf"\({revision_pattern(ubertooth.expected_revision)}\)",
     )
     if libbtbb is not None:
         # Both versions are on that one line, libbtbb's second.
         patterns += (
-            rf"{_HOST_VERSION_LINE_START}\b.*\blibbtbb\s+\S+\s+"
+            rf"{_HOST_VERSION_LINE_START}\b.*\blibbtbb[ \t]+\S+[ \t]+"
             rf"\({revision_pattern(libbtbb.expected_revision)}\)",
         )
     return patterns

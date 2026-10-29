@@ -1,6 +1,7 @@
 import re
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from ubertooth_harness.catalog import builtin_catalog
@@ -82,10 +83,30 @@ class HostCliSurfaceTests(unittest.TestCase):
         by_id = {case.case_id: case for case in cases}
         for tool in ("ubertooth-util", "ubertooth-rx", "ubertooth-tx",
                      "ubertooth-afh"):
-            self.assertEqual((tool, "-V"), by_id[f"{tool}-version"].argv)
-            self.assertTrue(re.search(by_id[f"{tool}-version"].output_patterns[0], VERSION))
+            case = by_id[f"{tool}-version"]
+            self.assertEqual((tool, "-V"), case.argv)
+            self.assertTrue(re.search(case.output_patterns[0], VERSION))
+            # A board that cannot be read makes -V exit 1 after printing the
+            # host line, and may not even be a board this run uses.
+            self.assertEqual((0, 1), case.expected_returncodes)
         for tool in ("ubertooth-scan", "ubertooth-follow"):
             self.assertEqual((tool,), by_id[f"{tool}-help"].needs.bluez_tools)
+
+    def test_a_board_that_cannot_be_read_does_not_fail_the_version_cases(self):
+        class BusyBoard(SurfaceTools):
+            def run(self, argv, **kwargs):
+                result = super().run(argv, **kwargs)
+                if tuple(argv)[1:] == ("-V",):
+                    return replace(
+                        result, returncode=1,
+                        stdout=result.stdout + "Firmware version: unavailable, "
+                               "in use by another program\n",
+                    )
+                return result
+
+        summary, _events = run_surface(BusyBoard(), MACOS)
+
+        self.assertTrue(summary.passed, summary.failure_reason)
 
     def test_bluez_tools_are_not_applicable_on_macos_not_skipped(self):
         executor = SurfaceTools()

@@ -509,8 +509,10 @@ class Builder:
                 # `-V` goes on to read any attached board and exits 1 if one
                 # cannot be read -- busy, or held by another run. The built
                 # tools' own version is what this step checks, so the line
-                # decides it and the exit status does not.
-                if _host_version_matches(plan, host_version):
+                # decides it and the exit status does not. A command killed at
+                # its deadline is still a failed step: it answered and then
+                # hung.
+                if _host_version_matches(plan, host_version) and not result.timed_out:
                     continue
             if result.timed_out or result.returncode != 0:
                 reason = "timed out" if result.timed_out else f"exited {result.returncode}"
