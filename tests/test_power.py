@@ -263,6 +263,15 @@ class AcronamePowerControllerTests(unittest.TestCase):
         self.assertEqual([], hub.usb.calls)
         self.assertEqual([], hub.usb.reads)
 
+    def test_an_unreadable_firmware_version_is_reported_not_raised(self):
+        for reported in ("not a version", None, float("inf")):
+            hub = FakeHub(0x12345678)
+            hub.system.version = reported
+            with self.assertRaisesRegex(
+                    PowerControllerError, "unreadable firmware version"):
+                acroname(hub).connect()
+            self.assertTrue(hub.disconnected)
+
     def test_unarmed_is_reported_before_the_connection_is_needed(self):
         with self.assertRaisesRegex(PowerControllerError, "not armed"):
             acroname(FakeHub(0x12345678)).set_power_enabled(0, False)

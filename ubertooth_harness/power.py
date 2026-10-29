@@ -288,7 +288,7 @@ class AcronameUSBHub3pController:
             )
             try:
                 version = int(reported)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 raise PowerControllerError(
                     f"controller 0x{self.serial_number:08x} reported an "
                     f"unreadable firmware version {reported!r}"
