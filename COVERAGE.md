@@ -11,7 +11,9 @@ from the harness catalog (`ubertooth_harness/catalog.py`,
 `ubertooth_harness/refusal_cases.py`, `ubertooth_harness/dfu_host_cases.py`,
 `ubertooth_harness/util_refusal_cases.py`), its plans (`testplans/*.yaml`) and its
 preflight, flash, and guard code. Profiles: **smoke** runs in the `fast` plan,
-**comprehensive** in the `release` plan; tests without a profile name their plan.
+**comprehensive** in the `release` plan; tests without a profile name their
+plan. The `mac` plan picks per test what a Mac host changes (see the README),
+so it runs both profiles.
 The `host` plan holds the tests that need no Ubertooth (Host CLI surface, Raw
 receive replay, Refused command lines, Util mode refusals, DFU image checks,
 and Python tools smoke); CI runs it against the tools it builds.
@@ -38,10 +40,10 @@ Harness-wide checks that use the CLIs:
   before and after the test, with queries only: `ubertooth-util -v -V -C -a -z -d`
   and then `ubertooth-btle -v`. The `ubertooth-btle -v` read is skipped unless
   the board's firmware API is at least the host API.
-- **Flash reliability** (`slow` plan): repeated `ubertooth-dfu -U <serial> -d <image> -r`.
+- **Flash reliability** (`slow` and `mac` plans): repeated `ubertooth-dfu -U <serial> -d <image> -r`.
   Each flash is verified with `ubertooth-util -v`.
-- **DFU images** (smoke in the `slow` plan, comprehensive in the `firmware`
-  plan): writes the test image, reads it back, and tries bad images on the
+- **DFU images** (smoke in the `slow` and `mac` plans, comprehensive in the
+  `firmware` plan): writes the test image, reads it back, and tries bad images on the
   selected board; every case ends with the test image read back and verified.
 - **DFU image checks** (no Ubertooth; smoke in the `host` and `fast` plans and
   CI, comprehensive in `release`): `ubertooth-dfu -d <image> -r` and `-s` with

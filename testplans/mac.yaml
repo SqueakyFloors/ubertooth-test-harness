@@ -1,8 +1,8 @@
 plan: Ubertooth on macOS
 # What can behave differently on a Mac. The firmware and the radio are the
-# same on every host, so radio correctness (range test, AFH, following, the
-# CRC matrices) is covered by the Linux plans and not repeated here, and the
-# command-line refusal matrix runs in the fork's macOS CI. This plan covers
+# same on every host, so what needs a second board or a peer (the range test,
+# following) stays in the Linux plans, and the command-line refusal matrix
+# runs in the fork's macOS CI. This plan covers
 # the host side that macOS changes: the build, the USB stack (libusb on
 # IOKit: device listing, claiming, DFU detach and re-enumeration), threads,
 # signals and timers, and pipes and files. ubertooth-scan and ubertooth-follow
@@ -20,8 +20,8 @@ suites:
     - Host CLI surface:
         hosts: [Host_Mac]
 
-    # The Python tools build (venv, the USB binding, specan-ui -h without a
-    # display) and btle-extcap.
+    # The Python tools the run built: specan-ui -h without a display, and
+    # btle-extcap.
     - Python tools:
         hosts: [Host_Mac]
         coverage: comprehensive
@@ -87,6 +87,8 @@ suites:
 
     # --- One smoke pass of the rest: same firmware, Mac host path ------------
 
+    # Smoke leaves out the full reset into the boot defaults, which is in the
+    # comprehensive profile; add it here once the plan has run on a Mac.
     - Radio setting transitions:
         hosts: [Host_Mac]
         Ubertooth: default
