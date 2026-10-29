@@ -246,6 +246,19 @@ python -m ubertooth_harness run-suite \
   --output runs --allow-power-changes
 ```
 
+[`testplans/mac.yaml`](testplans/mac.yaml) is the macOS plan, for a Mac
+host (`Host_Mac` in the registry). The firmware and radio are the same on every
+host, so it leaves out what the Linux plans already prove about the board (range
+test, AFH, following, the CRC matrices) and the command-line refusal matrix,
+which the fork's macOS CI runs. It covers what macOS changes on the host side:
+the build (run it with `--build --with-firmware --with-python`), the USB stack
+(listing, `-U` selection, `-N`, reset and re-enumeration, util mode start and
+stop, DFU detach and 20 alternating flashes), and streaming (timed and
+signal-stopped captures to files and standard output, specan, and the extcap
+FIFO), plus one smoke pass of the radio-setting, CRC, BLE settings and debug
+register tests. `ubertooth-scan` and `ubertooth-follow` need BlueZ and are not
+in it. It runs once a Mac runner exists.
+
 [`testplans/range.yaml`](testplans/range.yaml) runs the `Two-device range test`
 between the host's default board (sender) and `UT_Linux1` (responder). The
 test transmits: both boards send on 2.4 GHz, the sender at every PA level up
