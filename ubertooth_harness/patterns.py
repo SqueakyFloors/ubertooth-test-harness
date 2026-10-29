@@ -9,8 +9,8 @@ COMPILE_INFO_PATTERN = r"\bubertooth\s+\S+\s+\("
 # `ubertooth-util -v` names the image the build came from when the firmware
 # carries an info block ("Firmware version: bluetooth_rxtx git-1c7f06d6
 # (API:1.35)"), and leaves it out when it does not ("Firmware version:
-# 2020-12-R1 (API:1.07)"). Both forms are accepted everywhere the harness
-# reads a revision off a board.
+# 2020-12-R1 (API:1.07)"). Both forms are accepted, and any image name, where
+# the harness only reads the revision off a board.
 IMAGE_NAME_PATTERN = r"(?:\S+\s+)?"
 FIRMWARE_VERSION_RE = re.compile(
     rf"Firmware version:\s+{IMAGE_NAME_PATTERN}(?P<revision>\S+)\s+\(API:"

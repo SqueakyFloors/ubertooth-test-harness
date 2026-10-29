@@ -267,7 +267,7 @@ class AcronameUSBHub3pController:
                 f"0x{self.serial_number:08x}: error {result}"
             )
         try:
-            observed = self._result_value(
+            observed = self._result_int(
                 hub.system.getSerialNumber(), "controller serial"
             )
             if observed != self.serial_number:
@@ -283,16 +283,9 @@ class AcronameUSBHub3pController:
                         f"controller 0x{self.serial_number:08x} is model "
                         f"{model}, not a USBHub3+ ({self._model})"
                     )
-            reported = self._result_value(
+            version = self._result_int(
                 hub.system.getVersion(), "controller firmware version"
             )
-            try:
-                version = int(reported)
-            except (TypeError, ValueError, OverflowError):
-                raise PowerControllerError(
-                    f"controller 0x{self.serial_number:08x} reported an "
-                    f"unreadable firmware version {reported!r}"
-                ) from None
         except BaseException:
             _quiet_disconnect(hub)
             raise
@@ -310,8 +303,23 @@ class AcronameUSBHub3pController:
             raise PowerControllerError(f"{operation} failed with error {error}")
         return result.value
 
+    def _result_int(self, result, operation: str) -> int:
+        """The read's value as a number; anything else is a controller error.
+
+        BrainStem hands back whatever the library decoded, so a value int()
+        cannot take must be reported like any other failed read, not escape
+        as a TypeError from somewhere deeper.
+        """
+        value = self._result_value(result, operation)
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise PowerControllerError(
+                f"{operation} returned {value!r}, which is not a number"
+            ) from error
+
     def _port_state(self, port: int, operation: str) -> int:
-        return int(self._result_value(self._usb().getPortState(port), operation))
+        return self._result_int(self._usb().getPortState(port), operation)
 
     def snapshot(self, port: int) -> PortState:
         port = _validate_port(port)
@@ -321,8 +329,8 @@ class AcronameUSBHub3pController:
             port,
             bool(state & USBHUB3P_STATE_VBUS),
             state & USBHUB3P_STATE_DATA == USBHUB3P_STATE_DATA,
-            int(self._result_value(usb.getPortVoltage(port), "read VBUS voltage")),
-            int(self._result_value(usb.getPortCurrent(port), "read VBUS current")),
+            self._result_int(usb.getPortVoltage(port), "read VBUS voltage"),
+            self._result_int(usb.getPortCurrent(port), "read VBUS current"),
         )
 
     def _require_changes_armed(self) -> None:

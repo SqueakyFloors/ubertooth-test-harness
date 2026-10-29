@@ -464,7 +464,8 @@ Validation and preparation have distinct phases:
    command then uses first; record the toolchain and SHA-256 identities of the
    built artifacts. Without `--build`, already-installed artifacts are used.
 5. Mandatory preflight: verify installed host revision and every selected
-   Ubertooth firmware revision, compile identity, and registered serial before
+   Ubertooth firmware revision (the application image, or the bare revision
+   older firmware prints), compile identity, and registered serial before
    the first suite test starts.
 
 The `manifest` record is written to run.jsonl before preflight and snapshots requested

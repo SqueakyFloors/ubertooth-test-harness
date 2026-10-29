@@ -796,7 +796,10 @@ entries:
 
 - `Host version` once per selected host, matched to the resolved source commit;
 - firmware version, compile identity, and registered serial once per selected
-  Ubertooth, always selected by serial.
+  Ubertooth, always selected by serial. The firmware version must be the
+  application image (`bluetooth_rxtx`) built from the resolved commit, or the
+  bare revision older firmware prints; a board left on another image, such as
+  `btbr`, is a mismatch.
 
 Checks are deduplicated by host/resource and emit normal check/command events.
 Any mismatch prevents the first `test_started` event. This local slice verifies
