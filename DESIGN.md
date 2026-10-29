@@ -748,7 +748,7 @@ The same script deploys a **Mac test host**, where there is no systemd and no
 controller of its own: it writes two launchd LaunchAgents to
 `~/Library/LaunchAgents`, `com.ubertooth-harness.runner` and
 `com.ubertooth-harness.tunnel`, and loads them with `launchctl bootstrap
-gui/$UID`. The tunnel is `ssh -N -o BatchMode=yes -L
+gui/$UID`. The tunnel is `ssh -N -o BatchMode=yes -o StrictHostKeyChecking=yes -L
 127.0.0.1:PORT:127.0.0.1:PORT [-J JUMP] HOST`, so the Mac runner dials a
 loopback controller as any other runner does; the key that forward uses is the
 access control, and the Mac is not reachable from the network (the forward
@@ -758,7 +758,13 @@ trust boundary as `ssh -R` to a target). Both agents have `RunAtLoad` and
 `ExitTimeOut` leaves time to cancel a run and restore its boards. The tunnel's
 host, jump host and port come from the options, the environment, or the
 private config file `harness-open` reads, through the shared
-[`scripts/harness-config.sh`](scripts/harness-config.sh). Controller-only
+[`scripts/harness-config.sh`](scripts/harness-config.sh). Since the agent's
+`ssh` reads the user's SSH configuration, deploy resolves that configuration
+first with `ssh -G`, which connects to nothing, and refuses to install
+anything when a stanza matching the controller host adds a forward of its
+own: the agent would open that forward too, and it may bind beyond loopback.
+`ClearAllForwardings` is not an option, since it would drop the agent's own
+`-L` with it. Controller-only
 options are refused on macOS and the macOS-only options on Linux, a changed
 agent is replaced (`bootout` then `bootstrap`), and a deploy that would
 restart the runner while that Mac's own target has an active run is refused

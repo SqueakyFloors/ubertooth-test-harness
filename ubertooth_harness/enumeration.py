@@ -24,8 +24,10 @@ UBERTOOTH_PRODUCTS = frozenset({"6000", "6001", "6002", "6003"})
 SYSFS_USB_DEVICES = "/sys/bus/usb/devices"
 # macOS has no sysfs. `ioreg` prints the kernel's IO registry, which holds the
 # descriptors macOS read when each device was enumerated; -p IOUSB selects the
-# USB plane, -l every property, -w0 unwrapped lines, -a an XML plist.
-IOREG_ARGV = ("ioreg", "-p", "IOUSB", "-l", "-w0", "-a")
+# USB plane, -l every property, -w0 unwrapped lines, -a an XML plist. The full
+# path, because PATH is the runner's environment: on an Intel Mac an earlier
+# /usr/local/bin is writable by any admin.
+IOREG_ARGV = ("/usr/sbin/ioreg", "-p", "IOUSB", "-l", "-w0", "-a")
 IOREG_TIMEOUT_S = 15.0
 # The DFU bootloader reports no serial number (iSerialNumber = 0), so such a
 # device cannot be identified. It is reported under this prefix, which can
@@ -178,6 +180,7 @@ class IoregUbertoothEnumerator:
     ):
         self.argv = tuple(argv)
         self.timeout_s = timeout_s
+        self.name = Path(self.argv[0]).name if self.argv else "ioreg"
         self._run = run
 
     def serials(self) -> frozenset[str]:
@@ -191,12 +194,12 @@ class IoregUbertoothEnumerator:
             )
         except (OSError, subprocess.SubprocessError) as error:
             raise EnumerationError(
-                f"cannot read USB devices from {self.argv[0]}: {error}"
+                f"cannot read USB devices from {self.name}: {error}"
             ) from error
         if finished.returncode != 0:
             detail = (finished.stderr or b"").decode(errors="replace").strip()
             raise EnumerationError(
-                f"{self.argv[0]} exited {finished.returncode}"
+                f"{self.name} exited {finished.returncode}"
                 + (f": {detail.splitlines()[0][:200]}" if detail else "")
             )
         return ubertooth_serials_from_ioreg(finished.stdout or b"")

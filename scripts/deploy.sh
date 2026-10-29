@@ -343,6 +343,53 @@ check_path --hardware "$hardware" -f
 check_path --plans-dir "$plans_dir" -d
 [ "$manage_libbtbb" = 1 ] || [ -z "$libbtbb_source" ] || check_path --libbtbb-source "$libbtbb_source" -d
 
+check_inherited_forwards() {
+    local resolved extra line
+    if ! resolved=$(ssh -G "${tunnel_argv[@]:1}" 2>/dev/null); then
+        say "warning: could not read the SSH configuration for $controller_host"
+        say "  (ssh -G failed), so the tunnel agent may not connect either."
+        return
+    fi
+    extra=
+    while IFS= read -r line; do
+        case $line in
+            # The agent's own forward, in either format ssh prints it.
+            "localforward [127.0.0.1]:$port [127.0.0.1]:$port") ;;
+            "localforward 127.0.0.1:$port 127.0.0.1:$port") ;;
+            localforward*|remoteforward*|dynamicforward*)
+                extra="$extra  $line
+" ;;
+        esac
+    done <<EOF
+$resolved
+EOF
+    [ -z "$extra" ] || die "the SSH configuration adds forwards of its own for $controller_host, which the tunnel agent would open too:
+$extra  One of these could bind a port on this Mac, or on $controller_host, that the network can reach. Move them out of the stanza that matches $controller_host, or give the harness its own Host alias."
+}
+
+# Loopback at both ends: the forward binds only this machine's loopback and
+# reaches only the controller's loopback listener. BatchMode so a missing key
+# or host key fails instead of waiting for an answer nobody can give. This
+# connection is the only thing standing between the controller and the
+# network, so host-key checking is pinned on and connection sharing off,
+# whatever the user's ssh configuration says.
+# RemoteCommand=none: a host alias whose ssh configuration sets a remote
+# command cannot be given -N, and the agent would exit on every respawn.
+tunnel_argv=(/usr/bin/ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes
+             -o StrictHostKeyChecking=yes -o ControlPath=none
+             -o RemoteCommand=none
+             -o ServerAliveInterval=30 -o ServerAliveCountMax=3
+             -L "127.0.0.1:$port:127.0.0.1:$port")
+[ -z "$controller_jump" ] || tunnel_argv+=(-J "$controller_jump")
+tunnel_argv+=("$controller_host")
+# Before anything is created: the agent's ssh reads this user's SSH
+# configuration, where a stanza matching the controller host can add forwards
+# of its own, and one of those could bind a port on this Mac that the network
+# can reach. ClearAllForwardings would drop the agent's own -L along with
+# them, so the configuration is checked instead: `ssh -G` resolves it and
+# prints the result without connecting.
+[ "$platform" = linux ] || check_inherited_forwards
+
 commit=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)
 
 if [ "$no_start" = 0 ] && [ "$dry_run" = 0 ]; then
@@ -448,19 +495,6 @@ runner_argv=(runner --controller "ws://127.0.0.1:$port/ws/runner"
 [ "$allow_power_changes" = 0 ] || runner_argv+=(--allow-power-changes)
 runner_args=${runner_argv[*]}
 
-# Loopback at both ends: the forward binds only this machine's loopback and
-# reaches only the controller's loopback listener. BatchMode so a missing key
-# or host key fails instead of waiting for an answer nobody can give. This
-# connection is the only thing standing between the controller and the
-# network, so host-key checking is pinned on and connection sharing off,
-# whatever the user's ssh configuration says.
-tunnel_argv=(/usr/bin/ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes
-             -o StrictHostKeyChecking=yes -o ControlPath=none
-             -o ServerAliveInterval=30 -o ServerAliveCountMax=3
-             -L "127.0.0.1:$port:127.0.0.1:$port")
-[ -z "$controller_jump" ] || tunnel_argv+=(-J "$controller_jump")
-tunnel_argv+=("$controller_host")
-
 header="# Written by scripts/deploy.sh from $ROOT (commit $commit).
 # Rerun that script to change it; edits here are overwritten."
 
@@ -553,6 +587,8 @@ try:
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/targets", timeout=5) as reply:
         targets = json.load(reply).get("targets", [])
 except Exception:
+    # No answer is not the same as no active run, and the caller says so.
+    print("unreachable")
     sys.exit(0)
 for target in targets:
     if only and target.get("host") != only:
@@ -625,6 +661,12 @@ if [ "$no_start" = 0 ] && [ "$restart_needed" = 1 ]; then
         say "note: the installed runner uses port $busy_port; asking that controller about active runs"
     fi
     busy=$(active_runs "$busy_port" "$busy_filter")
+    if [ "$busy" = unreachable ]; then
+        # Worth saying: a Mac asks through the tunnel, which launchd may be
+        # between respawns of, and a run would then go unnoticed.
+        say "warning: no controller answered on 127.0.0.1:$busy_port, so an active run could not be ruled out"
+        busy=
+    fi
     if [ -n "$busy" ]; then
         if [ "$force" = 1 ]; then
             say "warning: restarting during active runs (--force): $busy"

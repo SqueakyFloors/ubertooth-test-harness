@@ -59,8 +59,14 @@ FAKES = {
         [ "${FAKE_LOGINCTL_EXIT:-0}" = 0 ] || exit "$FAKE_LOGINCTL_EXIT"
         echo "Linger=${FAKE_LINGER:-no}"
         """),
-    # Only `ssh -G` (config lookup) runs in dry-run tests; real tunnels use FAKE_SSH.
-    "ssh": '#!/bin/sh\n[ "$1" = -G ] || exit 99\nprintf "hostname %s\\nuser alice\\n" "$2"\n',
+    # Only `ssh -G` (config lookup) runs in dry-run tests; real tunnels use
+    # FAKE_SSH. $FAKE_SSH_FORWARDS stands in for forwards an ssh config adds.
+    "ssh": (
+        '#!/bin/sh\n[ "$1" = -G ] || exit 99\n'
+        '[ -z "${FAKE_SSH_G_EXIT:-}" ] || exit "$FAKE_SSH_G_EXIT"\n'
+        'printf "hostname %s\\nuser alice\\n" "$2"\n'
+        '[ -z "${FAKE_SSH_FORWARDS:-}" ] || printf "%s\\n" "$FAKE_SSH_FORWARDS"\n'
+    ),
     "uname": '#!/bin/sh\necho "${FAKE_UNAME:-Linux}"\n',
     "launchctl": LOGGING_FAKE + textwrap.dedent("""\
         # `print gui/UID` asks whether the login domain is there
@@ -663,6 +669,7 @@ class MacDeployTest(unittest.TestCase):
             # The only access control, so not left to the user's ssh config.
             "-o", "StrictHostKeyChecking=yes",
             "-o", "ControlPath=none",
+            "-o", "RemoteCommand=none",
             "-o", "ServerAliveInterval=30",
             "-o", "ServerAliveCountMax=3",
             "-L", "127.0.0.1:8765:127.0.0.1:8765",
@@ -901,6 +908,41 @@ class MacDeployTest(unittest.TestCase):
         self.assertIn("the installed runner uses port 8765", result.stdout)
         self.assertIn("active runs Host_Mac:run-7", result.stderr)
         self.assertIn("python - 8765 Host_Mac", self.lab.commands())
+
+    def test_forwards_the_ssh_config_adds_are_refused(self):
+        # The agent's ssh reads the user's config, so a stanza matching the
+        # controller host can add a forward the agent would open as well.
+        for forwards in (
+            "localforward [*]:19999 [10.0.0.1]:80",
+            "remoteforward 9000 [127.0.0.1]:22",
+            "dynamicforward 1080",
+        ):
+            with self.subTest(forwards=forwards):
+                result = self.lab.mac_deploy(FAKE_SSH_FORWARDS=forwards)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("adds forwards of its own", result.stderr)
+                self.assertIn(forwards, result.stderr)
+                self.assertEqual(_tree(self.lab.home), {})
+        # The agent's own forward is not one of them, in either printed form.
+        for ours in ("localforward [127.0.0.1]:8765 [127.0.0.1]:8765",
+                     "localforward 127.0.0.1:8765 127.0.0.1:8765"):
+            with self.subTest(ours=ours):
+                self.assertOk(self.lab.mac_deploy(FAKE_SSH_FORWARDS=ours))
+
+    def test_a_controller_that_does_not_answer_is_called_out(self):
+        # On a Mac the question goes through the tunnel, which launchd may be
+        # between respawns of; silence is not "no active run".
+        self.assertOk(self.lab.mac_deploy(FAKE_COMMIT="a" * 40))
+        self.busy_controller("unreachable")
+        result = self.lab.mac_deploy(FAKE_COMMIT="b" * 40)
+        self.assertOk(result)
+        self.assertIn("no controller answered on 127.0.0.1:8765", result.stdout)
+        self.assertIn("could not be ruled out", result.stdout)
+
+    def test_an_unreadable_ssh_config_is_a_warning(self):
+        result = self.lab.mac_deploy(FAKE_SSH_G_EXIT="255")
+        self.assertOk(result)
+        self.assertIn("could not read the SSH configuration", result.stdout)
 
     def test_a_failed_bootstrap_says_so(self):
         result = self.lab.mac_deploy(FAKE_BOOTSTRAP_EXIT="5")

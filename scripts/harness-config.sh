@@ -20,7 +20,7 @@
 # and stop. The caller must define die().
 
 harness_config_load() {
-    local env_host env_jump env_jump_set env_port _hc_mode _hc_status
+    local env_host env_jump env_jump_set env_port _hc_mode _hc_status _hc_errexit
     HARNESS_CONFIG_FILE=${HARNESS_OPEN_CONFIG:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/ubertooth-harness/harness-open.conf}
     # The environment wins over the file, so remember it before sourcing.
     env_host=${HARNESS_HOST-}
@@ -39,13 +39,16 @@ harness_config_load() {
         fi
         # Read it like a shell profile: a failing line inside must not kill
         # the caller without a word, so drop errexit and check the status.
+        # Whether the caller had it on is remembered, so this never turns it
+        # on for a caller that does not want it.
+        case $- in *e*) _hc_errexit=yes ;; *) _hc_errexit= ;; esac
         set +e
         # The file is the user's own and lives outside the repository, so
         # there is nothing for a linter to follow.
         # shellcheck source=/dev/null
         . "$HARNESS_CONFIG_FILE"
         _hc_status=$?
-        set -e
+        [ -z "$_hc_errexit" ] || set -e
         [ "$_hc_status" -eq 0 ] ||
             die "$HARNESS_CONFIG_FILE failed (status $_hc_status); fix it or unset HARNESS_OPEN_CONFIG"
     fi

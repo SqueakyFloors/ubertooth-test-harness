@@ -1576,6 +1576,7 @@ pkg-config and libusb.
 
 The tunnel agent runs
 `/usr/bin/ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes
+-o StrictHostKeyChecking=yes -o ControlPath=none -o RemoteCommand=none
 -o ServerAliveInterval=30 -o ServerAliveCountMax=3
 -L 127.0.0.1:PORT:127.0.0.1:PORT [-J JUMP] HOST`, and the runner dials
 `ws://127.0.0.1:PORT/ws/runner` through it, so both ends are loopback, as
@@ -1606,6 +1607,18 @@ limits it to the controller's own loopback port, and the forced command means
 the key cannot run anything (the agent's `ssh -N` asks for no command, so the
 forward is unaffected). A key without those restrictions is an ordinary login
 to the controller host, which is more than the tunnel needs.
+
+With `--controller-jump` the same key also authenticates to the jump host, so
+it needs an entry there too, as narrow:
+`restrict,port-forwarding,permitopen="<the lab host>:22"`, which lets it reach
+nothing but the SSH port it relays to.
+
+The agent connects with `-J`, so the jump host must allow that; it has no
+`--two-hop` equivalent (see **From a laptop** above for what that option is
+for). It also passes `-o RemoteCommand=none`, so a host alias whose ssh
+configuration runs a command still works, and it refuses to deploy at all
+when that configuration adds a forward of its own for this host, which the
+agent would open alongside the intended one.
 
 The host, jump host and port can come from `--controller-host`,
 `--controller-jump` and `--port`, from `HARNESS_HOST`, `HARNESS_JUMP` and

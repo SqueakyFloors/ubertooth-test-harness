@@ -209,7 +209,8 @@ class IoregEnumeratorTests(unittest.TestCase):
         calls = []
         self.enumerator(output=IOREG_FIXTURE.read_bytes(), calls=calls).serials()
         (argv, kwargs), = calls
-        self.assertEqual(("ioreg", "-p", "IOUSB", "-l", "-w0", "-a"), argv)
+        # The full path: PATH is the runner's, and /usr/local/bin comes first.
+        self.assertEqual(("/usr/sbin/ioreg", "-p", "IOUSB", "-l", "-w0", "-a"), argv)
         self.assertEqual(subprocess.DEVNULL, kwargs["stdin"])
         self.assertEqual(IOREG_TIMEOUT_S, kwargs["timeout"])
         self.assertFalse(kwargs["check"])
