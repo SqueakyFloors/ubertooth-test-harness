@@ -749,19 +749,23 @@ key of its own.
 **Estimate:** the median of the key's last 10 samples once there are 3, so one
 run that queued behind a busy board does not move it. With fewer, the rate
 learned at the other durations of the same test is scaled to this one (each
-sample less the catalog's fixed part, divided by its own units); failing that,
-the caller falls back to the catalog estimate. A sample more than ten times
-off the current median is dropped, but only once the median rests on 3
-samples, so one odd early run cannot lock out the good ones.
+sample less the catalog's fixed part, divided by its own units) and marked
+`estimate_scaled`; failing that, the caller falls back to the catalog
+estimate. A sample more than ten times off the current median is dropped, but
+only once the median rests on 3 samples, so one odd early run cannot lock out
+the good ones. A measured zero is never a sample, and the store keeps at most
+1000 keys.
 
 `GET /api/plans?target=HOST` and a run's `invocations` return the value with
-`estimate_source` (`learned`, `catalog`, `none`) and `estimate_samples`
-beside the unchanged `estimated_s`, plus `catalog_estimated_s`; learned build,
-preflight and flash durations come back as `stages`. Learning runs on a copy
-of the store in a worker thread and is swapped in when it finishes, so an API
-lookup never reads a half-updated store, and a learning failure costs the
-countdown accuracy and nothing else. Marking a learned estimate in the GUI
-("4s, from 10 runs") is the remaining step of issue #137.
+`estimate_source` (`learned`, `catalog`, `none`), `estimate_samples` and
+`estimate_scaled` beside the unchanged `estimated_s`, plus
+`catalog_estimated_s`; learned build, preflight and flash durations come back
+as `stages`. A run is counted once (`learned_durations` in its `run.json`), so
+a re-sent `run_finished` after a dropped connection cannot double its samples.
+Learning runs on a copy of the store in a worker thread and is swapped in when
+it finishes, so an API lookup never reads a half-updated store, and a learning
+failure costs the countdown accuracy and nothing else. Marking a learned
+estimate in the GUI ("4s, from 10 runs") is the remaining step of issue #137.
 
 ---
 

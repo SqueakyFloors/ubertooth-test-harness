@@ -273,9 +273,12 @@ def estimate_fields(
     ``estimated_s`` is the best estimate, ``catalog_estimated_s`` always the
     hand-calibrated one, and ``estimate_source``/``estimate_samples`` say
     where the value came from (``learned`` with its sample count, ``catalog``,
-    or ``none`` when neither knows). Without a target host (the plan listing
-    with no ``?target=``) nothing is learned and the catalog value stands, so
-    a client that ignores the new fields sees exactly what it did before.
+    or ``none`` when neither knows). ``estimate_scaled`` marks a learned value
+    that was scaled from the same test's samples at other durations, where
+    ``estimate_samples`` counts those samples rather than runs of this exact
+    duration. Without a target host (the plan listing with no ``?target=``)
+    nothing is learned and the catalog value stands, so a client that ignores
+    the new fields sees exactly what it did before.
     """
     catalog_s = _estimate(catalog, test_name, arguments)
     learned = (
@@ -286,11 +289,12 @@ def estimate_fields(
         return {
             "estimated_s": learned.seconds, "catalog_estimated_s": catalog_s,
             "estimate_source": LEARNED, "estimate_samples": learned.samples,
+            "estimate_scaled": learned.scaled,
         }
     return {
         "estimated_s": catalog_s, "catalog_estimated_s": catalog_s,
         "estimate_source": CATALOG if catalog_s is not None else UNKNOWN,
-        "estimate_samples": 0,
+        "estimate_samples": 0, "estimate_scaled": False,
     }
 
 
@@ -447,8 +451,9 @@ def run_stage_estimates(
         # asked for here; a stored one is still listed by /api/plans.
         wanted.append((BUILD_STAGE, "host tools", None))
     if checks is not None:
+        # A float, as the stored keys and /api/plans report units.
         wanted.append((PREFLIGHT_STAGE, "", {"argument": PREFLIGHT_UNITS,
-                                             "value": checks}))
+                                             "value": float(checks)}))
     stages = []
     for stage, profile, units in wanted:
         learned = estimates.lookup_stage(stage, host, profile=profile, units=units)
@@ -458,6 +463,7 @@ def run_stage_estimates(
             "stage": stage, "profile": profile, "units": units,
             "estimated_s": learned.seconds, "estimate_source": LEARNED,
             "estimate_samples": learned.samples,
+            "estimate_scaled": learned.scaled,
         })
     return stages
 

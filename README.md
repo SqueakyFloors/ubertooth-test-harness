@@ -1334,11 +1334,11 @@ Endpoints (JSON unless noted; `GET /` lists them):
 |---|---|
 | `GET /ui/` | the web GUI (HTML, `app.js`, `app.css`) |
 | `GET /api/refs` | `{"repository", "refs": [{"name", "kind", "commit"}], "fetched_at"}` from `git ls-remote` (`kind` is `default`, `branch` or `tag`); 503 if it cannot be listed |
-| `GET /api/plans[?target=HOST]` | every `<plan>.yaml` in `--plans-dir` with its suites, test names, per-test `estimated_s` (one invocation with the step's arguments, else null) and `per_board` (runs once per selected board), the suite total when every test has one, `per_board_tests`, and `runnable` (the plan's `runnable` flag; false for plans of planned tests and for a plan that does not load); a plan that does not load is listed with its `error`. With a `target`, `estimated_s` is what that host's own runs measured when enough of them did; `catalog_estimated_s`, `estimate_source` (`learned`, `catalog` or `none`) and `estimate_samples` say which, and `stages` lists the build, preflight and flash durations learned for it (see [Learned durations](#learned-durations)). Without one, nothing is learned and the catalog estimate stands. A `target` that is not a host name is refused with 422 |
+| `GET /api/plans[?target=HOST]` | every `<plan>.yaml` in `--plans-dir` with its suites, test names, per-test `estimated_s` (one invocation with the step's arguments, else null) and `per_board` (runs once per selected board), the suite total when every test has one, `per_board_tests`, and `runnable` (the plan's `runnable` flag; false for plans of planned tests and for a plan that does not load); a plan that does not load is listed with its `error`. With a `target`, `estimated_s` is what that host's own runs measured when enough of them did; `catalog_estimated_s`, `estimate_source` (`learned`, `catalog` or `none`), `estimate_samples` and `estimate_scaled` say which, and `stages` lists the build, preflight and flash durations learned for it (see [Learned durations](#learned-durations)). Without one, nothing is learned and the catalog estimate stands. A `target` that is not a host name is refused with 422 |
 | `GET /api/targets`, `GET /api/targets/{host}` | registry: host, hostname, OS, Python, Ubertooth serials, last heartbeat, `online`/`offline`, connected, active run |
 | `POST /api/targets/{host}/runs` | start a run with the protocol `run` fields: `{"ref", "commit": null, "plan", "suite", "tests": [], "build": false}` (`commit`, optional, is the full commit the caller saw listed for `ref`); 201 with the run (including the `commit` sent to the runner), 409 busy, offline, rejected by the runner, or `ref` moved away from `commit`, 422 invalid, a ref not in `/api/refs` (full commit IDs are accepted), or a name listing several commits, 504 no answer |
 | `GET /api/runs[?target=HOST]` | runs, newest first |
-| `GET /api/runs/{run_id}` | status, every event, the failure summary (`failures`), `invocations` (from the run's manifest, every planned invocation on the target with `invocation_id`, `test_name`, `estimated_s`, `catalog_estimated_s`, `estimate_source` and `estimate_samples`; null before the manifest record), and `stages`: the run's build and preflight estimates where its host has learned them |
+| `GET /api/runs/{run_id}` | status, every event, the failure summary (`failures`), `invocations` (from the run's manifest, every planned invocation on the target with `invocation_id`, `test_name`, `estimated_s`, `catalog_estimated_s`, `estimate_source`, `estimate_samples` and `estimate_scaled`; null before the manifest record), and `stages`: the run's build and preflight estimates where its host has learned them |
 | `GET /api/runs/{run_id}/report.md` | the run's report (Markdown) |
 | `POST /api/runs/{run_id}/cancel` | `{"reason": ""}`; 202 once the runner accepts |
 | `WS /ws/live[?run_id=ID]` | browser stream: a `snapshot`, then `target` and `run` updates, plus that run's `event` records; a browser 1000 updates behind is closed with 1013 `live stream overflowed` (reconnect for a new snapshot) |
@@ -1354,35 +1354,42 @@ cannot drive the controller through a local browser.
 
 The catalog's estimates are calibrated by hand on one machine, so the
 countdown drifts on any other host. The controller therefore learns the real
-durations from the runs it has already stored: when a run ends it reads that
-run's own `run.jsonl` and keeps the wall time of every test invocation that
-passed, plus the build, preflight and flash stages when they passed, in
+durations from the runs it records: as each run ends it reads that run's own
+`run.jsonl` and keeps the wall time of every test invocation that passed,
+plus the build, preflight and flash stages when they passed, in
 `estimates.json` beside the run directories (written atomically, so a crash
 leaves the previous content). Nothing else feeds it: no new event, no runner
 change, and no sample from a failed, skipped, cancelled or not-applicable
 test, which ends early or late for reasons that say nothing about how long
 the test takes. A run that failed still teaches what its passing tests took.
+Each run is counted once (`learned_durations` in its `run.json`), so a runner
+that reports the end again after a dropped connection does not double its
+samples; runs stored before this existed, and runs that end as `lost` (the
+runner never reported their end), are not mined.
 
 A sample is keyed by the stage, the test name, the target host (a Linux host
 and a Mac differ, as do two Linux hosts), the coverage profile, and the value
 of the argument the duration scales with (`duration`, `capture duration`,
 `flashes`, or preflight's number of checks), so a 5 s capture and a 30 s
-capture are not mixed. The last 10 samples of each key are kept, and the
-estimate is their median once there are at least 3: a median ignores the one
-run that waited on a busy board. Until a key has 3 samples of its own, a rate
-learned at another duration of the same test is used (the samples, less the
-catalog's fixed part, divided by their own units), so a test timed at 3 s
-also estimates a 6 s run; failing that, the catalog estimate stands. A sample
-more than ten times off the current median is dropped as an outlier, but only
-once the median itself rests on 3 samples, so one odd early run cannot lock
-out the good ones that follow.
+capture are not mixed. The last 10 samples of each key are kept, and at most
+1000 keys (when it is full, the key with the fewest samples makes room), so
+the file stays small. The estimate is the samples' median once there are at
+least 3: a median ignores the one run that waited on a busy board. Until a
+key has 3 samples of its own, a rate learned at another duration of the same
+test is used (the samples, less the catalog's fixed part, divided by their own
+units), so a test timed at 3 s also estimates a 6 s run; that value is marked
+`estimate_scaled`, because its sample count is of the other durations.
+Failing that, the catalog estimate stands. A sample more than ten times off
+the current median is dropped as an outlier, but only once the median itself
+rests on 3 samples, so one odd early run cannot lock out the good ones that
+follow.
 
 `GET /api/plans?target=HOST` and the `invocations` of `GET /api/runs/{run_id}`
-report the value with `estimate_source` and `estimate_samples` beside it, and
-the run detail's `stages` gives the build and preflight estimates for that
-run. The live countdown therefore sharpens by itself; Run setup still shows
-catalog estimates until the GUI asks for a target's own, and the "from N runs"
-label is still to come.
+report the value with `estimate_source`, `estimate_samples` and
+`estimate_scaled` beside it, and the run detail's `stages` gives the build and
+preflight estimates for that run. The live countdown therefore sharpens by
+itself; Run setup still shows catalog estimates until the GUI asks for a
+target's own, and the "from N runs" label is still to come.
 
 Runner messages are decoded strictly (up to 4 MiB, enough for a 1 MiB
 manifest record); a malformed or out-of-place message is counted on the

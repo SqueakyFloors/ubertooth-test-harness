@@ -54,6 +54,11 @@ STORE_FILE = "estimates.json"
 STORE_VERSION = 1
 # Samples kept per key, newest last.
 MAX_SAMPLES = 10
+# Keys kept at all. Every test, host, coverage profile and duration value
+# makes one, so a lab that changes a plan's durations often would otherwise
+# grow the file forever. Far above what any plan set needs; when it is
+# reached, the least established key makes room.
+MAX_KEYS = 1000
 # Samples a median must rest on before it is used (and before the outlier
 # rule can drop anything).
 MIN_SAMPLES = 3
@@ -145,7 +150,7 @@ def _count_units(name: str, value) -> tuple[str, float] | None:
     return (name, float(value))
 
 
-def test_key(
+def invocation_key(
     catalog: TestCatalog, test_name, arguments, host: str
 ) -> tuple[Key, float] | None:
     """The key and the catalog's fixed part for one invocation of a test.
@@ -166,6 +171,11 @@ def test_key(
         # No calibrated estimate: the test is expected to run for its
         # duration, and nothing of it is fixed overhead.
         units, fixed_s = _duration_units(normalized), 0.0
+    elif estimate.per_duration and estimate.per_count is not None:
+        # One key carries one scaling argument. No catalog estimate scales
+        # by both, and keying such a test by either alone would mix runs of
+        # different lengths, so it is left to the catalog estimate.
+        return None
     elif estimate.per_duration:
         units, fixed_s = _duration_units(normalized), estimate.fixed_s
     elif estimate.per_count is not None:
@@ -194,12 +204,14 @@ class EstimateStore:
         max_samples: int = MAX_SAMPLES,
         min_samples: int = MIN_SAMPLES,
         outlier_factor: float = OUTLIER_FACTOR,
+        max_keys: int = MAX_KEYS,
     ):
         self.path = Path(path)
         self.log = log
         self.max_samples = max_samples
         self.min_samples = min_samples
         self.outlier_factor = outlier_factor
+        self.max_keys = max_keys
         self._samples: dict[Key, list[float]] = {}
         self.outliers = 0
         self.updated_at: str | None = None
@@ -314,6 +326,7 @@ class EstimateStore:
         other = EstimateStore(
             self.path, log=self.log, max_samples=self.max_samples,
             min_samples=self.min_samples, outlier_factor=self.outlier_factor,
+            max_keys=self.max_keys,
         )
         other._samples = {key: list(values) for key, values in self._samples.items()}
         other.outliers = self.outliers
@@ -328,9 +341,11 @@ class EstimateStore:
 
     def add(self, key: Key, seconds) -> bool:
         """Keep one sample unless it is unusable or an outlier."""
-        value = _sample_seconds(seconds, allow_zero=True)
+        value = _sample_seconds(seconds)
         if value is None:
             return False
+        if key not in self._samples:
+            self._make_room()
         samples = self._samples.setdefault(key, [])
         if len(samples) >= self.min_samples:
             median = statistics.median(samples)
@@ -347,6 +362,22 @@ class EstimateStore:
         samples.append(value)
         del samples[: -self.max_samples]
         return True
+
+    def _make_room(self) -> None:
+        """Keep the store bounded before a new key is added."""
+        while len(self._samples) >= self.max_keys:
+            # Fewest samples first, then the key added longest ago (the
+            # dictionary keeps its insertion order), so an established key is
+            # never dropped to make room for a one-off duration.
+            _, key = min(
+                enumerate(self._samples),
+                key=lambda item: (len(self._samples[item[1]]), item[0]),
+            )
+            del self._samples[key]
+            self.log(
+                f"estimates: {self.path.name} is full at {self.max_keys} keys; "
+                f"dropped {key.stage} {key.name or key.host}"
+            )
 
     # ----- lookup ----------------------------------------------------------
 
@@ -380,7 +411,7 @@ class EstimateStore:
         """The learned estimate of one test invocation on ``host``."""
         if not host:
             return None
-        found = test_key(catalog, test_name, arguments, host)
+        found = invocation_key(catalog, test_name, arguments, host)
         if found is None:
             return None
         key, fixed_s = found
@@ -415,6 +446,8 @@ class EstimateStore:
                 "estimated_s": median,
                 "estimate_source": LEARNED if enough else UNKNOWN,
                 "estimate_samples": len(samples),
+                # Each entry is one stored key, so never scaled.
+                "estimate_scaled": False,
                 "per_unit_s": (
                     round(median / units["value"], 3)
                     if median is not None and units and units["value"] > 0 else None
@@ -466,7 +499,7 @@ class EstimateStore:
                     continue
                 begin, opening = opened
                 seconds = _elapsed(begin, moment)
-                found = test_key(
+                found = invocation_key(
                     catalog,
                     opening.get("test_name") or details.get("test_name"),
                     opening.get("arguments"),
@@ -540,14 +573,19 @@ def _host(value, fallback: str) -> str:
     return value if isinstance(value, str) and value else fallback
 
 
-def _sample_seconds(value, *, allow_zero: bool = False) -> float | None:
-    """A usable number of seconds, or None (never an exception)."""
+def _sample_seconds(value) -> float | None:
+    """A usable duration in seconds, or None (never an exception).
+
+    Zero is not usable: the records have millisecond resolution, so a
+    measured 0 means the pair of records is wrong, and three of them would
+    give a learned estimate of nothing at all.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     number = float(value)
     if number != number or number in (float("inf"), float("-inf")):
         return None
-    if number > MAX_SAMPLE_S or number < 0 or (number == 0 and not allow_zero):
+    if number <= 0 or number > MAX_SAMPLE_S:
         return None
     return number
 

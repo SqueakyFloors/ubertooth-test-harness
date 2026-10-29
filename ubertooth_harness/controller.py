@@ -199,6 +199,7 @@ _RUN_FIELDS = (
     "build",
     "status", "created_at", "finished_at", "exit_code", "reason",
     "runner_run_directory", "report", "report_error", "cancel_requested", "adopted",
+    "learned_durations",
 )
 
 
@@ -235,6 +236,8 @@ class Run:
     # Created from a runner report rather than a start request (for example,
     # the run outlived a controller restart).
     adopted: bool = False
+    # Its durations are already in the estimate store; see Controller.learn.
+    learned_durations: bool = False
     seen: set = dataclasses.field(default_factory=set, repr=False)
     last_event_sequence: int | None = None
     last_event_type: str | None = None
@@ -868,7 +871,14 @@ class Controller:
         one test invocation (or stage) that passed, so a run that failed
         still teaches what its passing tests took. Never raises: a learning
         failure costs the countdown accuracy, nothing else.
+
+        At most once per run, recorded in run.json: a runner whose connection
+        drops as it reports the end reports it again after reconnecting, and
+        counting that run twice would push every other sample out of the
+        window.
         """
+        if run.learned_durations:
+            return 0
         try:
             async with self._learning:
                 events = await asyncio.to_thread(self.read_events, run)
@@ -882,6 +892,8 @@ class Controller:
         except Exception as error:  # noqa: BLE001 - the run result stands
             self.log(f"run {run.run_id}: could not learn durations: {error}")
             return 0
+        run.learned_durations = True
+        self._persist(run)
         if kept:
             self.log(f"run {run.run_id}: learned {kept} duration sample(s)")
         return kept

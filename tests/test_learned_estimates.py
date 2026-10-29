@@ -5,13 +5,16 @@ records, and the API tests drive the controller on 127.0.0.1 with a scripted
 protocol-v2 runner, as the other controller tests do.
 """
 
+from dataclasses import replace
 import datetime
 import json
 from pathlib import Path
 import tempfile
+from types import MappingProxyType
 import unittest
+from unittest.mock import patch
 
-from ubertooth_harness.catalog import builtin_catalog
+from ubertooth_harness.catalog import Estimate, builtin_catalog
 from ubertooth_harness.controller import Controller
 from ubertooth_harness.gui import (
     estimate_fields,
@@ -25,7 +28,7 @@ from ubertooth_harness.learned import (
     STORE_FILE,
     EstimateStore,
     Key,
-    test_key,
+    invocation_key,
 )
 from ubertooth_harness.plan import load_plan
 
@@ -57,7 +60,7 @@ def record(kind, status, at, **details) -> dict:
     }
 
 
-def test_records(
+def passed_records(
     name, arguments, durations, *, host=HOST, status="passed", first=0.0
 ) -> list[dict]:
     """One test_started/test_finished pair per duration, back to back."""
@@ -74,7 +77,7 @@ def test_records(
 
 
 def key_of(name, arguments, host=HOST) -> Key:
-    found = test_key(builtin_catalog(), name, arguments, host)
+    found = invocation_key(builtin_catalog(), name, arguments, host)
     assert found is not None, name
     return found[0]
 
@@ -96,7 +99,7 @@ class StoreTestCase(unittest.TestCase):
 class LearningTests(StoreTestCase):
 
     def test_passed_invocations_become_samples_keyed_by_the_arguments(self):
-        kept = self.learn(test_records("Raw receive", RAW_RECEIVE, [70.0, 68.0]))
+        kept = self.learn(passed_records("Raw receive", RAW_RECEIVE, [70.0, 68.0]))
         self.assertEqual(2, kept)
         key = key_of("Raw receive", RAW_RECEIVE)
         self.assertEqual(
@@ -111,7 +114,7 @@ class LearningTests(StoreTestCase):
                 self.assertEqual(
                     0,
                     self.learn(
-                        test_records("Raw receive", RAW_RECEIVE, [70.0], status=status),
+                        passed_records("Raw receive", RAW_RECEIVE, [70.0], status=status),
                         store=store,
                     ),
                 )
@@ -131,9 +134,9 @@ class LearningTests(StoreTestCase):
             with self.subTest(broken):
                 self.assertEqual(0, self.learn([started, {**finished, **broken}]))
         # An unknown test name, and arguments the catalog refuses.
-        self.assertEqual(0, self.learn(test_records("No such test", {}, [3.0])))
+        self.assertEqual(0, self.learn(passed_records("No such test", {}, [3.0])))
         self.assertEqual(
-            0, self.learn(test_records("Raw receive", {"coverage": "wrong"}, [3.0]))
+            0, self.learn(passed_records("Raw receive", {"coverage": "wrong"}, [3.0]))
         )
         # Not a mapping, and a test_finished with no invocation.
         self.assertEqual(0, self.learn(["not an event", 7, None]))
@@ -143,7 +146,7 @@ class LearningTests(StoreTestCase):
 
     def test_the_invocations_own_host_wins_over_the_run_target(self):
         self.learn(
-            test_records("Argument validation", VALIDATION, [10.0], host="Host_Mac"),
+            passed_records("Argument validation", VALIDATION, [10.0], host="Host_Mac"),
             host="Host_Linux",
         )
         self.assertEqual(
@@ -152,12 +155,12 @@ class LearningTests(StoreTestCase):
         )
 
     def test_samples_of_different_hosts_profiles_and_durations_stay_apart(self):
-        self.learn(test_records("Raw receive", RAW_RECEIVE, [70.0]))
-        self.learn(test_records("Raw receive", RAW_RECEIVE, [71.0], host="Host_B"),
+        self.learn(passed_records("Raw receive", RAW_RECEIVE, [70.0]))
+        self.learn(passed_records("Raw receive", RAW_RECEIVE, [71.0], host="Host_B"),
                    host="Host_B")
-        self.learn(test_records(
+        self.learn(passed_records(
             "Raw receive", {"coverage": "smoke", "duration": "3s"}, [4.0]))
-        self.learn(test_records(
+        self.learn(passed_records(
             "Raw receive", {"coverage": "comprehensive", "duration": "6s"}, [130.0]))
         self.assertEqual(
             {
@@ -173,25 +176,39 @@ class LearningTests(StoreTestCase):
         )
 
     def test_equal_durations_written_differently_share_a_key(self):
-        self.learn(test_records(
+        self.learn(passed_records(
             "Spectrum analyzer", {"coverage": "smoke", "duration": "3s"}, [10.0]))
-        self.learn(test_records(
+        self.learn(passed_records(
             "Spectrum analyzer", {"coverage": "smoke", "duration": "3000ms"}, [11.0]))
         (key,) = self.store.keys()
         self.assertEqual(("duration", 3.0), key.units)
         self.assertEqual([10.0, 11.0], self.store.samples(key))
+
+    def test_a_test_that_scaled_by_two_arguments_is_left_to_the_catalog(self):
+        # No catalog estimate scales by a duration and a count at once; one
+        # key could carry only one of them, so such a test is not learned.
+        catalog = builtin_catalog()
+        definition = replace(
+            catalog.get("Raw receive"),
+            estimates=MappingProxyType({
+                "smoke": Estimate(9.0, per_duration=20, per_count=("flashes", 1)),
+            }),
+        )
+        with patch.object(catalog, "get", return_value=definition):
+            self.assertIsNone(invocation_key(
+                catalog, "Raw receive", {"coverage": "smoke", "duration": "3s"}, HOST))
 
     def test_flash_reliability_is_keyed_by_its_flash_count(self):
         arguments = {
             "platforms": ["macos"], "flashes": 4, "KGV sha256": "e" * 64,
             "KGV revision": "r", "image sequence": ["KGV", "test build"],
         }
-        self.learn(test_records("Flash reliability", arguments, [12.0]))
+        self.learn(passed_records("Flash reliability", arguments, [12.0]))
         (key,) = self.store.keys()
         self.assertEqual(("flashes", 4.0), key.units)
 
     def test_only_the_last_samples_are_kept(self):
-        self.learn(test_records("Argument validation", VALIDATION,
+        self.learn(passed_records("Argument validation", VALIDATION,
                                 [float(n) for n in range(1, MAX_SAMPLES + 4)]))
         self.assertEqual(
             [float(n) for n in range(4, MAX_SAMPLES + 4)],
@@ -202,13 +219,13 @@ class LearningTests(StoreTestCase):
 class MedianTests(StoreTestCase):
 
     def samples(self, values, name="Argument validation", arguments=VALIDATION):
-        self.learn(test_records(name, arguments, values))
+        self.learn(passed_records(name, arguments, values))
         return key_of(name, arguments)
 
     def test_the_median_needs_three_samples(self):
         key = self.samples([10.0, 12.0])
         self.assertIsNone(self.store.lookup(key))
-        self.learn(test_records("Argument validation", VALIDATION, [14.0]))
+        self.learn(passed_records("Argument validation", VALIDATION, [14.0]))
         learned = self.store.lookup(key)
         self.assertEqual(12.0, learned.seconds)
         self.assertEqual(3, learned.samples)
@@ -252,15 +269,33 @@ class MedianTests(StoreTestCase):
 
     def test_unusable_sample_values_are_refused(self):
         key = key_of("Argument validation", VALIDATION)
-        for value in (-1.0, None, "12", True, float("inf"), float("nan"), 10**9):
+        # Zero included: the records carry milliseconds, so a measured zero
+        # means the pair of records is wrong, and three of them would learn
+        # an estimate of no time at all.
+        for value in (0, 0.0, -1.0, None, "12", True, float("inf"), float("nan"),
+                      10**9):
             with self.subTest(value):
                 self.assertFalse(self.store.add(key, value))
         self.assertEqual([], self.store.samples(key))
+        self.assertIsNone(self.store.lookup(key))
+
+    def test_the_store_keeps_a_bounded_number_of_keys(self):
+        store = EstimateStore(self.path, log=self.logs.append, max_keys=3)
+        established = key_of("Argument validation", VALIDATION)
+        for value in (10.0, 11.0, 12.0):
+            store.add(established, value)
+        for seconds in range(1, 6):
+            store.add(key_of("Spectrum analyzer",
+                             {"coverage": "smoke", "duration": f"{seconds}s"}), 9.0)
+        self.assertEqual(3, len(store.keys()))
+        # The key with the most samples is never dropped for a one-off.
+        self.assertEqual([10.0, 11.0, 12.0], store.samples(established))
+        self.assertTrue(any("is full" in line for line in self.logs))
 
     def test_a_learned_rate_applies_to_another_duration(self):
         # Three comprehensive Raw receive runs at 3 s: 9 s fixed, 20 s per
         # second of duration in the catalog; measured 10 s plus 21 per second.
-        self.learn(test_records("Raw receive", RAW_RECEIVE, [72.0, 73.0, 74.0]))
+        self.learn(passed_records("Raw receive", RAW_RECEIVE, [72.0, 73.0, 74.0]))
         other = {"coverage": "comprehensive", "duration": "6s"}
         learned = self.store.lookup_test(
             builtin_catalog(), "Raw receive", other, HOST)
@@ -269,7 +304,7 @@ class MedianTests(StoreTestCase):
         self.assertEqual(3, learned.samples)
         self.assertTrue(learned.scaled)
         # The exact duration wins as soon as it has samples of its own.
-        self.learn(test_records("Raw receive", other, [130.0, 131.0, 132.0]))
+        self.learn(passed_records("Raw receive", other, [130.0, 131.0, 132.0]))
         exact = self.store.lookup_test(builtin_catalog(), "Raw receive", other, HOST)
         self.assertEqual(131.0, exact.seconds)
         self.assertFalse(exact.scaled)
@@ -277,11 +312,11 @@ class MedianTests(StoreTestCase):
     def test_nothing_is_scaled_without_units_or_without_samples(self):
         catalog = builtin_catalog()
         # A fixed estimate has no units to scale by.
-        self.learn(test_records("Argument validation", VALIDATION, [10.0, 11.0]))
+        self.learn(passed_records("Argument validation", VALIDATION, [10.0, 11.0]))
         self.assertIsNone(
             self.store.lookup_test(catalog, "Argument validation", VALIDATION, HOST))
         # Another test's samples, and another host's, do not scale this one.
-        self.learn(test_records("Raw receive", RAW_RECEIVE, [72.0, 73.0, 74.0]))
+        self.learn(passed_records("Raw receive", RAW_RECEIVE, [72.0, 73.0, 74.0]))
         self.assertIsNone(self.store.lookup_test(
             catalog, "Raw receive", {"coverage": "smoke", "duration": "6s"}, HOST))
         self.assertIsNone(self.store.lookup_test(
@@ -346,10 +381,12 @@ class StageTests(StoreTestCase):
             [
                 {"stage": "build", "name": "", "host": HOST, "profile": "host tools",
                  "units": None, "estimated_s": 310.0, "estimate_source": "learned",
-                 "estimate_samples": 3, "per_unit_s": None},
+                 "estimate_samples": 3, "estimate_scaled": False,
+                 "per_unit_s": None},
                 {"stage": "preflight", "name": "", "host": HOST, "profile": "",
                  "units": {"argument": "checks", "value": 2.0}, "estimated_s": None,
-                 "estimate_source": "none", "estimate_samples": 1, "per_unit_s": None},
+                 "estimate_source": "none", "estimate_samples": 1,
+                 "estimate_scaled": False, "per_unit_s": None},
             ],
             self.store.entries(host=HOST, stages=("build", "preflight", "flash")),
         )
@@ -360,21 +397,21 @@ class PersistenceTests(StoreTestCase):
 
     def test_samples_survive_a_restart(self):
         key = key_of("Argument validation", VALIDATION)
-        self.learn(test_records("Argument validation", VALIDATION, [10.0, 11.0, 12.0]))
+        self.learn(passed_records("Argument validation", VALIDATION, [10.0, 11.0, 12.0]))
         self.assertTrue(self.path.is_file())
         reopened = EstimateStore.load(self.path, log=self.logs.append)
         self.assertEqual([10.0, 11.0, 12.0], reopened.samples(key))
         self.assertEqual(11.0, reopened.lookup(key).seconds)
         # Learning again appends to what was stored.
         reopened.learn_from_run(
-            test_records("Argument validation", VALIDATION, [13.0]), host=HOST)
+            passed_records("Argument validation", VALIDATION, [13.0]), host=HOST)
         self.assertEqual(
             [10.0, 11.0, 12.0, 13.0],
             EstimateStore.load(self.path, log=self.logs.append).samples(key),
         )
 
     def test_the_file_is_replaced_atomically_and_is_readable_json(self):
-        self.learn(test_records("Argument validation", VALIDATION, [10.0]))
+        self.learn(passed_records("Argument validation", VALIDATION, [10.0]))
         data = json.loads(self.path.read_text(encoding="utf-8"))
         self.assertEqual(1, data["version"])
         self.assertEqual(
@@ -387,7 +424,7 @@ class PersistenceTests(StoreTestCase):
         self.assertEqual([STORE_FILE], [path.name for path in self.root.iterdir()])
 
     def test_nothing_is_written_when_nothing_was_learned(self):
-        self.assertEqual(0, self.learn(test_records(
+        self.assertEqual(0, self.learn(passed_records(
             "Argument validation", VALIDATION, [10.0], status="failed")))
         self.assertFalse(self.path.exists())
 
@@ -452,7 +489,8 @@ class PlanEstimateTests(StoreTestCase):
     def test_estimate_fields_of_a_test_neither_source_knows(self):
         self.assertEqual(
             {"estimated_s": None, "catalog_estimated_s": None,
-             "estimate_source": "none", "estimate_samples": 0},
+             "estimate_source": "none", "estimate_samples": 0,
+             "estimate_scaled": False},
             estimate_fields(builtin_catalog(), "No such test", {},
                             estimates=self.store, host=HOST),
         )
@@ -488,11 +526,11 @@ class PlanEstimateTests(StoreTestCase):
             [
                 {"stage": "build", "profile": "host tools", "units": None,
                  "estimated_s": 310.0, "estimate_source": "learned",
-                 "estimate_samples": 3},
+                 "estimate_samples": 3, "estimate_scaled": False},
                 {"stage": "preflight", "profile": "",
-                 "units": {"argument": "checks", "value": 3},
+                 "units": {"argument": "checks", "value": 3.0},
                  "estimated_s": 1.2, "estimate_source": "learned",
-                 "estimate_samples": 3},
+                 "estimate_samples": 3, "estimate_scaled": False},
             ],
             run_stage_estimates(self.store, events, HOST, build=True),
         )
@@ -530,7 +568,7 @@ class ControllerLearningTests(ControllerTestCase):
             for index in range(3):
                 await self.finished_run(
                     runner,
-                    test_records("Argument validation", VALIDATION, [10.0 + index]),
+                    passed_records("Argument validation", VALIDATION, [10.0 + index]),
                     run_id=f"run-{index}",
                 )
                 await wait_until(lambda n=index: len(self.samples()) == n + 1)
@@ -542,16 +580,54 @@ class ControllerLearningTests(ControllerTestCase):
         self.assertEqual(11.0, learned.seconds)
         self.assertEqual(3, learned.samples)
 
+    async def test_a_run_reported_finished_twice_is_learned_once(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            records = passed_records("Argument validation", VALIDATION, [10.0])
+            message = await self.accepted_run(runner)
+            for index, item in enumerate(records, 1):
+                await runner.send("event", run_id="run-1",
+                                  event={**item, "run_id": "run-1", "sequence": index})
+            for _ in range(2):
+                # A runner whose connection drops as it reports the end
+                # reports it again once it has reconnected.
+                await runner.send("run_finished", request_id=message["request_id"],
+                                  run_id="run-1", status="passed", exit_code=0,
+                                  run_directory="/absent")
+            await wait_until(lambda: len(self.samples()) == 1)
+            await runner.heartbeat()
+            await wait_until(lambda: self.controller.targets[HOST].last_heartbeat)
+        self.assertEqual([10.0], self.samples())
+        record_file = json.loads(
+            (self.results / "run-1" / "run.json").read_text(encoding="utf-8"))
+        self.assertTrue(record_file["learned_durations"])
+
     async def test_a_failed_run_still_teaches_from_its_passing_tests(self):
         async with FakeRunner(self.port) as runner:
             await self.registered(runner)
-            records = test_records("Argument validation", VALIDATION, [10.0])
-            records += test_records("Raw receive", RAW_RECEIVE, [70.0],
+            records = passed_records("Argument validation", VALIDATION, [10.0])
+            records += passed_records("Raw receive", RAW_RECEIVE, [70.0],
                                     status="failed", first=100.0)
             await self.finished_run(runner, records, status="failed")
             await wait_until(lambda: len(self.samples()) == 1)
         self.assertEqual([10.0], self.samples())
         self.assertEqual([], self.samples("Raw receive", RAW_RECEIVE))
+
+    async def test_a_run_that_ended_in_an_error_teaches_too(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            message = await self.accepted_run(runner)
+            for index, item in enumerate(
+                passed_records("Argument validation", VALIDATION, [10.0]), 1
+            ):
+                await runner.send("event", run_id="run-1",
+                                  event={**item, "run_id": "run-1", "sequence": index})
+            await runner.send("run_error", request_id=message["request_id"],
+                              run_id="run-1", exit_code=1,
+                              reason="the run ended without a summary")
+            await wait_until(lambda: self.controller.runs["run-1"].status == "error")
+            await wait_until(lambda: len(self.samples()) == 1)
+        self.assertEqual([10.0], self.samples())
 
     async def test_the_plans_endpoint_reports_the_targets_learned_estimates(self):
         step = load_plan(
@@ -576,7 +652,8 @@ class ControllerLearningTests(ControllerTestCase):
         self.assertEqual(
             [{"stage": "build", "name": "", "host": HOST, "profile": "host tools",
               "units": None, "estimated_s": 310.0, "estimate_source": "learned",
-              "estimate_samples": 3, "per_unit_s": None}],
+              "estimate_samples": 3, "estimate_scaled": False,
+              "per_unit_s": None}],
             payload["stages"],
         )
         # Without a target the catalog estimate stands, as before.
@@ -620,13 +697,15 @@ class ControllerLearningTests(ControllerTestCase):
         self.assertEqual(
             [{"invocation_id": "001-Raw receive", "test_name": "Raw receive",
               "estimated_s": 71.0, "catalog_estimated_s": 69.0,
-              "estimate_source": "learned", "estimate_samples": 3}],
+              "estimate_source": "learned", "estimate_samples": 3,
+              "estimate_scaled": False}],
             payload["invocations"],
         )
         self.assertEqual(
             [{"stage": "preflight", "profile": "",
-              "units": {"argument": "checks", "value": 2}, "estimated_s": 1.2,
-              "estimate_source": "learned", "estimate_samples": 3}],
+              "units": {"argument": "checks", "value": 2.0}, "estimated_s": 1.2,
+              "estimate_source": "learned", "estimate_samples": 3,
+              "estimate_scaled": False}],
             payload["stages"],
         )
 
