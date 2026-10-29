@@ -350,7 +350,9 @@ def _watchdog_section(run: _Run) -> list[str]:
         "", "## Watchdog", "",
         "The firmware resets a board that stops servicing USB or whose mode "
         "stops looping, and keeps the reason in RAM a reset does not clear. "
-        "A reset is reported, not failed: the board came back by itself.", "",
+        "A reset is reported, not failed: the board came back by itself. "
+        "Each row holds what that board's last whole record said, and what "
+        "its last read found.", "",
         "| Board | Serial | Reset itself | Last boot cause | Last read | "
         "Transfer errors | Radio waits that gave up |", "|---|---|---|---|---|---|---|",
     ]
@@ -445,7 +447,7 @@ def _results_table(run: _Run) -> list[str]:
             # A board that reset itself does not fail the test, so the table
             # says it happened and the Watchdog section below has the lines
             # themselves; printing them twice in one report helps nobody.
-            count = len(fd.get("warnings", []))
+            count = fd.get("watchdog_warnings", 0)
             if count:
                 note = (
                     f"warning: {count} watchdog warning"

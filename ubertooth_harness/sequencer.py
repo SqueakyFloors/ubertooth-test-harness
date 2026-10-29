@@ -95,32 +95,6 @@ def _full_reason(error: BaseException) -> str:
     return "; ".join(parts)
 
 
-def _bounded_warnings(warnings: Sequence[str]) -> list[str]:
-    """Watchdog warnings, cut to fit the event size limit.
-
-    Each warning is also in its own watchdog record, so the test record keeps
-    the first few and says how many more there were.
-    """
-    kept: list[str] = []
-    used = 0
-    for position, warning in enumerate(warnings):
-        room = _MAX_REASON_CHARS - used
-        if room <= 0:
-            kept.append(
-                f"... and {len(warnings) - position} more, each in its own "
-                "watchdog record"
-            )
-            break
-        if len(warning) > room:
-            # Cut to the room left, not dropped: the whole text is in this
-            # board's own watchdog record.
-            marker = " ... [truncated; it is in its own watchdog record]"
-            warning = warning[: max(0, room - len(marker))] + marker
-        kept.append(warning)
-        used += len(warning)
-    return kept
-
-
 def _bounded_reason(text: str, marker: str) -> str:
     """Keep reasons inside the event size limit, naming where the rest is."""
     if len(text) <= _MAX_REASON_CHARS:
@@ -1483,7 +1457,12 @@ class NamedTestSequencer:
                     case_statuses.append("failed")
                 if monitor is not None:
                     # After the power isolation has put every port back, so a
-                    # board switched off during the test is read powered.
+                    # board switched off during the test is read powered. The
+                    # boards it switched count from their power-on, so their
+                    # baselines go and their next read becomes one.
+                    monitor.lost_power(
+                        action.resource_alias for action in invocation.power_isolation
+                    )
                     watchdog = monitor.after_test(
                         invocation, invocation.arguments.get(WATCHDOG_LIMIT_ARGUMENT)
                     )
@@ -1524,10 +1503,11 @@ class NamedTestSequencer:
                             "failed_watchdog_checks": failed_watchdog_checks,
                             "skipped_cases": skipped_cases,
                             "not_applicable_cases": len(omitted),
-                            # Reported, not failed: a board that reset itself
-                            # came back by itself (watchdog.py). Bounded like
-                            # every other text on this record.
-                            "warnings": _bounded_warnings(watchdog_warnings),
+                            # Reported, not failed: a board that reset
+                            # itself came back by itself. Each warning is in
+                            # its own watchdog record, so the test record
+                            # counts them (watchdog.py).
+                            "watchdog_warnings": len(watchdog_warnings),
                             # False: the device was verified back in its known
                             # state, so later tests still run.
                             "stops_run": stop_run,
@@ -1554,7 +1534,7 @@ class NamedTestSequencer:
                         "failed_watchdog_checks": 0,
                         "skipped_cases": skipped_cases,
                         "not_applicable_cases": len(omitted),
-                        "warnings": _bounded_warnings(watchdog_warnings),
+                        "watchdog_warnings": len(watchdog_warnings),
                     },
                 )
 

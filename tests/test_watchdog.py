@@ -577,10 +577,9 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("did not answer on USB", outcome.failure)
 
     def test_a_failed_read_of_a_board_that_answered_before_is_not_old_firmware(self):
-        # A libusb error with no wording of its own, and a read whose record
-        # printed before the command failed. Neither is the board refusing the
-        # request, so each is retried and then fails.
-        for output in (samples.READ_FAILED, samples.RECORD_THEN_FAILED):
+        # A libusb error with no wording of its own: the board is not refusing
+        # the request, and printed no record, so it is retried and then fails.
+        for output in (samples.READ_FAILED,):
             monitor, commands, publisher, _clock = self.monitor(
                 {SERIAL: [samples.report(), output]})
             monitor.baseline()
@@ -612,6 +611,27 @@ class MonitorTests(unittest.TestCase):
         # And it is not waited for again, having shown what its firmware is.
         monitor.at_run_end()
         self.assertEqual(watchdog.RECOVERY_TRIES + 2, len(commands.argv))
+
+    def test_a_record_that_printed_is_the_read_whatever_else_failed(self):
+        # The command reads the record and then the radio waits. A board that
+        # printed the record answered, so the record counts and what became of
+        # the rest of the command is a note on it.
+        monitor, commands, publisher, _clock = self.monitor({SERIAL: [
+            samples.report(resets=0, boots=1),
+            samples.RECORD_THEN_FAILED,
+        ]})
+        monitor.baseline()
+
+        outcome = monitor.after_test(invocation())
+
+        self.assertEqual("", outcome.failure)
+        self.assertFalse(outcome.board_lost)
+        # One read: nothing to retry, the record is there.
+        self.assertEqual(2, len(commands.argv))
+        self.assertEqual(3, outcome.resets)
+        self.assertTrue(any("read its watchdog record, but its read did not "
+                            "finish" in note for note in outcome.notes), outcome.notes)
+        self.assertEqual("read", publisher.events[-1][2]["state"])
 
     def test_firmware_with_the_record_and_not_the_radio_waits_still_reads(self):
         # A fork commit has the watchdog record and not the radio waits: the
@@ -963,8 +983,12 @@ class RunRecordTests(unittest.TestCase):
         self.assertEqual(["baseline", "after the test", "run end"], stages)
         finished = next(e for e in events if e["event_type"] == "test_finished")
         self.assertEqual("passed", finished["status"])
-        self.assertTrue(any("reset itself" in line
-                            for line in finished["details"]["warnings"]))
+        self.assertEqual(1, finished["details"]["watchdog_warnings"])
+        self.assertTrue(any(
+            "reset itself" in line
+            for e in events if e["event_type"] == "watchdog"
+            for line in e["details"]["warnings"]
+        ))
         (offer,) = next(
             e for e in events if e["event_type"] == "watchdog_summary"
         )["details"]["issues"]
@@ -1007,12 +1031,13 @@ class RunRecordTests(unittest.TestCase):
         )
 
         finished = next(e for e in events if e["event_type"] == "test_finished")
-        self.assertEqual(1, len(finished["details"]["warnings"]))
-        # Once in the Watchdog section's warning list; the results table and
-        # the transcript are the other two places it belongs.
+        self.assertEqual(1, finished["details"]["watchdog_warnings"])
+        # Once in the Watchdog section's warning list. The results table says
+        # how many there were and leaves the text to that section.
         section = report.split("## Watchdog", 1)[1].split("## Transcript", 1)[0]
         self.assertEqual(
             1, section.count("reset itself 3 times during the test; the last was"))
+        self.assertIn("warning: 1 watchdog warning (see Watchdog)", report)
         self.assertEqual(3, summary.watchdog_resets)
 
     def test_a_board_lost_at_the_run_end_fails_the_run_as_itself(self):

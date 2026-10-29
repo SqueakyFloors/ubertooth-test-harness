@@ -672,18 +672,18 @@ not this test's to count. The baseline and the run-end read cover every board.
 
 Two things fail:
 
-- A board that does not answer on USB: gone from the bus, or on it and
-  refusing the read, which is how a board looks for a moment after the
-  watchdog has reset it (`libusb -9` until the host notices it came back).
-  The read is retried three times over about five seconds. A board that never
-  answers fails its test and stops the run, because nothing can use it again;
-  one that does not answer at the baseline stops the run before any test. A
-  read brings back a whole record or nothing: the record must parse, the
-  command must exit 0, and it must not have been killed at its deadline, so a
-  board that printed the record and then stalled on the radio-wait read is
-  one of these too. While a run is being cancelled a board is read once and
-  one that does not answer is recorded without failing: stopping the run is
-  what was asked for, and the board may have gone as part of it.
+- A board that does not answer on USB. It fails its test and stops the run,
+  because nothing can use it again; one that does not answer at the baseline
+  stops the run before any test runs. A read that brings back no record is
+  tried three times, about two and a half seconds apart and each read bounded
+  at ten seconds, because that is how a board looks for a moment after the
+  watchdog has reset it: it has re-enumerated and every request to it is
+  refused (`libusb -9`) until the host notices. A record that did print is the
+  read, whatever became of the rest of the command, with a note saying what
+  else it said: a board that printed its record answered. While a run is being
+  cancelled a board is read once and one that does not answer is recorded
+  without failing, since stopping the run is what was asked for and the board
+  may have gone as part of it.
 - A test whose plan sets `max_watchdog_resets: <n>` and whose boards reset
   themselves more than `n` times. Nothing else makes the count pass or fail,
   and there is no limit by default. This is for stability runs (the release
@@ -696,13 +696,14 @@ with no warning: each transfer error costs the packet that was arriving, and a
 radio wait that gave up means what that mode captured may be incomplete.
 
 Firmware without the request (2020-12-R1, which a flash test writes on
-purpose) refuses it, and the board answers every try and refuses it every
-time: that is how it is told from a board the host has not yet noticed
-re-enumerating, and it reads as "watchdog not reported" in the tool's own
-words, which is neither a warning nor a failure. Such a board stops being
-waited for as soon as it refuses the request again, and gets the window back
-the moment something else is wrong with it, such as the read right after a
-test reflashes it.
+purpose) refuses it, and keeps refusing it. That is how it is told from a
+board the host has not yet noticed re-enumerating, which answers inside the
+window: the last read of the window decides, and a board still refusing the
+request there reads as "watchdog not reported", in the tool's own words, which
+is neither a warning nor a failure. Such a board stops being waited for as
+soon as it refuses the request again, and gets the window back the moment
+something else is wrong with it, such as the read right after a test
+reflashes it.
 
 A commit that has the watchdog record and not the radio waits prints the
 record and refuses the second read; the record still counts, with the waits
