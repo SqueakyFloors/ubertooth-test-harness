@@ -16,8 +16,9 @@ from ubertooth_harness.patterns import (
 )
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
-    dfu_cases, dfu_host_cases, python_cases, receive_cases, refusal_cases, tool_cases,
-    transitions, util_cases, util_refusal_cases,
+    advertiser_cases, connection_cases, dfu_cases, dfu_host_cases, python_cases,
+    receive_cases, refusal_cases, tool_cases, transitions, util_cases,
+    util_refusal_cases,
 )
 
 
@@ -128,6 +129,48 @@ def _pa_level(value):
     if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 7:
         raise CatalogError("must be a PA level 0-7")
     return value
+
+
+def _advertising_interval(value):
+    # Bluetooth Core: legacy advertising interval 20 ms to 10.24 s.
+    if (not isinstance(value, int) or isinstance(value, bool)
+            or not 20 <= value <= 10240):
+        raise CatalogError("must be an advertising interval of 20-10240 ms")
+    return value
+
+
+def _connection_interval(value):
+    # The role firmware's range (Bluetooth Core: 7.5 ms to 4 s).
+    if (not isinstance(value, int) or isinstance(value, bool)
+            or not 8 <= value <= 4000):
+        raise CatalogError("must be a connection interval of 8-4000 ms")
+    return value
+
+
+def _check_connection_duration(arguments) -> None:
+    """The capture must span exactly one of the central's reconnections.
+
+    One, so it holds a CONNECT_IND and the connection after it; not two,
+    because a longer capture has been seen to die partway through
+    (connection_cases.CYCLE_MS says why).
+    """
+    cycle_s = connection_cases.CYCLE_MS / 1000.0
+    seconds = receive_cases.seconds_arg(arguments)
+    if not cycle_s < seconds < 2 * cycle_s:
+        raise CatalogError(
+            f"duration must be longer than {cycle_s:g}s and shorter than "
+            f"{2 * cycle_s:g}s, so the capture holds one of the central's "
+            "reconnections and not two")
+
+
+def _payload_tag(value):
+    # The advertiser firmware's payload tag: up to 12 bytes, or none.
+    text = str(value).lower() if isinstance(value, (str, int)) else None
+    if text == "none":
+        return ""
+    if text is None or not re.fullmatch(r"(?:[0-9a-f]{2}){1,12}", text):
+        raise CatalogError("must be 1-12 bytes of hex, or none")
+    return text
 
 
 def _coverage(value):
@@ -667,6 +710,14 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # 0684c11 it took about 69 s: the wedged boards made every cleanup
     # command time out.
     "Two-device range test": _default(Estimate(10.0)),
+    # ESTIMATE_PENDING_HW
+    "Capture known BLE advertiser": _profiles(
+        Estimate(25.0, per_duration=5), Estimate(70.0, per_duration=16)
+    ),
+    # ESTIMATE_PENDING_HW
+    "Capture known BLE connection": _profiles(
+        Estimate(30.0, per_duration=2), Estimate(60.0, per_duration=4)
+    ),
 })
 
 
@@ -952,6 +1003,52 @@ def builtin_catalog() -> TestCatalog:
             guards_other_ubertooths=True,
         ),
         TestDefinition(
+            "Capture known BLE advertiser",
+            "ubertooth-btle -n and -f capture a registered nRF52840 DK advertiser "
+            "on the channel it advertises on, with its payload, in PCAP and "
+            "PCAPNG, and none of its packets on another channel",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH,
+                "advertiser": ArgumentRule(_selector, default="default"),
+                "coverage": COVERAGE, "duration": DURATION,
+                "interval": ArgumentRule(_advertising_interval, default=100),
+                "payload": ArgumentRule(_payload_tag, default="c0ffee"),
+            }),
+            MappingProxyType({"Ubertooth": "Ubertooth", "advertiser": "nRF52840 DK"}),
+            command_builder=advertiser_cases.known_advertiser_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+            # Its first case flashes the DK when the board runs another
+            # firmware version, so the run holds the host lock.
+            writes_firmware=True,
+        ),
+        TestDefinition(
+            "Capture known BLE connection",
+            "ubertooth-btle -f follows a connection between two registered "
+            "nRF52840 DKs and the capture holds the CONNECT_IND parameters the "
+            "central asked for, with packets longer than a link without Data "
+            "Length Extension allows",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH,
+                "central": ArgumentRule(_selector, default="default"),
+                "peripheral": ArgumentRule(_selector, default="default"),
+                "coverage": COVERAGE, "duration": DURATION,
+                "interval": ArgumentRule(_connection_interval, default=30),
+                "update": ArgumentRule(_connection_interval, default=60),
+            }),
+            MappingProxyType({
+                "Ubertooth": "Ubertooth", "central": "nRF52840 DK",
+                "peripheral": "nRF52840 DK",
+            }),
+            check_arguments=_check_connection_duration,
+            command_builder=connection_cases.known_connection_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+            # Its first case flashes a DK when the board runs another
+            # firmware version, so the run holds the host lock.
+            writes_firmware=True,
+        ),
+        TestDefinition(
             "CLI usage smoke",
             "Exercise host tool usage paths",
             MappingProxyType({"hosts": HOSTS}),
@@ -1052,10 +1149,6 @@ def builtin_catalog() -> TestCatalog:
     ]
     definitions.extend(
         [
-            _device_test(
-                "Capture known BLE advertiser", "Capture a registered BLE advertiser",
-                extra={"advertiser": ArgumentRule(_required_text, required=True)},
-            ),
             _device_test(
                 "Capture eero setup beacon", "Trigger and capture an eero setup beacon",
                 extra={"eero": ArgumentRule(_required_text, required=True)},
