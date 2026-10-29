@@ -39,6 +39,12 @@ _HEX = re.compile(r"[0-9a-fA-F]{7,40}")
 SHOWN_ENV = "UBERTOOTH_HARNESS_LIBBTBB_PIN_SHOWN"
 EVENT = "libbtbb_pin"
 
+# The --libbtbb-ref value meaning "the LIBBTBB_REF the Ubertooth commit under
+# test sets in its own install.sh", resolved per run from that commit
+# (cli._fork_pin_ref). A long-lived runner then builds each commit against the
+# libbtbb it asks for, so a pin bump on the fork needs no redeploy (#139).
+FORK_PIN = "fork-pin"
+
 
 class PinUnreadable(RuntimeError):
     """install.sh names a libbtbb pin this module cannot compare."""

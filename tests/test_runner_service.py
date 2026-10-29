@@ -114,6 +114,27 @@ def make_source(root: Path):
     return source, short
 
 
+def make_libbtbb(root: Path):
+    """A throwaway libbtbb checkout; returns its path, commit and short commit."""
+    libbtbb = root / "libbtbb"
+    subprocess.run(["git", "init", "-q", str(libbtbb)], check=True)
+    (libbtbb / "lell.c").write_text("libbtbb\n")
+    subprocess.run(["git", "-C", str(libbtbb), "add", "lell.c"], check=True)
+    subprocess.run(
+        ["git", "-C", str(libbtbb), "-c", "user.name=Test",
+         "-c", "user.email=test@example.invalid", "commit", "-qm", "libbtbb"],
+        check=True,
+    )
+
+    def rev_parse(*args):
+        return subprocess.run(
+            ["git", "-C", str(libbtbb), "rev-parse", *args],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+    return libbtbb, rev_parse("HEAD"), rev_parse("--short", "HEAD")
+
+
 class RunnerFixture:
     """Temporary source, plan, hardware registry, and fake host tool."""
 
@@ -133,15 +154,43 @@ class RunnerFixture:
         )
         self.bin = root / "bin"
         self.bin.mkdir()
+        self.write_tool(short, "btbb")
+        self.output = root / "runs"
+
+    def write_tool(self, ubertooth_short: str, libbtbb_short: str) -> None:
+        """The fake ubertooth-util that answers the host-version checks."""
         tool = self.bin / "ubertooth-util"
         # FAKE_SLEEP keeps the command running so a cancel can arrive.
         tool.write_text(
             "#!/bin/sh\n"
             'if [ -n "$FAKE_SLEEP" ]; then sleep "$FAKE_SLEEP"; fi\n'
-            f'echo "libubertooth 1.1 (git-{short}), libbtbb 1.0 (git-btbb)"\n'
+            f'echo "libubertooth 1.1 (git-{ubertooth_short}), '
+            f'libbtbb 1.0 (git-{libbtbb_short})"\n'
         )
         tool.chmod(tool.stat().st_mode | stat.S_IXUSR)
-        self.output = root / "runs"
+
+    def pin_libbtbb(self, commit: str, libbtbb_short: str) -> str:
+        """Pin `commit` in the source's own install.sh; returns the new HEAD."""
+        (self.source / "install.sh").write_text(
+            "#!/bin/sh\n"
+            'LIBBTBB_URL="https://github.com/SqueakyFloors/libbtbb.git"\n'
+            f'LIBBTBB_REF="{commit}"\n'
+        )
+        git = ["git", "-C", str(self.source)]
+        subprocess.run([*git, "add", "install.sh"], check=True)
+        subprocess.run(
+            [*git, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+             "commit", "-qm", "pin libbtbb"],
+            check=True,
+        )
+
+        def rev_parse(*args):
+            return subprocess.run(
+                [*git, "rev-parse", *args], check=True, capture_output=True, text=True,
+            ).stdout.strip()
+
+        self.write_tool(rev_parse("--short", "HEAD"), libbtbb_short)
+        return rev_parse("HEAD")
 
     def config(self, url, **overrides):
         import os
@@ -462,6 +511,45 @@ class RunnerServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             f"builds enabled: libbtbb abc1234 from {libbtbb.resolve()}", self.logs[0]
         )
+
+    async def test_startup_log_says_fork_pin_is_resolved_per_run(self):
+        libbtbb = self.fixture.root / "libbtbb"
+        libbtbb.mkdir()
+        async with StubController() as controller, self.running(
+            controller, libbtbb_source=libbtbb, libbtbb_ref="fork-pin",
+        ):
+            await controller.next("register")
+        self.assertEqual(
+            "builds enabled: libbtbb fork-pin (the LIBBTBB_REF of each commit "
+            f"it builds) from {libbtbb.resolve()}", self.logs[0],
+        )
+
+    async def test_fork_pin_runs_the_libbtbb_the_commit_under_test_pins(self):
+        # A runner deployed with fork-pin passes it to every run, which reads
+        # the pin from the Ubertooth commit it was asked for (#139).
+        libbtbb, pin, pin_short = make_libbtbb(self.fixture.root)
+        head = self.fixture.pin_libbtbb(pin, pin_short)
+        async with StubController() as controller, self.running(
+            controller, libbtbb_source=libbtbb, libbtbb_ref="fork-pin",
+        ):
+            await controller.next("register")
+            await controller.send(run_request())
+            run_id = (await controller.next("run_accepted"))["run_id"]
+            finished = await controller.next("run_finished", skip=("heartbeat", "event"))
+            self.assertEqual("passed", finished["status"], finished)
+            run_dir = self.fixture.output.resolve() / run_id
+            started = json.loads((run_dir / "run.jsonl").read_text().splitlines()[0])
+            ubertooth, built = started["details"]["sources"]
+            self.assertEqual(head, ubertooth["commit"])
+            self.assertEqual(
+                (pin, pin, "fork-pin"),
+                (built["requested_ref"], built["commit"], built["ref_name"]),
+            )
+            # The pin check sees the libbtbb the commit asked for.
+            records = [json.loads(line) for line in
+                       (run_dir / "run.jsonl").read_text().splitlines()]
+            check = next(r for r in records if r["event_type"] == "libbtbb_pin")
+            self.assertEqual("passed", check["status"], check)
 
     async def test_malformed_messages_are_rejected_and_not_acted_on(self):
         good = json.loads(run_request())

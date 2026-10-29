@@ -169,9 +169,36 @@ def _finish_failed_run(publisher, output_dir: Path, reason: str) -> None:
         write_report(output_dir)
 
 
-# --libbtbb-ref value meaning "the LIBBTBB_REF the Ubertooth commit's
-# install.sh sets" (resolved per run, from the commit being built).
-FORK_PIN = "fork-pin"
+FORK_PIN = libbtbbpin.FORK_PIN
+_LIBBTBB_REF_HELP = (
+    f"libbtbb commit, branch or tag to build; {FORK_PIN} takes the "
+    "LIBBTBB_REF the Ubertooth commit under test sets in its own install.sh"
+)
+
+
+def _fork_pin_ref(ubertooth) -> str:
+    """The libbtbb commit the Ubertooth commit under test pins itself.
+
+    `--libbtbb-ref fork-pin` reads LIBBTBB_REF from install.sh at the
+    resolved Ubertooth commit, so a pin bump on the fork never leaves a
+    long-lived runner building against the libbtbb of an earlier deploy.
+    """
+    try:
+        pin = libbtbbpin.fork_pin_at(ubertooth.source_path, ubertooth.commit)
+    except (OSError, RuntimeError) as error:
+        raise ManifestError(f"--libbtbb-ref {FORK_PIN}: {error}") from None
+    if pin is None:
+        raise ManifestError(
+            f"--libbtbb-ref {FORK_PIN}: install.sh at Ubertooth "
+            f"{ubertooth.short_commit} sets no LIBBTBB_REF; name a libbtbb "
+            "commit with --libbtbb-ref instead"
+        )
+    print(
+        f"note: libbtbb ref '{FORK_PIN}' is {pin.ref}, the LIBBTBB_REF "
+        f"install.sh sets at Ubertooth {ubertooth.short_commit}",
+        file=sys.stderr, flush=True,
+    )
+    return pin.ref
 
 
 def _resolve_sources(args: argparse.Namespace):
@@ -187,23 +214,13 @@ def _resolve_sources(args: argparse.Namespace):
         )
     ]
     if args.libbtbb_source:
-        libbtbb_ref = args.libbtbb_ref
+        libbtbb_ref, ref_name = args.libbtbb_ref, None
         if libbtbb_ref == FORK_PIN:
-            # The libbtbb the Ubertooth commit under test pins in its own
-            # install.sh, so a pin bump on the fork never leaves a long-lived
-            # runner building against an older libbtbb.
-            try:
-                pin = libbtbbpin.fork_pin_at(sources[0].source_path, sources[0].commit)
-            except RuntimeError as error:
-                raise ManifestError(f"--libbtbb-ref {FORK_PIN}: {error}") from None
-            if pin is None:
-                raise ManifestError(
-                    f"--libbtbb-ref {FORK_PIN}: install.sh at Ubertooth "
-                    f"{sources[0].short_commit} has no LIBBTBB_REF; pass a libbtbb ref"
-                )
-            libbtbb_ref = pin.ref
+            # Recorded as the resolved commit, named fork-pin in the manifest
+            # and report so the run says where that commit came from.
+            libbtbb_ref, ref_name = _fork_pin_ref(sources[0]), FORK_PIN
         sources.append(
-            resolver.resolve("libbtbb", args.libbtbb_source, libbtbb_ref)
+            resolver.resolve("libbtbb", args.libbtbb_source, libbtbb_ref, ref_name)
         )
     return tuple(sources)
 
@@ -275,7 +292,7 @@ def _parser() -> argparse.ArgumentParser:
         "recorded in the manifest and report, not resolved",
     )
     run_suite.add_argument("--libbtbb-source", type=Path)
-    run_suite.add_argument("--libbtbb-ref")
+    run_suite.add_argument("--libbtbb-ref", metavar="REF", help=_LIBBTBB_REF_HELP)
     run_suite.add_argument(
         "--artifact",
         action="append",
@@ -332,7 +349,8 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--ubertooth-source", type=Path, required=True)
     build.add_argument("--ubertooth-ref", required=True)
     build.add_argument("--libbtbb-source", type=Path, required=True)
-    build.add_argument("--libbtbb-ref", required=True)
+    build.add_argument("--libbtbb-ref", required=True, metavar="REF",
+                       help=_LIBBTBB_REF_HELP)
     build.add_argument("--output", type=Path, required=True,
                        help="new directory for sources, build trees, and the prefix")
     _add_build_options(build, optional=False)
@@ -361,7 +379,11 @@ def _parser() -> argparse.ArgumentParser:
     runner.add_argument("--host", required=True)
     runner.add_argument("--ubertooth-source", type=Path, required=True)
     runner.add_argument("--libbtbb-source", type=Path)
-    runner.add_argument("--libbtbb-ref")
+    runner.add_argument(
+        "--libbtbb-ref", metavar="REF",
+        help=f"{_LIBBTBB_REF_HELP} (passed to every run, so {FORK_PIN} "
+        "follows the fork's pin without a redeploy)",
+    )
     runner.add_argument(
         "--plans-dir", type=Path, default=_DEFAULT_PLAN.parent,
         help="directory of <plan>.yaml files a run request may name",
