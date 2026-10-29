@@ -461,6 +461,19 @@ class StageTests(StoreTestCase):
         )
         self.assertEqual([], self.store.entries(host="Host_B"))
 
+    def test_entries_without_a_stage_filter_include_the_tests(self):
+        self.learn(passed_records("Raw receive", RAW_RECEIVE, [70.0, 71.0, 72.0]))
+        self.learn([record("preflight_started", "running", 0.0, requested_checks=2),
+                    record("preflight_finished", "passed", 2.0, requested_checks=2)])
+        entries = {entry["stage"]: entry for entry in self.store.entries()}
+        self.assertEqual({"test", "preflight"}, set(entries))
+        self.assertEqual(71.0, entries["test"]["estimated_s"])
+        # A test's fixed part belongs to the catalog, so the store reports
+        # no rate for it.
+        self.assertIsNone(entries["test"]["per_unit_s"])
+        self.assertEqual({"argument": "duration", "value": 3.0},
+                         entries["test"]["units"])
+
 
 class PersistenceTests(StoreTestCase):
 
@@ -496,6 +509,20 @@ class PersistenceTests(StoreTestCase):
         self.assertEqual(0, self.learn(passed_records(
             "Argument validation", VALIDATION, [10.0], status="failed")))
         self.assertFalse(self.path.exists())
+
+    def test_a_file_holding_more_keys_than_the_bound_is_trimmed_at_load(self):
+        self.path.write_text(json.dumps({"version": 1, "entries": [
+            {"stage": "test", "name": f"Test {index}", "host": HOST,
+             "profile": "smoke", "units": None,
+             "samples": [1.0] * (index + 1)}
+            for index in range(5)
+        ]}), encoding="utf-8")
+        store = EstimateStore.load(self.path, log=self.logs.append, max_keys=2)
+        # The best-established keys stay; the rest make way at once rather
+        # than one at a time on every later sample.
+        self.assertEqual(["Test 3", "Test 4"],
+                         sorted(key.name for key in store.keys()))
+        self.assertTrue(any("is full" in line for line in self.logs))
 
     def test_an_unusable_file_is_reported_and_treated_as_empty(self):
         for content in ("", "not json", "[]", '{"entries": 3}',
@@ -741,6 +768,25 @@ class ControllerLearningTests(ControllerTestCase):
         await self.start_controller()
         self.assertEqual(0, await self.controller.learn_pending())
         self.assertEqual([10.0], self.samples())
+
+    async def test_a_run_still_running_is_not_learned_at_startup(self):
+        # Its runner may still be running it; the end report, or a target
+        # that registers without it, decides.
+        directory = self.results / "run-active"
+        directory.mkdir(parents=True)
+        (directory / "run.json").write_text(json.dumps({
+            "run_id": "run-active", "target": HOST, "status": "running",
+            "created_at": stamp(0.0), "learned_durations": False,
+        }), encoding="utf-8")
+        (directory / "run.jsonl").write_text("".join(
+            json.dumps({**item, "run_id": "run-active"}) + "\n"
+            for item in passed_records("Argument validation", VALIDATION, [10.0])
+        ), encoding="utf-8")
+        await self.server.stop()
+        await self.start_controller()
+        self.assertEqual(0, await self.controller.learn_pending())
+        self.assertEqual([], self.samples())
+        self.assertFalse(self.controller.runs["run-active"].learned_durations)
 
     async def test_a_run_the_runner_no_longer_has_teaches_what_it_recorded(self):
         # The runner restarts; its run is lost, and what passed in it took

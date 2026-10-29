@@ -439,7 +439,7 @@ def run_stage_estimates(
     Only learned: neither stage has a catalog estimate, so a target that has
     not finished a run of its own gets an empty list. Preflight scales with
     its number of checks, which the run's manifest record gives; a build is
-    listed as soon as the run requests one.
+    listed as soon as the run asks for one or its records show one started.
     """
     if estimates is None or not host:
         return []
@@ -447,7 +447,13 @@ def run_stage_estimates(
     if isinstance(checks, bool) or not isinstance(checks, int) or checks <= 0:
         checks = None
     wanted: list[tuple[str, str, object]] = []
-    if build:
+    # A run adopted from a runner report carries no request, so its own
+    # records are what say whether it builds.
+    building = build or any(
+        isinstance(event, Mapping) and event.get("event_type") == "build_started"
+        for event in events
+    )
+    if building:
         # The runner builds host tools only, so the firmware variant is not
         # asked for here; a stored one is still listed by /api/plans.
         wanted.append((BUILD_STAGE, "host tools", None))

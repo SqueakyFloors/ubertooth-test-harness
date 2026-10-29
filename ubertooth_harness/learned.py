@@ -262,6 +262,9 @@ class EstimateStore:
             del self._samples[key][: -self.max_samples]
         if skipped:
             self.log(f"{self.path.name}: skipped {skipped} unusable entr(ies)")
+        # A file from a larger bound, or a hand-edited one, comes back under
+        # it here rather than one key at a time on every later sample.
+        self._trim_keys()
 
     def _parse_entry(self, entry) -> tuple[Key, list[float]] | None:
         if not isinstance(entry, Mapping):
@@ -402,19 +405,27 @@ class EstimateStore:
     def _make_room(self) -> None:
         """Keep the store bounded before a new key is added."""
         while len(self._samples) >= self.max_keys:
-            # Fewest samples first, then the key added longest ago (the
-            # dictionary keeps its insertion order), so an established key is
-            # never dropped to make room for a one-off duration.
-            _, key = min(
-                enumerate(self._samples),
-                key=lambda item: (len(self._samples[item[1]]), item[0]),
-            )
-            del self._samples[key]
-            self._rejected.pop(key, None)
-            self.log(
-                f"estimates: {self.path.name} is full at {self.max_keys} keys; "
-                f"dropped {key.stage} {key.name or key.host}"
-            )
+            self._drop_least_established()
+
+    def _trim_keys(self) -> None:
+        """Bring a file that holds more keys than the bound back under it."""
+        while len(self._samples) > self.max_keys:
+            self._drop_least_established()
+
+    def _drop_least_established(self) -> None:
+        # Fewest samples first, then the key added longest ago (the
+        # dictionary keeps its insertion order), so an established key is
+        # never dropped to make room for a one-off duration.
+        _, key = min(
+            enumerate(self._samples),
+            key=lambda item: (len(self._samples[item[1]]), item[0]),
+        )
+        del self._samples[key]
+        self._rejected.pop(key, None)
+        self.log(
+            f"estimates: {self.path.name} is full at {self.max_keys} keys; "
+            f"dropped {key.stage} {key.name or key.host}"
+        )
 
     # ----- lookup ----------------------------------------------------------
 
@@ -491,9 +502,14 @@ class EstimateStore:
                 "estimate_samples": len(samples),
                 # Each entry is one stored key, so never scaled.
                 "estimate_scaled": False,
+                # Seconds per unit of a stage, which has no fixed part. A
+                # test's fixed part is the catalog's, not the store's, so
+                # dividing its median by the units would be a rate of
+                # nothing in particular.
                 "per_unit_s": (
                     round(median / units["value"], 3)
-                    if median is not None and units and units["value"] > 0 else None
+                    if median is not None and units and units["value"] > 0
+                    and entry["stage"] != TEST_STAGE else None
                 ),
             })
         return views
