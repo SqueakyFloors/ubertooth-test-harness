@@ -351,7 +351,7 @@ def _watchdog_section(run: _Run) -> list[str]:
         "The firmware resets a board that stops servicing USB or whose mode "
         "stops looping, and keeps the reason in RAM a reset does not clear. "
         "A reset is reported, not failed: the board came back by itself.", "",
-        "| Board | Serial | Reset itself | Last boot cause | Watchdog record | "
+        "| Board | Serial | Reset itself | Last boot cause | Last read | "
         "Transfer errors | Radio waits that gave up |", "|---|---|---|---|---|---|---|",
     ]
     for board in summary.get("boards", []):
@@ -442,12 +442,16 @@ def _results_table(run: _Run) -> list[str]:
             skipped = fd.get("skipped_cases", "")
             not_applicable = fd.get("not_applicable_cases", "")
             reason = fd.get("reason", "")
-            # A board that reset itself does not fail the test, so its warning
-            # would otherwise only be in the Watchdog section. Each one is
-            # labelled, so it does not read as part of a failure reason.
-            for warning in fd.get("warnings", []):
-                reason = f"{reason}; " if reason else ""
-                reason += f"warning: {warning}"
+            # A board that reset itself does not fail the test, so the table
+            # says it happened and the Watchdog section below has the lines
+            # themselves; printing them twice in one report helps nobody.
+            count = len(fd.get("warnings", []))
+            if count:
+                note = (
+                    f"warning: {count} watchdog warning"
+                    f"{'' if count == 1 else 's'} (see Watchdog)"
+                )
+                reason = f"{reason}; {note}" if reason else note
         lines.append(
             f"| {_cell(details.get('invocation_id'))} | {_cell(where)} | {_cell(status)} "
             f"| {failed} | {skipped} | {not_applicable} | {_duration(started, finished)} "

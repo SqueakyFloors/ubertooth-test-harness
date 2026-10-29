@@ -111,10 +111,12 @@ def _bounded_warnings(warnings: Sequence[str]) -> list[str]:
                 "watchdog record"
             )
             break
-        # A warning longer than the room left is cut, not dropped: its whole
-        # text is in its own watchdog record.
-        kept.append(_bounded_reason(warning, "it is in its own watchdog record")
-                    if len(warning) > room else warning)
+        if len(warning) > room:
+            # Cut to the room left, not dropped: the whole text is in this
+            # board's own watchdog record.
+            marker = " ... [truncated; it is in its own watchdog record]"
+            warning = warning[: max(0, room - len(marker))] + marker
+        kept.append(warning)
         used += len(warning)
     return kept
 

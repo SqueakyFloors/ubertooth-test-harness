@@ -699,10 +699,15 @@ Firmware without the request (2020-12-R1, which a flash test writes on
 purpose) refuses it, and the board answers every try and refuses it every
 time: that is how it is told from a board the host has not yet noticed
 re-enumerating, and it reads as "watchdog not reported" in the tool's own
-words, which is neither a warning nor a failure. Such a board is not waited
-for at later reads, until one of them brings back a record again. Host tools
-older than the ones that added the last two lines of the report print the rest
-without them.
+words, which is neither a warning nor a failure. Such a board stops being
+waited for as soon as it refuses the request again, and gets the window back
+the moment something else is wrong with it, such as the read right after a
+test reflashes it.
+
+A commit that has the watchdog record and not the radio waits prints the
+record and refuses the second read; the record still counts, with the waits
+read as not reported. Host tools older than the ones that added the last two
+lines of the report print the rest without them.
 
 For each board that reset itself, the run's record and `report.md` carry a
 ready-to-file fork issue (board, firmware and host commits, mode, wait, test,

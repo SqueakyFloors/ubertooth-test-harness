@@ -151,9 +151,10 @@ _UNREACHABLE = re.compile(
 # board re-enumerate after its own reset, and permanent on firmware that
 # really has not got it, which a test writing the 2020-12-R1 image leaves on
 # a board on purpose. The retries tell the two apart.
+# Either of the command's two reads: a fork commit that has the watchdog
+# record and not the radio waits prints the record and refuses the second.
 _NO_SUCH_REQUEST = re.compile(
-    r"(?m)^error: could not read the watchdog record: the board's firmware "
-    r"does not support it\b"
+    r"(?m)^error: could not .*: the board's firmware does not support it\b"
 )
 
 
@@ -463,6 +464,11 @@ def notes_for(
             f"{label} last boot cause is now watchdog with no change in the "
             "unrequested count, so this was a reset the run asked for."
         )
+    if change.reset_itself and record.resets >= RESET_CAP:
+        lines.append(
+            f"{label} has reached the firmware's limit of {RESET_CAP} recorded "
+            "resets, so a later reset will not change the count."
+        )
     if change.new_transfer_errors:
         lines.append(
             f"{label} recorded {change.new_transfer_errors} capture transfer "
@@ -555,7 +561,9 @@ ShellRun = Callable[[Sequence[str], float], tuple[int, str, str]]
 
 def _run_gh(argv: Sequence[str], timeout_s: float) -> tuple[int, str, str]:
     result = subprocess.run(
-        list(argv), capture_output=True, text=True, timeout=timeout_s, check=False
+        list(argv), capture_output=True, text=True, timeout=timeout_s, check=False,
+        # A gh that decides to prompt must not read the run's own input.
+        stdin=subprocess.DEVNULL,
     )
     return result.returncode, result.stdout, result.stderr
 
@@ -654,7 +662,9 @@ class BoardRead:
     @property
     def status(self) -> str:
         if self.state == ABSENT:
-            return "failed" if self.fails else "canceled"
+            # A read whose failure nobody acts on is a warning, not a failure:
+            # a mid-test read, or one taken while the run was being canceled.
+            return "failed" if self.fails else "warning"
         if self.warnings:
             return "warning"
         return "passed"
@@ -769,17 +779,21 @@ class WatchdogMonitor:
 
     # ----- one board -------------------------------------------------------
 
-    def _read(self, board: MonitoredBoard, stage: str, owner: Mapping, tag: str) -> BoardRead:
+    def _read(
+        self, board: MonitoredBoard, stage: str, owner: Mapping, tag: str,
+        fails: bool = True,
+    ) -> BoardRead:
         """Read one board, waiting out the recovery window if it has gone.
 
-        One try, with no window, while the run is being canceled, for a board
-        the run has already given up on, and for one whose firmware has shown
-        it has no such request: none of those is worth waiting for.
+        One try, with no window, while the run is being canceled and for a
+        board the run has already given up on: neither is worth waiting for.
+        A board whose firmware is known to have no such request ends the
+        window as soon as it refuses the request again, but still gets the
+        whole of it when something else is wrong -- the read right after a
+        test reflashes it, for example.
         """
         tries = (
-            1 if self.cancelled()
-            or board.serial in self._lost
-            or board.serial in self._no_request
+            1 if self.cancelled() or board.serial in self._lost
             else self.recovery_tries
         )
         for attempt in range(1, tries + 1):
@@ -791,13 +805,26 @@ class WatchdogMonitor:
             )
             output = result.stdout + result.stderr
             record = parse_report(output)
-            # A whole read, or nothing. `-w` reads the record and then the
-            # radio waits, so a command that printed the record and then
-            # failed, or was killed at its deadline, is a board in trouble
-            # rather than a board read.
-            if record is not None and result.returncode == 0 and not result.timed_out:
+            refused = bool(_NO_SUCH_REQUEST.search(output))
+            unreachable = board_unreachable(output)
+            # A whole read, or nothing. The command makes two reads, so a
+            # record counts when the board refused the other one -- the
+            # record is there, and the radio waits read as not given -- but
+            # not when the command was killed at its deadline or the board
+            # could not be reached, where what printed is not to be trusted.
+            whole = (
+                record is not None
+                and not result.timed_out
+                and not unreachable
+                and (result.returncode == 0 or refused)
+            )
+            if whole:
                 self._no_request.discard(board.serial)
                 return self._compared(board, stage, record, output)
+            if refused and not unreachable and board.serial in self._no_request:
+                # Already known to be firmware without the request, and
+                # refusing it again: nothing to wait for.
+                break
             # Not a whole read, so try again: this is the window a board that
             # has just reset itself needs, where it has re-enumerated and the
             # host refuses every request to it until it notices. A
@@ -806,7 +833,8 @@ class WatchdogMonitor:
                 self.sleep(self.recovery_pause_s)
             elif attempt < tries:
                 break
-        if _NO_SUCH_REQUEST.search(output) and not board_unreachable(output):
+        if _NO_SUCH_REQUEST.search(output) and not board_unreachable(output) \
+                and parse_report(output) is None:
             # It answered every try and refused the request every time, so the
             # firmware really has not got it. Remembered, so a board running
             # such an image is not waited for at every later read.
@@ -827,15 +855,28 @@ class WatchdogMonitor:
                 ),
                 output=output, fails=False,
             )
+        window = (
+            f"in {tries} tr{'y' if tries == 1 else 'ies'} over about "
+            f"{(tries - 1) * self.recovery_pause_s:g}s"
+        )
+        if not fails:
+            # A mid-test read: the read after the test gives the board the
+            # window again and is what fails on it.
+            return BoardRead(
+                board, ABSENT, stage,
+                reason=(
+                    f"{board.label} did not answer this read ({window}); the "
+                    f"read after the test decides. It said: {_first_error(output)}"
+                ),
+                output=output, fails=False,
+            )
         return BoardRead(
             board, ABSENT, stage,
             reason=(
-                f"{board.label} did not answer on USB in {tries} "
-                f"tr{'y' if tries == 1 else 'ies'} over about "
-                f"{(tries - 1) * self.recovery_pause_s:g}s, so the run cannot "
-                "read its watchdog record or use the board again; it has left "
-                "the bus, something else is holding it, or its reads do not "
-                f"finish. The last read said: {_first_error(output)}"
+                f"{board.label} did not answer on USB {window}, so the run "
+                "cannot read its watchdog record or use the board again; it "
+                "has left the bus, something else is holding it, or its reads "
+                f"do not finish. The last read said: {_first_error(output)}"
             ),
             output=output,
         )
@@ -922,14 +963,18 @@ class WatchdogMonitor:
 
     # ----- rounds of reads -------------------------------------------------
 
-    def _round(self, stage: str, owner: Mapping, tag: str, boards=None) -> WatchdogOutcome:
+    def _round(
+        self, stage: str, owner: Mapping, tag: str, boards=None, fails: bool = True
+    ) -> WatchdogOutcome:
         warnings: list[str] = []
         notes: list[str] = []
         failures: list[str] = []
         lost: list[str] = []
         resets = 0
+        read_any = False
         for board in self.boards if boards is None else boards:
-            read = self._read(board, stage, owner, tag)
+            read_any = True
+            read = self._read(board, stage, owner, tag, fails)
             self._state[board.serial] = read.state
             warnings.extend(read.warnings)
             notes.extend(read.notes)
@@ -944,8 +989,11 @@ class WatchdogMonitor:
             elif read.state == NOT_REPORTED:
                 notes.append(read.reason)
             self.publisher.emit(EVENT, read.status, read.details())
-        self._last_read = self.clock()
-        self._read_any = True
+        if read_any:
+            # A round that read no board leaves the interval where it was, so
+            # the next board test still gets its mid-test read.
+            self._last_read = self.clock()
+            self._read_any = True
         return WatchdogOutcome(
             tuple(warnings), tuple(notes), "; ".join(failures), resets,
             board_lost=bool(failures), lost=tuple(lost),
@@ -991,6 +1039,7 @@ class WatchdogMonitor:
         outcome = self._round(
             DURING_TEST, self._owner(invocation),
             f"{key}-watchdog-during-{self._polls[key]}", self._for(invocation),
+            fails=False,
         )
         # Kept for the read after the test, which reports the test's warnings
         # in one place; what this round found is already in its own records.
@@ -1059,7 +1108,7 @@ class WatchdogMonitor:
             })
         self.publisher.emit(
             SUMMARY_EVENT,
-            "failed" if ABSENT in self._state.values()
+            "failed" if self._lost
             else "warning" if self.total_resets else "passed",
             {
                 "boards": [self._board_summary(board) for board in self.boards],

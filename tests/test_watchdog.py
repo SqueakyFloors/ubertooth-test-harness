@@ -613,6 +613,47 @@ class MonitorTests(unittest.TestCase):
         monitor.at_run_end()
         self.assertEqual(watchdog.RECOVERY_TRIES + 2, len(commands.argv))
 
+    def test_firmware_with_the_record_and_not_the_radio_waits_still_reads(self):
+        # A fork commit has the watchdog record and not the radio waits: the
+        # record prints, the second read is refused, and the command exits 1.
+        output = samples.FULL.replace(
+            "Radio waits that gave up since boot: synthesizer lock 0, unlock 0, "
+            "oscillator 0, state machine 0, packet bytes 0\n",
+            "error: could not read the radio wait timeouts: the board's firmware "
+            "does not support it (stalled, libusb -9)\n",
+        )
+        monitor, commands, publisher, _clock = self.monitor({SERIAL: [output]})
+
+        outcome = monitor.baseline()
+
+        self.assertEqual("", outcome.failure)
+        self.assertEqual(1, len(commands.argv))
+        read = publisher.events[-1][2]
+        self.assertEqual("read", read["state"])
+        self.assertEqual(3, read["resets"])
+        self.assertIsNone(read["radio_waits"])
+
+    def test_a_board_without_the_request_still_gets_the_window_after_a_reflash(self):
+        # A flash test leaves 2020-12-R1 on the board, so it is known to have
+        # no such request; the next test reflashes it, and the read that
+        # follows must wait for it to come back rather than fail at once.
+        monitor, commands, _publisher, _clock = self.monitor({SERIAL: [
+            # The baseline tries the whole window before it concludes that
+            # the firmware has not got the request.
+            *[samples.FIRMWARE_TOO_OLD] * watchdog.RECOVERY_TRIES,
+            samples.BOARD_GONE.format(serial=SERIAL),
+            samples.report(resets=0, boots=1),
+        ]})
+        monitor.baseline()
+        reads = len(commands.argv)
+        self.assertEqual(watchdog.RECOVERY_TRIES, reads)
+
+        outcome = monitor.after_test(invocation())
+
+        self.assertEqual("", outcome.failure)
+        self.assertFalse(outcome.board_lost)
+        self.assertEqual(reads + 2, len(commands.argv))
+
     def test_a_board_lost_during_a_long_test_still_fails_after_it(self):
         # A mid-test read reports nothing, so it must not give the board up:
         # the read after the test is what gives it its window and fails.
@@ -664,7 +705,8 @@ class MonitorTests(unittest.TestCase):
         self.assertFalse(outcome.board_lost)
         self.assertEqual(1, len(commands.argv))
         self.assertEqual(0.0, clock.now)
-        self.assertEqual("canceled", publisher.events[-1][1])
+        # Recorded as a warning, not a failure: nothing acts on it.
+        self.assertEqual("warning", publisher.events[-1][1])
         self.assertIn("while the run was being canceled",
                       publisher.events[-1][2]["reason"])
 
