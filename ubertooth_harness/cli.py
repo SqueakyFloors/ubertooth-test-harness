@@ -704,7 +704,10 @@ def _run_suite(args: argparse.Namespace) -> int:
         # The boards whose firmware preflight requires get the run's own
         # firmware first; that needs the firmware build.
         args.flash_boards = tuple(
-            BuildFlashBoard(alias, str(registry.get(alias).identity.get("serial", "")).lower())
+            BuildFlashBoard(
+                alias,
+                str(registry.get(alias).identity.get("serial", "")).strip().lower(),
+            )
             for alias in PreflightPolicy(registry, catalog).boards_needing_firmware(invocations)
         )
     if args.flash_boards and not args.with_firmware:

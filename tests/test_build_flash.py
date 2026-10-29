@@ -191,6 +191,33 @@ class BuildFlasherTests(unittest.TestCase):
         self.assertEqual("skipped", results[0]["status"])
         self.assertFalse([c for c in executor.commands if c[0] == "ubertooth-dfu"])
 
+    def test_another_abbreviation_read_back_after_the_write_is_accepted(self):
+        executor = FakeBoards("git-1c7f06d6", {SERIAL_A: OLD})
+        results = BuildFlasher(
+            executor, clock=self.clock, sleep=self.clock.sleep
+        ).run(
+            [BuildFlashBoard("UT_0", SERIAL_A)], self.image, "git-1c7f06d",
+            self.publisher, output_dir=self.run_dir,
+        )
+        self.assertEqual("flashed", results[0]["status"])
+        self.assertEqual("git-1c7f06d6", results[0]["after"])
+
+    def test_no_write_starts_without_its_whole_budget(self):
+        # A write killed part-way leaves the board in its bootloader.
+        executor = FakeBoards("git-new", {SERIAL_A: OLD})
+        original = executor.run
+
+        def run(argv, **kwargs):
+            self.clock.now += 6.0  # the read leaves under a write's budget
+            return original(argv, **kwargs)
+
+        executor.run = run
+        with self.assertRaises(HarnessError) as raised:
+            self.flash([BuildFlashBoard("UT_0", SERIAL_A)], executor,
+                       total_timeout_s=30.0)
+        self.assertIn("is left of the 30s deadline", str(raised.exception))
+        self.assertFalse([c for c in executor.commands if c[0] == "ubertooth-dfu"])
+
     def test_a_failed_write_stops_before_the_next_board(self):
         executor = FakeBoards("git-new", {SERIAL_A: OLD, SERIAL_B: OLD})
         executor.fail_write.add(SERIAL_A)
@@ -255,7 +282,7 @@ class BuildFlasherTests(unittest.TestCase):
                 [BuildFlashBoard("UT_0", SERIAL_A), BuildFlashBoard("UT_1", SERIAL_B)],
                 executor, total_timeout_s=50.0,
             )
-        self.assertIn("deadline of 50s reached", str(raised.exception))
+        self.assertIn("is left of the 50s deadline", str(raised.exception))
 
     def test_cancellation_lets_the_write_finish_and_stops_after_it(self):
         token = CancellationToken()

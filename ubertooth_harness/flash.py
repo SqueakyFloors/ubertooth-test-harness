@@ -399,7 +399,8 @@ class FlashReliabilityRunner:
         for serial in targets:
             sequence = list(request.step.image_sequence)
             for offset, label in enumerate(sequence):
-                if request.artifacts[label].expected_revision != known[serial]:
+                expected = request.artifacts[label].expected_revision
+                if not same_revision(expected, known[serial]):
                     sequences[serial] = sequence[offset:] + sequence[:offset]
                     break
             else:
@@ -742,7 +743,9 @@ class BuildFlasher:
                 "boards": results,
             })
             if status != "passed":
-                raise HarnessError(f"flashing the run's build failed: {reason}")
+                # The events carry the status; the message spells it out.
+                detail = reason if status == "failed" else f"{status}: {reason}"
+                raise HarnessError(f"flashing the run's build failed: {detail}")
             return results
 
         if not sha256:
@@ -764,13 +767,19 @@ class BuildFlasher:
             def remaining(budget: float) -> float:
                 return min(budget, deadline - self.clock())
 
-            def stop(reason: str) -> list[dict]:
-                status = "canceled" if token.is_cancelled() else "failed"
+            def stop(reason: str, *, status: str = "failed") -> list[dict]:
+                # The status is the whole story only when cancellation is why
+                # the stage stopped: a fault that races a Ctrl-C is a failure.
                 board_done(status, reason)
                 return finish(status, reason)
 
+            def stop_canceled() -> list[dict]:
+                return stop(
+                    token.reason or "cancellation requested", status="canceled"
+                )
+
             if token.is_cancelled():
-                return stop(f"canceled: {token.reason or 'cancellation requested'}")
+                return stop_canceled()
             if remaining(BUILD_FLASH_QUERY_TIMEOUT_S) <= 0:
                 return stop(f"deadline of {total:g}s reached before {name}")
             result = commands._execute_command(
@@ -787,7 +796,7 @@ class BuildFlasher:
             # A board that does not answer is still written: the write may
             # be what recovers it. The read-back decides.
             if token.is_cancelled():
-                return stop(f"canceled: {token.reason or 'cancellation requested'}")
+                return stop_canceled()
             if FlashReliabilityRunner._sha256(image) != sha256:
                 return stop(f"firmware image changed before flashing {name}: {image}")
             # A write that runs out of time is killed part-way, which leaves
@@ -795,7 +804,11 @@ class BuildFlasher:
             # whole budget left.
             budget = remaining(BUILD_FLASH_WRITE_TIMEOUT_S)
             if budget < BUILD_FLASH_WRITE_TIMEOUT_S:
-                return stop(f"deadline of {total:g}s reached before flashing {name}")
+                return stop(
+                    f"less than the {BUILD_FLASH_WRITE_TIMEOUT_S:g}s a write may "
+                    f"take is left of the {total:g}s deadline, so {name} was not "
+                    "written"
+                )
             write = commands._execute_command(
                 publisher, f"build-flash-{index}-write", "build_firmware_flash",
                 ["ubertooth-dfu", "-U", board.serial, "-d", str(image), "-r"],
@@ -806,12 +819,16 @@ class BuildFlasher:
                 how = "timed out" if write.timed_out else f"exited {write.returncode}"
                 return stop(f"ubertooth-dfu {how} writing {name}")
             actual = None
+            clipped = False
             for attempt in range(1, BUILD_FLASH_VERIFY_ATTEMPTS + 1):
                 if token.is_cancelled():
-                    return stop(f"canceled: {token.reason or 'cancellation requested'}")
+                    return stop_canceled()
                 budget = remaining(BUILD_FLASH_QUERY_TIMEOUT_S)
                 if budget <= 0:
                     return stop(f"deadline of {total:g}s reached verifying {name}")
+                # A read with less than its own time left may be cut off, so
+                # a silent board is then the deadline's doing, not the board's.
+                clipped = clipped or budget < BUILD_FLASH_QUERY_TIMEOUT_S
                 verify = commands._execute_command(
                     publisher, f"build-flash-{index}-verify-{attempt}",
                     "version_after_build_flash",
@@ -826,6 +843,11 @@ class BuildFlasher:
                     self.sleep(BUILD_FLASH_RETRY_S)
             record["after"] = actual or ""
             if actual is None:
+                if clipped:
+                    return stop(
+                        f"deadline of {total:g}s reached verifying {name}, which had "
+                        "not reported its firmware revision yet"
+                    )
                 return stop(
                     f"{name} did not report its firmware revision after the write "
                     f"({BUILD_FLASH_VERIFY_ATTEMPTS} reads)"

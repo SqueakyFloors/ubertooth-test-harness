@@ -909,10 +909,11 @@ the host lock, `<lease dir>/host-power.lock`, the same kind of `flock` lease
 (released by the kernel when the holder exits, so it never goes stale): a
 `run-suite` with power isolation (StarTech or Acroname) or an exclusive
 Ubertooth check, `Flash reliability`, or `DFU images` holds it for the whole
-run, a `--build` run that flashes its boards with its own build holds it for
-the flash stage (so two such runs on one host no longer start at the same
-time), and `lease` holds it for its command with `--host-lock`, or always when
-the command is `ubertooth-dfu`. A second such command on the host fails at
+run, a `--build` run that flashes its boards with its own build takes it with
+its leases before the build and releases it after the flash stage (so it is
+held for the build as well, and two such runs on one host do not start at the
+same time), and `lease` holds it for its command with `--host-lock`, or always
+when the command is `ubertooth-dfu`. A second such command on the host fails at
 once, before any build or device command, and names the holder (owner, run,
 command, pid, and since when); `--wait-for-boards` waits for it as for a
 board. `ubertooth-harness boards` shows it as `host lock`, and the run report
