@@ -310,6 +310,23 @@ class BuilderTests(unittest.TestCase):
 
             self.assertNotIn("-H", [c[-1] for c, _cwd in executor.calls])
 
+    def test_both_options_are_named_when_neither_answers(self):
+        with tempfile.TemporaryDirectory() as work:
+            plan = make_plan(work)
+
+            class Neither(OlderForkBuildExecutor):
+                def run(self, argv, **kwargs):
+                    result = super().run(argv, **kwargs)
+                    if tuple(argv)[-1] == "-H":
+                        return replace(result, returncode=1, stdout="",
+                                       stderr="error: unrecognized option '-H'\n")
+                    return result
+
+            with self.assertRaisesRegex(
+                BuildError, r"-V exited 1; -H exited 1"
+            ):
+                Builder(Neither(plan), publisher_in(work), run_dir=work).run(plan)
+
     def test_the_recorded_version_is_the_host_line_alone(self):
         # -V prints a board's firmware lines under the host line; the
         # manifest and the report call this field the built tools' version.

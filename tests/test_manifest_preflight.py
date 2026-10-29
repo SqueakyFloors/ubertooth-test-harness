@@ -16,6 +16,7 @@ from ubertooth_harness.manifest import (
     build_run_manifest,
 )
 from ubertooth_harness.patterns import (
+    HOST_VERSION_TIMEOUT_S,
     compile_info_pattern,
     firmware_version_pattern,
     revision_pattern,
@@ -499,8 +500,19 @@ class HostVersionCheckTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             _root, _source, _manifest, checks = prepare_preflight(directory)
 
-            self.assertEqual(("ubertooth-util", "-V"), checks[0].argv)
-            self.assertEqual(("ubertooth-util", "-H"), checks[0].fallback_argv)
+            check = checks[0]
+            self.assertEqual(("ubertooth-util", "-V"), check.argv)
+            self.assertEqual(("ubertooth-util", "-H"), check.fallback_argv)
+            # The rest of the wiring, which only a real run exercises: with
+            # no marker the fallback never runs, and without the tolerated
+            # status and the longer deadline a board the run does not even
+            # use fails preflight.
+            self.assertTrue(check.needs_fallback(
+                CommandResult(check.argv, 1, "", "error: unrecognized option\n",
+                              0.01, False)
+            ))
+            self.assertEqual((0, 1), check.accepted_returncodes)
+            self.assertEqual(HOST_VERSION_TIMEOUT_S, check.timeout_s)
 
     def test_every_shape_of_the_answer_passes(self):
         check = self.check()

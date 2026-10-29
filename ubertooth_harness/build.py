@@ -511,6 +511,7 @@ class Builder:
             result = run_step(command, command.argv, command.step_id)
             if command.step_id == "verify-host-version":
                 host_version = (result.stdout + result.stderr).strip()
+                tried = [(command.argv, result)]
                 if (command.fallback_argv and not result.timed_out
                         and HOST_VERSION_LABEL not in host_version):
                     # Nothing answered under the label, so this commit of the
@@ -522,6 +523,7 @@ class Builder:
                     result = run_step(command, command.fallback_argv,
                                       f"{command.step_id}-fallback")
                     host_version = (result.stdout + result.stderr).strip()
+                    tried.append((command.fallback_argv, result))
                 # `-V` goes on to read any attached board and exits 1 if one
                 # cannot be read -- busy, or held by another run. The built
                 # tools' own version is what this step checks, so the line
@@ -531,6 +533,18 @@ class Builder:
                 if _host_version_matches(plan, host_version) and not result.timed_out:
                     host_version = _host_version_line(host_version)
                     continue
+                # Both commands, named by the option asked: either may be the
+                # real problem, and the reason line is what an operator reads.
+                failures = "; ".join(
+                    f"{argv[-1]} "
+                    + ("timed out" if attempt.timed_out
+                       else f"exited {attempt.returncode}")
+                    for argv, attempt in tried
+                    if attempt.timed_out or attempt.returncode != 0
+                )
+                if failures:
+                    raise BuildError(f"{command.name}: {failures}")
+                continue
             if result.timed_out or result.returncode != 0:
                 reason = "timed out" if result.timed_out else f"exited {result.returncode}"
                 raise BuildError(f"{command.name} {reason}")
