@@ -236,11 +236,13 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(0, change.new_resets)
         self.assertEqual([], warnings_for("UT", current, change, "during the test"))
 
-    def test_a_boot_count_at_its_limit_is_taken_as_a_fresh_boot(self):
+    def test_a_boot_count_at_its_limit_hides_a_reboot_from_the_radio_waits(self):
         # Both counters stop at 255, so a reboot of a board pinned there is
-        # invisible; the since-boot radio waits must not be differenced.
+        # invisible. The counts are still differenced, because taking every
+        # read for a fresh boot would re-report the whole count each time;
+        # the baseline notes the pinned counter instead (MonitorTests).
         baseline = parse_report(samples.report(boots=255, radio_waits=(7, 0, 0, 0, 0)))
-        current = parse_report(samples.report(boots=255, radio_waits=(2, 0, 0, 0, 0)))
+        current = parse_report(samples.report(boots=255, radio_waits=(9, 0, 0, 0, 0)))
 
         change = compare(baseline, current)
 
@@ -575,15 +577,10 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("did not answer on USB", outcome.failure)
 
     def test_a_failed_read_of_a_board_that_answered_before_is_not_old_firmware(self):
-        # Every way an opened board's read can fail: the request refused as a
-        # stall (which is how a board looks while the host has not noticed it
-        # re-enumerated), a libusb error with no wording of its own, and a
-        # read whose record printed before the command failed. A board that
-        # has already given this run a record cannot be one whose firmware
-        # has no such request, so each is retried and then fails.
-        for output in (
-            samples.FIRMWARE_TOO_OLD, samples.READ_FAILED, samples.RECORD_THEN_FAILED,
-        ):
+        # A libusb error with no wording of its own, and a read whose record
+        # printed before the command failed. Neither is the board refusing the
+        # request, so each is retried and then fails.
+        for output in (samples.READ_FAILED, samples.RECORD_THEN_FAILED):
             monitor, commands, publisher, _clock = self.monitor(
                 {SERIAL: [samples.report(), output]})
             monitor.baseline()
@@ -595,6 +592,46 @@ class MonitorTests(unittest.TestCase):
             self.assertEqual(
                 watchdog.RECOVERY_TRIES + 1, len(commands.argv), output)
             self.assertEqual("failed", publisher.events[-1][1])
+
+    def test_firmware_flashed_without_the_request_reads_as_not_reported(self):
+        # A flash test writes the 2020-12-R1 image on purpose, and it has no
+        # such request. The board answers every try and refuses the request
+        # every time, which is how that is told from a board re-enumerating.
+        monitor, commands, publisher, _clock = self.monitor({SERIAL: [
+            samples.report(), samples.FIRMWARE_TOO_OLD,
+        ]})
+        monitor.baseline()
+
+        outcome = monitor.after_test(invocation())
+
+        self.assertEqual("", outcome.failure)
+        self.assertFalse(outcome.board_lost)
+        self.assertEqual("not reported", publisher.events[-1][2]["state"])
+        self.assertEqual(watchdog.RECOVERY_TRIES + 1, len(commands.argv))
+
+        # And it is not waited for again, having shown what its firmware is.
+        monitor.at_run_end()
+        self.assertEqual(watchdog.RECOVERY_TRIES + 2, len(commands.argv))
+
+    def test_a_board_lost_during_a_long_test_still_fails_after_it(self):
+        # A mid-test read reports nothing, so it must not give the board up:
+        # the read after the test is what gives it its window and fails.
+        monitor, commands, _publisher, clock = self.monitor(
+            {SERIAL: [samples.report(), samples.BOARD_GONE.format(serial=SERIAL)]},
+            interval_s=10.0,
+        )
+        monitor.baseline()
+        clock.now += 11.0
+
+        during = monitor.poll_if_due(invocation())
+        reads = len(commands.argv)
+        after = monitor.after_test(invocation())
+
+        self.assertEqual("", during.failure)
+        self.assertIn("did not answer on USB", after.failure)
+        self.assertTrue(after.board_lost)
+        # The window again, not one try: the poll gave the board up for nobody.
+        self.assertEqual(reads + watchdog.RECOVERY_TRIES, len(commands.argv))
 
     def test_a_board_that_refuses_to_be_opened_is_retried_not_called_old(self):
         # The board is on the bus and refusing requests, which is how it looks
@@ -657,7 +694,7 @@ class MonitorTests(unittest.TestCase):
                       "support it", note)
         self.assertEqual("not reported", publisher.events[-1][2]["state"])
 
-    def test_the_baseline_says_a_pinned_reset_counter_cannot_rise(self):
+    def test_the_baseline_says_which_counters_have_stopped(self):
         monitor, _commands, _publisher, _clock = self.monitor(
             {SERIAL: [samples.report(resets=255, boots=255, cause="watchdog")]})
 
@@ -665,6 +702,10 @@ class MonitorTests(unittest.TestCase):
 
         self.assertTrue(any(
             "at the firmware's limit of 255 recorded resets" in note
+            for note in outcome.notes
+        ))
+        self.assertTrue(any(
+            "at the firmware's limit of 255 recorded boots" in note
             for note in outcome.notes
         ))
 

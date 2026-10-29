@@ -104,14 +104,18 @@ def _bounded_warnings(warnings: Sequence[str]) -> list[str]:
     kept: list[str] = []
     used = 0
     for position, warning in enumerate(warnings):
-        used += len(warning)
-        if used > _MAX_REASON_CHARS:
-            left = len(warnings) - position
+        room = _MAX_REASON_CHARS - used
+        if room <= 0:
             kept.append(
-                f"... and {left} more, each in its own watchdog record"
+                f"... and {len(warnings) - position} more, each in its own "
+                "watchdog record"
             )
             break
-        kept.append(warning)
+        # A warning longer than the room left is cut, not dropped: its whole
+        # text is in its own watchdog record.
+        kept.append(_bounded_reason(warning, "it is in its own watchdog record")
+                    if len(warning) > room else warning)
+        used += len(warning)
     return kept
 
 
@@ -1545,6 +1549,7 @@ class NamedTestSequencer:
                         "reason": "",
                         "failed_cases": 0,
                         "failed_guard_checks": 0,
+                        "failed_watchdog_checks": 0,
                         "skipped_cases": skipped_cases,
                         "not_applicable_cases": len(omitted),
                         "warnings": _bounded_warnings(watchdog_warnings),

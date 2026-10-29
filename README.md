@@ -640,9 +640,9 @@ once more at the end of the run. The reads are read-only and never run beside
 another command.
 
 A self-reset is the watchdog working, so the run **reports** it. A read whose
-unrequested reset count has risen since the baseline, a new processor fault,
-or a boot after a brown-out becomes a warning on that board and on the test;
-the test still passes. The warning names the mode and the wait the firmware
+unrequested reset count has risen since the baseline, or that recorded a new
+processor fault, becomes a warning on that board and on the test; the test
+still passes. The warning names the mode and the wait the firmware
 recorded, for example "in BLE follow mode, running a control request".
 
 The count, not the boot cause, is the signal. A reset the host asked for
@@ -678,12 +678,12 @@ Two things fail:
   The read is retried three times over about five seconds. A board that never
   answers fails its test and stops the run, because nothing can use it again;
   one that does not answer at the baseline stops the run before any test. A
-  board that has already given the run a record cannot be one whose firmware
-  lacks the request, so any later read of it that brings back no whole record
-  is one of these, not "not reported". While a run is being cancelled a board
-  is read once and a board that does not answer is recorded without failing:
-  stopping the run is what was asked for, and the board may have gone as part
-  of it.
+  read brings back a whole record or nothing: the record must parse, the
+  command must exit 0, and it must not have been killed at its deadline, so a
+  board that printed the record and then stalled on the radio-wait read is
+  one of these too. While a run is being cancelled a board is read once and
+  one that does not answer is recorded without failing: stopping the run is
+  what was asked for, and the board may have gone as part of it.
 - A test whose plan sets `max_watchdog_resets: <n>` and whose boards reset
   themselves more than `n` times. Nothing else makes the count pass or fail,
   and there is no limit by default. This is for stability runs (the release
@@ -695,10 +695,14 @@ Capture transfer errors and radio waits that gave up are recorded as notes
 with no warning: each transfer error costs the packet that was arriving, and a
 radio wait that gave up means what that mode captured may be incomplete.
 
-Firmware without the request (2020-12-R1, for example) refuses it, and a board
-that has given the run no record reads as "watchdog not reported", in the
-tool's own words, which is neither a warning nor a failure. Host tools older
-than the ones that added the last two lines report the rest without them.
+Firmware without the request (2020-12-R1, which a flash test writes on
+purpose) refuses it, and the board answers every try and refuses it every
+time: that is how it is told from a board the host has not yet noticed
+re-enumerating, and it reads as "watchdog not reported" in the tool's own
+words, which is neither a warning nor a failure. Such a board is not waited
+for at later reads, until one of them brings back a record again. Host tools
+older than the ones that added the last two lines of the report print the rest
+without them.
 
 For each board that reset itself, the run's record and `report.md` carry a
 ready-to-file fork issue (board, firmware and host commits, mode, wait, test,

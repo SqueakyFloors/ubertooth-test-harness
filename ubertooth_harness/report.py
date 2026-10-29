@@ -430,10 +430,15 @@ def _results_table(run: _Run) -> list[str]:
             fd = finished["details"]
             status = finished["status"]
             failed = fd.get("failed_cases", "")
-            guards = fd.get("failed_guard_checks", 0)
-            if guards:
-                # Guard checks are not cases; show them beside the case count.
-                failed = f"{failed} + {guards} guard check{'s' if guards != 1 else ''}"
+            # Guard and watchdog checks are not cases; show them beside the
+            # case count, so a test that failed on one of them does not read
+            # as a failure with nothing failed.
+            for count, what in (
+                (fd.get("failed_guard_checks", 0), "guard"),
+                (fd.get("failed_watchdog_checks", 0), "watchdog"),
+            ):
+                if count:
+                    failed = f"{failed} + {count} {what} check{'s' if count != 1 else ''}"
             skipped = fd.get("skipped_cases", "")
             not_applicable = fd.get("not_applicable_cases", "")
             reason = fd.get("reason", "")
