@@ -1,0 +1,54 @@
+plan: BLE advertiser capture
+suites:
+  # Needs a Linux host with an Ubertooth and an nRF52840 DK registered with
+  # the advertiser role and its BLE address (hardware.example.yaml). The DK
+  # transmits at normal BLE power on the channel each case sets; the
+  # Ubertooth only receives. Pass the DK image to flash when the board runs
+  # another firmware version: --artifact "nRF52840 advertiser=PATH/utdk.hex"
+  # (firmware/nrf52840dk/README.md). Other registered Ubertooths on the host
+  # are guarded (read only).
+  ble:
+    - Capture known BLE advertiser:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        advertiser: default
+        coverage: smoke
+        duration: 5s
+        interval: 100
+        payload: c0ffee
+
+  # Two more DKs, registered with the central and peripheral roles, connect
+  # on the 1M PHY with Data Length Extension while the Ubertooth follows
+  # them with `ubertooth-btle -f`.
+  connection:
+    - Capture known BLE connection:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        central: default
+        peripheral: default
+        coverage: smoke
+        # The capture must span one of the central's reconnections and not
+        # two: 5 s < duration < 10 s (connection_cases.CYCLE_MS).
+        duration: 8s
+        interval: 30
+        update: 60
+
+  ble-comprehensive:
+    - Capture known BLE advertiser:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        advertiser: default
+        coverage: comprehensive
+        duration: 5s
+        interval: 100
+        payload: c0ffee
+
+    - Capture known BLE connection:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        central: default
+        peripheral: default
+        coverage: comprehensive
+        duration: 8s
+        interval: 30
+        update: 60

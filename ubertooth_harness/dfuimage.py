@@ -35,7 +35,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import stat
 import struct
 import subprocess
@@ -49,7 +48,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ubertooth_harness.executor import CommandResult  # noqa: E402
-from ubertooth_harness.patterns import FIRMWARE_REVISION_RE  # noqa: E402
+from ubertooth_harness.patterns import FIRMWARE_VERSION_RE  # noqa: E402
 from ubertooth_harness.rawlog import CommandCapture, format_command_record  # noqa: E402
 
 SUFFIX_LENGTH = 16
@@ -77,7 +76,7 @@ EDGE_KINDS = (
 # The synthetic image ``synth`` writes when a run has no firmware build.
 SYNTHETIC_REVISION = "harness-synthetic"
 
-_VERSION_RE = FIRMWARE_REVISION_RE
+_VERSION_RE = FIRMWARE_VERSION_RE
 
 
 def dfu_crc(data: bytes) -> int:

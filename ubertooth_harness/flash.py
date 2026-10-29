@@ -9,12 +9,9 @@ from typing import Callable, Mapping
 from ubertooth_harness.cancellation import CancellationToken
 from ubertooth_harness.events import EventPublisher
 from ubertooth_harness.executor import CommandExecutor, CommandResult
-from ubertooth_harness.patterns import FIRMWARE_REVISION_RE
+from ubertooth_harness.patterns import FIRMWARE_VERSION_RE as _VERSION_RE
 from ubertooth_harness.plan import FlashStep
 from ubertooth_harness.rawlog import record_output
-
-
-_VERSION_RE = FIRMWARE_REVISION_RE
 
 
 class HarnessError(RuntimeError):

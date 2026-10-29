@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 import tempfile
 import unittest
@@ -10,10 +11,21 @@ from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.manifest import (
     GitRevisionResolver,
     ManifestError,
+    SourceRevision,
     build_run_manifest,
 )
+from ubertooth_harness.patterns import (
+    compile_info_pattern,
+    firmware_version_pattern,
+    revision_pattern,
+)
 from ubertooth_harness.planner import TestInvocation
-from ubertooth_harness.preflight import PreflightError, PreflightPolicy
+from ubertooth_harness.preflight import (
+    PreflightCheck,
+    PreflightError,
+    PreflightPolicy,
+    host_version_patterns,
+)
 from ubertooth_harness.resources import FileResourceRegistry
 from ubertooth_harness.sequencer import NamedTestSequencer
 from ubertooth_harness.topology import PowerIsolationAction
@@ -440,6 +452,133 @@ class PreflightTests(unittest.TestCase):
                     manifest=None,
                     preflight_checks=(),
                 )
+
+
+class RevisionAbbreviationTests(unittest.TestCase):
+    """The same commit stamped with hashes of different lengths still matches."""
+
+    HASH = "1c7f06d621579382c2fedc64fda4e3450da8c965"
+
+    @staticmethod
+    def matches(expected, reported, image="bluetooth_rxtx ") -> bool:
+        output = f"Firmware version: {image}{reported} (API:1.35)"
+        return re.search(firmware_version_pattern(expected), output) is not None
+
+    def test_firmware_that_names_its_image_matches(self):
+        # Firmware with an info block reports the image it came from; older
+        # firmware and release builds report only the revision.
+        self.assertTrue(self.matches("git-1c7f06d6", "git-1c7f06d6"))
+        self.assertTrue(self.matches("git-1c7f06d6", "git-1c7f06d6", image=""))
+        self.assertTrue(self.matches("2020-12-R1", "2020-12-R1", image=""))
+
+    def test_compile_info_accepts_the_image_name_before_the_build_string(self):
+        self.assertRegex(
+            "bluetooth_rxtx: ubertooth git-1c7f06d6 (2026-10-27 12:00:00)",
+            compile_info_pattern("git-1c7f06d"),
+        )
+        self.assertRegex(
+            "ubertooth git-1c7f06d6 (2026-10-27 12:00:00)",
+            compile_info_pattern("git-1c7f06d"),
+        )
+
+    def test_board_reports_a_longer_abbreviation_than_expected(self):
+        # The run that found this: the board said git-1c7f06d6, the host
+        # tools git-1c7f06d, and preflight called it an identity mismatch.
+        self.assertTrue(self.matches("git-1c7f06d", "git-1c7f06d6"))
+        self.assertTrue(self.matches("git-1c7f06d", "git-" + self.HASH))
+
+    def test_board_reports_a_shorter_abbreviation_than_expected(self):
+        self.assertTrue(self.matches("git-1c7f06d6", "git-1c7f06d"))
+        self.assertTrue(self.matches("git-" + self.HASH, "git-1c7f06d"))
+
+    def test_equal_abbreviations_match(self):
+        self.assertTrue(self.matches("git-1c7f06d", "git-1c7f06d"))
+
+    def test_a_different_commit_does_not_match(self):
+        self.assertFalse(self.matches("git-1c7f06d", "git-2fd0d39"))
+        self.assertFalse(self.matches("git-1c7f06d", "git-1c7f06e"))
+
+    def test_a_hash_shorter_than_git_ever_abbreviates_does_not_match(self):
+        self.assertFalse(self.matches("git-1c7f06d621", "git-1c7f0"))
+
+    def test_a_modified_source_marker_does_not_match(self):
+        self.assertFalse(self.matches("git-1c7f06d", "git-1c7f06d*"))
+        self.assertFalse(self.matches("git-1c7f06d", "git-1c7f06d6*"))
+        self.assertFalse(self.matches("git-1c7f06d6", "git-1c7f06d*"))
+
+    def test_a_revision_that_is_not_a_hash_is_matched_exactly(self):
+        self.assertEqual("git\\-test", revision_pattern("git-test"))
+        self.assertTrue(self.matches("git-test", "git-test"))
+        self.assertFalse(self.matches("git-test", "git-tested"))
+
+    def test_host_version_patterns_accept_either_abbreviation(self):
+        source = SourceRevision(
+            name="Ubertooth",
+            source_path="/src",
+            repository="example",
+            requested_ref="HEAD",
+            commit=self.HASH,
+            short_commit="1c7f06d",
+        )
+        libbtbb = SourceRevision(
+            name="libbtbb",
+            source_path="/btbb",
+            repository="example",
+            requested_ref="HEAD",
+            commit="2fd0d391d99e9b0620146f63f439c1ec74f79861",
+            short_commit="2fd0d3912",
+        )
+        output = "libubertooth 1.1 (git-1c7f06d621), libbtbb 1.1 (git-2fd0d39)\n"
+
+        for pattern in host_version_patterns(source, libbtbb):
+            self.assertRegex(output, pattern)
+
+    def test_preflight_check_accepts_a_longer_abbreviation_on_the_board(self):
+        check = PreflightCheck(
+            check_id="preflight-002-firmware-version",
+            name="Firmware version",
+            host="Host_Linux",
+            resource_alias="UT_Linux0",
+            resource_identity=MappingProxyType({"serial": "abcdef0123456789"}),
+            argv=("ubertooth-util", "-U", "abcdef0123456789", "-v"),
+            expected_patterns=(firmware_version_pattern("git-1c7f06d"),),
+            expected_revision="git-1c7f06d",
+        )
+        result = CommandResult(
+            argv=check.argv,
+            returncode=0,
+            stdout="Firmware version: bluetooth_rxtx git-1c7f06d6 (API:1.35)\n",
+            stderr="",
+            duration_s=0.05,
+            timed_out=False,
+        )
+
+        self.assertEqual("", check.result_failure(result))
+
+    def test_a_mismatch_reason_names_the_pattern_that_failed(self):
+        check = PreflightCheck(
+            check_id="preflight-002-firmware-version",
+            name="Firmware version",
+            host="Host_Linux",
+            resource_alias="UT_Linux0",
+            resource_identity=MappingProxyType({}),
+            argv=("ubertooth-util", "-v"),
+            expected_patterns=("Firmware version:\\s+git\\-other",),
+            expected_revision="git-other",
+        )
+        result = CommandResult(
+            argv=check.argv,
+            returncode=0,
+            stdout="Firmware version: bluetooth_rxtx git-1c7f06d6 (API:1.35)\n",
+            stderr="",
+            duration_s=0.05,
+            timed_out=False,
+        )
+
+        reason = check.result_failure(result)
+
+        self.assertIn("identity mismatch for UT_Linux0", reason)
+        self.assertIn("git\\-other", reason)
 
 
 if __name__ == "__main__":
