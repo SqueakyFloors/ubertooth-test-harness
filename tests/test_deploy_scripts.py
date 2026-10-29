@@ -808,6 +808,28 @@ class MacDeployTest(unittest.TestCase):
             tunnel[-5:],
         )
 
+    def test_a_config_file_cannot_change_deploy_s_own_variables(self):
+        # The file is sourced as shell, so it is read in a subshell: only the
+        # three connection values come back out of it.
+        config = self.lab.root / "nosy.conf"
+        config.write_text(
+            "HARNESS_HOST=conf-host.example\nport=1234\nrunner_host=Nope\n"
+            "force=1\npython=/bin/true\n",
+            encoding="utf-8",
+        )
+        env = {"HARNESS_HOST": None, "HARNESS_JUMP": "",
+               "HARNESS_OPEN_CONFIG": str(config)}
+        self.assertOk(self.lab.mac_deploy(FAKE_COMMIT="a" * 40, **env))
+        runner = self.parsed(RUNNER_AGENT)["ProgramArguments"]
+        self.assertIn("ws://127.0.0.1:8765/ws/runner", runner)
+        self.assertIn("Host_Mac", runner)
+        self.assertEqual(str(self.lab.checkout / ".venv" / "bin" / "python"), runner[0])
+        # Nor does force=1 in the file arm --force.
+        self.busy_controller("Host_Mac:run-7")
+        result = self.lab.mac_deploy(FAKE_COMMIT="b" * 40, **env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("active runs Host_Mac:run-7", result.stderr)
+
     def test_a_config_file_others_can_write_is_refused(self):
         config = self.lab.root / "writable.conf"
         config.write_text("HARNESS_HOST=conf-host.example\n", encoding="utf-8")

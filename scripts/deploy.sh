@@ -281,13 +281,29 @@ fi
 if [ "$platform" = macos ]; then
     lib=$ROOT/scripts/harness-config.sh
     [ -f "$lib" ] || die "$lib is missing; run this script from its checkout"
-    # Linted on its own; shellcheck does not need to follow it here.
-    # shellcheck source=/dev/null
-    . "$lib"
-    harness_config_load
-    [ "$controller_host_option" = 1 ] || controller_host=${HARNESS_HOST-}
-    [ "$controller_jump_option" = 1 ] || controller_jump=${HARNESS_JUMP-}
-    [ "$port_option" = 1 ] || port=${HARNESS_PORT:-$port}
+    # In a subshell: that file is sourced as shell, and a stray assignment in
+    # it must not change anything else deploy writes or launches. Only these
+    # four values come back. A refusal inside prints its own message and fails
+    # the substitution, which stops the script.
+    config_values=$(
+        # Linted on its own; shellcheck does not need to follow it here.
+        # shellcheck source=/dev/null
+        . "$lib"
+        harness_config_load
+        printf '%s\n%s\n%s\n%s\n' "${HARNESS_HOST-}" "${HARNESS_JUMP-}" \
+            "${HARNESS_PORT-}" "$HARNESS_CONFIG_FILE"
+    )
+    {
+        IFS= read -r config_host
+        IFS= read -r config_jump
+        IFS= read -r config_port
+        IFS= read -r config_file
+    } <<EOF
+$config_values
+EOF
+    [ "$controller_host_option" = 1 ] || controller_host=$config_host
+    [ "$controller_jump_option" = 1 ] || controller_jump=$config_jump
+    [ "$port_option" = 1 ] || port=${config_port:-$port}
 fi
 
 case $port in
@@ -300,7 +316,7 @@ if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then die "--port must be a number
 if [ "$platform" = macos ]; then
     if [ -z "$controller_host" ]; then
         [ "$controller_host_option" = 0 ] || die "--controller-host must not be empty"
-        die "no controller host: pass --controller-host HOST, set HARNESS_HOST, or name one in $HARNESS_CONFIG_FILE (the Linux host the controller runs on)"
+        die "no controller host: pass --controller-host HOST, set HARNESS_HOST, or name one in $config_file (the Linux host the controller runs on)"
     fi
     check_name --controller-host "$controller_host"
     [ -z "$controller_jump" ] || check_name --controller-jump "$controller_jump"
