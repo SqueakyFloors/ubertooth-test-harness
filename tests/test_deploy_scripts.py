@@ -1,14 +1,17 @@
 """Lab deploy scripts: scripts/deploy.sh, install-desktop-shortcut.sh, harness-open.
 
-Each script runs against a temporary HOME and fake systemctl, loginctl, sudo,
-python3, git, uname, gio, ssh and browser commands on PATH, so no test touches
-systemd, the network, or the real home directory.
+Each script runs against a temporary HOME and fake systemctl, loginctl,
+launchctl, defaults, sudo, python3, git, uname, gio, ssh and browser commands
+on PATH, so no test touches systemd, launchd, the network, or the real home
+directory. The macOS deploy is driven by a fake `uname`, so these tests run on
+either platform.
 """
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
+import plistlib
 import pwd
 import re
 import shutil
@@ -28,9 +31,16 @@ SCRIPTS = REPO / "scripts"
 DEPLOY = SCRIPTS / "deploy.sh"
 SHORTCUT = SCRIPTS / "install-desktop-shortcut.sh"
 HARNESS_OPEN = SCRIPTS / "harness-open"
+# Sourced by deploy.sh and harness-open, not run on its own.
+CONFIG_LIB = SCRIPTS / "harness-config.sh"
 ALL_SCRIPTS = (DEPLOY, SHORTCUT, HARNESS_OPEN)
+SHELL_FILES = ALL_SCRIPTS + (CONFIG_LIB,)
 CONTROLLER_UNIT = "ubertooth-harness-controller.service"
 RUNNER_UNIT = "ubertooth-harness-runner.service"
+RUNNER_LABEL = "com.ubertooth-harness.runner"
+TUNNEL_LABEL = "com.ubertooth-harness.tunnel"
+RUNNER_AGENT = f"{RUNNER_LABEL}.plist"
+TUNNEL_AGENT = f"{TUNNEL_LABEL}.plist"
 USER = pwd.getpwuid(os.getuid()).pw_name
 # Placeholders: no real lab host or SSH alias belongs in this repository.
 LAB_HOST = "lab-host.example"
@@ -52,6 +62,23 @@ FAKES = {
     # Only `ssh -G` (config lookup) runs in dry-run tests; real tunnels use FAKE_SSH.
     "ssh": '#!/bin/sh\n[ "$1" = -G ] || exit 99\nprintf "hostname %s\\nuser alice\\n" "$2"\n',
     "uname": '#!/bin/sh\necho "${FAKE_UNAME:-Linux}"\n',
+    "launchctl": LOGGING_FAKE + textwrap.dedent("""\
+        # `print gui/UID` asks whether the login domain is there
+        # ($FAKE_LAUNCHD_DOMAIN_EXIT, default 0); `print gui/UID/LABEL` whether
+        # that agent is loaded ($FAKE_AGENT_LOADED_EXIT, default 1: it is not).
+        if [ "$1" = print ]; then
+            case $2 in
+                */*/*) exit "${FAKE_AGENT_LOADED_EXIT:-1}" ;;
+                *) exit "${FAKE_LAUNCHD_DOMAIN_EXIT:-0}" ;;
+            esac
+        fi
+        exit 0
+        """),
+    # macOS reports no automatic login user unless one is set.
+    "defaults": LOGGING_FAKE + textwrap.dedent("""\
+        [ -n "${FAKE_AUTOLOGIN_USER:-}" ] || exit 1
+        echo "$FAKE_AUTOLOGIN_USER"
+        """),
     "git": textwrap.dedent("""\
         #!/bin/sh
         # Logs "git <args>" to $FAKE_GIT_LOG. clone makes DIR/.git, fetch
@@ -115,7 +142,7 @@ class FakeLab:
         # The checkout deploy.sh installs from is the one it lives in.
         self.checkout = self.root / "checkout"
         (self.checkout / "scripts").mkdir(parents=True)
-        for script in ALL_SCRIPTS:
+        for script in SHELL_FILES:
             shutil.copy2(script, self.checkout / "scripts" / script.name)
         # deploy.sh reads the harness's libbtbb pin from here.
         shutil.copy2(SCRIPTS / "ci.sh", self.checkout / "scripts" / "ci.sh")
@@ -141,6 +168,14 @@ class FakeLab:
         return self.home / ".config" / "systemd" / "user"
 
     @property
+    def agent_dir(self) -> Path:
+        return self.home / "Library" / "LaunchAgents"
+
+    @property
+    def log_dir(self) -> Path:
+        return self.data_dir / "logs"
+
+    @property
     def data_dir(self) -> Path:
         return self.home / ".local" / "share" / "ubertooth-harness"
 
@@ -163,6 +198,14 @@ class FakeLab:
         base = ("--runner-host", "Host_Linux", "--ubertooth-source", str(self.ubertooth))
         if "--uninstall" in args:
             base = ()
+        return self.run("deploy.sh", *base, *args, **env)
+
+    def mac_deploy(self, *args: str, **env: str | None) -> subprocess.CompletedProcess:
+        """deploy.sh on a Mac: the controller host comes from the environment."""
+        base = ("--runner-host", "Host_Mac", "--ubertooth-source", str(self.ubertooth))
+        if "--uninstall" in args:
+            base = ()
+        env.setdefault("FAKE_UNAME", "Darwin")
         return self.run("deploy.sh", *base, *args, **env)
 
     def commands(self) -> list[str]:
@@ -511,13 +554,19 @@ class DeployTest(unittest.TestCase):
                     stripped.startswith(("#", "say ", "die ")), line
                 )
 
-    def test_refuses_macos(self):
-        result = self.lab.deploy(FAKE_UNAME="Darwin")
+    def test_refuses_an_unknown_os(self):
+        result = self.lab.deploy(FAKE_UNAME="SunOS")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("macOS is not supported yet", result.stderr)
-        self.assertIn("launchd", result.stderr)
+        self.assertIn("unsupported OS SunOS", result.stderr)
         self.assertEqual(_tree(self.lab.home), {})
         self.assertEqual(self.lab.commands(), [])
+
+    def test_refuses_the_macos_only_options(self):
+        for option in ("--controller-host", "--controller-jump"):
+            result = self.lab.deploy(option, LAB_HOST)
+            self.assertNotEqual(result.returncode, 0, option)
+            self.assertIn(f"{option} is a macOS option", result.stderr)
+        self.assertEqual(_tree(self.lab.home), {})
 
     def test_requires_runner_host_and_source(self):
         result = self.lab.run("deploy.sh")
@@ -555,6 +604,303 @@ class DeployTest(unittest.TestCase):
         self.assertOk(result)
         self.assertIn("--uninstall", result.stdout)
         self.assertNotIn("set -euo", result.stdout)
+
+
+class MacDeployTest(unittest.TestCase):
+    """deploy.sh on macOS: a runner LaunchAgent and its SSH tunnel."""
+
+    def setUp(self):
+        self.lab = FakeLab(self)
+        self.domain = f"gui/{os.getuid()}"
+
+    def assertOk(self, result):
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def agent(self, name: str) -> str:
+        return (self.lab.agent_dir / name).read_text(encoding="utf-8")
+
+    def parsed(self, name: str) -> dict:
+        """The agent as launchd would read it, which also checks the XML."""
+        return plistlib.loads((self.lab.agent_dir / name).read_bytes())
+
+    def launchctl(self) -> list[str]:
+        return [c for c in self.lab.commands() if c.startswith("launchctl")]
+
+    def test_installs_a_runner_agent_and_a_loopback_tunnel(self):
+        result = self.lab.mac_deploy()
+        self.assertOk(result)
+        python = self.lab.checkout / ".venv" / "bin" / "python"
+        runner = self.parsed(RUNNER_AGENT)
+        tunnel = self.parsed(TUNNEL_AGENT)
+        self.assertEqual(RUNNER_LABEL, runner["Label"])
+        self.assertEqual([
+            str(python), "-m", "ubertooth_harness", "runner",
+            "--controller", "ws://127.0.0.1:8765/ws/runner",
+            "--hardware", f"{self.lab.checkout}/hardware.yaml",
+            "--host", "Host_Mac",
+            "--ubertooth-source", str(self.lab.ubertooth),
+            "--plans-dir", f"{self.lab.checkout}/testplans",
+            "--output", f"{self.lab.data_dir}/runner/runs",
+            "--libbtbb-source", str(self.lab.libbtbb),
+            "--libbtbb-ref", HARNESS_PIN,
+        ], runner["ProgramArguments"])
+        self.assertEqual(TUNNEL_LABEL, tunnel["Label"])
+        self.assertEqual([
+            "/usr/bin/ssh", "-N",
+            "-o", "BatchMode=yes",
+            "-o", "ExitOnForwardFailure=yes",
+            "-o", "ServerAliveInterval=30",
+            "-o", "ServerAliveCountMax=3",
+            "-L", "127.0.0.1:8765:127.0.0.1:8765",
+            "-J", JUMP_HOST,
+            LAB_HOST,
+        ], tunnel["ProgramArguments"])
+        for agent, prefix in ((runner, "runner"), (tunnel, "tunnel")):
+            self.assertTrue(agent["RunAtLoad"])
+            self.assertTrue(agent["KeepAlive"])
+            self.assertEqual(10, agent["ThrottleInterval"])
+            self.assertEqual(str(self.lab.checkout), agent["WorkingDirectory"])
+            self.assertEqual(f"{self.lab.log_dir}/{prefix}.log", agent["StandardOutPath"])
+            self.assertEqual(f"{self.lab.log_dir}/{prefix}.err.log", agent["StandardErrorPath"])
+            # A LaunchAgent inherits almost no PATH, and a build needs Homebrew.
+            self.assertEqual(
+                "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+                agent["EnvironmentVariables"]["PATH"],
+            )
+        # Cancelling a run and restoring its boards takes time; ssh needs none.
+        self.assertEqual(180, runner["ExitTimeOut"])
+        self.assertEqual(20, tunnel["ExitTimeOut"])
+        for name in (RUNNER_AGENT, TUNNEL_AGENT):
+            text = self.agent(name)
+            self.assertTrue(text.startswith('<?xml version="1.0" encoding="UTF-8"?>\n'), name)
+            self.assertTrue(text.endswith("</plist>\n"), name)
+            self.assertIn(f"from {self.lab.checkout}", text)
+        # No controller here: it runs on the Linux host.
+        self.assertEqual(sorted(p.name for p in self.lab.agent_dir.iterdir()),
+                         [RUNNER_AGENT, TUNNEL_AGENT])
+        self.assertFalse(self.lab.unit_dir.exists())
+        self.assertFalse((self.lab.data_dir / "controller").exists())
+        self.assertTrue(self.lab.log_dir.is_dir())
+        self.assertTrue((self.lab.data_dir / "runner" / "runs").is_dir())
+        self.assertIn(f"python3 {self.lab.checkout}/bootstrap.py", self.lab.commands())
+        self.assertEqual(self.launchctl(), [
+            f"launchctl print {self.domain}",
+            f"launchctl print {self.domain}/{TUNNEL_LABEL}",
+            f"launchctl bootstrap {self.domain} {self.lab.agent_dir}/{TUNNEL_AGENT}",
+            f"launchctl print {self.domain}/{RUNNER_LABEL}",
+            f"launchctl bootstrap {self.domain} {self.lab.agent_dir}/{RUNNER_AGENT}",
+        ])
+        self.assertNotIn("systemctl", "".join(self.lab.commands()))
+        self.assertIn(f"tunnel: 127.0.0.1:8765 on this Mac to 127.0.0.1:8765 on {LAB_HOST}"
+                      f" through {JUMP_HOST}", result.stdout)
+        self.assertIn("BatchMode=yes", result.stdout)
+        self.assertIn("known_hosts", result.stdout)
+        self.assertIn("GUI: http://127.0.0.1:8765/ui/", result.stdout)
+
+    def test_second_run_changes_nothing_and_leaves_loaded_agents_alone(self):
+        self.assertOk(self.lab.mac_deploy())
+        before = _tree(self.lab.home)
+        self.lab.clear_log()
+        result = self.lab.mac_deploy(FAKE_AGENT_LOADED_EXIT="0")
+        self.assertOk(result)
+        self.assertEqual(_tree(self.lab.home), before)
+        self.assertIn(f"{RUNNER_AGENT} unchanged", result.stdout)
+        self.assertIn(f"{TUNNEL_LABEL} is already loaded", result.stdout)
+        self.assertEqual(self.launchctl(), [
+            f"launchctl print {self.domain}",
+            f"launchctl print {self.domain}/{TUNNEL_LABEL}",
+            f"launchctl print {self.domain}/{RUNNER_LABEL}",
+        ])
+
+    def test_a_changed_agent_is_booted_out_and_bootstrapped_again(self):
+        self.assertOk(self.lab.mac_deploy(FAKE_COMMIT="a" * 40))
+        self.lab.clear_log()
+        result = self.lab.mac_deploy(FAKE_COMMIT="b" * 40, FAKE_AGENT_LOADED_EXIT="0")
+        self.assertOk(result)
+        self.assertIn("commit " + "b" * 40, self.agent(RUNNER_AGENT))
+        self.assertEqual(self.launchctl(), [
+            f"launchctl print {self.domain}",
+            f"launchctl print {self.domain}/{TUNNEL_LABEL}",
+            f"launchctl bootout {self.domain}/{TUNNEL_LABEL}",
+            f"launchctl bootstrap {self.domain} {self.lab.agent_dir}/{TUNNEL_AGENT}",
+            f"launchctl print {self.domain}/{RUNNER_LABEL}",
+            f"launchctl bootout {self.domain}/{RUNNER_LABEL}",
+            f"launchctl bootstrap {self.domain} {self.lab.agent_dir}/{RUNNER_AGENT}",
+        ])
+
+    def test_port_and_jump_options(self):
+        self.assertOk(self.lab.mac_deploy(
+            "--port", "9123", "--controller-host", "other.example",
+            "--controller-jump", "", "--allow-power-changes",
+        ))
+        tunnel = self.parsed(TUNNEL_AGENT)["ProgramArguments"]
+        self.assertEqual(["-L", "127.0.0.1:9123:127.0.0.1:9123", "other.example"],
+                         tunnel[-3:])
+        self.assertNotIn("-J", tunnel)
+        self.assertNotIn(JUMP_HOST, tunnel)
+        runner = self.parsed(RUNNER_AGENT)["ProgramArguments"]
+        self.assertIn("ws://127.0.0.1:9123/ws/runner", runner)
+        self.assertEqual("--allow-power-changes", runner[-1])
+
+    def test_the_controller_host_comes_from_the_config_file(self):
+        config = self.lab.root / "harness-open.conf"
+        config.write_text(
+            "HARNESS_HOST=conf-host.example\nHARNESS_JUMP=conf-jump.example\n"
+            "HARNESS_PORT=9300\n",
+            encoding="utf-8",
+        )
+        self.assertOk(self.lab.mac_deploy(
+            HARNESS_HOST=None, HARNESS_JUMP=None, HARNESS_OPEN_CONFIG=str(config),
+        ))
+        tunnel = self.parsed(TUNNEL_AGENT)["ProgramArguments"]
+        self.assertEqual(
+            ["-L", "127.0.0.1:9300:127.0.0.1:9300", "-J", "conf-jump.example",
+             "conf-host.example"],
+            tunnel[-5:],
+        )
+        # The environment wins over the file, and an option over both.
+        self.assertOk(self.lab.mac_deploy(
+            "--port", "9400", HARNESS_OPEN_CONFIG=str(config),
+        ))
+        tunnel = self.parsed(TUNNEL_AGENT)["ProgramArguments"]
+        self.assertEqual(
+            ["-L", "127.0.0.1:9400:127.0.0.1:9400", "-J", JUMP_HOST, LAB_HOST],
+            tunnel[-5:],
+        )
+
+    def test_a_config_file_others_can_write_is_refused(self):
+        config = self.lab.root / "writable.conf"
+        config.write_text("HARNESS_HOST=conf-host.example\n", encoding="utf-8")
+        config.chmod(0o666)
+        result = self.lab.mac_deploy(HARNESS_OPEN_CONFIG=str(config))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("writable by others", result.stderr)
+        self.assertEqual(_tree(self.lab.home), {})
+
+    def test_refuses_to_run_without_a_controller_host(self):
+        result = self.lab.mac_deploy(HARNESS_HOST=None)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no controller host", result.stderr)
+        self.assertIn("--controller-host", result.stderr)
+        self.assertEqual(_tree(self.lab.home), {})
+
+    def test_rejects_option_like_or_odd_hosts(self):
+        for args in (
+            ("--controller-host", "-oProxyCommand=touch x"),
+            ("--controller-host", "a;b"),
+            ("--controller-host", ""),
+            ("--controller-jump", "a b"),
+            ("--port", "0"),
+        ):
+            result = self.lab.mac_deploy(*args)
+            self.assertNotEqual(result.returncode, 0, args)
+        self.assertEqual(_tree(self.lab.home), {})
+
+    def test_refuses_the_linux_only_option(self):
+        result = self.lab.mac_deploy("--ubertooth-repo", "https://example.org/u.git")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--ubertooth-repo is a controller option", result.stderr)
+        self.assertEqual(_tree(self.lab.home), {})
+
+    def test_no_launchd_domain_changes_nothing(self):
+        result = self.lab.mac_deploy(FAKE_LAUNCHD_DOMAIN_EXIT="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"no launchd domain {self.domain}", result.stderr)
+        self.assertIn("nothing was changed", result.stderr)
+        self.assertEqual(_tree(self.lab.home), {})
+        self.assertNotIn(f"python3 {self.lab.checkout}/bootstrap.py", self.lab.commands())
+
+    def test_no_start_writes_agents_only(self):
+        result = self.lab.mac_deploy("--no-start")
+        self.assertOk(result)
+        self.assertTrue((self.lab.agent_dir / RUNNER_AGENT).is_file())
+        self.assertEqual(self.launchctl(), [])
+        self.assertIn("not started (--no-start)", result.stdout)
+        self.assertIn(f"launchctl bootstrap {self.domain} "
+                      f"{self.lab.agent_dir}/{TUNNEL_AGENT} "
+                      f"{self.lab.agent_dir}/{RUNNER_AGENT}", result.stdout)
+
+    def test_dry_run_changes_nothing_and_prints_the_agents(self):
+        result = self.lab.mac_deploy("--dry-run")
+        self.assertOk(result)
+        self.assertEqual(_tree(self.lab.home), {})
+        self.assertIn(f"would create {self.lab.agent_dir}/{RUNNER_AGENT}:", result.stdout)
+        self.assertIn("<string>127.0.0.1:8765:127.0.0.1:8765</string>", result.stdout)
+        self.assertIn(f"would run: launchctl bootstrap {self.domain}", result.stdout)
+        self.assertIn(f"would run: python3 {self.lab.checkout}/bootstrap.py", result.stdout)
+        self.assertEqual([c for c in self.launchctl() if " print " not in c], [])
+
+    def test_uninstall_boots_out_and_removes_only_the_agents(self):
+        self.assertOk(self.lab.mac_deploy())
+        other = self.lab.agent_dir / "com.example.other.plist"
+        other.write_text("<plist/>\n", encoding="utf-8")
+        runs = self.lab.data_dir / "runner" / "runs" / "keep.json"
+        runs.write_text("{}", encoding="utf-8")
+        self.lab.clear_log()
+        result = self.lab.mac_deploy("--uninstall")
+        self.assertOk(result)
+        self.assertEqual([p.name for p in self.lab.agent_dir.iterdir()],
+                         ["com.example.other.plist"])
+        self.assertTrue(runs.is_file())
+        self.assertTrue((self.lab.checkout / ".venv" / "bin" / "python").is_file())
+        self.assertEqual(self.launchctl(), [
+            f"launchctl bootout {self.domain}/{RUNNER_LABEL}",
+            f"launchctl bootout {self.domain}/{TUNNEL_LABEL}",
+        ])
+        # Again: nothing left to remove.
+        self.lab.clear_log()
+        result = self.lab.mac_deploy("--uninstall")
+        self.assertOk(result)
+        self.assertIn(f"{RUNNER_AGENT} is not installed", result.stdout)
+        self.assertEqual(self.launchctl(), [])
+
+    def busy_controller(self, *runs: str):
+        """Make the venv python answer as the controller would, logging argv."""
+        _write_exe(
+            self.lab.checkout / ".venv" / "bin" / "python",
+            "#!/bin/sh\ncat >/dev/null\n"
+            'printf "python %s\\n" "$*" >> "$FAKE_LOG"\n'
+            + "".join(f"echo {run}\n" for run in runs),
+        )
+
+    def test_refuses_to_restart_during_this_host_s_run(self):
+        self.assertOk(self.lab.mac_deploy(FAKE_COMMIT="a" * 40))
+        before = _tree(self.lab.home)
+        self.busy_controller("Host_Mac:run-7")
+        self.lab.clear_log()
+        result = self.lab.mac_deploy(FAKE_COMMIT="b" * 40)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("active runs Host_Mac:run-7", result.stderr)
+        self.assertEqual(_tree(self.lab.home), before)
+        self.assertEqual(self.launchctl(), [f"launchctl print {self.domain}"])
+        # Only this Mac's runner is restarted, so only its runs are asked for.
+        self.assertIn("python - 8765 Host_Mac", self.lab.commands())
+
+    def test_force_restarts_during_an_active_run(self):
+        self.assertOk(self.lab.mac_deploy(FAKE_COMMIT="a" * 40))
+        self.busy_controller("Host_Mac:run-7")
+        result = self.lab.mac_deploy("--force", FAKE_COMMIT="b" * 40)
+        self.assertOk(result)
+        self.assertIn("restarting during active runs (--force)", result.stdout)
+        self.assertIn(f"launchctl bootstrap {self.domain} "
+                      f"{self.lab.agent_dir}/{RUNNER_AGENT}", self.launchctl())
+
+    def test_automatic_login_is_checked(self):
+        result = self.lab.mac_deploy()
+        self.assertOk(result)
+        self.assertIn("is not this Mac's automatic login user", result.stdout)
+        self.assertIn("Automatic login", result.stdout)
+        result = self.lab.mac_deploy(FAKE_AUTOLOGIN_USER=USER)
+        self.assertOk(result)
+        self.assertNotIn("automatic login", result.stdout)
+        self.assertIn("defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser",
+                      self.lab.commands())
+
+    def test_never_runs_sudo_or_systemctl(self):
+        for args in ((), ("--no-start",), ("--dry-run",), ("--uninstall",)):
+            self.lab.mac_deploy(*args)
+        self.assertFalse([c for c in self.lab.commands()
+                          if c.startswith(("sudo", "systemctl", "loginctl"))])
 
 
 class DesktopShortcutTest(unittest.TestCase):
@@ -668,7 +1014,12 @@ class HarnessOpenTest(unittest.TestCase):
         return result.stdout.splitlines()[0]
 
     def test_no_host_or_jump_name_is_built_into_the_script(self):
-        for line in HARNESS_OPEN.read_text(encoding="utf-8").splitlines():
+        lines = [
+            line
+            for script in (HARNESS_OPEN, CONFIG_LIB, DEPLOY)
+            for line in script.read_text(encoding="utf-8").splitlines()
+        ]
+        for line in lines:
             if line.lstrip().startswith("#"):
                 continue
             # Any assignment that can decide the host or jump host may only
@@ -797,12 +1148,16 @@ class HarnessOpenTest(unittest.TestCase):
         self.assertIn("refuses Host: 127.0.0.1:9999", result.stderr)
 
     def test_never_widens_the_forward(self):
+        # Both the laptop's own tunnel and the one a Mac runner's LaunchAgent
+        # keeps up must stay loopback to loopback.
+        for script in (HARNESS_OPEN, DEPLOY):
+            text = script.read_text(encoding="utf-8")
+            self.assertNotIn("GatewayPorts", text, script.name)
+            self.assertNotIn("0.0.0.0", text, script.name)
+            for line in text.splitlines():
+                if not line.lstrip().startswith("#"):
+                    self.assertNotRegex(line, r"(^|\s)-g(\s|$)", script.name)
         text = HARNESS_OPEN.read_text(encoding="utf-8")
-        self.assertNotIn("GatewayPorts", text)
-        self.assertNotIn("0.0.0.0", text)
-        for line in text.splitlines():
-            if not line.lstrip().startswith("#"):
-                self.assertNotRegex(line, r"(^|\s)-g(\s|$)")
         for args in ((), ("--two-hop",), ("--jump", "")):
             argv = self.dry_run(*args)[0].split()
             self.assertNotIn("-g", argv)
@@ -898,7 +1253,7 @@ class HarnessOpenTest(unittest.TestCase):
 
 class ScriptLintTest(unittest.TestCase):
     def test_bash_syntax(self):
-        for script in ALL_SCRIPTS:
+        for script in SHELL_FILES:
             result = subprocess.run(
                 ["bash", "-n", str(script)], capture_output=True, text=True, check=False
             )
@@ -914,7 +1269,8 @@ class ScriptLintTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("shellcheck"), "shellcheck is not installed")
     def test_shellcheck(self):
         result = subprocess.run(
-            ["shellcheck", *map(str, ALL_SCRIPTS)], capture_output=True, text=True, check=False
+            ["shellcheck", *map(str, SHELL_FILES)],
+            capture_output=True, text=True, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 

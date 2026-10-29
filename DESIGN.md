@@ -17,7 +17,8 @@ checkoff, and a countdown/ETA in a web GUI.
 > implemented and tested against scripted runners and the real runner, and it
 > serves the web GUI (targets, run setup, live checklist, history). A
 > single-node deploy script installs the controller and a runner as systemd
-> user services on one Linux host (Ansible multi-node deploy remains). MAC
+> user services on one Linux host, or a runner and its SSH tunnel as launchd
+> LaunchAgents on a Mac test host (Ansible multi-node deploy remains). MAC
 > polling soak execution and radio fixtures remain design-only. Multi-node, firmware-flash, and radio behaviour require the lab
 > rack; see the
 > [core Ubertooth lab plan](https://github.com/SqueakyFloors/ubertooth/blob/main/TEST_LAB.md).
@@ -125,8 +126,10 @@ Target runner → controller:
 
 Semantics:
 - `register` is the first message on every connection. Ubertooth serials come
-  from the read-only sysfs enumeration used by power isolation (Linux); no
-  device is opened, so registration cannot stop a running board.
+  from a read-only enumeration: the sysfs scan power isolation uses on Linux,
+  and `ioreg -p IOUSB -l -w0 -a` on macOS. Neither opens a device, so
+  registration cannot stop a running board. Power isolation itself stays
+  Linux-only, since it is the switchable hubs that are validated there.
 - One run at a time. The runner executes `run-suite` as a child process in
   its harness environment, with a runner-assigned run ID and the runner's own
   hardware registry, host, source checkouts, output root, and
@@ -739,7 +742,27 @@ Ubertooth checkout's `origin/main` `install.sh` (else the harness's
 launcher for the desktop user, and `scripts/harness-open` opens a
 loopback-to-loopback SSH tunnel (`-J`, or `--two-hop` through an
 owner-only Unix socket on the jump host, never a TCP port there) and the
-browser from a laptop. See README "Deploy on the lab host". Linux only; launchd is not done.
+browser from a laptop. See README "Deploy on the lab host".
+
+The same script deploys a **Mac test host**, where there is no systemd and no
+controller of its own: it writes two launchd LaunchAgents to
+`~/Library/LaunchAgents`, `com.ubertooth-harness.runner` and
+`com.ubertooth-harness.tunnel`, and loads them with `launchctl bootstrap
+gui/$UID`. The tunnel is `ssh -N -o BatchMode=yes -L
+127.0.0.1:PORT:127.0.0.1:PORT [-J JUMP] HOST`, so the Mac runner dials a
+loopback controller as any other runner does; the SSH key is the access
+control and the Mac opens no listener. Both agents have `RunAtLoad` and
+`KeepAlive` and log under the harness data directory; the runner's
+`ExitTimeOut` leaves time to cancel a run and restore its boards. The tunnel's
+host, jump host and port come from the options, the environment, or the
+private config file `harness-open` reads, through the shared
+[`scripts/harness-config.sh`](scripts/harness-config.sh). Controller-only
+options are refused on macOS and the macOS-only options on Linux, a changed
+agent is replaced (`bootout` then `bootstrap`), and a deploy that would
+restart the runner while that Mac's own target has an active run is refused
+without `--force`. Since a LaunchAgent lives in the user's GUI login session,
+a Mac test host should log that user in automatically; deploy warns when it
+does not.
 
 Later (multi-node), Ansible:
 

@@ -26,7 +26,11 @@ import time
 from typing import Callable, Mapping
 import urllib.parse
 
-from ubertooth_harness.enumeration import SysfsUbertoothEnumerator, UbertoothEnumerator
+from ubertooth_harness.enumeration import (
+    EnumerationError,
+    UbertoothEnumerator,
+    local_enumerator,
+)
 from ubertooth_harness.environment import capture
 from ubertooth_harness.events import RUN_LOG, generate_run_id
 from ubertooth_harness.protocol import (
@@ -325,12 +329,14 @@ class RunnerService:
         serials = None
         enumeration_error = None
         enumerator = self.enumerator
-        if enumerator is None and sys.platform.startswith("linux"):
-            # Read-only sysfs scan: never opens a device or sends a stop.
-            enumerator = SysfsUbertoothEnumerator()
         if enumerator is None:
-            enumeration_error = f"USB enumeration is not supported on {sys.platform}"
-        else:
+            # Read-only: sysfs on Linux, ioreg on macOS. Neither opens a
+            # device, so neither sends a stop to a board that is capturing.
+            try:
+                enumerator = local_enumerator()
+            except EnumerationError as error:
+                enumeration_error = str(error)
+        if enumerator is not None:
             try:
                 serials = sorted(enumerator.serials())
             except Exception as error:
