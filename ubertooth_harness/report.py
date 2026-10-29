@@ -325,19 +325,32 @@ def _flash_row(run: _Run, built: bool) -> str:
         return f"no ({details.get('reason', '')})"
     boards = "; ".join(
         f"{item.get('resource')} "
-        + (f"written, was {item.get('before') or 'unreadable'}, now {item.get('after') or 'unknown'}"
-           if item.get("written") else f"already ran {item.get('after')}")
+        + _flash_board_text(item)
         for item in details.get("boards", [])
     )
     text = f"with the build's firmware {details.get('expected_revision', '')}: {boards}"
     started = next(
         (e for e in run.events if e["event_type"] == "build_flash_started"), {}
     )
-    if started.get("details", {}).get("host_lock"):
+    written = any(item.get("written") for item in details.get("boards", []))
+    if written and started.get("details", {}).get("host_lock"):
         text += " (host lock held while writing)"
     if status != "passed":
         return f"**{status}**: {details.get('reason', '')}; {text}"
     return f"yes, verified before preflight; {text}"
+
+
+def _flash_board_text(item: Mapping) -> str:
+    """What happened to one board in the flash stage."""
+    if item.get("written"):
+        return (
+            f"written, was {item.get('before') or 'unreadable'}, "
+            f"now {item.get('after') or 'unknown'}"
+        )
+    if item.get("after"):
+        return f"already ran {item['after']}"
+    # The stage stopped before this board was read or written.
+    return "not written"
 
 
 def _known(value) -> str:

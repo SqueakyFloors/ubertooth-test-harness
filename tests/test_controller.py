@@ -1,6 +1,6 @@
 """Controller service on 127.0.0.1 with an ephemeral port and no hardware.
 
-Most tests drive the controller with a scripted protocol-v2 runner; one runs
+Most tests drive the controller with a scripted protocol-v3 runner; one runs
 the real target runner end to end with the Host-only plan the runner tests
 use.
 """
@@ -98,7 +98,7 @@ def event(run_id, sequence, event_type="test_started", status="running", **detai
 
 
 class FakeRunner:
-    """Scripted protocol-v2 runner over a real loopback WebSocket."""
+    """Scripted protocol-v3 runner over a real loopback WebSocket."""
 
     def __init__(self, port):
         self.url = f"ws://127.0.0.1:{port}/ws/runner"

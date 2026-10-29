@@ -19,6 +19,13 @@ class HarnessError(RuntimeError):
     """The harness request is unsafe or cannot be started."""
 
 
+class FlashCancelled(HarnessError):
+    """The flash stage stopped because the run was canceled, not by a fault.
+
+    The caller ends the run as canceled rather than failed.
+    """
+
+
 @dataclass(frozen=True)
 class FirmwareArtifact:
     label: str
@@ -742,10 +749,12 @@ class BuildFlasher:
                 "reason": reason, "expected_revision": expected_revision,
                 "boards": results,
             })
+            if status == "canceled":
+                raise FlashCancelled(
+                    f"flashing the run's build was canceled: {reason}"
+                )
             if status != "passed":
-                # The events carry the status; the message spells it out.
-                detail = reason if status == "failed" else f"{status}: {reason}"
-                raise HarnessError(f"flashing the run's build failed: {detail}")
+                raise HarnessError(f"flashing the run's build failed: {reason}")
             return results
 
         if not sha256:

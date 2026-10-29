@@ -745,12 +745,16 @@ naming `--no-flash-build`.
   `ubertooth-dfu -U <serial> -d <image> -r` (25 s), then `-v` again until it
   reports the build's revision (up to 3 reads, 5 s each, 1 s apart, while the
   board re-enumerates). The image's SHA-256 is checked again before each
-  write. The whole stage has a deadline of 10 s plus 48 s per board.
+  write. The whole stage has a deadline of 10 s plus 48 s per board, and a
+  write only starts with its whole 25 s left: a write cut off part-way would
+  leave the board in its bootloader, so a board that cannot be written in the
+  time left is not written at all, and the stage says so.
 - The first failure stops the run before preflight, with the reason (the
   `ubertooth-dfu` exit, a board that does not answer after the write, or the
   revision it reports instead), in `run_finished` and the GUI failure
   summary. Cancellation (Ctrl-C, SIGTERM, SIGHUP, the GUI's Cancel) lets a
-  write in progress finish and stops after it.
+  write in progress finish, stops after it, and ends the run as canceled,
+  not failed; a fault that arrives with a cancellation is still a failure.
 - Locks: the run takes the [host lock](#the-host-lock) with its board leases
   (host lock first), holds it while writing, and releases it once every board
   is verified, unless the run itself switches power or writes firmware later.

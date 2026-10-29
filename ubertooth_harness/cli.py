@@ -34,7 +34,12 @@ from ubertooth_harness.events import (
 )
 from ubertooth_harness.executor import SubprocessCommandExecutor
 from ubertooth_harness.isolation import IsolationRuntime, IsolationSetupError
-from ubertooth_harness.flash import BuildFlashBoard, BuildFlasher, HarnessError
+from ubertooth_harness.flash import (
+    BuildFlashBoard,
+    BuildFlasher,
+    FlashCancelled,
+    HarnessError,
+)
 from ubertooth_harness import leases as board_leases
 from ubertooth_harness import libbtbbpin
 from ubertooth_harness.manifest import (
@@ -168,11 +173,13 @@ def _build(
         ).run(plan)
 
 
-def _finish_failed_run(publisher, output_dir: Path, reason: str) -> None:
-    """Close a run that failed before its tests started, then write report.md."""
+def _finish_failed_run(
+    publisher, output_dir: Path, reason: str, status: str = "failed"
+) -> None:
+    """Close a run that stopped before its tests started, then write report.md."""
     try:
         publisher.emit(
-            "run_finished", "failed", {"status": "failed", "failure_reason": reason}
+            "run_finished", status, {"status": status, "failure_reason": reason}
         )
     finally:
         write_report(output_dir)
@@ -849,7 +856,11 @@ def _run_leased(
         )
     except BaseException as error:
         if publisher is not None:
-            _finish_failed_run(publisher, run_dir, str(error) or type(error).__name__)
+            # A cancellation during the flash stage ends the run canceled.
+            _finish_failed_run(
+                publisher, run_dir, str(error) or type(error).__name__,
+                "canceled" if isinstance(error, FlashCancelled) else "failed",
+            )
         if isolation is not None:
             isolation.close()
         raise

@@ -8,6 +8,7 @@ import fcntl
 import io
 import json
 import os
+import signal
 import sys
 import tempfile
 import unittest
@@ -514,6 +515,28 @@ class RunSuiteFlashTests(unittest.TestCase):
         self.assertEqual(2, self.run_suite(executor))
         self.assertIn(f"runs {OLD} after the write, expected {self.revision}", self.stderr)
         self.assertNotIn("preflight_started", [e["event_type"] for e in self.events()])
+
+    def test_a_cancel_during_the_flash_stage_ends_the_run_canceled(self):
+        executor = FakeBoards(self.revision, {SERIAL_A: OLD, SERIAL_B: OLD})
+        original = executor.run
+
+        def run(argv, **kwargs):
+            if argv[0] == "ubertooth-dfu":
+                # What Ctrl-C does: the harness's own handler takes it.
+                os.kill(os.getpid(), signal.SIGINT)
+            return original(argv, **kwargs)
+
+        executor.run = run
+        self.assertEqual(2, self.run_suite(executor))
+        finished = self.events()[-1]
+        self.assertEqual(
+            ("run_finished", "canceled"), (finished["event_type"], finished["status"])
+        )
+        self.assertIn("canceled", finished["details"]["failure_reason"])
+        # The second board is not touched after the cancellation.
+        self.assertEqual(
+            1, len([c for c in executor.commands if c[0] == "ubertooth-dfu"])
+        )
 
     def test_missing_arm_toolchain_is_refused_before_anything_runs(self):
         executor = FakeBoards(self.revision, {SERIAL_A: OLD})
