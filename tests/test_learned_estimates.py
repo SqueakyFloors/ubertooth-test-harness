@@ -772,14 +772,24 @@ class ControllerLearningTests(ControllerTestCase):
         # A generated run ID never collides, but nothing stops a runner
         # from reporting one, and a directory of that name would sit where
         # the learned durations are kept.
-        async with FakeRunner(self.port) as runner:
-            await self.registered(runner, active=STORE_FILE)
-            await runner.send("run_finished", request_id="req-1",
-                              run_id=STORE_FILE, status="passed", exit_code=0,
-                              run_directory="/absent")
-            await wait_until(lambda: any("reserved" in line for line in self.logs))
-        self.assertNotIn(STORE_FILE, self.controller.runs)
-        self.assertFalse((self.results / STORE_FILE).is_dir())
+        # Either case: on a Mac's filesystem they are the same file. (A
+        # name starting with a dot is refused by the protocol first.)
+        for run_id in (STORE_FILE, STORE_FILE.upper()):
+            with self.subTest(run_id):
+                self.logs.clear()
+                async with FakeRunner(self.port) as runner:
+                    await self.registered(runner, active=run_id)
+                    await runner.send("run_finished", request_id="req-1",
+                                      run_id=run_id, status="passed", exit_code=0,
+                                      run_directory="/absent")
+                    await wait_until(
+                        lambda: any("reserved" in line for line in self.logs))
+                    # Refused, and the connection carries on.
+                    await runner.heartbeat()
+                    await wait_until(
+                        lambda: self.controller.targets[HOST].last_heartbeat)
+                self.assertNotIn(run_id, self.controller.runs)
+                self.assertFalse((self.results / run_id).is_dir())
 
     async def test_a_run_still_running_is_not_learned_at_startup(self):
         # Its runner may still be running it; the end report, or a target

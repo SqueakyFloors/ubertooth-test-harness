@@ -439,9 +439,14 @@ class Controller:
         directory = (self.results_dir / run_id).resolve()
         if directory.parent != self.results_dir:
             raise _Violation(f"run_id {run_id!r} is not a flat directory name")
-        if directory == self.estimates.path or directory.name.startswith("."):
-            # The learned durations live beside the run directories; a run
-            # must not take that name (a generated run ID never does).
+        if (
+            # The learned durations live beside the run directories, so a
+            # run must not take that name (a generated run ID never does).
+            # Case-insensitively: on a Mac's filesystem Estimates.json and
+            # estimates.json are the same file.
+            directory.name.casefold() == self.estimates.path.name.casefold()
+            or directory.name.startswith(".")
+        ):
             raise _Violation(f"run_id {run_id!r} is reserved")
         return directory
 
@@ -781,11 +786,14 @@ class Controller:
             run_id = message["run_id"]
             if run_id in self.runs:
                 raise _Violation(f"run_accepted reuses run_id {run_id}")
+            # Checked before the request is taken off the pending list, so a
+            # refused name leaves it there for a later answer.
+            directory = self._run_directory(run_id)
             del self._pending_runs[message["request_id"]]
             fields = pending.fields
             run = Run(
                 run_id=run_id, target=target.host,
-                directory=self._run_directory(run_id),
+                directory=directory,
                 request_id=message["request_id"], ref=fields["ref"],
                 commit=fields["commit"], plan=fields["plan"], suite=fields["suite"],
                 tests=list(fields["tests"]), build=fields["build"],
