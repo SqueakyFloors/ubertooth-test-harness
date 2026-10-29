@@ -404,8 +404,9 @@ class PreflightTests(unittest.TestCase):
                 source.commit, persisted["details"]["manifest"]["sources"][0]["commit"]
             )
 
-    def test_firmware_check_accepts_the_application_image_name(self):
+    def test_firmware_check_accepts_an_image_name(self):
         # Fork 730b4f5 (#523): -v names the image ahead of the revision.
+        # Any image name is accepted; the revision is what must match.
         with tempfile.TemporaryDirectory() as directory:
             _, source, _, checks = self.prepare(directory)
             check = next(c for c in checks if c.name == "Firmware version")
@@ -416,9 +417,9 @@ class PreflightTests(unittest.TestCase):
                     CommandResult(check.argv, 0, text, "", 0.01, False))
 
             self.assertFalse(failure(f"Firmware version: {revision} (API:1.35)\n"))
-            self.assertFalse(
-                failure(f"Firmware version: bluetooth_rxtx {revision} (API:1.35)\n"))
-            for other in (f"btbr {revision}", f"bluetooth_rxtx {revision}x",
+            for named in (f"bluetooth_rxtx {revision}", f"btbr {revision}"):
+                self.assertFalse(failure(f"Firmware version: {named} (API:1.35)\n"))
+            for other in (f"bluetooth_rxtx {revision}x",
                           f"bluetooth_rxtx git-other {revision}"):
                 self.assertIn("identity mismatch",
                               failure(f"Firmware version: {other} (API:1.35)\n"))
