@@ -139,6 +139,15 @@ Semantics:
   `GitRevisionResolver`, for libbtbb too); the fetch never moves the working
   tree, `HEAD` or a local branch, and a failure is a `run_error` naming the
   remote and why.
+- The runner's `--libbtbb-ref` goes to every run as given. The deployed
+  default, `fork-pin`, is resolved per run from the Ubertooth commit the run
+  was asked for (its own `install.sh` `LIBBTBB_REF`), so each commit is built
+  against the libbtbb it asks for and a pin bump on the fork needs no
+  redeploy. The resolved commit is what the manifest records, named
+  `fork-pin`. Every run resolves it, build or not, since the libbtbb a run
+  records is checked against the tools' version line; a commit with no pin,
+  or one that names something other than a commit, fails the run with that
+  reason.
 - Whether a runner can build (it has a libbtbb source and ref) is not in
   `register`: a new field would need a protocol version bump. The runner
   logs it at startup and refuses a `run` with `build` set that it cannot
@@ -747,9 +756,11 @@ the checkout commit, changes), never runs sudo, and prints the one-time
 `sudo loginctl enable-linger <user>` when linger is off, since user services
 otherwise stop at logout. By default it also gives the runner a libbtbb for
 Build runs: a clone of the libbtbb fork under the harness data directory
-(cloned once, fetched on later deploys) at the `LIBBTBB_REF` pin in the
-Ubertooth checkout's `origin/main` `install.sh` (else the harness's
-`LIBBTBB_PIN`); `--no-libbtbb` opts out. `scripts/install-desktop-shortcut.sh` adds a GUI
+(cloned once, fetched on later deploys), built at `--libbtbb-ref fork-pin`,
+the `LIBBTBB_REF` each Ubertooth commit sets in its own `install.sh`. Deploy
+reads no pin itself, so a long-lived runner follows a pin bump on the fork
+without a redeploy; `--libbtbb-ref` holds every run to one libbtbb instead,
+and `--no-libbtbb` opts out. `scripts/install-desktop-shortcut.sh` adds a GUI
 launcher for the desktop user, and `scripts/harness-open` opens a
 loopback-to-loopback SSH tunnel (`-J`, or `--two-hop` through an
 owner-only Unix socket on the jump host, never a TCP port there) and the
