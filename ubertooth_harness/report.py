@@ -438,9 +438,11 @@ def _results_table(run: _Run) -> list[str]:
             not_applicable = fd.get("not_applicable_cases", "")
             reason = fd.get("reason", "")
             # A board that reset itself does not fail the test, so its warning
-            # would otherwise only be in the Watchdog section.
+            # would otherwise only be in the Watchdog section. Each one is
+            # labelled, so it does not read as part of a failure reason.
             for warning in fd.get("warnings", []):
-                reason = f"{reason}; {warning}" if reason else f"warning: {warning}"
+                reason = f"{reason}; " if reason else ""
+                reason += f"warning: {warning}"
         lines.append(
             f"| {_cell(details.get('invocation_id'))} | {_cell(where)} | {_cell(status)} "
             f"| {failed} | {skipped} | {not_applicable} | {_duration(started, finished)} "

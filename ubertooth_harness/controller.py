@@ -52,7 +52,6 @@ from ubertooth_harness.gui import (
     GitRefSource,
     RefListError,
     failure_summary,
-    watchdog_boards,
     list_plans,
     load_assets,
     planned_invocations,
@@ -1293,7 +1292,6 @@ def create_app(controller: Controller):
         return {
             "run": view, "events": events, "failures": failure_summary(view, events),
             "invocations": planned_invocations(events),
-            "watchdog": watchdog_boards(events),
         }
 
     @app.get("/api/runs/{run_id}/report.md")

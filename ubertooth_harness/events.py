@@ -146,10 +146,14 @@ class TerminalEventSink:
                 self.stream.write(f"error: {details['reason']}\n")
         elif event.event_type == "watchdog_summary":
             counts = ", ".join(
-                f"{board.get('resource')}: {board.get('resets', 0)}"
+                f"{board.get('resource')}: {board.get('resets')}"
                 for board in details.get("boards", [])
+                if board.get("resets")
             )
-            self.stream.write(f"\n[watchdog] boards that reset themselves: {counts}\n")
+            self.stream.write(
+                "\n[watchdog] boards that reset themselves: "
+                + (counts or "none") + "\n"
+            )
         elif event.event_type == "manifest":
             self.stream.write("\n[manifest recorded]\n")
         elif event.event_type == "not_applicable":

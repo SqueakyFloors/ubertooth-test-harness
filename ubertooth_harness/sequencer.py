@@ -128,6 +128,21 @@ def _path_safe(name: str) -> str:
     return "".join(c if c.isalnum() or c in "._-" else "-" for c in name)
 
 
+def _utc_text(moment: datetime.datetime) -> str:
+    """A clock reading as the records write it: naive UTC, to the second.
+
+    A naive reading is already UTC, as ``EventPublisher.emit`` takes it, so
+    the zone is attached before any conversion.
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=datetime.timezone.utc)
+    return (
+        moment.astimezone(datetime.timezone.utc)
+        .replace(tzinfo=None)
+        .isoformat(timespec="seconds")
+    )
+
+
 class NamedTestSequencer:
     def __init__(
         self,
@@ -849,9 +864,9 @@ class NamedTestSequencer:
             return None
         try:
             source = manifest.source("Ubertooth")
-            firmware, host_version = source.expected_revision, source.commit
+            build = f"{source.expected_revision} (commit {source.commit})"
         except ManifestError:
-            firmware, host_version = "", ""
+            build = ""
         return WatchdogMonitor(
             lambda **arguments: self._run_command(
                 publisher,
@@ -864,14 +879,10 @@ class NamedTestSequencer:
             ),
             publisher,
             tuple(boards.values()),
-            firmware=firmware,
-            host_version=host_version,
+            build=build,
             clock=self.clock,
             cancelled=cancelled,
-            # Naive UTC, as every harness time is.
-            utc_now=lambda: publisher.utc_now().astimezone(
-                datetime.timezone.utc
-            ).replace(tzinfo=None).isoformat(timespec="seconds"),
+            utc_now=lambda: _utc_text(publisher.utc_now()),
             search=self.watchdog_search,
         )
 
@@ -1262,8 +1273,10 @@ class NamedTestSequencer:
                 guards = (planned_guards or {}).get(invocation.invocation_id) or ()
                 guard_context: dict[str, str] = {}
                 guard_pending = False
-                # Guard-check failures are counted apart from failed cases.
+                # Guard and watchdog check failures are counted apart from
+                # failed cases: neither is one of the test's own cases.
                 failed_guard_checks = 0
+                failed_watchdog_checks = 0
                 # A failed test ends the run only when the device state is not
                 # known: a guard changed or could not be read, a case was not
                 # verified restored, a flash failed, or isolation failed.
@@ -1452,10 +1465,12 @@ class NamedTestSequencer:
                     if watchdog.failure:
                         # A board that did not come back cannot be used again;
                         # a count over the test's limit leaves the device in a
-                        # known state, so later tests still run.
+                        # known state, so later tests still run. Neither is a
+                        # failed case: every case of the test may have passed.
                         unsafe = unsafe or watchdog.board_lost
                         case_failures.append(watchdog.failure)
                         case_statuses.append("failed")
+                        failed_watchdog_checks += 1
                 if case_failures:
                     status = (
                         "canceled"
@@ -1475,8 +1490,12 @@ class NamedTestSequencer:
                             "invocation_id": invocation.invocation_id,
                             "test_name": invocation.test_name,
                             "reason": test_failure,
-                            "failed_cases": len(case_failures) - failed_guard_checks,
+                            "failed_cases": (
+                                len(case_failures) - failed_guard_checks
+                                - failed_watchdog_checks
+                            ),
                             "failed_guard_checks": failed_guard_checks,
+                            "failed_watchdog_checks": failed_watchdog_checks,
                             "skipped_cases": skipped_cases,
                             "not_applicable_cases": len(omitted),
                             # Reported, not failed: a board that reset itself
@@ -1532,8 +1551,11 @@ class NamedTestSequencer:
             ending = monitor.at_run_end()
             if ending.failure:
                 # Not a failed test: no test is running. The run fails because
-                # a board it used cannot be used again.
-                status = "failed"
+                # a board it used cannot be used again -- unless it was
+                # canceled, where a board may have gone as part of stopping
+                # the run and the cancellation is the outcome.
+                if status != "canceled":
+                    status = "failed"
                 failure = f"{failure}; {ending.failure}" if failure else ending.failure
         summary = SequencerSummary(
             run_id=run_id,

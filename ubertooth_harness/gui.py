@@ -355,40 +355,6 @@ def planned_invocations(
     return planned
 
 
-# ----- watchdog ------------------------------------------------------------
-
-
-def watchdog_boards(events: Sequence[Mapping]) -> list[dict]:
-    """Each board of a run with the times it reset itself, newest read last.
-
-    Read from the run's ``watchdog`` records (watchdog.py), so it is current
-    while the run is going, not only once its summary arrives. Empty when
-    the run has read no board yet.
-    """
-    boards: dict[str, dict] = {}
-    for event in events:
-        if not isinstance(event, Mapping) or event.get("event_type") != "watchdog":
-            continue
-        details = event.get("details")
-        if not isinstance(details, Mapping):
-            continue
-        serial = _text(details.get("serial"))
-        board = boards.setdefault(serial, {
-            "resource": _text(details.get("resource")),
-            "serial": serial,
-            "resets": 0,
-            "state": "",
-            "warnings": [],
-        })
-        resets = details.get("new_resets")
-        board["resets"] += resets if isinstance(resets, int) else 0
-        board["state"] = _text(details.get("state"))
-        warnings = details.get("warnings")
-        if isinstance(warnings, list):
-            board["warnings"].extend(_text(line) for line in warnings)
-    return list(boards.values())
-
-
 # ----- failure summary -----------------------------------------------------
 
 

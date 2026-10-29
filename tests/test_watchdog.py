@@ -14,7 +14,6 @@ from ubertooth_harness.catalog import (
     builtin_catalog,
 )
 from ubertooth_harness.executor import CommandResult
-from ubertooth_harness.gui import watchdog_boards
 from ubertooth_harness.planner import TestInvocation
 from ubertooth_harness.report import render_run
 from ubertooth_harness.resources import FileResourceRegistry
@@ -126,12 +125,11 @@ class ParseTests(unittest.TestCase):
         for text in (
             samples.BOARD_GONE.format(serial=SERIAL),
             samples.BOARD_LEFT,
-            "error: no Ubertooth devices found\n",
+            "error: no Ubertooth is attached\n",
             # On the bus and refusing to be opened, which is how a board looks
             # for a moment after the watchdog has reset it.
             samples.BOARD_BUSY.format(serial=SERIAL),
             samples.CLAIM_FAILED.format(serial=SERIAL),
-            "error: Ubertooth device 0 is not answering\n",
         ):
             self.assertTrue(watchdog.board_unreachable(text), text)
         # Firmware that answered and has no such request is not that.
@@ -191,7 +189,28 @@ class CompareTests(unittest.TestCase):
         self.assertEqual([], warnings_for("UT", current, change, "during the test"))
         (note,) = notes_for("UT", current, change, "during the test")
         self.assertIn("counters started again", note)
-        self.assertIn("lost power", note)
+        self.assertIn("powered on again", note)
+
+    def test_a_power_cycle_that_leaves_the_counts_alone_is_still_a_restart(self):
+        # A board at 0 resets and 1 boot reads the same after a power cycle:
+        # the boot cause gaining power-on is the only sign.
+        baseline = parse_report(samples.report(resets=0, boots=1, cause="watchdog"))
+        current = parse_report(samples.report(resets=0, boots=1, cause="power-on"))
+
+        change = compare(baseline, current)
+
+        self.assertTrue(change.restarted)
+        self.assertEqual([], warnings_for("UT", current, change, "during the test"))
+
+    def test_firmware_flashed_over_the_record_reads_as_a_restart_too(self):
+        baseline = parse_report(samples.report(resets=4, boots=9, cause="watchdog"))
+        current = parse_report(samples.report(resets=0, boots=1, cause="watchdog"))
+
+        change = compare(baseline, current)
+
+        self.assertTrue(change.restarted)
+        (note,) = notes_for("UT", current, change, "during the test")
+        self.assertIn("lost power, or it was flashed with firmware", note)
 
     def test_a_reset_after_a_power_change_counts_from_the_restart(self):
         baseline = parse_report(samples.report(resets=4, boots=9))
@@ -238,27 +257,20 @@ class CompareTests(unittest.TestCase):
         self.assertEqual("", again.new_fault)
         self.assertEqual([], warnings_for("UT", faulted, again, "during the test"))
 
-    def test_a_brown_out_boot_warns_that_the_supply_dipped(self):
-        current = parse_report(samples.report(cause="brown-out", boots=2))
-
-        change = compare(parse_report(samples.report()), current)
-
-        self.assertTrue(change.gained_brown_out)
-        self.assertTrue(any(
-            "supply dipped" in line
-            for line in warnings_for("UT", current, change, "during the test")
-        ))
-
-    def test_a_brown_out_after_a_power_cycle_says_nothing(self):
+    def test_a_brown_out_is_a_restart_note_not_a_warning(self):
         # The part sets the brown-out flag on an ordinary power-up too, so a
-        # deliberate power cycle (a test's isolation, a re-plug) must not warn.
+        # deliberate power cycle (a test's isolation, a re-plug) must not warn
+        # about a supply dip. Either way the board was powered on again, which
+        # started its counters again.
         current = parse_report(samples.report(cause="power-on+brown-out", boots=1))
 
         change = compare(parse_report(samples.report(boots=4, resets=1)), current)
 
         self.assertTrue(change.restarted)
-        self.assertFalse(change.gained_brown_out)
+        self.assertTrue(change.brown_out)
         self.assertEqual([], warnings_for("UT", current, change, "during the test"))
+        (note,) = notes_for("UT", current, change, "during the test")
+        self.assertIn("powered on again", note)
 
     def test_radio_waits_start_again_at_every_boot_not_only_a_power_cycle(self):
         # They live in ordinary RAM, so any reset clears them; the boot count
@@ -303,8 +315,7 @@ class ForkIssueTests(unittest.TestCase):
             resource="UT_Linux0",
             record=parse_report(samples.FULL),
             resets=1,
-            firmware="git-d8e8c54",
-            host_version="d8e8c549" + "0" * 32,
+            build="git-d8e8c54 (commit d8e8c549" + "0" * 32 + ")",
             test_name="Capture known BLE connection",
             run_id="named-run",
             when="2026-10-29T20:33:38",
@@ -320,7 +331,8 @@ class ForkIssueTests(unittest.TestCase):
         )
         self.assertIn("reset itself once during a test harness run", issue.body)
         self.assertIn(f"- Board serial: `{SERIAL}` (UT_Linux0)", issue.body)
-        self.assertIn("- Firmware: git-d8e8c54", issue.body)
+        self.assertIn("- Firmware and host tools: git-d8e8c54 (commit d8e8c549",
+                      issue.body)
         self.assertIn("- Mode: BLE follow", issue.body)
         self.assertIn("- Wait: running a control request", issue.body)
         self.assertIn("- Test: Capture known BLE connection", issue.body)
@@ -434,7 +446,8 @@ class MonitorTests(unittest.TestCase):
         clock = Clock()
         monitor = WatchdogMonitor(
             commands, publisher, boards, clock=clock, sleep=clock.sleep,
-            firmware="git-test", utc_now=lambda: "2026-10-29T20:00:00",
+            build="git-test (commit " + "d" * 40 + ")",
+            utc_now=lambda: "2026-10-29T20:00:00",
             **{
                 "search": lambda issue: watchdog.DuplicateSearch(issue.search_terms),
                 **options,
@@ -526,7 +539,8 @@ class MonitorTests(unittest.TestCase):
 
         self.assertEqual("", outcome.failure)
         (note,) = outcome.notes
-        self.assertIn("watchdog not reported by this firmware", note)
+        self.assertIn("watchdog not reported: the board's firmware does not "
+                      "support it", note)
         (event,) = [e for e in publisher.events if e[0] == "watchdog"]
         self.assertEqual("passed", event[1])
         self.assertEqual("not reported", event[2]["state"])
@@ -557,15 +571,17 @@ class MonitorTests(unittest.TestCase):
         # The board is on the bus and refusing requests, which is how it looks
         # for a moment after the watchdog has reset it.
         monitor, commands, _publisher, _clock = self.monitor({SERIAL: [
+            samples.report(resets=0, boots=1),
             samples.BOARD_BUSY.format(serial=SERIAL),
             samples.CLAIM_FAILED.format(serial=SERIAL),
             samples.report(resets=1, boots=2, cause="watchdog"),
         ]})
+        monitor.baseline()
 
         outcome = monitor.after_test(invocation())
 
         self.assertEqual("", outcome.failure)
-        self.assertEqual(3, len(commands.argv))
+        self.assertEqual(4, len(commands.argv))
         self.assertEqual(1, outcome.resets)
 
     def test_a_cancelled_run_does_not_wait_for_a_board_that_has_gone(self):
@@ -591,7 +607,8 @@ class MonitorTests(unittest.TestCase):
 
         self.assertEqual("", outcome.failure)
         (note,) = outcome.notes
-        self.assertIn("watchdog not reported by this firmware", note)
+        self.assertIn("watchdog not reported: the board's firmware does not "
+                      "support it", note)
         self.assertEqual("not reported", publisher.events[-1][2]["state"])
 
     def test_a_round_during_a_test_reads_only_that_test_s_boards(self):
@@ -626,14 +643,16 @@ class MonitorTests(unittest.TestCase):
 
     def test_a_board_that_comes_back_inside_the_window_is_only_read_again(self):
         monitor, commands, _publisher, _clock = self.monitor({SERIAL: [
+            samples.report(resets=0, boots=1),
             samples.BOARD_GONE.format(serial=SERIAL),
             samples.report(resets=1, boots=2, cause="watchdog"),
         ]})
+        monitor.baseline()
 
         outcome = monitor.after_test(invocation())
 
         self.assertEqual("", outcome.failure)
-        self.assertEqual(2, len(commands.argv))
+        self.assertEqual(3, len(commands.argv))
         self.assertEqual(1, outcome.resets)
 
     def test_a_long_test_is_read_again_between_cases(self):
@@ -818,14 +837,11 @@ class RunRecordTests(unittest.TestCase):
         self.assertIn("Firmware watchdog reset in BLE follow mode", report)
         self.assertIn("warning: UT_Linux0", report)
 
-        # The GUI's per-board count comes from the same records.
-        (board,) = watchdog_boards(events)
-        self.assertEqual(
-            {"resource": "UT_Linux0", "serial": SERIAL, "resets": 3, "state": "read",
-             "warnings": board["warnings"]},
-            board,
-        )
-        self.assertEqual(1, len(board["warnings"]))
+        # The per-board count the GUI adds up as the records arrive.
+        reads = [e["details"] for e in events if e["event_type"] == "watchdog"]
+        self.assertEqual(3, sum(read["new_resets"] for read in reads))
+        self.assertEqual({"UT_Linux0"}, {read["resource"] for read in reads})
+        self.assertEqual({"read"}, {read["state"] for read in reads})
 
     def test_a_run_with_no_reset_records_the_reads_and_says_nothing_more(self):
         summary, events, report, _executor = self.run_suite([samples.report()])
@@ -839,7 +855,11 @@ class RunRecordTests(unittest.TestCase):
         self.assertIn("## Watchdog", report)
         self.assertNotIn("board self-resets", report)
         self.assertNotIn("Issue to file", report)
-        self.assertEqual(0, watchdog_boards(events)[0]["resets"])
+        self.assertEqual(
+            0,
+            sum(e["details"]["new_resets"] for e in events
+                if e["event_type"] == "watchdog"),
+        )
 
     def test_a_mid_test_reset_is_in_the_test_record_once(self):
         summary, events, report, _executor = self.run_suite(

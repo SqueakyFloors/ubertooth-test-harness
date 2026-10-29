@@ -543,9 +543,12 @@
       el("span", { className: "board-name", text: board.resource || board.serial }),
       el("span", {
         className: "board-resets",
-        text: board.state === "read"
-          ? ` ${board.resets} self-reset${board.resets === 1 ? "" : "s"}`
-          : ` watchdog ${board.state || "not read"}`,
+        // The count always, since it matters most on a board whose last read
+        // failed; then what that read found, when it was not a record.
+        text: ` ${board.resets} self-reset${board.resets === 1 ? "" : "s"}`
+          + (board.state === "read" || !board.state ? ""
+            : board.state === "absent" ? "; did not answer"
+            : `; watchdog ${board.state}`),
       }),
       board.warning ? el("span", { className: "reason", text: ` — ${board.warning}` }) : null)));
 
