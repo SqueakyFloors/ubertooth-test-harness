@@ -332,9 +332,11 @@ def _flash_row(run: _Run, built: bool) -> str:
     started = next(
         (e for e in run.events if e["event_type"] == "build_flash_started"), {}
     )
-    written = any(item.get("written") for item in details.get("boards", []))
-    if written and started.get("details", {}).get("host_lock"):
-        text += " (host lock held while writing)"
+    if started.get("details", {}).get("host_lock"):
+        written = any(item.get("written") for item in details.get("boards", []))
+        text += (
+            " (host lock held while writing)" if written else " (host lock held)"
+        )
     if status != "passed":
         return f"**{status}**: {details.get('reason', '')}; {text}"
     return f"yes, verified before preflight; {text}"
