@@ -123,6 +123,24 @@ roles, exact argv, timeouts, and result checks. Every plan item must contain
 exactly one known test name; unknown names, legacy `cmd/check` entries, unknown
 arguments, and invalid values fail during load.
 
+Every test accepts `platforms:` (`linux`, `macos`, no duplicates) beside its
+`hosts:`, and a test left without it runs on every platform:
+
+```yaml
+  - Host CLI surface:
+      hosts: each
+      platforms: [linux]
+```
+
+The two select separately: `hosts:` says which registered hosts the step may
+run on, `platforms:` which of them can run it. A host whose platform the step
+does not list is left out as not applicable (see
+[Host requirements](#host-requirements)), so one plan can hold Linux-only,
+macOS-only, and shared steps and still run on `hosts: each`; a step no named
+host can run fails planning. Three tests must state their platforms and still
+require the argument: `Flash reliability`, `Exclusive Ubertooth topology`,
+and `MAC polling soak`.
+
 `hardware.yaml` is the ignored local resource registry; copy
 [`hardware.example.yaml`](hardware.example.yaml) to start. Register every macOS/Linux computer as a
 `Host`, then attach typed resources such as `UT_Linux0`, `DK_Linux0`, and
@@ -388,7 +406,8 @@ are logged, so no captured traffic reaches the run record.
 
 A case or a whole test declares what it needs from the host in one place
 (`ubertooth_harness/hostneeds.py`, `Needs`): a host platform (also the plan's
-`platforms:` argument), a tool built only with BlueZ, the Python tools build,
+`platforms:` argument, which every test accepts), a tool built only with
+BlueZ, the Python tools build,
 or a firmware build. It is resolved before anything runs, from the host's
 registry platform and the run's options and build manifest. What the host
 cannot run is left out and recorded as `not applicable on <host>: <reason>`,
@@ -407,7 +426,7 @@ run.
 | BlueZ (`ubertooth-scan`, `ubertooth-follow`) | `Host CLI surface` scan and follow `-h`; every `follow` and `scan` case of `Refused command lines` | macOS (no BlueZ): Linux only; on Linux, a run that uses installed tools without them on `PATH` (a Linux `--build` configures with `REQUIRE_ALL=ON` and fails unless both are in the run prefix, so its cases are required) |
 | Python tools build | `Python tools` `ubertooth-specan-ui -h` | the run has no `--build --with-python` |
 | firmware build | `DFU image checks` `sign-test-build` | the run has no `--build --with-firmware` and no `--artifact "test build=PATH"` |
-| platform | plan entries with `platforms:` (Flash reliability, Exclusive Ubertooth topology, MAC polling soak; the `exclusive` and `mac-polling` plans list Linux only) | the host's platform is not listed |
+| platform | any plan entry with `platforms:`, which every test accepts (the `exclusive` and `mac-polling` plans list Linux only; `Flash reliability`, `Exclusive Ubertooth topology`, and `MAC polling soak` must state it) | the host's platform is not listed |
 
 Runtime skips remain only for what running the command alone can tell: a
 built libubertooth that predates `UBERTOOTH_TEST_NO_DEVICES` (the refusal

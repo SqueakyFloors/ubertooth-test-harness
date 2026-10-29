@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from ubertooth_harness.catalog import CatalogError, builtin_catalog
+from ubertooth_harness.hostneeds import Needs
 from ubertooth_harness.planner import PlanCompiler, PlanningError
 from ubertooth_harness.plan import PlanError, load_plan
 from ubertooth_harness.resources import FileResourceRegistry, RegistryError
@@ -142,6 +143,51 @@ class CatalogTests(unittest.TestCase):
             ("ubertooth-util", "-U", "abc123", "-vVspb"), cases[-1].argv
         )
         self.assertTrue(definition.continue_on_case_failure)
+
+    def test_every_test_accepts_platforms_with_the_same_values(self):
+        catalog = builtin_catalog()
+        # The three tests that must state their platforms keep their own
+        # required rule; everywhere else the argument is optional.
+        required = {"Flash reliability", "Exclusive Ubertooth topology",
+                    "MAC polling soak"}
+
+        for name in catalog.names:
+            rule = catalog.get(name).arguments.get("platforms")
+            with self.subTest(name):
+                self.assertIsNotNone(rule)
+                self.assertEqual(name in required, rule.required)
+                self.assertEqual(("linux",), rule.validator(["linux"]))
+                self.assertEqual(("linux", "macos"),
+                                 rule.validator(["linux", "macos"]))
+                with self.assertRaisesRegex(CatalogError, "only linux and macos"):
+                    rule.validator(["windows"])
+                with self.assertRaisesRegex(CatalogError, "duplicates"):
+                    rule.validator(["linux", "linux"])
+                with self.assertRaisesRegex(CatalogError, "non-empty list"):
+                    rule.validator([])
+                with self.assertRaisesRegex(CatalogError, "non-empty list"):
+                    rule.validator("linux")
+
+    def test_platforms_on_any_test_becomes_a_platform_need(self):
+        definition = builtin_catalog().get("Host CLI surface")
+
+        arguments = definition.normalize_arguments({"platforms": ["linux"]})
+
+        self.assertEqual(("linux",), arguments["platforms"])
+        self.assertEqual((Needs(platforms=("linux",)),),
+                         definition.test_needs(arguments))
+        with self.assertRaisesRegex(CatalogError, "only linux and macos"):
+            definition.normalize_arguments({"platforms": ["windows"]})
+
+    def test_a_test_without_platforms_runs_on_every_platform(self):
+        definition = builtin_catalog().get("Host CLI surface")
+
+        arguments = definition.normalize_arguments({"hosts": "each"})
+
+        # Absent rather than an empty value, so the records of a step that
+        # leaves it out stay as they were.
+        self.assertNotIn("platforms", arguments)
+        self.assertEqual((), definition.test_needs(arguments))
 
     def test_mac_polling_soak_rejects_negative_failure_limits(self):
         definition = builtin_catalog().get("MAC polling soak")
@@ -338,6 +384,17 @@ class PlanningTests(unittest.TestCase):
         plan_path.write_text(plan_text)
         return load_plan(plan_path), FileResourceRegistry.load(registry_path)
 
+    def compile_identity(self, platforms):
+        """Compile `Ubertooth identity` on both hosts with these platforms."""
+        step = "" if platforms is None else f"        platforms: [{platforms}]\n"
+        with tempfile.TemporaryDirectory() as directory:
+            plan, registry = self.prepare(
+                directory,
+                "plan: platforms\nsuites:\n  fast:\n    - Ubertooth identity:\n"
+                "        hosts: each\n" + step,
+            )
+            return PlanCompiler(builtin_catalog(), registry).compile_suite(plan, "fast")
+
     def test_default_ubertooth_expands_once_per_registered_host(self):
         with tempfile.TemporaryDirectory() as directory:
             plan, registry = self.prepare(
@@ -531,6 +588,49 @@ suites:
 
             with self.assertRaisesRegex(PlanningError, "power mapping"):
                 PlanCompiler(builtin_catalog(), registry).compile(plan, "mac-polling")
+
+    def test_platforms_plans_a_test_only_where_its_platform_is_listed(self):
+        for platforms, expected in (
+            (None, ["Host_Linux", "Host_Mac"]),
+            ("linux, macos", ["Host_Linux", "Host_Mac"]),
+            ("linux", ["Host_Linux"]),
+            ("macos", ["Host_Mac"]),
+        ):
+            with self.subTest(platforms=platforms):
+                compiled = self.compile_identity(platforms)
+
+                self.assertEqual(
+                    expected, [item.host for item in compiled.invocations]
+                )
+                left_out = list(compiled.not_applicable)
+                self.assertEqual(
+                    [host for host in ("Host_Linux", "Host_Mac")
+                     if host not in expected],
+                    [item.host for item in left_out],
+                )
+                for item in left_out:
+                    self.assertEqual("Ubertooth identity", item.test_name)
+                    self.assertIn("runs only on", item.reason)
+
+    def test_platforms_no_named_host_has_fails_planning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan, registry = self.prepare(
+                directory,
+                """plan: platforms
+suites:
+  fast:
+    - Ubertooth identity:
+        hosts: [Host_Mac]
+        platforms: [linux]
+""",
+            )
+
+            with self.assertRaisesRegex(
+                PlanningError,
+                "Ubertooth identity: no selected host can run it: Host_Mac: "
+                "runs only on Linux",
+            ):
+                PlanCompiler(builtin_catalog(), registry).compile(plan, "fast")
 
     def test_platform_requirement_fails_before_execution(self):
         with tempfile.TemporaryDirectory() as directory:
