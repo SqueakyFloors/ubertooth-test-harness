@@ -100,6 +100,11 @@ def fork_pin_at(source: Path | str, ref: str) -> ForkPin | None:
     return parse_install_sh(result.stdout)
 
 
+def is_commit(ref: str) -> bool:
+    """Whether ``ref`` is a hexadecimal commit, not a name that can move."""
+    return bool(_HEX.fullmatch(ref))
+
+
 def _same_commit(a: str, b: str) -> bool:
     """Equal refs, or two hex commits where one is a prefix of the other."""
     if a == b:

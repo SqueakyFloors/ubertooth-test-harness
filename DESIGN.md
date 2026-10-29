@@ -144,7 +144,10 @@ Semantics:
   was asked for (its own `install.sh` `LIBBTBB_REF`), so each commit is built
   against the libbtbb it asks for and a pin bump on the fork needs no
   redeploy. The resolved commit is what the manifest records, named
-  `fork-pin`; a commit with no literal pin fails the run with that reason.
+  `fork-pin`. Every run resolves it, build or not, since the libbtbb a run
+  records is checked against the tools' version line; a commit with no pin,
+  or one that names something other than a commit, fails the run with that
+  reason.
 - Whether a runner can build (it has a libbtbb source and ref) is not in
   `register`: a new field would need a protocol version bump. The runner
   logs it at startup and refuses a `run` with `build` set that it cannot

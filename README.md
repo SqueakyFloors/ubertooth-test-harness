@@ -675,13 +675,16 @@ reads `LIBBTBB_REF` from `install.sh` at the Ubertooth commit it resolved and
 builds exactly that libbtbb, so each commit is tested against the libbtbb it
 asks for. The run prints the commit it took (`note: libbtbb ref 'fork-pin'
 is ...`) and records it in the manifest as that commit, named `fork-pin`, so
-report.md shows `` `fork-pin` at `<commit>` ``; the pin check above then
-reports `passed`. A commit whose `install.sh` sets no literal `LIBBTBB_REF`
-(an older fork commit, or a pin built from a shell variable) is refused,
-naming the commit and asking for a libbtbb commit instead. This is what a
-long-lived runner is deployed with, so a pin bump on the fork reaches it
-without a redeploy; `scripts/ci.sh` keeps naming the commit, since comparing
-it with the fork's is the point of its check.
+report.md shows `` `fork-pin` at `<commit>` ``. It is refused, naming the
+Ubertooth commit and asking for a libbtbb ref instead, when that commit has
+no `install.sh` or sets no `LIBBTBB_REF` (an older fork commit), when the pin
+is built from a shell variable, and when it is a name that can move rather
+than a commit, since `fork-pin` is a promise of one exact commit. Every run
+resolves it, build or not, because the libbtbb a run records is checked
+against the tools' own version line. This is what a long-lived runner is
+deployed with, so a pin bump on the fork reaches it without a redeploy;
+`scripts/ci.sh` keeps naming the commit, since comparing it with the fork's
+is the point of its check.
 
 `--libbtbb-ref` can still name any ref, with one limit: the harness passes no
 `-DCMAKE_POLICY_VERSION_MINIMUM`, so a libbtbb declaring
@@ -734,7 +737,8 @@ build revision. Dirty or untracked source content is rejected. Supply
 `--libbtbb-source` and `--libbtbb-ref` together when validating an exact
 companion build; `--libbtbb-ref fork-pin` takes that commit from the
 Ubertooth commit's own `install.sh` (see [Building the resolved
-revision](#building-the-resolved-revision)). When `--ubertooth-ref` is a commit chosen by name elsewhere
+revision](#building-the-resolved-revision)). When `--ubertooth-ref` is a
+commit chosen by name elsewhere
 (the target runner passes the commit the controller listed),
 `--ubertooth-ref-name NAME` records that branch or tag name next to it in the
 manifest (`ref_name`) and report.md; it is never resolved. Repeat `--artifact NAME=PATH` to hash build products into the

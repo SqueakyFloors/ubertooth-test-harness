@@ -322,13 +322,18 @@ class ForkPinRefTests(unittest.TestCase):
         self.assertEqual("", note)
 
     def test_a_commit_without_a_pin_says_so(self):
-        with self.assertRaises(cli.ManifestError) as raised:
-            self._resolve(self.unpinned)
-        message = str(raised.exception)
-        self.assertIn("--libbtbb-ref fork-pin", message)
-        self.assertIn(f"install.sh at Ubertooth {self.unpinned[:7]}", message)
-        self.assertIn("sets no LIBBTBB_REF", message)
-        self.assertIn("name a libbtbb commit", message)
+        # No install.sh at all, and an install.sh without the pin: the same
+        # refusal, since neither commit says which libbtbb it wants.
+        no_pin = self._commit(self.fork, "install.sh", "#!/bin/sh\necho hi\n")
+        for commit in (self.unpinned, no_pin):
+            with self.subTest(ubertooth=commit[:7]):
+                with self.assertRaises(cli.ManifestError) as raised:
+                    self._resolve(commit)
+                message = str(raised.exception)
+                self.assertIn("--libbtbb-ref fork-pin", message)
+                self.assertIn(f"Ubertooth {commit[:7]}", message)
+                self.assertIn("sets no LIBBTBB_REF", message)
+                self.assertIn("name a libbtbb commit", message)
 
     def test_a_pin_that_is_not_a_commit_says_so(self):
         variable = self._commit(self.fork, "install.sh", 'LIBBTBB_REF="${REF}"\n')
@@ -336,6 +341,19 @@ class ForkPinRefTests(unittest.TestCase):
             self._resolve(variable)
         self.assertIn("--libbtbb-ref fork-pin", str(raised.exception))
         self.assertIn("not a literal commit", str(raised.exception))
+
+    def test_a_pin_that_can_move_is_refused_not_resolved(self):
+        # fork-pin is a promise of one exact commit, so a branch or tag name
+        # is refused rather than built at whatever it points to today.
+        for name in ("master", "v1.0"):
+            with self.subTest(pin=name):
+                moving = self._commit(self.fork, "install.sh", _install_sh(name))
+                with self.assertRaises(cli.ManifestError) as raised:
+                    self._resolve(moving)
+                message = str(raised.exception)
+                self.assertIn("--libbtbb-ref fork-pin", message)
+                self.assertIn(f"sets LIBBTBB_REF={name}", message)
+                self.assertIn("not a commit", message)
 
     def test_a_pin_the_libbtbb_checkout_lacks_is_reported(self):
         missing = self._commit(self.fork, "install.sh", _install_sh("b" * 40))

@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import stat
 import subprocess
@@ -114,25 +115,35 @@ def make_source(root: Path):
     return source, short
 
 
+# Never read the developer's git configuration in a fixture repository.
+GIT_ENV = {
+    "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.invalid",
+    "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.invalid",
+    "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+}
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True,
+        env={**os.environ, **GIT_ENV},
+    ).stdout.strip()
+
+
 def make_libbtbb(root: Path):
-    """A throwaway libbtbb checkout; returns its path, commit and short commit."""
+    """A throwaway libbtbb with two commits; returns its path and the older
+    commit, long and short, so a lookup that lands on HEAD cannot pass."""
     libbtbb = root / "libbtbb"
-    subprocess.run(["git", "init", "-q", str(libbtbb)], check=True)
-    (libbtbb / "lell.c").write_text("libbtbb\n")
-    subprocess.run(["git", "-C", str(libbtbb), "add", "lell.c"], check=True)
-    subprocess.run(
-        ["git", "-C", str(libbtbb), "-c", "user.name=Test",
-         "-c", "user.email=test@example.invalid", "commit", "-qm", "libbtbb"],
-        check=True,
-    )
-
-    def rev_parse(*args):
-        return subprocess.run(
-            ["git", "-C", str(libbtbb), "rev-parse", *args],
-            check=True, capture_output=True, text=True,
-        ).stdout.strip()
-
-    return libbtbb, rev_parse("HEAD"), rev_parse("--short", "HEAD")
+    libbtbb.mkdir()
+    _git(libbtbb, "init", "-q", "-b", "master")
+    commits = []
+    for text in ("libbtbb\n", "libbtbb, later\n"):
+        (libbtbb / "lell.c").write_text(text)
+        _git(libbtbb, "add", "lell.c")
+        _git(libbtbb, "commit", "-qm", text.strip())
+        commits.append(_git(libbtbb, "rev-parse", "HEAD"))
+    pin = commits[0]
+    return libbtbb, pin, _git(libbtbb, "rev-parse", "--short", pin)
 
 
 class RunnerFixture:
@@ -176,25 +187,12 @@ class RunnerFixture:
             'LIBBTBB_URL="https://github.com/SqueakyFloors/libbtbb.git"\n'
             f'LIBBTBB_REF="{commit}"\n'
         )
-        git = ["git", "-C", str(self.source)]
-        subprocess.run([*git, "add", "install.sh"], check=True)
-        subprocess.run(
-            [*git, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
-             "commit", "-qm", "pin libbtbb"],
-            check=True,
-        )
-
-        def rev_parse(*args):
-            return subprocess.run(
-                [*git, "rev-parse", *args], check=True, capture_output=True, text=True,
-            ).stdout.strip()
-
-        self.write_tool(rev_parse("--short", "HEAD"), libbtbb_short)
-        return rev_parse("HEAD")
+        _git(self.source, "add", "install.sh")
+        _git(self.source, "commit", "-qm", "pin libbtbb")
+        self.write_tool(_git(self.source, "rev-parse", "--short", "HEAD"), libbtbb_short)
+        return _git(self.source, "rev-parse", "HEAD")
 
     def config(self, url, **overrides):
-        import os
-
         environment = {"PATH": f"{self.bin}{os.pathsep}{os.environ.get('PATH', '')}"}
         environment.update(overrides.pop("environment", {}))
         values = dict(

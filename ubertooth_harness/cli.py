@@ -189,9 +189,17 @@ def _fork_pin_ref(ubertooth) -> str:
         raise ManifestError(f"--libbtbb-ref {FORK_PIN}: {error}") from None
     if pin is None:
         raise ManifestError(
+            f"--libbtbb-ref {FORK_PIN}: Ubertooth {ubertooth.short_commit} has "
+            "no install.sh, or its install.sh sets no LIBBTBB_REF; name a "
+            "libbtbb commit with --libbtbb-ref instead"
+        )
+    if not libbtbbpin.is_commit(pin.ref):
+        # fork-pin promises the exact libbtbb a commit asks for, so a name
+        # that can move (a branch or tag) is refused rather than resolved.
+        raise ManifestError(
             f"--libbtbb-ref {FORK_PIN}: install.sh at Ubertooth "
-            f"{ubertooth.short_commit} sets no LIBBTBB_REF; name a libbtbb "
-            "commit with --libbtbb-ref instead"
+            f"{ubertooth.short_commit} sets LIBBTBB_REF={pin.ref}, which is "
+            "not a commit; name a libbtbb ref with --libbtbb-ref instead"
         )
     print(
         f"note: libbtbb ref '{FORK_PIN}' is {pin.ref}, the LIBBTBB_REF "
