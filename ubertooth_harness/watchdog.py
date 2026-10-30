@@ -22,12 +22,18 @@ boot cause that gained `watchdog` with no counter increase is recorded as a
 note.
 
 Both counters are since power-on. Cutting power to the board (unplugging it,
-or switching its hub port) starts them again, which the comparison sees as a
-count that went backwards: that re-baselines the board rather than warning.
+or switching its hub port) starts them again, and so does flashing firmware
+that does not recognize the record it finds: the comparison sees a count that
+went backwards, or a boot cause that has gained power-on or brown-out, and
+re-baselines the board rather than warning.
 
-What fails a run is a board that does not come back: a read that finds no such
-board is retried until the recovery window runs out. Firmware too old for the
-request reads as "watchdog not reported", which is not a failure either.
+What fails a run is a board that does not answer. A record that printed is the
+read, whatever became of the rest of the command, because the board that
+printed it answered; a read with no record is tried again, since a board the
+watchdog has just reset refuses every request until the host notices it
+re-enumerated. The last try decides: a board still refusing the request there
+is firmware without it, which reads as "watchdog not reported" and is no
+failure, and anything else is a board the run cannot use again.
 """
 
 from __future__ import annotations
