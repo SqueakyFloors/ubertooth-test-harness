@@ -115,9 +115,9 @@ class HostLockTests(unittest.TestCase):
         order = []
         real = leases._try_lock
 
-        def recording(path, mode):
+        def recording(path, mode, **kwargs):
             order.append(Path(path).name)
-            return real(path, mode)
+            return real(path, mode, **kwargs)
 
         with mock.patch.object(leases, "_try_lock", recording):
             leases.acquire([B, A], holder("agent-1"), directory=self.dir, host_lock=True).release()

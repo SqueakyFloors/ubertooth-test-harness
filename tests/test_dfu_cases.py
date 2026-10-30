@@ -33,8 +33,11 @@ def signed(payload: bytes, vendor=dfuimage.VENDOR, product=dfuimage.PRODUCT) -> 
 
 
 def firmware(revision=REVISION, size=3000) -> bytes:
-    marker = f"ubertooth {revision} (builder@host) timestamp\0".encode()
-    return signed(bytes(range(256)) * (size // 256) + marker)
+    """Filler carrying the firmware info block -d reads the revision from."""
+    body = bytearray(bytes(range(256)) * (size // 256))
+    block = dfuimage.fw_info_block(revision=revision)
+    body[dfuimage.FW_INFO_OFFSET:dfuimage.FW_INFO_OFFSET + len(block)] = block
+    return signed(bytes(body))
 
 
 class FakeDfuBoard:
@@ -122,7 +125,7 @@ class FakeDfuBoard:
             # A partial write needs the old path that refused only in DFU.
             if not (self.flags.get("stuck_on_reject") or self.flags.get("partial_write_on_reject")):
                 # check_download_image() before any device is opened (e8edd15).
-                refusal = self._refusal(path.read_bytes(), "-r" in options)
+                refusal = self._refusal(path, path.read_bytes())
                 if refusal:
                     code = 0 if self.flags.get("reject_exit_zero") else 1
                     return self._result(command, code, "Checking firmware signature\n", refusal)
@@ -139,7 +142,7 @@ class FakeDfuBoard:
             Path(options[options.index("-u") + 1]).write_bytes(self._read())
         if "-d" in options:
             data = path.read_bytes()
-            refusal = self._refusal(data, "-r" in options)
+            refusal = self._refusal(path, data)
             if refusal:
                 if self.flags.get("partial_write_on_reject"):
                     # Sector 0x4000 erased and its first block written.
@@ -169,33 +172,39 @@ class FakeDfuBoard:
 
     @staticmethod
     def _marker(data):
-        start = data.find(b"ubertooth ") + len(b"ubertooth ")
-        end = data.find(b" (", start)
-        return data[start:end].decode() if start >= len(b"ubertooth ") and end > start else None
+        """The revision the image names, from its firmware info block."""
+        info = dfuimage.fw_info(data)
+        return info.revision if info is not None else None
 
-    def _refusal(self, data, reset):
-        """check_suffix() order and messages, then the -r revision marker."""
+    def _refusal(self, path, data):
+        """dfu_image_check()'s order and messages, then the firmware info
+        block. Each refusal is one line: the file, the reason, and that the
+        board was left alone."""
         if len(data) < 16:
-            return "Error: could not read 16-byte DFU suffix (file truncated?)\n"
-        _dev, product, vendor, bcd, sig, length, crc = struct.unpack("<HHHH3sBI", data[-16:])
-        refusal = (
-            f"Unknown DFU suffix length: {length}\n" if length != 16
-            else f"Unknown DFU version: {bcd:04x}\n" if bcd not in (0x0100, 0x0101)
-            else "DFU Signature mismatch: not a DFU file\n" if sig != b"UFD"
-            else "CRC mismatch: calculated: 0x0, found: 0x1\n" if crc != dfuimage.dfu_crc(data[:-4])
-            else f"DFU suffix is for USB vendor 0x{vendor:04x}, not 0x1d50: "
-            "this image is for another device\n" if vendor != 0x1D50
-            and not self.flags.get("accept_wrong_id")
-            else f"DFU suffix is for USB product 0x{product:04x}, not 0x6003: "
-            "this image is for another device\n" if product != 0x6003
-            and not self.flags.get("accept_wrong_id")
-            else ""
-        )
-        if refusal:
-            return refusal + "Signature check failed, firmware will not be updated\n"
-        if reset and self._marker(data) is None:
-            return "Unable to determine expected firmware revision from image\n"
-        return ""
+            reason = f"Too short for a 16-byte DFU suffix: the file is {len(data)} byte(s)"
+        else:
+            _dev, product, vendor, bcd, sig, length, crc = struct.unpack(
+                "<HHHH3sBI", data[-16:])
+            reason = (
+                f"Unknown DFU suffix length: {length}" if length != 16
+                else f"Unknown DFU version: {bcd:04x}" if bcd not in (0x0100, 0x0101)
+                else "DFU Signature mismatch: not a DFU file" if sig != b"UFD"
+                else "CRC mismatch: calculated: 0x0, found: 0x1"
+                if crc != dfuimage.dfu_crc(data[:-4])
+                else f"DFU suffix is for USB vendor 0x{vendor:04x}, not 0x1d50: "
+                "this image is for another device" if vendor != 0x1D50
+                and not self.flags.get("accept_wrong_id")
+                else f"DFU suffix is for USB product 0x{product:04x}, not 0x6003: "
+                "this image is for another device" if product != 0x6003
+                and not self.flags.get("accept_wrong_id")
+                # The suffix is fine; a file from another tree has no block.
+                else "" if self._marker(data) is not None
+                else "there is no firmware info block here at offset "
+                f"0x{dfuimage.FW_INFO_OFFSET:x}"
+            )
+        if not reason:
+            return ""
+        return f"error: {path}: {reason}; firmware will not be updated\n"
 
     def _sign(self, command, path):
         if path.suffix != ".bin":

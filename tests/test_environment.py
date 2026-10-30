@@ -239,6 +239,62 @@ class BootstrapTests(unittest.TestCase):
     def test_marker_names_match(self):
         self.assertEqual(bootstrap.MARKER, environment.MARKER)
 
+    def test_acroname_api_is_installed_only_on_request_and_hash_checked(self):
+        def installs(argv):
+            installed = []
+
+            def install(venv, requirements, *, require_hashes=False):
+                installed.append((Path(requirements).name, require_hashes))
+
+            with mock.patch.object(bootstrap, "find_base_python", return_value="py"), \
+                    mock.patch.object(bootstrap, "check_venv_support"), \
+                    mock.patch.object(bootstrap, "ensure_venv", return_value=False), \
+                    mock.patch.object(bootstrap, "install_requirements", side_effect=install), \
+                    mock.patch("sys.stdout"):
+                self.assertEqual(0, bootstrap.main(argv))
+            return installed
+
+        self.assertEqual([("requirements.txt", False)], installs([]))
+        self.assertEqual(
+            [("requirements.txt", False), ("requirements-acroname.txt", True)],
+            installs(["--with-acroname"]),
+        )
+
+    def test_acroname_requirements_pin_every_package_with_hashes(self):
+        lines = (PROJECT / bootstrap.ACRONAME_REQUIREMENTS).read_text().replace(
+            "\\\n", " ").splitlines()
+        pins = [line.split() for line in lines if line and not line.startswith("#")]
+        self.assertEqual(
+            ["brainstem==2.12.5", "cffi==2.1.1", "pycparser==3.12"],
+            [pin[0] for pin in pins],
+        )
+        for pin in pins:
+            self.assertTrue(pin[1:], pin[0])
+            self.assertTrue(all(h.startswith("--hash=sha256:") and len(h) == 78
+                                for h in pin[1:]), pin[0])
+        self.assertIn(
+            "--hash=sha256:7bb4b41dbf18cccb72c8a7aada011b0a4baa73f396ae482c2067ab7b918a17f0",
+            pins[0],
+        )
+        # Proprietary: never in the default requirements.
+        self.assertNotIn("brainstem", (PROJECT / "requirements.txt").read_text())
+
+    def test_hash_checked_install_passes_require_hashes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            venv = Path(directory) / ".venv"
+            commands = []
+
+            def run(argv, *, env=None, timeout=None, capture=True):
+                commands.append([str(a) for a in argv])
+                return mock.Mock(returncode=0)
+
+            with mock.patch.object(bootstrap, "probe", return_value={"prefix": str(venv)}), \
+                    mock.patch.object(bootstrap, "_run", side_effect=run):
+                bootstrap.install_requirements(
+                    venv, PROJECT / bootstrap.ACRONAME_REQUIREMENTS, require_hashes=True
+                )
+            self.assertIn("--require-hashes", commands[0])
+
 
 if __name__ == "__main__":
     unittest.main()

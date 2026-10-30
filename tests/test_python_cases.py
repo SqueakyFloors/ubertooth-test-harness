@@ -22,7 +22,7 @@ from tests.test_build import (
 REPOSITORY = Path(__file__).resolve().parents[1]
 
 # btle-extcap.py as at fork d04f79e (#342), trimmed to what the cases exercise.
-EXTCAP = '''#!/usr/bin/env python3
+EXTCAP_D04F79E = '''#!/usr/bin/env python3
 import getopt, re, sys
 from subprocess import Popen, PIPE
 
@@ -183,10 +183,17 @@ def list_interfaces():
 main()
 '''
 
-# Strict: fails at fork d04f79e (SqueakyFloors/ubertooth#362).
-STRICT_EXTCAP = {"extcap-interfaces-util-fails"}
-# The fix #362 asks for: ubertooth-util's stderr passed on, its failure kept.
-FIXED_UTIL_EXTCAP = EXTCAP.replace(
+# Failed at fork d04f79e (SqueakyFloors/ubertooth#362, fixed in 779f4f7).
+UTIL_FAILS_EXTCAP = {"extcap-interfaces-util-fails"}
+# Printed the usage text after a described error before fork 12211ce (#406).
+USAGE_AFTER_ERROR_EXTCAP = {
+    "extcap-unknown-option", "extcap-refuses-extcap-reload-option",
+    "extcap-refuses-extcap-control-in", "extcap-refuses-extcap-control-out",
+    "extcap-refuses-extcap-config-option-name",
+}
+# btle-extcap.py as on fork main since 12211ce: ubertooth-util's failure is
+# kept (779f4f7, #374) and a described error prints no usage text.
+EXTCAP = EXTCAP_D04F79E.replace(
     """    out = Popen(['ubertooth-util', '-U', 'all', '-s'], stdout=PIPE, stderr=PIPE,
                 universal_newlines=True).communicate()[0]
 """, """    proc = Popen(['ubertooth-util', '-U', 'all', '-s'], stdout=PIPE,
@@ -194,8 +201,9 @@ FIXED_UTIL_EXTCAP = EXTCAP.replace(
     out = proc.communicate()[0]
     if proc.returncode != 0:
         sys.exit(1)
-""")
-assert FIXED_UTIL_EXTCAP != EXTCAP
+""").replace("usage(sys.stderr); sys.exit(1)", "sys.exit(1)")
+assert EXTCAP.count("sys.exit(1)") > EXTCAP_D04F79E.count("sys.exit(1)")
+assert "usage(sys.stderr)" not in EXTCAP
 COMPREHENSIVE_INTERFACES = (
     "extcap-interfaces", "extcap-interfaces-serials", "extcap-interfaces-version",
     "extcap-interfaces-version-word", "extcap-interfaces-stray-word",
@@ -267,12 +275,19 @@ class PythonToolCaseTests(unittest.TestCase):
                        for case_id, case in self.cases("comprehensive").items()
                        if case_id.startswith("extcap")}
         failing = {case_id for case_id, (skip, failure) in results.items() if failure}
-        self.assertEqual(STRICT_EXTCAP, failing)
+        self.assertEqual(set(), failing)
         self.assertTrue(all(not skip for skip, _failure in results.values()))
 
-    def test_the_strict_case_passes_once_a_failing_util_is_reported(self):
+    def test_the_util_and_usage_cases_fail_at_d04f79e(self):
         with tempfile.TemporaryDirectory() as directory:
-            fork = FakeFork(directory, f"0: {SERIAL_A}\n", FIXED_UTIL_EXTCAP)
+            fork = FakeFork(directory, f"0: {SERIAL_A}\n", EXTCAP_D04F79E)
+            failing = {case_id for case_id, case in self.cases("comprehensive").items()
+                       if case_id.startswith("extcap") and run_case(case, fork.env)[1]}
+        self.assertEqual(UTIL_FAILS_EXTCAP | USAGE_AFTER_ERROR_EXTCAP, failing)
+
+    def test_the_util_case_passes_once_a_failing_util_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fork = FakeFork(directory, f"0: {SERIAL_A}\n", EXTCAP)
             case = self.cases("comprehensive")["extcap-interfaces-util-fails"]
             self.assertEqual(("", ""), run_case(case, fork.env))
             # The stand-in is used only by this case: the listing still works.
@@ -287,7 +302,7 @@ class PythonToolCaseTests(unittest.TestCase):
         self.assertEqual({
             "extcap-version-attached", "extcap-version-next-word", "extcap-version-bare",
             "extcap-stray-word", "extcap-help-stray-word", "extcap-capture-channel-40",
-        } | STRICT_EXTCAP, failing)
+        } | UTIL_FAILS_EXTCAP | USAGE_AFTER_ERROR_EXTCAP, failing)
 
     def test_extcap_without_the_source_fails_rather_than_skips(self):
         case = self.cases("smoke")["extcap-dlts"]

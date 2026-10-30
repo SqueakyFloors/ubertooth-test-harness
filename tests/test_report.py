@@ -88,6 +88,35 @@ class ReportTests(unittest.TestCase):
             self.assertNotIn(SERIAL, report)
             self.assertIn("<serial>", report)
 
+    def test_devices_row_names_a_dk_by_its_jlink_serial(self):
+        # A BLE run's devices are an Ubertooth and one or two nRF52840 DKs.
+        # The DK's registry identity has no `serial`, so the row used to name
+        # it with nothing at all.
+        from ubertooth_harness.report import _Run, _setup_rows
+
+        records = []
+        identities = (
+            ("UT_Linux4", {"serial": SERIAL}),
+            ("DK_Linux1", {"jlink serial": "001050210121"}),
+        )
+        for index, (alias, identity) in enumerate(identities):
+            check = {"phase": "preflight", "check_id": f"p{index}",
+                     "check_name": "Device serial"}
+            records.append({"run_id": "r", "event_type": "check_started",
+                            "status": "running",
+                            "timestamp": "2026-01-01T00:00:00+00:00",
+                            "details": {**check, "resource": alias,
+                                        "resource_identity": identity}})
+            records.append({"run_id": "r", "event_type": "check_finished",
+                            "status": "passed",
+                            "timestamp": "2026-01-01T00:00:00+00:00",
+                            "details": check})
+
+        devices = dict(_setup_rows(_Run(records)))["Devices"]
+
+        self.assertIn(f"UT_Linux4 serial {SERIAL}", devices)
+        self.assertIn("DK_Linux1 serial 001050210121", devices)
+
     def test_redaction_masks_32_hex_tokens_but_not_longer_digests(self):
         from ubertooth_harness.report import _redact
 

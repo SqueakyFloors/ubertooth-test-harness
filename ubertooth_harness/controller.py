@@ -24,7 +24,7 @@ commit listed for that ref, and the runner runs exactly that commit, so a
 stale or differently configured runner checkout cannot substitute another
 one; the commit is recorded in ``run.json``.
 
-Target runners connect to ``/ws/runner`` and speak protocol v2
+Target runners connect to ``/ws/runner`` and speak protocol v3
 (``ubertooth_harness/protocol.py``), decoded strictly. Each run is stored as a
 flat directory ``<results dir>/<run_id>/`` holding ``run.json`` (the
 controller's record), ``run.jsonl`` (the runner's events appended as received,
@@ -52,11 +52,14 @@ from ubertooth_harness.gui import (
     GitRefSource,
     RefListError,
     failure_summary,
+    learned_stages,
     list_plans,
     load_assets,
     planned_invocations,
+    run_stage_estimates,
     security_headers,
 )
+from ubertooth_harness.learned import STORE_FILE, EstimateStore
 from ubertooth_harness.report import write_report
 from ubertooth_harness.protocol import (
     MAX_RUNNER_MESSAGE_BYTES,
@@ -193,9 +196,10 @@ class Target:
 
 _RUN_FIELDS = (
     "run_id", "target", "request_id", "ref", "commit", "plan", "suite", "tests",
-    "build",
+    "build", "flash_build",
     "status", "created_at", "finished_at", "exit_code", "reason",
     "runner_run_directory", "report", "report_error", "cancel_requested", "adopted",
+    "learned_durations",
 )
 
 
@@ -219,6 +223,9 @@ class Run:
     suite: str | None = None
     tests: list = dataclasses.field(default_factory=list)
     build: bool = False
+    # The boards were flashed with the build first (only with build; runs
+    # stored before protocol 3 did not flash).
+    flash_build: bool = False
     status: str = "running"
     created_at: str = dataclasses.field(default_factory=_now)
     finished_at: str | None = None
@@ -232,6 +239,8 @@ class Run:
     # Created from a runner report rather than a start request (for example,
     # the run outlived a controller restart).
     adopted: bool = False
+    # Its durations are already in the estimate store; see Controller.learn.
+    learned_durations: bool = False
     seen: set = dataclasses.field(default_factory=set, repr=False)
     last_event_sequence: int | None = None
     last_event_type: str | None = None
@@ -348,6 +357,11 @@ class Controller:
         # Lists the refs a run may name; None refuses every run.
         self.ref_source = ref_source
         self.plans_dir = Path(plans_dir).expanduser()
+        # Durations learned from the runs stored here, kept beside them.
+        self.estimates = EstimateStore.load(self.results_dir / STORE_FILE, log=log)
+        self._learning = asyncio.Lock()
+        # Runs that ended without being learned from (see _load_runs).
+        self._unlearned: list[str] = []
         # The listening port; the request guard rejects everything until set.
         self.port: int | None = None
         self.targets: dict[str, Target] = {}
@@ -376,6 +390,15 @@ class Controller:
             if run.run_id != directory.name:
                 self.log(f"skipping run {directory.name}: run_id mismatch")
                 continue
+            if "learned_durations" not in data:
+                # Stored before durations were learned at all: leave it,
+                # rather than mining every old run on the first startup.
+                run.learned_durations = True
+            elif not run.active and not run.learned_durations:
+                # Terminal but not learned: the controller stopped between
+                # recording the end and learning from it. The monitor picks
+                # it up once the service is serving.
+                self._unlearned.append(run.run_id)
             self._load_events(run)
             self.runs[run.run_id] = run
 
@@ -419,6 +442,15 @@ class Controller:
         directory = (self.results_dir / run_id).resolve()
         if directory.parent != self.results_dir:
             raise _Violation(f"run_id {run_id!r} is not a flat directory name")
+        if (
+            # The learned durations live beside the run directories, so a
+            # run must not take that name (a generated run ID never does).
+            # Case-insensitively: on a Mac's filesystem Estimates.json and
+            # estimates.json are the same file.
+            directory.name.casefold() == self.estimates.path.name.casefold()
+            or directory.name.startswith(".")
+        ):
+            raise _Violation(f"run_id {run_id!r} is reserved")
         return directory
 
     def _persist(self, run: Run) -> None:
@@ -699,6 +731,9 @@ class Controller:
             self._persist(run)
             self._publish_run(run)
             self.log(f"run {run.run_id} on {target.host}: {LOST} ({run.reason})")
+            # Its records are complete as far as they go, and a test that
+            # passed in them took as long as it says.
+            await self.learn(run)
 
     def _fail_pending(self, host: str, reason: str) -> None:
         for table in (self._pending_runs, self._pending_cancels):
@@ -754,14 +789,18 @@ class Controller:
             run_id = message["run_id"]
             if run_id in self.runs:
                 raise _Violation(f"run_accepted reuses run_id {run_id}")
+            # Checked before the request is taken off the pending list, so a
+            # refused name leaves it there for a later answer.
+            directory = self._run_directory(run_id)
             del self._pending_runs[message["request_id"]]
             fields = pending.fields
             run = Run(
                 run_id=run_id, target=target.host,
-                directory=self._run_directory(run_id),
+                directory=directory,
                 request_id=message["request_id"], ref=fields["ref"],
                 commit=fields["commit"], plan=fields["plan"], suite=fields["suite"],
                 tests=list(fields["tests"]), build=fields["build"],
+                flash_build=fields["flash_build"],
             )
             self.runs[run_id] = run
             self._persist(run)
@@ -848,12 +887,90 @@ class Controller:
                 self._publish_target(target)
             self._publish_run(run)
             self.log(f"run {run.run_id} on {target.host}: {run.status}")
+            await self.learn(run)
         elif kind == "protocol_error":
             target.last_runner_protocol_error = message["reason"]
             self.log(f"{target.host} rejected a controller message: {message['reason']}")
 
+    # ----- learned durations -----------------------------------------------
+
+    async def learn(self, run: Run) -> int:
+        """Take this finished run's clean durations into the estimate store.
+
+        Reads only the controller's own copy of run.jsonl. Every sample is
+        one test invocation (or stage) that passed, so a run that failed
+        still teaches what its passing tests took. Only a cancellation
+        leaves this method by raising: a learning failure costs the
+        countdown accuracy, nothing else.
+
+        At most once per run, recorded in run.json: a runner whose connection
+        drops as it reports the end reports it again after reconnecting, and
+        counting that run twice would push every other sample out of the
+        window. A run that ended without being learned from is picked up by
+        ``learn_pending`` at the next startup.
+        """
+        async with self._learning:
+            # Claimed under the lock and before the first await, so two
+            # overlapping reports of one run's end cannot both learn it.
+            if run.learned_durations:
+                return 0
+            run.learned_durations = True
+            try:
+                events = await asyncio.to_thread(self.read_events, run)
+                # Learned into a copy, which the worker thread does not
+                # save: nothing is written until the claim, the store and
+                # the file change together below, so a cancellation here
+                # leaves no samples behind.
+                updated = self.estimates.copy()
+                kept = await asyncio.to_thread(
+                    updated.learn_from_run, events, host=run.target, save=False
+                )
+            except BaseException as error:  # noqa: BLE001 - the run result stands
+                # Not learned after all: leave the run for another attempt.
+                run.learned_durations = False
+                if isinstance(error, asyncio.CancelledError):
+                    raise
+                self.log(f"run {run.run_id}: could not learn durations: {error}")
+                return 0
+            # Nothing awaits from here, so a cancellation cannot land
+            # between the file and the record of what is in it.
+            if kept and not updated.save():
+                # The file could not be written (save logs why), so neither
+                # the samples nor the claim stand: another attempt may get
+                # them, and a restart finds the run still unlearned.
+                run.learned_durations = False
+                return 0
+            self.estimates = updated
+            try:
+                self._persist(run)
+            except OSError as error:
+                # The samples are in estimates.json but the run is not
+                # marked: a later startup may count this one run twice.
+                self.log(f"run {run.run_id}: learned durations, but {error}")
+        if kept:
+            self.log(f"run {run.run_id}: learned {kept} duration sample(s)")
+        return kept
+
+    async def learn_pending(self) -> int:
+        """Learn from stored runs that ended before their durations were taken.
+
+        Learning is recorded per run, so a controller that stopped between
+        a run's end and its samples picks it up here instead of losing them.
+        """
+        kept = 0
+        for run_id in list(self._unlearned):
+            self._unlearned.remove(run_id)
+            run = self.runs.get(run_id)
+            if run is not None and not run.active:
+                kept += await self.learn(run)
+        return kept
+
     async def monitor(self) -> None:
         """Mark targets offline after missed heartbeats; expire stale requests."""
+        try:
+            await self.learn_pending()
+        except Exception as error:  # noqa: BLE001 - the watchdog must run
+            self.log(f"could not learn from stored runs: {error}")
         while True:
             await asyncio.sleep(self.monitor_interval_s)
             self.check_heartbeats()
@@ -958,6 +1075,7 @@ class Controller:
     async def start_run(
         self, host: str, *, ref: str, plan: str, suite: str,
         tests: list[str], build: bool, commit: str | None = None,
+        flash_build: bool = True,
     ) -> Run:
         # Checked first: everything after it runs without yielding until the
         # request is recorded as pending.
@@ -977,7 +1095,8 @@ class Controller:
         request_id = uuid.uuid4().hex
         fields = dict(
             ref=ref, commit=commit, plan=plan, suite=suite, tests=list(tests),
-            build=build,
+            # Flashing applies only to a run that builds (#135).
+            build=build, flash_build=bool(build and flash_build),
         )
         try:
             text = encode_controller_message("run", request_id=request_id, **fields)
@@ -1175,16 +1294,22 @@ ENDPOINTS = {
     "GET /": "this summary (a browser asking for HTML is sent to /ui/)",
     "GET /ui/": "web GUI",
     "GET /api/refs": "branches and tags of the Ubertooth repository (git ls-remote)",
-    "GET /api/plans": "test plans with suites, tests and duration estimates",
+    "GET /api/plans": (
+        "test plans with suites, tests and duration estimates "
+        "(?target=HOST uses the durations learned on that target)"
+    ),
     "GET /api/targets": "registered targets",
     "GET /api/targets/{host}": "one target",
     "POST /api/targets/{host}/runs": "start a run: {ref, commit, plan, suite, tests, build}",
     "GET /api/runs": "runs, newest first (?target=HOST)",
-    "GET /api/runs/{run_id}": "one run with its events, failure summary and planned invocations",
+    "GET /api/runs/{run_id}": (
+        "one run with its events, failure summary, planned invocations and "
+        "learned stage estimates"
+    ),
     "GET /api/runs/{run_id}/report.md": "the run's report",
     "POST /api/runs/{run_id}/cancel": "cancel an active run: {reason}",
     "WS /ws/live": "live target and run updates (?run_id=ID adds that run's events)",
-    "WS /ws/runner": "target runner protocol v2",
+    "WS /ws/runner": "target runner protocol v3",
 }
 
 
@@ -1202,6 +1327,8 @@ def create_app(controller: Controller):
         suite: str
         tests: list[str] = Field(default_factory=list)
         build: bool = False
+        # Flash the boards with the build first: the default when building.
+        flash_build: bool = True
 
     class CancelRequest(BaseModel):
         model_config = ConfigDict(extra="forbid", strict=True)
@@ -1252,9 +1379,19 @@ def create_app(controller: Controller):
         return await controller.list_refs()
 
     @app.get("/api/plans")
-    async def get_plans():
-        plans = await asyncio.to_thread(list_plans, controller.plans_dir)
-        return {"plans": plans}
+    async def get_plans(target: str | None = None):
+        # With a target, each test's estimate is what that host's own
+        # finished runs measured; the stages it has learned come with it.
+        if target is not None and not valid_identifier(target):
+            raise ControllerError("target must be a registry host name", 422)
+        estimates = controller.estimates
+        plans = await asyncio.to_thread(
+            list_plans, controller.plans_dir, estimates=estimates, target=target
+        )
+        return {
+            "plans": plans, "target": target,
+            "stages": learned_stages(estimates, target),
+        }
 
     @app.get("/api/targets")
     async def list_targets():
@@ -1272,6 +1409,7 @@ def create_app(controller: Controller):
         run = await controller.start_run(
             host, ref=request.ref, plan=request.plan, suite=request.suite,
             tests=request.tests, build=request.build, commit=request.commit,
+            flash_build=request.flash_build,
         )
         return {"run": run.view()}
 
@@ -1289,9 +1427,13 @@ def create_app(controller: Controller):
         run = controller.get_run(run_id)
         events = await asyncio.to_thread(controller.read_events, run)
         view = run.view()
+        estimates = controller.estimates
         return {
             "run": view, "events": events, "failures": failure_summary(view, events),
-            "invocations": planned_invocations(events),
+            "invocations": planned_invocations(events, estimates=estimates),
+            "stages": run_stage_estimates(
+                estimates, events, run.target, build=run.build
+            ),
         }
 
     @app.get("/api/runs/{run_id}/report.md")
