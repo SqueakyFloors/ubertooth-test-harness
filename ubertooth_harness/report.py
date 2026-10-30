@@ -19,6 +19,7 @@ from ubertooth_harness import targets
 from ubertooth_harness.events import REPORT, RUN_LOG
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.rawlog import NOTE, TAGS, CommandCapture, format_command_record
+from ubertooth_harness.rf import describe as describe_placement
 from ubertooth_harness.watchdog import wait_counts
 
 
@@ -170,6 +171,37 @@ def _identity_serial(identity: Mapping) -> str:
         if value:
             return str(value)
     return ""
+
+
+def _resource_text(details: Mapping) -> str:
+    """role=alias for every bound resource, with its RF placement where the
+    registry records one, so a result reads next to what it was taken at."""
+    placements = details.get("rf") or {}
+    return ", ".join(
+        f"{role}={alias}"
+        + (f" [{describe_placement(placements[role])}]" if role in placements else "")
+        for role, alias in details.get("resources", {}).items()
+    )
+
+
+def _placement_rows(run: _Run) -> list[tuple[str, str]]:
+    """One row naming the RF placement of every board the run used."""
+    placed = {}
+    for invocation in run.manifest.get("invocations") or []:
+        resources = invocation.get("resources") or {}
+        for role, record in (invocation.get("resource_placements") or {}).items():
+            alias = resources.get(role)
+            if alias:
+                placed[alias] = record
+    if not placed:
+        return []
+    return [(
+        "RF placement",
+        "; ".join(
+            f"{alias}: {describe_placement(record)}"
+            for alias, record in sorted(placed.items())
+        ),
+    )]
 
 
 def _setup_rows(run: _Run) -> list[tuple[str, str]]:
@@ -342,6 +374,7 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
             "; ".join(f"{item.get('resource')} {item.get('lock')}" for item in external)
             + " (held for the whole run)",
         ))
+    rows.extend(_placement_rows(run))
     if artifacts:
         rows.append((
             "Artifacts",
@@ -538,7 +571,7 @@ def _results_table(run: _Run) -> list[str]:
         started = record["started"]
         details = started["details"]
         finished = record["finished"]
-        resources = ", ".join(f"{k}={v}" for k, v in details.get("resources", {}).items())
+        resources = _resource_text(details)
         where = details.get("host", "") + (f" ({resources})" if resources else "")
         if finished is None:
             status, failed, skipped, reason = "did not finish", "", "", ""
@@ -739,7 +772,7 @@ def _transcript(run: _Run) -> list[str]:
         elif kind == "preflight_finished":
             line(event, f"=== PREFLIGHT EXIT: {status}{_reason(details)} ===")
         elif kind == "test_started":
-            resources = ", ".join(f"{k}={v}" for k, v in details.get("resources", {}).items())
+            resources = _resource_text(details)
             suffix = f" ({resources})" if resources else ""
             line(event, f"=== TEST {details.get('invocation_id')}: {details.get('test_name')} on {details.get('host')}{suffix} ===")
         elif kind == "known_target":

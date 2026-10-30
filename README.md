@@ -133,6 +133,10 @@ Every test accepts `platforms:` (`linux`, `macos`, no duplicates) beside its
       platforms: [linux]
 ```
 
+Every test that binds hardware also accepts `rf:`, which asks for a board by
+where it sits on the bench, one requirement per hardware role (see
+[RF placement](#rf-placement-where-a-board-sits-on-the-bench)).
+
 The two select separately: `hosts:` says which registered hosts the step may
 run on, `platforms:` which of them can run it. A host whose platform the step
 does not list is left out as not applicable (see
@@ -155,6 +159,61 @@ roles require explicit aliases; a future explicit `all pairs` policy will be
 separate. Target-runner discovery is
 reconciled as present/missing/unknown before execution and never silently
 reassigns an alias.
+
+### RF placement: where a board sits on the bench
+
+A unit may record its RF placement, so a test can ask for a weak link and a
+report can say what its figures were taken at. `rf:` is set by hand and
+describes the bench; the harness never measures it:
+
+```yaml
+  UT_Linux2:
+    type: Ubertooth
+    attached to: Host_Linux
+    identity:
+      serial: ...
+    rf:
+      antenna: true        # is the antenna attached
+      attenuation_db: 20   # inline attenuation between the board and the air
+      distance_m: 1        # how far from the rest of the bench (optional)
+```
+
+A unit with no `rf:` is taken to be an ordinary one: antenna attached, no
+attenuation, distance not recorded. Keep the numbers current whenever the
+attenuator or the position changes. Only attached hardware may have a
+placement; a `Host` may not.
+
+A plan asks for a placement per hardware role:
+
+```yaml
+  - Classic Bluetooth receive:
+      hosts: [Host_Linux]
+      coverage: smoke
+      duration: 10s
+      rf:
+        Ubertooth: {min_attenuation_db: 10}
+```
+
+A requirement takes `min_attenuation_db`, `max_attenuation_db`, and `antenna`,
+and it narrows selection before the selector is read. `default` takes the
+host's default only when that board satisfies the requirement, and otherwise
+the lowest-alias board on the host that does; `each` covers the matching
+boards alone; an explicit alias that cannot satisfy the requirement fails
+planning. A host with no board placed for a role is recorded as not applicable,
+naming the requirement and what the host has instead.
+
+Tests whose cases need an ordinary link ask for one themselves, so a plan need
+not: `Classic Bluetooth receive`, `Raw receive`, `BLE extcap capture`,
+`Capture known BLE advertiser`, and `Capture known BLE connection` require
+`antenna: true` with no attenuation, which keeps a capture, a survey, or a
+followed connection off an attenuated board. A plan's `rf:` for a role
+overrides that default.
+
+Every run records the placement of each board it used, in `manifest.json`
+(`resource_placements` per invocation) and in each `test_started` record of
+`run.jsonl`. The report shows it in an `RF placement` setup row and beside the
+resources of every result and transcript heading, so a range, transmit power,
+or RSSI figure is read next to the attenuation it was taken at.
 
 ### USB power controllers
 
@@ -1277,10 +1336,16 @@ a BLE capture case ran, and `output/` when a command printed a lot):
   the summary, whose `watchdog_resets` is the run's total.
 - `report.md`: compiled from `run.jsonl` when the run ends, including failed or
   canceled runs. It lists the setup (commits, host and platform, toolchain,
-  Python, device serials and firmware, artifact hashes) and a results table,
-  then a Watchdog section when any board was read, then the full transcript.
-  A board that reset itself puts its warning in the test's Reason column too,
-  since the test itself passed.
+  Python, device serials and firmware, RF placement, artifact hashes) and a
+  results table, then a Watchdog section when any board was read, then the
+  full transcript. A board that reset itself puts its warning in the test's
+  Reason column too, since the test itself passed.
+
+Where a board the run used records an RF placement
+([RF placement](#rf-placement-where-a-board-sits-on-the-bench)), the manifest
+carries it per invocation as `resource_placements`, each `test_started` record
+repeats it as `rf`, and the report shows it in a setup row and beside the
+resources of every result and transcript heading.
 
 Each transcript line starts with the time elapsed since the run started
 (`HH:MM:SS.mmm`); the report header gives the run's UTC start time, and
