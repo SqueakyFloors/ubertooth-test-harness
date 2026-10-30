@@ -104,7 +104,13 @@ run_build() {
         --libbtbb-source "$bb" --libbtbb-ref "${LIBBTBB_REF:-$LIBBTBB_PIN}" \
         --with-python --output "$WORK/build" > "$WORK/build.json"
     cat "$WORK/build.json"
-    "$WORK/build/prefix/bin/ubertooth-util" -H
+    # -V prints the host tools' version, then reads every attached board and
+    # exits 1 if one cannot be read. Only the version line is wanted here, so
+    # the status is not what decides, as in the build step itself: a busy
+    # board on a lab host must not abort the job.
+    "$WORK/build/prefix/bin/ubertooth-util" -V > "$WORK/host-version.txt" 2>&1 || true
+    cat "$WORK/host-version.txt"
+    grep -q '^Host tools version: ' "$WORK/host-version.txt"
     test -z "$(git -C "$ut" status --porcelain)"
 
     step "host-only tests with the built tools (no Ubertooth)"

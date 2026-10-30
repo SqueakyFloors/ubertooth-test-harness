@@ -175,7 +175,7 @@ class RunnerFixture:
         tool.write_text(
             "#!/bin/sh\n"
             'if [ -n "$FAKE_SLEEP" ]; then sleep "$FAKE_SLEEP"; fi\n'
-            f'echo "libubertooth 1.1 (git-{ubertooth_short}), '
+            f'echo "Host tools version: libubertooth 1.1 (git-{ubertooth_short}), '
             f'libbtbb 1.0 (git-{libbtbb_short})"\n'
         )
         tool.chmod(tool.stat().st_mode | stat.S_IXUSR)

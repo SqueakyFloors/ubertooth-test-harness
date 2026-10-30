@@ -14,6 +14,7 @@ from ubertooth_harness.planner import TestInvocation
 from ubertooth_harness import nrfdk
 from ubertooth_harness.patterns import (
     FIRMWARE_VERSION_RE,
+    HOST_VERSION_TIMEOUT_S,
     compile_info_pattern,
     firmware_version_pattern,
     revision_pattern,
@@ -56,6 +57,19 @@ class PreflightCheck:
     expected_patterns: tuple[str, ...]
     expected_revision: str
     timeout_s: float = 5.0
+    # Same question asked a second way, for a fork commit whose tools answer
+    # it on a different option, with the pattern that says `argv` answered at
+    # all. The fallback runs only when that pattern is missing, so a tool that
+    # answered with the wrong version is reported rather than asked twice.
+    # Its result then stands in for the check's (sequencer.py).
+    fallback_argv: tuple[str, ...] | None = None
+    fallback_when_missing: str | None = None
+    # Exit statuses this check accepts. The host version check accepts 1 as
+    # well: `ubertooth-util -V` prints the host tools' version first and then
+    # reads every attached board, exiting 1 if one cannot be read, which is a
+    # board this run may not even use. The version line is what the check
+    # reads, so the patterns decide it.
+    accepted_returncodes: tuple[int, ...] = (0,)
     # Guard-only boards: the firmware API must be no older than the host
     # tools' (ubertooth-btle would stop older firmware). Newer is fine.
     minimum_api: int | None = None
@@ -67,7 +81,7 @@ class PreflightCheck:
             return f"{self.name}: command timed out"
         if result.cancelled:
             return f"{self.name}: command canceled"
-        if result.returncode != 0:
+        if result.returncode not in self.accepted_returncodes:
             return f"{self.name}: command exited {result.returncode}"
         output = result.stdout + result.stderr
         for pattern in self.expected_patterns:
@@ -101,18 +115,62 @@ class PreflightCheck:
                 )
         return ""
 
+    def needs_fallback(self, result: CommandResult) -> bool:
+        """Did the command leave the question unanswered, so ask the fallback?"""
+        if self.fallback_argv is None or self.fallback_when_missing is None:
+            return False
+        # A command killed at its deadline, or stopped by the operator, is a
+        # failed check: the fallback answering afterwards would hide that the
+        # first command hung.
+        if result.cancelled or result.timed_out:
+            return False
+        output = result.stdout + result.stderr
+        return re.search(self.fallback_when_missing, output) is None
+
+
+# `-V` is the version command in every tool the fork builds from C, and its
+# first line is the host tools' own version, printed before any board is
+# looked for (fork #813). Commits before that answered the host version on
+# `-H`/`--host-version`, where `-V` was the board's compile info, so the host
+# version check asks `-V` first and falls back to `-H`: the fallback output is
+# the same line, since both options print it from one function in
+# libubertooth.
+HOST_VERSION_ARGV = ("ubertooth-util", "-V")
+HOST_VERSION_FALLBACK_ARGV = ("ubertooth-util", "-H")
+
+# The label the host version is printed under. Its presence says the option
+# was answered; a version under it that is not the resolved one is a failure,
+# not a reason to ask the older option.
+HOST_VERSION_LABEL = "Host tools version:"
+
+# The start of the line the host version is on: `libubertooth` at the start
+# of a line, under the label or, on fork commits before the labels (fork
+# 201c3c49), on its own. Anchoring there keeps the firmware lines `-V` prints
+# under it out of the match, since one of them names the same revision
+# ("Firmware build: ubertooth git-... (builder@host) ...").
+_HOST_VERSION_LINE_START = (
+    rf"(?m)^(?:{re.escape(HOST_VERSION_LABEL)} )?libubertooth"
+)
+
 
 def host_version_patterns(ubertooth, libbtbb=None) -> tuple[str, ...]:
-    """Patterns `ubertooth-util -H` output must match for the resolved sources.
+    """Patterns the host tools' version line must match for the resolved sources.
 
-    A trailing `*` (modified source) does not match.
+    The line is what `ubertooth-util -V` prints first, and what `-H` printed
+    on older fork commits, with or without its label. A trailing `*`
+    (modified source) does not match.
     """
+    # Spaces and tabs, not \s, so a match cannot run past the end of that
+    # line onto the version of something else.
     patterns = (
-        rf"libubertooth\s+\S+\s+\({revision_pattern(ubertooth.expected_revision)}\)",
+        rf"{_HOST_VERSION_LINE_START}[ \t]+\S+[ \t]+"
+        rf"\({revision_pattern(ubertooth.expected_revision)}\)",
     )
     if libbtbb is not None:
+        # Both versions are on that one line, libbtbb's second.
         patterns += (
-            rf"libbtbb\s+\S+\s+\({revision_pattern(libbtbb.expected_revision)}\)",
+            rf"{_HOST_VERSION_LINE_START}\b.*\blibbtbb[ \t]+\S+[ \t]+"
+            rf"\({revision_pattern(libbtbb.expected_revision)}\)",
         )
     return patterns
 
@@ -248,9 +306,13 @@ class PreflightPolicy:
                         host=invocation.host,
                         resource_alias=None,
                         resource_identity=MappingProxyType({}),
-                        argv=("ubertooth-util", "-H"),
+                        argv=HOST_VERSION_ARGV,
                         expected_patterns=host_patterns,
                         expected_revision=ubertooth_source.expected_revision,
+                        timeout_s=HOST_VERSION_TIMEOUT_S,
+                        fallback_argv=HOST_VERSION_FALLBACK_ARGV,
+                        fallback_when_missing=re.escape(HOST_VERSION_LABEL),
+                        accepted_returncodes=(0, 1),
                     )
                 )
             for alias in invocation.resources.values():

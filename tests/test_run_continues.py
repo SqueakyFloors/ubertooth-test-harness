@@ -99,7 +99,7 @@ class RunContinuesTests(unittest.TestCase):
         # The CRC read fails, so its restore is skipped: nothing reported a
         # cleanup failure, but the state was never verified.
         def fail(argv):
-            return tuple(argv[3:]) == ("-v",) and argv[0] == "ubertooth-btle"
+            return tuple(argv[3:]) == ("-k",) and argv[0] == "ubertooth-btle"
 
         device = ToolUbertooth(crc="1", fail=fail)
         invocations = [

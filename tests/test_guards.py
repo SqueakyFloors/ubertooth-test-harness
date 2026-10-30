@@ -426,7 +426,7 @@ class GuardExecutionTests(unittest.TestCase):
         for command in commands:
             self.assertEqual(serial, command[2], command)
             if command[0] == "ubertooth-btle":
-                self.assertEqual(("-v",), command[3:], command)
+                self.assertEqual(("-k",), command[3:], command)
             else:
                 self.assertEqual("ubertooth-util", command[0])
                 self.assertEqual(1, len(command[3:]), command)

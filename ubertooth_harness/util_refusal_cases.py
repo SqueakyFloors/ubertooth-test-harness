@@ -82,10 +82,14 @@ def _refuse(words, patterns, *, forbidden=FORBIDDEN, returncodes=(1,)) -> Step:
 
 
 def _host_version() -> Step:
-    # Nothing on a device to restore. -H never opens one; it records that the
-    # tool still runs.
-    return tool_step("host-version", TOOL, ("-H",), returncodes=(0,),
-                     patterns=(r"libubertooth ",), forbidden=(NO_BOARD_NOTE,))
+    # Nothing on a device to restore; this records that the tool still runs.
+    # -V prints the host tools' version before looking for a board, and under
+    # the no-device switch it reports none attached and exits 0 without the
+    # switch's own note, which belongs to a command that wanted a board.
+    return tool_step("host-version", TOOL, ("-V",), returncodes=(0,),
+                     patterns=(r"Host tools version: libubertooth ",
+                               r"Firmware version: no Ubertooth attached"),
+                     forbidden=(NO_BOARD_NOTE,))
 
 
 def _case(case_id, name, steps, expected_state) -> StateCase:
