@@ -401,7 +401,13 @@ class Builder:
         what it decided itself, in ``build_step_finished``, which is the line
         report.md and the GUI show. Set ``status`` and ``reason`` on the
         yielded outcome to say more than "passed"; a BuildError raised inside
-        is the step's failure and its reason.
+        is the step's failure and its reason. Reasons stay to one line: the
+        marker they land in is one line.
+
+        Anything that is not a BuildError (an executor OSError, Ctrl-C in a
+        place nothing handles) leaves the step open with no record, as it
+        leaves the build itself without a ``build_finished``; report.md then
+        says the step did not finish, which is what happened.
         """
         self.publisher.emit(
             "build_step_started", "running",
@@ -581,10 +587,15 @@ class Builder:
                     if failures:
                         raise BuildError(f"{command.name}: {failures}")
                     # Both answered, with a version this build did not ask
-                    # for; _run_plan raises below with both revisions.
+                    # for; _run_plan raises below with both revisions. The
+                    # reason carries one line, not the whole of -V: the
+                    # firmware lines it prints under the version would break
+                    # the step's own marker in the transcript.
+                    reported = _host_version_line(host_version).splitlines()
                     step["status"] = "failed"
                     step["reason"] = (
-                        f"not the resolved revision: {host_version or 'no version line'}"
+                        "not the resolved revision: "
+                        + (reported[0] if reported else "no version line")
                     )
                     continue
                 if result.timed_out or result.returncode != 0:

@@ -760,15 +760,15 @@ def _transcript(run: _Run) -> list[str]:
             close_build_step(event)
             open_step = details.get("step_name", details.get("step_id", ""))
             line(event, f"+++ {open_step} +++")
-            build_step = [open_step, "passed"]
+            build_step = [open_step, "passed", details.get("step_id")]
             continue
         elif kind == "build_step_finished":
             # The step's own outcome, which its commands do not give: a step
-            # may accept a command that exited non-zero.
-            name = details.get("step_name") or details.get("step_id", "")
-            if build_step is not None:
-                name = build_step[0]
+            # may accept a command that exited non-zero. A record for some
+            # other step leaves the open one to be closed as it was before.
+            if build_step is not None and build_step[2] == details.get("step_id"):
                 build_step = None
+            name = details.get("step_name") or details.get("step_id", "")
             line(event, f"--- {name} EXIT: {status}{_reason(details)} ---")
             continue
         elif kind == "build_finished":

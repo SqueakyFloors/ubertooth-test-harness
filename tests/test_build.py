@@ -496,6 +496,41 @@ class BuilderTests(unittest.TestCase):
               / "app.js").read_text(encoding="utf-8")
 
         self.assertIn('kind === "build_step_finished"', js)
+        self.assertIn(
+            '`--- ${details.step_name ?? details.step_id ?? ""} EXIT: ${status}'
+            '${details.reason ? ": " + details.reason : ""} ---`',
+            js,
+        )
+
+    def test_a_mismatched_version_reason_is_one_line(self):
+        # -V prints the attached board's firmware lines under the version;
+        # the step's reason lands in a one-line marker in the transcript.
+        with tempfile.TemporaryDirectory() as work:
+            plan = make_plan(work)
+            executor = FakeBuildExecutor(
+                plan,
+                host_version=(
+                    "Host tools version: libubertooth 1.1 (git-ccccccc), "
+                    "libbtbb 1.0 (git-bbbbbbb)\n"
+                    "Firmware version: bluetooth_rxtx git-ccccccc (API:1.07)\n"
+                    "libusb_claim_interface error -6\n"
+                ),
+            )
+
+            with self.assertRaisesRegex(BuildError, "expected"):
+                Builder(executor, publisher_in(work), run_dir=work).run(plan)
+
+            events = load_events(Path(work) / "run.jsonl")
+            step = [e for e in events if e["event_type"] == "build_step_finished"][-1]
+
+            self.assertEqual(
+                "not the resolved revision: Host tools version: libubertooth "
+                "1.1 (git-ccccccc), libbtbb 1.0 (git-bbbbbbb)",
+                step["details"]["reason"],
+            )
+            marker = next(text for text in render_run(events).splitlines()
+                          if "EXIT: failed" in text)
+            self.assertTrue(marker.endswith("---"), marker)
 
     def test_every_catalog_tool_must_come_from_the_prefix(self):
         with tempfile.TemporaryDirectory() as work:
