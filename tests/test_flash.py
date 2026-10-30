@@ -814,18 +814,43 @@ class AlternatingFlashTests(unittest.TestCase):
         self.assertIn("unselected device guard changed or became unavailable after "
                       "flash 2 (expected git-guard, got git-changed)", summary.failure_reason)
 
-    def test_index_and_suffix_selectors_are_refused(self):
+    def test_index_and_prefix_selectors_are_refused(self):
         request = self.build(2, guards=("guard",))
         runner = FlashReliabilityRunner(self.executor)
         for name, bad in (
             ("index", replace(request, rotate_serials=("1",))),
-            ("suffix", replace(request, rotate_serials=("lected",))),
-            ("guard suffix", replace(request, guard_serials=("ected",))),
+            # libubertooth matches a selector against the start of a serial,
+            # so a prefix of another selector names that board too.
+            ("prefix", replace(request, rotate_serials=("sele",))),
+            ("guard prefix", replace(request, guard_serials=("sec",))),
+            # Its match is case-insensitive, so case alone does not separate
+            # two selectors.
+            ("prefix in another case", replace(request, rotate_serials=("SELE",))),
+            ("same serial in another case", replace(request, rotate_serials=("SELECTED",))),
             ("duplicate", replace(request, rotate_serials=("selected",))),
             ("guard overlap", replace(request, rotate_serials=("guard",))),
         ):
             with self.subTest(name), self.assertRaises(HarnessError):
                 runner.validate(bad)
+
+    def test_a_selector_refused_names_the_selector_it_also_matches(self):
+        request = self.build(2, guards=("guard",))
+        with self.assertRaisesRegex(
+            HarnessError, "device selector 'sele' also matches 'selected'"
+        ):
+            FlashReliabilityRunner(self.executor).validate(
+                replace(request, rotate_serials=("sele",))
+            )
+
+    def test_a_selector_sharing_only_an_ending_is_not_an_overlap(self):
+        # libubertooth matches the start of a serial, so 'ected' does not
+        # select the board 'selected': the two name different boards, and
+        # whether 'ected' names an attached board at all is for the run to
+        # find out, not this check.
+        request = self.build(2, guards=("guard",))
+        FlashReliabilityRunner(self.executor).validate(
+            replace(request, rotate_serials=("ected",))
+        )
 
 
 class BetweenFlashesTests(unittest.TestCase):

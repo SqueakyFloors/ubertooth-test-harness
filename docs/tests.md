@@ -1288,13 +1288,10 @@ and records the last revision read from each board.
 
 **Known limits.** It measures the write-and-verify path, not what the firmware
 then does. Selectors must be full serials: libubertooth reads an all-digit
-`-U` value as a USB index and otherwise matches the end of a serial, so the
-test refuses digit-only selectors and any serial that is the ending of
-another. Harness issue
-[#126](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/126) is
-open on that overlap check: it compares the end of a serial where libubertooth
-matches the start. A manual recovery or a power cycle never turns a failed run
-into a pass.
+`-U` value as a USB index and otherwise matches, case-insensitively, the start
+of a serial, so the test refuses digit-only selectors and any selector that is
+the beginning of another, which would name the same board twice. A manual
+recovery or a power cycle never turns a failed run into a pass.
 
 ## DFU images
 
