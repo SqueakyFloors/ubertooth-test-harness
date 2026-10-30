@@ -1228,13 +1228,31 @@ Ubertooth check, `Flash reliability`, or `DFU images` holds it for the whole
 run, a `--build` run that flashes its boards with its own build takes it with
 its leases before the build and releases it after the flash stage (so it is
 held for the build as well, and two such runs on one host do not start at the
-same time), and `lease` holds it for its command with `--host-lock`, or always
-when the command is `ubertooth-dfu`. A second such command on the host fails at
-once, before any build or device command, and names the holder (owner, run,
-command, pid, and since when); `--wait-for-boards` waits for it as for a
-board. `ubertooth-harness boards` shows it as `host lock`, and the run report
-records it. Runs that neither switch power nor write firmware do not take it,
-so they still share the host.
+same time), and `lease` holds it for its command with `--host-lock`, or on its
+own when the command line names `ubertooth-dfu`. A second command that needs
+the lock fails at once, before any build or device command, and names the
+holder (owner, run, command, pid, and since when); `--wait-for-boards` waits
+for it as for a board. The run report records it. Runs that neither switch
+power nor write firmware do not take it, so they still share the host.
+
+What counts as naming `ubertooth-dfu`: the tool anywhere in the command line,
+so `sudo ubertooth-dfu ...`, `env VAR=1 ubertooth-dfu ...` and
+`sh -c "ubertooth-dfu ..."` all take the lock, matched by a word's last path
+component, which leaves out `ubertooth-dfu-wrapper`. `lease` says on standard
+error when it asks for the lock this way. Only the text is read, with the two
+ways that is wrong settled in favor of the lock: a command that reaches the
+tool without naming it — through a variable, a wrapper script of its own, or a
+list of commands read from a file — needs `--host-lock`, and one that merely
+mentions the name holds the lock for as long as it runs, which delays other
+commands and breaks nothing.
+
+`ubertooth-harness boards` shows the lock as `host lock (this machine)`: it is
+the lock on the machine the command runs on, whatever `--host` names, since a
+lock file read here says nothing about another machine's. In `--json` it is
+the entry with `host_lock: true`. The board lines are local in the same way,
+which is why `boards` asks for the host it is running on: name another
+machine's host and its boards are listed from this machine's lease directory,
+where nothing holds them.
 
 Lock order: the host lock first, then the boards in serial order, taken in one
 all-or-nothing attempt. Nothing blocks while holding a lock (a busy lock
