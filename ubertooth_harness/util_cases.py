@@ -546,7 +546,7 @@ def _role_cleanup(role: str, serial: str, settings) -> tuple[Step, ...]:
     steps = [
         _stop(serial, f"{role}-cleanup-stop", f"{role.capitalize()}: return to idle"),
         Step(f"{role}-restore-crc", f"{role.capitalize()}: restore original CRC",
-             lambda context: _btle(serial, f"-v{require(context, original_crc)}"),
+             lambda context: _btle(serial, f"-k{require(context, original_crc)}"),
              mutates=True),
         _crc_read(serial, f"{role}-verify-restored-crc",
                   f"{role.capitalize()}: verify restored CRC", f"restored {role} crc",

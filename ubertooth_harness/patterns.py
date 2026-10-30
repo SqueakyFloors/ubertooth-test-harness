@@ -18,6 +18,13 @@ FIRMWARE_VERSION_RE = re.compile(
 PART_ID_PATTERN = r"Part ID:\s+[0-9A-Fa-f]+"
 BOARD_ID_PATTERN = r"Board ID Number:\s+\d+"
 
+# How long to give a `-V`, wherever one is asked. `ubertooth-util -H` only
+# printed the host's own lines, but `-V` goes on to read every attached board,
+# and a board that does not answer costs a libusb control timeout or two
+# before `-V` gives up on it and prints why. The usual 5 s is not enough for
+# that on a host with several boards.
+HOST_VERSION_TIMEOUT_S = 20.0
+
 
 def serial_pattern(serial: str) -> str:
     return rf"Serial No:\s+{re.escape(serial.lower())}(?:\s|$)"

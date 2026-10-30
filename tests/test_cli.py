@@ -24,7 +24,7 @@ class HostVersionExecutor:
         command = tuple(argv)
         self.commands.append(command)
         output = (
-            f"libubertooth 1.1 ({self.revision}), "
+            f"Host tools version: libubertooth 1.1 ({self.revision}), "
             f"libbtbb 1.0 ({self.libbtbb})\n"
         )
         if on_output:
@@ -44,8 +44,8 @@ class FlashDeviceExecutor:
     def run(self, argv, *, timeout_s, cancellation=None, on_output=None, cwd=None):
         command = tuple(argv)
         self.commands.append(command)
-        if command == ("ubertooth-util", "-H"):
-            output = f"libubertooth 1.1 ({self.host_revision}), libbtbb 1.0 (git-btbb)\n"
+        if command == ("ubertooth-util", "-V"):
+            output = f"Host tools version: libubertooth 1.1 ({self.host_revision}), libbtbb 1.0 (git-btbb)\n"
         elif command[0] == "ubertooth-dfu":
             serial = command[command.index("-U") + 1]
             self.revisions[serial] = self.images[command[command.index("-d") + 1]]
@@ -384,7 +384,7 @@ suites:
                 event_types.index("test_started"),
             )
             self.assertEqual(
-                [("ubertooth-util", "-H"), ("ubertooth-util", "-H")],
+                [("ubertooth-util", "-V"), ("ubertooth-util", "-V")],
                 executor.commands,
             )
 
