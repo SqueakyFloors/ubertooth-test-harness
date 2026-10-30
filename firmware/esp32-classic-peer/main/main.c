@@ -26,7 +26,8 @@
 #define SHELL_RX_BUF   1024
 #define SHELL_TX_BUF   2048
 #define SHELL_LINE_MAX 160 /* longest command line accepted */
-#define SHELL_OUT_MAX  768 /* longest answer line, set by the status JSON */
+#define SHELL_OUT_MAX  1024 /* longest answer line, set by the status JSON,
+                             * whose longest possible form is 892 bytes */
 #define SHELL_WORDS    8
 
 static SemaphoreHandle_t out_lock;
@@ -115,6 +116,8 @@ static void cmd_help(void)
         "sco stop                      drop it and stop the profile",
         "sco stats                     the controller's packet counters",
         "clock                         the native and piconet clocks",
+        "afh <20 hex digits>           hop over this channel map",
+        "afh off                       hop over every channel again",
         "defaults                      restore every boot setting",
         "reset                         restart the board",
     };
@@ -203,6 +206,16 @@ static void run(int argc, char **argv)
             answer(err);
         } else {
             answer("sco takes start, stop, or stats");
+        }
+        return;
+    }
+    if (strcmp(c, "afh") == 0) {
+        if (argc == 2 && strcmp(argv[1], "off") == 0) {
+            answer(bt_set_afh_all());
+        } else if (argc == 2) {
+            answer(bt_set_afh(argv[1]));
+        } else {
+            answer("afh takes twenty hex digits or off");
         }
         return;
     }

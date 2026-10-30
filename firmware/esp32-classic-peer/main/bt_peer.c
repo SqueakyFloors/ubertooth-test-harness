@@ -28,6 +28,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
+#include "utesp_afh.h"
 #include "utesp_clock.h"
 
 #define STREAM_PERIOD_MS_DEFAULT 100
@@ -43,6 +44,21 @@
 #define CLOSE_TIMEOUT_MS    2000
 #define SPP_INIT_TIMEOUT_MS 5000
 #define SERVER_TIMEOUT_MS   3000
+#define AFH_TIMEOUT_MS      3000
+
+/* The AFH channel map: ten bytes, in which bit b of byte i is channel
+ * 8i + b, so the 79 channels fill all but the top bit of the last byte. A
+ * bit set means the channel may be hopped on.
+ *
+ * A piconet has to keep at least 20 channels, so a map with fewer is refused
+ * rather than sent (Core 6.0 Vol 4 Part E 7.3.46, and the minimum N_min of
+ * Vol 2 Part B 2.6.3). ESP-IDF passes a map straight to the controller
+ * without checking either rule. */
+#define AFH_MAP_LEN     UTESP_AFH_MAP_LEN
+#define AFH_HEX_LEN     (AFH_MAP_LEN * 2)
+#define AFH_RESERVED    0x80 /* the top bit of the last byte */
+#define AFH_USED_MIN    20
+#define AFH_CHANNELS    79
 
 static struct {
     bool started;
@@ -66,12 +82,19 @@ static struct {
     uint32_t counter;
     uint32_t writes, write_errors, rx_bytes, connects, disconnects;
     int last_err;
+    uint8_t afh[AFH_MAP_LEN];  /* the map the host last asked for */
+    esp_bt_status_t afh_status; /* what the controller said about it */
 } st;
 
 static SemaphoreHandle_t st_lock;     /* guards st against the callbacks */
 static SemaphoreHandle_t link_ev;     /* given when a link opens or closes */
 static SemaphoreHandle_t spp_init_ev; /* given once SPP is up */
 static SemaphoreHandle_t server_ev;   /* given when the server starts or stops */
+static SemaphoreHandle_t afh_ev;      /* given when a channel map is answered */
+
+/* Every channel: what a board hops over until a map is asked for. */
+static const uint8_t afh_all[AFH_MAP_LEN] = {0xff, 0xff, 0xff, 0xff, 0xff,
+                                             0xff, 0xff, 0xff, 0xff, 0x7f};
 
 /* The lock may not exist if bring-up ran out of memory. The shell still has
  * to answer then, and with no Bluetooth there is nothing to race. */
@@ -254,6 +277,13 @@ static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
         UNLOCK();
         break;
 
+    case ESP_BT_GAP_SET_AFH_CHANNELS_EVT:
+        LOCK();
+        st.afh_status = param->set_afh_channels.stat;
+        UNLOCK();
+        xSemaphoreGive(afh_ev);
+        break;
+
     default:
         break;
     }
@@ -402,11 +432,17 @@ const char *bt_start(void)
     st.payload_len = STREAM_PAYLOAD_DEFAULT;
     strcpy(st.name, "-");
 
+    /* The controller hops over every channel until a map is asked for, so
+     * that is what the board starts out reporting. No command is sent at
+     * boot: the controller is already in that state. */
+    memcpy(st.afh, afh_all, AFH_MAP_LEN);
+
     st_lock = xSemaphoreCreateMutex();
     link_ev = xSemaphoreCreateBinary();
     spp_init_ev = xSemaphoreCreateBinary();
     server_ev = xSemaphoreCreateBinary();
-    if (!st_lock || !link_ev || !spp_init_ev || !server_ev) {
+    afh_ev = xSemaphoreCreateBinary();
+    if (!st_lock || !link_ev || !spp_init_ev || !server_ev || !afh_ev) {
         return "out of memory";
     }
 
@@ -484,6 +520,12 @@ const char *bt_start(void)
      * having even if this did not come up, and "clock" says so itself. */
     if (utesp_clock_init() != UTESP_CLOCK_OK) {
         shell_line("utesp: clock read unavailable");
+    }
+    /* And for reading back the map a link hops over, which only the status
+     * line uses: without it the line reports the map the host asked for and
+     * says why the link's own map is missing. */
+    if (utesp_afh_init() != UTESP_AFH_OK) {
+        shell_line("utesp: channel map read unavailable");
     }
     st.started = true;
     return NULL;
@@ -700,9 +742,201 @@ const char *bt_stream_payload(unsigned bytes)
     return NULL;
 }
 
+/* ------------------------------------------------------- the channel map */
+
+/* Exactly twenty hex digits, either case, into the ten bytes of a map.
+ * Hand-checked rather than left to scanf, whose %2x takes a sign and a
+ * single digit. */
+static bool afh_parse(const char *s, uint8_t *out)
+{
+    if (strlen(s) != AFH_HEX_LEN) {
+        return false;
+    }
+    for (int i = 0; i < AFH_MAP_LEN; i++) {
+        const char *p = s + i * 2;
+        if (!isxdigit((unsigned char)p[0]) || !isxdigit((unsigned char)p[1])) {
+            return false;
+        }
+        out[i] = (uint8_t)strtoul((char[3]){p[0], p[1], '\0'}, NULL, 16);
+    }
+    return true;
+}
+
+/* The twenty hex digits of a map, in the same order afh_parse() reads. */
+static void afh_text(const uint8_t *map, char *out)
+{
+    for (int i = 0; i < AFH_MAP_LEN; i++) {
+        sprintf(out + i * 2, "%02x", map[i]);
+    }
+}
+
+/* How many of the 79 channels the map marks used. */
+static unsigned afh_used(const uint8_t *map)
+{
+    unsigned n = 0;
+
+    for (int ch = 0; ch < AFH_CHANNELS; ch++) {
+        if (map[ch / 8] & (1 << (ch % 8))) {
+            n++;
+        }
+    }
+    return n;
+}
+
+/* A controller that refuses the map is reported with the status it gave,
+ * rather than as a silent failure. Only the shell task gets here, so the one
+ * buffer is enough. */
+static const char *afh_refused_reason(esp_bt_status_t status)
+{
+    static char reason[64];
+
+    snprintf(reason, sizeof(reason), "the controller refused the channel map, status %d",
+             (int)status);
+    return reason;
+}
+
+/* Sends the map and waits for the controller's answer, so a shell answer is
+ * never ahead of the radio. The map is remembered only once the controller
+ * has taken it. */
+static const char *afh_apply(const uint8_t *map)
+{
+    esp_bt_gap_afh_channels channels;
+    esp_bt_status_t status;
+    bool started;
+
+    LOCK();
+    started = st.started;
+    UNLOCK();
+    if (!started || !afh_ev) {
+        return "bluetooth is not up";
+    }
+
+    memcpy(channels, map, AFH_MAP_LEN);
+    xSemaphoreTake(afh_ev, 0); /* drop a stale signal */
+    if (esp_bt_gap_set_afh_channels(channels) != ESP_OK) {
+        return "the stack would not take the channel map";
+    }
+    if (xSemaphoreTake(afh_ev, pdMS_TO_TICKS(AFH_TIMEOUT_MS)) != pdTRUE) {
+        return "the controller did not answer the channel map";
+    }
+
+    LOCK();
+    status = st.afh_status;
+    if (status == ESP_BT_STATUS_SUCCESS) {
+        memcpy(st.afh, map, AFH_MAP_LEN);
+    }
+    UNLOCK();
+    return status == ESP_BT_STATUS_SUCCESS ? NULL : afh_refused_reason(status);
+}
+
+const char *bt_set_afh(const char *map_text)
+{
+    uint8_t map[AFH_MAP_LEN];
+
+    if (!afh_parse(map_text, map)) {
+        return "the channel map must be twenty hex digits";
+    }
+    /* The spec reserves the 80th bit, and ESP-IDF passes it to the
+     * controller as it is, so a map that sets it is refused here. */
+    if (map[AFH_MAP_LEN - 1] & AFH_RESERVED) {
+        return "the top bit of the last byte is reserved and must be zero";
+    }
+    if (afh_used(map) < AFH_USED_MIN) {
+        return "a piconet needs at least 20 channels";
+    }
+    return afh_apply(map);
+}
+
+const char *bt_set_afh_all(void)
+{
+    return afh_apply(afh_all);
+}
+
+/* Why a read of the link's map brought nothing back. */
+static const char *afh_read_failure(int result)
+{
+    switch (result) {
+    case UTESP_AFH_NOT_READY:
+        return "the channel map read is not available";
+    case UTESP_AFH_NO_MEMORY:
+        return "out of memory";
+    case UTESP_AFH_TIMED_OUT:
+        return "the controller did not answer the channel map read";
+    case UTESP_AFH_BAD_ANSWER:
+        return "the controller's channel map answer was short";
+    default:
+        return "the channel map read failed";
+    }
+}
+
+/* A controller that refuses the read is reported with the status it gave.
+ * Only the shell task gets here, so the one buffer is enough. */
+static const char *afh_refused_read(uint8_t status)
+{
+    static char reason[64];
+
+    snprintf(reason, sizeof(reason),
+             "the controller refused the channel map read, status 0x%02x", status);
+    return reason;
+}
+
+/* The AFH fields of the status line: the map the host asked for, and the map
+ * the link is really hopping over, read from the controller.
+ *
+ * `afh_link` is null with no link, when the controller would not answer, and
+ * when it says AFH is off on the link, because the map means nothing then;
+ * `afh_link_error` is empty unless something went wrong. */
+static void afh_status_fields(char *out, size_t len)
+{
+    uint8_t map[AFH_MAP_LEN];
+    char hex[AFH_HEX_LEN + 1], link_hex[AFH_HEX_LEN + 1];
+    struct utesp_afh_map link = {0};
+    const char *error = "";
+    bool in_piconet;
+    uint16_t handle;
+    int result;
+
+    LOCK();
+    memcpy(map, st.afh, AFH_MAP_LEN);
+    in_piconet = st.acl_up;
+    handle = st.acl_handle;
+    UNLOCK();
+    afh_text(map, hex);
+
+    if (in_piconet) {
+        /* Outside the lock: this waits on the controller. */
+        result = utesp_afh_read(handle, &link);
+        if (result == UTESP_AFH_NO_LINK) {
+            /* The link went down between learning the handle and the read,
+             * which is the same news as having no link at all. */
+            in_piconet = false;
+        } else if (result != UTESP_AFH_OK) {
+            in_piconet = false;
+            error = afh_read_failure(result);
+        } else if (link.status != 0) {
+            in_piconet = false;
+            error = afh_refused_read(link.status);
+        }
+    }
+
+    if (in_piconet && link.enabled) {
+        afh_text(link.map, link_hex);
+        snprintf(out, len,
+                 "\"afh\":\"%s\",\"afh_used\":%u,\"afh_link\":\"%s\","
+                 "\"afh_link_used\":%u,\"afh_mode\":\"on\",\"afh_link_error\":\"\"",
+                 hex, afh_used(map), link_hex, afh_used(link.map));
+    } else {
+        snprintf(out, len,
+                 "\"afh\":\"%s\",\"afh_used\":%u,\"afh_link\":null,"
+                 "\"afh_link_used\":null,\"afh_mode\":%s,\"afh_link_error\":\"%s\"",
+                 hex, afh_used(map), in_piconet ? "\"off\"" : "null", error);
+    }
+}
+
 const char *bt_defaults(void)
 {
     char name[NAME_LEN_MAX + 1];
+    bool put_channels_back;
     const char *err = sco_stop();
 
     if (err) {
@@ -730,7 +964,15 @@ const char *bt_defaults(void)
     }
     LOCK();
     strcpy(st.name, name);
+    put_channels_back = memcmp(st.afh, afh_all, AFH_MAP_LEN) != 0;
     UNLOCK();
+
+    /* Only when a map was asked for. A board that has never set one needs no
+     * command, so "defaults" goes on working exactly as it did even on a
+     * controller that will not take a channel map at all. */
+    if (put_channels_back && (err = afh_apply(afh_all)) != NULL) {
+        return err;
+    }
 
     if ((err = bt_set_discoverable(true)) != NULL) {
         return err;
@@ -758,13 +1000,16 @@ const char *bt_sco_start(void)
 void bt_status_json(char *out, size_t len)
 {
     char self[18], peer[18], remote[18];
+    char afh_fields[224];
     const uint8_t *a = own_addr();
     struct sco_view sco;
     int n;
 
     addr_text(a, self);
-    /* Read before taking this module's lock: sco_get() takes its own. */
+    /* Read before taking this module's lock: sco_get() takes its own, and
+     * the channel map fields take it and then wait on the controller. */
     sco_get(&sco);
+    afh_status_fields(afh_fields, sizeof(afh_fields));
     LOCK();
     addr_text(st.peer, peer);
     addr_text(st.remote, remote);
@@ -779,7 +1024,7 @@ void bt_status_json(char *out, size_t len)
                  "\"sco\":\"%s\",\"sco_profile\":\"%s\",\"sco_codec\":\"%s\","
                  "\"sco_handle\":%u,\"sco_frame_len\":%u,\"sco_tx_frames\":%" PRIu32 ","
                  "\"sco_tx_errors\":%" PRIu32 ",\"sco_rx_frames\":%" PRIu32 ","
-                 "\"sco_rx_bad\":%" PRIu32 "}",
+                 "\"sco_rx_bad\":%" PRIu32 ",%s}",
                  st.role == PEER_ROLE_ACCEPTOR ? "acceptor" : "initiator", UTESP_FW_VERSION,
                  st.started ? "true" : "false", self, a[3], a[4], a[5], a[2], a[0], a[1],
                  st.name, st.discoverable ? "true" : "false", st.server_on ? "true" : "false",
@@ -788,7 +1033,8 @@ void bt_status_json(char *out, size_t len)
                  st.stream_on ? "true" : "false", st.period_ms, st.payload_len, st.counter,
                  st.writes, st.write_errors, st.rx_bytes, st.connects, st.disconnects,
                  st.last_err, sco.state, sco.profile, sco.codec, sco.handle,
-                 sco.frame_len, sco.tx_frames, sco.tx_errors, sco.rx_frames, sco.rx_bad);
+                 sco.frame_len, sco.tx_frames, sco.tx_errors, sco.rx_frames, sco.rx_bad,
+                 afh_fields);
     UNLOCK();
 
     /* Truncated JSON would be a line a driver silently mis-parses. Say so

@@ -8,7 +8,7 @@
 
 /* The harness pins this string and reflashes a board that reports anything
  * else, so it changes whenever the shell protocol or the air behavior does. */
-#define UTESP_FW_VERSION "utesp-1.2.0"
+#define UTESP_FW_VERSION "utesp-1.3.0"
 
 enum peer_role {
     PEER_ROLE_ACCEPTOR = 0, /* the boot role: wait for the other board */
@@ -34,6 +34,17 @@ const char *bt_stream_period(unsigned ms);
 const char *bt_stream_payload(unsigned bytes);
 const char *bt_defaults(void);
 const char *bt_sco_start(void);
+
+/* Asks the controller to hop over the channels this map marks used, as
+ * twenty hex digits: bit b of byte i is channel 8i + b, and the top bit of
+ * the last byte is reserved and must be zero. A map the spec does not allow,
+ * including one with fewer than 20 used channels, is refused and nothing
+ * changes. */
+const char *bt_set_afh(const char *map_text);
+
+/* Puts every channel back, which is what a board hops over before any map
+ * has been asked for. */
+const char *bt_set_afh_all(void);
 
 /* One JSON object, no newline, truncated to fit. */
 void bt_status_json(char *out, size_t len);
