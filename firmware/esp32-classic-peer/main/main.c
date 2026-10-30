@@ -26,7 +26,7 @@
 #define SHELL_RX_BUF   1024
 #define SHELL_TX_BUF   2048
 #define SHELL_LINE_MAX 160 /* longest command line accepted */
-#define SHELL_OUT_MAX  1024 /* longest answer line, set by the status JSON */
+#define SHELL_OUT_MAX  768 /* longest answer line, set by the status JSON */
 #define SHELL_WORDS    8
 
 static SemaphoreHandle_t out_lock;

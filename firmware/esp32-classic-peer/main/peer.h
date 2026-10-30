@@ -57,6 +57,9 @@ const char *sco_stop(void);
 /* The controller's own (e)SCO packet counters, as one JSON object. */
 const char *sco_pkt_stats(char *out, size_t len);
 
+/* Zeroes the frame counters, for "defaults". */
+void sco_zero_counters(void);
+
 /* What the status line reports about the audio link. The three strings are
  * fixed literals, so they need no copying. */
 struct sco_view {

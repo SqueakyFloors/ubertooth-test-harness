@@ -436,10 +436,12 @@ const char *bt_start(void)
         return "stream task failed";
     }
     /* Only the machinery, not a profile: nothing of the audio link is on the
-     * air until "sco start". */
+     * air until "sco start". The audio link is the optional half of this
+     * firmware, so a board whose SPP side came up is reported as working
+     * even when this did not; "sco start" then says so. */
     const char *sco_err = sco_init();
     if (sco_err) {
-        return sco_err;
+        shell_line("utesp: audio link unavailable: %s", sco_err);
     }
     st.started = true;
     return NULL;
@@ -678,6 +680,7 @@ const char *bt_defaults(void)
     st.counter = 0;
     st.last_err = 0;
     UNLOCK();
+    sco_zero_counters();
 
     default_name(name, sizeof(name));
     if (esp_bt_gap_set_device_name(name) != ESP_OK) {

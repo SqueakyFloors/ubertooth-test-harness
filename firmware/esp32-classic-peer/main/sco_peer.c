@@ -16,11 +16,11 @@
  * supplies it. There is no microphone here, so each frame is a known
  * pattern: a little-endian frame counter followed by a ramp.
  *
- * The two sides clock each other. A synchronous link is symmetric and the
- * controller hands up one frame per interval, so answering each frame with
- * one frame of the same length sends at exactly the link's rate, with no
- * timer here to drift against it. Each side sends a couple of frames when
- * the link comes up to start the exchange.
+ * The link clocks the sending. A synchronous link is symmetric and the
+ * controller hands up one frame per interval, so a frame arriving is the cue
+ * to send one, which matches the link's rate without a timer here to drift
+ * against it. A fallback timeout sends anyway if nothing arrives, so a
+ * dropped cue cannot leave a live link silent.
  *
  * What the controller negotiated for the link - SCO or eSCO, the packet
  * type, the interval and the retransmission window - is not reported by any
@@ -43,25 +43,30 @@
 
 /* How long a blocking shell command waits for the controller. Bringing the
  * service level connection up pages the peer and then exchanges a dozen AT
- * commands, so it is the slowest step. */
-#define PROF_TIMEOUT_MS  3000
-#define SLC_TIMEOUT_MS   15000
-#define AUDIO_TIMEOUT_MS 10000
-#define STATS_TIMEOUT_MS 2000
+ * commands, so it is the slowest step. The three stopping timeouts are short
+ * on purpose: "role" and "defaults" stop the audio link first, and they must
+ * not become commands a driver times out on. */
+#define PROF_TIMEOUT_MS      3000
+#define SLC_TIMEOUT_MS       15000
+#define AUDIO_TIMEOUT_MS     10000
+#define AUDIO_DOWN_TIMEOUT_MS 3000
+#define SLC_DOWN_TIMEOUT_MS   3000
+#define STATS_TIMEOUT_MS     2000
 
-/* The cap on one audio frame. A CVSD link over HCI asks for 60 bytes of
- * 16-bit linear audio; the link's real frame size comes from the audio state
- * event and is checked against this. */
+/* The cap on one audio frame. The link's real frame size comes from the audio
+ * state event and is checked against this; a CVSD link over HCI asked for 120
+ * bytes of 16-bit samples when measured, and this leaves room for a wider
+ * one without putting a large buffer in static memory. */
 #define FRAME_MAX 240
 
-/* Frames sent when the link comes up: the first starts the far end sending,
- * the second keeps the link fed while that first answer crosses. */
-#define PRIME_FRAMES 2
+/* How long the sender waits for the next frame to arrive before sending one
+ * anyway. Short enough that a live link never goes quiet for long, long
+ * enough that it does not outrun a link that is answering normally. */
+#define FRAME_WAIT_MS 50
 
-/* At most this many frames may be owed at once. A link that outruns the
- * sender drops credits rather than building a queue, which keeps the audio
- * live instead of late. */
-#define FRAME_CREDIT_MAX 4
+/* How long profile_stop() waits for a frame that is already with the stack,
+ * so a buffer is never submitted into a profile being taken apart. */
+#define QUIESCE_WAIT_MS 200
 
 struct pkt_stats {
     uint32_t rx_total, rx_correct, rx_err, rx_none, rx_lost;
@@ -69,16 +74,21 @@ struct pkt_stats {
 };
 
 static struct {
+    bool ready;       /* sco_init() succeeded, so the commands can work */
     bool profile_up;  /* one of the two HFP profiles is initialized */
     enum peer_role role;
-    bool slc;    /* the service level connection is up */
-    bool audio;  /* the synchronous link is up */
+    bool slc;     /* the service level connection is up */
+    bool audio;   /* the synchronous link is up */
+    bool quiesce; /* the sender must not start another frame */
+    bool sending; /* a frame is with the stack right now */
     uint16_t handle;
     uint16_t frame_len;
     bool msbc; /* the codec the controller settled on */
     uint32_t counter;
     uint32_t tx_frames, tx_errors, rx_frames, rx_bad;
-    esp_bd_addr_t peer;
+    esp_bd_addr_t peer;   /* who the gateway calls */
+    esp_bd_addr_t remote; /* the far end of the live link, either role */
+    bool stats_wanted;    /* a packet-counter request is outstanding */
     struct pkt_stats stats;
     bool stats_ok;
     esp_hf_prof_state_t prof_state;
@@ -89,7 +99,7 @@ static SemaphoreHandle_t prof_ev;  /* a profile finished starting or stopping */
 static SemaphoreHandle_t slc_ev;   /* the service level connection changed */
 static SemaphoreHandle_t audio_ev; /* the synchronous link changed */
 static SemaphoreHandle_t stats_ev; /* the packet counters arrived */
-static SemaphoreHandle_t frame_ev; /* counting: one per frame owed */
+static SemaphoreHandle_t frame_ev; /* a frame arrived: send one back */
 
 #define LOCK()                                      \
     do {                                            \
@@ -97,11 +107,11 @@ static SemaphoreHandle_t frame_ev; /* counting: one per frame owed */
             xSemaphoreTake(sc_lock, portMAX_DELAY); \
         }                                           \
     } while (0)
-#define UNLOCK()                 \
-    do {                         \
-        if (sc_lock) {           \
+#define UNLOCK()                     \
+    do {                             \
+        if (sc_lock) {               \
             xSemaphoreGive(sc_lock); \
-        }                        \
+        }                            \
     } while (0)
 
 /* ------------------------------------------------------------- the pattern */
@@ -130,21 +140,28 @@ static void send_frame(void)
     esp_hf_audio_buff_t *buf;
     uint16_t handle, len;
     uint32_t counter;
-    bool audio;
+    bool go;
     esp_err_t err;
 
     LOCK();
-    audio = sc.audio;
+    len = sc.frame_len;
+    /* quiesce is how a stop keeps this out of a profile it is taking apart,
+     * and sending is how it knows the last frame has left. */
+    go = sc.audio && !sc.quiesce;
     role = sc.role;
     handle = sc.handle;
-    len = sc.frame_len;
     counter = sc.counter;
-    if (audio) {
-        sc.counter++;
+    if (go && (len < 4 || len > FRAME_MAX)) {
+        /* An unusable frame size: count it rather than write past a buffer
+         * the size asked for, or stop silently. */
+        sc.tx_errors++;
+        go = false;
+    }
+    if (go) {
+        sc.sending = true;
     }
     UNLOCK();
-
-    if (!audio || len == 0 || len > FRAME_MAX) {
+    if (!go) {
         return;
     }
 
@@ -153,6 +170,7 @@ static void send_frame(void)
     if (!buf) {
         LOCK();
         sc.tx_errors++;
+        sc.sending = false;
         UNLOCK();
         return;
     }
@@ -161,13 +179,6 @@ static void send_frame(void)
 
     err = (role == PEER_ROLE_INITIATOR) ? esp_hf_ag_audio_data_send(handle, buf)
                                         : esp_hf_client_audio_data_send(handle, buf);
-    LOCK();
-    if (err == ESP_OK) {
-        sc.tx_frames++;
-    } else {
-        sc.tx_errors++;
-    }
-    UNLOCK();
     if (err != ESP_OK) {
         /* A send that was refused never took the buffer. */
         if (role == PEER_ROLE_INITIATOR) {
@@ -176,31 +187,48 @@ static void send_frame(void)
             esp_hf_client_audio_buff_free(buf);
         }
     }
+
+    LOCK();
+    if (err == ESP_OK) {
+        sc.tx_frames++;
+        /* The counter steps only for a frame that went out, so it never
+         * gains a gap and always matches tx_frames. */
+        sc.counter++;
+    } else {
+        sc.tx_errors++;
+    }
+    sc.sending = false;
+    UNLOCK();
 }
 
 /* Sends on its own task rather than inside the callback: the callback runs on
  * the Bluetooth task, and handing work back to that same task from inside it
- * is how a stack deadlocks. */
+ * is how a stack deadlocks.
+ *
+ * The wait has a timeout so that a cue lost while this task was descheduled,
+ * or a frame the controller never handed up, costs one quiet interval rather
+ * than the rest of the link. */
 static void sco_task(void *arg)
 {
     (void)arg;
     for (;;) {
-        xSemaphoreTake(frame_ev, portMAX_DELAY);
-        send_frame();
-    }
-}
+        bool up;
 
-static void owe_frames(unsigned n)
-{
-    for (unsigned i = 0; i < n; i++) {
-        xSemaphoreGive(frame_ev);
+        xSemaphoreTake(frame_ev, pdMS_TO_TICKS(FRAME_WAIT_MS));
+        LOCK();
+        up = sc.audio && !sc.quiesce;
+        UNLOCK();
+        if (up) {
+            send_frame();
+        }
     }
 }
 
 /* ---------------------------------------------------------------- callbacks */
 
 /* Both profiles report an incoming frame the same way, and either way the
- * application owns the buffer and frees it. */
+ * application owns the buffer: both headers say the user "should free audio
+ * buffer by calling esp_hf_ag_audio_buff_free" (and the client's equivalent). */
 static void frame_in(esp_hf_audio_buff_t *buf, bool bad, enum peer_role role)
 {
     LOCK();
@@ -215,8 +243,10 @@ static void frame_in(esp_hf_audio_buff_t *buf, bool bad, enum peer_role role)
     } else {
         esp_hf_client_audio_buff_free(buf);
     }
-    /* Answer this frame with one of ours, which is what keeps the sending
-     * rate equal to the link's. */
+    /* The cue to send one of ours, which is what keeps the sending rate equal
+     * to the link's. A binary semaphore on purpose: this is "there is a frame
+     * to answer", not a count to work through, so a cue given while the
+     * sender is busy is dropped rather than letting a backlog build. */
     xSemaphoreGive(frame_ev);
 }
 
@@ -234,20 +264,22 @@ static void hf_frame_in(esp_hf_sync_conn_hdl_t hdl, esp_hf_audio_buff_t *buf, bo
 
 /* Records a synchronous link coming up or going down. The state carries the
  * codec: there is a separate value for an mSBC link. */
-static void audio_changed(int state, uint16_t handle, uint16_t frame_len)
+static void audio_changed(int state, uint16_t handle, uint16_t frame_len,
+                          const esp_bd_addr_t remote)
 {
     bool up = (state == ESP_HF_AUDIO_STATE_CONNECTED ||
                state == ESP_HF_AUDIO_STATE_CONNECTED_MSBC);
 
     LOCK();
     sc.audio = up;
-    sc.handle = handle;
-    sc.msbc = (state == ESP_HF_AUDIO_STATE_CONNECTED_MSBC);
+    /* Keep the handle and the frame size only while there is a link to use
+     * them on, so a status line never describes one that has gone. */
+    sc.handle = up ? handle : 0;
+    sc.frame_len = up ? frame_len : 0;
+    sc.msbc = up && state == ESP_HF_AUDIO_STATE_CONNECTED_MSBC;
     if (up) {
-        sc.frame_len = frame_len;
         sc.counter = 0;
-    } else {
-        sc.frame_len = 0;
+        memcpy(sc.remote, remote, ESP_BD_ADDR_LEN);
     }
     UNLOCK();
 
@@ -255,10 +287,23 @@ static void audio_changed(int state, uint16_t handle, uint16_t frame_len)
         return; /* not an answer to anything yet */
     }
     shell_line("utesp: sco %s", up ? "connected" : "disconnected");
-    if (up) {
-        owe_frames(PRIME_FRAMES);
-    }
     xSemaphoreGive(audio_ev);
+}
+
+static void record_stats(const struct pkt_stats *s)
+{
+    LOCK();
+    /* Only while a request is outstanding: a reply that arrives after one
+     * timed out must not be handed to the next request. */
+    if (sc.stats_wanted) {
+        sc.stats = *s;
+        sc.stats_ok = true;
+        sc.stats_wanted = false;
+        UNLOCK();
+        xSemaphoreGive(stats_ev);
+        return;
+    }
+    UNLOCK();
 }
 
 static void ag_cb(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
@@ -274,6 +319,9 @@ static void ag_cb(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
     case ESP_HF_CONNECTION_STATE_EVT:
         LOCK();
         sc.slc = (param->conn_stat.state == ESP_HF_CONNECTION_STATE_SLC_CONNECTED);
+        if (sc.slc) {
+            memcpy(sc.remote, param->conn_stat.remote_bda, ESP_BD_ADDR_LEN);
+        }
         UNLOCK();
         if (param->conn_stat.state == ESP_HF_CONNECTION_STATE_SLC_CONNECTED ||
             param->conn_stat.state == ESP_HF_CONNECTION_STATE_DISCONNECTED) {
@@ -283,7 +331,7 @@ static void ag_cb(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
 
     case ESP_HF_AUDIO_STATE_EVT:
         audio_changed(param->audio_stat.state, param->audio_stat.sync_conn_handle,
-                      param->audio_stat.preferred_frame_size);
+                      param->audio_stat.preferred_frame_size, param->audio_stat.remote_addr);
         break;
 
     /* The hands-free unit asks for these while the service level connection
@@ -308,25 +356,16 @@ static void ag_cb(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
         esp_hf_ag_unknown_at_send(param->unat_rep.remote_addr, NULL);
         break;
 
-    case ESP_HF_BCS_RESPONSE_EVT:
-        LOCK();
-        sc.msbc = (param->bcs_rep.mode == ESP_HF_WBS_YES);
-        UNLOCK();
+    case ESP_HF_PKT_STAT_NUMS_GET_EVT: {
+        const struct pkt_stats s = {
+            param->pkt_nums.rx_total,  param->pkt_nums.rx_correct,
+            param->pkt_nums.rx_err,    param->pkt_nums.rx_none,
+            param->pkt_nums.rx_lost,   param->pkt_nums.tx_total,
+            param->pkt_nums.tx_discarded,
+        };
+        record_stats(&s);
         break;
-
-    case ESP_HF_PKT_STAT_NUMS_GET_EVT:
-        LOCK();
-        sc.stats.rx_total = param->pkt_nums.rx_total;
-        sc.stats.rx_correct = param->pkt_nums.rx_correct;
-        sc.stats.rx_err = param->pkt_nums.rx_err;
-        sc.stats.rx_none = param->pkt_nums.rx_none;
-        sc.stats.rx_lost = param->pkt_nums.rx_lost;
-        sc.stats.tx_total = param->pkt_nums.tx_total;
-        sc.stats.tx_discarded = param->pkt_nums.tx_discarded;
-        sc.stats_ok = true;
-        UNLOCK();
-        xSemaphoreGive(stats_ev);
-        break;
+    }
 
     default:
         break;
@@ -346,28 +385,33 @@ static void hf_cb(esp_hf_client_cb_event_t event, esp_hf_client_cb_param_t *para
     case ESP_HF_CLIENT_CONNECTION_STATE_EVT:
         LOCK();
         sc.slc = (param->conn_stat.state == ESP_HF_CLIENT_CONNECTION_STATE_SLC_CONNECTED);
+        if (sc.slc) {
+            memcpy(sc.remote, param->conn_stat.remote_bda, ESP_BD_ADDR_LEN);
+        }
         UNLOCK();
-        xSemaphoreGive(slc_ev);
+        /* The same two states the gateway signals on, so an acceptor-side
+         * wait added later behaves the same way. */
+        if (param->conn_stat.state == ESP_HF_CLIENT_CONNECTION_STATE_SLC_CONNECTED ||
+            param->conn_stat.state == ESP_HF_CLIENT_CONNECTION_STATE_DISCONNECTED) {
+            xSemaphoreGive(slc_ev);
+        }
         break;
 
     case ESP_HF_CLIENT_AUDIO_STATE_EVT:
         audio_changed(param->audio_stat.state, param->audio_stat.sync_conn_handle,
-                      param->audio_stat.preferred_frame_size);
+                      param->audio_stat.preferred_frame_size, param->audio_stat.remote_bda);
         break;
 
-    case ESP_HF_CLIENT_PKT_STAT_NUMS_GET_EVT:
-        LOCK();
-        sc.stats.rx_total = param->pkt_nums.rx_total;
-        sc.stats.rx_correct = param->pkt_nums.rx_correct;
-        sc.stats.rx_err = param->pkt_nums.rx_err;
-        sc.stats.rx_none = param->pkt_nums.rx_none;
-        sc.stats.rx_lost = param->pkt_nums.rx_lost;
-        sc.stats.tx_total = param->pkt_nums.tx_total;
-        sc.stats.tx_discarded = param->pkt_nums.tx_discarded;
-        sc.stats_ok = true;
-        UNLOCK();
-        xSemaphoreGive(stats_ev);
+    case ESP_HF_CLIENT_PKT_STAT_NUMS_GET_EVT: {
+        const struct pkt_stats s = {
+            param->pkt_nums.rx_total,  param->pkt_nums.rx_correct,
+            param->pkt_nums.rx_err,    param->pkt_nums.rx_none,
+            param->pkt_nums.rx_lost,   param->pkt_nums.tx_total,
+            param->pkt_nums.tx_discarded,
+        };
+        record_stats(&s);
         break;
+    }
 
     default:
         break;
@@ -383,7 +427,7 @@ const char *sco_init(void)
     slc_ev = xSemaphoreCreateBinary();
     audio_ev = xSemaphoreCreateBinary();
     stats_ev = xSemaphoreCreateBinary();
-    frame_ev = xSemaphoreCreateCounting(FRAME_CREDIT_MAX, 0);
+    frame_ev = xSemaphoreCreateBinary();
     if (!sc_lock || !prof_ev || !slc_ev || !audio_ev || !stats_ev || !frame_ev) {
         return "out of memory";
     }
@@ -395,6 +439,7 @@ const char *sco_init(void)
     if (xTaskCreate(sco_task, "utesp_sco", 3072, NULL, 6, NULL) != pdPASS) {
         return "sco task failed";
     }
+    sc.ready = true;
     return NULL;
 }
 
@@ -454,13 +499,36 @@ static const char *profile_start(enum peer_role role)
     sc.role = role;
     sc.tx_frames = sc.tx_errors = sc.rx_frames = sc.rx_bad = 0;
     sc.stats_ok = false;
+    sc.stats_wanted = false;
     UNLOCK();
     return NULL;
+}
+
+/* Stops the sender and waits for a frame already with the stack, so nothing
+ * is submitted into a profile that is being taken apart. */
+static void quiesce_sender(void)
+{
+    LOCK();
+    sc.quiesce = true;
+    sc.audio = false;
+    UNLOCK();
+
+    for (int waited = 0; waited < QUIESCE_WAIT_MS; waited += 2) {
+        bool busy;
+        LOCK();
+        busy = sc.sending;
+        UNLOCK();
+        if (!busy) {
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
 }
 
 static const char *profile_stop(void)
 {
     enum peer_role role;
+    const char *err;
     bool up;
 
     LOCK();
@@ -471,21 +539,32 @@ static const char *profile_stop(void)
         return NULL;
     }
 
+    quiesce_sender();
     xSemaphoreTake(prof_ev, 0);
-    if (role == PEER_ROLE_INITIATOR) {
-        esp_hf_ag_deinit();
-    } else {
-        esp_hf_client_deinit();
+    if ((role == PEER_ROLE_INITIATOR ? esp_hf_ag_deinit() : esp_hf_client_deinit()) != ESP_OK) {
+        LOCK();
+        sc.quiesce = false;
+        UNLOCK();
+        return "stopping the profile was refused";
     }
-    /* Whatever the profile says, it is no longer ours to drive. */
+    /* Only report it stopped once the profile says so. Leaving profile_up set
+     * on a failure is what makes the next "sco start" try the stop again
+     * rather than start the other role on top of this one. */
+    if ((err = profile_wait(false)) != NULL) {
+        LOCK();
+        sc.quiesce = false;
+        UNLOCK();
+        return err;
+    }
+
     LOCK();
     sc.profile_up = false;
     sc.slc = false;
-    sc.audio = false;
     sc.handle = 0;
     sc.frame_len = 0;
+    sc.quiesce = false;
     UNLOCK();
-    return profile_wait(false);
+    return NULL;
 }
 
 /* ---------------------------------------------------------------- commands */
@@ -495,6 +574,10 @@ const char *sco_start(enum peer_role role, const uint8_t *peer_addr)
     const char *err;
     bool audio;
 
+    if (!sc.ready) {
+        return "the audio link is not available on this board";
+    }
+
     LOCK();
     audio = sc.audio;
     UNLOCK();
@@ -502,7 +585,7 @@ const char *sco_start(enum peer_role role, const uint8_t *peer_addr)
         return "the audio link is already up";
     }
 
-    if ((err = profile_stop()) != NULL) {
+    if ((err = sco_stop()) != NULL) {
         return err;
     }
     if ((err = profile_start(role)) != NULL) {
@@ -564,33 +647,45 @@ const char *sco_stop(void)
 {
     bool audio, slc, up;
     enum peer_role role;
-    esp_bd_addr_t peer;
+    esp_bd_addr_t remote;
 
     LOCK();
     up = sc.profile_up;
     audio = sc.audio;
     slc = sc.slc;
     role = sc.role;
-    memcpy(peer, sc.peer, ESP_BD_ADDR_LEN);
+    memcpy(remote, sc.remote, ESP_BD_ADDR_LEN);
     UNLOCK();
     if (!up) {
         return NULL;
     }
 
-    if (role == PEER_ROLE_INITIATOR && audio) {
+    /* Close the link from whichever side is asked, rather than leaving
+     * reserved slots on the air for the profile teardown to deal with. */
+    if (audio) {
         xSemaphoreTake(audio_ev, 0);
-        if (esp_hf_ag_audio_disconnect(peer) == ESP_OK) {
-            xSemaphoreTake(audio_ev, pdMS_TO_TICKS(AUDIO_TIMEOUT_MS));
+        if ((role == PEER_ROLE_INITIATOR ? esp_hf_ag_audio_disconnect(remote)
+                                         : esp_hf_client_disconnect_audio(remote)) == ESP_OK) {
+            xSemaphoreTake(audio_ev, pdMS_TO_TICKS(AUDIO_DOWN_TIMEOUT_MS));
         }
     }
-    if (role == PEER_ROLE_INITIATOR && slc) {
+    if (slc) {
         xSemaphoreTake(slc_ev, 0);
-        if (esp_hf_ag_slc_disconnect(peer) == ESP_OK) {
-            xSemaphoreTake(slc_ev, pdMS_TO_TICKS(SLC_TIMEOUT_MS));
+        if ((role == PEER_ROLE_INITIATOR ? esp_hf_ag_slc_disconnect(remote)
+                                         : esp_hf_client_disconnect(remote)) == ESP_OK) {
+            xSemaphoreTake(slc_ev, pdMS_TO_TICKS(SLC_DOWN_TIMEOUT_MS));
         }
     }
     /* Taking the profile away drops anything the two steps above left. */
     return profile_stop();
+}
+
+void sco_zero_counters(void)
+{
+    LOCK();
+    sc.tx_frames = sc.tx_errors = sc.rx_frames = sc.rx_bad = 0;
+    sc.counter = 0;
+    UNLOCK();
 }
 
 const char *sco_pkt_stats(char *out, size_t len)
@@ -598,33 +693,38 @@ const char *sco_pkt_stats(char *out, size_t len)
     struct pkt_stats s;
     uint16_t handle;
     enum peer_role role;
-    bool audio;
-    esp_err_t err;
+    bool audio, got;
 
     LOCK();
     audio = sc.audio;
     handle = sc.handle;
     role = sc.role;
     sc.stats_ok = false;
+    sc.stats_wanted = audio;
     UNLOCK();
     if (!audio) {
         return "no audio link to count packets on";
     }
 
     xSemaphoreTake(stats_ev, 0);
-    err = (role == PEER_ROLE_INITIATOR) ? esp_hf_ag_pkt_stat_nums_get(handle)
-                                        : esp_hf_client_pkt_stat_nums_get(handle);
-    if (err != ESP_OK) {
+    if ((role == PEER_ROLE_INITIATOR ? esp_hf_ag_pkt_stat_nums_get(handle)
+                                     : esp_hf_client_pkt_stat_nums_get(handle)) != ESP_OK) {
+        LOCK();
+        sc.stats_wanted = false;
+        UNLOCK();
         return "the packet counters were refused";
     }
     if (xSemaphoreTake(stats_ev, pdMS_TO_TICKS(STATS_TIMEOUT_MS)) != pdTRUE) {
+        LOCK();
+        sc.stats_wanted = false;
+        UNLOCK();
         return "the packet counters did not arrive";
     }
     LOCK();
     s = sc.stats;
-    audio = sc.stats_ok;
+    got = sc.stats_ok;
     UNLOCK();
-    if (!audio) {
+    if (!got) {
         return "the packet counters did not arrive";
     }
 

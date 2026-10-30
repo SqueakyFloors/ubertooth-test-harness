@@ -99,6 +99,7 @@ not part of any answer, so a driver skips them:
 | `utesp: spp disconnected` | the link went down |
 | `utesp: sco connected` | the synchronous audio link came up |
 | `utesp: sco disconnected` | it went down |
+| `utesp: audio link unavailable: <reason>` | after boot, if only the audio half failed to set up; SPP still works and `sco start` answers `ERR` |
 
 ESP-IDF's own log lines start with `W (` or `E (` and are warnings or errors;
 `sdkconfig.defaults` keeps the log at that level so nothing else appears.
@@ -216,7 +217,7 @@ does SPP on the air exactly as it was before this was added.
 |---|---|---|
 | `sco start` | start the profile and wait | start the profile, page the acceptor, open the audio link |
 | while up | send and count frames | send and count frames |
-| `sco stop` | stop the profile | drop the link, drop the service level connection, stop the profile |
+| `sco stop` | drop the link and the service level connection, stop the profile | the same |
 
 So a test runs `sco start` on the acceptor first, then `spp peer <acceptor
 address>` and `sco start` on the initiator. `sco start` on the initiator
@@ -227,6 +228,14 @@ controller did not open a synchronous link`. `role` and `defaults` take the
 audio link down, because it belongs to a role; `spp stop` does not, as the
 two links are separate.
 
+These commands block the shell while the controller works, so a driver's read
+timeout has to allow for the worst case: about 28 seconds for `sco start` on
+the initiator (3 s to start the profile, 15 s to page and bring the service
+level connection up, 10 s for the audio link), about 10 seconds for `sco stop`
+(3 s each for the link and the service level connection, 3 s for the profile),
+and the same 10 seconds for `role` and `defaults`, which stop the audio link
+first. A link to a board that is awake takes four or five seconds in practice.
+
 ### The audio pattern
 
 There is no microphone on these boards, so the firmware makes the audio. Each
@@ -234,11 +243,12 @@ frame is a little-endian 32-bit frame counter followed by a ramp
 (`frame[i] = i`), which lets a capture tell one frame from the next and a gap
 from a loss. The counter restarts at zero each time the link comes up.
 
-The two sides clock each other. A synchronous link is symmetric and the
+The link clocks the sending. A synchronous link is symmetric and the
 controller hands up one frame per interval, so each side answers each frame
-it receives with one frame of its own: that sends at exactly the link's rate
-with no timer here to drift against it. Each side sends two frames when the
-link comes up to start the exchange.
+it receives with one frame of its own: that matches the link's rate with no
+timer here to drift against it. If no frame arrives for 50 ms the firmware
+sends one anyway, which both starts the exchange when the link comes up and
+keeps a live link from going silent if a frame is ever missed.
 
 The frames are 16-bit linear samples, and the controller does the CVSD coding
 (see the codec note below), so the bytes on the air are **not** the bytes the
@@ -264,9 +274,12 @@ number a capture can be checked against:
 {"rx_total":4057,"rx_correct":4037,"rx_err":0,"rx_none":20,"rx_lost":0,"tx_total":4059,"tx_discarded":0}
 ```
 
-That is a measured 30-second link: 4059 packets each way, which is one every
-7.4 ms, so the controller opened an eSCO link on a 7.5 ms interval. 120-byte
-frames of 16-bit samples at that rate is the 64 kbit/s a CVSD link carries.
+That is a measured 30-second link: 4059 packets each way, one every 7.4 ms,
+which is the rate a 7.5 ms interval gives. The interval itself is not
+reported, so that is an inference from the packet rate, not a reading (see
+below). The frames are 120 bytes of 16-bit samples at that rate, which is
+128 kbit/s handed to the controller; the controller codes it down to the
+64 kbit/s a CVSD link carries on the air.
 
 ### The packet type is not selectable, and is not reported
 
@@ -300,11 +313,14 @@ the direction the fork's tests want anyway. The link is easy to find there:
 `ubertooth-rx -l e9c5ba -u 0d -t 30` read 168 packets of the piconet while
 an audio link was up, and 0 in the same 30 seconds with the boards idle.
 
-The codec is a build-time choice, not a run-time one, for the same reason:
-`CONFIG_BT_HFP_WBS_ENABLE` decides whether mSBC is offered at all. This image
-sets it to `n`, so the link is always CVSD. With wide-band speech the two
-boards would settle on mSBC, whose air mode is transparent, and then the
-firmware would have to produce real mSBC frames rather than samples.
+The codec is a build-time choice for the same reason:
+`CONFIG_BT_HFP_WBS_ENABLE` decides whether mSBC is offered at all, and this
+image sets it to `n`, so the link is always CVSD and `sco_codec` always reads
+`cvsd` while one is up. With wide-band speech the two boards would settle on
+mSBC, whose air mode is transparent, and then the firmware would have to
+produce real mSBC frames rather than samples. `sco_codec` still reports what
+the audio state says rather than a constant, so a build that turns wide-band
+speech on does not start lying.
 
 ## The piconet clock is not readable from this firmware
 
