@@ -28,6 +28,7 @@
 #include "stack/hcidefs.h"
 #include "stack/hcimsgs.h"
 
+#include "esp_bt_main.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -52,28 +53,52 @@
 /* One read at a time: request_lock makes a reader the owner of the slot
  * below, and answer is given when the Command Complete for its command
  * arrives. slot_lock is held for the moment it takes to write the answer in
- * or to give up on it, which is what keeps a late answer from being handed
- * to the next reader. */
+ * or to give up on it.
+ *
+ * Each request gets a number, which rides along in the command's own
+ * metadata and comes back with its answer. A read that gave up waiting is
+ * what makes this worth doing: its answer can still arrive, and matching the
+ * number is what stops that answer being handed to the next reader, which
+ * would report a clock from a second ago as a fresh one. */
+static bool clock_ready;
 static SemaphoreHandle_t request_lock;
 static SemaphoreHandle_t answer;
 static SemaphoreHandle_t slot_lock;
 static struct {
-    bool waiting; /* the reader still wants the answer */
+    bool waiting;  /* the reader still wants the answer */
+    uint32_t seq;  /* which request it is waiting for; numbering starts at 1 */
     int64_t sent_us;
     struct utesp_clock got;
 } slot;
 
 int utesp_clock_init(void)
 {
-    if (request_lock) {
+    SemaphoreHandle_t request, slot_guard, arrived;
+
+    if (clock_ready) {
         return UTESP_CLOCK_OK;
     }
-    request_lock = xSemaphoreCreateMutex();
-    slot_lock = xSemaphoreCreateMutex();
-    answer = xSemaphoreCreateBinary();
-    if (!request_lock || !slot_lock || !answer) {
+    /* Published together, so a failed start cannot leave a read using one
+     * semaphore that exists and one that does not. */
+    request = xSemaphoreCreateMutex();
+    slot_guard = xSemaphoreCreateMutex();
+    arrived = xSemaphoreCreateBinary();
+    if (!request || !slot_guard || !arrived) {
+        if (request) {
+            vSemaphoreDelete(request);
+        }
+        if (slot_guard) {
+            vSemaphoreDelete(slot_guard);
+        }
+        if (arrived) {
+            vSemaphoreDelete(arrived);
+        }
         return UTESP_CLOCK_NO_MEMORY;
     }
+    request_lock = request;
+    slot_lock = slot_guard;
+    answer = arrived;
+    clock_ready = true;
     return UTESP_CLOCK_OK;
 }
 
@@ -82,11 +107,11 @@ int utesp_clock_init(void)
 static void clock_complete(BT_HDR *response, void *context)
 {
     const int64_t now = esp_timer_get_time();
+    const uint32_t seq = (uint32_t)(uintptr_t)context;
     uint8_t *stream = response->data + response->offset;
     struct utesp_clock got;
     uint16_t opcode = 0;
 
-    (void)context;
     memset(&got, 0, sizeof(got));
     got.answered_us = now;
 
@@ -104,7 +129,7 @@ static void clock_complete(BT_HDR *response, void *context)
     }
 
     xSemaphoreTake(slot_lock, portMAX_DELAY);
-    if (slot.waiting && opcode == HCI_READ_CLOCK) {
+    if (slot.waiting && slot.seq == seq && opcode == HCI_READ_CLOCK) {
         got.read_us = now - slot.sent_us;
         slot.got = got;
         slot.waiting = false;
@@ -122,6 +147,7 @@ static int read_clock(uint16_t handle, uint8_t which, struct utesp_clock *out)
     BT_HDR *cmd;
     hci_cmd_metadata_t *metadata;
     uint8_t *pp;
+    uint32_t seq;
     bool answered;
 
     if ((cmd = HCI_GET_CMD_BUF(READ_CLOCK_PARAM_LEN)) == NULL) {
@@ -143,15 +169,16 @@ static int read_clock(uint16_t handle, uint8_t which, struct utesp_clock *out)
     metadata->opcode = HCI_READ_CLOCK;
     metadata->command_complete_cb = clock_complete;
     metadata->command_status_cb = NULL;
-    metadata->context = NULL;
 
     /* Any leftover from a read that timed out, so the wait below is this
      * command's. */
     xSemaphoreTake(answer, 0);
     xSemaphoreTake(slot_lock, portMAX_DELAY);
+    seq = ++slot.seq;
     slot.waiting = true;
     slot.sent_us = esp_timer_get_time();
     xSemaphoreGive(slot_lock);
+    metadata->context = (void *)(uintptr_t)seq;
 
     hci_layer_get_interface()->transmit_command(cmd, clock_complete, NULL, NULL);
 
@@ -174,7 +201,9 @@ int utesp_clock_read(const uint8_t *peer_addr, bool piconet, struct utesp_clock 
     uint16_t handle = 0;
     int result;
 
-    if (!request_lock || !out) {
+    /* The queue the command goes on exists only while Bluedroid is enabled,
+     * so check that here rather than trust every caller to. */
+    if (!clock_ready || !out || esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_ENABLED) {
         return UTESP_CLOCK_NOT_READY;
     }
     if (piconet) {
