@@ -84,8 +84,9 @@ static struct {
     uint32_t counter;
     uint32_t writes, write_errors, rx_bytes, connects, disconnects;
     int last_err;
-    uint8_t afh[AFH_MAP_LEN];   /* the map the host last asked for */
-    esp_bt_status_t afh_status; /* what the controller said about it */
+    uint8_t afh[AFH_MAP_LEN];   /* the map the controller has taken */
+    uint8_t afh_asked[AFH_MAP_LEN]; /* the map the last "afh" sent it */
+    esp_bt_status_t afh_status; /* what the controller said about that */
     bool afh_owed;              /* a map the controller has not answered */
 } st;
 
@@ -292,6 +293,12 @@ static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
     case ESP_BT_GAP_SET_AFH_CHANNELS_EVT:
         LOCK();
         st.afh_status = param->set_afh_channels.stat;
+        /* The map becomes the board's here rather than where it was sent, so
+         * an answer that arrives after "afh" gave up waiting still leaves
+         * "status" reporting what the controller took. */
+        if (st.afh_status == ESP_BT_STATUS_SUCCESS) {
+            memcpy(st.afh, st.afh_asked, AFH_MAP_LEN);
+        }
         st.afh_owed = false;
         UNLOCK();
         xSemaphoreGive(afh_ev);
@@ -449,6 +456,7 @@ const char *bt_start(void)
      * that is what the board starts out reporting. No command is sent at
      * boot: the controller is already in that state. */
     memcpy(st.afh, afh_all, AFH_MAP_LEN);
+    memcpy(st.afh_asked, afh_all, AFH_MAP_LEN);
 
     st_lock = xSemaphoreCreateMutex();
     link_ev = xSemaphoreCreateBinary();
@@ -821,6 +829,7 @@ static const char *afh_apply(const uint8_t *map)
     started = st.started;
     owed = st.afh_owed;
     if (started && afh_ev && !owed) {
+        memcpy(st.afh_asked, map, AFH_MAP_LEN);
         st.afh_owed = true;
     }
     UNLOCK();
@@ -845,15 +854,13 @@ static const char *afh_apply(const uint8_t *map)
         return "the stack would not take the channel map";
     }
     if (xSemaphoreTake(afh_ev, pdMS_TO_TICKS(AFH_TIMEOUT_MS)) != pdTRUE) {
-        /* The answer may still arrive, so the board goes on owing one. */
+        /* The answer may still arrive, so the board goes on owing one, and
+         * the map is still this board's to report if it is taken. */
         return "the controller did not answer the channel map";
     }
 
     LOCK();
     status = st.afh_status;
-    if (status == ESP_BT_STATUS_SUCCESS) {
-        memcpy(st.afh, map, AFH_MAP_LEN);
-    }
     UNLOCK();
     return status == ESP_BT_STATUS_SUCCESS ? NULL : afh_refused_reason(status);
 }

@@ -518,7 +518,7 @@ result.
 
 | Field | Meaning |
 |---|---|
-| `afh` | the map the host asked for, twenty hex digits; the all-channel map until `afh` has been run |
+| `afh` | the map the controller has taken from this board, twenty hex digits; the all-channel map until `afh` has been run |
 | `afh_used` | how many of the 79 channels that map marks used |
 | `afh_link` | the map the live link is really hopping over, read from the controller, or `null` |
 | `afh_link_used` | how many channels that map marks used, or `null` |
@@ -530,6 +530,11 @@ host asks for is a classification, not an order: the leader's controller
 keeps its own view of the channels as well, so the map it ends up hopping
 over can be a subset of what was asked for. `afh_link` is that map, which is
 the one to compare a recovered map against.
+
+`afh` changes when the controller takes the map, not when the command sends
+it, so a map the controller accepts after `afh` has given up waiting on it
+still shows up there rather than leaving `status` reporting the map before
+it.
 
 With no link there is no link map: `afh_link`, `afh_link_used` and `afh_mode`
 read `null`, `afh_link_error` is empty, and `afh` still reports what was
