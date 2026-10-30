@@ -142,7 +142,7 @@ def _dump_check(step_id, name, file_name, fmt, *, min_records=0, types="br,keep-
 
 _PACKET = re.compile(
     r"^systime=\d+ ch=\s*(?P<ch>\d+) LAP=[0-9a-f]{6} err=(?P<err>\d+) clkn=\d+ "
-    r"clk_offset=\d+ s=-?\d+ n=-?\d+ snr=-?\d+$"
+    r"clk_offset=\d+ s=-?\d+ (?:n=-?\d+ snr=-?\d+|n=none snr=none)$"
 )
 _SURVEY_LINE = re.compile(
     r"^\?\?:\?\?:(?:\?\?|[0-9A-F]{2}):[0-9A-F]{2}:[0-9A-F]{2}:[0-9A-F]{2}$"

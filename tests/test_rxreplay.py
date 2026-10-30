@@ -213,7 +213,7 @@ class ReplayRx:
             got_lap, errors, channel, packet = result
             systime = struct.unpack(">I", record[:4])[0] if self.fixed else int(time.time()) + 7
             lines.append(f"systime={systime} ch={channel:2d} LAP={got_lap:06x} err={errors} "
-                         "clkn=1 clk_offset=1000 s=-55 n=-120 snr=65")
+                         "clkn=1 clk_offset=1000 s=-55 n=none snr=none")
             found.append(record)
             dumped.append(record)
             if packet and packet["crc"] and got_lap not in uap_seen:
@@ -642,3 +642,18 @@ class ReplayCaseTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PacketLineShapeTests(unittest.TestCase):
+    """The fork prints noise and SNR as figures, or both as none (its #909)."""
+
+    def test_both_shapes_match_and_a_mixed_line_does_not(self):
+        from ubertooth_harness import receive_cases
+        base = "systime=1 ch= 5 LAP=9e8b33 err=0 clkn=1 clk_offset=2 s=-40 "
+        patterns = (rxreplay.PACKET_LINE, receive_cases._PACKET)
+        for tail, matches in (("n=-55 snr=15", True), ("n=none snr=none", True),
+                              ("n=none snr=15", False), ("n=-55 snr=none", False)):
+            for pattern in patterns:
+                with self.subTest(tail=tail, pattern=pattern.pattern[:20]):
+                    self.assertEqual(bool(pattern.match(base + tail)), matches)
+

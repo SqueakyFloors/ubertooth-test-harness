@@ -272,7 +272,10 @@ def packet_record_indices(lap: int | None = None) -> list[int]:
 
 PACKET_LINE = re.compile(
     r"^systime=(?P<systime>\d+) ch=\s*(?P<ch>\d+) LAP=(?P<lap>[0-9a-f]{6}) "
-    r"err=(?P<err>\d+) clkn=\d+ clk_offset=\d+ s=-?\d+ n=-?\d+ snr=-?\d+$"
+    r"err=(?P<err>\d+) clkn=\d+ clk_offset=\d+ s=-?\d+ "
+    # Since the fork's #909 a record with no background estimate prints
+    # "none" for both fields; one with an estimate prints both figures.
+    r"(?:n=-?\d+ snr=-?\d+|n=none snr=none)$"
 )
 UAP_LINE = re.compile(r"UAP = 0x(?P<uap>[0-9a-f]+) found after \d+ total packets")
 # libbtbb works the UAP out from the packets' CRCs and says so. Since libbtbb
