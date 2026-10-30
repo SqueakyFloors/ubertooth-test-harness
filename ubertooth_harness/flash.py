@@ -10,12 +10,20 @@ from ubertooth_harness.cancellation import CancellationToken
 from ubertooth_harness.events import EventPublisher
 from ubertooth_harness.executor import CommandExecutor, CommandResult
 from ubertooth_harness.patterns import FIRMWARE_VERSION_RE as _VERSION_RE
+from ubertooth_harness.patterns import same_revision
 from ubertooth_harness.plan import FlashStep
 from ubertooth_harness.rawlog import record_output
 
 
 class HarnessError(RuntimeError):
     """The harness request is unsafe or cannot be started."""
+
+
+class FlashCancelled(HarnessError):
+    """The flash stage stopped because the run was canceled, not by a fault.
+
+    The caller ends the run as canceled rather than failed.
+    """
 
 
 @dataclass(frozen=True)
@@ -398,7 +406,8 @@ class FlashReliabilityRunner:
         for serial in targets:
             sequence = list(request.step.image_sequence)
             for offset, label in enumerate(sequence):
-                if request.artifacts[label].expected_revision != known[serial]:
+                expected = request.artifacts[label].expected_revision
+                if not same_revision(expected, known[serial]):
                     sequences[serial] = sequence[offset:] + sequence[:offset]
                     break
             else:
@@ -653,3 +662,208 @@ class FlashReliabilityRunner:
             if status == "failed" and not reason:
                 reason = "run ended before all requested flashes were verified"
         return finish(current_revision, status, reason)
+
+
+# ----- flashing the boards with the run's own build (#135) ------------------
+
+# Per board: one read before, one write, then up to BUILD_FLASH_VERIFY_ATTEMPTS
+# reads (the board re-enumerates after the write).
+BUILD_FLASH_WRITE_TIMEOUT_S = 25.0
+BUILD_FLASH_QUERY_TIMEOUT_S = 5.0
+BUILD_FLASH_VERIFY_ATTEMPTS = 3
+BUILD_FLASH_RETRY_S = 1.0
+BUILD_FLASH_PHASE = "flash"
+
+
+def build_flash_deadline(boards: int) -> float:
+    """Whole-stage deadline for flashing ``boards`` boards one at a time."""
+    per_board = (
+        BUILD_FLASH_QUERY_TIMEOUT_S + BUILD_FLASH_WRITE_TIMEOUT_S
+        + BUILD_FLASH_VERIFY_ATTEMPTS * (BUILD_FLASH_QUERY_TIMEOUT_S + BUILD_FLASH_RETRY_S)
+    )
+    return 10.0 + boards * per_board
+
+
+@dataclass(frozen=True)
+class BuildFlashBoard:
+    alias: str
+    serial: str
+
+
+class BuildFlasher:
+    """Write the run's own firmware build to its boards before preflight.
+
+    Boards are written one at a time with ``ubertooth-dfu -U <serial> -d
+    <image> -r`` and read back with ``ubertooth-util -U <serial> -v``, which
+    must report the build's revision. A board that already reports it is not
+    written. The first failure stops the stage (HarnessError with the reason).
+    A write in progress is never interrupted; cancellation is honoured
+    between commands.
+    """
+
+    def __init__(
+        self,
+        executor: CommandExecutor,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ):
+        self.executor = executor
+        self.clock = clock
+        self.sleep = sleep
+
+    def run(
+        self,
+        boards,
+        image: Path,
+        expected_revision: str,
+        publisher: EventPublisher,
+        *,
+        output_dir: Path,
+        cancellation: CancellationToken | None = None,
+        host_lock: bool = False,
+        total_timeout_s: float | None = None,
+    ) -> list[dict]:
+        boards = tuple(boards)
+        token = cancellation or CancellationToken()
+        total = total_timeout_s or build_flash_deadline(len(boards))
+        deadline = self.clock() + total
+        # Command recording (and output spilling) as in flash reliability.
+        commands = FlashReliabilityRunner(self.executor, clock=self.clock)
+        commands._output_dir = Path(output_dir)
+        owner = {"phase": BUILD_FLASH_PHASE}
+        image = Path(image)
+        sha256 = FlashReliabilityRunner._sha256(image) if image.is_file() else ""
+        publisher.emit("build_flash_started", "running", {
+            "image": str(image),
+            "image_sha256": sha256,
+            "expected_revision": expected_revision,
+            "boards": [{"resource": b.alias, "serial": b.serial} for b in boards],
+            "host_lock": host_lock,
+            "deadline_s": total,
+        })
+        results: list[dict] = []
+
+        def finish(status: str, reason: str = "") -> list[dict]:
+            publisher.emit("build_flash_finished", status, {
+                "reason": reason, "expected_revision": expected_revision,
+                "boards": results,
+            })
+            if status == "canceled":
+                raise FlashCancelled(
+                    f"flashing the run's build was canceled: {reason}"
+                )
+            if status != "passed":
+                raise HarnessError(f"flashing the run's build failed: {reason}")
+            return results
+
+        if not sha256:
+            return finish("failed", f"the build has no firmware image at {image}")
+        for index, board in enumerate(boards, 1):
+            name = f"{board.alias} (serial {board.serial})"
+            record = {"resource": board.alias, "serial": board.serial,
+                      "before": "", "after": "", "written": False, "status": "running"}
+            results.append(record)
+            publisher.emit("build_flash_board_started", "running", {
+                "resource": board.alias, "serial": board.serial,
+                "expected_revision": expected_revision,
+            })
+
+            def board_done(status: str, reason: str = "") -> None:
+                record["status"] = status
+                publisher.emit("build_flash_board_finished", status, {**record, "reason": reason})
+
+            def remaining(budget: float) -> float:
+                return min(budget, deadline - self.clock())
+
+            def stop(reason: str, *, status: str = "failed") -> list[dict]:
+                # The status is the whole story only when cancellation is why
+                # the stage stopped: a fault that races a Ctrl-C is a failure.
+                board_done(status, reason)
+                return finish(status, reason)
+
+            def stop_canceled() -> list[dict]:
+                return stop(
+                    token.reason or "cancellation requested", status="canceled"
+                )
+
+            if token.is_cancelled():
+                return stop_canceled()
+            if remaining(BUILD_FLASH_QUERY_TIMEOUT_S) <= 0:
+                return stop(f"deadline of {total:g}s reached before {name}")
+            result = commands._execute_command(
+                publisher, f"build-flash-{index}-before", "version_before_build_flash",
+                ["ubertooth-util", "-U", board.serial, "-v"],
+                remaining(BUILD_FLASH_QUERY_TIMEOUT_S), token, owner=owner,
+            )
+            before = FlashReliabilityRunner._revision(result) if result.returncode == 0 else None
+            record["before"] = before or ""
+            if before is not None and same_revision(expected_revision, before):
+                record["after"] = before
+                board_done("skipped", f"already runs {expected_revision}; not written")
+                continue
+            # A board that does not answer is still written: the write may
+            # be what recovers it. The read-back decides.
+            if token.is_cancelled():
+                return stop_canceled()
+            if FlashReliabilityRunner._sha256(image) != sha256:
+                return stop(f"firmware image changed before flashing {name}: {image}")
+            # A write that runs out of time is killed part-way, which leaves
+            # the board in its bootloader, so a write only starts with its
+            # whole budget left.
+            budget = remaining(BUILD_FLASH_WRITE_TIMEOUT_S)
+            if budget < BUILD_FLASH_WRITE_TIMEOUT_S:
+                return stop(
+                    f"less than the {BUILD_FLASH_WRITE_TIMEOUT_S:g}s a write may "
+                    f"take is left of the {total:g}s deadline, so {name} was not "
+                    "written"
+                )
+            write = commands._execute_command(
+                publisher, f"build-flash-{index}-write", "build_firmware_flash",
+                ["ubertooth-dfu", "-U", board.serial, "-d", str(image), "-r"],
+                budget, owner=owner,
+            )
+            record["written"] = True
+            if write.timed_out or write.returncode != 0:
+                how = "timed out" if write.timed_out else f"exited {write.returncode}"
+                return stop(f"ubertooth-dfu {how} writing {name}")
+            actual = None
+            clipped = False
+            for attempt in range(1, BUILD_FLASH_VERIFY_ATTEMPTS + 1):
+                if token.is_cancelled():
+                    return stop_canceled()
+                budget = remaining(BUILD_FLASH_QUERY_TIMEOUT_S)
+                if budget <= 0:
+                    return stop(f"deadline of {total:g}s reached verifying {name}")
+                # A read with less than its own time left may be cut off, so
+                # a silent board is then the deadline's doing, not the board's.
+                clipped = clipped or budget < BUILD_FLASH_QUERY_TIMEOUT_S
+                verify = commands._execute_command(
+                    publisher, f"build-flash-{index}-verify-{attempt}",
+                    "version_after_build_flash",
+                    ["ubertooth-util", "-U", board.serial, "-v"],
+                    budget, token, owner=owner,
+                )
+                if verify.returncode == 0:
+                    actual = FlashReliabilityRunner._revision(verify)
+                if actual is not None:
+                    break
+                if attempt < BUILD_FLASH_VERIFY_ATTEMPTS:
+                    self.sleep(BUILD_FLASH_RETRY_S)
+            record["after"] = actual or ""
+            if actual is None:
+                if clipped:
+                    return stop(
+                        f"deadline of {total:g}s reached verifying {name}, which had "
+                        "not reported its firmware revision yet"
+                    )
+                return stop(
+                    f"{name} did not report its firmware revision after the write "
+                    f"({BUILD_FLASH_VERIFY_ATTEMPTS} reads)"
+                )
+            if not same_revision(expected_revision, actual):
+                return stop(
+                    f"{name} runs {actual} after the write, expected {expected_revision}"
+                )
+            board_done("flashed")
+        return finish("passed")

@@ -36,7 +36,10 @@ UNIDENTIFIED_PREFIX = "unidentified:"
 
 # Measured on the lab host (StarTech hub): a board leaves USB about
 # 0.1-0.3 s after power-off and re-enumerates about 0.7-0.8 s after power-on
-# (about 1.2 s including restoration). Defaults leave generous headroom.
+# (about 1.2 s including restoration). On the Acroname USBHub3+ a board
+# leaves 0.06-0.22 s after power-off and re-enumerates 0.37-0.59 s after
+# power-on, answering ubertooth-util -v about 0.02 s later. Defaults leave
+# generous headroom for both.
 DEFAULT_REMOVAL_DEADLINE_S = 5.0
 DEFAULT_RETURN_DEADLINE_S = 10.0
 DEFAULT_POLL_INTERVAL_S = 0.1

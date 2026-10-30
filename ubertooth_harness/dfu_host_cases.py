@@ -2,10 +2,13 @@
 
 Since fork e8edd15 (#217) ``ubertooth-dfu -d`` checks the whole image before
 any device is opened (host/doc/ubertooth-dfu.md: the suffix and its length,
-the DFU version, the UFD signature, a non-empty payload, the CRC, and the
-vendor and product, which must be 1d50:6003 or the 0xffff wildcard; with -r
-also the revision marker), and a file that fails is reported with exit 1
-"without opening a device". ``-s`` never needs one. So both run here as
+the DFU version, the UFD signature, a non-empty payload, the CRC, the vendor
+and product, which must be 1d50:6003 or the 0xffff wildcard, and the
+firmware info block the image carries), and a file that fails is reported
+with exit 1 "without opening a device": one line naming the file, what is
+wrong with it, and that the firmware was left alone. So each bad image here
+expects its own reason rather than one shared line. ``-s`` never needs a
+device either, so both run here as
 ``env UBERTOOTH_TEST_NO_DEVICES=1 ubertooth-dfu ...`` with no board at all:
 a refusal must come before the board lookup, so the switch's "no board is
 selected" note and the DFU stage log are forbidden in it, and the case
@@ -22,16 +25,22 @@ with a tool that touches no board here.
 Images. The run's firmware build (``--build --with-firmware`` or
 ``--artifact "test build=PATH"``) is not available to the host-only plan,
 which CI runs without an ARM toolchain. So every case works from a
-deterministic synthetic image (dfuimage.py synth: filler bytes with a
-``ubertooth harness-synthetic (`` revision marker, and the suffix computed by
-the harness itself); the bad images derive from it as DFU images derives
-them from the test build. ``sign-test-build`` checks ``-s`` against the
-build's own ``.dfu``, byte for byte; it declares that it needs the firmware
-build (hostneeds.py), so a run without one leaves it out as not applicable.
+deterministic synthetic image (dfuimage.py synth: filler bytes carrying a
+firmware info block at offset 0x100 that names the revision
+``harness-synthetic``, and the suffix computed by the harness itself); the
+bad images derive from it as DFU images derives them from the test build.
+An image with no readable block there is not an image from the fork's tree,
+and ``-d`` refuses it, so every image a case expects to be accepted carries
+one. The block also reports a firmware API version, and a synthetic image's
+is not one the tools speak, so ``-d`` warns that the two differ; that is
+left alone here rather than pinning the fork's current number.
+``sign-test-build`` checks ``-s`` against the build's own ``.dfu``, byte for
+byte; it declares that it needs the firmware build (hostneeds.py), so a run
+without one leaves it out as not applicable.
 
 Comprehensive coverage adds edge images (empty, 15 bytes, a suffix with no
-payload, a suffix length larger than the file, DFU version 2.0, no revision
-marker, a directory, a missing file), the accepted DFU 1.1 and wildcard
+payload, a suffix length larger than the file, DFU version 2.0, no firmware
+info block, a directory, a missing file), the accepted DFU 1.1 and wildcard
 suffixes, -s inputs it cannot use, and how -s puts its output in place. Since
 fork f2e06fa (#305) -s replaces ``<file>.dfu`` only once the whole signed
 image is ready, through a temporary file beside it (ubertooth-dfu.md): an
@@ -44,6 +53,7 @@ and ``-s`` with an accepted ``-d`` signs before the board lookup that fails.
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import sys
 
 from ubertooth_harness import dfuimage
@@ -69,8 +79,14 @@ _OWN_SUFFIX = "the harness's own suffix of it"
 # A refusal ends before the board lookup: no switch note, no DFU stage log
 # ("DFU +0.000s: operation started"), no expected revision announced.
 REFUSED_FORBIDDEN = (NO_BOARD_NOTE, r"DFU \+\d", r"DFU expected revision")
-_CHECK_FAILED = r"Signature check failed, firmware will not be updated"
+_NOT_UPDATED = r"firmware will not be updated"
 _CHECKING = r"Checking firmware signature"
+
+
+def _refused(file_name: str, reason: str) -> str:
+    """The one line a refused image gets: the file, the reason, and that the
+    board was left alone. ``reason`` is a pattern."""
+    return rf"(?m)^error: \S*{re.escape(file_name)}: {reason}; {_NOT_UPDATED}$"
 
 
 def _path(name):
@@ -163,7 +179,7 @@ def _download(file_name, patterns, *, refused=True, step_id="attempt") -> Step:
                          patterns=patterns, forbidden=REFUSED_FORBIDDEN)
     return tool_step(step_id, TOOL, ("-d", ("file", file_name), "-r"),
                      patterns=(_CHECKING, *patterns, NO_BOARD_NOTE),
-                     forbidden=(_CHECK_FAILED, r"firmware programming attempt"))
+                     forbidden=(_NOT_UPDATED, r"firmware programming attempt"))
 
 
 def _refusal_case(case_id, name, prepare, file_name, patterns, expected):
@@ -172,15 +188,19 @@ def _refusal_case(case_id, name, prepare, file_name, patterns, expected):
     ), expected)
 
 
-# (kind, what the image check says beyond "Signature check failed")
+# (kind, the reason the refusal gives for this image). The three images whose
+# suffix is cut out of firmware bytes leave bLength whatever byte landed
+# there, so only the reason is pinned, not the number.
+_SUFFIX_LENGTH = r"Unknown DFU suffix length: \d+"
+_ANOTHER_DEVICE = "this image is for another device"
 _BAD = (
     ("corrupt", r"CRC mismatch: calculated: 0x[0-9a-f]+, found: 0x[0-9a-f]+"),
-    ("truncated", None),
-    ("no-suffix", None),
-    ("text", None),
+    ("truncated", _SUFFIX_LENGTH),
+    ("no-suffix", _SUFFIX_LENGTH),
+    ("text", _SUFFIX_LENGTH),
     ("bad-signature", r"DFU Signature mismatch: not a DFU file"),
-    ("wrong-vendor", r"DFU suffix is for USB vendor 0x1234, not 0x1d50"),
-    ("wrong-product", r"DFU suffix is for USB product 0x0001, not 0x6003"),
+    ("wrong-vendor", rf"DFU suffix is for USB vendor 0x1234, not 0x1d50: {_ANOTHER_DEVICE}"),
+    ("wrong-product", rf"DFU suffix is for USB product 0x0001, not 0x6003: {_ANOTHER_DEVICE}"),
 )
 _BAD_NAMES = {
     "corrupt": "a wrong CRC", "truncated": "a truncated image",
@@ -188,29 +208,34 @@ _BAD_NAMES = {
     "bad-signature": "a suffix without UFD", "wrong-vendor": "another vendor ID",
     "wrong-product": "another product ID",
 }
-_REFUSED = ("exit 1 with the image check's message, before any board lookup; "
-            "the image and the directory unchanged")
+_REFUSED = ("exit 1 with one error line naming the file and this image's own "
+            "reason, before any board lookup; the image and the directory unchanged")
 
 
 def _bad_image_cases():
     cases = []
-    for kind, message in _BAD:
+    for kind, reason in _BAD:
         bad = f"{kind}.dfu"
-        patterns = (_CHECKING, *((message,) if message else ()), _CHECK_FAILED)
         cases.append(_refusal_case(
             f"reject-{kind}", f"-d refuses {_BAD_NAMES[kind]} with no Ubertooth",
-            (_make(kind, bad),), bad, patterns, _REFUSED))
+            (_make(kind, bad),), bad, (_CHECKING, _refused(bad, reason)), _REFUSED))
     return cases
 
 
 def _accept_case(case_id, name, prepare, file_name):
+    # The image and revision come from the firmware info block the image
+    # carries, so both lines also show that the block was read.
+    accepted = (
+        rf"Image: {dfuimage.SYNTHETIC_IMAGE_NAME} {dfuimage.SYNTHETIC_REVISION} \(API:",
+        rf"DFU expected revision: {dfuimage.SYNTHETIC_REVISION}",
+    )
     return _case(case_id, name, (
         _synth(), *prepare, _state_before(),
-        _download(file_name, (rf"DFU expected revision: {dfuimage.SYNTHETIC_REVISION}",),
-                  refused=False),
+        _download(file_name, accepted, refused=False),
         _state_after(),
-    ), "the image check passes and the command goes on to the board lookup, which "
-       "finds none (exit 1); the directory unchanged")
+    ), "the image check passes, the firmware info block names the image and its "
+       "revision, and the command goes on to the board lookup, which finds none "
+       "(exit 1); the directory unchanged")
 
 
 def _sign(file_name, *, returncodes=(0,), patterns=()) -> Step:
@@ -280,35 +305,34 @@ def _mkdir(name) -> Step:
                 lambda context: ("mkdir", _path(name)(context)), timeout_s=5.0)
 
 
-# (kind, message) of the edge images -d must refuse.
+# (kind, the reason the refusal gives) of the edge images -d must refuse.
 _EDGE_REFUSED = (
-    ("empty", (_CHECKING, r"Too short for a 16-byte DFU suffix: the file is 0 byte\(s\)",
-               _CHECK_FAILED)),
-    ("short", (_CHECKING, r"Too short for a 16-byte DFU suffix: the file is 15 byte\(s\)",
-               _CHECK_FAILED)),
-    ("suffix-only", (_CHECKING, r"DFU suffix with no firmware: nothing to write",
-                     _CHECK_FAILED)),
-    ("long-suffix-length", (_CHECKING, r"Unknown DFU suffix length: 200", _CHECK_FAILED)),
-    ("dfu-2.0", (_CHECKING, r"Unknown DFU version: 0200", _CHECK_FAILED)),
-    # The suffix is fine; -r needs the revision the image names.
-    ("no-marker", (_CHECKING,
-                   r"Unable to determine expected firmware revision from image")),
+    ("empty", r"Too short for a 16-byte DFU suffix: the file is 0 byte\(s\)"),
+    ("short", r"Too short for a 16-byte DFU suffix: the file is 15 byte\(s\)"),
+    ("suffix-only", r"DFU suffix with no firmware: nothing to write"),
+    ("long-suffix-length", r"Unknown DFU suffix length: 200"),
+    ("dfu-2.0", r"Unknown DFU version: 0200"),
+    # The suffix is fine; what is missing is the block that says which image
+    # and revision the file holds.
+    ("no-fw-info", rf"there is no firmware info block here at offset "
+                   rf"0x{dfuimage.FW_INFO_OFFSET:x}"),
 )
 _EDGE_NAMES = {
     "empty": "an empty file", "short": "a 15-byte file",
     "suffix-only": "a suffix with no firmware",
     "long-suffix-length": "a suffix length larger than the file",
-    "dfu-2.0": "DFU version 2.0", "no-marker": "an image with no revision marker (-r)",
+    "dfu-2.0": "DFU version 2.0",
+    "no-fw-info": "an image with no firmware info block",
 }
 
 
 def _comprehensive_cases():
     cases = []
-    for kind, patterns in _EDGE_REFUSED:
+    for kind, reason in _EDGE_REFUSED:
         image = f"{kind}.dfu"
         cases.append(_refusal_case(
             f"reject-{kind}", f"-d refuses {_EDGE_NAMES[kind]}", (_make(kind, image),),
-            image, patterns, _REFUSED))
+            image, (_CHECKING, _refused(image, reason)), _REFUSED))
     cases.append(_refusal_case(
         "reject-directory", "-d refuses a directory", (_mkdir("folder.dfu"),),
         "folder.dfu", (r"error: \S*folder\.dfu is not a regular file",), _REFUSED))
@@ -415,7 +439,7 @@ def _sign_output_cases():
             tool_step("sign", TOOL, ("-s", ("file", "image.bin"), "-d",
                                      ("file", SYNTHETIC_DFU), "-r"),
                       returncodes=(1,), patterns=(_CHECKING, NO_BOARD_NOTE),
-                      forbidden=(_CHECK_FAILED, r"firmware programming attempt")),
+                      forbidden=(_NOT_UPDATED, r"firmware programming attempt")),
             check,
         ), "exit 1 at the board lookup, with image.dfu already written"),
     ]

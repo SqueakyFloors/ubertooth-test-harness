@@ -22,7 +22,6 @@ from tests.test_tool_cases import failed_names
 
 NAME = "DFU image checks"
 NOTE = "note: UBERTOOTH_TEST_NO_DEVICES is set, so no board is selected\n"
-_MARKER = re.compile(rb"ubertooth ([\x21-\x7e]+) \(")
 
 
 class FakeDfu:
@@ -32,6 +31,8 @@ class FakeDfu:
     (with the mode of the file it replaces) and renames it into place.
 
     ``bugs``: check-late (the board lookup comes before the image check),
+    skip-fw-info (the check does not ask for the firmware info block, so a
+    file that is not an image from the fork's tree is accepted),
     touch-image (a refused -d rewrites its image), double-suffix (-s signs an
     already suffixed .bin), needs-writable (-s opens its input r+b),
     other-product (-s writes product 0x6002), and the -s output as before
@@ -96,7 +97,9 @@ class FakeDfu:
         out = "Checking firmware signature\n" if image is not None else ""
         problem = ""
         if image is not None and "check-late" not in self.bugs:
-            problem = self._check(Path(image), "-r" in words)
+            problem = self._check(Path(image))
+            if not problem and Path(image).is_file():
+                problem = self._fw_info_refusal(Path(image), Path(image).read_bytes())
         if sign is not None and (not problem or "sign-first" in self.bugs):
             failure = self._sign(Path(sign))
             if failure:
@@ -109,9 +112,14 @@ class FakeDfu:
             if "touch-image" in self.bugs and Path(image).is_file():
                 Path(image).write_bytes(Path(image).read_bytes() + b"\0")
             return self._result(command, 1, out, problem)
-        revision = _MARKER.search(Path(image).read_bytes()).group(1).decode()
-        return self._result(command, 1, out, f"DFU expected revision: {revision}\n"
-                            "DFU +0.000s: operation started\n" + NOTE
+        info = dfuimage.fw_info(Path(image).read_bytes())
+        named = ""
+        if info is not None:
+            api = f"{(info.api_version >> 8) & 0xFF:x}.{info.api_version & 0xFF:02x}"
+            named = (f"Image: {info.image} {info.revision} (API:{api})\n"
+                     f"DFU expected revision: {info.revision}\n")
+        return self._result(command, 1, out, named
+                            + "DFU +0.000s: operation started\n" + NOTE
                             + "could not open Ubertooth device\n")
 
     def _sign(self, source: Path) -> str:
@@ -147,36 +155,43 @@ class FakeDfu:
         return ""
 
     @staticmethod
-    def _check(path: Path, want_revision: bool) -> str:
-        failed = "Signature check failed, firmware will not be updated\n"
+    def _check(path: Path) -> str:
+        """The one refusal line, or "" when the image is accepted."""
+        def refused(reason):
+            return f"error: {path}: {reason}; firmware will not be updated\n"
+
         if path.is_dir():
             return f"error: {path} is not a regular file\n"
         data = path.read_bytes()
         if len(data) < 16:
-            return (f"Too short for a 16-byte DFU suffix: the file is {len(data)} byte(s)\n"
-                    + failed)
+            return refused(f"Too short for a 16-byte DFU suffix: the file is "
+                           f"{len(data)} byte(s)")
         device, product, vendor, bcd, signature, length, crc = struct.unpack(
             "<HHHH3sBI", data[-16:])
         if length != 16:
-            return f"Unknown DFU suffix length: {length}\n" + failed
+            return refused(f"Unknown DFU suffix length: {length}")
         if bcd not in (0x0100, 0x0101):
-            return f"Unknown DFU version: {bcd:04x}\n" + failed
+            return refused(f"Unknown DFU version: {bcd:04x}")
         if signature != b"UFD":
-            return "DFU Signature mismatch: not a DFU file\n" + failed
+            return refused("DFU Signature mismatch: not a DFU file")
         if len(data) == 16:
-            return "DFU suffix with no firmware: nothing to write\n" + failed
+            return refused("DFU suffix with no firmware: nothing to write")
         calculated = dfuimage.dfu_crc(data[:-4])
         if calculated != crc:
-            return f"CRC mismatch: calculated: 0x{calculated:x}, found: 0x{crc:x}\n" + failed
+            return refused(f"CRC mismatch: calculated: 0x{calculated:x}, found: 0x{crc:x}")
         if vendor not in (0x1D50, 0xFFFF):
-            return (f"DFU suffix is for USB vendor 0x{vendor:04x}, not 0x1d50: "
-                    "this image is for another device\n" + failed)
+            return refused(f"DFU suffix is for USB vendor 0x{vendor:04x}, not 0x1d50: "
+                           "this image is for another device")
         if product not in (0x6003, 0xFFFF):
-            return (f"DFU suffix is for USB product 0x{product:04x}, not 0x6003: "
-                    "this image is for another device\n" + failed)
-        if want_revision and not _MARKER.search(data):
-            return "Unable to determine expected firmware revision from image\n"
+            return refused(f"DFU suffix is for USB product 0x{product:04x}, not 0x6003: "
+                           "this image is for another device")
         return ""
+
+    def _fw_info_refusal(self, path: Path, data: bytes) -> str:
+        if "skip-fw-info" in self.bugs or dfuimage.fw_info(data) is not None:
+            return ""
+        return (f"error: {path}: there is no firmware info block here at offset "
+                f"0x{dfuimage.FW_INFO_OFFSET:x}; firmware will not be updated\n")
 
 
 def cases(coverage):
@@ -245,7 +260,7 @@ class HelperTests(unittest.TestCase):
             edge = dfuimage.make_edge(kind, image)
             problems = dfuimage.suffix_problems(edge)
             # suffix_problems() checks the suffix only, not the payload.
-            if kind in ("dfu-1.1", "no-marker", "suffix-only"):
+            if kind in ("dfu-1.1", "no-fw-info", "suffix-only"):
                 self.assertEqual([], problems, kind)
             elif kind == "wildcard":
                 self.assertEqual(["VID:PID ffff:ffff"], problems)
@@ -254,13 +269,24 @@ class HelperTests(unittest.TestCase):
         long_length = dfuimage.make_edge("long-suffix-length", image)
         self.assertEqual(80, len(long_length))
         self.assertEqual(200, long_length[-5])
-        self.assertNotIn(b"ubertooth ", dfuimage.make_edge("no-marker", image))
+
+    def test_only_the_no_fw_info_edge_image_loses_its_firmware_info_block(self):
+        image = dfuimage.with_suffix(dfuimage.synthetic_binary())
+        for kind in ("dfu-1.1", "wildcard"):
+            info = dfuimage.fw_info(dfuimage.make_edge(kind, image))
+            self.assertEqual(dfuimage.SYNTHETIC_REVISION, info.revision, kind)
+        self.assertIsNone(dfuimage.fw_info(dfuimage.make_edge("no-fw-info", image)))
 
     def test_synthetic_binary_names_its_revision_and_is_not_whole_blocks(self):
         binary = dfuimage.synthetic_binary()
-        self.assertEqual(dfuimage.SYNTHETIC_REVISION.encode(), _MARKER.search(binary).group(1))
+        self.assertEqual(
+            dfuimage.FwInfo(dfuimage.SYNTHETIC_IMAGE_NAME, dfuimage.SYNTHETIC_REVISION,
+                            dfuimage.SYNTHETIC_API_VERSION),
+            dfuimage.fw_info(binary))
         self.assertNotEqual(0, len(binary) % dfuimage.BLOCK_SIZE)
         self.assertEqual(binary, dfuimage.synthetic_binary())
+        self.assertEqual("other-revision",
+                         dfuimage.fw_info(dfuimage.synthetic_binary("other-revision")).revision)
 
     def test_state_reports_added_removed_and_changed_entries(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -348,7 +374,7 @@ class CaseTests(unittest.TestCase):
                 self.assertEqual(names(*failing), failed_names(events))
 
     def test_test_build_is_signed_and_compared_when_the_run_has_one(self):
-        build = dfuimage.with_suffix(b"ubertooth git-test (builder) " + bytes(range(200)))
+        build = dfuimage.with_suffix(dfuimage.synthetic_binary("git-test"))
         tools = FakeDfu()
         summary, events = run(tools, coverage="smoke", test_build=build)
         self.assertTrue(summary.passed, summary.failure_reason)
@@ -369,11 +395,16 @@ class CaseTests(unittest.TestCase):
         self.assertEqual(names(*REJECTS, "accept-synthetic", coverage="smoke"),
                          failed_names(events))
 
+    def test_an_image_check_that_skips_the_firmware_info_block_fails(self):
+        summary, events = run(FakeDfu(bugs=("skip-fw-info",)))
+        self.assertFalse(summary.passed)
+        self.assertEqual(names("reject-no-fw-info"), failed_names(events))
+
     def test_a_refusal_that_rewrites_the_image_fails(self):
         summary, events = run(FakeDfu(bugs=("touch-image",)))
         self.assertFalse(summary.passed)
         edge = [f"reject-{kind}" for kind in ("empty", "short", "suffix-only",
-                                              "long-suffix-length", "dfu-2.0", "no-marker")]
+                                              "long-suffix-length", "dfu-2.0", "no-fw-info")]
         self.assertEqual(names(*REJECTS, *edge), failed_names(events))
 
     def test_double_suffix_and_writable_input_fail(self):

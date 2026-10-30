@@ -40,15 +40,18 @@ VALUE_OPTIONS = {
 class FakeTools:
     """The seven tools' argument handling as at fork f2e06fa (#264, #286): file
     options are named in the option loop and opened after every check, dfu
-    -s writes nothing when -d is refused, and "Ignoring extra capture file"
+    -s writes nothing when -d is refused, and "ignoring extra capture file"
     goes to stderr; ubertooth-btle as at fork e4f1dc5 (#377): -h exits 0 and
     the note reads "warning: ignoring extra capture file"; every -h exits 0
-    (fork 12211ce, #406) and dfu says "error: -s requires a .bin". ``bugs`` switches on a misbehavior: open-early (a file
+    (fork 12211ce, #406), dfu says "error: -s requires a .bin", and an option
+    given a value twice is refused in the option loop (opt_check_once()).
+    ``bugs`` switches on a misbehavior: open-early (a file
     option creates its file in the loop), extra-stdout, temp-left (dfu -u
     leaves its temporary file), sign-first (fork #286, before f2e06fa: dfu -s
     writes its .dfu before the -d image check), help-first (-h prints the
     usage before the stray-word check), no-double-dash (a word after "--"
-    is read as an option).
+    is read as an option), repeat-allowed (an option given a value twice is
+    taken, as it was before opt_check_once()).
     ``missing`` tools are not installed; ``switch`` False is a library from
     before b6d8ede."""
 
@@ -88,6 +91,7 @@ class FakeTools:
         assert tool not in self.missing, tool
         out, err = [], []
         files, operands, flags = {}, [], []
+        with_value = set()
         index = 0
         while index < len(words):
             word = words[index]
@@ -110,22 +114,27 @@ class FakeTools:
                     return self._result(command, 1, USAGE[tool], "".join(err))
                 value = words[index + 1]
                 index += 2
+                # opt_check_once() runs before the switch, so a repeat is
+                # refused before the value is read and before -h.
+                if option in with_value and "repeat-allowed" not in self.bugs:
+                    return self._result(
+                        command, 1, "".join(out), "".join(err)
+                        + f"error: option '-{option}' given more than once\n")
+                with_value.add(option)
                 refusal_text = self._value(tool, option, value)
                 if refusal_text:
                     return self._result(command, 1, "".join(out),
                                         "".join(err) + refusal_text)
                 if option in FILE_OPTIONS[tool]:
+                    # btle -q and -c share one PCAP handle, so the first of
+                    # the two wins and the second file is only reported.
                     key = "q" if option in "qc" and tool == "ubertooth-btle" else option
                     if "open-early" in self.bugs and value != "-":
                         self._create(tool, option, value)
-                    if key in files and option in "rqc":
-                        # ubertooth-btle's wording since fork e4f1dc5.
-                        note = ("warning: ignoring extra capture file: "
-                                if tool == "ubertooth-btle"
-                                else "Ignoring extra capture file: ")
+                    if key in files:
                         (out if "extra-stdout" in self.bugs else err).append(
-                            f"{note}{value}\n")
-                    elif key not in files or option in "dsu":
+                            f"warning: ignoring extra capture file: {value}\n")
+                    else:
                         files[key] = (option, value)
                 else:
                     flags.append((option, value))
@@ -145,11 +154,17 @@ class FakeTools:
             return self._result(command, 1, "".join(out), "".join(err) + refused)
         if tool == "ubertooth-dfu":
             return self._dfu(command, files, dict(flags), out, err)
+        # Every check on the command line has passed, so the command asks
+        # for a board. ubertooth-specan opens its -d file only once it has
+        # one (fork 47bae592), so a file it could not have opened is never
+        # created and never mentioned here.
+        if tool == "ubertooth-specan":
+            return self._result(command, 1, "".join(out), "".join(err) + NOTE
+                                + "error: no Ubertooth devices found\n")
         for option, value in files.values():
             if value == "-":
                 out.append("\x00pcap header\x00")
             elif not Path(value).parent.is_dir():
-                # ubertooth-specan since fork fcadf34: one "error: " line.
                 return self._result(command, 1, "".join(out), "".join(err)
                                     + f"error: {value}: No such file or directory\n")
             else:
@@ -180,7 +195,7 @@ class FakeTools:
         if tool == "ubertooth-dfu" and option == "s" and not value.endswith(".bin"):
             return "error: -s requires a .bin\n"
         if tool == "ubertooth-btle" and option == "r" and value == "-":
-            return "Error: PCAPNG capture to stdout is not supported; use -q - or -c -\n"
+            return "error: PCAPNG capture to stdout is not supported; use -q - or -c -\n"
         return ""
 
     @staticmethod
@@ -191,8 +206,10 @@ class FakeTools:
         if tool == "ubertooth-btle" and ("a", None) in flags and len(
                 [o for o in options if o == "a"]) > 1:
             return "error: -a cannot both read and set the access address\n"
-        if tool == "ubertooth-rx" and "z" in options and "l" in options:
-            return "No address should be specified for survey mode\n"
+        if tool == "ubertooth-rx" and "z" in options and (
+                "l" in options or "u" in options):
+            return ("error: survey mode (-z) discovers addresses, so it cannot "
+                    "be given -l or -u\n")
         if tool == "ubertooth-rx" and "u" in options and "l" not in options:
             return "error: -u <UAP> requires -l <LAP>\n"
         if tool == "ubertooth-specan":
@@ -216,9 +233,12 @@ class FakeTools:
                 Path(str(source)[:-4] + ".dfu").write_bytes(source.read_bytes() + b"suffix")
         if image is not None:
             self._drop(temp)
+            # The seeded bad.dfu is a line of text: its last bytes stand in
+            # for the suffix, so the length it reports is what landed there.
+            length = Path(image).read_bytes()[-5]
             return self._result(command, 1, "Checking firmware signature\n",
-                                "Too short for a 16-byte DFU suffix\n"
-                                "Signature check failed, firmware will not be updated\n")
+                                f"error: {image}: Unknown DFU suffix length: "
+                                f"{length}; firmware will not be updated\n")
         self._drop(temp)
         return self._result(command, 1, "", NOTE)
 
@@ -303,9 +323,10 @@ class CaseTests(unittest.TestCase):
         self.assertTrue(definition.implemented)
         self.assertEqual({}, dict(definition.hardware_roles or {}))
         _a, smoke = cases("smoke")
-        # 3 ways for each of 13 file options (dump has its -U), plus the three
-        # extra-capture-file cases and a stray word on scan and follow.
-        self.assertEqual(13 * 3 + 3 + 2, len(smoke))
+        # 3 ways for each of 13 file options (dump has its -U), plus the
+        # extra-capture-file case, three repeated-option cases, and a stray
+        # word on scan and follow.
+        self.assertEqual(13 * 3 + 1 + 3 + 2, len(smoke))
         _a, full = cases("comprehensive")
         self.assertEqual(len(smoke) + 14 + 6, len(full))
         self.assertEqual(len(full), len({case.case_id for case in full}))
@@ -342,18 +363,30 @@ class CaseTests(unittest.TestCase):
         summary, events = run(FakeTools(bugs=("open-early",)), coverage="smoke")
         self.assertFalse(summary.passed)
         failed = failed_names(events)
-        # Every file option in every refusal; btle -n -q - -q <file> opened the
-        # ignored file too. The scan and follow stray cases name no file.
-        self.assertEqual(13 * 3 + 3, len(failed))
-        self.assertFalse([name for name in failed if "is refused" in name])
+        # Every file option in every refusal, plus the four cases that name two
+        # capture files: the first one is opened in the loop before the repeat
+        # or the note. The scan and follow stray cases name no file.
+        self.assertEqual(13 * 3 + 4, len(failed))
+        self.assertFalse([name for name in failed if "'stray' is refused" in name])
 
     def test_extra_capture_note_on_stdout_fails(self):
         summary, events = run(FakeTools(bugs=("extra-stdout",)), coverage="smoke")
         self.assertFalse(summary.passed)
+        self.assertEqual(["btle -n -q - -c <file>: the extra-file note is on stderr"],
+                         failed_names(events))
+
+    def test_an_option_given_a_value_twice_and_taken_fails(self):
+        """Before opt_check_once() the extra value was dropped with a note, or
+        kept. Every case that repeats an option has to notice."""
+        summary, events = run(FakeTools(bugs=("repeat-allowed",)))
+        self.assertFalse(summary.passed)
         self.assertEqual(sorted([
-            "btle -n -q - -q <file>: the extra-file note is on stderr",
-            "follow -q twice and a stray word: the note is on stderr",
-            "rx -r twice and a stray word: the note is on stderr",
+            "btle -q twice and a stray word: the repeat is refused",
+            "rx -r twice and a stray word: the repeat is refused",
+            "follow -q twice and a stray word: the repeat is refused",
+            "dfu -s: a second -s other.txt creates and truncates nothing",
+            "follow -d twice with -h", "rx -d twice with -h",
+            "dump -d twice with -h", "specan -d twice with -h",
         ]), failed_names(events))
 
     def test_dfu_temporary_file_left_behind_fails(self):
