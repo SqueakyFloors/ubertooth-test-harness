@@ -110,9 +110,11 @@ class FlashReliabilityRunner:
         if len(set(request.guard_serials)) != len(request.guard_serials):
             raise HarnessError("guard serials must be unique")
         # libubertooth treats an all-digit -U value as a USB index (which can
-        # change when a board resets) and matches anything else as the END of
-        # a serial, first board wins. Each selector must name exactly one
-        # board, so refuse indexes and selectors that end another selector.
+        # change when a board resets) and matches anything else
+        # case-insensitively against the START of a serial. Each selector must
+        # name exactly one board, so refuse indexes and selectors that are a
+        # prefix of another selector: that board answers both, and
+        # libubertooth refuses a selector matching more than one board.
         selectors = (*targets, *request.guard_serials)
         for selector in selectors:
             if selector.isdigit():
@@ -120,7 +122,7 @@ class FlashReliabilityRunner:
                     f"device selector '{selector}' is a USB index; use the full serial"
                 )
             for other in selectors:
-                if selector != other and other.endswith(selector):
+                if selector != other and other.lower().startswith(selector.lower()):
                     raise HarnessError(
                         f"device selector '{selector}' also matches '{other}'; "
                         "use full serials"

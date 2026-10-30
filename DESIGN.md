@@ -263,10 +263,11 @@ Therefore the target runner MUST identify devices by **serial number**, not inde
   and "sender" roles are deterministic regardless of enumeration order.
 
 The fork's `-U` also accepts a serial string, but libubertooth treats an
-all-digit value as an index and matches any other value as the *end* of a
-serial (first matching board wins). The flash runner therefore refuses
-digit-only selectors and any selector that is the ending of another, and the
-registry should hold full 32-hex-digit serials. With `alternate Ubertooths`,
+all-digit value as an index and matches any other value case-insensitively
+against the *start* of a serial, refusing one that matches more than one
+attached board. The flash runner therefore refuses digit-only selectors and
+any selector that is the beginning of another, and the registry should hold
+full 32-hex-digit serials. With `alternate Ubertooths`,
 the planner binds every other registered board on the host as an
 `alternated Ubertooth N` resource of the flash invocation (requiring a
 `hosts: [...]` list, full serials, at least two boards, a single selected board rather than `each`, and
