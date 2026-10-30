@@ -743,6 +743,103 @@ idle at boot defaults it cannot see a leaked `-S` or `-r`, or a mode start
 values unchanged, so a guard could be left transmitting without the test
 failing. Modulation, access address, and USB re-enumeration are not read.
 
+### Firmware watchdog
+
+The fork's firmware resets a board that stops servicing USB or whose mode
+stops looping, and keeps the reason in a corner of RAM a reset does not clear.
+`ubertooth-util -U <serial> -w` reads that record. Every run reads it on each
+Ubertooth it binds, guards included: after preflight (the baseline), between
+cases once three minutes have passed since the last read, after each test, and
+once more at the end of the run. The reads are read-only and never run beside
+another command.
+
+A self-reset is the watchdog working, so the run **reports** it. A read whose
+unrequested reset count has risen since the baseline, or that recorded a new
+processor fault, becomes a warning on that board and on the test; the test
+still passes. The warning names the mode and the wait the firmware
+recorded, for example "in BLE follow mode, running a control request".
+
+The count, not the boot cause, is the signal. A reset the host asked for
+(`-r`, or `ubertooth-dfu` entering the bootloader) is a watchdog reset as far
+as the microcontroller is concerned, so `Last boot cause: watchdog` turns up
+on a healthy board; the firmware leaves those out of the count. A boot cause
+that gained `watchdog` with no change in the count is therefore recorded as a
+note, not a warning.
+
+Both counters are since power-on, so cutting power to a board starts them
+again; so does flashing firmware that does not recognize the record it finds.
+A count below the baseline's, or a boot cause that gained `power-on` or
+`brown-out`, is read as that restart: the board is re-baselined where it
+restarted, with a note naming the causes, and only resets after it are
+counted. Both counts stop at 255; a board already there is noted at the
+baseline, because a reset can then no longer change the count. The radio-wait
+counts are since boot rather than since power-on, so every reboot starts them
+again.
+
+A reset is attributed to the test after which it was first read. A board no
+test binds is read at the baseline and at the end of the run, so a reset on it
+belongs to the run rather than to a test.
+
+A read during a test covers only the boards that test binds: another test's
+board may be switched off by this one's power isolation, and its resets are
+not this test's to count. The baseline and the run-end read cover every board.
+
+Two limits worth knowing. The reads between cases need a test with more than
+one case, so a test that compiles to a single case — the flash soak is one —
+is read at its start and its end and not in between; that is the one part of
+[#164](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/164)
+still to do, and it needs a read inside the flash loop, which already runs
+commands between flashes. And the firmware records one processor fault, the
+last, so a board that faults the same way twice is reported once: the record
+cannot tell a repeat from the fault it already held.
+
+Two things fail:
+
+- A board that does not answer on USB. It fails its test and stops the run,
+  because nothing can use it again; one that does not answer at the baseline
+  stops the run before any test runs. A read that brings back no record is
+  tried three times, about two and a half seconds apart and each read bounded
+  at ten seconds, because that is how a board looks for a moment after the
+  watchdog has reset it: it has re-enumerated and every request to it is
+  refused (`libusb -9`) until the host notices. A record that did print is the
+  read, whatever became of the rest of the command, with a note saying what
+  else it said: a board that printed its record answered. While a run is being
+  cancelled a board is read once and one that does not answer is recorded
+  without failing, since stopping the run is what was asked for and the board
+  may have gone as part of it.
+- A test whose plan sets `max_watchdog_resets: <n>` and whose boards reset
+  themselves more than `n` times. Nothing else makes the count pass or fail,
+  and there is no limit by default. This is for stability runs (the release
+  soak, [ubertooth#703](https://github.com/SqueakyFloors/ubertooth/issues/703)).
+  Every test accepts the argument. The boards are still in a known state, so
+  later tests run.
+
+Capture transfer errors and radio waits that gave up are recorded as notes
+with no warning: each transfer error costs the packet that was arriving, and a
+radio wait that gave up means what that mode captured may be incomplete.
+
+Firmware without the request (2020-12-R1, which a flash test writes on
+purpose) refuses it, and keeps refusing it. That is how it is told from a
+board the host has not yet noticed re-enumerating, which answers inside the
+window: the last read of the window decides, and a board still refusing the
+request there reads as "watchdog not reported", in the tool's own words, which
+is neither a warning nor a failure. Such a board stops being waited for as
+soon as it refuses the request again, and gets the window back the moment
+something else is wrong with it, such as the read right after a test
+reflashes it.
+
+A commit that has the watchdog record and not the radio waits prints the
+record and refuses the second read; the record still counts, with the waits
+read as not reported. Host tools older than the ones that added the last two
+lines of the report print the rest without them.
+
+For each board that reset itself, the run's record and `report.md` carry a
+ready-to-file fork issue (board, firmware and host commits, mode, wait, test,
+time, and the `-w` output) and the open fork issues a `gh issue list` search
+for the same mode and wait found, so the reset can be commented on an existing
+issue instead. A search that cannot run (no `gh`, not signed in, no network)
+says so, and the issue is still offered.
+
 ## Building the resolved revision
 
 By default a run tests the Ubertooth tools already installed, and preflight
@@ -1169,11 +1266,17 @@ a BLE capture case ran, and `output/` when a command printed a lot):
   records are `run_started` and `manifest` (sources, plan and registry hashes,
   artifacts, invocations, Python/OS environment, and build toolchain), then
   build commands, preflight, and each test's events, including every command
-  and its output as it arrives. `run_finished` holds the summary.
+  and its output as it arrives. One `watchdog` record per board per read
+  ([Firmware watchdog](#firmware-watchdog)) carries that board's record and
+  what changed, and `watchdog_summary` at the end of the run carries the
+  per-board self-reset count and any fork issue to file. `run_finished` holds
+  the summary, whose `watchdog_resets` is the run's total.
 - `report.md`: compiled from `run.jsonl` when the run ends, including failed or
   canceled runs. It lists the setup (commits, host and platform, toolchain,
   Python, device serials and firmware, artifact hashes) and a results table,
-  then the full transcript.
+  then a Watchdog section when any board was read, then the full transcript.
+  A board that reset itself puts its warning in the test's Reason column too,
+  since the test itself passed.
 
 Each transcript line starts with the time elapsed since the run started
 (`HH:MM:SS.mmm`); the report header gives the run's UTC start time, and
@@ -1570,7 +1673,10 @@ word and symbol (colour only reinforces it).
   test` (Linux only) are calibrated from runs on the Linux lab host. A test with no implementation yet is
   estimated at its `duration` argument, if any. A Linux host, one board, or a
   failing test ends sooner or later, so the countdown is a guide, never a
-  timeout. An estimate is per invocation: `Ubertooth: each` runs the test
+  timeout. Under the clock, a Boards list appears once the run has read a
+  board's firmware watchdog record: each board with the times it has reset
+  itself during this run and the last warning if there was one (see
+  [Firmware watchdog](#firmware-watchdog)). An estimate is per invocation: `Ubertooth: each` runs the test
   once per board the target selects. Run setup counts such a test once and
   says so; once the run's manifest arrives (before preflight) the live
   checklist lists every planned invocation on the target with its estimate,

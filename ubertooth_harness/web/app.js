@@ -309,7 +309,7 @@
     return {
       run_id: runId, seen: new Set(), events: [], items: [],
       byInvocation: new Map(), log: [], partial: "", stage: "waiting",
-      invocations: null,
+      invocations: null, boards: new Map(),
     };
   }
 
@@ -363,6 +363,7 @@
     }
     live.planned = Array.isArray(live.invocations) || Boolean(suite);
     live.byInvocation = new Map();
+    live.boards = new Map();
     // Records from the socket and from REST may interleave; replay in order.
     const events = [...live.events].sort((a, b) => a.sequence - b.sequence);
     live.events = [];
@@ -441,6 +442,23 @@
       // The libbtbb differs from the fork's install.sh pin, or was not compared.
       pushLog(`warning: ${String(details.message ?? "")}`);
     }
+    if (kind === "watchdog") {
+      // The firmware reset a board, or did not: a count, never a failure.
+      const serial = String(details.serial ?? "");
+      const board = live.boards.get(serial) || {
+        resource: String(details.resource ?? ""), serial, resets: 0, state: "", warning: "",
+      };
+      board.resets += typeof details.new_resets === "number" ? details.new_resets : 0;
+      board.state = String(details.state ?? "");
+      const warnings = Array.isArray(details.warnings) ? details.warnings : [];
+      if (warnings.length) board.warning = String(warnings[warnings.length - 1]);
+      live.boards.set(serial, board);
+      for (const line of warnings) pushLog(`warning: ${String(line)}`);
+      for (const line of Array.isArray(details.notes) ? details.notes : []) {
+        pushLog(`note: ${String(line)}`);
+      }
+      if (status === "failed" && details.reason) pushLog(`error: ${String(details.reason)}`);
+    }
     if (kind === "test_started") {
       const name = String(details.test_name ?? "");
       const id = String(details.invocation_id ?? "");
@@ -516,6 +534,25 @@
     $("live-summary").replaceChildren(...fields.flatMap(([term, value]) =>
       [el("dt", { text: term }), el("dd", {}, value)]));
     $("cancel-button").hidden = run.status !== "running";
+
+    // Per board: how many times the firmware's watchdog reset it during this
+    // run, and the last warning if there was one. Hidden until a board is read.
+    const boards = [...live.boards.values()];
+    $("live-boards").hidden = boards.length === 0;
+    $("boards").replaceChildren(...boards.map((board) => el("li", {
+      className: board.resets ? "board board-reset" : "board",
+    },
+      el("span", { className: "board-name", text: board.resource || board.serial }),
+      el("span", {
+        className: "board-resets",
+        // The count always, since it matters most on a board whose last read
+        // failed; then what that read found, when it was not a record.
+        text: ` ${board.resets} self-reset${board.resets === 1 ? "" : "s"}`
+          + (board.state === "read" || !board.state ? ""
+            : board.state === "absent" ? "; did not answer"
+            : `; watchdog ${board.state}`),
+      }),
+      board.warning ? el("span", { className: "reason", text: ` — ${board.warning}` }) : null)));
 
     $("checklist").replaceChildren(...live.items.map((item) => {
       const shown = itemStatus(item, run);

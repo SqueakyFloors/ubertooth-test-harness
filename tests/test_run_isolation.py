@@ -39,6 +39,7 @@ from ubertooth_harness.report import load_events, render_run
 from ubertooth_harness.resources import STARTECH_DRIVER, FileResourceRegistry
 from ubertooth_harness.sequencer import NamedTestSequencer
 
+from tests import watchdog_samples
 from tests.test_sequencer import CollectSink, run_contract
 
 SERIALS = {
@@ -167,6 +168,17 @@ class LabExecutor:
         stdout, stderr, code = "", "", 0
         if argv == ("ubertooth-util", "-V"):
             stdout = "Host tools version: libubertooth 1.1 (git-test)\n"
+        elif argv[0] == "ubertooth-util" and argv[-1] == "-w":
+            # The watchdog read selects its board, so several attached boards
+            # do not stop it; a board that is off answers nothing.
+            selected = argv[argv.index("-U") + 1] if "-U" in argv else (
+                seen[0] if len(seen) == 1 else ""
+            )
+            if selected and selected in seen:
+                stdout = watchdog_samples.report()
+            else:
+                stderr = watchdog_samples.BOARD_GONE.format(serial=selected)
+                code = 1
         elif len(seen) != 1 and argv[0] in ("ubertooth-util", "bash"):
             # ubertooth_start() opens no device, so the tool fails.
             stderr, code = multiple_devices(seen), 1

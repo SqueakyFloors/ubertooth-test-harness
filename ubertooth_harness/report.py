@@ -18,6 +18,7 @@ from typing import Iterable, Mapping, Sequence
 from ubertooth_harness.events import REPORT, RUN_LOG
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.rawlog import NOTE, TAGS, CommandCapture, format_command_record
+from ubertooth_harness.watchdog import wait_counts
 
 
 REDACTED = "<serial>"
@@ -182,6 +183,10 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
             result += (
                 f", {summary.get('not_applicable_cases', 0)} cases and "
                 f"{summary.get('not_applicable_tests', 0)} tests not applicable on this host"
+            )
+        if summary.get("watchdog_resets"):
+            result += (
+                f", {summary['watchdog_resets']} board self-resets (see Watchdog)"
             )
         if summary.get("failure_reason"):
             result += f"; {summary['failure_reason']}"
@@ -404,6 +409,86 @@ def _not_applicable_section(run: _Run) -> list[str]:
     return lines
 
 
+def _watchdog_section(run: _Run) -> list[str]:
+    """What the firmware's watchdog record said, per board, and the fork
+    issue to file for a board that reset itself.
+
+    A self-reset is the watchdog working, so it is reported here rather than
+    failing the run; `ubertooth-util -w` is what the run read (watchdog.py).
+    """
+    summary = next(
+        (e.get("details", {}) for e in reversed(run.events)
+         if e["event_type"] == "watchdog_summary"), None
+    )
+    if summary is None:
+        return []
+    lines = [
+        "", "## Watchdog", "",
+        "The firmware resets a board that stops servicing USB or whose mode "
+        "stops looping, and keeps the reason in RAM a reset does not clear. "
+        "A reset is reported, not failed: the board came back by itself. "
+        "Each row holds what that board's last whole record said, and what "
+        "its last read found.", "",
+        "| Board | Serial | Reset itself | Last boot cause | Last read | "
+        "Transfer errors | Radio waits that gave up |", "|---|---|---|---|---|---|---|",
+    ]
+    for board in summary.get("boards", []):
+        waits = board.get("radio_waits")
+        counts = wait_counts(waits) if waits else "not reported"
+        errors = board.get("transfer_errors")
+        lines.append(
+            f"| {_cell(board.get('resource', ''))} | {_cell(board.get('serial', ''))} "
+            f"| {board.get('resets', 0)} | {_cell(board.get('boot_cause') or '–')} "
+            f"| {_cell(board.get('state', ''))} "
+            f"| {'not reported' if errors is None else errors} | {_cell(counts)} |"
+        )
+    warnings = [
+        line
+        for event in run.events if event["event_type"] == "watchdog"
+        for line in event.get("details", {}).get("warnings", [])
+    ]
+    notes = [
+        line
+        for event in run.events if event["event_type"] == "watchdog"
+        for line in event.get("details", {}).get("notes", [])
+    ]
+    for heading, items in (("Warnings", warnings), ("Notes", notes)):
+        if items:
+            lines += ["", f"**{heading}**", ""]
+            lines += [f"- {item}" for item in items]
+    for offer in summary.get("issues", []):
+        issue = offer.get("issue", {})
+        duplicates = offer.get("duplicates", {})
+        lines += [
+            "", f"### Issue to file on {issue.get('repository', 'the fork')}", "",
+            f"Board {_cell(offer.get('resource', ''))} reset itself "
+            f"{offer.get('resets', 0)} time(s). File this, or comment on an open "
+            "issue below if it is the same one.", "",
+        ]
+        matches = duplicates.get("matches") or []
+        if matches:
+            lines += ["Open fork issues matching this mode and wait:", ""]
+            lines += [
+                f"- [#{match.get('number')}]({match.get('url')}) {match.get('title')}"
+                for match in matches
+            ]
+            lines.append("")
+        elif duplicates.get("error"):
+            lines += [
+                f"No duplicate search: {duplicates['error']} "
+                f"(search: `{duplicates.get('terms', '')}`).", "",
+            ]
+        else:
+            lines += [
+                f"No open fork issue matches `{duplicates.get('terms', '')}`.", "",
+            ]
+        # Four backticks: the body carries the `-w` output in a fence of its own.
+        lines += ["````text", f"Title: {issue.get('title', '')}", ""]
+        lines += str(issue.get("body", "")).splitlines()
+        lines.append("````")
+    return lines
+
+
 def _results_table(run: _Run) -> list[str]:
     lines = [
         "| Test | Host and resources | Result | Failed cases | Skipped cases "
@@ -423,13 +508,28 @@ def _results_table(run: _Run) -> list[str]:
             fd = finished["details"]
             status = finished["status"]
             failed = fd.get("failed_cases", "")
-            guards = fd.get("failed_guard_checks", 0)
-            if guards:
-                # Guard checks are not cases; show them beside the case count.
-                failed = f"{failed} + {guards} guard check{'s' if guards != 1 else ''}"
+            # Guard and watchdog checks are not cases; show them beside the
+            # case count, so a test that failed on one of them does not read
+            # as a failure with nothing failed.
+            for count, what in (
+                (fd.get("failed_guard_checks", 0), "guard"),
+                (fd.get("failed_watchdog_checks", 0), "watchdog"),
+            ):
+                if count:
+                    failed = f"{failed} + {count} {what} check{'s' if count != 1 else ''}"
             skipped = fd.get("skipped_cases", "")
             not_applicable = fd.get("not_applicable_cases", "")
             reason = fd.get("reason", "")
+            # A board that reset itself does not fail the test, so the table
+            # says it happened and the Watchdog section below has the lines
+            # themselves; printing them twice in one report helps nobody.
+            count = fd.get("watchdog_warnings", 0)
+            if count:
+                note = (
+                    f"warning: {count} watchdog warning"
+                    f"{'' if count == 1 else 's'} (see Watchdog)"
+                )
+                reason = f"{reason}; {note}" if reason else note
         lines.append(
             f"| {_cell(details.get('invocation_id'))} | {_cell(where)} | {_cell(status)} "
             f"| {failed} | {skipped} | {not_applicable} | {_duration(started, finished)} "
@@ -613,6 +713,22 @@ def _transcript(run: _Run) -> list[str]:
         elif kind == "check_finished":
             name = details.get("check_name") or details.get("case_name") or details.get("check_id")
             line(event, f"--- {name} EXIT: {status}{_reason(details)} ---")
+        elif kind == "watchdog":
+            line(event, f"[M] watchdog {status} ({details.get('stage', '')}): "
+                        f"{details.get('resource', '')} "
+                        f"{details.get('new_resets', 0)} new self-reset(s), "
+                        f"{details.get('resets', '?')} since power-on"
+                        + _reason(details))
+            for warning in details.get("warnings", []):
+                line(event, f"[M] warning: {warning}")
+            for note in details.get("notes", []):
+                line(event, f"[M] note: {note}")
+        elif kind == "watchdog_summary":
+            counts = ", ".join(
+                f"{board.get('resource')} {board.get('resets', 0)}"
+                for board in details.get("boards", [])
+            )
+            line(event, f"[M] watchdog {status}: self-resets by board: {counts}")
         elif kind == "step_finished":
             text = f"[S] {details.get('stage', 'step')} {status}: {details.get('step_name', '')}"
             if details.get("expected") is not None:
@@ -694,6 +810,7 @@ def render_run(events: Sequence[Mapping], *, redact_serials: bool = False, trans
     lines = [f"# Ubertooth test run `{run.run_id}`", "", "| | |", "|---|---|"]
     lines += [f"| {_cell(key)} | {_cell(value)} |" for key, value in _setup_rows(run)]
     lines += ["", "## Results", ""] + _results_table(run) + _not_applicable_section(run)
+    lines += _watchdog_section(run)
     if transcript:
         lines += ["", "## Transcript", "", LEGEND, "", "```text"] + _transcript(run) + ["```"]
     text = "\n".join(lines) + "\n"
