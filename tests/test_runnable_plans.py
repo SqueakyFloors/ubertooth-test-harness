@@ -80,6 +80,13 @@ class RunnablePlanTests(unittest.TestCase):
                 self.assertTrue(unimplemented_tests(plan, catalog), path.name)
         self.assertEqual(["backlog.yaml", "mac-polling.yaml"], not_runnable)
 
+    def test_every_committed_plan_validates(self):
+        for path in sorted(PLANS.glob("*.yaml")):
+            with self.subTest(path.name):
+                code, out, err = _validate(path)
+                self.assertEqual(0, code, err)
+                self.assertIn("plan: ", out)
+
     def test_the_fast_plan_runs_spectrum_rssi_sanity_and_not_ble_monitor(self):
         names = [step.test_name for step in load_plan(PLANS / "fast.yaml").steps("fast")]
         self.assertIn("Spectrum RSSI sanity", names)

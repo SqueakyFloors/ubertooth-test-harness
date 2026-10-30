@@ -544,9 +544,20 @@ suites:
   slow:
     - Flash reliability:
         hosts: [Host_Linux, Host_Mac]
+        platforms: [linux, macos]
         Ubertooth: default
         flashes: 100
 ```
+
+Every test accepts `platforms:` (`linux`, `macos`, no duplicates), and a step
+that leaves it out runs on every platform. `hosts:` chooses the registered
+hosts a step may run on; `platforms:` narrows those to the ones that can run
+it, as a test-wide need (`hostneeds.Needs`), so the planner compiles the step
+only for hosts whose platform it lists and records the rest as not applicable.
+A step no named host can run fails planning. `Flash reliability`, `Exclusive
+Ubertooth topology`, and `MAC polling soak` must state their platforms and
+keep the argument required; the flash reliability compatibility view
+(`plan.flash_steps`) is built per listed platform.
 
 Host version, firmware version, compile identity, and serial identity are
 mandatory generated preflight checks rather than optional suite items. Their
