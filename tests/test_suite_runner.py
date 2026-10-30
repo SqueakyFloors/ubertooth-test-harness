@@ -81,6 +81,10 @@ class ModuleSelectionTests(unittest.TestCase):
             with self.subTest(name):
                 self.assertEqual(["tests.test_build"], runner._modules([name]))
 
+    def test_a_module_named_twice_runs_once(self):
+        self.assertEqual(["tests.test_build"], runner._modules(
+            ["test_build", "tests.test_build", "tests/test_build.py"]))
+
     def test_an_unknown_module_is_an_error(self):
         with self.assertRaisesRegex(SystemExit, "no test module tests/test_nope.py"):
             runner._modules(["test_nope"])
@@ -157,13 +161,16 @@ class ChildTests(unittest.TestCase):
     def test_stopping_a_module_takes_the_commands_it_started(self):
         # A hung module may have left a command of its own running, holding a
         # lock or a port; the whole process group goes.
+        # A session of its own, so stopping its group cannot reach this test
+        # run; the sleeps end by themselves if this test is ever stopped
+        # before its own stop runs.
         child = subprocess.Popen(
             [sys.executable, "-c",
              "import subprocess, sys, time\n"
              "started = subprocess.Popen([sys.executable, '-c', "
-             "'import time; time.sleep(120)'])\n"
+             "'import time; time.sleep(20)'])\n"
              "print(started.pid, flush=True)\n"
-             "time.sleep(120)\n"],
+             "time.sleep(20)\n"],
             stdout=subprocess.PIPE, text=True, start_new_session=True)
         self.addCleanup(child.kill)
         grandchild = int(child.stdout.readline())
@@ -304,6 +311,30 @@ class ExecutableFixtureTests(unittest.TestCase):
         self.assertEqual(0o700, path.stat().st_mode & 0o777)
 
 
+class WholeRunTests(unittest.TestCase):
+    """main(), in this process, with one module's child made to fail."""
+
+    def test_a_module_that_cannot_be_started_is_an_error_and_the_rest_run(self):
+        real = runner._start
+
+        def start(module, verbosity, timeout=runner.TIMEOUT_S):
+            if module == "tests.test_plan":
+                raise OSError(24, "too many open files")
+            return real(module, verbosity, timeout)
+
+        for number in (signal.SIGTERM, signal.SIGHUP):
+            self.addCleanup(signal.signal, number, signal.getsignal(number))
+        with mock.patch.object(runner, "_start", start), \
+                mock.patch("sys.stderr", io.StringIO()) as err:
+            status = runner.main(["-j", "2", "test_build", "test_plan"])
+        text = err.getvalue()
+        self.assertEqual(1, status, text)
+        self.assertIn("too many open files", text)
+        self.assertIn("FAILED (errors=1)", text)
+        # The module that did run is still in the summary.
+        self.assertRegex(text, r"(?m)^\s*ok\s+\S+\s+\d+ tests  tests\.test_build$")
+
+
 class EndToEndTests(unittest.TestCase):
 
     def run_runner(self, *args):
@@ -337,11 +368,13 @@ class EndToEndTests(unittest.TestCase):
         # The children are in sessions of their own, so nothing but this
         # reaches them: a cancelled CI job or a Ctrl-C must not leave test
         # processes behind holding their leases, ports and lock files.
+        # In this process's group, not a session of its own: the signal below
+        # goes to its pid, and a stop of this whole run takes it along.
         process = subprocess.Popen(
             [sys.executable, str(RUNNER), "-j", "2", "test_extcap_capture",
              "test_deploy_scripts"],
             cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, start_new_session=True)
+            text=True)
         self.addCleanup(process.kill)
         children = []
         deadline = time.monotonic() + 60

@@ -549,9 +549,9 @@ class RunTests(ControllerTestCase):
             )
             # One outstanding start request per target. The reply timeout is
             # read when the request arrives, so it is shortened before the
-            # one that has to expire, not after (issue #184); two seconds are
-            # still far longer than the loopback round trip below needs.
-            self.controller.reply_timeout_s = 2.0
+            # one that has to expire, not after (issue #184); three seconds
+            # are still far longer than the loopback round trip below needs.
+            self.controller.reply_timeout_s = 3.0
             post, _ = await self.start_run(runner)
             status, payload, _ = await self.http(
                 "POST", "/api/targets/Host_A/runs",

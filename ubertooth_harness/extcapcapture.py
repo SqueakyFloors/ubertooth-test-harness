@@ -294,7 +294,9 @@ def capture(argv, fifo, seconds, *, board=None, channel=None, refused=False,
     """
     if no_btle and not refused:
         raise ValueError("no_btle needs refused")
-    if stop_after_records is not None and stop_after_records < 1:
+    if stop_after_records is not None and (
+            not isinstance(stop_after_records, int)
+            or isinstance(stop_after_records, bool) or stop_after_records < 1):
         raise ValueError("stop_after_records is a count of records, 1 or more")
     failures = []
     started = os.path.join(os.path.dirname(os.path.abspath(fifo)), BTLE_STARTED)

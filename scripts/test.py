@@ -163,7 +163,9 @@ def _modules(names: list[str]) -> list[str]:
         if not (TESTS / f"{stem}.py").exists():
             raise SystemExit(f"error: no test module tests/{stem}.py")
         chosen.append(f"tests.{stem}")
-    return chosen
+    # Named twice is still one process: two at once would share nothing but
+    # the confusion.
+    return list(dict.fromkeys(chosen))
 
 
 def _longest_first(modules: list[str]) -> list[str]:
@@ -233,13 +235,17 @@ def _stop(children) -> None:
         _signal_group(child, signal.SIGKILL)
 
 
+def _ignore_signals() -> None:
+    """Nothing interrupts the stop itself: a second Ctrl-C part way through
+    it would leave children running and the run waiting for them."""
+    for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(number, signal.SIG_IGN)
+
+
 def _interrupt() -> None:
     """Close the run to new children and stop the ones running."""
     global _stopping
-    # Nothing interrupts the stop itself: a second Ctrl-C part way through
-    # would leave children running and the run waiting for them.
-    for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        signal.signal(number, signal.SIG_IGN)
+    _ignore_signals()
     with _lock:
         _stopping = True
         children = list(_running)
@@ -362,7 +368,7 @@ def _report(outcomes: list[Outcome], seconds: float, jobs: int, durations: int,
         for name in outcome.unexpected_successes:
             out.write(f"\n{SEPARATOR1}\nUNEXPECTED SUCCESS: {name}\n{SEPARATOR2}\n")
 
-    if durations:
+    if durations > 0:
         timings = sorted((timing for outcome in outcomes
                           for timing in outcome.timings),
                          key=lambda timing: timing[1], reverse=True)[:durations]
@@ -436,7 +442,15 @@ def main(argv=None) -> int:
         running = {pool.submit(_start, module, verbosity): module
                    for module in modules}
         for future in concurrent.futures.as_completed(running):
-            outcome = future.result()
+            try:
+                outcome = future.result()
+            except Exception as error:
+                # Starting or reading a child failed (too many processes, a
+                # full disk). The module is an error and the run goes on:
+                # letting this out would lose every other module's result.
+                outcome = Outcome(running[future], 0.0)
+                outcome.errors.append(
+                    [outcome.module, f"running this module failed: {error!r}\n"])
             outcomes.append(outcome)
             print(f"{outcome.status():>4} {outcome.seconds:6.1f}s "
                   f"{outcome.tests:4d} tests  {outcome.module}",
@@ -444,6 +458,7 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         # The children lead their own sessions, so neither the terminal's
         # interrupt nor a signal sent to this process reaches them.
+        _ignore_signals()
         print("\ninterrupted", file=sys.stderr, flush=True)
         _interrupt()
         # The threads are still in a read of a child that has just been
