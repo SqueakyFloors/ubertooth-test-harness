@@ -1029,7 +1029,10 @@ const char *bt_defaults(void)
     }
     LOCK();
     strcpy(st.name, name);
-    put_channels_back = memcmp(st.afh, afh_all, AFH_MAP_LEN) != 0;
+    /* A map still unanswered counts as one to put back: it may yet be taken,
+     * and then a "defaults" that sent nothing would have answered OK while
+     * the board moved to a reduced map afterwards. */
+    put_channels_back = memcmp(st.afh, afh_all, AFH_MAP_LEN) != 0 || st.afh_owed;
     UNLOCK();
 
     if ((err = bt_set_discoverable(true)) != NULL) {
@@ -1066,7 +1069,10 @@ const char *bt_sco_start(void)
 void bt_status_json(char *out, size_t len)
 {
     char self[18], peer[18], remote[18];
-    char afh_fields[224];
+    /* static, like the shell's own answer buffers: only the shell task gets
+     * here and its stack is small. 224 bytes holds the longest the six
+     * fields can be, which is 171; a seventh has to be counted in here. */
+    static char afh_fields[224];
     const uint8_t *a = own_addr();
     struct sco_view sco;
     int n;

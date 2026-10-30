@@ -547,10 +547,13 @@ it, so a map the controller accepts after `afh` has given up waiting on it
 still shows up there rather than leaving `status` reporting the map before
 it.
 
-With no link there is no link map: `afh_link`, `afh_link_used` and `afh_mode`
-read `null`, `afh_link_error` is empty, and `afh` still reports what was
-asked for. A link whose AFH the controller reports as off reads the same way
-except that `afh_mode` is `"off"`, because the map means nothing then.
+With no one link there is no link map: `afh_link`, `afh_link_used` and
+`afh_mode` read `null`, `afh_link_error` is empty, and `afh` still reports
+what was asked for. That covers a board with no link and a board with more
+than one, which is no one piconet, exactly as the clock read treats it; these
+boards are connectable, so something else in the room can open the second
+one. A link whose AFH the controller reports as off reads the same way except
+that `afh_mode` is `"off"`, because the map means nothing then.
 
 The link map is read first and the rest of the line is gathered after it, so
 on a link that is going down the three link fields can describe a link the
@@ -582,9 +585,13 @@ carries the whole argument for why no public route works; it applies here
 word for word.
 
 One read at a time, and a read that times out cannot leave its answer for the
-next one. A controller that will not answer this command at all costs nothing
-but the `afh_link_error` line: the map that was asked for, and everything
-else `status` reports, is unaffected.
+next one. A controller that answers the command and refuses it costs nothing
+but the `afh_link_error` line: the map that was asked for, and everything else
+`status` reports, is unaffected. A controller that stops answering altogether
+is the worse case the clock section describes: the command it never answered
+keeps its place in the host's pending list and one of the command credits, so
+`afh_link_error` says the controller did not answer and `reset` is the way
+out.
 
 If a controller ever stops answering altogether, the `afh` that was waiting
 answers `ERR the controller did not answer the channel map` after three
