@@ -481,6 +481,17 @@ class CheckTests(unittest.TestCase):
         swapped = [want[1], want[0]] + want[2:]
         self.assertIn("packet line 1", check(self.lines(swapped)))
 
+    def test_packets_check_takes_an_absent_noise_figure(self):
+        # The fixture's records claim no background estimate, so a current
+        # ubertooth-rx prints the word instead of a figure (fork 532adc19).
+        want = rxreplay.expected_packets()
+        none = self.LINE.replace("n=-2 snr=1", "n=none snr=none")
+        output = "".join(
+            none.format(t=5, lap=lap, err=err, ch=ch) + "\n"
+            for lap, err, ch in want
+        )
+        self.assertEqual("", rxreplay.packets_check(want)(output))
+
     def test_uap_and_survey_checks(self):
         want = rxreplay.expected_packets(lap=rxreplay.LAP_A)
         check = rxreplay.uap_check(want)
