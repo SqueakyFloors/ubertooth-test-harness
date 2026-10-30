@@ -28,6 +28,13 @@ TIMESTAMP = re.compile(r"^\d\d:\d\d:\d\d\.\d{3} ")
 SLOW_PLAN = load_plan(Path(__file__).resolve().parents[1] / "testplans" / "slow.yaml")
 
 
+
+def firmware_line(revision):
+    # Since fork 730b4f5 (#523) a build with an info block names its image
+    # (the test build); the KGV prints its revision alone.
+    image = "bluetooth_rxtx " if revision.startswith("git-") else ""
+    return f"Firmware version: {image}{revision} (API:1.07)\n"
+
 class CollectEventSink:
     def __init__(self):
         self.events: list[RunEvent] = []
@@ -118,7 +125,7 @@ class FakeExecutor:
             ):
                 self.cancel_token.cancel("operator requested")
                 self.cancel_after_flash = None
-            stdout = f"Firmware version: {revision} (API:1.07)\n"
+            stdout = firmware_line(revision)
             if on_output is not None:
                 on_output("stdout", stdout)
             return CommandResult(
@@ -271,7 +278,7 @@ class FlashRunnerTests(unittest.TestCase):
                 self.assertRegex(line, TIMESTAMP)
             self.assertIn(" [C] ubertooth-util -U selected -v", lines[1])
             self.assertIn(" [C] ubertooth-util -U guard -v", lines[3])
-            self.assertIn("[O] Firmware version: git-guard (API:1.07)", lines[4])
+            self.assertIn("[O] Firmware version: bluetooth_rxtx git-guard (API:1.07)", lines[4])
             headers = [i for i, line in enumerate(lines) if re.search(r"     \+\+\+ flash \d+: ", line)]
             self.assertEqual(summary.attempted_flashes, len(headers))
             for index in headers:
@@ -283,7 +290,7 @@ class FlashRunnerTests(unittest.TestCase):
                 self.assertIn(" [C] ubertooth-util -U selected -v", block[3])
                 self.assertIn("[O] Firmware version: ", block[4])
                 self.assertIn(" [C] ubertooth-util -U guard -v", block[5])
-                self.assertIn("[O] Firmware version: git-guard (API:1.07)", block[6])
+                self.assertIn("[O] Firmware version: bluetooth_rxtx git-guard (API:1.07)", block[6])
                 self.assertIn("EXIT: passed, read back", block[7])
 
     def test_failed_flash_shows_error_output_and_exit_code(self):
@@ -589,7 +596,7 @@ class BoardsExecutor:
             self.revisions[serial] = self.image_revisions[argv[argv.index("-d") + 1]]
             stdout = "Verified firmware revision\n"
         else:
-            stdout = f"Firmware version: {self.revisions[serial]} (API:1.07)\n"
+            stdout = firmware_line(self.revisions[serial])
         for hook in getattr(self, "after", []):
             hook(argv, flashes)
         if on_output is not None:

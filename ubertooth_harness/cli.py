@@ -60,6 +60,12 @@ from ubertooth_harness.preflight import (
     PreflightError,
     PreflightPolicy,
 )
+from ubertooth_harness.power import (
+    PowerControllerError,
+    controller_from_resource,
+    controller_ports,
+    snapshot_ports,
+)
 from ubertooth_harness.resources import FileResourceRegistry, RegistryError
 from ubertooth_harness.report import render_runs, write_report
 from ubertooth_harness.sequencer import NamedTestSequencer, run_started_details
@@ -377,6 +383,15 @@ def _parser() -> argparse.ArgumentParser:
     boards.add_argument("--lease-dir", type=Path, help=argparse.SUPPRESS)
     _add_external_lock_option(boards)
     boards.add_argument("--json", action="store_true", help="machine-readable output")
+
+    power = subparsers.add_parser(
+        "power",
+        help="read a USB power controller's ports (power, data, VBUS, current) "
+        "and the resources mapped to them; changes nothing",
+    )
+    power.add_argument("--hardware", type=Path, required=True)
+    power.add_argument("controller", metavar="ALIAS", help="registered USB power controller")
+    power.add_argument("--json", action="store_true", help="machine-readable output")
 
     lease = subparsers.add_parser(
         "lease",
@@ -1058,6 +1073,57 @@ def _boards_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _power_command(args: argparse.Namespace) -> int:
+    registry = FileResourceRegistry.load(args.hardware)
+    resource = registry.get(args.controller)
+    try:
+        # Unarmed: this command can never switch a port.
+        controller = controller_from_resource(resource, allow_real_changes=False)
+        ports = controller_ports(resource)
+        mapped = {
+            board.power["port"]: board.alias
+            for board in registry.resources.values()
+            if board.power.get("controller") == resource.alias
+            and isinstance(board.power.get("port"), int)
+        }
+        controller.connect()
+        try:
+            states = snapshot_ports(controller, ports)
+            firmware = getattr(controller, "firmware_version", None)
+        finally:
+            try:
+                controller.close()
+            except Exception:  # noqa: BLE001 - a read error above is the one to report
+                pass
+    except PowerControllerError as error:
+        raise HarnessError(f"power controller {resource.alias}: {error}") from error
+    rows = [
+        {
+            "port": state.port,
+            "power_enabled": state.power_enabled,
+            "data_enabled": state.data_enabled,
+            "vbus_microvolts": state.vbus_microvolts,
+            "vbus_microamps": state.vbus_microamps,
+            "resource": mapped.get(state.port),
+        }
+        for state in states
+    ]
+    if args.json:
+        print(json.dumps({"controller": resource.alias, "driver": resource.driver,
+                          "firmware_version": firmware, "ports": rows},
+                         indent=2, sort_keys=True))
+        return 0
+    print(f"{resource.alias} ({resource.driver})"
+          + (f", firmware {firmware}" if firmware else ""))
+    for row in rows:
+        volts = "-" if row["vbus_microvolts"] is None else f"{row['vbus_microvolts'] / 1e6:.2f} V"
+        amps = "-" if row["vbus_microamps"] is None else f"{row['vbus_microamps'] / 1e3:.1f} mA"
+        print(f"port {row['port']}: power {'on ' if row['power_enabled'] else 'off'} "
+              f"data {'on ' if row['data_enabled'] else 'off'} "
+              f"VBUS {volts:>7} {amps:>9}  {row['resource'] or ''}".rstrip())
+    return 0
+
+
 def _lease_command(args: argparse.Namespace) -> int:
     command = list(args.command_line)
     if not command:
@@ -1120,6 +1186,10 @@ def main(argv: list[str] | None = None) -> int:
             return _boards_command(args)
         if args.command == "lease":
             return _lease_command(args)
+        if args.command == "power":
+            # Opens a real controller: only from the harness environment.
+            require_harness_environment()
+            return _power_command(args)
         if args.command == "report":
             text = render_runs(args.runs, redact_serials=args.redact_serials, title=args.title)
             if args.output:

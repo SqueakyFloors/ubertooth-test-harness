@@ -509,9 +509,9 @@ class FailureSummaryTests(ControllerTestCase):
         # One per board the planner selected, each with its estimate.
         self.assertEqual(
             [{"invocation_id": "001-Exclusive Ubertooth topology",
-              "test_name": "Exclusive Ubertooth topology", "estimated_s": 13.0},
+              "test_name": "Exclusive Ubertooth topology", "estimated_s": 15.0},
              {"invocation_id": "002-Exclusive Ubertooth topology",
-              "test_name": "Exclusive Ubertooth topology", "estimated_s": 13.0}],
+              "test_name": "Exclusive Ubertooth topology", "estimated_s": 15.0}],
             payload["invocations"],
         )
 

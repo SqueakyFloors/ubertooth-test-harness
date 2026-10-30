@@ -9,12 +9,16 @@ COMPILE_INFO_PATTERN = r"\bubertooth\s+\S+\s+\("
 # `ubertooth-util -v` names the image the build came from when the firmware
 # carries an info block ("Firmware version: bluetooth_rxtx git-1c7f06d6
 # (API:1.35)"), and leaves it out when it does not ("Firmware version:
-# 2020-12-R1 (API:1.07)"). Both forms are accepted everywhere the harness
-# reads a revision off a board.
+# 2020-12-R1 (API:1.07)"). Both forms are accepted, and any image name, where
+# the harness only reads the revision off a board.
 IMAGE_NAME_PATTERN = r"(?:\S+\s+)?"
 FIRMWARE_VERSION_RE = re.compile(
     rf"Firmware version:\s+{IMAGE_NAME_PATTERN}(?P<revision>\S+)\s+\(API:"
 )
+# The preflight identity check is stricter than the reads above: the run's
+# tests need the application image, so a board on another image (btbr, a
+# bench image) is a mismatch even when it was built from the same commit.
+APPLICATION_IMAGE_PATTERN = r"(?:bluetooth_rxtx\s+)?"
 PART_ID_PATTERN = r"Part ID:\s+[0-9A-Fa-f]+"
 BOARD_ID_PATTERN = r"Board ID Number:\s+\d+"
 
@@ -75,9 +79,13 @@ def same_revision(expected: str, reported: str) -> bool:
 
 
 def firmware_version_pattern(expected: str) -> str:
-    """`ubertooth-util -v` output for firmware built from ``expected``."""
+    """`ubertooth-util -v` output for the application image built from ``expected``.
+
+    Only the application image the harness tests may be named, so a board on
+    another image does not match.
+    """
     return (
-        rf"Firmware version:\s+{IMAGE_NAME_PATTERN}"
+        rf"Firmware version:\s+{APPLICATION_IMAGE_PATTERN}"
         rf"{revision_pattern(expected)}(?:\s|\()"
     )
 

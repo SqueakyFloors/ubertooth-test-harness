@@ -302,6 +302,11 @@ class DeployTest(unittest.TestCase):
         self.assertNotIn(f"systemctl --user restart {CONTROLLER_UNIT}", self.lab.commands())
         self.assertIn(f"systemctl --user restart {RUNNER_UNIT}", self.lab.commands())
 
+    def test_with_acroname_bootstraps_the_brainstem_api(self):
+        self.assertOk(self.lab.deploy("--with-acroname"))
+        self.assertIn(f"python3 {self.lab.checkout}/bootstrap.py --with-acroname",
+                      self.lab.commands())
+
     def test_port_and_pass_through_options(self):
         libbtbb = self.lab.root / "libbtbb"
         libbtbb.mkdir()

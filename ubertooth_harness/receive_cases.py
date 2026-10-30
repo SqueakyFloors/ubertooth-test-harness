@@ -22,8 +22,8 @@ ubertooth-afh with an unknown -U exited 139 (segfault) before fork 219a5b0
 
 Raw receive (comprehensive) alternates bounded ubertooth-btle -n and
 ubertooth-dump -d runs and requires that no capture hold packets from the
-previous mode; it is strict until SqueakyFloors/ubertooth#318 is fixed (at
-fork 89d9197 every dump starts with two records from before it).
+previous mode (SqueakyFloors/ubertooth#318: at fork 89d9197 every dump
+started with two records from before it; fixed in 9e31dd5 and ed30131).
 """
 
 from __future__ import annotations
@@ -542,7 +542,7 @@ def raw_receive_cases(arguments, _resources, resource_identities):
                          r"error: access code must be 2, 4, 6 or 8 hex digits \(got zz\)",),
                      mutates=True),
             ), "rejected with exit 1 before any mode starts"),
-            # Strict until SqueakyFloors/ubertooth#318 is fixed.
+            # SqueakyFloors/ubertooth#318, fixed in fork 9e31dd5 and ed30131.
             _stale_case(serial, n),
         ]
     return tuple(cases)

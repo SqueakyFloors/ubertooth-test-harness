@@ -320,11 +320,16 @@ and power readback.
 The controller protocol reads an immutable port snapshot containing power/data
 enable state and VBUS voltage/current. The simulated implementation supports
 planning and restoration tests. The optional [BrainStem](https://acroname.com/software/brainstem-development-kit) adapter uses the
-verified v2.12 Python boundary: deterministic
-`USBHub3p.discoverAndConnect(Spec.USB, serial)`, dependent `system.getSerialNumber()` identity readback, Result error/value
-checks for getters, and integer error/readback checks for setters. It imports
-BrainStem lazily and real writes are unarmed by default; no dependency is added
-until the physical hub and distributable are validated.
+BrainStem 2.12.5 Python API, validated on a USBHub3+: deterministic
+`USBHub3p.discoverAndConnect(Spec.USB, serial)`, `system.getSerialNumber()`
+and `system.getModel()` identity readback, and the hub's `usb` entity by port
+index (`getPortState` bits 0 VBUS, 1 USB 2.0 data, 3 USB 3.0 data;
+`getPortVoltage`, `getPortCurrent`; `setPowerEnable`/`setPowerDisable`,
+`setDataEnable`/`setDataDisable`). Getters are checked for their Result error,
+setters for their integer error, and every write is read back. It imports
+BrainStem lazily and real writes are unarmed by default. BrainStem is
+proprietary, so it is an opt-in, hash-checked install
+(`bootstrap.py --with-acroname`, `requirements-acroname.txt`).
 
 The StarTech managed hub adapter speaks the hub's management-controller serial
 protocol (CR-terminated ASCII at 9600 baud: `?Q` firmware version, `GP` port
@@ -487,7 +492,8 @@ Validation and preparation have distinct phases:
    writing, then released unless the run needs it later; the firmware build
    is implied.
 5. Mandatory preflight: verify installed host revision and every selected
-   Ubertooth firmware revision, compile identity, and registered serial before
+   Ubertooth firmware revision (the application image, or the bare revision
+   older firmware prints), compile identity, and registered serial before
    the first suite test starts.
 
 The `manifest` record is written to run.jsonl before preflight and snapshots requested
