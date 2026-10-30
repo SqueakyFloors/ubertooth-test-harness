@@ -163,14 +163,18 @@ class FakeUbertooth:
         reject_strays=True,
         pa_zero_sets=True,
         set_and_read=True,
+        one_value_each=True,
     ):
         self.serial = serial
         # Fork behaviors the option cases check; False models older builds:
-        # next_word (8b58f75/0b63b01), reject_strays (#146/#155), and
+        # next_word (8b58f75/0b63b01), reject_strays (#146/#155),
         # pa_zero_sets (4ed4a1d; before it -a0 was a query), set_and_read
-        # (5b45b3e, #228; before it a later read of a value dropped its set).
+        # (5b45b3e, #228; before it a later read of a value dropped its set),
+        # and one_value_each (opt_check_once(); before it an option given a
+        # value twice kept the last value, and -c with -C sent the second).
         self.next_word = next_word
         self.set_and_read = set_and_read
+        self.one_value_each = one_value_each
         self.reject_strays = reject_strays
         self.pa_zero_sets = pa_zero_sets
         self.aa = "8e89bed6"
@@ -214,7 +218,12 @@ class FakeUbertooth:
         if command[0] == "ubertooth-btle":
             return self._btle(command, options, on_output)
         if "-U" in options:
-            # Repeated -U: the last selection wins (getopt overwrites).
+            # Two -U name two boards for one command.
+            if self.one_value_each:
+                return self._result(command, 1, "",
+                                    "error: option '-U' given more than once\n",
+                                    on_output)
+            # Before opt_check_once() the last selection won (getopt overwrote).
             options = options[options.index("-U") + 2:]
         return self._util(command, options, on_output)
 
@@ -255,7 +264,13 @@ class FakeUbertooth:
             return fail(error)
         crc = None  # None: not given, "q": read, "0"/"1": set
         get_aa = set_aa = None
+        with_value = set()
         for option, value in pairs:
+            # opt_check_once(), before the value is looked at.
+            if value is not None and self.one_value_each:
+                if option in with_value:
+                    return fail(f"error: option '-{option}' given more than once")
+                with_value.add(option)
             if option == "k":
                 if value is None:
                     crc = "q"
@@ -382,7 +397,21 @@ class FakeUbertooth:
         gets = set()  # values read by a separate flag (fork 5b45b3e)
         modes = []
         flags = set()
+        with_value = set()
+        channel_option = None
         for option, value in pairs:
+            # opt_check_once() and the -c/-C conflict both run before the
+            # value is looked at, so they beat a bad value and a stray word.
+            if value is not None and self.one_value_each:
+                if option in with_value:
+                    return fail(f"error: option '-{option}' given more than once")
+                with_value.add(option)
+                if option in "cC":
+                    if channel_option is not None:
+                        return fail(f"error: -{option} cannot be combined with "
+                                    f"-{channel_option}; they are the same channel "
+                                    "setting written two ways")
+                    channel_option = option
             if option in "lacCdqz" and value is not None:
                 if option == "a":
                     if len(value) != 1 or value not in "01234567":
@@ -630,16 +659,18 @@ class CoverageGenerationTests(unittest.TestCase):
         with self.assertRaisesRegex(CatalogError, "missing required argument 'coverage'"):
             definition.normalize_arguments({"hosts": "each"})
 
-    def test_repeated_channel_index_is_last_option_wins(self):
+    def test_repeated_channel_index_is_refused_and_changes_nothing(self):
         _args, cases = cases_for("Radio setting transitions", "comprehensive")
-        case = next(c for c in cases if c.case_id == "channel-index-repeated-set-last-wins")
-        argv = next(s for s in case.steps if s.step_id == "set-twice").resolve_argv(
-            {"original channel-index": "2441"}
-        )
+        case = next(c for c in cases if c.case_id == "channel-index-repeated-set-refused")
+        context = {"original channel-index": "2441"}
+        step = next(s for s in case.steps if s.step_id == "set-twice")
 
-        self.assertEqual(("-C48", "-C24"), argv[3:])
-        last = next(s for s in case.steps if s.step_id == "verify-last")
-        self.assertEqual("2426", last.observe.expected_value({"original channel-index": "2441"}))
+        self.assertEqual(("-C48", "-C24"), step.resolve_argv(context)[3:])
+        self.assertEqual((1,), step.expected_returncodes)
+        self.assertEqual((r"(?m)^error: option '\-C' given more than once$",),
+                         step.output_patterns)
+        unchanged = next(s for s in case.steps if s.step_id == "verify-unchanged")
+        self.assertEqual("2441", unchanged.observe.expected_value(context))
 
     def test_internal_error_still_runs_cleanup_then_propagates(self):
         from unittest import mock
@@ -740,8 +771,11 @@ class TransitionExecutionTests(unittest.TestCase):
             for mode in ("no-follow", "follow"):
                 for state in ("enabled", "disabled"):
                     self.assertIn(f"crc-{state}-during-{mode}-capture-{label}", full_ids)
-        for pair in ("pcapng-then-pcapng", "pcap-le-phdr-then-pcap-ppi", "pcap-ppi-then-pcap-le-phdr"):
+        # -q and -c share one handle; the same option twice is refused, so
+        # only the two mixed pairs are first-option-wins.
+        for pair in ("pcap-le-phdr-then-pcap-ppi", "pcap-ppi-then-pcap-le-phdr"):
             self.assertIn(f"capture-repeated-{pair}-first-wins", full_ids)
+        self.assertNotIn("capture-repeated-pcapng-then-pcapng-first-wins", full_ids)
         self.assertIn("capture-pcapng-and-pcap-both-written", full_ids)
         self.assertTrue(all(c.capture_dir for c in full if "capture" in c.case_id))
 
@@ -761,14 +795,14 @@ class TransitionExecutionTests(unittest.TestCase):
                 "pcapng, link type: 256" if case_id.endswith("pcapng") else "pcap, link type: 256"
             )
             self.assertEqual(expected, value, case_id)
-        self.assertEqual(3, len([e for e in steps(events, step_id="verify-second-absent")
+        self.assertEqual(2, len([e for e in steps(events, step_id="verify-second-absent")
                                  if e.status == "passed"]))
         first = {
             e.details["case_id"]: e.details["observed"]
             for e in steps(events, step_id="verify-first")
         }
         self.assertEqual(
-            ["pcap, link type: 192", "pcap, link type: 256", "pcapng, link type: 256"],
+            ["pcap, link type: 192", "pcap, link type: 256"],
             sorted(first.values()),
         )
         mode_argv = [
@@ -1006,24 +1040,32 @@ class TransitionExecutionTests(unittest.TestCase):
 
         self.assertTrue(summary.passed, summary.failure_reason)
         self.assertEqual(("1", "1", "1"), (device.state["usr"], device.state["rx"], device.state["tx"]))
-        case = "001-Radio setting transitions-all-leds-repeated-set-last-wins"
-        last = steps(events, step_id="verify-last", case_id=case)[0]
-        self.assertEqual("0/0/0", last.details["observed"])
+        case = "001-Radio setting transitions-all-leds-repeated-set-refused"
+        unchanged = steps(events, step_id="verify-unchanged", case_id=case)[0]
+        self.assertEqual("1/1/1", unchanged.details["observed"])
 
-    def test_repeated_usr_led_always_changes_the_value(self):
+    def test_a_repeated_set_that_is_taken_fails_its_case(self):
+        """Before opt_check_once() the last value won. Every repeated-set case
+        has to notice, whatever the board's original value is."""
         for original in ("0", "1"):
-            device = FakeUbertooth()
+            device = FakeUbertooth(one_value_each=False)
             device.state["usr"] = original
 
             summary, events = run_test(
                 "Radio setting transitions", device, coverage="comprehensive"
             )
 
-            case = "001-Radio setting transitions-usr-led-repeated-set-last-wins"
-            last = steps(events, step_id="verify-last", case_id=case)[0]
             with self.subTest(original=original):
-                self.assertTrue(summary.passed, summary.failure_reason)
-                self.assertNotEqual(original, last.details["observed"])
+                self.assertFalse(summary.passed)
+                self.assertEqual(
+                    sorted(["all-leds-repeated-set-refused",
+                            "channel-index-repeated-set-refused",
+                            "channel-index-then-mhz", "channel-mhz-then-index",
+                            "channel-repeated-set-refused",
+                            "pa-level-repeated-set-refused",
+                            "squelch-repeated-set-refused",
+                            "usr-led-repeated-set-refused"]),
+                    failed_ids(events, "Radio setting transitions"))
 
     def test_unrestorable_original_skips_cases_before_any_change(self):
         for leds in (("1", "0"), ("0", "1")):
