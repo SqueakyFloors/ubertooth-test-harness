@@ -100,6 +100,8 @@ not part of any answer, so a driver skips them:
 | `utesp: sco connected` | the synchronous audio link came up |
 | `utesp: sco disconnected` | it went down |
 | `utesp: audio link unavailable: <reason>` | after boot, if only the audio half failed to set up; SPP still works and `sco start` answers `ERR` |
+| `utesp: sco frame size <n> unusable, sending no audio` | a link came up asking for a frame size this firmware cannot fill |
+| `utesp: sco the profile is still running: <reason>` | a start failed and could not put the profile away either |
 
 ESP-IDF's own log lines start with `W (` or `E (` and are warnings or errors;
 `sdkconfig.defaults` keeps the log at that level so nothing else appears.
@@ -119,7 +121,7 @@ ESP-IDF's own log lines start with `W (` or `E (` and are warnings or errors;
 | `stream payload <bytes>` | bytes per write, 8 to 512 (default 100) |
 | `sco start` | acceptor: be ready; initiator: open the audio link |
 | `sco stop` | drop the audio link and stop the profile |
-| `sco stats` | one JSON line of the controller's packet counters |
+| `sco stats` | one JSON line of the controller's packet counters, then `OK` |
 | `defaults` | restore every boot setting and zero the counters |
 | `reset` | answer `OK`, then restart the board |
 
@@ -210,8 +212,13 @@ ESP-IDF's own
 [configuration help](https://docs.espressif.com/projects/esp-idf/en/v5.5.6/esp32/api-reference/bluetooth/esp_hf_ag.html)
 says the two roles "can be included simultaneously but they cannot run
 simultaneously", so the image holds both and only the one the role needs is
-started. Nothing starts until `sco start`, which leaves a board that only
-does SPP on the air exactly as it was before this was added.
+started. Nothing starts until `sco start`, so a board that has not run it is on the
+air exactly as it was before this was added. After a `sco start` and
+`sco stop` the SPP side works as before, but whether the Hands-Free SDP
+record and any Class of Device the profile set are fully undone is ESP-IDF's
+business and is not checked here: a test that compares two SPP captures byte
+for byte should run them on a board that has had no audio link, or reset it
+in between.
 
 | Step | Acceptor (hands-free unit) | Initiator (audio gateway) |
 |---|---|---|
@@ -236,14 +243,19 @@ cannot fill is a failed start: the link carries no pattern, so `sco start`
 answers `ERR the link asked for a frame size this firmware cannot fill` and
 puts the profile away.
 
+A start that fails tries to put the profile away, and if that does not work
+either it says so with a `utesp: sco the profile is still running` notice:
+the answer to the command is why the start failed, and the notice is the
+reason `role` and `defaults` will refuse next.
+
 These commands block the shell while the controller works, so a driver's read
 timeout has to allow for the worst case. Counting the tidying up a failure
 does: about 32 seconds for `sco start` on the initiator (3 s to start the
 profile, 15 s to page and bring the service level connection up, 10 s for the
 audio link, then up to 3.5 s to put the profile back), about 10 seconds for
 `sco stop` (3 s each for the link and the service level connection, 3.5 s for
-the profile), and about 15 seconds for `role` and `defaults`, which stop the
-audio link and then the SPP side. Allow 35 seconds and nothing will time out.
+the profile), and about 18 seconds for `role` and `defaults`, which stop the
+audio link, then the SPP side, and then start the SPP server again. Allow 40 seconds and nothing will time out.
 A link to a board that is awake takes four or five seconds in practice.
 
 If `sco stop` keeps answering `ERR`, the profile is still the firmware's to
@@ -254,8 +266,16 @@ out; the SPP side goes on working in the meantime.
 
 There is no microphone on these boards, so the firmware makes the audio. Each
 frame is a little-endian 32-bit frame counter followed by a ramp
-(`frame[i] = i`), which lets a capture tell one frame from the next and a gap
-from a loss. The counter restarts at zero each time the link comes up.
+(`frame[i] = i`), so no two frames of a link are alike and the content is
+fixed rather than whatever the buffer happened to hold. The counter restarts
+at zero each time the link comes up.
+
+The counter is **not** readable from an Ubertooth capture: the controller
+codes these samples to CVSD, so the bytes on the air are not these bytes. It
+is readable by whatever sees the frames before that coding, which is the far
+end over HCI, and it would reach the air unchanged in a build whose codec is
+transparent. What a capture gets from this link is its timing and its packet
+count, not its payload.
 
 The link clocks the sending. A synchronous link is symmetric and the
 controller hands up one frame per interval, so each side answers each frame
@@ -264,10 +284,9 @@ timer here to drift against it. If no frame arrives for 50 ms the firmware
 sends one anyway, which both starts the exchange when the link comes up and
 keeps a live link from going silent if a frame is ever missed.
 
-The frames are 16-bit linear samples, and the controller does the CVSD coding
-(see the codec note below), so the bytes on the air are **not** the bytes the
-firmware wrote. The far end therefore counts frames rather than comparing
-bytes, and `sco_rx_bad` counts the frames the controller marked as damaged.
+The far end counts frames rather than comparing bytes, and `sco_rx_bad`
+counts the frames the controller marked as damaged. Nothing in the harness
+decodes CVSD, so no test compares payloads today.
 
 ### What `status` reports
 

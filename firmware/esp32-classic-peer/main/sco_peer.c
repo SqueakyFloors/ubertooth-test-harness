@@ -119,10 +119,14 @@ static SemaphoreHandle_t frame_ev; /* a frame arrived: send one back */
 /* ------------------------------------------------------------- the pattern */
 
 /* One frame of the known pattern: a little-endian 32-bit frame counter, then
- * a ramp. A test can tell one frame from the next, and a gap from a loss.
+ * a ramp, so no two frames of a link are alike and the content is fixed
+ * rather than whatever the buffer held.
  *
- * CVSD is a lossy air format, so the far end counts frames rather than
- * comparing bytes; the counter is there for a capture to read. */
+ * The counter is not readable from the air: the controller codes these
+ * samples to CVSD, so the bytes on the air are not these bytes. It is
+ * readable by anything that sees the frames before that, which is the far
+ * end over HCI, and it would reach the air unchanged in a build whose codec
+ * is transparent. Counting frames is what the far end does today. */
 static void fill_frame(uint8_t *out, uint16_t len, uint32_t counter)
 {
     out[0] = (uint8_t)(counter & 0xff);
@@ -231,22 +235,47 @@ static void sco_task(void *arg)
 
 /* ---------------------------------------------------------------- callbacks */
 
+/* Whether a profile is this module's right now. The callbacks stay
+ * registered across a deinit, and the stack may hand up an event it had
+ * already queued, so every handler that writes link state asks this first: a
+ * late "connected" must not bring sc.audio back after the profile it
+ * belonged to has gone, or the next "sco start" would refuse with "already
+ * up" and the sender would push frames at an API that is no longer there. */
+static bool profile_is_ours(void)
+{
+    bool ours;
+
+    LOCK();
+    ours = sc.profile_up;
+    UNLOCK();
+    return ours;
+}
+
 /* Both profiles report an incoming frame the same way, and either way the
  * application owns the buffer: both headers say the user "should free audio
  * buffer by calling esp_hf_ag_audio_buff_free" (and the client's equivalent). */
 static void frame_in(esp_hf_audio_buff_t *buf, bool bad, enum peer_role role)
 {
-    LOCK();
-    sc.rx_frames++;
-    if (bad) {
-        sc.rx_bad++;
-    }
-    UNLOCK();
+    bool ours = profile_is_ours();
 
+    if (ours) {
+        LOCK();
+        sc.rx_frames++;
+        if (bad) {
+            sc.rx_bad++;
+        }
+        UNLOCK();
+    }
+
+    /* The buffer is freed either way: the stack handed it over, so leaving it
+     * would leak whether or not the profile is still ours. */
     if (role == PEER_ROLE_INITIATOR) {
         esp_hf_ag_audio_buff_free(buf);
     } else {
         esp_hf_client_audio_buff_free(buf);
+    }
+    if (!ours) {
+        return;
     }
     /* The cue to send one of ours, which is what keeps the sending rate equal
      * to the link's. A binary semaphore on purpose: this is "there is a frame
@@ -275,14 +304,19 @@ static void audio_changed(int state, uint16_t handle, uint16_t frame_len,
     bool up = (state == ESP_HF_AUDIO_STATE_CONNECTED ||
                state == ESP_HF_AUDIO_STATE_CONNECTED_MSBC);
     bool usable = up && frame_len >= 4 && frame_len <= FRAME_MAX;
+    bool was_up;
 
     if (state == ESP_HF_AUDIO_STATE_CONNECTING) {
         /* Nothing has changed yet, and in particular a link already up must
          * keep its handle and frame size. */
         return;
     }
+    if (!profile_is_ours()) {
+        return;
+    }
 
     LOCK();
+    was_up = sc.audio;
     sc.audio = up;
     /* Keep the handle and the frame size only while there is a link to use
      * them on, so a status line never describes one that has gone. The size
@@ -298,7 +332,11 @@ static void audio_changed(int state, uint16_t handle, uint16_t frame_len,
     }
     UNLOCK();
 
-    shell_line("utesp: sco %s", up ? "connected" : "disconnected");
+    /* Only a link that was up can go down, so a connect that the controller
+     * refused does not read as a disconnection nobody asked about. */
+    if (up || was_up) {
+        shell_line("utesp: sco %s", up ? "connected" : "disconnected");
+    }
     if (up && !usable) {
         shell_line("utesp: sco frame size %u unusable, sending no audio", frame_len);
     }
@@ -332,6 +370,9 @@ static void ag_cb(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
         break;
 
     case ESP_HF_CONNECTION_STATE_EVT:
+        if (!profile_is_ours()) {
+            break;
+        }
         LOCK();
         sc.slc = (param->conn_stat.state == ESP_HF_CONNECTION_STATE_SLC_CONNECTED);
         if (sc.slc) {
@@ -398,6 +439,9 @@ static void hf_cb(esp_hf_client_cb_event_t event, esp_hf_client_cb_param_t *para
         break;
 
     case ESP_HF_CLIENT_CONNECTION_STATE_EVT:
+        if (!profile_is_ours()) {
+            break;
+        }
         LOCK();
         sc.slc = (param->conn_stat.state == ESP_HF_CLIENT_CONNECTION_STATE_SLC_CONNECTED);
         if (sc.slc) {
@@ -617,6 +661,17 @@ static const char *profile_stop(void)
 
 /* ---------------------------------------------------------------- commands */
 
+/* Says so when the tidying up after a failed start could not finish. The
+ * answer to the command is the reason it failed, which is what a driver
+ * needs; this is the second thing it needs, because the profile is still the
+ * firmware's and the next "role" or "defaults" will refuse too. */
+static void give_up(const char *err)
+{
+    if (err) {
+        shell_line("utesp: sco the profile is still running: %s", err);
+    }
+}
+
 const char *sco_start(enum peer_role role, const uint8_t *peer_addr)
 {
     esp_bd_addr_t peer;
@@ -646,7 +701,7 @@ const char *sco_start(enum peer_role role, const uint8_t *peer_addr)
             return err;
         }
         if ((err = profile_start(role)) != NULL) {
-            profile_stop();
+            give_up(profile_stop());
             return err;
         }
         slc = false;
@@ -659,7 +714,7 @@ const char *sco_start(enum peer_role role, const uint8_t *peer_addr)
     }
 
     if (!peer_addr) {
-        profile_stop();
+        give_up(profile_stop());
         return "set the peer address first with \"spp peer\"";
     }
     memcpy(peer, peer_addr, ESP_BD_ADDR_LEN);
@@ -672,29 +727,29 @@ const char *sco_start(enum peer_role role, const uint8_t *peer_addr)
     if (!slc) {
         xSemaphoreTake(slc_ev, 0);
         if (esp_hf_ag_slc_connect(peer) != ESP_OK) {
-            profile_stop();
+            give_up(profile_stop());
             return "service level connect failed";
         }
         if (xSemaphoreTake(slc_ev, pdMS_TO_TICKS(SLC_TIMEOUT_MS)) != pdTRUE) {
-            profile_stop();
+            give_up(profile_stop());
             return "service level connect timed out";
         }
         LOCK();
         err = sc.slc ? NULL : "the peer refused the service level connection";
         UNLOCK();
         if (err) {
-            profile_stop();
+            give_up(profile_stop());
             return err;
         }
     }
 
     xSemaphoreTake(audio_ev, 0);
     if (esp_hf_ag_audio_connect(peer) != ESP_OK) {
-        profile_stop();
+        give_up(profile_stop());
         return "audio connect failed";
     }
     if (xSemaphoreTake(audio_ev, pdMS_TO_TICKS(AUDIO_TIMEOUT_MS)) != pdTRUE) {
-        profile_stop();
+        give_up(profile_stop());
         return "audio connect timed out";
     }
     LOCK();
@@ -702,7 +757,7 @@ const char *sco_start(enum peer_role role, const uint8_t *peer_addr)
     frame_len = sc.frame_len;
     UNLOCK();
     if (!audio) {
-        profile_stop();
+        give_up(profile_stop());
         return "the controller did not open a synchronous link";
     }
     /* A link this firmware cannot fill carries no audio pattern, which is
@@ -710,7 +765,7 @@ const char *sco_start(enum peer_role role, const uint8_t *peer_addr)
      * link left half working. The notice from audio_changed() gives the
      * size. */
     if (frame_len == 0) {
-        sco_stop();
+        give_up(sco_stop());
         return "the link asked for a frame size this firmware cannot fill";
     }
     return NULL;
