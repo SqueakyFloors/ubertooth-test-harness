@@ -915,9 +915,11 @@ class MultiBoardCaseTests(unittest.TestCase):
 
     def test_version_listing_check(self):
         check = util_cases.version_listing_check(2)
+        HEAD = ("Host tools version: libubertooth 1.1 (git-x), libbtbb 1.3 (git-b)",
+                "libbtbb loaded from: /p/lib/libbtbb.so.1")
 
-        def answer(*boards, host="Host tools version: libubertooth 1.1 (git-x)"):
-            return "".join(line + "\n" for line in (host, *boards))
+        def answer(*boards, head=HEAD):
+            return "".join(line + "\n" for line in (*head, *boards))
 
         boards = (
             "Firmware version (0): bluetooth_rxtx git-x (API:1.37)",
@@ -926,9 +928,16 @@ class MultiBoardCaseTests(unittest.TestCase):
             "Firmware build (1): ubertooth git-x (u@h) ts",
         )
         self.assertEqual("", check(answer(*boards)))
-        # The libbtbb path line sits beside the host version, not a board.
-        self.assertEqual("", check(answer("libbtbb loaded from: /p/l.so", *boards)))
-        self.assertIn("not the host tools' version", check(answer(*boards, host=boards[0])))
+        # The host tools' two lines open the answer, in that order and once
+        # each: a missing, repeated, or reordered one is not that answer.
+        for head in ((), HEAD[:1], HEAD[::-1],
+                     ("Host tools version: 1.1", HEAD[1])):
+            self.assertIn("does not open with the host tools' version",
+                          check(answer(*boards, head=head)), head)
+        # A repeated head line is counted as a board's, so the answer has one
+        # line too many.
+        self.assertIn("is not 2 per board",
+                      check(answer(*boards, head=HEAD + HEAD[1:])))
         self.assertIn("is not 2 per board", check(answer(*boards[:2])))
         self.assertIn("expected the Firmware version of board 1 here",
                       check(answer(*boards[:2], boards[3], boards[2])))

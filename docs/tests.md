@@ -84,8 +84,10 @@ access address (`-a`).
 
 **Guard Ubertooths.** A guarded test binds every other registered Ubertooth on
 the host as a `guard Ubertooth N` resource and reads each one before the test
-and after every case, with queries only: `ubertooth-util -v -V -C -a -z -d`,
-then `ubertooth-btle -k`. Every read must match the baseline taken before the
+and after every case, with queries only and one command per read:
+`ubertooth-util -v`, `-V`, `-C`, `-a`, `-z`, `-d`, then `ubertooth-btle -k`
+(`-V` ends the command, so it could not share one with the others anyway).
+Every read must match the baseline taken before the
 first case; one that differs fails the test. This is what catches a regression
 that reaches a board the command did not select. The `ubertooth-btle -k` read
 is left out unless that board's firmware API is at least the host tools' API,

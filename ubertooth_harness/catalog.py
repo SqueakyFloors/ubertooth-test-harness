@@ -21,6 +21,7 @@ from ubertooth_harness.patterns import (
     FIRMWARE_PATTERN,
     HOST_VERSION_LINE,
     HOST_VERSION_TIMEOUT_S,
+    LIBBTBB_PATH_LINE,
     PART_ID_PATTERN,
     serial_pattern,
 )
@@ -619,7 +620,8 @@ def _ubertooth_identity_cases(_arguments, _resources, resource_identities):
             "firmware-compile-info",
             "Firmware compile info",
             common + ("-V",),
-            (HOST_VERSION_LINE, firmware, FIRMWARE_BUILD_LINE, compile_info),
+            (HOST_VERSION_LINE, LIBBTBB_PATH_LINE, firmware,
+             FIRMWARE_BUILD_LINE, compile_info),
             timeout_s=HOST_VERSION_TIMEOUT_S,
         ),
         CommandCase(

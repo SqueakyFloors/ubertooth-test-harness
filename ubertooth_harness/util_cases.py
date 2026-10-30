@@ -57,7 +57,9 @@ from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
     COMPILE_INFO_PATTERN,
     FIRMWARE_PATTERN,
+    HOST_VERSION_LINE,
     HOST_VERSION_TIMEOUT_S,
+    LIBBTBB_PATH_LINE,
     PART_ID_PATTERN,
     serial_pattern,
 )
@@ -747,11 +749,9 @@ _BLOCK_PATTERNS = (
     ("-p", "part ID", "Part ID", PART_ID_PATTERN),
     ("-s", "serial", _SERIAL_LABEL, rf"^{_SERIAL_LABEL}: {_SERIAL_RE}$"),
 )
-# The -V answer's own lines, in the order it prints them per board. The host
-# tools' line comes first, once, and the libbtbb path line beside it is not
-# about a board at all.
-_HOST_VERSION_PREFIX = "Host tools version: "
-_LIBBTBB_PATH_PREFIX = "libbtbb loaded from: "
+# The -V answer's own lines, in the order it prints them per board, after the
+# host tools' two lines (the version and the libbtbb path), neither of which
+# is about a board at all.
 _VERSION_REPORTS = (
     ("Firmware version", FIRMWARE_PATTERN),
     ("Firmware build", COMPILE_INFO_PATTERN),
@@ -835,11 +835,16 @@ def version_listing_check(count):
     """
     def check(stdout):
         lines = stdout.splitlines()
-        if not lines or not lines[0].startswith(_HOST_VERSION_PREFIX):
-            first = lines[0] if lines else ""
-            return f"the first line is not the host tools' version: {first!r}"
-        reports = [line for line in lines[1:]
-                   if not line.startswith(_LIBBTBB_PATH_PREFIX)]
+        # The answer opens with the host tools' two lines, in that order and
+        # once each (libubertooth's ubertooth_print_host_version()); the
+        # boards follow. Fixed rather than filtered, so an answer that
+        # repeats them or leaves one out is a failure.
+        head, reports = lines[:2], lines[2:]
+        if (len(head) < 2
+                or not re.search(HOST_VERSION_LINE, head[0])
+                or not re.search(LIBBTBB_PATH_LINE, head[1])):
+            return ("the answer does not open with the host tools' version "
+                    f"and the libbtbb path: {head!r}")
         expected = [(label, index, pattern) for index in range(count)
                     for label, pattern in _VERSION_REPORTS]
         if len(reports) != len(expected):

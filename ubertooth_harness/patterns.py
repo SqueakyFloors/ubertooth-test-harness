@@ -13,6 +13,9 @@ COMPILE_INFO_PATTERN = r"\bubertooth\s+\S+\s+\("
 # the command, so this answer is the whole of what a command line carrying it
 # prints; the build string used to come out bare, with no label.
 HOST_VERSION_LINE = r"(?m)^Host tools version: libubertooth \S+"
+# Which libbtbb was loaded, which the host version line cannot say; "unknown"
+# where the path could not be found, so the line is always there.
+LIBBTBB_PATH_LINE = r"(?m)^libbtbb loaded from: \S"
 FIRMWARE_BUILD_LINE = r"(?m)^Firmware build: "
 
 # `ubertooth-util -v` names the image the build came from when the firmware

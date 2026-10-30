@@ -37,10 +37,12 @@ Harness-wide checks that use the CLIs:
   `ubertooth-util -V` must match the resolved host sources; forks before the
   one `-V` answer (ubertooth#813) are asked `-H` instead, there and in the
   build's verify step only: every other check wants this tree's tools. For each selected board, `ubertooth-util -U <serial>` runs `-v`
-  (firmware revision and API), `-V`, and `-s`.
+  (firmware revision and API), `-V` (its `Firmware build:` line), and `-s`,
+  one command each.
 - **Guards** (stateful tests): every other registered board on the host is read
-  before and after the test, with queries only: `ubertooth-util -v -V -C -a -z -d`
-  and then `ubertooth-btle -k`. The `ubertooth-btle -k` read is skipped unless
+  before and after the test, with queries only, one command per read:
+  `ubertooth-util -v`, `-V`, `-C`, `-a`, `-z`, `-d`, and then
+  `ubertooth-btle -k`. The `ubertooth-btle -k` read is skipped unless
   the board's firmware API is at least the host API.
 - **Flash reliability** (`slow` and `mac` plans): repeated `ubertooth-dfu -U <serial> -d <image> -r`.
   Each flash is verified with `ubertooth-util -v`.
@@ -89,7 +91,7 @@ Harness-wide checks that use the CLIs:
 | `-U all` | identity queries for every board | Covered | Multi-board selection (smoke): `-U all -s` lists every registered board, and only those, with indices in order; comprehensive: `-U all -bvps` gives four lines per board. Each line carries the label the single-board report prints with the board's index in it, `Serial No (0): <serial>`, since fork [#610](https://github.com/SqueakyFloors/ubertooth/issues/610). `-V` is not one of the queries the listing can show: it is the version command, so `-U all -V` is not refused and answers for every board itself, with its own labels (`Firmware build (0): ...`), also covered there (comprehensive). Rejected with a setter or mode: Argument validation (comprehensive). Since fork `d9c63d9` `-U all` with no query is refused with `error: -U all needs one of the read-only queries -b, -v, -p or -s to list`, and `-U all -N` alone prints the count and exits 0 (it was refused): Not covered |
 | `-N` | count devices | Covered | Ubertooth count (fast, release): equals the registered boards on the host. With `-i` it prints the count and the command carries on (fork `db5649b`; it dropped the mode before, [ubertooth#332](https://github.com/SqueakyFloors/ubertooth/issues/332)): `-N -i` and `-i -N` print `0`, then `-i` finds no board, exit 1: Util mode refusals (comprehensive) |
 | `-v` | firmware revision | Covered | Ubertooth identity (fast, release), preflight, util compositions (smoke) |
-| `-V` | version report | Covered | Host version and Host CLI surface (fast, release): the `Host tools version:` line, which needs no board, and which preflight and the build's verify step check against the resolved sources (falling back to `-H` on forks before the one `-V` answer, [ubertooth#813](https://github.com/SqueakyFloors/ubertooth/issues/813)). Ubertooth identity and preflight check the whole answer on one board: the host line, `Firmware version:`, and `Firmware build:`. Since fork `f898fe5` it is the version command and ends the command, so it composes with nothing: util compositions (smoke) requires `-V -s` to print that answer and no serial line, and Multi-board selection (comprehensive) requires `-U all -V` and `-V` with no selector to report every board, indexed |
+| `-V` | version report | Covered | Host version and Host CLI surface (fast, release): the `Host tools version:` line, which needs no board, and which preflight and the build's verify step check against the resolved sources (falling back to `-H` on forks before the one `-V` answer, [ubertooth#813](https://github.com/SqueakyFloors/ubertooth/issues/813)). Ubertooth identity checks every line of the answer on one board (the host version line, the libbtbb path, `Firmware version:`, and `Firmware build:`); preflight checks only the `Firmware build:` line's compile info, against the resolved sources. Since fork `f898fe5` it is the version command and ends the command, so it composes with nothing: util compositions (smoke) requires `-V -s` to print that answer and no serial line, and Multi-board selection (comprehensive) requires `-U all -V` and `-V` with no selector to report every board, indexed |
 | `-s` | MCU serial | Covered | Ubertooth identity, preflight, cleanup identity check |
 | `-p` | part ID | Covered | Ubertooth identity, util compositions (smoke) |
 | `-b` | board ID | Covered | Ubertooth identity, util compositions (smoke) |
@@ -115,7 +117,7 @@ Harness-wide checks that use the CLIs:
 
 Combinations to test:
 
-- Read-only queries in one command (`-v -V`, all reports, every compatible pair): Covered (smoke, comprehensive).
+- Read-only queries in one command (all nine composable reports, every compatible pair): Covered (smoke, comprehensive). `-V` is not one of them, because it ends the command: `-V -s` must answer the version and print no serial line (smoke).
 - A set option given a value twice is refused, and the setting is unchanged (`-c -C -a -z -l -d`, and `ubertooth-util -U`): Covered (comprehensive). `opt_check_once()` in the fork refuses it before any device is opened; the last value used to win.
 - `-c` and `-C` are one channel setting written two ways, so a value given to both is refused in either order, with the channel unchanged: Covered (comprehensive).
 - Rejected set followed by a report (`-a9 -v`): refused with exit 1 before the report runs (strict parsing, fork `658730c`): Covered (comprehensive).

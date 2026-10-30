@@ -82,6 +82,7 @@ from ubertooth_harness.patterns import (
     HOST_VERSION_LINE,
     HOST_VERSION_TIMEOUT_S,
     IMAGE_NAME_PATTERN,
+    LIBBTBB_PATH_LINE,
     PART_ID_PATTERN,
     serial_pattern,
 )
@@ -886,6 +887,7 @@ def _version_case(serial):
         _util(serial, "-V", "-s"),
         (
             HOST_VERSION_LINE,
+            LIBBTBB_PATH_LINE,
             FIRMWARE_PATTERN,
             FIRMWARE_BUILD_LINE,
             COMPILE_INFO_PATTERN,
