@@ -21,7 +21,9 @@ from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.rawlog import (
     NOTE,
     RECORD_OUTPUT_BYTES,
+    RECORD_OUTPUT_EVENTS,
     RECORD_TAIL_BYTES,
+    RECORD_TAIL_EVENTS,
     TAGS,
     Chunk,
     CommandCapture,
@@ -33,12 +35,16 @@ from ubertooth_harness.watchdog import wait_counts
 
 REDACTED = "<serial>"
 # Fallback cap for a command whose output run.jsonl holds in full, because the
-# run was recorded before output was capped as it was written: this many
-# characters of the start and of the end of it are rendered, the same shape
-# as the records a capped command leaves (rawlog's byte limits, counted here
-# in characters, since the report renders characters).
+# run was recorded before output was capped as it was written: this much of
+# the start and of the end of it is rendered. Both limits are rawlog's, and
+# both matter: the size bounds a few huge records, the count bounds many tiny
+# ones, which cost a timestamp and a tag each in the transcript. rawlog counts
+# bytes in run.jsonl and the report counts characters, which differ only for
+# output that is not ASCII.
 LEGACY_OUTPUT_HEAD_CHARS = RECORD_OUTPUT_BYTES
+LEGACY_OUTPUT_HEAD_RECORDS = RECORD_OUTPUT_EVENTS
 LEGACY_OUTPUT_TAIL_CHARS = RECORD_TAIL_BYTES
+LEGACY_OUTPUT_TAIL_RECORDS = RECORD_TAIL_EVENTS
 LEGEND = (
     "Times are elapsed since the run started (UTC start in Time above). "
     "Tags: `[C]` command sent, `[O]` stdout, `[E]` stderr, `[R]` command result, "
@@ -697,27 +703,36 @@ def _recorded_with_a_cap(outputs: Sequence[Mapping], finished: Mapping) -> bool:
     return bool(finished.get("output_file") or finished.get("output_files"))
 
 
-def _take_chunks(chunks: Sequence[Chunk], limit: int, *, from_end: bool) -> list[Chunk]:
-    """Whole chunks from one end of ``chunks``, up to ``limit`` characters.
+def _take_chunks(
+    chunks: Sequence[Chunk], *, chars: int, records: int, from_end: bool
+) -> list[Chunk]:
+    """Chunks from one end of ``chunks``, within both limits.
 
-    The chunk that would cross the limit is cut at the nearest line boundary
-    inside it, so the kept output starts and ends on whole lines.
+    The chunk that would cross the character limit is cut inside it. Taken
+    from the end, the cut moves on to the next line boundary, so the output
+    kept starts on a whole line as run.jsonl's own tail does. Taken from the
+    start, it keeps what fits: the start is bounded by size, and a line
+    longer than the limit would otherwise be dropped whole.
     """
     taken: list[Chunk] = []
-    room = limit
+    room = chars
     for moment, stream, text in chunks:
+        if len(taken) >= records:
+            break
         if len(text) <= room:
             taken.append((moment, stream, text))
             room -= len(text)
             continue
+        cut = len(text) - room
         if from_end:
-            part = text[len(text) - room:]
-            cut = part.find("\n")
-            part = part[cut + 1:] if cut >= 0 else part
+            part = text[cut:]
+            if cut > 0 and text[cut - 1] != "\n" and "\n" in part:
+                # Starts inside a line that is left out: begin at the next.
+                part = part.split("\n", 1)[1]
         else:
             part = text[:room]
-            cut = part.rfind("\n")
-            part = part[:cut + 1] if cut >= 0 else part
+            boundary = part.rfind("\n")
+            part = part[:boundary + 1] if boundary >= 0 else part
         if part:
             taken.append((moment, stream, part))
         break
@@ -733,13 +748,21 @@ def _capped_chunks(chunks: Sequence[Chunk]) -> list[Chunk]:
     so the note points at run.jsonl.
     """
     total = sum(len(text) for _moment, _stream, text in chunks)
-    if total <= LEGACY_OUTPUT_HEAD_CHARS + LEGACY_OUTPUT_TAIL_CHARS:
+    if (total <= LEGACY_OUTPUT_HEAD_CHARS + LEGACY_OUTPUT_TAIL_CHARS
+            and len(chunks) <= LEGACY_OUTPUT_HEAD_RECORDS + LEGACY_OUTPUT_TAIL_RECORDS):
         return list(chunks)
-    head = _take_chunks(chunks, LEGACY_OUTPUT_HEAD_CHARS, from_end=False)
-    tail = _take_chunks(list(reversed(chunks)), LEGACY_OUTPUT_TAIL_CHARS, from_end=True)
+    head = _take_chunks(
+        chunks, chars=LEGACY_OUTPUT_HEAD_CHARS,
+        records=LEGACY_OUTPUT_HEAD_RECORDS, from_end=False,
+    )
+    tail = _take_chunks(
+        list(reversed(chunks)), chars=LEGACY_OUTPUT_TAIL_CHARS,
+        records=LEGACY_OUTPUT_TAIL_RECORDS, from_end=True,
+    )
     tail.reverse()
     kept = sum(len(text) for _moment, _stream, text in head + tail)
-    moment = head[-1][0] if head else chunks[0][0]
+    # Stamped where the gap ends, as a recorded note is (its ``received``).
+    moment = tail[0][0] if tail else chunks[-1][0]
     note = (moment, NOTE, f"{total - kept} more characters of output are in run.jsonl\n")
     return head + [note] + tail
 

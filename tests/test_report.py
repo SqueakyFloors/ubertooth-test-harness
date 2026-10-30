@@ -1,3 +1,4 @@
+import datetime
 import itertools
 import json
 import re
@@ -10,7 +11,19 @@ from ubertooth_harness.report import load_events, render_run, render_runs, write
 
 
 SERIAL = "aaaa0000"
+_START = datetime.datetime(2026, 1, 1)
 _moments = itertools.count()
+
+
+def dump_events(texts: list[str]) -> list[dict]:
+    """One command that printed ``texts`` on stderr, recorded with no cap."""
+    return [
+        command_event("command_started", "running", {"argv": ["ubertooth-dump"]}),
+        *(command_event("command_output", "running",
+                        {"stream": "stderr", "text": text}) for text in texts),
+        command_event("command_finished", "passed",
+                      {"returncode": 0, "duration_s": 9.0}),
+    ]
 
 
 def command_event(event_type: str, status: str, details: dict) -> dict:
@@ -20,10 +33,10 @@ def command_event(event_type: str, status: str, details: dict) -> dict:
     needs thousands of records, and writing them through run.jsonl and the
     console writer takes minutes.
     """
-    second, ms = divmod(next(_moments), 1000)
+    moment = _START + datetime.timedelta(milliseconds=next(_moments))
     return {
         "run_id": "run-a", "event_type": event_type, "status": status,
-        "timestamp": f"2026-01-01T00:00:{second:02d}.{ms:03d}",
+        "timestamp": moment.isoformat(timespec="milliseconds"),
         "details": {"command_id": "c", **details},
     }
 
@@ -192,46 +205,97 @@ class ReportTests(unittest.TestCase):
         from ubertooth_harness.report import (
             LEGACY_OUTPUT_HEAD_CHARS, LEGACY_OUTPUT_TAIL_CHARS,
         )
+        from ubertooth_harness.report import (
+            LEGACY_OUTPUT_HEAD_RECORDS, LEGACY_OUTPUT_TAIL_RECORDS,
+        )
         line = "rx block timestamp 283640 * 100 nanoseconds\n"
         records = 5000
-        events = [
-            command_event("command_started", "running",
-                          {"argv": ["ubertooth-dump"]}),
-        ]
-        events += [
-            command_event("command_output", "running",
-                          {"stream": "stderr", "text": line})
-            for _ in range(records)
-        ]
-        events.append(command_event("command_output", "running",
-                                    {"stream": "stderr", "text": "the end\n"}))
-        events.append(command_event("command_finished", "passed",
-                                    {"returncode": 0, "duration_s": 9.0}))
+        report = render_run(dump_events([line] * records + ["the end\n"]))
         printed = len(line) * records + len("the end\n")
 
-        report = render_run(events)
-
-        kept = report.count(line.rstrip())
-        self.assertLess(kept * len(line),
-                        LEGACY_OUTPUT_HEAD_CHARS + LEGACY_OUTPUT_TAIL_CHARS)
-        self.assertGreater(kept, 0)
+        # Many small records: the record limits bind, because each costs a
+        # timestamp and a tag of its own in the transcript.
+        lines = LEGACY_OUTPUT_HEAD_RECORDS + LEGACY_OUTPUT_TAIL_RECORDS - 1
+        self.assertEqual(lines, report.count(line.rstrip()))
         self.assertIn("[E] the end", report)  # how the command ended
-        gap = int(re.search(
-            r"\[M\] (\d+) more characters of output are in run\.jsonl", report,
-        ).group(1))
+        self.assertEqual(
+            printed - (lines * len(line) + len("the end\n")),
+            self.gap_in(report),
+        )
+
+    def test_a_few_long_records_are_capped_by_size(self):
+        from ubertooth_harness.report import (
+            LEGACY_OUTPUT_HEAD_CHARS, LEGACY_OUTPUT_TAIL_CHARS,
+        )
+        line = "x" * 63 + "\n"
+        record = line * 64  # 4 KiB, as a non-streaming command is recorded in
+        records = 40
+        report = render_run(dump_events([record] * records + ["the end\n"]))
+        printed = len(record) * records + len("the end\n")
+
+        self.assertLess(report.count(line.rstrip()) * len(line),
+                        LEGACY_OUTPUT_HEAD_CHARS + LEGACY_OUTPUT_TAIL_CHARS)
+        self.assertIn("[E] the end", report)
         # Everything but the start and the end of the output, give or take
         # the line the cap fell inside.
         self.assertAlmostEqual(
             printed - LEGACY_OUTPUT_HEAD_CHARS - LEGACY_OUTPUT_TAIL_CHARS,
-            gap, delta=len(line),
+            self.gap_in(report), delta=len(line),
         )
         # The end starts on a whole line, as run.jsonl's own tail does. (The
         # start may stop inside one, as run.jsonl's head does: it is bounded
-        # by size, not by lines.)
+        # by size and records, not by lines.)
         after = report.split("more characters of output are in run.jsonl\n", 1)[1]
         for text in after.splitlines():
-            if "rx block" in text:
+            if "[E] x" in text:
                 self.assertTrue(text.endswith(line.rstrip()), text)
+
+    def test_the_cap_cuts_a_record_where_run_jsonl_would(self):
+        from ubertooth_harness.report import _take_chunks
+
+        chunk = [(_START, "stderr", "aaa\nbbb\nccc\n")]
+
+        def took(**limits):
+            return [text for _moment, _stream, text in _take_chunks(chunk, **limits)]
+
+        # From the end: a cut on a line boundary keeps that whole line, and
+        # one inside a line starts at the next.
+        self.assertEqual(["ccc\n"], took(chars=4, records=1, from_end=True))
+        self.assertEqual(["ccc\n"], took(chars=6, records=1, from_end=True))
+        # From the start: whole lines, or the fragment that fits when the
+        # record holds no line boundary at all.
+        self.assertEqual(["aaa\n"], took(chars=6, records=1, from_end=False))
+        self.assertEqual(["aa"], [
+            text for _moment, _stream, text in _take_chunks(
+                [(_START, "stderr", "a" * 100)], chars=2, records=1, from_end=False,
+            )
+        ])
+
+    def test_the_cap_keeps_both_streams_in_arrival_order(self):
+        events = [command_event("command_started", "running",
+                                {"argv": ["ubertooth-dump"]})]
+        for index in range(3000):
+            for stream in ("stdout", "stderr"):
+                events.append(command_event(
+                    "command_output", "running",
+                    {"stream": stream, "text": f"{stream} {index}\n"},
+                ))
+        events.append(command_event("command_finished", "passed",
+                                    {"returncode": 0, "duration_s": 1.0}))
+
+        report = render_run(events)
+
+        transcript = [text for text in report.splitlines()
+                      if "[O] " in text or "[E] " in text]
+        self.assertEqual("[O] stdout 0", transcript[0].split(" ", 1)[1])
+        self.assertEqual("[E] stderr 0", transcript[1].split(" ", 1)[1])
+        self.assertEqual("[E] stderr 2999", transcript[-1].split(" ", 1)[1])
+
+    def gap_in(self, report: str) -> int:
+        """Characters the report says it left out of the transcript."""
+        return int(re.search(
+            r"\[M\] (\d+) more characters of output are in run\.jsonl", report,
+        ).group(1))
 
     def test_output_capped_when_it_was_recorded_is_shown_as_recorded(self):
         # The records a capped command leaves are already the start and the
