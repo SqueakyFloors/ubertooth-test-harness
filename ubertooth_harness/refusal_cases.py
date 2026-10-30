@@ -5,12 +5,21 @@ host/doc/ubertooth-{btle,dfu,dump,follow,rx,specan}.md that a refused command
 line creates and truncates nothing: every file option only names its file
 while the command line is read, and the file is opened once every check has
 passed (ubertooth-dfu adds: and leaves no temporary file). The same change
-moved "Ignoring extra capture file" to standard error, so it cannot land in a
+moved "ignoring extra capture file" to standard error, so it cannot land in a
 capture written to stdout (ubertooth-btle -q -). Since fork e4f1dc5 (fork
 #377) ubertooth-btle words that note "warning: ignoring extra capture file:"
 (ubertooth-btle.md, DIAGNOSTICS). -h exits 0 on every tool since fork
 12211ce (fork #406; btle since e4f1dc5) and still creates and truncates
 nothing.
+
+The one-value-each rule (opt_check_once() in opt_parse.c, called from every
+tool's option loop before its switch): no option may be given a value twice.
+"-r a.pcapng -r b.pcapng" names two files for one capture, so the command
+line is refused with "error: option '-r' given more than once" and exit 1,
+rather than one of the two being dropped. It is refused before the value is
+looked at and before -h, so a repeat beats both a bad value and the usage
+text. Only ubertooth-btle's -q and -c still share one capture handle, and
+they are different letters: naming a file with each is the one note left.
 
 Each case seeds files with known contents in its own capture directory,
 refuses one command naming a new file and one naming a seeded file, then
@@ -31,7 +40,8 @@ word (the one argument rule): smoke checks a stray word on each, and
 comprehensive adds -h with a stray word, a bare -, and a word after --.
 
 Comprehensive coverage adds the checks that run after the option loop, a
-repeated -d, and ubertooth-dfu with an input that cannot be used, including
+repeated -d alongside -h, and ubertooth-dfu with an input that cannot be
+used, including
 -s <file.bin> -d <bad image>: since fork f2e06fa (#286) the files that are
 only read are checked first, so the refused image neither creates nor
 replaces <file>.dfu (ubertooth-dfu.md).
@@ -62,10 +72,15 @@ NO_DEVICES = ("env", "UBERTOOTH_TEST_NO_DEVICES=1")
 NO_BOARD_NOTE = r"UBERTOOTH_TEST_NO_DEVICES is set, so no board is selected"
 STRAY = "stray"
 _STRAY_PATTERN = rf"error: unexpected argument '{STRAY}'"
-_EXTRA = "Ignoring extra capture file: "
-# ubertooth-btle since fork e4f1dc5 (fork #377); rx and follow keep _EXTRA.
-_BTLE_EXTRA = "warning: ignoring extra capture file: "
+# ubertooth-btle's wording since fork e4f1dc5 (fork #377); it is the only
+# note of its kind left, because -q and -c share one capture handle.
+_EXTRA = "warning: ignoring extra capture file: "
 _TIMEOUT_S = 10.0
+
+
+def _repeated(option: str) -> str:
+    """What a tool says when an option is given a value twice."""
+    return rf"(?m)^error: option '{re.escape(option)}' given more than once$"
 
 
 @dataclass(frozen=True)
@@ -200,8 +215,7 @@ def _case(case_id, name, steps, expected_state) -> StateCase:
 
 
 def _no_extra_on_stdout(stdout: str) -> str:
-    # Either wording: ubertooth-btle's lower-case one, or rx and follow's.
-    if _EXTRA.lower() in stdout.lower():
+    if "ignoring extra capture file" in stdout.lower():
         return f"'{_EXTRA.strip()}' went to stdout, where a capture can be"
     return ""
 
@@ -230,6 +244,12 @@ def _file_names(tool: Tool, option: str, extension: str):
 
 def _refusal_case(tool: Tool, option: str, extension: str, way) -> StateCase:
     slug, label, extra, returncodes, patterns = way
+    if slug == "value" and extra[0] == option:
+        # The file option and the later option are the same letter, so this
+        # is a repeat: it is refused before the value is looked at, which
+        # the value's own refusal never gets to say.
+        label = f"a second {' '.join(extra)}"
+        patterns = (_repeated(option),)
     seeded, new, kept, absent, unchanged = _file_names(tool, option, extension)
     short = _short(tool.name)
     return _case(
@@ -250,55 +270,70 @@ def _refusal_case(tool: Tool, option: str, extension: str, way) -> StateCase:
     )
 
 
-def _extra_capture_cases():
-    """'Ignoring extra capture file' goes to stderr, and neither file of a
-    refused command appears."""
+def _repeat_and_extra_cases():
+    """A repeated capture option is refused, and the one note left for two
+    files through one handle goes to stderr."""
     btle = _case(
-        "btle-q-stdout-extra", "btle -n -q - -q <file>: the extra-file note is on stderr",
+        "btle-q-stdout-extra", "btle -n -q - -c <file>: the extra-file note is on stderr",
         (
             probe_step("ubertooth-btle"),
-            # Accepted, so the PCAP header goes to stdout and the board lookup
-            # finds none: the note must not be in that capture. -n gives the
-            # command its work: since fork 482264d (#287) a command line with
-            # no mode is refused.
+            # -q and -c share one PCAP handle, so the first of the two wins
+            # and the second file is only reported. The command is accepted,
+            # so it reaches the board lookup and finds none with the switch
+            # set: the note must not have gone to stdout, where the capture
+            # -q - writes would be. -n gives the command its work: since fork
+            # 482264d (#287) a command line with no mode is refused.
             tool_step("accepted", "ubertooth-btle",
-                       ("-n", "-q", "-", "-q", ("file", "extra.pcap")),
-                       patterns=(_BTLE_EXTRA + r"\S*extra\.pcap", NO_BOARD_NOTE),
+                       ("-n", "-q", "-", "-c", ("file", "extra.pcap")),
+                       patterns=(_EXTRA + r"\S*extra\.pcap", NO_BOARD_NOTE),
                        forbidden=(), check=_no_extra_on_stdout),
             _check(("extra.pcap",), ()),
         ),
         "exit 1 (no board); the note on stderr only; extra.pcap not created",
     )
     cases = [btle]
-    for tool, option, extension in (("ubertooth-rx", "-r", "pcapng"),
+    for tool, option, extension in (("ubertooth-btle", "-q", "pcap"),
+                                    ("ubertooth-rx", "-r", "pcapng"),
                                     ("ubertooth-follow", "-q", "pcap")):
         first, second = f"first.{extension}", f"second.{extension}"
         short = _short(tool)
         cases.append(_case(
             f"{short}-{option[1:]}-repeated-stray",
-            f"{short} {option} twice and a stray word: the note is on stderr",
+            f"{short} {option} twice and a stray word: the repeat is refused",
             (
                 probe_step(tool),
+                # The repeat is caught in the option loop, so it is reported
+                # instead of the stray word and instead of any note about an
+                # extra file.
                 tool_step("refuse", tool, (option, ("file", first), option,
                                             ("file", second), STRAY),
-                           patterns=(_EXTRA + rf"\S*{second}", _STRAY_PATTERN),
-                           check=_no_extra_on_stdout),
+                           patterns=(_repeated(option),),
+                           forbidden=(NO_BOARD_NOTE, _STRAY_PATTERN, _EXTRA)),
                 _check((first, second), ()),
             ),
-            "refused (exit 1); the note on stderr only; neither file created",
+            f"refused (exit 1) with error: option '{option}' given more than once, "
+            "before the stray word and before any board is asked for; neither "
+            "file created",
         ))
     return cases
+
+
+# A seeded bad.dfu is a line of text, not an image, so what the image check
+# finds wrong with it depends on the seed: the one refusal line is what
+# matters here, and the DFU image checks test covers the reasons one by one.
+_BAD_IMAGE = r"(?m)^error: \S*bad\.dfu: [^\n]+; firmware will not be updated$"
 
 
 def _comprehensive_cases():
     cases = []
 
     def simple(case_id, name, tool, words, patterns, absent, expected, *,
-               seeded=(), kept=()):
+               seeded=(), kept=(), forbidden=(NO_BOARD_NOTE,)):
         steps = [probe_step(tool)]
         if seeded:
             steps.append(_seed(seeded))
-        steps += [tool_step("refuse", tool, words, patterns=patterns),
+        steps += [tool_step("refuse", tool, words, patterns=patterns,
+                            forbidden=forbidden),
                   _check(absent, kept)]
         cases.append(_case(case_id, name, steps, expected))
 
@@ -317,7 +352,8 @@ def _comprehensive_cases():
            "refused (exit 1); new.pcap not created")
     simple("rx-d-survey-address", "rx -d with -z -l", "ubertooth-rx",
            ("-d", ("file", "new.dump"), "-z", "-l", "123456"),
-           (r"No address should be specified for survey mode",), ("new.dump",),
+           (r"(?m)^error: survey mode \(-z\) discovers addresses, so it cannot be "
+            r"given -l or -u$",), ("new.dump",),
            "refused (exit 1); new.dump not created")
     simple("rx-q-uap-without-lap", "rx -q with -u and no -l", "ubertooth-rx",
            ("-q", ("file", "new.pcap"), "-u", "12"),
@@ -327,25 +363,32 @@ def _comprehensive_cases():
            ("-d", ("file", "new.specan"), "-l", "2480", "-u", "2402"),
            (r"error: lower frequency must not exceed upper frequency",), ("new.specan",),
            "refused (exit 1); new.specan not created")
-    # A -d file that cannot be opened is one "error: " line, before any board
-    # lookup (fork fcadf34, ubertooth-specan.md DIAGNOSTICS).
-    simple("specan-d-unopenable", "specan -d in a missing directory", "ubertooth-specan",
-           ("-d", ("file", "missing/new.specan")),
-           (r"(?m)^error: \S*/missing/new\.specan: No such file or directory$",),
-           ("missing",), "exit 1 with no board lookup; nothing created")
-    # A repeated -d keeps the last name; neither is opened when refused.
+    # Since fork 47bae592 a -d file is opened once a board is open and its
+    # firmware accepted, so that a run refused for either reason leaves no
+    # empty file behind (ubertooth-specan.md, DIAGNOSTICS). With no board the
+    # command stops at the lookup, and the file it could not have opened is
+    # neither created nor mentioned.
+    simple("specan-d-unopenable", "specan -d in a missing directory, with no board",
+           "ubertooth-specan", ("-d", ("file", "missing/new.specan")),
+           (NO_BOARD_NOTE, r"(?m)^error: no Ubertooth devices found$"),
+           ("missing",), "exit 1 at the board lookup; nothing created, and nothing "
+           "said about the -d file, which is opened only once a board is",
+           forbidden=(r"missing/new\.specan",))
+    # A repeated -d is refused in the option loop, which -h never reaches:
+    # the error line describes the problem, so no usage text follows it.
     for tool in ("ubertooth-follow", "ubertooth-rx", "ubertooth-dump", "ubertooth-specan"):
         spec = next(item for item in TOOLS if item.name == tool)
         short = _short(tool)
-        returncodes = (spec.help_returncode,)
         cases.append(_case(
             f"{short}-d-repeated-help", f"{short} -d twice with -h", (
                 probe_step(tool),
                 tool_step("refuse", tool, ("-d", ("file", "first.dump"), "-d",
                                             ("file", "second.dump"), "-h"),
-                           returncodes=returncodes, patterns=(spec.usage,)),
+                           patterns=(_repeated("-d"),),
+                           forbidden=(NO_BOARD_NOTE, spec.usage)),
                 _check(("first.dump", "second.dump"), ()),
-            ), f"usage (exit {returncodes[0]}); neither file created"))
+            ), "refused (exit 1) with error: option '-d' given more than once, "
+               "no usage text; neither file created"))
     # ubertooth-dfu with an input it cannot use: -u replaces its output only
     # once a whole read-back has arrived, and leaves no temporary file
     # whichever way it ends on its own (ubertooth-dfu.md, READING FLASH BACK).
@@ -356,7 +399,7 @@ def _comprehensive_cases():
            seeded=("kept.bin",), kept=("kept.bin",))
     simple("dfu-u-bad-image", "dfu -u <kept> -d <bad image>", "ubertooth-dfu",
            ("-u", ("file", "kept.bin"), "-d", ("file", "bad.dfu")),
-           (r"Signature check failed",), (),
+           (_BAD_IMAGE,), (),
            "exit 1 with no device opened; kept.bin unchanged; no temporary file",
            seeded=("kept.bin", "bad.dfu"), kept=("kept.bin", "bad.dfu"))
     # The image check refuses the command before -s writes anything (fork
@@ -367,10 +410,10 @@ def _comprehensive_cases():
             _seed(("new.bin", "kept.bin", "kept.dfu", "bad.dfu")),
             tool_step("refuse-new", "ubertooth-dfu",
                        ("-s", ("file", "new.bin"), "-d", ("file", "bad.dfu")),
-                       patterns=(r"Signature check failed",)),
+                       patterns=(_BAD_IMAGE,)),
             tool_step("refuse-kept", "ubertooth-dfu",
                        ("-s", ("file", "kept.bin"), "-d", ("file", "bad.dfu")),
-                       patterns=(r"Signature check failed",)),
+                       patterns=(_BAD_IMAGE,)),
             _check(("new.dfu",), ("new.bin", "kept.bin", "kept.dfu", "bad.dfu")),
         ), "exit 1 with no device opened; new.dfu not created; kept.dfu unchanged"))
     return cases
@@ -432,7 +475,7 @@ def refusal_cases(arguments, _resources, _resource_identities):
         for option, extension in tool.files:
             for way in _ways(tool):
                 cases.append(_refusal_case(tool, option, extension, way))
-    cases += _extra_capture_cases()
+    cases += _repeat_and_extra_cases()
     cases += bluez_stray_cases(arguments["coverage"])
     if arguments["coverage"] == "comprehensive":
         cases += _comprehensive_cases()

@@ -63,6 +63,11 @@
           <input type="checkbox" id="build" name="build" checked>
           <label for="build">Build the ref on the target first</label>
         </div>
+        <div class="field field-check">
+          <input type="checkbox" id="flash-build" name="flash_build" checked aria-describedby="flash-build-note">
+          <label for="flash-build">Flash the firmware to the boards first</label>
+        </div>
+        <p id="flash-build-note" class="hint" hidden>Flashing needs Build: without it the boards keep their firmware, which must already be the ref's.</p>
         <div class="form-actions">
           <button type="submit" id="run-button" class="primary">Run</button>
           <p id="run-status" class="hint" role="status" aria-live="polite"></p>

@@ -302,6 +302,11 @@ class DeployTest(unittest.TestCase):
         self.assertNotIn(f"systemctl --user restart {CONTROLLER_UNIT}", self.lab.commands())
         self.assertIn(f"systemctl --user restart {RUNNER_UNIT}", self.lab.commands())
 
+    def test_with_acroname_bootstraps_the_brainstem_api(self):
+        self.assertOk(self.lab.deploy("--with-acroname"))
+        self.assertIn(f"python3 {self.lab.checkout}/bootstrap.py --with-acroname",
+                      self.lab.commands())
+
     def test_port_and_pass_through_options(self):
         libbtbb = self.lab.root / "libbtbb"
         libbtbb.mkdir()
@@ -405,6 +410,41 @@ class DeployTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("exists but is not a git clone", result.stderr)
         self.assertEqual("mine\n", (self.lab.libbtbb / "notes.txt").read_text(encoding="utf-8"))
+
+    def test_external_board_lock_is_passed_to_the_runner(self):
+        result = self.lab.deploy("--dry-run", "--external-board-lock", "~/locks/board-{serial}.lock")
+        self.assertOk(result)
+        self.assertEqual(_tree(self.lab.home), {})
+        self.assertIn(
+            f" --external-board-lock {self.lab.home}/locks/board-{{serial}}.lock\n", result.stdout
+        )
+        self.assertOk(self.lab.deploy("--external-board-lock", "/var/lock/board-{serial}.lock"))
+        runner = (self.lab.unit_dir / RUNNER_UNIT).read_text(encoding="utf-8")
+        controller = (self.lab.unit_dir / CONTROLLER_UNIT).read_text(encoding="utf-8")
+        self.assertIn(" --external-board-lock /var/lock/board-{serial}.lock\n", runner)
+        self.assertNotIn("external-board-lock", controller)
+        # Without the option the runner gets none (the default deploy).
+        self.assertOk(self.lab.deploy())
+        runner = (self.lab.unit_dir / RUNNER_UNIT).read_text(encoding="utf-8")
+        self.assertNotIn("external-board-lock", runner)
+
+    def test_bad_external_board_lock_templates_are_refused(self):
+        for value, complaint in (
+            ("locks/board-{serial}.lock", "absolute path"),
+            ("/locks/board.lock", "must contain {serial}"),
+            ("/locks/{serial}-{serial}.lock", "exactly once"),
+            ("/locks/{alias}-{serial}.lock", "exactly once"),
+            ("/locks/a b-{serial}.lock", "does not quote"),
+            ("/locks/$HOME-{serial}.lock", "does not quote"),
+            ("/locks/{serial}/", "must name a file"),
+        ):
+            with self.subTest(value):
+                result = self.lab.deploy("--external-board-lock", value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(complaint, result.stderr)
+        result = self.lab.deploy("--external-board-lock")
+        self.assertIn("--external-board-lock needs a value", result.stderr)
+        self.assertEqual(_tree(self.lab.home), {})
 
     def test_xdg_dirs_are_honoured(self):
         data = self.lab.root / "xdg-data"

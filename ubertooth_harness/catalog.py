@@ -704,17 +704,17 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # Three load runs of four flashes each took 10.4-10.7 s.
     "Flash reliability": _default(Estimate(0, per_count=("flashes", 2.65))),
     "DFU images": _profiles(Estimate(11.7), Estimate(69.0)),
-    # No run record (Linux only, needs power switching): two queries and the
-    # capture, plus up to 5 s removal and 10 s return deadlines with 1 s
-    # settles; about 8 s of power switching is assumed.
-    "Exclusive Ubertooth topology": _default(Estimate(8.0, per_duration=1)),
-    # No passing run yet: about 6 s from the test's start to -n on the Linux
-    # lab host (two resets), plus the result and about 40 reads and restores
-    # of both boards. On fork main 0684c11 a run fails in about 18 s: no
-    # result by the 10 s deadline (fork #26), then a clean cleanup. Before
-    # 0684c11 it took about 69 s: the wedged boards made every cleanup
-    # command time out.
-    "Two-device range test": _default(Estimate(10.0)),
+    # Three runs on the Linux lab host (Acroname USBHub3+, three other boards
+    # powered off, 5 s capture) took 12.5-16.7 s, median 15.2 s: about 1.3 s
+    # to a settled enumeration and switch-off, 1.5 s to confirm the board is
+    # alone, the queries and capture, and under 0.1 s to restore.
+    "Exclusive Ubertooth topology": _default(Estimate(10.0, per_duration=1)),
+    # Nine passing runs on the Linux lab host at fork 699960b (one guard
+    # board) took 11.5-14.9 s, median 13.3 s: about 6 s to -n (two resets),
+    # the result within about 1 s, then the reads and restores of both
+    # boards and the guard checks. Before fork #601 a run failed in about
+    # 18 s (no result by the 10 s deadline, fork #26).
+    "Two-device range test": _default(Estimate(13.5)),
     # ESTIMATE_PENDING_HW
     "Capture known BLE advertiser": _profiles(
         Estimate(25.0, per_duration=5), Estimate(70.0, per_duration=16)
