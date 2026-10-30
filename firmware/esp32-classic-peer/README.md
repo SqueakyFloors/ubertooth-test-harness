@@ -391,6 +391,8 @@ so on the leader the two numbers can differ by a tick or two.
 
 With no link there is no piconet: `piconet`, `accuracy` and `handle` read
 `null`, `native` still reads, and `t_us` and `read_us` are the native read's.
+A link that goes down while the command is in flight reads the same way, as
+no piconet rather than as a failure.
 A controller that refuses a read answers `ERR the controller refused the
 clock read, status 0x<hh>` and prints no line, rather than an answer with a
 hole in it.

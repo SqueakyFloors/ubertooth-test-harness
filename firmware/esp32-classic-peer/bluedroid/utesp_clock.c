@@ -65,8 +65,9 @@ static SemaphoreHandle_t request_lock;
 static SemaphoreHandle_t answer;
 static SemaphoreHandle_t slot_lock;
 static struct {
-    bool waiting;  /* the reader still wants the answer */
-    uint32_t seq;  /* which request it is waiting for; numbering starts at 1 */
+    bool waiting;     /* the reader still wants the answer */
+    uint32_t seq;     /* the newest request; numbering starts at 1 */
+    uint32_t pending; /* a request the controller has not answered yet, or 0 */
     int64_t sent_us;
     struct utesp_clock got;
 } slot;
@@ -129,11 +130,16 @@ static void clock_complete(BT_HDR *response, void *context)
     }
 
     xSemaphoreTake(slot_lock, portMAX_DELAY);
-    if (slot.waiting && slot.seq == seq && opcode == HCI_READ_CLOCK) {
-        got.read_us = now - slot.sent_us;
-        slot.got = got;
-        slot.waiting = false;
-        xSemaphoreGive(answer);
+    if (opcode == HCI_READ_CLOCK) {
+        if (slot.pending == seq) {
+            slot.pending = 0; /* the controller owes nothing now */
+        }
+        if (slot.waiting && slot.seq == seq) {
+            got.read_us = now - slot.sent_us;
+            slot.got = got;
+            slot.waiting = false;
+            xSemaphoreGive(answer);
+        }
     }
     xSemaphoreGive(slot_lock);
 
@@ -148,7 +154,18 @@ static int read_clock(uint16_t handle, uint8_t which, struct utesp_clock *out)
     hci_cmd_metadata_t *metadata;
     uint8_t *pp;
     uint32_t seq;
-    bool answered;
+    bool owed, answered;
+
+    /* A command the controller never answered still holds its place in the
+     * HCI layer's pending list and its buffer. Sending more of them would
+     * pile both up, so until that one is answered there is nothing useful to
+     * do but say the controller is not answering. */
+    xSemaphoreTake(slot_lock, portMAX_DELAY);
+    owed = slot.pending != 0;
+    xSemaphoreGive(slot_lock);
+    if (owed) {
+        return UTESP_CLOCK_TIMED_OUT;
+    }
 
     if ((cmd = HCI_GET_CMD_BUF(READ_CLOCK_PARAM_LEN)) == NULL) {
         return UTESP_CLOCK_NO_MEMORY;
@@ -175,6 +192,7 @@ static int read_clock(uint16_t handle, uint8_t which, struct utesp_clock *out)
     xSemaphoreTake(answer, 0);
     xSemaphoreTake(slot_lock, portMAX_DELAY);
     seq = ++slot.seq;
+    slot.pending = seq;
     slot.waiting = true;
     slot.sent_us = esp_timer_get_time();
     xSemaphoreGive(slot_lock);
@@ -223,5 +241,12 @@ int utesp_clock_read(const uint8_t *peer_addr, bool piconet, struct utesp_clock 
     xSemaphoreTake(request_lock, portMAX_DELAY);
     result = read_clock(handle, piconet ? WHICH_CLOCK_PICONET : WHICH_CLOCK_NATIVE, out);
     xSemaphoreGive(request_lock);
+
+    /* The link can go down between the lookup above and the command
+     * reaching the controller, which then says it does not know the handle.
+     * That is the same news as having found no handle at all. */
+    if (result == UTESP_CLOCK_OK && piconet && out->status == HCI_ERR_NO_CONNECTION) {
+        return UTESP_CLOCK_NO_LINK;
+    }
     return result;
 }
