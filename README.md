@@ -1229,18 +1229,25 @@ run, a `--build` run that flashes its boards with its own build takes it with
 its leases before the build and releases it after the flash stage (so it is
 held for the build as well, and two such runs on one host do not start at the
 same time), and `lease` holds it for its command with `--host-lock`, or always
-when the command line runs `ubertooth-dfu`. The tool is found wherever it
-appears, so `sudo ubertooth-dfu ...`, `env VAR=1 ubertooth-dfu ...` and
+when its command line names `ubertooth-dfu` anywhere, so
+`sudo ubertooth-dfu ...`, `env VAR=1 ubertooth-dfu ...` and
 `sh -c "ubertooth-dfu ..."` take the lock as a bare `ubertooth-dfu` does; a
-path is matched by its last component, so `ubertooth-dfu-wrapper` is not it.
-A command line that only mentions the name takes the lock it does not need,
-which costs a wait and nothing else. A second command that needs the lock
+word is matched by its last path component, so `ubertooth-dfu-wrapper` is not
+it. `lease` says on standard error when it takes the lock this way. Only the
+text of the command line is read, so a command that reaches the tool without
+naming it — through a variable, a wrapper script of its own, or a list of
+commands read from a file — needs `--host-lock`, and one that merely mentions
+the name holds the lock for as long as it runs, which delays other commands
+and breaks nothing. A second command that needs the lock
 fails at once, before any build or device command, and names the holder
 (owner, run, command, pid, and since when); `--wait-for-boards` waits for it
 as for a board. `ubertooth-harness boards` shows it as
 `host lock (this machine)`: the lock is the one on the machine the command
 runs on, whatever `--host` names, since a lock file read here says nothing
 about another machine's. In `--json` it is the entry with `host_lock: true`.
+The board lines are local in the same way, which is why `boards` asks for the
+host it is running on: name another machine's host and its boards are listed
+from this machine's lease directory, where nothing holds them.
 The run report records it. Runs that neither switch power nor write firmware
 do not take it, so they still share the host.
 

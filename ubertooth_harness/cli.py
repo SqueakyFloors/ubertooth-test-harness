@@ -404,7 +404,8 @@ def _parser() -> argparse.ArgumentParser:
     lease.add_argument(
         "--host-lock", action="store_true",
         help="also hold this host's power/firmware lock, for a command that "
-        "switches USB power or writes firmware (automatic for ubertooth-dfu)",
+        "switches USB power or writes firmware (automatic for a command line "
+        "that names ubertooth-dfu)",
     )
     _add_lease_options(lease)
     lease.epilog = "usage: ubertooth-harness lease --hardware H ALIAS... -- COMMAND [ARG...]"
@@ -1137,19 +1138,22 @@ _COMMAND_WORD = re.compile(r"""[^\s'"|&;()<>]+""")
 
 
 def _writes_firmware(command: Sequence[str]) -> bool:
-    """True when this command line runs ubertooth-dfu, however it is wrapped.
+    """True when the text of this command line names ubertooth-dfu.
 
     The tool is not always the first word: `sudo ubertooth-dfu ...`,
     `env VAR=1 ubertooth-dfu ...` and `sh -c "ubertooth-dfu ..."` all write
     firmware, so every word of every argument is examined, including the words
-    inside a quoted argument a shell would run. A path is matched by its last
-    component, so `/usr/local/bin/ubertooth-dfu` counts and
+    inside a quoted argument a shell would run. A word is matched by its last
+    path component, so `/usr/local/bin/ubertooth-dfu` counts and
     `ubertooth-dfu-wrapper` does not.
 
-    A command line that only mentions the name takes the host lock without
-    needing it, which costs a wait; one that writes firmware without the lock
-    can overlap another command's writes or power changes, which is what the
-    lock exists to prevent.
+    This reads the text and nothing else, which decides the two ways it is
+    wrong in the direction that costs least. A command line that only mentions
+    the name (`env PATH=/opt/ubertooth-dfu ls`) holds the lock while it runs,
+    which delays other commands and breaks nothing. A command line that
+    reaches the tool without naming it -- through a variable, a wrapper script
+    of its own, or a list of commands read from a file -- is not seen here,
+    and needs `--host-lock`; that is what the option is for.
     """
     return any(
         PurePosixPath(word).name == _DFU_TOOL
@@ -1172,7 +1176,17 @@ def _lease_command(args: argparse.Namespace) -> int:
         boards.append(board_leases.Board(alias, board_leases.resource_key(resource)))
     # A manual firmware write (or DFU read-back) must not overlap another
     # command's power changes or writes on this host.
-    host_lock = args.host_lock or _writes_firmware(command)
+    host_lock = args.host_lock
+    if not host_lock and _writes_firmware(command):
+        host_lock = True
+        # Nobody asked for this lock, and holding it makes every other
+        # command that switches power or writes firmware wait until this one
+        # exits, so say that it is being held and why.
+        print(
+            f"note: holding this host's power/firmware lock while the command "
+            f"runs: its command line names {_DFU_TOOL}",
+            file=sys.stderr,
+        )
     with board_leases.acquire(
         boards,
         board_leases.holder_info(run_id=None, owner=args.owner, purpose="lease: " + " ".join(command)),

@@ -410,32 +410,40 @@ class HostLockCliTests(unittest.TestCase):
             cwd=Path(__file__).resolve().parents[1],
         )
 
+    def _fake_dfu(self):
+        """A stand-in ubertooth-dfu that runs the probe given to it."""
+        dfu = self.root / "bin" / "ubertooth-dfu"
+        dfu.parent.mkdir(exist_ok=True)
+        dfu.write_text(f"#!/bin/sh\nexec '{sys.executable}' -c \"$1\" \"$2\"\n")
+        dfu.chmod(0o755)
+        return dfu
+
     def test_lease_takes_the_host_lock_only_when_asked_or_for_ubertooth_dfu(self):
         plain = self._lease("UT_0", "--", sys.executable, "-c", self._probe(), str(self.lease_dir))
         self.assertEqual(0, plain.returncode, plain.stderr)
         self.assertEqual("free", plain.stdout.strip())
+        self.assertEqual("", plain.stderr)
 
         asked = self._lease("--host-lock", "UT_0", "--",
                             sys.executable, "-c", self._probe(), str(self.lease_dir))
         self.assertEqual(0, asked.returncode, asked.stderr)
         self.assertEqual('"manual"', asked.stdout.strip())
+        # Asked for, so nothing is explained.
+        self.assertEqual("", asked.stderr)
 
-        dfu = self.root / "bin" / "ubertooth-dfu"
-        dfu.parent.mkdir()
-        dfu.write_text(f"#!/bin/sh\nexec '{sys.executable}' -c \"$1\" \"$2\"\n")
-        dfu.chmod(0o755)
+        dfu = self._fake_dfu()
         auto = self._lease("UT_0", "--", str(dfu), self._probe(), str(self.lease_dir))
         self.assertEqual(0, auto.returncode, auto.stderr)
         self.assertEqual('"manual"', auto.stdout.strip())
+        # Nobody asked for this one: it says it is holding the lock and why.
+        self.assertIn("holding this host's power/firmware lock", auto.stderr)
+        self.assertIn("names ubertooth-dfu", auto.stderr)
         self.assertFalse(leases.host_lock_state(directory=self.lease_dir)["held"])
 
     def test_lease_takes_the_host_lock_for_a_wrapped_ubertooth_dfu(self):
         # A wrapper is how a firmware write is usually run: the lock must not
         # depend on ubertooth-dfu being the first word.
-        dfu = self.root / "bin" / "ubertooth-dfu"
-        dfu.parent.mkdir()
-        dfu.write_text(f"#!/bin/sh\nexec '{sys.executable}' -c \"$1\" \"$2\"\n")
-        dfu.chmod(0o755)
+        dfu = self._fake_dfu()
         probe = " ".join(
             shlex.quote(word)
             for word in (str(dfu), self._probe(), str(self.lease_dir))
