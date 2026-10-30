@@ -201,7 +201,7 @@ class ToolUbertooth(FakeUbertooth):
             out.append(f"Access address: {self.state['aa']}")
             if self.btle_aa_bugs:
                 return self._result(command, 0, "\n".join(out) + "\n", "", on_output)
-        if "-v" in options:
+        if "-k" in options:
             out.append(self._crc_line(self.state["crc"]).strip())
         return self._result(command, 0, "\n".join(out) + "\n", "", on_output)
 
@@ -355,7 +355,7 @@ class BleSettingsTests(unittest.TestCase):
         device = ToolUbertooth(crc="1", btle_aa_bugs=True)
         summary, events = run_test("BLE settings", device, coverage="comprehensive")
         self.assertFalse(summary.passed)
-        self.assertEqual(["-a -v reports both", "Reject -azzzz"], failed_names(events))
+        self.assertEqual(["-a -k reports both", "Reject -azzzz"], failed_names(events))
 
     def test_access_address_next_word_fails_without_the_next_word_rule(self):
         # Before fork 0b63b01, -a 12345678 read the address and dropped the word.

@@ -24,7 +24,7 @@ COUNT_CASE = "count-with-mode"
 
 class FakeUtil:
     """ubertooth-util's argument checks as at fork main db5649b: unknown
-    options (-f was removed), stray word, -h/-H, util_check_modes(), -z with
+    options (-f was removed), stray word, -h/-V, util_check_modes(), -z with
     a mode, -U all, then -N, which prints the count and carries on to the
     board lookup. ``bugs``: pairs-accepted (no mode check), squelch-dropped
     (no -z check), order-as-given (modes named in command order), dfu-mode
@@ -40,8 +40,8 @@ class FakeUtil:
     def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
         command = tuple(argv)
         self.commands.append(command)
-        if command == ("ubertooth-util", "-H"):
-            return self._result(command, 0, "libubertooth 1.1 (git-test), libbtbb 1.0\n")
+        if command == ("ubertooth-util", "-V"):
+            return self._result(command, 0, "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0\n")
         if command[0] == sys.executable:
             assert Path(command[1]).name == "refusal.py" and command[2] == "probe", command
             answer = ("yes (/p/lib/libubertooth.so.1)" if self.switch else
@@ -78,8 +78,14 @@ class FakeUtil:
         if operands:
             return self._result(command, 1, "",
                                 f"error: unexpected argument '{operands[0]}'\n")
-        if "H" in given:
-            return self._result(command, 0, "libubertooth 1.1 (git-test)\n")
+        if "V" in given and len(given) == 1:
+            # The whole -V answer with the no-device switch set: the host
+            # lines, then nothing attached, exit 0 and no switch note.
+            return self._result(
+                command, 0,
+                "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0\n"
+                "libbtbb loaded from: /p/lib/libbtbb.so.1\n"
+                "Firmware version: no Ubertooth attached\n")
         if "h" in given:
             return self._result(command, 0, USAGE)
         modes = [mode for mode in modes_known if mode in given]
@@ -232,7 +238,7 @@ class CaseTests(unittest.TestCase):
         summary, _events = run(old)
         self.assertTrue(summary.passed, summary.failure_reason)
         tools = {c[3:] for c in old.commands if c[:2] == refusal_cases.NO_DEVICES}
-        self.assertEqual({("-H",)}, tools)
+        self.assertEqual({("-V",)}, tools)
 
 
 class PlanTests(unittest.TestCase):
