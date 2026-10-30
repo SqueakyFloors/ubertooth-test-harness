@@ -140,17 +140,18 @@ def _dump_check(step_id, name, file_name, fmt, *, min_records=0, types="br,keep-
 # reported. -r/-q create BR/EDR PCAPNG/PCAP files (link type 255) at start;
 # -d writes one full 68-byte record per packet found (possibly none).
 #
-# The noise and signal-to-noise fields are a figure or the word `none`: a
-# record says whether the board had a background estimate for its channel,
-# and a mode that has none prints `none` for both rather than a number
-# derived from the packet itself (fork 532adc19). The signal is always a
-# figure, since a record without the board's own measurement falls back to
-# the strongest reading it carries.
-_RSSI_FIELD = r"(?:-?\d+|none)"
+# The noise figure and the signal-to-noise ratio beside it are either both
+# figures or both the word `none`: a record says whether the board had a
+# background estimate for its channel, and a mode that has none prints `none`
+# for both rather than a number derived from the packet itself (fork
+# 532adc19). The ratio comes from the noise, so a line with one of each is
+# malformed. The signal is always a figure, since a record without the board's
+# own measurement falls back to the strongest reading it carries.
+_NOISE_AND_SNR = r"(?:n=-?\d+ snr=-?\d+|n=none snr=none)"
 
 _PACKET = re.compile(
     rf"^systime=\d+ ch=\s*(?P<ch>\d+) LAP=[0-9a-f]{{6}} err=(?P<err>\d+) clkn=\d+ "
-    rf"clk_offset=\d+ s=-?\d+ n={_RSSI_FIELD} snr={_RSSI_FIELD}$"
+    rf"clk_offset=\d+ s=-?\d+ {_NOISE_AND_SNR}$"
 )
 _SURVEY_LINE = re.compile(
     r"^\?\?:\?\?:(?:\?\?|[0-9A-F]{2}):[0-9A-F]{2}:[0-9A-F]{2}:[0-9A-F]{2}$"
