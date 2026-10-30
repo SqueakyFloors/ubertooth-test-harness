@@ -142,6 +142,22 @@ def _cell(value) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ")
 
 
+# The registry identity key that names a device differs by kind: an Ubertooth
+# has `serial`, an nRF52840 DK its J-Link probe's `jlink serial`. The keys are
+# listed rather than matched on the word "serial", which would also pick up a
+# DK's `serial device` and print a /dev/serial/by-id path.
+_IDENTITY_SERIAL_KEYS = ("serial", "jlink serial")
+
+
+def _identity_serial(identity: Mapping) -> str:
+    """The serial that names this device, whichever kind of device it is."""
+    for key in _IDENTITY_SERIAL_KEYS:
+        value = identity.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
 def _setup_rows(run: _Run) -> list[tuple[str, str]]:
     manifest = run.manifest
     rows = []
@@ -243,7 +259,7 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
         if not alias:
             continue
         device = devices.setdefault(alias, {
-            "serial": start.get("resource_identity", {}).get("serial", ""),
+            "serial": _identity_serial(start.get("resource_identity", {})),
             "firmware": "",
         })
         if details.get("check_name") == "Firmware version":
@@ -283,7 +299,11 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
     artifacts = manifest.get("artifacts", [])
     held = manifest.get("leases") or []
     host_lock = [item for item in held if item.get("key") == "host-power"]
-    held = [item for item in held if item.get("key") != "host-power"]
+    external = [item for item in held if item.get("external")]
+    held = [
+        item for item in held
+        if item.get("key") != "host-power" and not item.get("external")
+    ]
     if host_lock:
         rows.append((
             "Host lock",
@@ -296,6 +316,12 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
             "; ".join(
                 f"{item.get('resource')} since {item.get('acquired_at')}" for item in held
             ) + " (held for the whole run)",
+        ))
+    if external:
+        rows.append((
+            "External board locks",
+            "; ".join(f"{item.get('resource')} {item.get('lock')}" for item in external)
+            + " (held for the whole run)",
         ))
     if artifacts:
         rows.append((

@@ -18,11 +18,30 @@ images, a manual ``ubertooth-dfu`` under ``lease``) holds it for as long as
 it runs, so power changes and firmware writes on one host never overlap.
 A second such command fails at once and names the holder.
 
-Lock order: the host lock is always taken first, then the boards in serial
-order, in one all-or-nothing attempt; nothing ever blocks while holding a
-lock (a busy lock releases everything and the attempt is retried until the
-deadline). A process never takes the host lock after it already holds a
-board lease, so no two harness processes can wait on each other.
+External board locks: a lab may already lock its boards with its own
+per-board ``flock`` files (a script or wrapper that knows nothing about
+leases). With a template such as ``/some/dir/board-{serial}.lock`` (option
+``--external-board-lock`` or ``UBERTOOTH_HARNESS_EXTERNAL_BOARD_LOCK``), every
+lease also takes an exclusive ``flock`` on that board's external file, in the
+same all-or-nothing attempt, and ``boards`` reports a board whose external
+lock alone is held as held. The harness never writes to an external file; it
+only shows what the file holds.
+
+Lock order, one hierarchy for every acquirer:
+
+1. the external board locks, in serial order;
+2. the host lock;
+3. the board leases, in serial order.
+
+All are taken in one all-or-nothing attempt and nothing ever blocks while
+holding a lock (a busy lock releases everything and the attempt is retried
+until the deadline). Without a template this is the old order (host lock,
+then boards). A lab wrapper that takes its external board locks and then runs
+``lease`` (which may take the host lock, then leases) follows the same
+hierarchy, so neither it nor the harness can wait on the other in a cycle,
+and a process never takes a lock earlier in the order after a later one.
+A command run by such a wrapper must not be given the template too: its
+wrapper already holds those files, so it would find them busy and refuse.
 """
 
 from __future__ import annotations
@@ -35,6 +54,7 @@ import json
 import os
 import re
 import socket
+import stat
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,6 +62,11 @@ from typing import Callable, Iterable, Mapping, Sequence
 
 LEASE_DIR_ENV = "UBERTOOTH_HARNESS_LEASE_DIR"
 OWNER_ENV = "UBERTOOTH_HARNESS_OWNER"
+EXTERNAL_LOCK_ENV = "UBERTOOTH_HARNESS_EXTERNAL_BOARD_LOCK"
+SERIAL_FIELD = "{serial}"
+# How much of an external lock file `boards` and errors show.
+_EXTERNAL_HOLDER_BYTES = 4096
+_EXTERNAL_HOLDER_CHARS = 200
 DEFAULT_LEASE_DIR = Path.home() / ".ubertooth-harness" / "leases"
 # A probe by `boards` holds a shared lock for microseconds; retry briefly so
 # that probe never fails a run that did not ask to wait.
@@ -74,14 +99,19 @@ class Lease:
     fd: int
     holder: Mapping
     acquired_monotonic: float = field(default_factory=time.monotonic)
+    # An external board lock (see the module docstring), not a lease file.
+    external: bool = False
 
     def to_dict(self) -> dict:
-        return {
+        record = {
             "resource": self.board.alias,
             "key": self.board.key,
             "lock": str(self.path),
             "acquired_at": self.holder.get("acquired_at"),
         }
+        if self.external:
+            record["external"] = True
+        return record
 
 
 def lease_dir(override: Path | str | None = None) -> Path:
@@ -89,6 +119,73 @@ def lease_dir(override: Path | str | None = None) -> Path:
         return Path(override)
     env = os.environ.get(LEASE_DIR_ENV)
     return Path(env) if env else DEFAULT_LEASE_DIR
+
+
+def external_lock_template(
+    value: str | None, *, environ: Mapping[str, str] | None = None
+) -> str | None:
+    """The validated external board lock template, or None when unset.
+
+    value is the --external-board-lock option; None falls back to
+    $UBERTOOTH_HARNESS_EXTERNAL_BOARD_LOCK. An empty value (option or
+    variable) means no external lock, so ``--external-board-lock ''`` turns
+    the variable off for one command. The template must be an absolute path
+    after ~ expansion and contain exactly one ``{serial}`` and no other brace;
+    the result has ~ expanded.
+    """
+    if value is None:
+        value = (os.environ if environ is None else environ).get(EXTERNAL_LOCK_ENV, "")
+    if not value:
+        return None
+    template = os.path.expanduser(value)
+    where = f"external board lock template {value!r}"
+    if template.count(SERIAL_FIELD) != 1:
+        raise LeaseError(f"{where} must contain {SERIAL_FIELD} exactly once")
+    rest = template.replace(SERIAL_FIELD, "")
+    if "{" in rest or "}" in rest:
+        raise LeaseError(f"{where} may contain no brace other than {SERIAL_FIELD}")
+    if not os.path.isabs(template):
+        raise LeaseError(f"{where} must be an absolute path (or start with ~/)")
+    if "\0" in template or template.endswith("/"):
+        raise LeaseError(f"{where} must name a file")
+    return template
+
+
+def external_lock_path(template: str, board: Board) -> Path:
+    """The board's external lock file: the template with its full serial."""
+    return Path(template.replace(SERIAL_FIELD, board.key))
+
+
+def read_external_holder(path: Path) -> str:
+    """What an external lock file says about its holder, for display only.
+
+    Any format is accepted: a JSON object is described like a lease's
+    holder, other text is shown as its first non-empty line, shortened.
+    """
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(_EXTERNAL_HOLDER_BYTES)
+    except OSError:
+        return ""
+    text = raw.decode("utf-8", errors="replace").strip()
+    if not text:
+        return ""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        data = None
+    if isinstance(data, dict) and data:
+        return describe_holder(data)
+    line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    line = "".join(ch if ch.isprintable() else "?" for ch in line)
+    if len(line) > _EXTERNAL_HOLDER_CHARS:
+        line = line[:_EXTERNAL_HOLDER_CHARS - 3] + "..."
+    return line
+
+
+def describe_external(path: Path, holder: str) -> str:
+    """'outside the harness: <path> (<holder>)', after 'held' in boards and errors."""
+    return f"outside the harness: {path}" + (f" ({holder})" if holder else "")
 
 
 def board_key(alias: str, identity: Mapping) -> str:
@@ -215,8 +312,46 @@ def _stamp(fd: int, record: Mapping | None) -> None:
         os.pwrite(fd, data, 0)
 
 
-def _try_lock(path: Path, mode: int) -> int | None:
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+def _file_identity(path: Path) -> tuple[int, int, int] | None:
+    """(mode, device, inode) of path, or None when it does not exist yet."""
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return (info.st_mode, info.st_dev, info.st_ino)
+
+
+def _released(held: list, message: str) -> "LeaseError":
+    """Drop what this attempt already holds, then give the error to raise.
+
+    Taking locks is all or nothing, so nothing may stay locked when the
+    attempt gives up.
+    """
+    LeaseSet(list(held)).release()
+    held.clear()
+    return LeaseError(message)
+
+
+def _try_lock(path: Path, mode: int, *, flags: int = os.O_RDWR) -> int | None:
+    # A lock file is read by whoever waits for it, so it is 0644 whatever the
+    # umask says; an existing file keeps the mode it has. Another process can
+    # create or remove the file between the two opens, so try a few times.
+    for _attempt in range(5):
+        try:
+            fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            try:
+                fd = os.open(path, flags)
+            except FileNotFoundError:
+                continue  # it was removed again; create it
+            break
+        try:
+            os.fchmod(fd, 0o644)
+        except OSError:
+            pass
+        break
+    else:
+        fd = os.open(path, flags | os.O_CREAT, 0o644)
     try:
         fcntl.flock(fd, mode | fcntl.LOCK_NB)
     except OSError as error:
@@ -236,10 +371,11 @@ class LeaseSet:
     def release(self) -> None:
         while self.leases:
             lease = self.leases.pop()
-            try:
-                _stamp(lease.fd, None)  # nobody reads a stale holder later
-            except OSError:
-                pass
+            if not lease.external:  # an external file is never written
+                try:
+                    _stamp(lease.fd, None)  # nobody reads a stale holder later
+                except OSError:
+                    pass
             try:
                 os.close(lease.fd)
             except OSError:
@@ -264,11 +400,13 @@ def acquire(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     host_lock: bool = False,
+    external_template: str | None = None,
 ) -> LeaseSet:
     """Lease every board, all or nothing, waiting up to wait_s for busy ones.
 
-    With host_lock, the host lock is taken too, before any board (see the
-    module docstring for the order).
+    With host_lock, the host lock is taken too; with external_template (an
+    already validated external_lock_template()), each board's external lock
+    too (see the module docstring for the order).
     """
     if not boards and not host_lock:
         return LeaseSet()
@@ -283,30 +421,117 @@ def acquire(
     unique: dict[str, Board] = {}
     for board in boards:
         unique.setdefault(board.key, board)  # first alias wins, as in boards_for_invocations
-    ordered = sorted(unique.values(), key=lambda b: b.key)
+    by_serial = sorted(unique.values(), key=lambda b: b.key)
+    # (board, lock file, external) in lock order.
+    ordered: list[tuple[Board, Path, bool]] = []
+    if external_template:
+        for board in by_serial:
+            path = external_lock_path(external_template, board)
+            own = root / f"{board.key}.lock"
+            # realpath, so a symlink to the lease file is caught too: the
+            # second flock of one file in one process conflicts with itself.
+            if os.path.realpath(path) == os.path.realpath(own):
+                raise LeaseError(
+                    f"external board lock {path} is the harness's own lease file; "
+                    "point the template at the lab's lock files"
+                )
+            if not path.parent.is_dir():
+                # A mistyped template must not start a lock tree nobody else uses.
+                raise LeaseError(
+                    f"external board lock directory {path.parent} does not exist "
+                    f"(template {external_template})"
+                )
+            ordered.append((board, path, True))
     if host_lock:
-        ordered.insert(0, HOST_LOCK)
+        ordered.append((HOST_LOCK, root / f"{HOST_LOCK.key}.lock", False))
+    ordered += [(board, root / f"{board.key}.lock", False) for board in by_serial]
     while True:
         held: list[Lease] = []
-        busy: tuple[Board, Path] | None = None
+        busy: tuple[Board, Path, bool] | None = None
+        where = root
+        files: dict[tuple[int, int], Path] = {}
         try:
-            for board in ordered:
-                path = root / f"{board.key}.lock"
-                fd = _try_lock(path, fcntl.LOCK_EX)
+            for board, path, external in ordered:
+                where = path.parent if external else root
+                existing = _file_identity(path)
+                if existing is not None:
+                    if external and not stat.S_ISREG(existing[0]):
+                        raise _released(
+                            held,
+                            f"{board.alias}: its external board lock {path} is not "
+                            "a regular file; point the template at the lab's lock "
+                            "files",
+                        )
+                    # flock is per open file description, so two paths that
+                    # are one file (a symlink, a hard link, one path twice)
+                    # would make the process wait for its own lock.
+                    if existing[1:] in files:
+                        raise _released(
+                            held,
+                            f"{board.alias}: its lock file {path} is the same file "
+                            f"as {files[existing[1:]]}; every board needs its own "
+                            "lock file",
+                        )
+                # An external file may belong to another user: read access
+                # is enough for flock, and it is never written.
+                try:
+                    fd = _try_lock(
+                        path, fcntl.LOCK_EX,
+                        # O_NONBLOCK: a lab path that is a FIFO must not make
+                        # the open itself wait forever. The check below then
+                        # refuses anything that is not a regular file.
+                        flags=(
+                            os.O_RDONLY | os.O_NONBLOCK if external else os.O_RDWR
+                        ),
+                    )
+                except PermissionError as error:
+                    if not external:
+                        raise
+                    # Waiting cannot fix this, so say which board and file.
+                    raise _released(
+                        held,
+                        f"{board.alias}: its external board lock {path} cannot be "
+                        f"opened for reading ({error.strerror}); the harness needs "
+                        "read access to the lab's lock file",
+                    ) from error
                 if fd is None:
-                    busy = (board, path)
+                    busy = (board, path, external)
                     break
-                held.append(Lease(board, path, fd, holder))
-                _stamp(fd, dict(holder, resource=board.alias))
+                held.append(Lease(board, path, fd, holder, external=external))
+                # The same two checks on the file that was actually opened,
+                # in case the path was replaced in between.
+                info = os.fstat(fd)
+                if external and not stat.S_ISREG(info.st_mode):
+                    raise _released(
+                        held,
+                        f"{board.alias}: its external board lock {path} is not a "
+                        "regular file; point the template at the lab's lock files",
+                    )
+                key = (info.st_dev, info.st_ino)
+                if key in files:
+                    raise _released(
+                        held,
+                        f"{board.alias}: its lock file {path} is the same file as "
+                        f"{files[key]}; every board needs its own lock file",
+                    )
+                files[key] = path
+                if not external:
+                    _stamp(fd, dict(holder, resource=board.alias))
         except OSError as error:
             LeaseSet(held).release()
-            raise LeaseError(f"cannot lease boards in {root}: {error}") from error
+            raise LeaseError(f"cannot lease boards in {where}: {error}") from error
         if busy is None:
             return LeaseSet(held)
         LeaseSet(held).release()
-        board, path = busy
+        board, path, external = busy
         if clock() >= deadline:
             waited = f" after waiting {wait_s:g}s" if wait_s else ""
+            if external:
+                raise LeaseError(
+                    f"{board.alias} is in use{waited}: held "
+                    f"{describe_external(path, read_external_holder(path))}; "
+                    "use --wait-for-boards MINUTES to wait for it"
+                )
             if board == HOST_LOCK:
                 raise LeaseError(
                     f"this host's power/firmware lock is in use{waited}: held by "
@@ -323,23 +548,63 @@ def acquire(
 
 
 def board_states(
-    boards: Sequence[Board], *, directory: Path | str | None = None
+    boards: Sequence[Board],
+    *,
+    directory: Path | str | None = None,
+    external_template: str | None = None,
 ) -> list[dict]:
-    """Free or held, and by whom, for each board. Never blocks a run for long."""
+    """Free or held, and by whom, for each board. Never blocks a run for long.
+
+    With external_template, a board whose external lock is held counts as
+    held even without a lease; ``external`` then gives that lock's file,
+    whether it is held, and what the file says about its holder.
+    """
     root = lease_dir(directory)
     states = []
     for board in boards:
         path = root / f"{board.key}.lock"
         state = {"resource": board.alias, "key": board.key, "held": False, "holder": {}}
-        if path.exists():
-            fd = _try_lock(path, fcntl.LOCK_SH)
-            if fd is None:
-                state["held"] = True
-                state["holder"] = read_holder(path)
-            else:
-                os.close(fd)
+        if _probe(path):
+            state["held"] = True
+            state["holder"] = read_holder(path)
+        if external_template:
+            external = external_lock_path(external_template, board)
+            try:
+                # O_NONBLOCK, and a regular-file check: a lab path that is a
+                # FIFO must not make the listing wait forever.
+                held = _probe(external, flags=os.O_RDONLY | os.O_NONBLOCK,
+                              regular_only=True)
+                problem = ""
+            except OSError as error:  # e.g. another user's unreadable file
+                # Unknown is not free: a run would refuse this board, so the
+                # listing must not call it free either.
+                held, problem = True, str(error)
+            state["external"] = {
+                "lock": str(external),
+                "held": held,
+                "holder": (
+                    read_external_holder(external) if held and not problem else ""
+                ),
+            }
+            if problem:
+                state["external"]["error"] = problem
+            state["held"] = state["held"] or held
         states.append(state)
     return states
+
+
+def _probe(path: Path, *, flags: int = os.O_RDWR, regular_only: bool = False) -> bool:
+    """True when someone holds path's flock; creates no file that is missing."""
+    identity = _file_identity(path)
+    if identity is None:
+        return False
+    if regular_only and not stat.S_ISREG(identity[0]):
+        raise OSError(errno.EINVAL, "not a regular file", str(path))
+    fd = _try_lock(path, fcntl.LOCK_SH, flags=flags)
+    if fd is None:
+        return True
+    os.close(fd)
+    return False
 
 
 def host_lock_state(*, directory: Path | str | None = None) -> dict:
