@@ -283,7 +283,11 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
     artifacts = manifest.get("artifacts", [])
     held = manifest.get("leases") or []
     host_lock = [item for item in held if item.get("key") == "host-power"]
-    held = [item for item in held if item.get("key") != "host-power"]
+    external = [item for item in held if item.get("external")]
+    held = [
+        item for item in held
+        if item.get("key") != "host-power" and not item.get("external")
+    ]
     if host_lock:
         rows.append((
             "Host lock",
@@ -296,6 +300,12 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
             "; ".join(
                 f"{item.get('resource')} since {item.get('acquired_at')}" for item in held
             ) + " (held for the whole run)",
+        ))
+    if external:
+        rows.append((
+            "External board locks",
+            "; ".join(f"{item.get('resource')} {item.get('lock')}" for item in external)
+            + " (held for the whole run)",
         ))
     if artifacts:
         rows.append((

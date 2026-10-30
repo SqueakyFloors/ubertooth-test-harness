@@ -437,7 +437,13 @@ the manifest) from before preflight until it ends ([#4](https://github.com/Squea
 such command on the host fails at once and names the holder. The host lock is
 taken first, then the board leases in serial order, all or nothing and
 without blocking while any lock is held, so lock order cannot deadlock (see
-README, "The host lock").
+README, "The host lock"). With an external board lock template
+(`--external-board-lock` or `UBERTOOTH_HARNESS_EXTERNAL_BOARD_LOCK`, [#123](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/123)),
+each board's own lock file from other tools on the host is taken in the same
+attempt, before the host lock: external board locks (serial order), host
+lock, leases (serial order). A lab wrapper that takes a board's file and then
+a lease follows the same hierarchy, so neither can wait on the other in a
+cycle (README, "External board locks").
 
 The exclusive-topology btle case runs `timeout --foreground -k 2 -s INT`, so
 [`timeout`](https://www.gnu.org/software/coreutils/manual/html_node/timeout-invocation.html) and btle stay in the command's own process group (the executor
