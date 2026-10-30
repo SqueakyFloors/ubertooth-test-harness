@@ -11,11 +11,13 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -114,9 +116,53 @@ class ChildTests(unittest.TestCase):
         self.assertEqual("FAIL", outcome.status())
         self.assertIn("did not finish within 0.001s", outcome.errors[0][1])
 
+    def child(self, returncode, output="", errors="", report=None):
+        """A stand-in child process, in place of a real one."""
+        class Child:
+            pid = os.getpid()  # never signaled: it ends on its own here
+
+            def __init__(self, argv):
+                self.argv = argv
+                self.returncode = returncode
+
+            def communicate(self, timeout=None):
+                return output, errors
+
+        def popen(argv, **_kwargs):
+            if report is not None:
+                path = argv[argv.index("--worker-result") + 1]
+                Path(path).write_text(json.dumps(report))
+            return Child(argv)
+
+        return mock.patch.object(runner.subprocess, "Popen", popen)
+
+    def test_stopping_a_module_takes_the_commands_it_started(self):
+        # A hung module may have left a command of its own running, holding a
+        # lock or a port; the whole process group goes.
+        child = subprocess.Popen(
+            [sys.executable, "-c",
+             "import subprocess, sys, time\n"
+             "started = subprocess.Popen([sys.executable, '-c', "
+             "'import time; time.sleep(120)'])\n"
+             "print(started.pid, flush=True)\n"
+             "time.sleep(120)\n"],
+            stdout=subprocess.PIPE, text=True, start_new_session=True)
+        self.addCleanup(child.kill)
+        grandchild = int(child.stdout.readline())
+        runner._stop(child)
+        child.stdout.close()
+        self.assertIsNotNone(child.poll())
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                os.kill(grandchild, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.05)
+        self.fail(f"the command the module started ({grandchild}) is still running")
+
     def test_a_child_that_dies_without_a_result_is_an_error(self):
-        dead = subprocess.CompletedProcess([], -11, "", "zsh: segmentation fault\n")
-        with mock.patch.object(runner.subprocess, "run", return_value=dead):
+        with self.child(-11, errors="zsh: segmentation fault\n"):
             outcome = runner._start("tests.test_build", 1)
         self.assertEqual("FAIL", outcome.status())
         (_module, text), = outcome.errors
@@ -126,20 +172,14 @@ class ChildTests(unittest.TestCase):
     def test_a_child_that_exits_oddly_with_passing_tests_is_an_error(self):
         # A module that passes its tests and then exits 3 (an atexit hook, a
         # stray sys.exit) must not pass quietly.
-        passing = runner._start("tests.test_build", 1)
-        report = {"module": "tests.test_build", "tests": passing.tests,
+        report = {"module": "tests.test_build", "tests": 4,
                   "failures": [], "errors": [], "skipped": [],
                   "expected_failures": 0, "unexpected_successes": [],
                   "timings": []}
-
-        def fake_run(argv, **kwargs):
-            result_path = argv[argv.index("--worker-result") + 1]
-            Path(result_path).write_text(json.dumps(report))
-            return subprocess.CompletedProcess(argv, 3, "", "")
-
-        with mock.patch.object(runner.subprocess, "run", fake_run):
+        with self.child(3, report=report):
             outcome = runner._start("tests.test_build", 1)
         self.assertEqual("FAIL", outcome.status())
+        self.assertEqual(4, outcome.tests)
         self.assertIn("exited 3", outcome.errors[0][1])
 
 

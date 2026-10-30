@@ -36,6 +36,7 @@ import concurrent.futures
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
@@ -50,6 +51,7 @@ CACHE = TESTS / ".test-durations.json"
 # Long enough for the slowest module on a small, busy runner; a module that
 # reaches it has hung, and is stopped so the rest of the run still reports.
 TIMEOUT_S = 900.0
+STOP_WAIT_S = 5.0
 SEPARATOR1 = "=" * 70
 SEPARATOR2 = "-" * 70
 
@@ -98,6 +100,11 @@ def _worker(module: str, verbosity: int, result_path: str) -> int:
 
 
 # --------------------------------------------------------------- the parent
+
+# The children now running, so Ctrl-C can stop them: they lead process
+# groups of their own and do not get the terminal's interrupt themselves.
+_running: set = set()
+
 
 class Outcome:
     """What one child reported, or what its absence says."""
@@ -183,6 +190,26 @@ def _save_durations(outcomes: list[Outcome]) -> None:
         pass  # A read-only tree only costs the ordering.
 
 
+def _signal_group(child, number: int) -> None:
+    """Signal a child and everything it started; it leads its own group."""
+    try:
+        os.killpg(child.pid, number)
+    except (OSError, ProcessLookupError):
+        pass
+
+
+def _stop(child) -> None:
+    """Stop a child's whole process group, SIGTERM then SIGKILL."""
+    _signal_group(child, signal.SIGTERM)
+    try:
+        child.wait(STOP_WAIT_S)
+    except subprocess.TimeoutExpired:
+        pass
+    # Whatever the group has left, including a command the tests started and
+    # did not stop: otherwise reading the child's output waits on its pipe.
+    _signal_group(child, signal.SIGKILL)
+
+
 def _start(module: str, verbosity: int, timeout: float = TIMEOUT_S) -> Outcome:
     """Run one module in a child process and collect what it reported."""
     started = time.monotonic()
@@ -191,20 +218,31 @@ def _start(module: str, verbosity: int, timeout: float = TIMEOUT_S) -> Outcome:
         argv = [sys.executable, str(Path(__file__).resolve()),
                 "--worker", module, "--worker-result", result_path,
                 "--worker-verbosity", str(verbosity)]
+        # Each child leads its own process group, so a module that hangs can
+        # be stopped along with the commands it started: one of those left
+        # running would hold a lock or a port the rest of the run needs.
+        child = subprocess.Popen(argv, cwd=ROOT, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True,
+                                 start_new_session=True)
+        _running.add(child)
+        timed_out = False
         try:
-            child = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True,
-                                   timeout=timeout)
-        except subprocess.TimeoutExpired as expired:
+            output, errors = child.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
             # A hung test would otherwise hold the whole run with nothing to
-            # read, since the child's output only arrives when it ends.
-            outcome = Outcome(module, time.monotonic() - started)
-            outcome.output = (expired.stdout or "") + (expired.stderr or "")
+            # read, since a child's output only arrives when it ends.
+            timed_out = True
+            _stop(child)
+            output, errors = child.communicate()
+        finally:
+            _running.discard(child)
+        outcome = Outcome(module, time.monotonic() - started)
+        outcome.output = output + errors
+        if timed_out:
             outcome.errors.append([
                 module, f"the tests did not finish within {timeout:g}s and were "
                         f"stopped\n{outcome.output or '(no output)'}\n"])
             return outcome
-        outcome = Outcome(module, time.monotonic() - started)
-        outcome.output = child.stdout + child.stderr
         try:
             with open(result_path) as file:
                 report = json.load(file)
@@ -318,6 +356,8 @@ def main(argv=None) -> int:
         except KeyboardInterrupt:
             for future in running:
                 future.cancel()
+            for child in list(_running):
+                _signal_group(child, signal.SIGTERM)
             print("\ninterrupted", file=sys.stderr)
             return 1
     seconds = time.monotonic() - started

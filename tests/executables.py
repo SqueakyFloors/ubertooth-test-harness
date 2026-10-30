@@ -33,12 +33,13 @@ def _cache_dir() -> Path:
 
 
 def _intact(source: Path, text: str, mode: int) -> bool:
+    """True when the cached file still holds exactly what it was given."""
     try:
         stated = source.stat()
+        return (stated.st_mode & 0o7777 == mode
+                and source.read_text(encoding="utf-8") == text)
     except OSError:
         return False
-    return (stated.st_mode & 0o7777 == mode
-            and stated.st_size == len(text.encode()))
 
 
 def write_executable(path, text: str, mode: int = 0o755) -> Path:
