@@ -24,6 +24,11 @@ port (VCOM0, the DK's uart0). Run as a script by the advertiser cases::
 ``idle`` is the release command: it leaves the board in the advertiser role
 with every setting back to its boot value, whatever it was doing.
 
+Every command also takes ``--alias NAME``, the board's registry alias. With
+it, each line sent to the shell and each line the board answers is written to
+stderr as ``[NAME >] adv start`` and ``[NAME <] OK``, so a run records the
+whole conversation beside the Ubertooth tool output.
+
 Every command fails closed: a wrong tool version, a probe that is not
 attached, a shell that does not answer within its timeout, an ``ERR`` reply,
 or a status that does not show what was asked prints ``error: <why>`` on
@@ -48,9 +53,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
+if __package__ in (None, ""):
+    # Run as a script: make the package importable for the shell-line format.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from ubertooth_harness import targets  # noqa: E402
+
 # The firmware version the harness expects (firmware/nrf52840dk/src/roles.h
 # UTDK_FW_VERSION; tests/test_nrfdk.py keeps them in step).
-FIRMWARE_VERSION = "utdk-1.2.1"
+FIRMWARE_VERSION = targets.DK_FIRMWARE
 # nrfutil and its device command, as installed and validated on the lab host.
 NRFUTIL_VERSION = "8.2.1"
 NRFUTIL_DEVICE_VERSION = "2.23.0"
@@ -72,7 +83,6 @@ FLASH_TIMEOUT_S = 120.0
 TOOL_TIMEOUT_S = 30.0
 POLL_S = 0.05
 
-_LINUX_BY_ID = "/dev/serial/by-id/usb-SEGGER_J-Link_{serial:012d}-if00"
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _ADDRESS = re.compile(r"^[0-9A-F]{2}(?::[0-9A-F]{2}){5}$")
 _SHELL_ERROR = re.compile(r": (?:command not found|wrong parameter count)$")
@@ -164,7 +174,7 @@ def tag_hex(value: str) -> str:
 def default_port(serial: int, platform: str = sys.platform) -> str | None:
     """The stable VCOM0 path on Linux; None elsewhere (ask nrfutil)."""
     if platform.startswith("linux"):
-        return _LINUX_BY_ID.format(serial=serial)
+        return targets.DK_BY_ID.format(serial=serial)
     return None
 
 
@@ -298,15 +308,20 @@ def check_image(path: Path, version: str = FIRMWARE_VERSION) -> None:
 
 
 class Shell:
-    """Line protocol: one command line out; data lines, then OK or ERR <why>."""
+    """Line protocol: one command line out; data lines, then OK or ERR <why>.
 
-    def __init__(self, port, clock=time.monotonic):
+    ``log(direction, text)``, when given, is called with every line sent and
+    every line received, so a run can record the whole conversation.
+    """
+
+    def __init__(self, port, clock=time.monotonic, log=None):
         self.port = port
         self.clock = clock
+        self.log = log
         self._buffer = b""
 
     @classmethod
-    def open(cls, path: str) -> "Shell":
+    def open(cls, path: str, log=None) -> "Shell":
         try:
             import serial  # pyserial, imported lazily
         except ImportError as error:
@@ -316,7 +331,7 @@ class Shell:
                                  exclusive=True)
         except (OSError, ValueError, serial.SerialException) as error:
             raise NrfDkError(f"cannot open {path}: {error}") from error
-        return cls(port)
+        return cls(port, log=log)
 
     def close(self) -> None:
         self.port.close()
@@ -336,10 +351,14 @@ class Shell:
         """Send one command; its data lines. ERR or no answer raises."""
         self.port.reset_input_buffer()
         self._buffer = b""
+        if self.log is not None:
+            self.log(targets.SENT, text)
         self.port.write(text.encode("ascii") + b"\r")
         self.port.flush()
         data = []
         for line in self._lines(self.clock() + timeout):
+            if line and self.log is not None:
+                self.log(targets.RECEIVED, line)
             if line == "OK":
                 return data
             if line.startswith("ERR"):
@@ -409,24 +428,40 @@ class Dk:
     run: Runner = run_tool
     # Opens the shell on ``port``; tests pass a fake.
     opener: Callable[[str], Shell] | None = None
+    # The board's registry alias. With one, every line to and from its shell
+    # is written to stderr marked with it, so the run records the whole
+    # conversation; without one nothing is written.
+    alias: str = ""
 
 
-def resolve(jlink: str, port: str | None, run: Runner = run_tool) -> Dk:
+def resolve(jlink: str, port: str | None, run: Runner = run_tool,
+            alias: str = "") -> Dk:
     serial = jlink_serial(jlink)
     path = port or default_port(serial)
     if path is None:
         path = probe_vcom0(find_probe(serial, run))
         if path is None:
             raise NrfDkError(f"J-Link {serial} reports no VCOM0 port; register 'serial device'")
-    return Dk(serial, path, run)
+    return Dk(serial, path, run, alias=alias)
+
+
+def shell_logger(alias: str, stream=None):
+    """Writes each shell line, marked with ``alias``, for the run's transcript."""
+    def log(direction: str, text: str) -> None:
+        print(targets.shell_line(alias, direction, text),
+              file=stream or sys.stderr, flush=True)
+    return log
 
 
 def _open(dk: Dk) -> Shell:
+    log = shell_logger(dk.alias) if dk.alias else None
     if dk.opener is not None:
-        return dk.opener(dk.port)
+        shell = dk.opener(dk.port)
+        shell.log = log
+        return shell
     if not os.path.exists(dk.port):
         raise NrfDkError(f"{dk.port} does not exist: is J-Link {dk.serial} attached?")
-    return Shell.open(dk.port)
+    return Shell.open(dk.port, log=log)
 
 
 def _report(status: dict, out) -> None:
@@ -762,6 +797,10 @@ def main(argv: Sequence[str] | None = None, run: Runner = run_tool) -> int:
         command = sub.add_parser(name)
         command.add_argument("--jlink", required=True, help="J-Link serial")
         command.add_argument("--port", help="VCOM0 path (default: by J-Link serial)")
+        command.add_argument(
+            "--alias", default="",
+            help="the board's registry alias; with it, every line to and from "
+                 "its shell is written to stderr marked with that alias")
         commands[name] = command
     commands["ensure"].add_argument("--hex", type=Path, help="image to flash if needed")
     commands["ensure"].add_argument("--address", help="expected BLE address")
@@ -788,7 +827,7 @@ def main(argv: Sequence[str] | None = None, run: Runner = run_tool) -> int:
     commands["update"].add_argument("--interval", required=True, type=int, help="ms")
     args = parser.parse_args(argv)
     try:
-        dk = resolve(args.jlink, args.port, run)
+        dk = resolve(args.jlink, args.port, run, args.alias)
         if args.command == "identify":
             identify(dk)
         elif args.command == "ensure":

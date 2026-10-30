@@ -1073,7 +1073,11 @@ Host_Linux:
 (8.2.1) and `nrfutil device` (2.23.0), flashes by J-Link serial, and talks to
 the shell on VCOM0 (`/dev/serial/by-id/usb-SEGGER_J-Link_<serial>-if00` on
 Linux; `serial device` in the identity overrides it). Every command fails
-closed with an `error:` line. `Capture known BLE advertiser`
+closed with an `error:` line. A run passes the board's registry alias as
+`--alias`, and each command then writes every line it sends to the shell and
+every line the board answers on standard error, `[DK_Linux0 >] adv start` and
+`[DK_Linux0 <] OK`, so the whole conversation is in the run's record and its
+transcript (see [Known targets](#known-targets)). `Capture known BLE advertiser`
 ([`testplans/ble.yaml`](testplans/ble.yaml)) flashes the DK only when it
 reports another firmware version, from the image given as
 `--artifact "nRF52840 advertiser=PATH/zephyr.hex"`:
@@ -1284,7 +1288,10 @@ run.jsonl keeps absolute UTC times (`2026-10-24T00:18:21.535`, no offset
 suffix). Each line then carries a tag: `[C]` command sent (shell-quoted), `[O]`
 stdout, `[E]` stderr, `[R]` command result (tool, exit code, duration, timeout
 or cancellation), `[S]` state-change step, `[I]` power isolation, `[M]` harness
-record. Section markers are indented to line up with the tagged text:
+record, and, for a line of a known target's serial shell, `[<alias> >]` sent
+to it and `[<alias> <]` answered by it (see [Known
+targets](#known-targets)). Section markers are indented to line up with the
+tagged text:
 `+++ name +++` opens a step and `--- name EXIT: status ---` closes it; `===`
 lines open and close the run, build, preflight, and each test:
 
@@ -1357,6 +1364,32 @@ stopped; other commands are terminated as a process group.
 Commands carry no credentials today. Before adding one that does, redact argv
 and output where events are created; masking only in a display is not enough
 because run.jsonl and report.md are persisted.
+
+### Known targets
+
+Some tests run against a device the harness drives itself, so the run knows
+exactly what was on the air: an nRF52840 DK in one of its roles, or an ESP32
+Classic peer. The rest listen to whatever traffic is there. A run records
+which, once per test, as a `known_target` record, and `report.md` and the web
+GUI both show what it says:
+
+- the results table has a **Known target** column naming the board and its
+  role, or `none`;
+- a **Known targets** list under the table gives the whole line per test, for
+  example `Run against known target: nRF52840 DK advertiser DK_Linux0
+  (J-Link 000123456789, /dev/serial/by-id/usb-SEGGER_J-Link_000123456789-if00),
+  firmware utdk-1.2.1, BLE address C0:00:00:00:00:01`, and a test with no
+  known target says `No known target: no nRF52840 DK or ESP32 Classic peer
+  took part in this test`;
+- the transcript carries the same line as an `[M]` record where the test
+  starts.
+
+The serial port path is the one registered as `serial device`, or the stable
+`/dev/serial/by-id` path derived from the probe's or bridge's serial on a
+Linux host. The firmware version is the one the device's driver requires and
+verifies; the board's own answer is in the transcript, because every line of
+the conversation with its shell is recorded too (`[<alias> >]` out,
+`[<alias> <]` back).
 
 ### Reports for several runs
 
@@ -1665,7 +1698,9 @@ word and symbol (colour only reinforces it).
   run's build](#flashing-the-boards-with-the-runs-build)); Run starts the whole suite.
 - **Live run:** the suite's tests as a checklist that ticks from the run's
   events (✓ passed, ✗ failed, … running, ○ pending or not run; always text
-  plus symbol), the current stage (building, preflight, tests), elapsed time,
+  plus symbol), under each test the [known target](#known-targets) it ran
+  against or a line saying it had none, the current stage (building,
+  preflight, tests), elapsed time,
   a Cancel button, and the last 200 log lines in a scrolling console panel. A countdown is shown only when
   every test in the suite has an estimate. Every implemented test has a
   catalog estimate (`ESTIMATES` in `ubertooth_harness/catalog.py`) for each

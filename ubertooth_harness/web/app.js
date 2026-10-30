@@ -473,6 +473,13 @@
       if (!live.testsStarted && record.timestamp) live.testsStarted = record.timestamp;
       live.byInvocation.set(String(details.invocation_id), item);
       pushLog(`=== TEST ${name} on ${details.host ?? ""} ===`);
+    } else if (kind === "known_target") {
+      // Which device the harness drove for this test, or that it had none;
+      // the controller sends the summary the report shows.
+      const summary = String(details.summary ?? "");
+      const item = live.byInvocation.get(String(details.invocation_id));
+      if (item) item.target = summary;
+      if (summary) pushLog(summary);
     } else if (kind === "not_applicable") {
       // Left out before the run: the host cannot run it (not a skip or failure).
       const name = String(details.test_name ?? "");
@@ -563,6 +570,7 @@
         statusBadge(shown), " ", el("span", { className: "check-name", text: item.name }),
         item.estimated_s !== null && item.estimated_s !== undefined
           ? el("span", { className: "hint check-estimate", text: ` (about ${formatSeconds(item.estimated_s)})` }) : null,
+        item.target ? el("span", { className: "reason check-target", text: item.target }) : null,
         item.reason ? el("span", { className: "reason", text: ` — ${item.reason}` }) : null);
     }));
     if (!live.items.length) {

@@ -52,7 +52,8 @@ class ReportTests(unittest.TestCase):
             report = (write_report(run)).read_text()
 
             self.assertIn("| Result | **passed**: 1/1 tests", report)
-            self.assertIn("| 001-Ubertooth identity | Host_Mac (Ubertooth=UT_0) | passed |", report)
+            self.assertIn(
+                "| 001-Ubertooth identity | Host_Mac (Ubertooth=UT_0) |  | passed |", report)
             self.assertIn("=== TEST 001-Ubertooth identity: Ubertooth identity on Host_Mac (Ubertooth=UT_0) ===", report)
             self.assertIn(f"[C] ubertooth-util -U {SERIAL} -s", report)
             self.assertIn(f"[O] Serial No: {SERIAL}", report)

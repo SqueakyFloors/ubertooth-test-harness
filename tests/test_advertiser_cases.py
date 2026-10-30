@@ -10,7 +10,12 @@ from ubertooth_harness.planner import PlanCompiler
 from ubertooth_harness.preflight import PreflightPolicy
 from ubertooth_harness.resources import FileResourceRegistry, RegistryError
 from tests.test_sequencer import run_contract
-from ubertooth_harness.stateful import CAPTURE_DIR_KEY, StateCaseError, artifact_key
+from ubertooth_harness.stateful import (
+    CAPTURE_DIR_KEY,
+    MissingContext,
+    StateCaseError,
+    artifact_key,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 SERIAL = "0123456789abcdef0123456789abcdef"
@@ -52,6 +57,35 @@ def registry_with(text):
         path = Path(directory) / "hardware.yaml"
         path.write_text(text)
         return FileResourceRegistry.load(path)
+
+
+class AliasTests(unittest.TestCase):
+    """With the board's alias, nrfdk.py marks its shell lines with it (#186)."""
+
+    def test_every_dk_command_carries_the_registered_alias(self):
+        driver = str(Path(nrfdk.__file__).resolve())
+        context = {CAPTURE_DIR_KEY: "/tmp", "counter before": "1", "counter after": "2"}
+        cases = known_advertiser_cases(
+            arguments(), {"Ubertooth": "UT_Linux0", "advertiser": "DK_Linux0"},
+            IDENTITIES)
+
+        found = 0
+        for case in cases:
+            for step in case.steps + case.cleanup:
+                try:
+                    argv = list(step.resolve_argv(context))
+                except MissingContext:
+                    continue  # an Ubertooth cleanup step, not a DK command
+                if argv[1:2] != [driver]:
+                    continue
+                found += 1
+                self.assertEqual(["--alias", "DK_Linux0"], argv[5:7], argv)
+        self.assertGreater(found, 0)
+
+    def test_without_an_alias_no_option_is_passed(self):
+        step = known_advertiser_cases(arguments(), {}, IDENTITIES)[0].steps[0]
+
+        self.assertNotIn("--alias", step.resolve_argv({}))
 
 
 class CaseTests(unittest.TestCase):

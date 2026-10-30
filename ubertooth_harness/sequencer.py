@@ -30,6 +30,7 @@ from ubertooth_harness.power import PowerControllerError
 from ubertooth_harness.preflight import PreflightCheck
 from ubertooth_harness.rawlog import record_output
 from ubertooth_harness.resources import RegistryError
+from ubertooth_harness import targets
 from ubertooth_harness.topology import IsolationCancelled, applied_power_isolation
 from ubertooth_harness.report import write_report
 from ubertooth_harness.cases import FlashCase
@@ -423,6 +424,36 @@ class NamedTestSequencer:
             )
             raise
         publisher.emit("isolation_finished", "passed", dict(owner))
+
+    def _record_known_targets(
+        self,
+        publisher: EventPublisher,
+        invocation: TestInvocation,
+        definition,
+    ) -> None:
+        """Record which known device this test ran against, or that it had none.
+
+        A test driven against an nRF52840 DK or an ESP32 Classic peer knows
+        exactly what was on the air; the rest listen to whatever is there.
+        One record per test says which, so report.md and the GUI read the
+        same thing (targets.py).
+        """
+        platform = None
+        if self.registry is not None:
+            platform = self.registry.get(invocation.host).platform
+        found = targets.known_targets(
+            definition.hardware_roles or {},
+            invocation.resources,
+            invocation.resource_identities,
+            platform,
+        )
+        publisher.emit(
+            "known_target",
+            "recorded" if found else "none",
+            targets.target_details(
+                invocation.invocation_id, invocation.test_name, found
+            ),
+        )
 
     def _run_command(
         self,
@@ -1230,6 +1261,7 @@ class NamedTestSequencer:
                         "arguments": dict(invocation.arguments),
                     },
                 )
+                self._record_known_targets(publisher, invocation, definition)
                 cases = (
                     planned_cases[invocation.invocation_id]
                     if invocation.invocation_id in planned_cases

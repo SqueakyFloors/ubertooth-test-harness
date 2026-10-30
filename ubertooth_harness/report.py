@@ -15,6 +15,7 @@ import re
 import sys
 from typing import Iterable, Mapping, Sequence
 
+from ubertooth_harness import targets
 from ubertooth_harness.events import REPORT, RUN_LOG
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.rawlog import NOTE, TAGS, CommandCapture, format_command_record
@@ -25,7 +26,9 @@ REDACTED = "<serial>"
 LEGEND = (
     "Times are elapsed since the run started (UTC start in Time above). "
     "Tags: `[C]` command sent, `[O]` stdout, `[E]` stderr, `[R]` command result, "
-    "`[S]` state step, `[I]` power isolation, `[M]` harness record. "
+    "`[S]` state step, `[I]` power isolation, `[M]` harness record, "
+    "`[<alias> >]` a line sent to that known target's serial shell and "
+    "`[<alias> <]` a line it answered. "
     "`+++` opens a step and `---` closes it; `===` marks the run, build, "
     "flash, preflight, and each test."
 )
@@ -93,6 +96,13 @@ class _Run:
             if e["event_type"] == "check_finished"
             and e.get("details", {}).get("phase") == "preflight"
         ]
+        # Which known device each test ran against, by invocation (#186).
+        self.known_targets = {
+            e["details"]["invocation_id"]: e["details"]
+            for e in self.events
+            if e["event_type"] == "known_target"
+            and e.get("details", {}).get("invocation_id")
+        }
 
     @property
     def status(self) -> str:
@@ -489,11 +499,38 @@ def _watchdog_section(run: _Run) -> list[str]:
     return lines
 
 
+def _known_target_section(run: _Run) -> list[str]:
+    """One line per test naming the known device it ran against, or none."""
+    if not run.tests or not run.known_targets:
+        return []
+    lines = ["", "### Known targets", "",
+             "Which device the harness drove for each test, so a capture "
+             "against a known device is told apart from one of whatever "
+             "traffic was there.", ""]
+    for record in run.tests:
+        invocation = record["started"]["details"].get("invocation_id", "")
+        details = run.known_targets.get(invocation)
+        summary = (
+            details.get("summary") if details
+            # Runs recorded before the harness kept this record.
+            else "not recorded"
+        )
+        lines.append(f"- `{invocation}`: {summary}")
+    return lines
+
+
+def _target_cell(run: _Run, invocation: str) -> str:
+    details = run.known_targets.get(invocation)
+    if details is None:
+        return ""
+    return targets.column(details.get("targets") or ())
+
+
 def _results_table(run: _Run) -> list[str]:
     lines = [
-        "| Test | Host and resources | Result | Failed cases | Skipped cases "
-        "| Not applicable cases | Duration | Reason |",
-        "|---|---|---|---|---|---|---|---|",
+        "| Test | Host and resources | Known target | Result | Failed cases "
+        "| Skipped cases | Not applicable cases | Duration | Reason |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for record in run.tests:
         started = record["started"]
@@ -530,13 +567,15 @@ def _results_table(run: _Run) -> list[str]:
                     f"{'' if count == 1 else 's'} (see Watchdog)"
                 )
                 reason = f"{reason}; {note}" if reason else note
+        target = _target_cell(run, details.get("invocation_id", ""))
         lines.append(
-            f"| {_cell(details.get('invocation_id'))} | {_cell(where)} | {_cell(status)} "
+            f"| {_cell(details.get('invocation_id'))} | {_cell(where)} "
+            f"| {_cell(target)} | {_cell(status)} "
             f"| {failed} | {skipped} | {not_applicable} | {_duration(started, finished)} "
             f"| {_cell(reason)} |"
         )
     if not run.tests:
-        lines.append("| (no tests started) | | | | | | | |")
+        lines.append("| (no tests started) | | | | | | | | |")
     return lines
 
 
@@ -701,6 +740,8 @@ def _transcript(run: _Run) -> list[str]:
             resources = ", ".join(f"{k}={v}" for k, v in details.get("resources", {}).items())
             suffix = f" ({resources})" if resources else ""
             line(event, f"=== TEST {details.get('invocation_id')}: {details.get('test_name')} on {details.get('host')}{suffix} ===")
+        elif kind == "known_target":
+            line(event, f"[M] {details.get('summary', '')}")
         elif kind == "test_finished":
             line(
                 event,
@@ -809,7 +850,8 @@ def render_run(events: Sequence[Mapping], *, redact_serials: bool = False, trans
     run = _Run(events)
     lines = [f"# Ubertooth test run `{run.run_id}`", "", "| | |", "|---|---|"]
     lines += [f"| {_cell(key)} | {_cell(value)} |" for key, value in _setup_rows(run)]
-    lines += ["", "## Results", ""] + _results_table(run) + _not_applicable_section(run)
+    lines += ["", "## Results", ""] + _results_table(run)
+    lines += _known_target_section(run) + _not_applicable_section(run)
     lines += _watchdog_section(run)
     if transcript:
         lines += ["", "## Transcript", "", LEGEND, "", "```text"] + _transcript(run) + ["```"]

@@ -156,6 +156,8 @@ class TerminalEventSink:
                 )
         elif event.event_type == "manifest":
             self.stream.write("\n[manifest recorded]\n")
+        elif event.event_type == "known_target":
+            self.stream.write(f"[M] {details.get('summary', '')}\n")
         elif event.event_type == "not_applicable":
             what = str(details.get("test_name", ""))
             if details.get("case_name"):
@@ -195,12 +197,14 @@ class TerminalEventSink:
         elif event.event_type == "command_output":
             # Output arrives in chunks that need not end on a line boundary;
             # tag whole lines only.
+            from ubertooth_harness.rawlog import line_tag
+
             name = "stderr" if details.get("stream") == "stderr" else "stdout"
-            tag = "[E]" if name == "stderr" else "[O]"
             text = self._partial[name] + str(details.get("text", ""))
             *complete, self._partial[name] = text.split("\n")
             for part in complete:
-                self.stream.write(f"{tag} {part.rstrip(chr(13))}\n")
+                tag, part = line_tag(name, part.rstrip(chr(13)))
+                self.stream.write(f"{tag} {part}\n")
         elif event.event_type == "command_output_omitted":
             self._flush_partial()
             self.stream.write(
