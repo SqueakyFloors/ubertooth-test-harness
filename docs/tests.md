@@ -1285,10 +1285,9 @@ and records the last revision read from each board.
 **Known limits.** It measures the write-and-verify path, not what the firmware
 then does. Selectors must be full serials: libubertooth reads an all-digit
 `-U` value as a USB index and otherwise matches, case-insensitively, the start
-of a serial, refusing a selector that matches more than one attached board, so
-the test refuses digit-only selectors and any selector that is the beginning
-of another. A manual recovery or a power cycle never turns a failed run into a
-pass.
+of a serial, so the test refuses digit-only selectors and any selector that is
+the beginning of another, which would name the same board twice. A manual
+recovery or a power cycle never turns a failed run into a pass.
 
 ## DFU images
 
