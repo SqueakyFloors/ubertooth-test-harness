@@ -1547,9 +1547,10 @@ queried. `final_revision` stays the last verified revision of the selected
 board.
 
 Device selectors are serials: libubertooth treats an all-digit `-U` value as a
-USB index and matches anything else as the end of a serial (first board wins),
-so the flash test refuses digit-only selectors and any serial that is the
-ending of another. Register full 32-hex-digit serials.
+USB index and matches anything else case-insensitively against the start of a
+serial. The flash test therefore refuses digit-only selectors and any selector
+that is the beginning of another, because the board the longer one names
+answers both. Register full 32-hex-digit serials.
 
 Because the test writes the firmware it verifies, preflight checks only its
 Ubertooth's serial, not its firmware revision. It must be the last test on that
