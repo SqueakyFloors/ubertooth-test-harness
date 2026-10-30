@@ -13,8 +13,8 @@
  * project's top-level CMakeLists.txt arranges, and uses the same interfaces
  * the rest of Bluedroid uses. Nothing in ESP-IDF itself is changed. The
  * command joins the queue every other command goes on, under the same
- * command credits, and the HCI layer matches the Command Complete to it by
- * opcode and calls the callback below; host and controller stay in step.
+ * command credits, and the HCI layer matches the answer to it by opcode and
+ * calls the callback below; host and controller stay in step.
  *
  * Only this file sends Read Clock, so matching by opcode is unambiguous. */
 
@@ -24,7 +24,6 @@
 #include "hci/hci_layer.h"
 #include "osi/allocator.h"
 #include "stack/bt_types.h"
-#include "stack/btm_api.h"
 #include "stack/hcidefs.h"
 #include "stack/hcimsgs.h"
 
@@ -40,23 +39,24 @@
 #define WHICH_CLOCK_NATIVE   0
 #define WHICH_CLOCK_PICONET  1
 
-/* The event: code, parameter length, command credits, opcode, then status,
- * handle, clock, and accuracy. */
-#define EVENT_HEADER_LEN  5
-#define RETURN_PARAM_LEN  9
-#define EVENT_EXPECTED_LEN (EVENT_HEADER_LEN + RETURN_PARAM_LEN)
+/* The answer: event code, parameter length, command credits, and the opcode,
+ * then the status, handle, clock, and accuracy. The HCI layer has already
+ * refused anything shorter than the opcode by the time the callback runs. */
+#define EVENT_OPCODE_LEN   5
+#define EVENT_STATUS_LEN   6
+#define EVENT_EXPECTED_LEN 14
 
 /* The controller answers in well under a millisecond. This is only so a
  * controller that has stopped answering cannot hold the shell. */
 #define ANSWER_TIMEOUT_MS 1000
 
 /* One read at a time: request_lock makes a reader the owner of the slot
- * below, and answer is given when the Command Complete for its command
- * arrives. slot_lock is held for the moment it takes to write the answer in
- * or to give up on it.
+ * below, and answer is given when the reply to its command arrives.
+ * slot_lock is held for the moment it takes to write the answer in or to
+ * give up on it.
  *
  * Each request gets a number, which rides along in the command's own
- * metadata and comes back with its answer. A read that gave up waiting is
+ * metadata and comes back with its reply. A read that gave up waiting is
  * what makes this worth doing: its answer can still arrive, and matching the
  * number is what stops that answer being handed to the next reader, which
  * would report a clock from a second ago as a fresh one. */
@@ -67,7 +67,7 @@ static SemaphoreHandle_t slot_lock;
 static struct {
     bool waiting;     /* the reader still wants the answer */
     uint32_t seq;     /* the newest request; numbering starts at 1 */
-    uint32_t pending; /* a request the controller has not answered yet, or 0 */
+    uint32_t pending; /* a request the controller has not replied to, or 0 */
     int64_t sent_us;
     struct utesp_clock got;
 } slot;
@@ -103,47 +103,79 @@ int utesp_clock_init(void)
     return UTESP_CLOCK_OK;
 }
 
-/* Called from the HCI layer's receive path with the whole event, and owns
- * the buffer from here on. */
+/* Hands an answer to the reader waiting for request seq, if it is still
+ * waiting, and in any case notes that the controller has replied to that
+ * request. */
+static void deliver(uint32_t seq, const struct utesp_clock *got)
+{
+    xSemaphoreTake(slot_lock, portMAX_DELAY);
+    if (slot.pending == seq) {
+        slot.pending = 0; /* the controller owes nothing now */
+    }
+    if (slot.waiting && slot.seq == seq) {
+        slot.got = *got;
+        slot.got.read_us = got->answered_us - slot.sent_us;
+        slot.waiting = false;
+        xSemaphoreGive(answer);
+    }
+    xSemaphoreGive(slot_lock);
+}
+
+/* Called from the HCI layer's receive path with the whole Command Complete
+ * event, and owns that buffer from here on. */
 static void clock_complete(BT_HDR *response, void *context)
 {
-    const int64_t now = esp_timer_get_time();
     const uint32_t seq = (uint32_t)(uintptr_t)context;
     uint8_t *stream = response->data + response->offset;
     struct utesp_clock got;
     uint16_t opcode = 0;
 
     memset(&got, 0, sizeof(got));
-    got.answered_us = now;
+    got.answered_us = esp_timer_get_time();
+    got.status = HCI_ERR_UNSPECIFIED; /* until the event says otherwise */
 
-    if (response->len >= EVENT_EXPECTED_LEN) {
+    /* A controller that refuses the command may answer with the status
+     * alone, so each part is read only once it is known to be there. */
+    if (response->len >= EVENT_OPCODE_LEN) {
         STREAM_SKIP_UINT8(stream); /* event code, HCI_COMMAND_COMPLETE_EVT */
         STREAM_SKIP_UINT8(stream); /* parameter total length */
         STREAM_SKIP_UINT8(stream); /* command credits, the HCI layer's own */
         STREAM_TO_UINT16(opcode, stream);
+    }
+    if (response->len >= EVENT_STATUS_LEN) {
         STREAM_TO_UINT8(got.status, stream);
+    }
+    if (response->len >= EVENT_EXPECTED_LEN) {
         STREAM_TO_UINT16(got.handle, stream);
         STREAM_TO_UINT32(got.clock, stream);
         STREAM_TO_UINT16(got.accuracy, stream);
         /* The clock is 28 bits and the rest of the word is reserved. */
         got.clock &= 0x0fffffff;
+        got.complete = true;
     }
 
-    xSemaphoreTake(slot_lock, portMAX_DELAY);
     if (opcode == HCI_READ_CLOCK) {
-        if (slot.pending == seq) {
-            slot.pending = 0; /* the controller owes nothing now */
-        }
-        if (slot.waiting && slot.seq == seq) {
-            got.read_us = now - slot.sent_us;
-            slot.got = got;
-            slot.waiting = false;
-            xSemaphoreGive(answer);
-        }
+        deliver(seq, &got);
     }
-    xSemaphoreGive(slot_lock);
-
     osi_free(response);
+}
+
+/* A Command Status for Read Clock means the controller would not run it.
+ * With this callback set the HCI layer leaves the command buffer to it, as
+ * Bluedroid's own status handler does. */
+static void clock_refused(uint8_t status, BT_HDR *command, void *context)
+{
+    struct utesp_clock got;
+
+    memset(&got, 0, sizeof(got));
+    got.answered_us = esp_timer_get_time();
+    got.status = status;
+    /* The HCI layer stops tracking a command once it has seen any reply to
+     * it, so this is the only reply there will be, whatever the status says,
+     * and the reader is told now rather than left to time out. A status with
+     * none of the clock fields reads as a short answer. */
+    deliver((uint32_t)(uintptr_t)context, &got);
+    HCI_FREE_CMD_BUF(command);
 }
 
 /* Builds the command and waits for its answer. The caller holds
@@ -156,10 +188,11 @@ static int read_clock(uint16_t handle, uint8_t which, struct utesp_clock *out)
     uint32_t seq;
     bool owed, answered;
 
-    /* A command the controller never answered still holds its place in the
-     * HCI layer's pending list and its buffer. Sending more of them would
-     * pile both up, so until that one is answered there is nothing useful to
-     * do but say the controller is not answering. */
+    /* A command the controller never replied to still holds its place in the
+     * HCI layer's pending list, its buffer, and one of the command credits.
+     * Sending more would pile those up, so until it is answered there is
+     * nothing useful to do but say the controller is not answering. A board
+     * in that state is recovered by "reset". */
     xSemaphoreTake(slot_lock, portMAX_DELAY);
     owed = slot.pending != 0;
     xSemaphoreGive(slot_lock);
@@ -180,12 +213,11 @@ static int read_clock(uint16_t handle, uint8_t which, struct utesp_clock *out)
 
     /* The HCI layer reads the callbacks and the opcode out of the buffer's
      * metadata rather than out of the arguments to transmit_command(), so
-     * they are set here, as Bluedroid's own btu_hcif_send_cmd() sets them.
-     * Read Clock answers with a Command Complete, never a Command Status. */
+     * they are set here, as Bluedroid's own btu_hcif_send_cmd() sets them. */
     metadata = HCI_GET_CMD_METAMSG(cmd);
     metadata->opcode = HCI_READ_CLOCK;
     metadata->command_complete_cb = clock_complete;
-    metadata->command_status_cb = NULL;
+    metadata->command_status_cb = clock_refused;
 
     /* Any leftover from a read that timed out, so the wait below is this
      * command's. */
@@ -198,7 +230,8 @@ static int read_clock(uint16_t handle, uint8_t which, struct utesp_clock *out)
     xSemaphoreGive(slot_lock);
     metadata->context = (void *)(uintptr_t)seq;
 
-    hci_layer_get_interface()->transmit_command(cmd, clock_complete, NULL, NULL);
+    hci_layer_get_interface()->transmit_command(cmd, clock_complete, clock_refused,
+                                                metadata->context);
 
     answered = xSemaphoreTake(answer, pdMS_TO_TICKS(ANSWER_TIMEOUT_MS)) == pdTRUE;
 
@@ -211,12 +244,17 @@ static int read_clock(uint16_t handle, uint8_t which, struct utesp_clock *out)
     slot.waiting = false;
     xSemaphoreGive(slot_lock);
 
-    return answered ? UTESP_CLOCK_OK : UTESP_CLOCK_TIMED_OUT;
+    if (!answered) {
+        return UTESP_CLOCK_TIMED_OUT;
+    }
+    if (out->status == HCI_SUCCESS && !out->complete) {
+        return UTESP_CLOCK_BAD_ANSWER;
+    }
+    return UTESP_CLOCK_OK;
 }
 
-int utesp_clock_read(const uint8_t *peer_addr, bool piconet, struct utesp_clock *out)
+int utesp_clock_read(uint16_t handle, bool piconet, struct utesp_clock *out)
 {
-    uint16_t handle = 0;
     int result;
 
     /* The queue the command goes on exists only while Bluedroid is enabled,
@@ -224,28 +262,15 @@ int utesp_clock_read(const uint8_t *peer_addr, bool piconet, struct utesp_clock 
     if (!clock_ready || !out || esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_ENABLED) {
         return UTESP_CLOCK_NOT_READY;
     }
-    if (piconet) {
-        BD_ADDR bda;
-
-        if (!peer_addr) {
-            return UTESP_CLOCK_NO_LINK;
-        }
-        memcpy(bda, peer_addr, sizeof(bda));
-        handle = BTM_GetHCIConnHandle(bda, BT_TRANSPORT_BR_EDR);
-        if (handle == 0xffff) {
-            return UTESP_CLOCK_NO_LINK;
-        }
-    }
-    /* The handle is ignored for the board's own clock, so 0 goes out there. */
 
     xSemaphoreTake(request_lock, portMAX_DELAY);
     result = read_clock(handle, piconet ? WHICH_CLOCK_PICONET : WHICH_CLOCK_NATIVE, out);
     xSemaphoreGive(request_lock);
 
-    /* The link can go down between the lookup above and the command
-     * reaching the controller, which then says it does not know the handle.
-     * That is the same news as having found no handle at all. */
-    if (result == UTESP_CLOCK_OK && piconet && out->status == HCI_ERR_NO_CONNECTION) {
+    /* The link can go down between the caller learning its handle and the
+     * command reaching the controller, which then says it does not know the
+     * handle. That is the same news as having no link at all. */
+    if (result == UTESP_CLOCK_OK && out->status == HCI_ERR_NO_CONNECTION) {
         return UTESP_CLOCK_NO_LINK;
     }
     return result;

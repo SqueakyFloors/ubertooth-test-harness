@@ -367,7 +367,7 @@ speech on does not start lying.
 `clock` answers with one JSON line:
 
 ```json
-{"native":15243776,"piconet":15243776,"accuracy":250,"handle":129,"t_us":41237655,"read_us":697}
+{"native":15243776,"piconet":15243776,"accuracy":0,"handle":129,"t_us":41237655,"read_us":697}
 ```
 
 - `native`: this board's own clock (CLKN). It is 28 bits in units of 312.5
@@ -377,14 +377,18 @@ speech on does not start lying.
   the piconet leader's native clock. The initiator pages, so it is the
   leader, and on that board the two numbers are the same counter read twice.
   Both boards of a pair report the same piconet clock.
-- `accuracy`: the piconet clock's accuracy in parts per million, as the
-  controller reports it. 65535 means the controller does not know.
-- `handle`: the ACL connection handle the piconet clock was read for.
-- `t_us`: microseconds since this board booted, taken when the controller's
-  answer arrived. It is monotonic, and it is the instant of the piconet
-  read, which is the one a capture is lined up against.
-- `read_us`: how long that read took, from the command joining the queue to
-  the answer arriving. It bounds how stale the clock value is.
+- `accuracy`: the largest error the piconet clock may have, in the same
+  units as the clock itself, so one tick is 312.5 microseconds. 65535 means
+  the controller does not know. The spec sets it to zero for a native read,
+  which is why the one reported is the piconet read's.
+- `handle`: the connection handle of the baseband link, as the controller
+  echoed it back.
+- `t_us`: microseconds since this board booted, monotonic, taken when the
+  answer reached the host. The controller sampled the clock some time before
+  that, so it is an upper bound on that instant, and `read_us` bounds how
+  far off it can be.
+- `read_us`: how long the read took, from the command joining the queue to
+  the answer reaching the host.
 
 The two clocks are two separate commands, a fraction of a millisecond apart,
 so on the leader the two numbers can differ by a tick or two.
@@ -395,7 +399,10 @@ A link that goes down while the command is in flight reads the same way, as
 no piconet rather than as a failure.
 A controller that refuses a read answers `ERR the controller refused the
 clock read, status 0x<hh>` and prints no line, rather than an answer with a
-hole in it.
+hole in it. If a controller ever stops answering altogether, the command
+that was sent keeps its place in the host's pending list, so later reads
+answer `ERR the controller did not answer the clock read` until the board is
+reset.
 
 ### How the command is sent
 

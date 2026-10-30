@@ -53,6 +53,8 @@ static struct {
     bool connecting; /* an outgoing connection is on its way */
     bool connected;
     uint32_t handle;
+    bool acl_up;         /* a baseband link to the peer is up */
+    uint16_t acl_handle; /* its connection handle, which the clock read needs */
     esp_bd_addr_t peer;   /* what "spp peer" set: who the initiator calls */
     esp_bd_addr_t remote; /* the far end of the live link */
     bool peer_set;
@@ -224,6 +226,37 @@ static void connect_failed(int status)
     st.last_err = status;
     UNLOCK();
     xSemaphoreGive(link_ev);
+}
+
+/* The baseband link under the profiles. Its connection handle is what
+ * HCI_Read_Clock needs to name a piconet, and this event is the only place
+ * an application is told it; the SPP and audio handles are the profiles'
+ * own, not this one. */
+static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
+{
+    switch (event) {
+    case ESP_BT_GAP_ACL_CONN_CMPL_STAT_EVT:
+        if (param->acl_conn_cmpl_stat.stat == ESP_BT_STATUS_SUCCESS) {
+            LOCK();
+            st.acl_up = true;
+            st.acl_handle = param->acl_conn_cmpl_stat.handle;
+            UNLOCK();
+        }
+        break;
+
+    case ESP_BT_GAP_ACL_DISCONN_CMPL_STAT_EVT:
+        LOCK();
+        /* A board can be left with a second link's close while its own is
+         * still up, so only the live one's close clears the handle. */
+        if (st.acl_up && st.acl_handle == param->acl_disconn_cmpl_stat.handle) {
+            st.acl_up = false;
+        }
+        UNLOCK();
+        break;
+
+    default:
+        break;
+    }
 }
 
 static void spp_cb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
@@ -400,6 +433,9 @@ const char *bt_start(void)
     }
     if (esp_spp_register_callback(spp_cb) != ESP_OK) {
         return "callback registration failed";
+    }
+    if (esp_bt_gap_register_callback(gap_cb) != ESP_OK) {
+        return "gap callback registration failed";
     }
 
     default_name(st.name, sizeof(st.name));
@@ -765,22 +801,6 @@ void bt_status_json(char *out, size_t len)
 
 /* ------------------------------------------------------------- the clocks */
 
-/* Which board's address names the piconet to read the clock of: the far end
- * of the live SPP link, or of the audio link when that is the only one. Both
- * are the same board when both links are up. */
-static bool link_addr(esp_bd_addr_t out)
-{
-    bool have;
-
-    LOCK();
-    have = st.connected;
-    if (have) {
-        memcpy(out, st.remote, ESP_BD_ADDR_LEN);
-    }
-    UNLOCK();
-    return have ? true : sco_remote_addr(out);
-}
-
 static const char *read_failure(int result)
 {
     switch (result) {
@@ -790,6 +810,8 @@ static const char *read_failure(int result)
         return "out of memory";
     case UTESP_CLOCK_TIMED_OUT:
         return "the controller did not answer the clock read";
+    case UTESP_CLOCK_BAD_ANSWER:
+        return "the controller's clock answer was short";
     default:
         return "the clock read failed";
     }
@@ -811,29 +833,30 @@ const char *bt_clock_json(char *out, size_t len)
 {
     struct utesp_clock native, piconet;
     const struct utesp_clock *reported;
-    esp_bd_addr_t remote;
     char piconet_fields[80];
     bool started, in_piconet;
+    uint16_t acl_handle;
     int result;
     int n;
 
     LOCK();
     started = st.started;
+    in_piconet = st.acl_up;
+    acl_handle = st.acl_handle;
     UNLOCK();
     if (!started) {
         return "bluetooth is not up";
     }
 
-    if ((result = utesp_clock_read(NULL, false, &native)) != UTESP_CLOCK_OK) {
+    if ((result = utesp_clock_read(0, false, &native)) != UTESP_CLOCK_OK) {
         return read_failure(result);
     }
     if (native.status != 0) {
         return refused(native.status);
     }
 
-    in_piconet = link_addr(remote);
     if (in_piconet) {
-        result = utesp_clock_read(remote, true, &piconet);
+        result = utesp_clock_read(acl_handle, true, &piconet);
         if (result == UTESP_CLOCK_NO_LINK) {
             /* The link went down between the two reads. */
             in_piconet = false;

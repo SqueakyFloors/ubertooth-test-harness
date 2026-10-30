@@ -1,0 +1,13 @@
+# Target labels
+ bootloader
+# Source files and their labels
+/Users/ruswagne/worktrees/ubertooth-test-harness/88_esp32-clock-wt/firmware/esp32-classic-peer/build/CMakeFiles/bootloader
+/Users/ruswagne/worktrees/ubertooth-test-harness/88_esp32-clock-wt/firmware/esp32-classic-peer/build/CMakeFiles/bootloader.rule
+/Users/ruswagne/worktrees/ubertooth-test-harness/88_esp32-clock-wt/firmware/esp32-classic-peer/build/CMakeFiles/bootloader-complete.rule
+/Users/ruswagne/worktrees/ubertooth-test-harness/88_esp32-clock-wt/firmware/esp32-classic-peer/build/bootloader-prefix/src/bootloader-stamp/bootloader-build.rule
+/Users/ruswagne/worktrees/ubertooth-test-harness/88_esp32-clock-wt/firmware/esp32-classic-peer/build/bootloader-prefix/src/bootloader-stamp/bootloader-configure.rule
+/Users/ruswagne/worktrees/ubertooth-test-harness/88_esp32-clock-wt/firmware/esp32-classic-peer/build/bootloader-prefix/src/bootloader-stamp/bootloader-download.rule
+/Users/ruswagne/worktrees/ubertooth-test-harness/88_esp32-clock-wt/firmware/esp32-classic-peer/build/bootloader-prefix/src/bootloader-stamp/bootloader-install.rule
+/Users/ruswagne/worktrees/ubertooth-test-harness/88_esp32-clock-wt/firmware/esp32-classic-peer/build/bootloader-prefix/src/bootloader-stamp/bootloader-mkdir.rule
+/Users/ruswagne/worktrees/ubertooth-test-harness/88_esp32-clock-wt/firmware/esp32-classic-peer/build/bootloader-prefix/src/bootloader-stamp/bootloader-patch.rule
+/Users/ruswagne/worktrees/ubertooth-test-harness/88_esp32-clock-wt/firmware/esp32-classic-peer/build/bootloader-prefix/src/bootloader-stamp/bootloader-update.rule

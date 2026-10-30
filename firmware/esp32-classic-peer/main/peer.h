@@ -61,12 +61,6 @@ const char *sco_stop(void);
 /* The controller's own (e)SCO packet counters, as one JSON object. */
 const char *sco_pkt_stats(char *out, size_t len);
 
-/* The address of the far end of the audio link's service level connection,
- * six bytes, or false if there is none. The clock read needs an address to
- * find the piconet by, and a board can have an audio link with no SPP
- * link. */
-bool sco_remote_addr(uint8_t *out);
-
 /* Zeroes the frame counters, for "defaults". */
 void sco_zero_counters(void);
 

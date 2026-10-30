@@ -892,16 +892,3 @@ void sco_get(struct sco_view *out)
     out->rx_bad = sc.rx_bad;
     UNLOCK();
 }
-
-bool sco_remote_addr(uint8_t *out)
-{
-    bool have;
-
-    LOCK();
-    have = sc.slc;
-    if (have) {
-        memcpy(out, sc.remote, ESP_BD_ADDR_LEN);
-    }
-    UNLOCK();
-    return have;
-}
