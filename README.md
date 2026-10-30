@@ -124,6 +124,11 @@ roles, exact argv, timeouts, and result checks. Every plan item must contain
 exactly one known test name; unknown names, legacy `cmd/check` entries, unknown
 arguments, and invalid values fail during load.
 
+[`docs/tests.md`](docs/tests.md) describes every catalog test: what it does,
+how it produces a known answer, the hardware roles and arguments it needs,
+what passes and fails, and what a pass does not prove. Read it to decide which
+tests a plan should hold.
+
 Every test accepts `platforms:` (`linux`, `macos`, no duplicates) beside its
 `hosts:`, and a test left without it runs on every platform:
 

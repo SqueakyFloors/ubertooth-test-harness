@@ -37,6 +37,10 @@
   in the lab. See "Public text" in `.kiro/steering/branch-and-review.md`.
 - Keep `COVERAGE.md` current: a PR that adds or changes test coverage of a
   CLI option updates its rows in the same PR.
+- Keep `docs/tests.md` current: a PR that adds a catalog test, removes one, or
+  changes what a test checks updates that test's section in the same PR.
+  Section headings are the catalog names exactly, so a missing section is easy
+  to spot. Reviewers check for it.
 - Run the unit suite with `python scripts/test.py` (one process per module,
   one per core; `--durations 10` for the slowest tests). It is what
   `scripts/ci.sh test` runs. `python -m unittest discover -s tests` runs the
