@@ -14,6 +14,7 @@ from ubertooth_harness.build import (
     BuildError,
     Builder,
     homebrew_include_dir,
+    missing_tools,
     plan_build,
     require_tools,
     resolve_python,
@@ -33,7 +34,12 @@ from ubertooth_harness.events import (
 )
 from ubertooth_harness.executor import SubprocessCommandExecutor
 from ubertooth_harness.isolation import IsolationRuntime, IsolationSetupError
-from ubertooth_harness.flash import HarnessError
+from ubertooth_harness.flash import (
+    BuildFlashBoard,
+    BuildFlasher,
+    FlashCancelled,
+    HarnessError,
+)
 from ubertooth_harness import leases as board_leases
 from ubertooth_harness import libbtbbpin
 from ubertooth_harness.manifest import (
@@ -47,7 +53,13 @@ from ubertooth_harness.plan import PlanError, check_runnable, image_label, load_
 from ubertooth_harness import pytools
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.planner import PlanCompiler, PlanningError
-from ubertooth_harness.preflight import PreflightError, PreflightPolicy
+from ubertooth_harness.preflight import (
+    BUILD_AND_FLASH_FIX,
+    FLASH_FIX,
+    NO_FLASH_FIX,
+    PreflightError,
+    PreflightPolicy,
+)
 from ubertooth_harness.resources import FileResourceRegistry, RegistryError
 from ubertooth_harness.report import render_runs, write_report
 from ubertooth_harness.sequencer import NamedTestSequencer, run_started_details
@@ -77,8 +89,9 @@ def _add_build_options(parser: argparse.ArgumentParser, *, optional: bool) -> No
     parser.add_argument(
         "--with-firmware",
         action="store_true",
-        help="also build bluetooth_rxtx firmware (needs arm-none-eabi-gcc); "
-        "the image is recorded, not flashed",
+        help="also build bluetooth_rxtx firmware (needs arm-none-eabi-gcc) and "
+        "record the image; run-suite --build builds it anyway when it flashes "
+        "the boards, which it does unless its --no-flash-build is given",
     )
     parser.add_argument(
         "--with-python",
@@ -110,17 +123,34 @@ def _add_lease_options(parser: argparse.ArgumentParser) -> None:
     )
     # Tests and unusual hosts only; the default is shared by every agent.
     parser.add_argument("--lease-dir", type=Path, help=argparse.SUPPRESS)
+    _add_external_lock_option(parser)
+
+
+def _add_external_lock_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--external-board-lock", metavar="TEMPLATE",
+        help="also hold each board's own lock file from another tool on this "
+        "host: an absolute path with {serial} (the board's lock key: an "
+        "Ubertooth's full 32-hex serial), e.g. "
+        "'/var/lock/board-{serial}.lock'; default "
+        f"${board_leases.EXTERNAL_LOCK_ENV}; '' turns it off",
+    )
+
+
+def _external_template(args: argparse.Namespace) -> str | None:
+    return board_leases.external_lock_template(args.external_board_lock)
 
 
 @contextlib.contextmanager
 def _signals_cancel(token: CancellationToken):
-    """SIGINT/SIGTERM cancel the token instead of interrupting the process."""
+    """SIGINT/SIGTERM/SIGHUP cancel the token instead of interrupting the process."""
     previous = {}
 
     def request(signum, _frame):
         token.cancel(f"received {signal.Signals(signum).name}")
 
-    for signum in (signal.SIGINT, signal.SIGTERM):
+    # SIGHUP too: a dropped SSH session must not kill a firmware write.
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         previous[signum] = signal.getsignal(signum)
         signal.signal(signum, request)
     try:
@@ -159,11 +189,13 @@ def _build(
         ).run(plan)
 
 
-def _finish_failed_run(publisher, output_dir: Path, reason: str) -> None:
-    """Close a run that failed before its tests started, then write report.md."""
+def _finish_failed_run(
+    publisher, output_dir: Path, reason: str, status: str = "failed"
+) -> None:
+    """Close a run that stopped before its tests started, then write report.md."""
     try:
         publisher.emit(
-            "run_finished", "failed", {"status": "failed", "failure_reason": reason}
+            "run_finished", status, {"status": status, "failure_reason": reason}
         )
     finally:
         write_report(output_dir)
@@ -327,6 +359,12 @@ def _parser() -> argparse.ArgumentParser:
         "applicable on this host and why; build, lease and run nothing",
     )
     _add_build_options(run_suite, optional=True)
+    run_suite.add_argument(
+        "--no-flash-build", action="store_true",
+        help="with --build, do not flash the boards with the build's firmware "
+        "before preflight (flashing is the default when building; it also "
+        "builds the firmware)",
+    )
     _add_lease_options(run_suite)
 
     boards = subparsers.add_parser(
@@ -337,6 +375,7 @@ def _parser() -> argparse.ArgumentParser:
     boards.add_argument("--hardware", type=Path, required=True)
     boards.add_argument("--host", help="only boards attached to this host")
     boards.add_argument("--lease-dir", type=Path, help=argparse.SUPPRESS)
+    _add_external_lock_option(boards)
     boards.add_argument("--json", action="store_true", help="machine-readable output")
 
     lease = subparsers.add_parser(
@@ -408,6 +447,7 @@ def _parser() -> argparse.ArgumentParser:
     runner.add_argument(
         "--heartbeat-interval", type=float, default=10.0, metavar="SECONDS",
     )
+    _add_external_lock_option(runner)
 
     controller = subparsers.add_parser(
         "controller",
@@ -506,6 +546,7 @@ def _runner(args: argparse.Namespace) -> int:
         libbtbb_ref=args.libbtbb_ref,
         allow_power_changes=args.allow_power_changes,
         heartbeat_interval_s=args.heartbeat_interval,
+        external_board_lock=args.external_board_lock,
     ))
     host = FileResourceRegistry.load(service.config.hardware).get(args.host)
     if host.type != "Host":
@@ -594,6 +635,7 @@ def _prepare_run(
             artifacts += (FileIdentity.from_path("test build", built.plan.firmware_image),)
         # Every test command runs the tools just built, not installed ones.
         executor = SubprocessCommandExecutor(_test_environment(sources, built.plan))
+        _flash_build(args, sources, built, executor, publisher, run_dir, leases)
     manifest = build_run_manifest(
         run_id=run_id,
         plan_name=plan.name,
@@ -607,8 +649,42 @@ def _prepare_run(
         build=built.to_manifest() if built else None,
         leases=leases.to_manifest() if leases is not None else (),
     )
-    preflight_checks = preflight_policy.compile(invocations, manifest)
+    if not args.build:
+        fix = BUILD_AND_FLASH_FIX
+    elif args.no_flash_build:
+        fix = NO_FLASH_FIX
+    else:
+        fix = FLASH_FIX
+    preflight_checks = preflight_policy.compile(invocations, manifest, firmware_fix=fix)
     return manifest, preflight_checks, executor, built
+
+
+def _flash_build(args, sources, built, executor, publisher, run_dir, leases) -> None:
+    """Flash the run's boards with the firmware just built, before preflight.
+
+    The default whenever the run builds (#135); --no-flash-build keeps the
+    boards' firmware. The host lock is held while writing and then released,
+    unless the run itself switches power or writes firmware later.
+    """
+    boards = getattr(args, "flash_boards", ())
+    if not boards:
+        reason = (
+            "--no-flash-build" if args.no_flash_build
+            else "no board needs the run's firmware"
+        )
+        publisher.emit("build_flash_finished", "skipped", {
+            "reason": reason, "expected_revision": "", "boards": [],
+        })
+        return
+    ubertooth = next(source for source in sources if source.name == "Ubertooth")
+    with _signals_cancel(CancellationToken()) as token:
+        BuildFlasher(executor).run(
+            boards, built.plan.firmware_image, ubertooth.expected_revision, publisher,
+            output_dir=run_dir, cancellation=token,
+            host_lock=leases is not None and leases.holds_host_lock(),
+        )
+    if leases is not None and not getattr(args, "keep_host_lock", True):
+        leases.release_host_lock()
 
 
 def _test_environment(sources, plan) -> dict:
@@ -645,6 +721,8 @@ def _parse_artifacts(values: list[str]) -> tuple[FileIdentity, ...]:
 
 
 def _run_suite(args: argparse.Namespace) -> int:
+    # A bad template fails before anything else, dry run included.
+    external_template = _external_template(args)
     catalog = builtin_catalog()
     plan = load_plan(args.plan, catalog)
     registry = FileResourceRegistry.load(args.hardware)
@@ -700,10 +778,37 @@ def _run_suite(args: argparse.Namespace) -> int:
         raise HarnessError("--with-python requires --build")
     if args.build and not args.libbtbb_source:
         raise HarnessError("--build requires --libbtbb-source and --libbtbb-ref")
+    if args.no_flash_build and not args.build:
+        raise HarnessError("--no-flash-build requires --build")
+    args.flash_boards = ()
+    if args.build and not args.no_flash_build:
+        # The boards whose firmware preflight requires get the run's own
+        # firmware first; that needs the firmware build.
+        args.flash_boards = tuple(
+            BuildFlashBoard(
+                alias,
+                str(registry.get(alias).identity.get("serial", "")).strip().lower(),
+            )
+            for alias in PreflightPolicy(registry, catalog).boards_needing_firmware(invocations)
+        )
+    if args.flash_boards and not args.with_firmware:
+        args.with_firmware = True
+        if not args.dry_run and "arm-none-eabi-gcc" in missing_tools(
+            _detected_platform(), True
+        ):
+            raise HarnessError(
+                "flashing the boards with the run's build (the default with "
+                "--build) needs the firmware build, and arm-none-eabi-gcc is not "
+                "installed; install it, or use --no-flash-build to keep the "
+                "boards' firmware"
+            )
     if args.dry_run:
         return _dry_run(args, catalog, plan, host, invocations, not_applicable)
     artifacts = _parse_artifacts(args.artifact)
     run_id = validate_run_id(args.run_id) if args.run_id else generate_run_id()
+    # Power isolation and firmware-writing tests hold the host lock for the
+    # whole run; flashing the build first holds it only while writing.
+    args.keep_host_lock = board_leases.needs_host_lock(invocations, catalog)
     leases = board_leases.acquire(
         board_leases.boards_for_invocations(invocations, registry),
         board_leases.holder_info(
@@ -713,7 +818,8 @@ def _run_suite(args: argparse.Namespace) -> int:
         directory=args.lease_dir,
         wait_s=args.wait_for_boards * 60,
         # Power isolation and firmware writes hold this host's lock too.
-        host_lock=board_leases.needs_host_lock(invocations, catalog),
+        host_lock=args.keep_host_lock or bool(args.flash_boards),
+        external_template=external_template,
     )
     try:
         return _run_leased(
@@ -743,6 +849,13 @@ def _dry_run(args, catalog, plan, host, invocations, not_applicable) -> int:
     )
     print(f"dry run: {plan.name} / {args.suite} on {args.host}; nothing is built or run")
     print(f"host: {capabilities.describe()}")
+    if args.flash_boards:
+        print("flash before preflight with the build's firmware: " + ", ".join(
+            f"{board.alias} ({board.serial})" for board in args.flash_boards
+        ))
+    elif args.build:
+        print("flash before preflight: no ("
+              + ("--no-flash-build" if args.no_flash_build else "no board needs it") + ")")
     runs = omitted = 0
     for invocation in invocations:
         definition = catalog.get(invocation.test_name)
@@ -818,7 +931,11 @@ def _run_leased(
         )
     except BaseException as error:
         if publisher is not None:
-            _finish_failed_run(publisher, run_dir, str(error) or type(error).__name__)
+            # A cancellation during the flash stage ends the run canceled.
+            _finish_failed_run(
+                publisher, run_dir, str(error) or type(error).__name__,
+                "canceled" if isinstance(error, FlashCancelled) else "failed",
+            )
         if isolation is not None:
             isolation.close()
         raise
@@ -881,6 +998,7 @@ def _registered_boards(registry, host: str | None = None):
 
 
 def _boards_command(args: argparse.Namespace) -> int:
+    external_template = _external_template(args)
     registry = FileResourceRegistry.load(args.hardware)
     hosts = [resource.alias for resource in registry.hosts()]
     if args.host:
@@ -896,7 +1014,8 @@ def _boards_command(args: argparse.Namespace) -> int:
         )
     registered = _registered_boards(registry, args.host)
     states = board_leases.board_states(
-        [board for board, problem in registered if problem is None], directory=args.lease_dir
+        [board for board, problem in registered if problem is None], directory=args.lease_dir,
+        external_template=external_template,
     )
     states += [
         {"resource": alias, "key": None, "held": False, "holder": {}, "unleasable": problem}
@@ -908,15 +1027,34 @@ def _boards_command(args: argparse.Namespace) -> int:
         print(json.dumps(states, indent=2, sort_keys=True))
         return 0
     for state in states:
+        external = state.get("external") or {}
         if state.get("unleasable"):
             print(f"{state['resource']:<12} not leasable: {state['unleasable']}")
-        elif state["held"]:
+        elif state["held"] and state["holder"]:
             holder = state["holder"]
             since = board_leases.held_for(holder)
             detail = board_leases.describe_holder(holder)
             print(f"{state['resource']:<12} held  {detail}" + (f" (for {since})" if since else ""))
+            if external.get("held") and not external.get("error"):
+                # Two parties hold the board; name the other one too.
+                print(f"{'':<12} and   " + board_leases.describe_external(
+                    Path(external["lock"]), external.get("holder", "")
+                ))
+        elif external.get("held"):
+            if external.get("error"):
+                print(f"{state['resource']:<12} held  outside the harness: "
+                      f"{external['lock']} (cannot be read, so taken as held)")
+            else:
+                detail = board_leases.describe_external(
+                    Path(external["lock"]), external.get("holder", "")
+                )
+                print(f"{state['resource']:<12} held  {detail}")
+        elif state["held"]:
+            print(f"{state['resource']:<12} held  {board_leases.describe_holder({})}")
         else:
             print(f"{state['resource']:<12} free")
+        if external.get("error"):
+            print(f"{'':<12} warning: cannot read external lock: {external['error']}")
     return 0
 
 
@@ -924,6 +1062,7 @@ def _lease_command(args: argparse.Namespace) -> int:
     command = list(args.command_line)
     if not command:
         raise HarnessError("lease needs a command after --")
+    external_template = _external_template(args)
     registry = FileResourceRegistry.load(args.hardware)
     boards = []
     for alias in args.boards:
@@ -943,6 +1082,7 @@ def _lease_command(args: argparse.Namespace) -> int:
         directory=args.lease_dir,
         wait_s=args.wait_for_boards * 60,
         host_lock=host_lock,
+        external_template=external_template,
     ) as held:
         # The command inherits the locks, so the boards stay leased until it
         # exits even if this process is killed first.

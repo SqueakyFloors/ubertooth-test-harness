@@ -44,7 +44,7 @@ class ReceiveUbertooth(ToolUbertooth):
     each case can be shown to fail:
 
     rx-ignores-timeout, rx-exits-early, rx-ignores-channel, rx-ignores-errors,
-    rx-link-type, rx-writes-extra, rx-dump-trailing, rx-sweep-notice (-s
+    rx-link-type, rx-dump-trailing, rx-sweep-notice (-s
     prints the notice it printed before 5ac22a8), rx-sweep-overrides-channel
     (-s sweeps although -c names a channel),
     rx-no-survey, afh-zero-map (#187), afh-no-message, afh-exits-0, afh-exits-early,
@@ -134,18 +134,11 @@ class ReceiveUbertooth(ToolUbertooth):
                 ch = int(channel)
             lines.append(f"systime=1 ch={ch:2d} LAP=9e8b33 err={min(index, errors)} clkn=1 "
                          "clk_offset=1 s=-40 n=-55 snr=15")
-        lines.append("UAP = 0x47 found after 3 total packets.")
         if "-z" in options and "rx-no-survey" not in self.bugs:
             lines += ["Survey Results", "??:??:??:9E:8B:33", "??:??:47:9E:8B:33"]
-        captures = {}
         for index, option in enumerate(options):
             if option in ("-r", "-q", "-d"):
                 path = options[index + 1]
-                handle = option
-                if handle in captures and "rx-writes-extra" not in self.bugs:
-                    lines.insert(0, f"Ignoring extra capture file: {path}")
-                    continue
-                captures[handle] = path
                 link = 1 if "rx-link-type" in self.bugs else 255
                 if option == "-r":
                     data = self._pcapng_header(link)
@@ -156,9 +149,10 @@ class ReceiveUbertooth(ToolUbertooth):
                     if "rx-dump-trailing" in self.bugs:
                         data += b"\0\0\0"
                 Path(path).write_bytes(data)
-        stderr = ""
+        # libbtbb writes its notes to stderr (libbtbb bf878df2).
+        stderr = "UAP = 0x47 found after 3 total packets.\n"
         if "-s" in options and "rx-sweep-notice" in self.bugs:
-            stderr = "sweep mode is now the default and the -s argument is deprecated\n"
+            stderr += "sweep mode is now the default and the -s argument is deprecated\n"
         self._run_mode("2402" if channel is None else str(2402 + int(channel)))
         stdout = "\n".join(lines) + "\n"
         if "rx-ignores-timeout" in self.bugs or seconds == 0:
@@ -291,7 +285,7 @@ class ReceiveCaseGenerationTests(unittest.TestCase):
         self.assertEqual(["rx-survey-timeout", "rx-capture-pcapng", "afh-timeout-no-packets"],
                          [c.case_id for c in smoke])
         _a, full = cases_for(CLASSIC, "comprehensive")
-        self.assertEqual(15, len(full))
+        self.assertEqual(14, len(full))
         _a, smoke = cases_for(RAW, "smoke")
         self.assertEqual(["dump-full", "dump-bitstream", "ego-rx"], [c.case_id for c in smoke])
         _a, full = cases_for(RAW, "comprehensive")
@@ -356,17 +350,13 @@ class ClassicReceiveTests(unittest.TestCase):
               "Sniff all LAPs (-t) ends by itself", "Fixed channel (-c 39)",
               "Explicit sweep (-s)", "-s -c 39: the channel wins",
               "No access-code errors (-e 0)", "Four access-code errors (-e 4)",
-              "PCAP capture (-q)",
-              "Repeated -r: the first file is written, the extra ignored",
-              "Packet dump (-d)"]
+              "PCAP capture (-q)", "Packet dump (-d)"]
         expectations = {
             # Every ubertooth-rx case checks that -t ends the run on time.
             "rx-ignores-timeout": rx,
             "rx-exits-early": rx,
             "rx-no-survey": ["Survey (-z -t) ends by itself"],
-            "rx-link-type": ["PCAPNG capture (-r)", "PCAP capture (-q)",
-                             "Repeated -r: the first file is written, the extra ignored"],
-            "rx-writes-extra": ["Repeated -r: the first file is written, the extra ignored"],
+            "rx-link-type": ["PCAPNG capture (-r)", "PCAP capture (-q)"],
             "rx-dump-trailing": ["Packet dump (-d)"],
             "rx-ignores-channel": ["Fixed channel (-c 39)", "-s -c 39: the channel wins"],
             "rx-sweep-notice": ["Explicit sweep (-s)", "-s -c 39: the channel wins"],
@@ -581,6 +571,17 @@ class CheckerTests(unittest.TestCase):
         self.assertIn("channel 5", receive_cases.packet_check(channel=39)(out))
         self.assertIn("2 access-code errors", receive_cases.packet_check(max_errors=0)(out))
         self.assertEqual("", receive_cases.packet_check(max_errors=2)(out))
+        # A mode with no background estimate prints the word, not a figure
+        # (fork 532adc19), and the line still counts as a packet.
+        absent = ("systime=1 ch={ch:2d} LAP=9e8b33 err={err} clkn=1 "
+                  "clk_offset=1 s=-4 n=none snr=none")
+        self.assertIn("channel 5", receive_cases.packet_check(channel=39)(
+            absent.format(ch=39, err=0) + "\n" + absent.format(ch=5, err=2) + "\n"))
+        # The ratio comes from the noise, so one of each is a malformed line
+        # and counts as no packet at all.
+        mixed = absent.replace("snr=none", "snr=1")
+        self.assertEqual("", receive_cases.packet_check(channel=39)(
+            mixed.format(ch=5, err=2) + "\n"))
         survey = receive_cases.packet_check(survey=True)
         self.assertEqual("", survey("Survey Results\n??:??:47:9E:8B:33\n"))
         self.assertEqual("", survey("Survey Results\n"))

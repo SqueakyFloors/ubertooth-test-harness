@@ -26,7 +26,7 @@ LEGEND = (
     "Tags: `[C]` command sent, `[O]` stdout, `[E]` stderr, `[R]` command result, "
     "`[S]` state step, `[I]` power isolation, `[M]` harness record. "
     "`+++` opens a step and `---` closes it; `===` marks the run, build, "
-    "preflight, and each test."
+    "flash, preflight, and each test."
 )
 
 
@@ -117,6 +117,9 @@ class _Run:
             details = event.get("details", {})
             if event["event_type"] == "check_started":
                 identities.append(details.get("resource_identity", {}))
+            elif event["event_type"] == "build_flash_started":
+                for board in details.get("boards", []):
+                    add(board.get("serial"))
             elif event["event_type"] == "flash_run_started":
                 add(details.get("serial"))
                 for serial in (*details.get("serials", []), *details.get("guard_serials", [])):
@@ -140,6 +143,25 @@ def _duration(first: Mapping | None, last: Mapping | None) -> str:
 
 def _cell(value) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ")
+
+
+# The registry identity key that names a device differs by kind: an Ubertooth
+# has `serial`, an nRF52840 DK its J-Link probe's `jlink serial`. The keys are
+# listed rather than matched on the word "serial", which would also pick up a
+# DK's `serial device` and print a /dev/serial/by-id path.
+# An Ubertooth is named by its own serial, a DK by its J-Link probe's, and
+# an ESP32 Classic peer by its USB bridge's: a peer has no serial of its
+# own, and the bridge serial is what the registry and the lab lease it by.
+_IDENTITY_SERIAL_KEYS = ("serial", "jlink serial", "bridge serial")
+
+
+def _identity_serial(identity: Mapping) -> str:
+    """The serial that names this device, whichever kind of device it is."""
+    for key in _IDENTITY_SERIAL_KEYS:
+        value = identity.get(key)
+        if value:
+            return str(value)
+    return ""
 
 
 def _setup_rows(run: _Run) -> list[tuple[str, str]]:
@@ -216,6 +238,7 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
         rows.append(("Built tools report", build.get("host_version", "")))
     else:
         rows.append(("Built", "no (installed tools)"))
+    rows.append(("Flash", _flash_row(run, bool(build))))
     capabilities = run.capabilities
     if capabilities:
         tools = capabilities.get("bluez_tools")
@@ -244,10 +267,7 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
             continue
         identity = start.get("resource_identity", {})
         device = devices.setdefault(alias, {
-            # An ESP32 Classic peer has no board serial of its own: the
-            # serial of its USB bridge is what the registry and the lab
-            # name it by.
-            "serial": identity.get("serial") or identity.get("bridge serial", ""),
+            "serial": _identity_serial(identity),
             "firmware": "",
         })
         if details.get("check_name") == "Firmware version":
@@ -287,7 +307,11 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
     artifacts = manifest.get("artifacts", [])
     held = manifest.get("leases") or []
     host_lock = [item for item in held if item.get("key") == "host-power"]
-    held = [item for item in held if item.get("key") != "host-power"]
+    external = [item for item in held if item.get("external")]
+    held = [
+        item for item in held
+        if item.get("key") != "host-power" and not item.get("external")
+    ]
     if host_lock:
         rows.append((
             "Host lock",
@@ -301,12 +325,64 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
                 f"{item.get('resource')} since {item.get('acquired_at')}" for item in held
             ) + " (held for the whole run)",
         ))
+    if external:
+        rows.append((
+            "External board locks",
+            "; ".join(f"{item.get('resource')} {item.get('lock')}" for item in external)
+            + " (held for the whole run)",
+        ))
     if artifacts:
         rows.append((
             "Artifacts",
             "; ".join(f"{a['name']} sha256 {a['sha256'][:12]}" for a in artifacts),
         ))
     return rows
+
+
+def _flash_row(run: _Run, built: bool) -> str:
+    """Whether the run flashed its boards with its own build first (#135)."""
+    finished = next(
+        (e for e in run.events if e["event_type"] == "build_flash_finished"), None
+    )
+    if finished is None:
+        started = any(e["event_type"] == "build_flash_started" for e in run.events)
+        if started:
+            return "**did not finish**"
+        return "no (the run does not build)" if not built else "no"
+    details = finished.get("details", {})
+    status = finished.get("status", "")
+    if status == "skipped":
+        return f"no ({details.get('reason', '')})"
+    boards = "; ".join(
+        f"{item.get('resource')} "
+        + _flash_board_text(item)
+        for item in details.get("boards", [])
+    )
+    text = f"with the build's firmware {details.get('expected_revision', '')}: {boards}"
+    started = next(
+        (e for e in run.events if e["event_type"] == "build_flash_started"), {}
+    )
+    if started.get("details", {}).get("host_lock"):
+        written = any(item.get("written") for item in details.get("boards", []))
+        text += (
+            " (host lock held while writing)" if written else " (host lock held)"
+        )
+    if status != "passed":
+        return f"**{status}**: {details.get('reason', '')}; {text}"
+    return f"yes, verified before preflight; {text}"
+
+
+def _flash_board_text(item: Mapping) -> str:
+    """What happened to one board in the flash stage."""
+    if item.get("written"):
+        return (
+            f"written, was {item.get('before') or 'unreadable'}, "
+            f"now {item.get('after') or 'unknown'}"
+        )
+    if item.get("after"):
+        return f"already ran {item['after']}"
+    # The stage stopped before this board was read or written.
+    return "not written"
 
 
 def _known(value) -> str:
@@ -508,6 +584,19 @@ def _transcript(run: _Run) -> list[str]:
         elif kind == "build_finished":
             close_build_step(event)
             line(event, f"=== BUILD EXIT: {status}{_reason(details)} ===")
+        elif kind == "build_flash_started":
+            line(event, f"=== FLASH: {len(details.get('boards', []))} board(s) with the "
+                        f"build's firmware {details.get('expected_revision', '')} ===")
+        elif kind == "build_flash_board_started":
+            line(event, f"+++ flash {details.get('resource')} ({details.get('serial')}) +++")
+        elif kind == "build_flash_board_finished":
+            line(event, f"--- flash {details.get('resource')} EXIT: {status}, read back "
+                        f"{details.get('after') or 'nothing'}{_reason(details)} ---")
+        elif kind == "build_flash_finished":
+            if status == "skipped":
+                line(event, f"[M] flash before preflight skipped{_reason(details)}")
+            else:
+                line(event, f"=== FLASH EXIT: {status}{_reason(details)} ===")
         elif kind == "preflight_started":
             line(event, "=== PREFLIGHT ===")
         elif kind == "preflight_finished":

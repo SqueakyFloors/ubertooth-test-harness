@@ -11,7 +11,7 @@ checkoff, and a countdown/ETA in a web GUI.
 > compilation, simulated port restoration, grouped and stateful command cases,
 > per-run builds, and flash reliability as a plan test are implemented. Each run
 > writes one run.jsonl and one report.md. The persistent target runner
-> (protocol v2, outbound-only to a loopback controller) is implemented and
+> (protocol v3, outbound-only to a loopback controller) is implemented and
 > tested against a stub controller. The controller (target registry, run
 > dispatch, results store, REST and live WebSocket API; `127.0.0.1` only) is
 > implemented and tested against scripted runners and the real runner, and it
@@ -56,7 +56,7 @@ checkoff, and a countdown/ETA in a web GUI.
   `/api/runs/{id}/cancel`. `/ws/live` fans out target status changes, run
   updates, and (with `?run_id=`) one run's events to browsers, best effort: a
   browser that falls behind is disconnected, never the runner. `/ws/runner`
-  speaks protocol v2. Each run is a flat directory
+  speaks protocol v3. Each run is a flat directory
   `<results dir>/<run_id>/` (`run.json`, `run.jsonl`, `report.md`), with the
   results directory outside the repository by default
   (`$XDG_DATA_HOME/ubertooth-harness/controller/runs`). `GET /` returns a
@@ -91,9 +91,9 @@ the runner refuses any controller URL whose host is not loopback (`127.0.0.1`,
 connects to the checked address itself, ignores proxies, and follows no HTTP
 redirects.
 
-Implemented protocol, version 2 (`ubertooth_harness/protocol.py`; version 2
-added the run's `commit`). Every message is one JSON text frame
-`{"version": 2, "type": ..., ...fields}`. Each
+Implemented protocol, version 3 (`ubertooth_harness/protocol.py`; version 2
+added the run's `commit`, version 3 its `flash_build`). Every message is one
+JSON text frame `{"version": 3, "type": ..., ...fields}`. Each
 type has an exact field set; the receiver rejects any other version, unknown
 type, missing or extra field, or wrongly typed value, and does not act on it
 (the runner answers `protocol_error {reason}`). Inbound messages to the runner
@@ -105,7 +105,7 @@ Controller → target runner:
 
 | Type | Fields |
 |------|--------|
-| `run` | `request_id`, `ref` (git ref name, for the record; no whitespace, no leading `-`), `commit` (the full commit the controller listed for `ref`, which the runner runs; `null` only when the controller could not list refs, and then the runner resolves `ref` in its own Ubertooth checkout), `plan` (name of `<plans dir>/<plan>.yaml`), `suite`, `tests` (exact test names; empty = whole suite), `build` (bool) |
+| `run` | `request_id`, `ref` (git ref name, for the record; no whitespace, no leading `-`), `commit` (the full commit the controller listed for `ref`, which the runner runs; `null` only when the controller could not list refs, and then the runner resolves `ref` in its own Ubertooth checkout), `plan` (name of `<plans dir>/<plan>.yaml`), `suite`, `tests` (exact test names; empty = whole suite), `build` (bool), `flash_build` (bool: with `build`, flash the run's boards with that build's firmware before preflight; false passes `--no-flash-build`; ignored without `build`, and the controller sends and records it false then) |
 | `cancel` | `run_id`, `reason` |
 
 Target runner → controller:
@@ -433,11 +433,22 @@ writes must never overlap isolation changes, so a run that isolates power
 (StarTech or Acroname), checks an exclusive Ubertooth, or writes firmware
 (`Flash reliability`, `DFU images`) holds the per-host lock
 `<lease dir>/host-power.lock` (an `flock` lease, like a board's, recorded in
-the manifest) from before preflight until it ends ([#4](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/4)). A second
+the manifest) from before preflight until it ends ([#4](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/4)).
+A run that flashes its boards with its own build takes the same lock with its
+leases, before the build, and releases it after the flash stage unless the run
+itself switches power or writes firmware later (then it keeps it to the end).
+When it is released there, the hold is over before the manifest is written, so
+it is in the report's flash section rather than the manifest's leases. A second
 such command on the host fails at once and names the holder. The host lock is
 taken first, then the board leases in serial order, all or nothing and
 without blocking while any lock is held, so lock order cannot deadlock (see
-README, "The host lock").
+README, "The host lock"). With an external board lock template
+(`--external-board-lock` or `UBERTOOTH_HARNESS_EXTERNAL_BOARD_LOCK`, [#123](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/123)),
+each board's own lock file from other tools on the host is taken in the same
+attempt, before the host lock: external board locks (serial order), host
+lock, leases (serial order). A lab wrapper that takes a board's file and then
+a lease follows the same hierarchy, so neither can wait on the other in a
+cycle (README, "External board locks").
 
 The exclusive-topology btle case runs `timeout --foreground -k 2 -s INT`, so
 [`timeout`](https://www.gnu.org/software/coreutils/manual/html_node/timeout-invocation.html) and btle stay in the command's own process group (the executor
@@ -467,6 +478,14 @@ Validation and preparation have distinct phases:
    directory, build out of tree, and install into a per-run prefix that every
    command then uses first; record the toolchain and SHA-256 identities of the
    built artifacts. Without `--build`, already-installed artifacts are used.
+   With `--build`, unless `--no-flash-build`, the run then flashes every
+   Ubertooth whose firmware revision preflight requires (not guard-only boards,
+   whose API alone is checked, nor boards a firmware-writing test writes
+   itself) with the build's `bluetooth_rxtx.dfu`, one board at a time, and
+   reads `-v` back until it reports the build's revision; the first failure
+   stops the run before preflight (#135). The host lock is held while
+   writing, then released unless the run needs it later; the firmware build
+   is implied.
 5. Mandatory preflight: verify installed host revision and every selected
    Ubertooth firmware revision, compile identity, and registered serial before
    the first suite test starts.
@@ -741,7 +760,8 @@ by the REST API and `/ws/live`.
 - **Run setup:** git-ref dropdown (default branch, branches, tags from
   `GET /api/refs`, which runs `git ls-remote` against the configured
   repository and caches for 60 s) + plan and suite selectors
-  (`GET /api/plans`) + one target + build toggle → "Run". The controller
+  (`GET /api/plans`) + one target + build toggle + "Flash the firmware to the boards
+  first" (ticked by default, disabled while build is off) → "Run". The controller
   refuses a ref that is not in the list or a full commit ID (422). The run
   request carries the commit listed for the ref (the GUI sends the commit it
   showed; a ref that has moved since is refused with 409 and the page lists
@@ -821,8 +841,9 @@ Later (multi-node), Ansible:
    automated build/install, armed physical power control, and generic
    command/soak execution remain.
 3. **Target runner service** — register/heartbeat/run over the wire; test against a
-   stub controller. Implemented (protocol v2, loopback controllers only;
-   v2 added the listed commit to `run` and does not interoperate with v1).
+   stub controller. Implemented (protocol v3, loopback controllers only;
+   v2 added the listed commit to `run`, v3 `flash_build`; no version
+   interoperates with another).
 4. **Controller + web GUI** — targets, ref dropdown, live checkoff, countdown.
    Implemented: controller (registry, dispatch, results store, REST and live
    WebSocket API, `127.0.0.1` only) and the GUI (targets, run setup, live

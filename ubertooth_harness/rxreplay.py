@@ -270,11 +270,29 @@ def packet_record_indices(lap: int | None = None) -> list[int]:
 
 # --- output checks ------------------------------------------------------------
 
+# The noise figure and the signal-to-noise ratio beside it are either both
+# figures or both the word `none`: one comes from the other, so a line with one
+# of each is malformed and does not count as a packet. The fixture's records
+# set neither of the status bits that say the board measured this packet's
+# power or estimated its channel's background, so a current ubertooth-rx prints
+# `none` for both (fork 532adc19); a record from a board that does set them
+# prints figures.
+_NOISE_AND_SNR = r"(?:n=-?\d+ snr=-?\d+|n=none snr=none)"
+
 PACKET_LINE = re.compile(
-    r"^systime=(?P<systime>\d+) ch=\s*(?P<ch>\d+) LAP=(?P<lap>[0-9a-f]{6}) "
-    r"err=(?P<err>\d+) clkn=\d+ clk_offset=\d+ s=-?\d+ n=-?\d+ snr=-?\d+$"
+    rf"^systime=(?P<systime>\d+) ch=\s*(?P<ch>\d+) LAP=(?P<lap>[0-9a-f]{{6}}) "
+    rf"err=(?P<err>\d+) clkn=\d+ clk_offset=\d+ s=-?\d+ {_NOISE_AND_SNR}$"
 )
 UAP_LINE = re.compile(r"UAP = 0x(?P<uap>[0-9a-f]+) found after \d+ total packets")
+# libbtbb works the UAP out from the packets' CRCs and says so. Since libbtbb
+# bf878df2 it says it on standard error, like every note a library makes, so
+# the line cannot land in a capture written to standard output.
+ANY_UAP_NOTE = UAP_LINE.pattern
+
+
+def uap_note(uap: int) -> str:
+    """libbtbb's note that it worked this UAP out, as the library writes it."""
+    return rf"UAP = 0x{uap:x} found after \d+ total packets"
 
 
 def packets_check(expected: list[tuple[int, int, int]]):
@@ -302,21 +320,23 @@ def packets_check(expected: list[tuple[int, int, int]]):
     return check
 
 
-def uap_check(expected: list[tuple[int, int, int]], uap: int | None):
-    """Packet lines as expected; with ``uap``, libbtbb reports exactly that UAP,
-    without, it reports none."""
+def uap_check(expected: list[tuple[int, int, int]]):
+    """Packet lines as expected, and no UAP note among them.
+
+    The note is libbtbb's, and standard output holds the packet lines (or a
+    capture), so the note belongs on standard error. Which UAP the library
+    found, or that it found none, is checked by the step's patterns, which
+    read standard error too.
+    """
     packets = packets_check(expected)
 
     def check(output: str) -> str:
         problem = packets(output)
         if problem:
             return problem
-        found = {int(m["uap"], 16) for m in UAP_LINE.finditer(output)}
-        if uap is None:
-            return f"reported UAP {min(found):02x}" if found else ""
-        if found != {uap}:
-            reported = ", ".join(f"{u:02x}" for u in sorted(found)) or "none"
-            return f"reported UAP {reported}, expected {uap:02x}"
+        found = sorted({m["uap"] for m in UAP_LINE.finditer(output)})
+        if found:
+            return "libbtbb's note about UAP " + ", ".join(found) + " is on stdout"
         return ""
 
     return check
