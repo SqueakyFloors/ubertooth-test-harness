@@ -1103,9 +1103,57 @@ the reader closing the FIFO, which must exit 0 by itself.
 
 **Known limits.** No peer, so the stream may carry no packet records at all;
 the checks are about the header, the stream, and the exit. Nothing here runs
-real Wireshark or tshark; harness issue
-[#148](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/148)
-asks for one tshark case so a real dissector reads what the plugin sends.
+real Wireshark or tshark: `BLE extcap in tshark` does that, with a known
+advertiser.
+
+## BLE extcap in tshark
+
+**What it does.** Real `tshark` captures through the `btle-extcap` plugin from
+a registered nRF52840 DK advertiser, and its own dissector decodes the DK's
+address.
+
+**Theory of operation.** The cases above play Wireshark's part themselves and
+check the stream with the harness's own parser, which could share a misreading
+with the plugin. A dissector written by someone else cannot: if Wireshark
+prints the DK's address, then link type 256 and libbtbb's 10-byte LE
+pseudo-header are read the way the plugin writes them, and the calls that
+Wireshark version makes to an extcap program are the ones the plugin answers.
+The known advertiser is what makes the answer exact rather than "something was
+decoded": the DK advertises from its registered address, so the row tshark
+must print is known before the capture starts. The plugin is installed in a
+Wireshark configuration of its own (a temporary `HOME`, and the extcap
+directory that tshark itself reports for it), so the host user's configuration
+is untouched and no other extcap program can answer for the interface. tshark
+runs in a session of its own, so the SIGINT case reaches tshark alone: sent to
+the process group it would also hit the `dumpcap` that reads the FIFO, and
+tshark would report a child that died instead of stopping its capture.
+
+**Hardware and arguments.** One `Ubertooth`, selected by full serial, and one
+`advertiser` (nRF52840 DK) with a registered J-Link serial and BLE address.
+Guarded. `coverage:` and a required `duration:`. The Ubertooth defaults to
+needing an ordinary link. The test writes DK firmware: its first case flashes
+the DK when it runs anything but the version the harness pins, so the run
+holds the host lock. Every case is skipped where `tshark` is not installed,
+which only running it can tell; the version that read the records is recorded
+in the run manifest.
+
+**Expected outcome.** Smoke runs 2 cases: the DK is confirmed to run the
+pinned firmware at its registered address, then `tshark -i ubertooth<serial>`
+captures for the duration and at least one row carries the DK's address as an
+ADV_NONCONN_IND, with tshark exiting 0 and no process left behind.
+Comprehensive runs 4, adding a capture filter, which Wireshark passes on as
+`--extcap-capture-filter` and the plugin cannot apply: its warning must reach
+tshark (which relays what the plugin wrote) and the capture must run anyway;
+and a capture stopped with SIGINT halfway, which must exit 0 with the rows
+decoded so far. Every case leaves the DK idle in the advertiser role with its
+boot settings and restores the Ubertooth's channel, squelch, and LEDs.
+
+**Known limits.** One Wireshark version answers for itself: what the version
+on the host does is what the case shows, and tshark hands packets on in
+batches, so the rows a case sees are not every packet the board caught. The
+checks are about the fields Wireshark decoded, not how many, so the counting
+checks stay in `Capture known BLE advertiser`. The GUI is not exercised, only
+tshark.
 
 ## Capture known BLE advertiser
 

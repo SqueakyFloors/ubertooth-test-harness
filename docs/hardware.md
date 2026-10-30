@@ -486,7 +486,8 @@ permissions of an already-open device node.
 `python3.12-venv`), then `python3 bootstrap.py`; the fork's host-tool build
 prerequisites; `arm-none-eabi-gcc` for any run that builds firmware or flashes
 a board; BlueZ, which `ubertooth-scan` and `ubertooth-follow` need and which
-exists on Linux only. Add `--with-acroname` to `bootstrap.py` on a host with
+exists on Linux only; `tshark` from the distribution (no GUI) for
+`BLE extcap in tshark`, whose cases are skipped without it. Add `--with-acroname` to `bootstrap.py` on a host with
 an Acroname hub. Install the peer SDKs only on the host that builds the peer
 images: nRF Connect SDK v3.4.1 with `nrfutil sdk-manager` (about 6 GB), and
 ESP-IDF v5.5.6 (about 3 GB). A host with docker can build the DK image
