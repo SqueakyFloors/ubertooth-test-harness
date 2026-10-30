@@ -352,5 +352,32 @@ class RegistryTests(unittest.TestCase):
             list(peers[0].argv[2:]))
 
 
+class ReportTests(unittest.TestCase):
+
+    def test_the_devices_row_names_a_peer_by_its_bridge_serial(self):
+        from ubertooth_harness.report import _Run, _setup_rows
+
+        records = []
+        for index, (alias, identity) in enumerate((
+            ("UT_Linux0", {"serial": SERIAL}),
+            ("ESP32_Linux0", {"bridge serial": ACCEPTOR_BRIDGE,
+                              "BD_ADDR": ACCEPTOR_ADDRESS}),
+        )):
+            check = {"phase": "preflight", "check_id": f"p{index}",
+                     "check_name": "Device serial"}
+            records.append({"run_id": "r", "event_type": "check_started",
+                            "status": "running",
+                            "timestamp": "2026-01-01T00:00:00+00:00",
+                            "details": {**check, "resource": alias,
+                                        "resource_identity": identity}})
+            records.append({"run_id": "r", "event_type": "check_finished",
+                            "status": "passed",
+                            "timestamp": "2026-01-01T00:00:00+00:00",
+                            "details": check})
+        rows = dict(_setup_rows(_Run(records)))
+        self.assertIn(f"ESP32_Linux0 serial {ACCEPTOR_BRIDGE}", rows["Devices"])
+        self.assertIn(f"UT_Linux0 serial {SERIAL}", rows["Devices"])
+
+
 if __name__ == "__main__":
     unittest.main()

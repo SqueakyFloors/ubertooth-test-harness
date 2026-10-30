@@ -242,8 +242,12 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
         alias = start.get("resource")
         if not alias:
             continue
+        identity = start.get("resource_identity", {})
         device = devices.setdefault(alias, {
-            "serial": start.get("resource_identity", {}).get("serial", ""),
+            # An ESP32 Classic peer has no board serial of its own: the
+            # serial of its USB bridge is what the registry and the lab
+            # name it by.
+            "serial": identity.get("serial") or identity.get("bridge serial", ""),
             "firmware": "",
         })
         if details.get("check_name") == "Firmware version":
