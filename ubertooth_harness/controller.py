@@ -60,7 +60,13 @@ from ubertooth_harness.gui import (
     security_headers,
 )
 from ubertooth_harness.learned import STORE_FILE, EstimateStore
+from ubertooth_harness.outputfiles import saved_output
 from ubertooth_harness.report import write_report
+from ubertooth_harness.runfiles import (
+    PAGE_BYTES,
+    OutputFileError,
+    read_output_page,
+)
 from ubertooth_harness.protocol import (
     MAX_RUNNER_MESSAGE_BYTES,
     PROTOCOL_VERSION,
@@ -1307,6 +1313,11 @@ ENDPOINTS = {
         "learned stage estimates"
     ),
     "GET /api/runs/{run_id}/report.md": "the run's report",
+    "GET /api/runs/{run_id}/files": "the output files the run saved, with the checks that read each",
+    "GET /api/runs/{run_id}/file": (
+        "one page of a saved output file: ?path=<a path the run recorded>"
+        "&offset=<bytes>&limit=<bytes>"
+    ),
     "POST /api/runs/{run_id}/cancel": "cancel an active run: {reason}",
     "WS /ws/live": "live target and run updates (?run_id=ID adds that run's events)",
     "WS /ws/runner": "target runner protocol v3",
@@ -1443,6 +1454,23 @@ def create_app(controller: Controller):
         if not run.report or not path.is_file():
             raise ControllerError(f"run {run_id} has no report", 404)
         return FileResponse(path, media_type="text/markdown; charset=utf-8")
+
+    @app.get("/api/runs/{run_id}/files")
+    async def get_run_files(run_id: str):
+        run = controller.get_run(run_id)
+        events = await asyncio.to_thread(controller.read_events, run)
+        return {"files": [saved.to_dict() for saved in saved_output(events)]}
+
+    @app.get("/api/runs/{run_id}/file")
+    async def get_run_file(run_id: str, path: str, offset: int = 0, limit: int = PAGE_BYTES):
+        run = controller.get_run(run_id)
+        events = await asyncio.to_thread(controller.read_events, run)
+        try:
+            return await asyncio.to_thread(
+                read_output_page, run.directory, events, path, offset, limit
+            )
+        except OutputFileError as error:
+            raise ControllerError(error.detail, error.status) from error
 
     @app.post("/api/runs/{run_id}/cancel", status_code=202)
     async def cancel_run(run_id: str, request: CancelRequest):

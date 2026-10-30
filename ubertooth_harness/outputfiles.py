@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 import hashlib
 from pathlib import Path
 import re
-from typing import Iterable, Iterator, Sequence
+from typing import Iterable, Iterator, Mapping, Sequence
 
 OUTPUT_DIR = "output"
 STREAMS = ("stdout", "stderr")
@@ -548,3 +548,75 @@ def text_lines(source) -> Iterable[str]:
     if isinstance(source, str):
         return source.splitlines()
     return source
+
+
+@dataclass(frozen=True)
+class SavedOutput:
+    """One saved file as a run's records describe it, with what read it.
+
+    ``owner`` is the run record fields naming where the file came from (its
+    phase, invocation, case, and command), and ``checks`` are the recorded
+    checks that read it. This is what the report's Output files table and the
+    GUI's file list are built from; both read it from run.jsonl, so neither
+    has to open the file to list it.
+    """
+
+    file: OutputFile
+    owner: dict
+    checks: tuple[OutputCheck, ...] = ()
+
+    @property
+    def group(self) -> str:
+        """Which test or phase the file belongs to, for grouping a list."""
+        return str(
+            self.owner.get("invocation_id") or self.owner.get("phase") or "run"
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            **self.file.to_dict(),
+            "owner": dict(self.owner),
+            "checks": [check.to_dict() for check in self.checks],
+        }
+
+
+# Event types that record a saved file: a command's own streams, and the
+# files a case's tools wrote.
+FILE_EVENTS = ("command_finished", "output_files")
+CHECKS_EVENT = "output_checks"
+_OWNER_KEYS = ("phase", "invocation_id", "case_id", "check_id", "step_id",
+               "command_id", "argv")
+
+
+def _owner(details) -> dict:
+    return {key: details[key] for key in _OWNER_KEYS if key in details}
+
+
+def saved_output(events: Sequence[Mapping]) -> tuple[SavedOutput, ...]:
+    """Every saved file a run recorded, in the order the run produced them.
+
+    Each file carries the checks whose record names it. A file named by no
+    check carries none: a capture, or a stream no check read.
+    """
+    by_path: dict[str, list[OutputCheck]] = {}
+    for event in events:
+        if event.get("event_type") != CHECKS_EVENT:
+            continue
+        for value in (event.get("details") or {}).get("checks") or []:
+            check = OutputCheck.from_dict(value)
+            for name in check.files:
+                by_path.setdefault(name, []).append(check)
+    saved = []
+    seen = set()
+    for event in events:
+        if event.get("event_type") not in FILE_EVENTS:
+            continue
+        details = event.get("details") or {}
+        for file in saved_files(details):
+            if file.path in seen:
+                continue
+            seen.add(file.path)
+            saved.append(SavedOutput(
+                file, _owner(details), tuple(by_path.get(file.path, ()))
+            ))
+    return tuple(saved)

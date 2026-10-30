@@ -311,10 +311,15 @@ button.primary:disabled:hover { background: var(--primary); }
 .live-overview { grid-area: overview; display: grid; gap: 0.9rem; align-content: start; }
 .live-checklist { grid-area: checklist; min-width: 0; }
 .live-log { grid-area: log; min-width: 0; }
+/* The saved-file viewer sits beside the log tail on a wide screen. */
+.live-file { grid-area: file; min-width: 0; }
+.live {
+  grid-template-areas: "overview" "checklist" "log" "file";
+}
 @media (min-width: 60rem) {
   .live {
     grid-template-columns: minmax(15rem, 19rem) minmax(0, 1fr);
-    grid-template-areas: "overview checklist" "log log";
+    grid-template-areas: "overview checklist" "log file";
   }
 }
 
@@ -381,6 +386,31 @@ button.primary:disabled:hover { background: var(--primary); }
 }
 .log:focus-visible { outline-offset: 2px; }
 
+/* A saved file, not a live stream: black on white in a fixed-width font,
+   whatever the page's color scheme, so the two are never mistaken. */
+.live-file h3 { margin: 0 0 0.4rem; font-size: 0.95rem; }
+.file-about { margin: 0 0 0.4rem; overflow-wrap: anywhere; }
+.file-actions {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+.file-actions .hint { margin: 0; }
+.file-view {
+  margin: 0; padding: 0.75rem 0.9rem; max-height: 24rem; min-height: 6rem; overflow: auto;
+  background: #ffffff; color: #000000;
+  border: 1px solid var(--line); border-radius: var(--radius-small);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem; line-height: 1.5;
+  white-space: pre; overflow-wrap: normal;
+}
+.file-view:focus-visible { outline-offset: 2px; }
+.check-files {
+  flex-basis: 100%; padding-left: 2.1rem; margin: 0.15rem 0 0;
+  display: flex; flex-wrap: wrap; gap: 0.1rem 0.6rem;
+  font-size: 0.8rem; list-style: none;
+}
+.check-files .file-failed { color: var(--bad-fg); }
+
 /* ----- history ---------------------------------------------------------- */
 
 .table-wrap {
@@ -422,3 +452,10 @@ td.actions button, td.actions .button-link {
     scroll-behavior: auto !important;
   }
 }
+
+/* A button that reads as a link: the saved output file names. */
+.link {
+  background: none; border: none; padding: 0; font: inherit;
+  color: var(--link, #0b5cad); text-decoration: underline; cursor: pointer;
+}
+.link:hover { text-decoration: none; }

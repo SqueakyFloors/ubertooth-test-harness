@@ -17,6 +17,7 @@ from typing import Iterable, Mapping, Sequence
 
 from ubertooth_harness.events import REPORT, RUN_LOG
 from ubertooth_harness.executor import CommandResult
+from ubertooth_harness import outputfiles
 from ubertooth_harness.outputfiles import output_file_list
 from ubertooth_harness.rawlog import NOTE, TAGS, CommandCapture, format_command_record
 from ubertooth_harness.watchdog import wait_counts
@@ -490,6 +491,64 @@ def _watchdog_section(run: _Run) -> list[str]:
     return lines
 
 
+# Sizes in the Output files table: a reader wants the order of magnitude,
+# and the exact byte count is in run.jsonl.
+_UNITS = (("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10))
+
+
+def _size(count: int) -> str:
+    for name, step in _UNITS:
+        if count >= step:
+            return f"{count / step:.1f} {name} ({count} bytes)"
+    return f"{count} bytes"
+
+
+def _checks_cell(saved) -> str:
+    """The checks that read one file, and how they came out."""
+    if not saved.checks:
+        return "none"
+    failed = [check for check in saved.checks if check.reason]
+    kinds = {}
+    for check in saved.checks:
+        kinds[check.kind] = kinds.get(check.kind, 0) + 1
+    counts = ", ".join(f"{count} {kind}" for kind, count in sorted(kinds.items()))
+    if not failed:
+        return f"{counts}: all passed"
+    named = "; ".join(f"{check.name}: {check.reason}" for check in failed[:3])
+    return f"{counts}: {len(failed)} failed ({named})"
+
+
+def _output_files_section(run: _Run) -> list[str]:
+    """The files the run saved, by test, with the checks that read each one.
+
+    Together with the SHA-256 this is what lets a reader check a result
+    afterwards from the report alone, and `ubertooth-harness validate` run
+    the same checks again.
+    """
+    saved = outputfiles.saved_output(run.events)
+    if not saved:
+        return []
+    lines = ["", "## Output files", ""]
+    groups: dict[str, list] = {}
+    for item in saved:
+        groups.setdefault(item.group, []).append(item)
+    for group, items in groups.items():
+        lines += [
+            f"### {group}", "",
+            "| File | Stream | Size | Lines | SHA-256 | Checks |",
+            "|---|---|---|---|---|---|",
+        ]
+        for item in items:
+            lines.append(
+                f"| {_cell(item.file.path)} | {_cell(item.file.stream)} "
+                f"| {_size(item.file.bytes)} "
+                f"| {item.file.lines or ''} | `{item.file.sha256}` "
+                f"| {_cell(_checks_cell(item))} |"
+            )
+        lines.append("")
+    return lines
+
+
 def _results_table(run: _Run) -> list[str]:
     lines = [
         "| Test | Host and resources | Result | Failed cases | Skipped cases "
@@ -812,6 +871,7 @@ def render_run(events: Sequence[Mapping], *, redact_serials: bool = False, trans
     lines += [f"| {_cell(key)} | {_cell(value)} |" for key, value in _setup_rows(run)]
     lines += ["", "## Results", ""] + _results_table(run) + _not_applicable_section(run)
     lines += _watchdog_section(run)
+    lines += _output_files_section(run)
     if transcript:
         lines += ["", "## Transcript", "", LEGEND, "", "```text"] + _transcript(run) + ["```"]
     text = "\n".join(lines) + "\n"
