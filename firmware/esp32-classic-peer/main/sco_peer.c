@@ -6,8 +6,8 @@
  *
  * ESP-IDF gives an application synchronous links only through the Hands-Free
  * Profile, so that is how the link is brought up: the initiator runs the
- * audio gateway and pages, which keeps it the piconet master as it is for
- * SPP, and the acceptor runs the hands-free unit. ESP-IDF includes both
+ * audio gateway and pages, which keeps it the piconet's leader as it is
+ * for SPP, and the acceptor runs the hands-free unit. ESP-IDF includes both
  * profiles in one image but says they cannot run at the same time, so only
  * the one the role needs is started. Nothing here starts until "sco start",
  * which leaves a board that only does SPP on the air exactly as it was.
@@ -66,7 +66,7 @@
 
 /* How long profile_stop() waits for a frame that is already with the stack,
  * so a buffer is never submitted into a profile being taken apart. */
-#define QUIESCE_WAIT_MS 200
+#define QUIESCE_WAIT_MS 500
 
 struct pkt_stats {
     uint32_t rx_total, rx_correct, rx_err, rx_none, rx_lost;
@@ -88,7 +88,8 @@ static struct {
     uint32_t tx_frames, tx_errors, rx_frames, rx_bad;
     esp_bd_addr_t peer;   /* who the gateway calls */
     esp_bd_addr_t remote; /* the far end of the live link, either role */
-    bool stats_wanted;    /* a packet-counter request is outstanding */
+    bool stats_wanted; /* a packet-counter request is outstanding */
+    bool stats_dead;   /* a request went unanswered: see sco_pkt_stats() */
     struct pkt_stats stats;
     bool stats_ok;
     esp_hf_prof_state_t prof_state;
@@ -146,17 +147,13 @@ static void send_frame(void)
     LOCK();
     len = sc.frame_len;
     /* quiesce is how a stop keeps this out of a profile it is taking apart,
-     * and sending is how it knows the last frame has left. */
-    go = sc.audio && !sc.quiesce;
+     * and sending is how it knows the last frame has left. A frame size
+     * outside the usable range was reported and zeroed when the link came
+     * up, so there is nothing to say about it here. */
+    go = sc.audio && !sc.quiesce && len >= 4 && len <= FRAME_MAX;
     role = sc.role;
     handle = sc.handle;
     counter = sc.counter;
-    if (go && (len < 4 || len > FRAME_MAX)) {
-        /* An unusable frame size: count it rather than write past a buffer
-         * the size asked for, or stop silently. */
-        sc.tx_errors++;
-        go = false;
-    }
     if (go) {
         sc.sending = true;
     }
@@ -269,16 +266,21 @@ static void audio_changed(int state, uint16_t handle, uint16_t frame_len,
 {
     bool up = (state == ESP_HF_AUDIO_STATE_CONNECTED ||
                state == ESP_HF_AUDIO_STATE_CONNECTED_MSBC);
+    bool usable = up && frame_len >= 4 && frame_len <= FRAME_MAX;
 
     LOCK();
     sc.audio = up;
     /* Keep the handle and the frame size only while there is a link to use
-     * them on, so a status line never describes one that has gone. */
+     * them on, so a status line never describes one that has gone. The size
+     * is checked here, once, rather than on every frame: a link whose frame
+     * size this firmware cannot fill carries no audio, and "sco_frame_len":0
+     * in the status line is how that shows. */
     sc.handle = up ? handle : 0;
-    sc.frame_len = up ? frame_len : 0;
+    sc.frame_len = usable ? frame_len : 0;
     sc.msbc = up && state == ESP_HF_AUDIO_STATE_CONNECTED_MSBC;
     if (up) {
         sc.counter = 0;
+        sc.stats_dead = false;
         memcpy(sc.remote, remote, ESP_BD_ADDR_LEN);
     }
     UNLOCK();
@@ -287,6 +289,9 @@ static void audio_changed(int state, uint16_t handle, uint16_t frame_len,
         return; /* not an answer to anything yet */
     }
     shell_line("utesp: sco %s", up ? "connected" : "disconnected");
+    if (up && !usable) {
+        shell_line("utesp: sco frame size %u unusable, sending no audio", frame_len);
+    }
     xSemaphoreGive(audio_ev);
 }
 
@@ -471,6 +476,17 @@ static const char *profile_start(enum peer_role role)
     const char *err;
 
     xSemaphoreTake(prof_ev, 0);
+    /* The profile is recorded as ours the moment the init call is accepted,
+     * before waiting for its event. The init may well land after the wait
+     * gives up, and a profile nobody owns is one nothing will ever stop:
+     * the next role would start the other one on top of it, which ESP-IDF
+     * says cannot work. Every failure below leaves this set so the caller's
+     * profile_stop() has something to stop. */
+    LOCK();
+    sc.profile_up = true;
+    sc.role = role;
+    UNLOCK();
+
     if (role == PEER_ROLE_INITIATOR) {
         if (esp_hf_ag_register_callback(ag_cb) != ESP_OK ||
             esp_hf_ag_init() != ESP_OK) {
@@ -495,8 +511,6 @@ static const char *profile_start(enum peer_role role)
         }
     }
     LOCK();
-    sc.profile_up = true;
-    sc.role = role;
     sc.tx_frames = sc.tx_errors = sc.rx_frames = sc.rx_bad = 0;
     sc.stats_ok = false;
     sc.stats_wanted = false;
@@ -505,12 +519,18 @@ static const char *profile_start(enum peer_role role)
 }
 
 /* Stops the sender and waits for a frame already with the stack, so nothing
- * is submitted into a profile that is being taken apart. */
-static void quiesce_sender(void)
+ * is submitted into a profile that is being taken apart. Says whether the
+ * frame did leave: tearing the profile down under one would hand a buffer to
+ * a pool being freed.
+ *
+ * Note that this does not touch sc.audio. Only the controller's own event, or
+ * a profile teardown that the stack confirmed, may say the link is down; a
+ * stop that failed must leave the status line describing what is really on
+ * the air. */
+static bool quiesce_sender(void)
 {
     LOCK();
     sc.quiesce = true;
-    sc.audio = false;
     UNLOCK();
 
     for (int waited = 0; waited < QUIESCE_WAIT_MS; waited += 2) {
@@ -519,10 +539,11 @@ static void quiesce_sender(void)
         busy = sc.sending;
         UNLOCK();
         if (!busy) {
-            return;
+            return true;
         }
         vTaskDelay(pdMS_TO_TICKS(2));
     }
+    return false;
 }
 
 static const char *profile_stop(void)
@@ -539,7 +560,12 @@ static const char *profile_stop(void)
         return NULL;
     }
 
-    quiesce_sender();
+    if (!quiesce_sender()) {
+        LOCK();
+        sc.quiesce = false;
+        UNLOCK();
+        return "a frame is still with the stack";
+    }
     xSemaphoreTake(prof_ev, 0);
     if ((role == PEER_ROLE_INITIATOR ? esp_hf_ag_deinit() : esp_hf_client_deinit()) != ESP_OK) {
         LOCK();
@@ -557,9 +583,11 @@ static const char *profile_stop(void)
         return err;
     }
 
+    /* The profile is gone, so anything it was holding up is gone with it. */
     LOCK();
     sc.profile_up = false;
     sc.slc = false;
+    sc.audio = false;
     sc.handle = 0;
     sc.frame_len = 0;
     sc.quiesce = false;
@@ -595,7 +623,7 @@ const char *sco_start(enum peer_role role, const uint8_t *peer_addr)
 
     if (role == PEER_ROLE_ACCEPTOR) {
         /* The hands-free unit waits: the gateway pages, so that it is the
-         * piconet master here as it is for SPP. */
+         * piconet's leader here as it is for SPP. */
         return NULL;
     }
 
@@ -693,17 +721,25 @@ const char *sco_pkt_stats(char *out, size_t len)
     struct pkt_stats s;
     uint16_t handle;
     enum peer_role role;
-    bool audio, got;
+    bool audio, dead, got;
 
     LOCK();
     audio = sc.audio;
     handle = sc.handle;
     role = sc.role;
+    dead = sc.stats_dead;
     sc.stats_ok = false;
-    sc.stats_wanted = audio;
+    sc.stats_wanted = audio && !dead;
     UNLOCK();
     if (!audio) {
         return "no audio link to count packets on";
+    }
+    /* A request that went unanswered may still be in flight, and a reply
+     * carries nothing to tell it from the next request's. Rather than risk
+     * answering one request with another's counters, the command is refused
+     * until the link is made again, which is a clean slate. */
+    if (dead) {
+        return "a packet-counter request went unanswered; make the link again";
     }
 
     xSemaphoreTake(stats_ev, 0);
@@ -717,6 +753,7 @@ const char *sco_pkt_stats(char *out, size_t len)
     if (xSemaphoreTake(stats_ev, pdMS_TO_TICKS(STATS_TIMEOUT_MS)) != pdTRUE) {
         LOCK();
         sc.stats_wanted = false;
+        sc.stats_dead = true;
         UNLOCK();
         return "the packet counters did not arrive";
     }

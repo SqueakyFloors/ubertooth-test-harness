@@ -203,7 +203,7 @@ the two boards.
 ESP-IDF gives an application synchronous links only through the Hands-Free
 Profile, so that is how the link is opened: the initiator runs the audio
 gateway and the acceptor runs the hands-free unit. The gateway pages, which
-keeps the initiator the piconet master, the same way round as for SPP, so
+keeps the initiator the piconet's leader, the same way round as for SPP, so
 the LAP on the air is still the initiator's.
 
 ESP-IDF's own
@@ -229,12 +229,14 @@ audio link down, because it belongs to a role; `spp stop` does not, as the
 two links are separate.
 
 These commands block the shell while the controller works, so a driver's read
-timeout has to allow for the worst case: about 28 seconds for `sco start` on
-the initiator (3 s to start the profile, 15 s to page and bring the service
-level connection up, 10 s for the audio link), about 10 seconds for `sco stop`
-(3 s each for the link and the service level connection, 3 s for the profile),
-and the same 10 seconds for `role` and `defaults`, which stop the audio link
-first. A link to a board that is awake takes four or five seconds in practice.
+timeout has to allow for the worst case. Counting the tidying up a failure
+does: about 32 seconds for `sco start` on the initiator (3 s to start the
+profile, 15 s to page and bring the service level connection up, 10 s for the
+audio link, then up to 3.5 s to put the profile back), about 10 seconds for
+`sco stop` (3 s each for the link and the service level connection, 3.5 s for
+the profile), and about 15 seconds for `role` and `defaults`, which stop the
+audio link and then the SPP side. Allow 35 seconds and nothing will time out.
+A link to a board that is awake takes four or five seconds in practice.
 
 ### The audio pattern
 
@@ -325,8 +327,8 @@ speech on does not start lying.
 ## The piconet clock is not readable from this firmware
 
 A test that checks the clock an Ubertooth recovers wants the piconet clock
-from the master, which here is the initiator. The master's native clock
-(CLKN) **is** the piconet clock, and the ESP32's controller will report it:
+from the board that leads the piconet, which here is the initiator. That
+board's own native clock (CLKN) **is** the piconet clock, and the ESP32's controller will report it:
 `HCI_Read_Clock` (opcode `0x1407`) with `Which_Clock` = 0 answers with a
 status of success and a rising clock value. Measured on one of these boards
 on 2026-10-30 with a throwaway firmware that runs the controller with no host
@@ -364,8 +366,8 @@ command here. Everything the application could use to send it is closed:
   operations.
 
 A board that gave up Bluedroid could report the clock: driven over HCI, it
-could join a piconet as a slave and read the piconet clock with
-`Which_Clock` = 1, or be driven as a host and read its own. That is a
+could join a piconet as the other side of a link and read the piconet clock
+with `Which_Clock` = 1, or lead one and read its own. That is a
 different role from this firmware and is not built here.
 
 ## Extending
