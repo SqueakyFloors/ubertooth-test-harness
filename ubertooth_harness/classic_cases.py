@@ -78,9 +78,10 @@ STREAM_PERIOD_MS = 20
 STREAM_PAYLOAD = 200
 # Packet lines a capture of the master's piconet must hold. The Ubertooth
 # sweeps 79 channels and decodes only the access codes it happens to land on,
-# so the yield is low and varies: 21 to 28 packet lines per 25 s run on the
-# bench. This is a floor a working receive clears, not an expected count.
-MIN_PACKETS = 3
+# so the count varies widely: eight 25 s runs on the bench gave 50 to 189
+# lines of this piconet. This is a floor a working receive clears with room
+# to spare, not an expected count.
+MIN_PACKETS = 10
 # Writes the initiator must report afterwards, so a case cannot pass on a
 # link that came up and then sent nothing.
 MIN_WRITES = 50
