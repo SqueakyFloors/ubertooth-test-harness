@@ -426,7 +426,7 @@ def _run(argv, reader, seconds, errors, failures, refused, out, *, close=False,
             next_scan = time.monotonic() + CHILD_SCAN_S
         if not reader.read():
             time.sleep(POLL_S)
-        elif (stop_after_records
+        elif (stop_after_records is not None
                 and parse_stream(bytes(reader.data)).records >= stop_after_records):
             break
     stopped = process.poll() is None

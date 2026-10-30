@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -176,6 +177,14 @@ class ChildTests(unittest.TestCase):
             time.sleep(0.05)
         self.fail(f"the command the module started ({grandchild}) is still running")
 
+    def test_no_module_starts_once_the_run_is_stopping(self):
+        runner._stopping = True
+        self.addCleanup(setattr, runner, "_stopping", False)
+        outcome = runner._start("tests.test_build", 1)
+        self.assertEqual("FAIL", outcome.status())
+        self.assertIn("interrupted before this module ran", outcome.errors[0][1])
+        self.assertEqual(0, outcome.tests)
+
     def test_a_child_that_dies_without_a_result_is_an_error(self):
         with self.child(-11, errors="zsh: segmentation fault\n"):
             outcome = runner._start("tests.test_build", 1)
@@ -321,6 +330,32 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(1, result.returncode)
         self.assertIn("no test module tests/test_nope.py", result.stderr)
         self.assertNotIn("running", result.stderr)
+
+    def test_a_signal_to_the_runner_stops_every_child(self):
+        # The children are in sessions of their own, so nothing but this
+        # reaches them: a cancelled CI job or a Ctrl-C must not leave test
+        # processes behind holding their leases, ports and lock files.
+        process = subprocess.Popen(
+            [sys.executable, str(RUNNER), "-j", "2", "test_extcap_capture",
+             "test_deploy_scripts"],
+            cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, start_new_session=True)
+        self.addCleanup(process.kill)
+        children = []
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and len(children) < 2:
+            children = subprocess.run(("pgrep", "-P", str(process.pid)),
+                                      capture_output=True, text=True).stdout.split()
+            time.sleep(0.1)
+        self.assertEqual(2, len(children), "the runner started no children")
+        process.send_signal(signal.SIGTERM)
+        output = process.communicate(timeout=60)[0]
+        self.assertEqual(1, process.returncode, output)
+        self.assertIn("interrupted", output)
+        left = [pid for pid in children
+                if subprocess.run(("kill", "-0", pid),
+                                  capture_output=True).returncode == 0]
+        self.assertEqual([], left, f"test processes left running: {left}")
 
     def test_jobs_must_be_a_real_count(self):
         result = self.run_runner("-j", "0", "test_build")

@@ -27,6 +27,10 @@ tests/.test-durations.json, and by file size until that file exists.
 is shown when it failed, or with ``-v`` for every module, since a child's
 output only arrives when it ends. A module that hangs is stopped after
 TIMEOUT_S and reported as an error, so one hung test cannot hold a run.
+
+Ctrl-C, or a SIGTERM to the runner, stops every child and the commands they
+started: each child leads a process group of its own, which neither signal
+reaches by itself.
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -103,9 +108,13 @@ def _worker(module: str, verbosity: int, result_path: str) -> int:
 
 # --------------------------------------------------------------- the parent
 
-# The children now running, so Ctrl-C can stop them: they lead process
+# The children now running, so an interrupt can stop them: they lead process
 # groups of their own and do not get the terminal's interrupt themselves.
+# _stopping closes the run to new children, so none is started, and left
+# running, after the interrupt.
+_lock = threading.Lock()
 _running: set = set()
+_stopping = False
 
 
 class Outcome:
@@ -209,20 +218,68 @@ def _stop(children) -> None:
 
     The group, not the child alone, so a command the tests started and did
     not stop goes too: one left running holds a lock or a port the rest of
-    the run needs, and its end of the child's output pipe. Neither child is
-    waited for in between, so each stays its group's leader until both
-    signals are sent and the numbers cannot have been given to anyone else.
+    the run needs, and its end of the child's output pipe. A second
+    interrupt does not get out of here with children still running.
     """
     children = list(children)
     for child in children:
         _signal_group(child, signal.SIGTERM)
-    time.sleep(STOP_WAIT_S)
-    for child in children:
-        _signal_group(child, signal.SIGKILL)
+    try:
+        time.sleep(STOP_WAIT_S)
+    except KeyboardInterrupt:
+        pass  # Interrupted again: do not wait, kill now.
+    while True:
+        try:
+            for child in children:
+                _signal_group(child, signal.SIGKILL)
+            return
+        except KeyboardInterrupt:
+            continue
+
+
+def _interrupt() -> None:
+    """Close the run to new children and stop the ones running."""
+    global _stopping
+    with _lock:
+        _stopping = True
+        children = list(_running)
+    _stop(children)
+
+
+def _interrupted(number, _frame):
+    """A signal aimed at the runner has to take the children with it: they
+    are in sessions of their own, so a job cancel or a kill never reaches
+    them. Raising here goes through the one interrupt path below."""
+    raise KeyboardInterrupt(f"signal {number}")
+
+
+def _register(child) -> bool:
+    """Track a running child; False when the run is already stopping."""
+    with _lock:
+        if _stopping:
+            return False
+        _running.add(child)
+        return True
+
+
+def _decode(output) -> str:
+    """The partial output of a child that timed out, bytes or text."""
+    if not output:
+        return ""
+    return output if isinstance(output, str) else output.decode(errors="replace")
+
+
+def _not_run(module: str) -> Outcome:
+    outcome = Outcome(module, 0.0)
+    outcome.errors.append([module, "the run was interrupted before this "
+                                   "module ran\n"])
+    return outcome
 
 
 def _start(module: str, verbosity: int, timeout: float = TIMEOUT_S) -> Outcome:
     """Run one module in a child process and collect what it reported."""
+    if _stopping:
+        return _not_run(module)
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="harness-test-") as directory:
         result_path = os.path.join(directory, "result.json")
@@ -235,22 +292,27 @@ def _start(module: str, verbosity: int, timeout: float = TIMEOUT_S) -> Outcome:
         child = subprocess.Popen(argv, cwd=ROOT, stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE, text=True,
                                  start_new_session=True)
-        _running.add(child)
+        if not _register(child):
+            # The interrupt landed between the check above and this child.
+            _stop([child])
+            return _not_run(module)
         timed_out = False
         try:
             output, errors = child.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as expired:
             # A hung test would otherwise hold the whole run with nothing to
             # read, since a child's output only arrives when it ends.
             timed_out = True
+            output, errors = _decode(expired.stdout), _decode(expired.stderr)
             _stop([child])
             try:
                 # Bounded: a process that left the group still holds the
                 # write end of the pipe, and this is the hang the timeout
-                # exists to end.
+                # exists to end. What the child printed before it hung is
+                # the only evidence of where, so it is kept either way.
                 output, errors = child.communicate(timeout=STOP_WAIT_S)
             except subprocess.TimeoutExpired:
-                output, errors = "", "(the output pipe was still open)\n"
+                errors += "(something still holds the output pipe open)\n"
         finally:
             _running.discard(child)
         outcome = Outcome(module, time.monotonic() - started)
@@ -356,6 +418,11 @@ def main(argv=None) -> int:
     if jobs < 1:
         raise SystemExit(f"error: --jobs must be 1 or more, not {jobs}")
     verbosity = 2 if options.verbose else 1
+    for number in (signal.SIGTERM, signal.SIGHUP):
+        # Not where it is already ignored: under nohup, a closed terminal
+        # must not end the run.
+        if signal.getsignal(number) is not signal.SIG_IGN:
+            signal.signal(number, _interrupted)
     print(f"running {len(modules)} test modules, {jobs} at a time",
           file=sys.stderr, flush=True)
 
@@ -372,13 +439,14 @@ def main(argv=None) -> int:
                       f"{outcome.tests:4d} tests  {outcome.module}",
                       file=sys.stderr, flush=True)
         except KeyboardInterrupt:
-            # The children lead their own process groups, so the terminal's
-            # interrupt did not reach them; they are stopped outright, or
-            # leaving this block would wait for every one of them.
+            # The children lead their own sessions, so neither the terminal's
+            # interrupt nor a signal sent to this process reaches them; they
+            # are stopped outright, or leaving this block would wait for
+            # every one of them.
             for future in running:
                 future.cancel()
             print("\ninterrupted", file=sys.stderr, flush=True)
-            _stop(_running)
+            _interrupt()
             return 1
     seconds = time.monotonic() - started
 
