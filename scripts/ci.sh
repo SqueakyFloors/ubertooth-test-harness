@@ -195,7 +195,9 @@ NCS_BOARD=nrf52840dk/nrf52840
 DK_FIRMWARE=firmware/nrf52840dk
 
 run_firmware_dk() {
-    repo=$PWD
+    # The physical path: docker mounts and `west build -s` must not depend on
+    # a symlinked parent (/tmp on macOS).
+    repo=$(pwd -P)
     version=$(cat "$DK_FIRMWARE/NCS_VERSION")
     image=${NCS_IMAGE:-ghcr.io/nrfconnect/sdk-nrf-toolchain:$version}
     workspace=${NCS_WORKSPACE:-$WORK/ncs}
