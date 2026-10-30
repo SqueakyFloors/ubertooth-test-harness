@@ -4,7 +4,6 @@ import io
 import json
 import sys
 import unittest
-from pathlib import Path
 
 from ubertooth_harness import esp32peer
 from tests.fake_esp32 import FakePeerFirmware, FakePeerPort, opener, shell
@@ -372,9 +371,6 @@ class MainTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as raised:
                 esp32peer.main(["identify", "--device", ACCEPTOR, "--", "ls"])
         self.assertEqual(2, raised.exception.code)
-
-    def test_the_module_runs_as_a_script(self):
-        self.assertTrue(Path(esp32peer.__file__).is_file())
 
 
 class _captured:
