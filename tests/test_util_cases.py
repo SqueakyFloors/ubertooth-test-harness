@@ -748,8 +748,7 @@ class MultiBench:
                 if self.past_end is None:
                     return self._result(
                         command, 1, "",
-                        f"error: no Ubertooth at index {index} ({len(self.order)} attached)\n"
-                        "could not open Ubertooth device\n")
+                        f"error: no Ubertooth at index {index} ({len(self.order)} attached)\n")
                 index = 0
             serial = self.order[index]
             rest = tuple(options[1:])
@@ -769,10 +768,13 @@ class MultiBench:
         devices = "".join(
             f"  Device {i}: Serial No: {s}\n" for i, s in enumerate(self.order)
         )
+        # Neither refusal is followed by another line: the retired
+        # "could not open Ubertooth device" was the only one, and it named no
+        # cause of its own (fork 753269b).
         return self._result(
             command, 1, "",
             "multiple Ubertooth devices found! Use '-U' to specify device number\n"
-            + devices + "could not open Ubertooth device\n",
+            + devices,
         )
 
 

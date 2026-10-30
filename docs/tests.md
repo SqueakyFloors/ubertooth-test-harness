@@ -588,9 +588,8 @@ selection for a command that writes. The listing order is the USB index order,
 which the registry does not know, so the checks require the right set in index
 order rather than a particular board at a particular index. Harness issues
 [#162](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/162)
-(the identity listing expects output from before `-V` ended the command),
-[#174](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/174),
-and [#145](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/145)
+(the identity listing expects output from before `-V` ended the command) and
+[#145](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/145)
 are open against the expected wording.
 
 ## BLE mode conflicts
