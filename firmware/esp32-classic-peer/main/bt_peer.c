@@ -820,6 +820,8 @@ static const char *read_failure(int result)
         return "the controller did not answer the clock read";
     case UTESP_CLOCK_BAD_ANSWER:
         return "the controller's clock answer was short";
+    case UTESP_CLOCK_WRONG_LINK:
+        return "the controller answered the clock read for another link";
     default:
         return "the clock read failed";
     }

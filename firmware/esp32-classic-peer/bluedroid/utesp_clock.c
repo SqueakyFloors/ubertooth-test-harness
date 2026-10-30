@@ -67,6 +67,20 @@ static struct {
     struct utesp_clock got;
 } slot;
 
+/* Takes the command buffer a Command Status left behind, if there is one.
+ * Called from the reader, which is the only place it can be freed: the HCI
+ * layer is still reading it when clock_status() runs. */
+static BT_HDR *take_leftover(void)
+{
+    BT_HDR *buf;
+
+    xSemaphoreTake(slot_lock, portMAX_DELAY);
+    buf = slot.free_me;
+    slot.free_me = NULL;
+    xSemaphoreGive(slot_lock);
+    return buf;
+}
+
 int utesp_clock_init(void)
 {
     SemaphoreHandle_t request, slot_guard, arrived;
@@ -195,6 +209,12 @@ static int read_clock(uint16_t handle, uint8_t which, struct utesp_clock *out)
         return UTESP_CLOCK_TIMED_OUT;
     }
 
+    /* One left by a read that had already given up waiting, so a second one
+     * cannot push the first out of the slot unfreed. */
+    if ((free_me = take_leftover()) != NULL) {
+        HCI_FREE_CMD_BUF(free_me);
+    }
+
     if ((cmd = HCI_GET_CMD_BUF(READ_CLOCK_PARAM_LEN)) == NULL) {
         return UTESP_CLOCK_NO_MEMORY;
     }
@@ -237,13 +257,9 @@ static int read_clock(uint16_t handle, uint8_t which, struct utesp_clock *out)
         *out = slot.got;
     }
     slot.waiting = false;
-    free_me = slot.free_me;
-    slot.free_me = NULL;
     xSemaphoreGive(slot_lock);
 
-    /* Always taken, so a buffer left by a read that had already given up is
-     * freed by the next one rather than lost. */
-    if (free_me) {
+    if ((free_me = take_leftover()) != NULL) {
         HCI_FREE_CMD_BUF(free_me);
     }
 
@@ -254,9 +270,11 @@ static int read_clock(uint16_t handle, uint8_t which, struct utesp_clock *out)
         return UTESP_CLOCK_BAD_ANSWER;
     }
     /* A clock for a link other than the one asked about would be worse than
-     * no clock at all. */
-    if (out->complete && which == WHICH_CLOCK_PICONET && out->handle != handle) {
-        return UTESP_CLOCK_BAD_ANSWER;
+     * no clock at all. The handle is only meaningful in an answer that
+     * succeeded. */
+    if (out->status == HCI_SUCCESS && which == WHICH_CLOCK_PICONET &&
+        out->handle != handle) {
+        return UTESP_CLOCK_WRONG_LINK;
     }
     return UTESP_CLOCK_OK;
 }
