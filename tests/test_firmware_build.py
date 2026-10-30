@@ -25,6 +25,10 @@ from tests.test_nrfdk import hex_file
 from ubertooth_harness import nrfdk
 
 ROOT = Path(__file__).resolve().parents[1]
+# The path the shell works with: a `sh` started in ROOT reports the physical
+# directory, which differs from ROOT where a parent is a symlink (/tmp on
+# macOS), and that is what the script mounts and passes to `west build`.
+REPO = Path(os.path.realpath(ROOT))
 CI = ROOT / "scripts" / "ci.sh"
 WORKFLOW = ROOT / ".github" / "workflows" / "firmware.yml"
 FIRMWARE = ROOT / "firmware" / "nrf52840dk"
@@ -102,7 +106,7 @@ class FirmwareStepTests(unittest.TestCase):
         self.assertIn(f"-b {BOARD}", build)
         self.assertIn("--no-sysbuild", build)
         self.assertIn("-p always", build)
-        self.assertIn(f"-s {ROOT}/firmware/nrf52840dk", build)
+        self.assertIn(f"-s {REPO}/firmware/nrf52840dk", build)
         # The image check is the harness's own, and it names the version.
         self.assertIn(f"firmware version: {nrfdk.FIRMWARE_VERSION}", result.stdout)
         self.assertIn("firmware-dk passed", result.stdout)
@@ -113,7 +117,7 @@ class FirmwareStepTests(unittest.TestCase):
         self.run_step()
 
         for command in self.commands():
-            self.assertIn(f"-v {ROOT}:{ROOT}:ro", command)
+            self.assertIn(f"-v {REPO}:{REPO}:ro", command)
 
     def test_an_image_without_the_pinned_version_fails_the_step(self):
         # `nrfdk.py ensure` flashes only when the board reports another
@@ -130,14 +134,43 @@ class FirmwareStepTests(unittest.TestCase):
         self.assertEqual(1, result.returncode, result.stdout)
         self.assertNotIn("firmware-dk passed", result.stdout)
 
-    def test_an_existing_workspace_is_reused(self):
+    def test_a_workspace_for_this_version_is_reused_and_stamped(self):
         (self.workspace / ".west").mkdir(parents=True)
+        (self.workspace / ".ncs-version").write_text(f"{NCS_VERSION}\n")
 
         result = self.run_step()
 
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertNotIn("west init", "\n".join(self.commands()))
-        self.assertIn("reusing the workspace", result.stdout)
+        self.assertIn(f"reusing the {NCS_VERSION} workspace", result.stdout)
+
+    def test_a_new_workspace_records_the_version_it_was_made_for(self):
+        result = self.run_step()
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual(NCS_VERSION,
+                         (self.workspace / ".ncs-version").read_text().strip())
+
+    def test_a_workspace_made_for_another_version_is_refused(self):
+        # `west update` moves the projects to the manifest's revisions, but the
+        # manifest repository stays where `west init --mr` left it: reusing
+        # such a workspace would build sources the firmware does not pin.
+        (self.workspace / ".west").mkdir(parents=True)
+        (self.workspace / ".ncs-version").write_text("v3.0.0\n")
+
+        result = self.run_step()
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("was made for nRF Connect SDK v3.0.0", result.stderr)
+        self.assertNotIn("west build", "\n".join(self.commands()))
+
+    def test_an_unstamped_workspace_is_refused(self):
+        (self.workspace / ".west").mkdir(parents=True)
+
+        result = self.run_step()
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("was made for nRF Connect SDK unknown", result.stderr)
 
     def test_the_workspace_can_be_kept_outside_the_work_directory(self):
         kept = self.directory / "kept"

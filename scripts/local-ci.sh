@@ -21,7 +21,8 @@ while getopts r:s: opt; do
     case $opt in
         r) rev=$OPTARG ;;
         s) remote=$OPTARG ;;
-        *) echo "usage: scripts/local-ci.sh [-r REV] [-s SSH_PREFIX] [test|build|all]" >&2; exit 2 ;;
+        *) echo "usage: scripts/local-ci.sh [-r REV] [-s SSH_PREFIX]" \
+                "[test|build|all|firmware-dk]" >&2; exit 2 ;;
     esac
 done
 shift $((OPTIND - 1))

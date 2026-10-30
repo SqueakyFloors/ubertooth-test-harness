@@ -201,6 +201,7 @@ run_firmware_dk() {
     workspace=${NCS_WORKSPACE:-$WORK/ncs}
     build=$workspace/utdk-build
     hex=$build/zephyr/zephyr.hex
+    stamp=$workspace/.ncs-version
     mkdir -p "$workspace"
 
     # Every toolchain command runs in that image, which takes one shell
@@ -222,9 +223,19 @@ run_firmware_dk() {
 
     step "nRF Connect SDK $version workspace in $workspace"
     if [ -d "$workspace/.west" ]; then
-        echo "reusing the workspace that is there"
+        # A workspace made for another version keeps that version's manifest
+        # revision, so reusing it would build sources the firmware does not
+        # pin. Say so instead of deleting someone's workspace.
+        kept=$([ -f "$stamp" ] && cat "$stamp" || echo unknown)
+        if [ "$kept" != "$version" ]; then
+            echo "error: the workspace in $workspace was made for nRF Connect SDK" \
+                 "$kept, not $version; remove it or set NCS_WORKSPACE elsewhere" >&2
+            return 1
+        fi
+        echo "reusing the $version workspace that is there"
     else
         ncs "west init -m $NCS_URL --mr $version ."
+        echo "$version" > "$stamp"
     fi
     # --narrow with a depth of one: the manifest's revisions, not every ref
     # and the whole history of forty repositories.
@@ -238,7 +249,10 @@ run_firmware_dk() {
     # `nrfdk.py ensure` on a board that already runs the old one.
     step "the image carries the pinned firmware version"
     ls -l "$hex"
-    "$PYTHON" -m ubertooth_harness.nrfdk check-image "$hex"
+    # The harness package runs in its own Python 3.12 environment only, as
+    # run_build does it.
+    [ -x .venv/bin/python ] || "$PYTHON" bootstrap.py
+    .venv/bin/python -m ubertooth_harness.nrfdk check-image "$hex"
 }
 
 case "${1:-}" in
