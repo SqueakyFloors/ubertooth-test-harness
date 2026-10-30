@@ -1,11 +1,13 @@
 """Command-line interface for the local harness slice."""
 
 import argparse
+from collections.abc import Sequence
 import contextlib
 from dataclasses import asdict
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import re
 import signal
 import subprocess
 import sys
@@ -1043,13 +1045,17 @@ def _boards_command(args: argparse.Namespace) -> int:
         return 0
     for state in states:
         external = state.get("external") or {}
+        # The host lock is this machine's, whichever host --host named: a
+        # lock file read here says nothing about another machine's, so the
+        # line says which machine it is about.
+        label = state["resource"] + (" (this machine)" if state.get("host_lock") else "")
         if state.get("unleasable"):
-            print(f"{state['resource']:<12} not leasable: {state['unleasable']}")
+            print(f"{label:<12} not leasable: {state['unleasable']}")
         elif state["held"] and state["holder"]:
             holder = state["holder"]
             since = board_leases.held_for(holder)
             detail = board_leases.describe_holder(holder)
-            print(f"{state['resource']:<12} held  {detail}" + (f" (for {since})" if since else ""))
+            print(f"{label:<12} held  {detail}" + (f" (for {since})" if since else ""))
             if external.get("held") and not external.get("error"):
                 # Two parties hold the board; name the other one too.
                 print(f"{'':<12} and   " + board_leases.describe_external(
@@ -1057,17 +1063,17 @@ def _boards_command(args: argparse.Namespace) -> int:
                 ))
         elif external.get("held"):
             if external.get("error"):
-                print(f"{state['resource']:<12} held  outside the harness: "
+                print(f"{label:<12} held  outside the harness: "
                       f"{external['lock']} (cannot be read, so taken as held)")
             else:
                 detail = board_leases.describe_external(
                     Path(external["lock"]), external.get("holder", "")
                 )
-                print(f"{state['resource']:<12} held  {detail}")
+                print(f"{label:<12} held  {detail}")
         elif state["held"]:
-            print(f"{state['resource']:<12} held  {board_leases.describe_holder({})}")
+            print(f"{label:<12} held  {board_leases.describe_holder({})}")
         else:
-            print(f"{state['resource']:<12} free")
+            print(f"{label:<12} free")
         if external.get("error"):
             print(f"{'':<12} warning: cannot read external lock: {external['error']}")
     return 0
@@ -1124,6 +1130,34 @@ def _power_command(args: argparse.Namespace) -> int:
     return 0
 
 
+_DFU_TOOL = "ubertooth-dfu"
+# A word of a command line, as a shell would split it: the quotes and
+# operators a wrapped command uses are separators, everything else is a word.
+_COMMAND_WORD = re.compile(r"""[^\s'"|&;()<>]+""")
+
+
+def _writes_firmware(command: Sequence[str]) -> bool:
+    """True when this command line runs ubertooth-dfu, however it is wrapped.
+
+    The tool is not always the first word: `sudo ubertooth-dfu ...`,
+    `env VAR=1 ubertooth-dfu ...` and `sh -c "ubertooth-dfu ..."` all write
+    firmware, so every word of every argument is examined, including the words
+    inside a quoted argument a shell would run. A path is matched by its last
+    component, so `/usr/local/bin/ubertooth-dfu` counts and
+    `ubertooth-dfu-wrapper` does not.
+
+    A command line that only mentions the name takes the host lock without
+    needing it, which costs a wait; one that writes firmware without the lock
+    can overlap another command's writes or power changes, which is what the
+    lock exists to prevent.
+    """
+    return any(
+        PurePosixPath(word).name == _DFU_TOOL
+        for argument in command
+        for word in _COMMAND_WORD.findall(argument)
+    )
+
+
 def _lease_command(args: argparse.Namespace) -> int:
     command = list(args.command_line)
     if not command:
@@ -1138,7 +1172,7 @@ def _lease_command(args: argparse.Namespace) -> int:
         boards.append(board_leases.Board(alias, board_leases.resource_key(resource)))
     # A manual firmware write (or DFU read-back) must not overlap another
     # command's power changes or writes on this host.
-    host_lock = args.host_lock or Path(command[0]).name == "ubertooth-dfu"
+    host_lock = args.host_lock or _writes_firmware(command)
     with board_leases.acquire(
         boards,
         board_leases.holder_info(run_id=None, owner=args.owner, purpose="lease: " + " ".join(command)),

@@ -1229,12 +1229,20 @@ run, a `--build` run that flashes its boards with its own build takes it with
 its leases before the build and releases it after the flash stage (so it is
 held for the build as well, and two such runs on one host do not start at the
 same time), and `lease` holds it for its command with `--host-lock`, or always
-when the command is `ubertooth-dfu`. A second such command on the host fails at
-once, before any build or device command, and names the holder (owner, run,
-command, pid, and since when); `--wait-for-boards` waits for it as for a
-board. `ubertooth-harness boards` shows it as `host lock`, and the run report
-records it. Runs that neither switch power nor write firmware do not take it,
-so they still share the host.
+when the command line runs `ubertooth-dfu`. The tool is found wherever it
+appears, so `sudo ubertooth-dfu ...`, `env VAR=1 ubertooth-dfu ...` and
+`sh -c "ubertooth-dfu ..."` take the lock as a bare `ubertooth-dfu` does; a
+path is matched by its last component, so `ubertooth-dfu-wrapper` is not it.
+A command line that only mentions the name takes the lock it does not need,
+which costs a wait and nothing else. A second command that needs the lock
+fails at once, before any build or device command, and names the holder
+(owner, run, command, pid, and since when); `--wait-for-boards` waits for it
+as for a board. `ubertooth-harness boards` shows it as
+`host lock (this machine)`: the lock is the one on the machine the command
+runs on, whatever `--host` names, since a lock file read here says nothing
+about another machine's. In `--json` it is the entry with `host_lock: true`.
+The run report records it. Runs that neither switch power nor write firmware
+do not take it, so they still share the host.
 
 Lock order: the host lock first, then the boards in serial order, taken in one
 all-or-nothing attempt. Nothing blocks while holding a lock (a busy lock

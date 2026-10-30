@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -357,8 +358,41 @@ class HostLockCliTests(unittest.TestCase):
             )
         self.assertEqual(0, code)
         line = out.splitlines()[-1]
-        self.assertRegex(line, r"^host lock +held  agent-9, run run-agent-9, test, ")
+        self.assertRegex(
+            line,
+            r"^host lock \(this machine\) +held  agent-9, run run-agent-9, test, ",
+        )
         self.assertIn(f"pid {os.getpid()}", line)
+
+    def test_the_host_lock_line_says_it_is_this_machine_s_whatever_host_is_named(self):
+        # Leases and the host lock are read from this machine's lease
+        # directory, so naming another registered host must not make the line
+        # read as that machine's lock.
+        two_hosts = self.root / "two.yaml"
+        two_hosts.write_text(
+            self.hardware.read_text()
+            + f"  Host_Other:\n    type: Host\n    platform: {PLATFORM}\n"
+            "    roles: [test target]\n"
+        )
+        for host in ("Host_Local", "Host_Other"):
+            with self.subTest(host=host):
+                code, out, _err = self._main(
+                    "boards", "--hardware", str(two_hosts),
+                    "--lease-dir", str(self.lease_dir), "--host", host,
+                )
+                self.assertEqual(0, code)
+                self.assertRegex(out.splitlines()[-1], r"^host lock \(this machine\) +free$")
+
+    def test_boards_json_marks_the_host_lock_entry(self):
+        code, out, _err = self._main(
+            "boards", "--hardware", str(self.hardware),
+            "--lease-dir", str(self.lease_dir), "--json",
+        )
+        self.assertEqual(0, code)
+        states = json.loads(out)
+        self.assertEqual("host lock", states[-1]["resource"])
+        self.assertTrue(states[-1]["host_lock"])
+        self.assertTrue(all("host_lock" not in state for state in states[:-1]))
 
     def _probe(self):
         return (
@@ -394,6 +428,48 @@ class HostLockCliTests(unittest.TestCase):
         self.assertEqual(0, auto.returncode, auto.stderr)
         self.assertEqual('"manual"', auto.stdout.strip())
         self.assertFalse(leases.host_lock_state(directory=self.lease_dir)["held"])
+
+    def test_lease_takes_the_host_lock_for_a_wrapped_ubertooth_dfu(self):
+        # A wrapper is how a firmware write is usually run: the lock must not
+        # depend on ubertooth-dfu being the first word.
+        dfu = self.root / "bin" / "ubertooth-dfu"
+        dfu.parent.mkdir()
+        dfu.write_text(f"#!/bin/sh\nexec '{sys.executable}' -c \"$1\" \"$2\"\n")
+        dfu.chmod(0o755)
+        probe = " ".join(
+            shlex.quote(word)
+            for word in (str(dfu), self._probe(), str(self.lease_dir))
+        )
+        for name, command in (
+            ("env", ["env", "UBERTOOTH_HARNESS_TEST=1", str(dfu),
+                     self._probe(), str(self.lease_dir)]),
+            ("sh -c", ["/bin/sh", "-c", probe]),
+        ):
+            with self.subTest(name):
+                run = self._lease("UT_0", "--", *command)
+                self.assertEqual(0, run.returncode, run.stderr)
+                self.assertEqual('"manual"', run.stdout.strip())
+                self.assertFalse(leases.host_lock_state(directory=self.lease_dir)["held"])
+
+    def test_which_command_lines_count_as_a_firmware_write(self):
+        for command in (
+            ["ubertooth-dfu", "-U", "<serial>", "-d", "x.dfu"],
+            ["/usr/local/bin/ubertooth-dfu", "-r"],
+            ["sudo", "ubertooth-dfu", "-d", "x.dfu"],
+            ["env", "VAR=1", "ubertooth-dfu", "-d", "x.dfu"],
+            ["sh", "-c", "ubertooth-dfu -U <serial> -d x.dfu -r"],
+            ["sh", "-c", "cd /tmp && ubertooth-dfu -d x.dfu"],
+        ):
+            with self.subTest(command=command):
+                self.assertTrue(cli._writes_firmware(command))
+        for command in (
+            ["ubertooth-util", "-U", "<serial>", "-v"],
+            ["ubertooth-dfu-wrapper", "-d", "x.dfu"],
+            ["sh", "-c", "my-ubertooth-dfu-helper -d x.dfu"],
+            ["python", "-m", "ubertooth_harness", "boards"],
+        ):
+            with self.subTest(command=command):
+                self.assertFalse(cli._writes_firmware(command))
 
 
 if __name__ == "__main__":
