@@ -21,6 +21,9 @@ import shutil
 import tempfile
 
 _cache: dict[str, Path] = {}
+# How many times a content's cached file had to be written again because a
+# test changed one of its links: it names the next one.
+_replaced: dict[str, int] = {}
 _directory: Path | None = None
 
 
@@ -49,10 +52,13 @@ def write_executable(path, text: str, mode: int = 0o755) -> Path:
     source = _cache.get(key)
     if source is not None and not _intact(source, text, mode):
         # A test wrote to or chmodded one of the links, which is the same
-        # file: start again rather than hand out what it left behind.
+        # file: start again rather than hand out what it left behind. Under
+        # a new name, so what that test did to its own copy stands.
         source = None
+        _replaced[key] = _replaced.get(key, 0) + 1
     if source is None:
-        source = _cache_dir() / key
+        source = _cache_dir() / f"{key}-{_replaced.get(key, 0)}"
+        source.unlink(missing_ok=True)
         source.write_text(text, encoding="utf-8")
         source.chmod(mode)
         _cache[key] = source

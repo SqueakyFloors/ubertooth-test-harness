@@ -14,5 +14,6 @@ firmware/*/sdkconfig
 firmware/*/sdkconfig.old
 
 # scripts/test.py remembers how long each module took, to start the longest
-# first next time.
+# first next time (and writes it through a .test-durations-*.tmp).
 tests/.test-durations.json
+tests/.test-durations-*.tmp

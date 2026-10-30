@@ -512,9 +512,10 @@ class CaptureTests(unittest.TestCase):
         self.assertIn("processes left: none", out)
 
     def test_refused_mode_fails_a_capture_that_keeps_running(self):
-        # The capture does not end by itself here: it reaches the limit.
+        # The script captures as it should, which --refused says it must not:
+        # the stop comes at the third record, with the script still running.
         code, out = self.fixture().capture(
-            (f"--extcap-interface=ubertooth{SERIAL_A}",), refused=True, seconds=1.5)
+            (f"--extcap-interface=ubertooth{SERIAL_A}",), refused=True)
         self.assertEqual(1, code)
         self.assertIn("FAIL: btle-extcap was still capturing at the stop", out)
         self.assertIn("packet records were written", out)

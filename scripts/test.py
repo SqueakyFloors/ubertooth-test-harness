@@ -51,7 +51,8 @@ CACHE = TESTS / ".test-durations.json"
 # Long enough for the slowest module on a small, busy runner; a module that
 # reaches it has hung, and is stopped so the rest of the run still reports.
 TIMEOUT_S = 900.0
-STOP_WAIT_S = 5.0
+# Between SIGTERM and SIGKILL for a child that is being stopped.
+STOP_WAIT_S = 2.0
 SEPARATOR1 = "=" * 70
 SEPARATOR2 = "-" * 70
 
@@ -79,8 +80,9 @@ class _TimingResult(unittest.TextTestResult):
 def _worker(module: str, verbosity: int, result_path: str) -> int:
     """Run one module's tests, write the result as JSON, return its status."""
     # python scripts/test.py puts scripts/ first on the path, where the tests
-    # are not; the repository root is what `python -m unittest` would use.
-    sys.path.insert(0, str(ROOT))
+    # are not and scripts/test.py would shadow the standard library's test
+    # package; the repository root is what `python -m unittest` uses.
+    sys.path[0] = str(ROOT)
     tests = unittest.defaultTestLoader.loadTestsFromName(module)
     result = unittest.TextTestRunner(
         stream=sys.stderr, verbosity=verbosity, resultclass=_TimingResult).run(tests)
@@ -140,7 +142,9 @@ def _cores() -> int:
 def _modules(names: list[str]) -> list[str]:
     """The modules to run, as dotted names, from the command line or tests/."""
     if not names:
-        return sorted(f"tests.{path.stem}" for path in TESTS.glob("test_*.py"))
+        # test*.py directly under tests/, which is what `unittest discover`
+        # finds there; tests/test_suite_runner.py checks the two agree.
+        return sorted(f"tests.{path.stem}" for path in TESTS.glob("test*.py"))
     chosen = []
     for name in names:
         # tests/test_gui.py and tests/test_gui are paths; tests.test_gui and
@@ -179,6 +183,8 @@ def _longest_first(modules: list[str]) -> list[str]:
 def _save_durations(outcomes: list[Outcome]) -> None:
     """Keep each module's wall time for the next run's order."""
     try:
+        # .gitignore covers the name and these: a run killed between the
+        # write and the rename must not leave the tree dirty.
         with tempfile.NamedTemporaryFile(
                 "w", dir=TESTS, prefix=".test-durations-", suffix=".tmp",
                 delete=False) as file:
@@ -198,16 +204,21 @@ def _signal_group(child, number: int) -> None:
         pass
 
 
-def _stop(child) -> None:
-    """Stop a child's whole process group, SIGTERM then SIGKILL."""
-    _signal_group(child, signal.SIGTERM)
-    try:
-        child.wait(STOP_WAIT_S)
-    except subprocess.TimeoutExpired:
-        pass
-    # Whatever the group has left, including a command the tests started and
-    # did not stop: otherwise reading the child's output waits on its pipe.
-    _signal_group(child, signal.SIGKILL)
+def _stop(children) -> None:
+    """Stop these children's process groups, SIGTERM then SIGKILL.
+
+    The group, not the child alone, so a command the tests started and did
+    not stop goes too: one left running holds a lock or a port the rest of
+    the run needs, and its end of the child's output pipe. Neither child is
+    waited for in between, so each stays its group's leader until both
+    signals are sent and the numbers cannot have been given to anyone else.
+    """
+    children = list(children)
+    for child in children:
+        _signal_group(child, signal.SIGTERM)
+    time.sleep(STOP_WAIT_S)
+    for child in children:
+        _signal_group(child, signal.SIGKILL)
 
 
 def _start(module: str, verbosity: int, timeout: float = TIMEOUT_S) -> Outcome:
@@ -232,8 +243,14 @@ def _start(module: str, verbosity: int, timeout: float = TIMEOUT_S) -> Outcome:
             # A hung test would otherwise hold the whole run with nothing to
             # read, since a child's output only arrives when it ends.
             timed_out = True
-            _stop(child)
-            output, errors = child.communicate()
+            _stop([child])
+            try:
+                # Bounded: a process that left the group still holds the
+                # write end of the pipe, and this is the hang the timeout
+                # exists to end.
+                output, errors = child.communicate(timeout=STOP_WAIT_S)
+            except subprocess.TimeoutExpired:
+                output, errors = "", "(the output pipe was still open)\n"
         finally:
             _running.discard(child)
         outcome = Outcome(module, time.monotonic() - started)
@@ -316,7 +333,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="scripts/test.py", description=__doc__.splitlines()[0])
     parser.add_argument("-j", "--jobs", type=int, default=0, metavar="N",
-                        help="modules to run at a time (default: one per core)")
+                        help="modules to run at a time (0, the default: one "
+                             "per core)")
     parser.add_argument("--durations", type=int, default=0, metavar="N",
                         help="print the N slowest tests and modules")
     parser.add_argument("-v", "--verbose", action="store_true",
@@ -354,11 +372,13 @@ def main(argv=None) -> int:
                       f"{outcome.tests:4d} tests  {outcome.module}",
                       file=sys.stderr, flush=True)
         except KeyboardInterrupt:
+            # The children lead their own process groups, so the terminal's
+            # interrupt did not reach them; they are stopped outright, or
+            # leaving this block would wait for every one of them.
             for future in running:
                 future.cancel()
-            for child in list(_running):
-                _signal_group(child, signal.SIGTERM)
-            print("\ninterrupted", file=sys.stderr)
+            print("\ninterrupted", file=sys.stderr, flush=True)
+            _stop(_running)
             return 1
     seconds = time.monotonic() - started
 

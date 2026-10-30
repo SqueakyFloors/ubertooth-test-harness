@@ -38,6 +38,15 @@ def _load():
 runner = _load()
 
 
+def _flatten(suite):
+    """Every test case in a suite."""
+    for item in suite:
+        if isinstance(item, unittest.TestSuite):
+            yield from _flatten(item)
+        else:
+            yield item
+
+
 def _outcome(module, *, tests=1, failures=(), errors=(), skipped=(),
              unexpected=(), seconds=1.0, output=""):
     outcome = runner.Outcome(module, seconds)
@@ -52,13 +61,19 @@ def _outcome(module, *, tests=1, failures=(), errors=(), skipped=(),
 
 class ModuleSelectionTests(unittest.TestCase):
 
-    def test_every_test_module_runs_by_default(self):
-        modules = runner._modules([])
-        self.assertIn("tests.test_suite_runner", modules)
-        self.assertNotIn("tests.executables", modules)
-        self.assertEqual(
-            sorted(f"tests.{path.stem}" for path in (REPO / "tests").glob("test_*.py")),
-            modules)
+    def test_the_default_modules_are_the_ones_discovery_finds(self):
+        # The runner globs; `python -m unittest discover -s tests` walks. A
+        # module either command misses would be a test nobody runs, so the
+        # two lists have to be the same one.
+        suite = unittest.defaultTestLoader.discover(str(REPO / "tests"),
+                                                    top_level_dir=str(REPO))
+        discovered = set()
+        for test in _flatten(suite):
+            name = type(test).__module__
+            self.assertTrue(name.startswith("tests."), f"{name}: {test}")
+            discovered.add(name)
+        self.assertIn("tests.test_suite_runner", discovered)
+        self.assertEqual(sorted(discovered), runner._modules([]))
 
     def test_a_module_may_be_named_three_ways(self):
         for name in ("tests.test_build", "test_build", "tests/test_build.py"):
@@ -149,7 +164,7 @@ class ChildTests(unittest.TestCase):
             stdout=subprocess.PIPE, text=True, start_new_session=True)
         self.addCleanup(child.kill)
         grandchild = int(child.stdout.readline())
-        runner._stop(child)
+        runner._stop([child])
         child.stdout.close()
         self.assertIsNotNone(child.poll())
         deadline = time.monotonic() + 10
@@ -258,15 +273,18 @@ class ExecutableFixtureTests(unittest.TestCase):
         self.assertEqual(8, subprocess.run([str(path)], timeout=30).returncode)
         self.assertEqual(7, subprocess.run([str(again)], timeout=30).returncode)
 
-    def test_a_link_a_test_changed_is_written_again(self):
+    def test_a_link_a_test_changed_is_written_again_and_left_alone(self):
         # chmod and a write go to the one file behind every link, so the next
-        # caller must get a fresh one rather than what was left there.
+        # caller gets a fresh one, and what the test did to its own copy
+        # stays done.
         path = write_executable(self.directory / "tool", "#!/bin/sh\nexit 7\n")
         path.chmod(0o644)
         again = write_executable(self.directory / "other" / "tool",
                                  "#!/bin/sh\nexit 7\n")
         self.assertEqual(0o755, again.stat().st_mode & 0o777)
         self.assertEqual(7, subprocess.run([str(again)], timeout=30).returncode)
+        self.assertNotEqual(path.stat().st_ino, again.stat().st_ino)
+        self.assertEqual(0o644, path.stat().st_mode & 0o777)
 
     def test_content_and_mode_are_what_was_asked_for(self):
         path = write_executable(self.directory / "tool", "#!/bin/sh\nexit 0\n",
