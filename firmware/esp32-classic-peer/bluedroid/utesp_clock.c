@@ -51,23 +51,17 @@
 #define ANSWER_TIMEOUT_MS 1000
 
 /* One read at a time: request_lock makes a reader the owner of the slot
- * below, and answer is given when the reply to its command arrives.
- * slot_lock is held for the moment it takes to write the answer in or to
- * give up on it.
- *
- * Each request gets a number, which rides along in the command's own
- * metadata and comes back with its reply. A read that gave up waiting is
- * what makes this worth doing: its answer can still arrive, and matching the
- * number is what stops that answer being handed to the next reader, which
- * would report a clock from a second ago as a fresh one. */
+ * below, and answer is given when the controller's reply arrives. slot_lock
+ * is held for the moment it takes to write the answer in or to give up on
+ * it. Only one command is ever outstanding, which is what lets a reply be
+ * matched to a reader without numbering them. */
 static bool clock_ready;
 static SemaphoreHandle_t request_lock;
 static SemaphoreHandle_t answer;
 static SemaphoreHandle_t slot_lock;
 static struct {
-    bool waiting;     /* the reader still wants the answer */
-    uint32_t seq;     /* the newest request; numbering starts at 1 */
-    uint32_t pending; /* a request the controller has not replied to, or 0 */
+    bool waiting; /* a reader still wants the answer */
+    bool pending; /* the controller has not replied to the command sent */
     int64_t sent_us;
     struct utesp_clock got;
 } slot;
@@ -103,45 +97,23 @@ int utesp_clock_init(void)
     return UTESP_CLOCK_OK;
 }
 
-/* Hands an answer to the reader waiting for request seq, if it is still
- * waiting, and in any case notes that the controller has replied to that
- * request. */
-static void deliver(uint32_t seq, const struct utesp_clock *got)
-{
-    xSemaphoreTake(slot_lock, portMAX_DELAY);
-    if (slot.pending == seq) {
-        slot.pending = 0; /* the controller owes nothing now */
-    }
-    if (slot.waiting && slot.seq == seq) {
-        slot.got = *got;
-        slot.got.read_us = got->answered_us - slot.sent_us;
-        slot.waiting = false;
-        xSemaphoreGive(answer);
-    }
-    xSemaphoreGive(slot_lock);
-}
-
 /* Called from the HCI layer's receive path with the whole Command Complete
- * event, and owns that buffer from here on. */
+ * event, and owns that buffer from here on. The layer has already matched
+ * the event to this command by its opcode and refused anything too short to
+ * hold one. */
 static void clock_complete(BT_HDR *response, void *context)
 {
-    const uint32_t seq = (uint32_t)(uintptr_t)context;
     uint8_t *stream = response->data + response->offset;
     struct utesp_clock got;
-    uint16_t opcode = 0;
 
+    (void)context;
     memset(&got, 0, sizeof(got));
     got.answered_us = esp_timer_get_time();
     got.status = HCI_ERR_UNSPECIFIED; /* until the event says otherwise */
 
     /* A controller that refuses the command may answer with the status
      * alone, so each part is read only once it is known to be there. */
-    if (response->len >= EVENT_OPCODE_LEN) {
-        STREAM_SKIP_UINT8(stream); /* event code, HCI_COMMAND_COMPLETE_EVT */
-        STREAM_SKIP_UINT8(stream); /* parameter total length */
-        STREAM_SKIP_UINT8(stream); /* command credits, the HCI layer's own */
-        STREAM_TO_UINT16(opcode, stream);
-    }
+    stream += EVENT_OPCODE_LEN; /* event code, length, credits, and opcode */
     if (response->len >= EVENT_STATUS_LEN) {
         STREAM_TO_UINT8(got.status, stream);
     }
@@ -154,28 +126,17 @@ static void clock_complete(BT_HDR *response, void *context)
         got.complete = true;
     }
 
-    if (opcode == HCI_READ_CLOCK) {
-        deliver(seq, &got);
+    xSemaphoreTake(slot_lock, portMAX_DELAY);
+    slot.pending = false; /* the controller owes nothing now */
+    if (slot.waiting) {
+        got.read_us = got.answered_us - slot.sent_us;
+        slot.got = got;
+        slot.waiting = false;
+        xSemaphoreGive(answer);
     }
+    xSemaphoreGive(slot_lock);
+
     osi_free(response);
-}
-
-/* A Command Status for Read Clock means the controller would not run it.
- * With this callback set the HCI layer leaves the command buffer to it, as
- * Bluedroid's own status handler does. */
-static void clock_refused(uint8_t status, BT_HDR *command, void *context)
-{
-    struct utesp_clock got;
-
-    memset(&got, 0, sizeof(got));
-    got.answered_us = esp_timer_get_time();
-    got.status = status;
-    /* The HCI layer stops tracking a command once it has seen any reply to
-     * it, so this is the only reply there will be, whatever the status says,
-     * and the reader is told now rather than left to time out. A status with
-     * none of the clock fields reads as a short answer. */
-    deliver((uint32_t)(uintptr_t)context, &got);
-    HCI_FREE_CMD_BUF(command);
 }
 
 /* Builds the command and waits for its answer. The caller holds
@@ -185,7 +146,6 @@ static int read_clock(uint16_t handle, uint8_t which, struct utesp_clock *out)
     BT_HDR *cmd;
     hci_cmd_metadata_t *metadata;
     uint8_t *pp;
-    uint32_t seq;
     bool owed, answered;
 
     /* A command the controller never replied to still holds its place in the
@@ -194,7 +154,7 @@ static int read_clock(uint16_t handle, uint8_t which, struct utesp_clock *out)
      * nothing useful to do but say the controller is not answering. A board
      * in that state is recovered by "reset". */
     xSemaphoreTake(slot_lock, portMAX_DELAY);
-    owed = slot.pending != 0;
+    owed = slot.pending;
     xSemaphoreGive(slot_lock);
     if (owed) {
         return UTESP_CLOCK_TIMED_OUT;
@@ -213,34 +173,40 @@ static int read_clock(uint16_t handle, uint8_t which, struct utesp_clock *out)
 
     /* The HCI layer reads the callbacks and the opcode out of the buffer's
      * metadata rather than out of the arguments to transmit_command(), so
-     * they are set here, as Bluedroid's own btu_hcif_send_cmd() sets them. */
+     * they are set here, as Bluedroid's own btu_hcif_send_cmd() sets them.
+     *
+     * No status callback: Read Clock is answered with a Command Complete
+     * (Core 6.0 Vol 4 Part E 7.5.6), and a callback here would have to free
+     * the command buffer the HCI layer still reads after the call. If a
+     * controller ever did answer with a Command Status, the layer would free
+     * the command and this read would time out. */
     metadata = HCI_GET_CMD_METAMSG(cmd);
     metadata->opcode = HCI_READ_CLOCK;
     metadata->command_complete_cb = clock_complete;
-    metadata->command_status_cb = clock_refused;
+    metadata->command_status_cb = NULL;
 
     /* Any leftover from a read that timed out, so the wait below is this
      * command's. */
     xSemaphoreTake(answer, 0);
     xSemaphoreTake(slot_lock, portMAX_DELAY);
-    seq = ++slot.seq;
-    slot.pending = seq;
+    slot.pending = true;
     slot.waiting = true;
     slot.sent_us = esp_timer_get_time();
     xSemaphoreGive(slot_lock);
-    metadata->context = (void *)(uintptr_t)seq;
 
-    hci_layer_get_interface()->transmit_command(cmd, clock_complete, clock_refused,
-                                                metadata->context);
+    hci_layer_get_interface()->transmit_command(cmd, clock_complete, NULL, NULL);
 
-    answered = xSemaphoreTake(answer, pdMS_TO_TICKS(ANSWER_TIMEOUT_MS)) == pdTRUE;
+    xSemaphoreTake(answer, pdMS_TO_TICKS(ANSWER_TIMEOUT_MS));
 
+    /* The answer, not the semaphore, decides: one that arrived just as the
+     * wait ran out is still this read's answer. After this nothing is
+     * expected, so a later one is dropped rather than kept for the next
+     * read. */
     xSemaphoreTake(slot_lock, portMAX_DELAY);
+    answered = !slot.waiting;
     if (answered) {
         *out = slot.got;
     }
-    /* Whether it answered or not, nothing is expected now: an answer that
-     * arrives after this is dropped rather than kept for the next read. */
     slot.waiting = false;
     xSemaphoreGive(slot_lock);
 

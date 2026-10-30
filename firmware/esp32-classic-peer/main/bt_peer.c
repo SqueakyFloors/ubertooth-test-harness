@@ -52,8 +52,9 @@
  *
  * A piconet has to keep at least 20 channels, so a map with fewer is refused
  * rather than sent (Core 6.0 Vol 4 Part E 7.3.46, and the minimum N_min of
- * Vol 2 Part B 2.6.3). ESP-IDF passes a map straight to the controller
- * without checking either rule. */
+ * Vol 2 Part B 2.6.3). Nothing in ESP-IDF checks that, and a map that sets
+ * the reserved bit is quietly changed rather than refused, so both rules are
+ * checked here. */
 #define AFH_MAP_LEN     UTESP_AFH_MAP_LEN
 #define AFH_HEX_LEN     (AFH_MAP_LEN * 2)
 #define AFH_RESERVED    0x80 /* the top bit of the last byte */
@@ -69,8 +70,9 @@ static struct {
     bool connecting; /* an outgoing connection is on its way */
     bool connected;
     uint32_t handle;
-    bool acl_up;         /* a baseband link to the peer is up */
-    uint16_t acl_handle; /* its connection handle, which the clock read needs */
+    unsigned acl_links;  /* live baseband links; the clock read needs one */
+    bool acl_known;      /* and needs to know which, see gap_cb() */
+    uint16_t acl_handle;
     esp_bd_addr_t peer;   /* what "spp peer" set: who the initiator calls */
     esp_bd_addr_t remote; /* the far end of the live link */
     bool peer_set;
@@ -82,8 +84,9 @@ static struct {
     uint32_t counter;
     uint32_t writes, write_errors, rx_bytes, connects, disconnects;
     int last_err;
-    uint8_t afh[AFH_MAP_LEN];  /* the map the host last asked for */
+    uint8_t afh[AFH_MAP_LEN];   /* the map the host last asked for */
     esp_bt_status_t afh_status; /* what the controller said about it */
+    bool afh_owed;              /* a map the controller has not answered */
 } st;
 
 static SemaphoreHandle_t st_lock;     /* guards st against the callbacks */
@@ -255,13 +258,21 @@ static void connect_failed(int status)
  * HCI_Read_Clock needs to name a piconet, and this event is the only place
  * an application is told it; the SPP and audio handles are the profiles'
  * own, not this one. */
+/* These two events are also the only honest way to count the links, which
+ * matters because the board is connectable: something else in the room can
+ * open a second one. "The piconet" then means nothing, and a board that has
+ * been down to two links and back to one no longer knows which handle the
+ * survivor is. Both cases read as no piconet rather than as a guess; one
+ * link, opened while there were none, is the bench's case and the only one
+ * the clock is read for. */
 static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
 {
     switch (event) {
     case ESP_BT_GAP_ACL_CONN_CMPL_STAT_EVT:
         if (param->acl_conn_cmpl_stat.stat == ESP_BT_STATUS_SUCCESS) {
             LOCK();
-            st.acl_up = true;
+            st.acl_links++;
+            st.acl_known = st.acl_links == 1;
             st.acl_handle = param->acl_conn_cmpl_stat.handle;
             UNLOCK();
         }
@@ -269,10 +280,11 @@ static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
 
     case ESP_BT_GAP_ACL_DISCONN_CMPL_STAT_EVT:
         LOCK();
-        /* A board can be left with a second link's close while its own is
-         * still up, so only the live one's close clears the handle. */
-        if (st.acl_up && st.acl_handle == param->acl_disconn_cmpl_stat.handle) {
-            st.acl_up = false;
+        if (st.acl_links) {
+            st.acl_links--;
+        }
+        if (st.acl_links != 1) {
+            st.acl_known = false;
         }
         UNLOCK();
         break;
@@ -280,6 +292,7 @@ static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
     case ESP_BT_GAP_SET_AFH_CHANNELS_EVT:
         LOCK();
         st.afh_status = param->set_afh_channels.stat;
+        st.afh_owed = false;
         UNLOCK();
         xSemaphoreGive(afh_ev);
         break;
@@ -802,21 +815,37 @@ static const char *afh_apply(const uint8_t *map)
 {
     esp_bt_gap_afh_channels channels;
     esp_bt_status_t status;
-    bool started;
+    bool started, owed;
 
     LOCK();
     started = st.started;
+    owed = st.afh_owed;
+    if (started && afh_ev && !owed) {
+        st.afh_owed = true;
+    }
     UNLOCK();
     if (!started || !afh_ev) {
         return "bluetooth is not up";
     }
+    /* The completion event says nothing about which map it answers, so one
+     * map at a time, and none at all while the controller still owes an
+     * answer: otherwise a late answer to a map that timed out would be read
+     * as this map's, and the shell would report a map the controller never
+     * took. A board left in that state is recovered by "reset". */
+    if (owed) {
+        return "the controller has not answered the last channel map";
+    }
 
     memcpy(channels, map, AFH_MAP_LEN);
-    xSemaphoreTake(afh_ev, 0); /* drop a stale signal */
+    xSemaphoreTake(afh_ev, 0); /* drop the signal a late answer left */
     if (esp_bt_gap_set_afh_channels(channels) != ESP_OK) {
+        LOCK();
+        st.afh_owed = false; /* nothing went out, so nothing is owed */
+        UNLOCK();
         return "the stack would not take the channel map";
     }
     if (xSemaphoreTake(afh_ev, pdMS_TO_TICKS(AFH_TIMEOUT_MS)) != pdTRUE) {
+        /* The answer may still arrive, so the board goes on owing one. */
         return "the controller did not answer the channel map";
     }
 
@@ -836,8 +865,9 @@ const char *bt_set_afh(const char *map_text)
     if (!afh_parse(map_text, map)) {
         return "the channel map must be twenty hex digits";
     }
-    /* The spec reserves the 80th bit, and ESP-IDF passes it to the
-     * controller as it is, so a map that sets it is refused here. */
+    /* The spec reserves the 80th bit. esp_bt_gap_set_afh_channels() masks it
+     * away, which would apply a map the caller did not write, so a map that
+     * sets it is refused here instead. */
     if (map[AFH_MAP_LEN - 1] & AFH_RESERVED) {
         return "the top bit of the last byte is reserved and must be zero";
     }
@@ -898,7 +928,11 @@ static void afh_status_fields(char *out, size_t len)
 
     LOCK();
     memcpy(map, st.afh, AFH_MAP_LEN);
-    in_piconet = st.acl_up;
+    /* The same one-link test the clock read uses: a board with a second link
+     * open, or one that no longer knows which handle survived, is in no one
+     * piconet, and a map read for a guessed handle would be worse than
+     * none. See gap_cb(). */
+    in_piconet = st.acl_links == 1 && st.acl_known;
     handle = st.acl_handle;
     UNLOCK();
     afh_text(map, hex);
@@ -1087,7 +1121,7 @@ const char *bt_clock_json(char *out, size_t len)
 
     LOCK();
     started = st.started;
-    in_piconet = st.acl_up;
+    in_piconet = st.acl_links == 1 && st.acl_known;
     acl_handle = st.acl_handle;
     UNLOCK();
     if (!started) {

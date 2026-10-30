@@ -389,9 +389,11 @@ speech on does not start lying.
   microseconds, so it advances 3200 times a second and wraps about every
   23.3 hours.
 - `piconet`: the clock of the piconet the board's link belongs to, which is
-  the piconet leader's native clock. The initiator pages, so it is the
-  leader, and on that board the two numbers are the same counter read twice.
-  Both boards of a pair report the same piconet clock.
+  the piconet leader's native clock. Both boards of a pair report the same
+  piconet clock, whichever of them is the leader. The initiator pages, so it
+  starts as the leader, and while it is, its two numbers are the same
+  counter read twice; the link policy allows a role switch, so do not rely
+  on that half.
 - `accuracy`: the largest error the piconet clock may have, in the same
   units as the clock itself, so one tick is 312.5 microseconds. 65535 means
   the controller does not know. The spec sets it to zero for a native read,
@@ -411,13 +413,16 @@ so on the leader the two numbers can differ by a tick or two.
 With no link there is no piconet: `piconet`, `accuracy` and `handle` read
 `null`, `native` still reads, and `t_us` and `read_us` are the native read's.
 A link that goes down while the command is in flight reads the same way, as
-no piconet rather than as a failure.
+no piconet rather than as a failure. So does a board with more than one
+baseband link, where "the piconet" would be a guess: these boards are
+connectable, so something else in the room can open one.
 A controller that refuses a read answers `ERR the controller refused the
 clock read, status 0x<hh>` and prints no line, rather than an answer with a
 hole in it. If a controller ever stops answering altogether, the command
-that was sent keeps its place in the host's pending list, so later reads
-answer `ERR the controller did not answer the clock read` until the board is
-reset.
+that was sent keeps its place in the host's pending list and holds the one
+command credit the host has, which stalls every Bluetooth command and not
+just this one; later reads answer `ERR the controller did not answer the
+clock read`, and `reset` is the way back.
 
 ### How the command is sent
 
@@ -494,15 +499,20 @@ A map the spec does not allow is refused and nothing changes:
 | `ERR the top bit of the last byte is reserved and must be zero` | bit 79 is reserved |
 | `ERR a piconet needs at least 20 channels` | fewer than 20 channels marked used |
 | `ERR the controller refused the channel map, status <n>` | the controller said no, with its own status |
+| `ERR the controller has not answered the last channel map` | an earlier `afh` timed out and is still unanswered; `reset` is the way out |
 | `ERR afh takes twenty hex digits or off` | the wrong number of words |
 
 The 20-channel minimum is the spec's (Core 6.0 Vol 4 Part E 7.3.46, and
-`N_min` in Vol 2 Part B 2.6.3). ESP-IDF checks neither that nor the reserved
-bit: `BTM_SetAfhChannels()` in
+`N_min` in Vol 2 Part B 2.6.3), and nothing in ESP-IDF checks it:
+`BTM_SetAfhChannels()` in
 `components/bt/host/bluedroid/stack/btm/btm_devctl.c` passes the ten bytes
-straight to the controller. So the refusals above are this firmware's, which
-is what keeps a test from asking for a map no piconet can use and reading
-whatever the controller then does as a result.
+straight to the controller. The reserved bit it does handle, by clearing it:
+`esp_bt_gap_set_afh_channels()` in
+`components/bt/host/bluedroid/api/esp_gap_bt_api.c` masks the last byte with
+`0x7f`, so a map that sets that bit would be applied as a different map from
+the one asked for. Refusing is the honest answer to both, and it keeps a test
+from reading whatever the controller does with a map no piconet can use as a
+result.
 
 ### The two maps in `status`
 
