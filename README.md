@@ -1411,7 +1411,12 @@ shapes, digit runs replaced by `N`, with their counts) and gives in `received`
 when the left-out output ended; it is followed by the last
 records (each with its arrival time in `received`, starting at a whole line),
 so the GUI failure summary (for a failed test or build) and report.md show how
-the command ended; report.md shows every output record run.jsonl holds.
+the command ended; report.md shows every output record run.jsonl holds. A
+command recorded before these limits existed left no file and no
+`command_output_omitted` record, so run.jsonl holds all of its output;
+rendering report.md for such a run caps it the same way instead, keeping the
+first 64 KiB and the last 16 KiB with one `[M]` line for the gap
+(`<n> more characters of output are in run.jsonl`).
 `command_finished` repeats `output_file` and `output_omitted`. The newest
 output, such as the harness's own timeout, cancellation or `OUTPUT SINK ERROR`
 line, is always among the last records. report.md shows the gap as `[M]`

@@ -18,12 +18,27 @@ from typing import Iterable, Mapping, Sequence
 from ubertooth_harness import targets
 from ubertooth_harness.events import REPORT, RUN_LOG
 from ubertooth_harness.executor import CommandResult
-from ubertooth_harness.rawlog import NOTE, TAGS, CommandCapture, format_command_record
+from ubertooth_harness.rawlog import (
+    NOTE,
+    RECORD_OUTPUT_BYTES,
+    RECORD_TAIL_BYTES,
+    TAGS,
+    Chunk,
+    CommandCapture,
+    format_command_record,
+)
 from ubertooth_harness.rf import describe as describe_placement
 from ubertooth_harness.watchdog import wait_counts
 
 
 REDACTED = "<serial>"
+# Fallback cap for a command whose output run.jsonl holds in full, because the
+# run was recorded before output was capped as it was written: this many
+# characters of the start and of the end of it are rendered, the same shape
+# as the records a capped command leaves (rawlog's byte limits, counted here
+# in characters, since the report renders characters).
+LEGACY_OUTPUT_HEAD_CHARS = RECORD_OUTPUT_BYTES
+LEGACY_OUTPUT_TAIL_CHARS = RECORD_TAIL_BYTES
 LEGEND = (
     "Times are elapsed since the run started (UTC start in Time above). "
     "Tags: `[C]` command sent, `[O]` stdout, `[E]` stderr, `[R]` command result, "
@@ -667,15 +682,91 @@ def _output_time(output: Mapping) -> datetime.datetime:
     return _time({"timestamp": received}) if received else _time(output)
 
 
+def _recorded_with_a_cap(outputs: Sequence[Mapping], finished: Mapping) -> bool:
+    """Whether run.jsonl capped this command's output as it was recorded.
+
+    A command whose output passed the record limits leaves a
+    ``command_output_omitted`` record and names its output file in
+    ``command_finished``. Without either, the records hold everything the
+    command printed, which is how a run recorded before the cap was written.
+    """
+    if any(o["event_type"] == "command_output_omitted" for o in outputs):
+        return True
+    # ``output_file`` is one combined file, ``output_files`` the per-stream
+    # files that replaced it.
+    return bool(finished.get("output_file") or finished.get("output_files"))
+
+
+def _take_chunks(chunks: Sequence[Chunk], limit: int, *, from_end: bool) -> list[Chunk]:
+    """Whole chunks from one end of ``chunks``, up to ``limit`` characters.
+
+    The chunk that would cross the limit is cut at the nearest line boundary
+    inside it, so the kept output starts and ends on whole lines.
+    """
+    taken: list[Chunk] = []
+    room = limit
+    for moment, stream, text in chunks:
+        if len(text) <= room:
+            taken.append((moment, stream, text))
+            room -= len(text)
+            continue
+        if from_end:
+            part = text[len(text) - room:]
+            cut = part.find("\n")
+            part = part[cut + 1:] if cut >= 0 else part
+        else:
+            part = text[:room]
+            cut = part.rfind("\n")
+            part = part[:cut + 1] if cut >= 0 else part
+        if part:
+            taken.append((moment, stream, part))
+        break
+    return taken
+
+
+def _capped_chunks(chunks: Sequence[Chunk]) -> list[Chunk]:
+    """The start and the end of a command's output, with the gap counted.
+
+    The fallback cap of #125: run.jsonl caps each command's output as it is
+    recorded, but a run recorded before that holds all of it, and rendering
+    report.md for one printed megabytes. There is no output file to point at,
+    so the note points at run.jsonl.
+    """
+    total = sum(len(text) for _moment, _stream, text in chunks)
+    if total <= LEGACY_OUTPUT_HEAD_CHARS + LEGACY_OUTPUT_TAIL_CHARS:
+        return list(chunks)
+    head = _take_chunks(chunks, LEGACY_OUTPUT_HEAD_CHARS, from_end=False)
+    tail = _take_chunks(list(reversed(chunks)), LEGACY_OUTPUT_TAIL_CHARS, from_end=True)
+    tail.reverse()
+    kept = sum(len(text) for _moment, _stream, text in head + tail)
+    moment = head[-1][0] if head else chunks[0][0]
+    note = (moment, NOTE, f"{total - kept} more characters of output are in run.jsonl\n")
+    return head + [note] + tail
+
+
+def _output_chunks(outputs: Sequence[Mapping], *, capped: bool) -> list[Chunk]:
+    """One command's output records as capture chunks, in arrival order."""
+    chunks = [
+        (_output_time(o), NOTE, _omitted_text(o["details"]))
+        if o["event_type"] == "command_output_omitted"
+        else (_output_time(o), o["details"].get("stream", "stdout"),
+              o["details"].get("text", ""))
+        for o in outputs
+    ]
+    return chunks if capped else _capped_chunks(chunks)
+
+
 def _command_record(
     started: Mapping, outputs: list[Mapping], finished: Mapping | None, stamp
 ) -> str:
     sd = started["details"]
     fd = finished["details"] if finished else {}
-    # Every command's output records are already capped in run.jsonl
-    # (rawlog.RECORD_*, the rest in output/), so the report shows them all.
-    stdout = "".join(o["details"]["text"] for o in outputs if o["details"].get("stream") == "stdout")
-    stderr = "".join(o["details"]["text"] for o in outputs if o["details"].get("stream") == "stderr")
+    # A command's output records are capped in run.jsonl as they are written
+    # (rawlog.RECORD_*, the rest in output/), so the report shows every record
+    # it kept; one recorded before that cap is capped here instead.
+    chunks = _output_chunks(outputs, capped=_recorded_with_a_cap(outputs, fd))
+    stdout = "".join(text for _moment, stream, text in chunks if stream == "stdout")
+    stderr = "".join(text for _moment, stream, text in chunks if stream == "stderr")
     result = CommandResult(
         tuple(sd.get("argv", [])),
         fd.get("returncode", -1),
@@ -686,12 +777,7 @@ def _command_record(
         bool(fd.get("cancelled", False)),
     )
     capture = CommandCapture(lambda: _time(started))
-    capture.chunks = [
-        (_output_time(o), NOTE, _omitted_text(o["details"]))
-        if o["event_type"] == "command_output_omitted"
-        else (_output_time(o), o["details"].get("stream", "stdout"), o["details"].get("text", ""))
-        for o in outputs
-    ]
+    capture.chunks = chunks
     capture.finished = _time(finished) if finished else None
     stopped = bool(finished) and finished.get("status") == "stopped"
     record = format_command_record(result, capture, stopped=stopped, stamp=stamp)

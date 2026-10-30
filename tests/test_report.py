@@ -1,4 +1,6 @@
+import itertools
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +10,22 @@ from ubertooth_harness.report import load_events, render_run, render_runs, write
 
 
 SERIAL = "aaaa0000"
+_moments = itertools.count()
+
+
+def command_event(event_type: str, status: str, details: dict) -> dict:
+    """One record of command `c`, timestamped a millisecond after the last.
+
+    Built here rather than through a publisher: a test of the output cap
+    needs thousands of records, and writing them through run.jsonl and the
+    console writer takes minutes.
+    """
+    second, ms = divmod(next(_moments), 1000)
+    return {
+        "run_id": "run-a", "event_type": event_type, "status": status,
+        "timestamp": f"2026-01-01T00:00:{second:02d}.{ms:03d}",
+        "details": {"command_id": "c", **details},
+    }
 
 
 def write_run(directory: Path, *, finish=True, host="Host_Mac", source=None):
@@ -166,6 +184,88 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(20, report.count(chunk.rstrip()))
             self.assertIn("[O] the end", report)
             self.assertNotIn("more characters of output", report)
+
+    def test_output_recorded_before_the_cap_is_capped_by_the_report(self):
+        # A run recorded before run.jsonl capped output at write time holds
+        # every line, and rendering it printed megabytes. The report keeps
+        # the start and the end, and says how much is only in run.jsonl.
+        from ubertooth_harness.report import (
+            LEGACY_OUTPUT_HEAD_CHARS, LEGACY_OUTPUT_TAIL_CHARS,
+        )
+        line = "rx block timestamp 283640 * 100 nanoseconds\n"
+        records = 5000
+        events = [
+            command_event("command_started", "running",
+                          {"argv": ["ubertooth-dump"]}),
+        ]
+        events += [
+            command_event("command_output", "running",
+                          {"stream": "stderr", "text": line})
+            for _ in range(records)
+        ]
+        events.append(command_event("command_output", "running",
+                                    {"stream": "stderr", "text": "the end\n"}))
+        events.append(command_event("command_finished", "passed",
+                                    {"returncode": 0, "duration_s": 9.0}))
+        printed = len(line) * records + len("the end\n")
+
+        report = render_run(events)
+
+        kept = report.count(line.rstrip())
+        self.assertLess(kept * len(line),
+                        LEGACY_OUTPUT_HEAD_CHARS + LEGACY_OUTPUT_TAIL_CHARS)
+        self.assertGreater(kept, 0)
+        self.assertIn("[E] the end", report)  # how the command ended
+        gap = int(re.search(
+            r"\[M\] (\d+) more characters of output are in run\.jsonl", report,
+        ).group(1))
+        # Everything but the start and the end of the output, give or take
+        # the line the cap fell inside.
+        self.assertAlmostEqual(
+            printed - LEGACY_OUTPUT_HEAD_CHARS - LEGACY_OUTPUT_TAIL_CHARS,
+            gap, delta=len(line),
+        )
+        # The end starts on a whole line, as run.jsonl's own tail does. (The
+        # start may stop inside one, as run.jsonl's head does: it is bounded
+        # by size, not by lines.)
+        after = report.split("more characters of output are in run.jsonl\n", 1)[1]
+        for text in after.splitlines():
+            if "rx block" in text:
+                self.assertTrue(text.endswith(line.rstrip()), text)
+
+    def test_output_capped_when_it_was_recorded_is_shown_as_recorded(self):
+        # The records a capped command leaves are already the start and the
+        # end of its output, with its own [M] note between them: capping
+        # them again would cut output the run deliberately kept.
+        for named in ({"output_file": "output/c.log"},
+                      {"output_files": [{"path": "output/c.stderr.log"}]}):
+            with tempfile.TemporaryDirectory() as directory, self.subTest(**named):
+                run = Path(directory) / "run-a"
+                publisher = open_run_publisher(run, "run-a")
+                publisher.emit("command_started", "running", {
+                    "command_id": "c", "argv": ["ubertooth-dump"],
+                })
+                chunk = "x" * 1000 + "\n"
+                for _ in range(100):
+                    publisher.emit("command_output", "running", {
+                        "command_id": "c", "stream": "stderr", "text": chunk,
+                    })
+                publisher.emit("command_output_omitted", "running", {
+                    "command_id": "c", **named,
+                    "output_omitted": {"lines": {"stderr": 7}, "chars": {"stderr": 70}},
+                })
+                publisher.emit("command_output", "running", {
+                    "command_id": "c", "stream": "stderr", "text": "the end\n",
+                })
+                publisher.emit("command_finished", "passed", {
+                    "command_id": "c", "returncode": 0, "duration_s": 9.0, **named,
+                })
+
+                report = render_run(load_events(run / "run.jsonl"))
+
+                self.assertEqual(100, report.count(chunk.rstrip()))
+                self.assertNotIn("more characters of output are in run.jsonl", report)
+                self.assertIn("7 stderr lines (70 characters)", report)
 
     def test_older_runs_with_offset_timestamps_render_elapsed_times(self):
         events = [
