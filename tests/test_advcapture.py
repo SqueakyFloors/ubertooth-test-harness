@@ -117,13 +117,31 @@ class CheckTests(unittest.TestCase):
         self.assertEqual([], result.problems)
         self.assertEqual((2, 1), (result.matches, result.scan_responses))
 
+    def test_a_scan_response_on_another_channel_is_still_reported(self):
+        # The advertiser answers on the channel the SCAN_REQ came in on, so a
+        # reply on another channel is a leak like any other packet.
+        _header, result = self.check(pcap([record(pdu_type=0x4, rf_channel=12, data=b"")]),
+                                     adv_type="conn", min_packets=0)
+
+        self.assertEqual(["1 packet(s) from C3:11:22:33:44:55 on rf channel 12, not 0"],
+                         result.problems)
+        self.assertEqual((0, 1), (result.matches, result.scan_responses))
+
+    def test_a_scan_response_from_a_nonconn_advertiser_is_a_fault(self):
+        # ADV_NONCONN_IND is not scannable, so there is nothing to answer.
+        _header, result = self.check(pcap([record(pdu_type=0x4, data=b"")]),
+                                     adv_type="nonconn")
+
+        self.assertEqual(0, result.scan_responses)
+        self.assertIn("SCAN_RSP, not ADV_NONCONN_IND", "\n".join(result.problems))
+
     def test_a_scan_response_still_counts_as_a_leak_for_absent(self):
         # --absent asks whether any of the advertiser's packets reached a
         # channel it does not advertise on; a scan response is one of them.
         _header, result = self.check(pcap([record(pdu_type=0x4, data=b"")]),
-                                     channel=38, absent=True)
+                                     channel=38, absent=True, adv_type="conn")
 
-        self.assertEqual(1, result.matches)
+        self.assertEqual((1, 0), (result.matches, result.scan_responses))
         self.assertIn("while it advertises on another channel than 38", result.problems[0])
 
     def test_packet_bounds(self):

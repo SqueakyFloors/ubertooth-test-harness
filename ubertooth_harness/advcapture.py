@@ -26,9 +26,11 @@ Checks (each failure is a ``FAIL:`` line and exit status 1):
   ``--counter-max``;
 - ``--absent``: none of the advertiser's packets at all.
 
-With ``--type``, a SCAN_RSP from the advertiser's own address is counted and
-reported on its own line, not checked: an ADV_IND advertiser must answer a
-scanner in range, and the test does not control who scans.
+With ``--type conn``, a SCAN_RSP from the advertiser's own address is counted
+and reported on its own line, and only its channel is checked: an ADV_IND
+advertiser must answer a scanner in range, and the test does not control who
+scans. ADV_NONCONN_IND is not scannable, so with ``--type nonconn`` a
+SCAN_RSP is checked like any other packet.
 
 Only counts and the advertiser's own fields are printed, never another
 device's address or data, so no nearby traffic reaches the run record.
@@ -252,21 +254,27 @@ def check(data: bytes, *, address: str, channel: int, absent: bool = False,
         packet = parse_advertising(record)
         if packet is None or packet.address != address or not packet.tx_add:
             continue
-        if not absent and adv_type is not None and packet.pdu_type == SCAN_RSP:
+        reasons = []
+        if packet.rf_channel != expected_rf:
+            reasons.append(f"on rf channel {packet.rf_channel}, not {expected_rf}")
+        if not absent and adv_type == "conn" and packet.pdu_type == SCAN_RSP:
             # An ADV_IND advertiser is scannable, and must answer a SCAN_REQ
             # from any scanner in range with a SCAN_RSP from its own address
             # (Core spec 6.0, Vol 6 Part B 4.4.2.3). The bench has scanners
             # the test does not control, so those replies arrive at random.
             # They are not advertising events the case asked for and carry no
-            # harness payload: count them, and leave them out of the checks.
+            # harness payload, so only the channel they arrived on is checked:
+            # a SCAN_RSP goes out on the channel its SCAN_REQ came in on, so
+            # one on another channel is still a leak. ADV_NONCONN_IND is not
+            # scannable, so a SCAN_RSP in one of those cases is a real fault
+            # and is checked like any other packet.
             result.scan_responses += 1
+            for reason in reasons:
+                wrong[reason] = wrong.get(reason, 0) + 1
             continue
         result.matches += 1
         result.channels[packet.rf_channel] = result.channels.get(packet.rf_channel, 0) + 1
         found = harness_payload(packet.adv_data)
-        reasons = []
-        if packet.rf_channel != expected_rf:
-            reasons.append(f"on rf channel {packet.rf_channel}, not {expected_rf}")
         if adv_type is not None and packet.pdu_type != PDU_TYPES[adv_type]:
             reasons.append(f"{PDU_NAMES.get(packet.pdu_type, packet.pdu_type)}, not "
                            f"{PDU_NAMES[PDU_TYPES[adv_type]]}")
