@@ -165,8 +165,8 @@ class LabExecutor:
             self.on_command(argv)
         seen = sorted(self.lab.serials())
         stdout, stderr, code = "", "", 0
-        if argv == ("ubertooth-util", "-H"):
-            stdout = "libubertooth 1.1 (git-test)\n"
+        if argv == ("ubertooth-util", "-V"):
+            stdout = "Host tools version: libubertooth 1.1 (git-test)\n"
         elif len(seen) != 1 and argv[0] in ("ubertooth-util", "bash"):
             # ubertooth_start() opens no device, so the tool fails.
             stderr, code = multiple_devices(seen), 1
@@ -1226,9 +1226,12 @@ class RunSuiteCliIsolationTests(unittest.TestCase):
             # one board attached, `-U <serial>` answers like the bare tool.
             def run(self, argv, **kwargs):
                 argv = tuple(argv)
-                if argv[1:2] == ("-U",) and argv[2] == serial:
+                selected = argv[1:2] == ("-U",) and argv[2] == serial
+                if selected:
                     argv = argv[:1] + argv[3:]
-                if argv == ("ubertooth-util", "-V"):
+                # The compile identity of the board the check named. Bare -V
+                # is the host version check, which the base fake answers.
+                if selected and argv == ("ubertooth-util", "-V"):
                     self.commands.append(argv)
                     return CommandResult(
                         argv, 0, f"ubertooth {revision} (test@host)\n", "", 0.01, False, False

@@ -229,7 +229,7 @@ class PlanningTests(unittest.TestCase):
 
 
 class FollowHelp:
-    """ubertooth-util -H for preflight, ubertooth-util -h for the test."""
+    """ubertooth-util -V for preflight, ubertooth-util -h for the test."""
 
     def __init__(self):
         self.commands = []
@@ -239,7 +239,7 @@ class FollowHelp:
         self.commands.append(command)
         if command[0] == "ubertooth-follow":
             raise AssertionError("a not-applicable case ran")
-        text = "libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
+        text = "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
         if command == ("ubertooth-util", "-h"):
             text = "usage\n"
         return CommandResult(command, 0, text, "", 0.01, False)

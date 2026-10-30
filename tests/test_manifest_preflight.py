@@ -3,6 +3,7 @@ import re
 import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 
@@ -15,12 +16,16 @@ from ubertooth_harness.manifest import (
     build_run_manifest,
 )
 from ubertooth_harness.patterns import (
+    HOST_VERSION_TIMEOUT_S,
     compile_info_pattern,
     firmware_version_pattern,
     revision_pattern,
 )
 from ubertooth_harness.planner import TestInvocation
 from ubertooth_harness.preflight import (
+    HOST_VERSION_ARGV,
+    HOST_VERSION_FALLBACK_ARGV,
+    HOST_VERSION_LABEL,
     PreflightCheck,
     PreflightError,
     PreflightPolicy,
@@ -62,9 +67,9 @@ class FakeExecutor:
     def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
         command = tuple(argv)
         self.commands.append(command)
-        if command == ("ubertooth-util", "-H"):
+        if command == ("ubertooth-util", "-V"):
             output = (
-                f"libubertooth 1.1 ({self.revision}), "
+                f"Host tools version: libubertooth 1.1 ({self.revision}), "
                 "libbtbb 1.0 (git-btbb)\n"
             )
         elif command[-1] == "-v":
@@ -255,36 +260,37 @@ class ManifestTests(unittest.TestCase):
             )
 
 
-class PreflightTests(unittest.TestCase):
+def prepare_preflight(directory):
+    root = Path(directory)
+    source_path = root / "source"
+    make_git_repo(source_path)
+    source = GitRevisionResolver().resolve("Ubertooth", source_path, "HEAD")
+    hardware_path = root / "hardware.yaml"
+    hardware_path.write_text(HARDWARE)
+    plan_path = root / "plan.yaml"
+    plan_path.write_text("plan\n")
+    registry = FileResourceRegistry.load(hardware_path)
+    invocations = make_invocations()
+    manifest = build_run_manifest(
+        run_id="preflight-run",
+        plan_name="test plan",
+        suite="fast",
+        host="Host_Linux",
+        plan_path=plan_path,
+        hardware_path=hardware_path,
+        sources=(source,),
+        invocations=invocations,
+        created_at="2026-10-22T00:00:00+00:00",
+    )
+    checks = PreflightPolicy(registry).compile(invocations, manifest)
+    return root, source, manifest, checks
 
-    def prepare(self, directory):
-        root = Path(directory)
-        source_path = root / "source"
-        make_git_repo(source_path)
-        source = GitRevisionResolver().resolve("Ubertooth", source_path, "HEAD")
-        hardware_path = root / "hardware.yaml"
-        hardware_path.write_text(HARDWARE)
-        plan_path = root / "plan.yaml"
-        plan_path.write_text("plan\n")
-        registry = FileResourceRegistry.load(hardware_path)
-        invocations = make_invocations()
-        manifest = build_run_manifest(
-            run_id="preflight-run",
-            plan_name="test plan",
-            suite="fast",
-            host="Host_Linux",
-            plan_path=plan_path,
-            hardware_path=hardware_path,
-            sources=(source,),
-            invocations=invocations,
-            created_at="2026-10-22T00:00:00+00:00",
-        )
-        checks = PreflightPolicy(registry).compile(invocations, manifest)
-        return root, source, manifest, checks
+
+class PreflightTests(unittest.TestCase):
 
     def test_policy_deduplicates_host_and_device_checks(self):
         with tempfile.TemporaryDirectory() as directory:
-            _root, source, _manifest, checks = self.prepare(directory)
+            _root, source, _manifest, checks = prepare_preflight(directory)
 
             self.assertEqual(4, len(checks))
             self.assertEqual(
@@ -308,7 +314,7 @@ class PreflightTests(unittest.TestCase):
 
     def test_firmware_writing_test_skips_revision_checks_on_its_device(self):
         with tempfile.TemporaryDirectory() as directory:
-            root, _source, manifest, _checks = self.prepare(directory)
+            root, _source, manifest, _checks = prepare_preflight(directory)
             invocations = (make_invocations()[0], self.flash_invocation())
             registry = FileResourceRegistry.load(root / "hardware.yaml")
 
@@ -320,7 +326,7 @@ class PreflightTests(unittest.TestCase):
 
     def test_tests_before_a_firmware_write_still_need_the_revision(self):
         with tempfile.TemporaryDirectory() as directory:
-            root, _source, manifest, _checks = self.prepare(directory)
+            root, _source, manifest, _checks = prepare_preflight(directory)
             invocations = make_invocations() + (self.flash_invocation(),)
             registry = FileResourceRegistry.load(root / "hardware.yaml")
 
@@ -332,7 +338,7 @@ class PreflightTests(unittest.TestCase):
 
     def test_two_firmware_writing_tests_may_share_a_device(self):
         with tempfile.TemporaryDirectory() as directory:
-            root, _source, manifest, _checks = self.prepare(directory)
+            root, _source, manifest, _checks = prepare_preflight(directory)
             invocations = (
                 make_invocations()[1],
                 self.flash_invocation("004-Flash reliability"),
@@ -346,7 +352,7 @@ class PreflightTests(unittest.TestCase):
 
     def test_no_test_may_follow_a_firmware_write_on_the_same_device(self):
         with tempfile.TemporaryDirectory() as directory:
-            root, _source, manifest, _checks = self.prepare(directory)
+            root, _source, manifest, _checks = prepare_preflight(directory)
             invocations = (self.flash_invocation("002-Flash reliability"), make_invocations()[2])
             registry = FileResourceRegistry.load(root / "hardware.yaml")
 
@@ -357,7 +363,7 @@ class PreflightTests(unittest.TestCase):
 
     def test_policy_rejects_binding_drift_from_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
-            root, _source, manifest, _checks = self.prepare(directory)
+            root, _source, manifest, _checks = prepare_preflight(directory)
             changed = list(make_invocations())
             original = changed[1]
             changed[1] = TestInvocation(
@@ -376,7 +382,7 @@ class PreflightTests(unittest.TestCase):
 
     def test_preflight_runs_before_tests_and_writes_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
-            root, source, manifest, checks = self.prepare(directory)
+            root, source, manifest, checks = prepare_preflight(directory)
             sink = CollectSink()
             executor = FakeExecutor(source.expected_revision)
 
@@ -406,7 +412,7 @@ class PreflightTests(unittest.TestCase):
 
     def test_preflight_failure_prevents_test_start(self):
         with tempfile.TemporaryDirectory() as directory:
-            root, source, manifest, checks = self.prepare(directory)
+            root, source, manifest, checks = prepare_preflight(directory)
             sink = CollectSink()
             executor = FakeExecutor(source.expected_revision, wrong_serial=True)
 
@@ -433,6 +439,140 @@ class PreflightTests(unittest.TestCase):
                     manifest=None,
                     preflight_checks=(),
                 )
+
+
+class HostVersionCheckTests(unittest.TestCase):
+    """The host tools' version, in the two shapes the fork's tools print it."""
+
+    # ubertooth-util -V, the one version answer (fork #813).
+    V_ANSWER = (
+        "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
+        "libbtbb loaded from: /usr/local/lib/libbtbb.so.1\n"
+        "Firmware version: bluetooth_rxtx git-test (API:1.35)\n"
+        "Firmware build: ubertooth git-test (builder@host) Mon Oct 27 11:22:33 2025\n"
+    )
+    # ubertooth-util -H on a fork commit before it: the same two host lines,
+    # printed by the same function, and no board read.
+    H_ANSWER = (
+        "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
+        "libbtbb loaded from: /usr/local/lib/libbtbb.so.1\n"
+    )
+    # -H before the fork labelled its version lines (fork 201c3c49): the same
+    # two versions, on a line of their own.
+    UNLABELLED_H_ANSWER = "libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
+    # What -V was on those commits: the board's build string, nothing about
+    # the host, and with no board attached it fails.
+    OLD_V_ANSWER = "ubertooth git-test (builder@host) Mon Oct 27 11:22:33 2025\n"
+
+    @staticmethod
+    def source(name, short_commit):
+        return SourceRevision(
+            name=name,
+            source_path=f"/src/{name}",
+            repository="example",
+            requested_ref="HEAD",
+            commit=short_commit.removeprefix("git-").ljust(40, "0"),
+            short_commit=short_commit.removeprefix("git-"),
+        )
+
+    def check(self):
+        return PreflightCheck(
+            check_id="preflight-001-host-version",
+            name="Host version",
+            host="Host_Linux",
+            resource_alias=None,
+            resource_identity=MappingProxyType({}),
+            argv=HOST_VERSION_ARGV,
+            expected_patterns=host_version_patterns(
+                self.source("Ubertooth", "git-test"), self.source("libbtbb", "git-btbb")
+            ),
+            expected_revision="git-test",
+            fallback_argv=HOST_VERSION_FALLBACK_ARGV,
+            fallback_when_missing=re.escape(HOST_VERSION_LABEL),
+            accepted_returncodes=(0, 1),
+        )
+
+    @staticmethod
+    def result(output, returncode=0):
+        return CommandResult(HOST_VERSION_ARGV, returncode, output, "", 0.01, False)
+
+    def test_the_run_asks_V_and_keeps_H_as_the_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _root, _source, _manifest, checks = prepare_preflight(directory)
+
+            check = checks[0]
+            self.assertEqual(("ubertooth-util", "-V"), check.argv)
+            self.assertEqual(("ubertooth-util", "-H"), check.fallback_argv)
+            # The rest of the wiring, which only a real run exercises: with
+            # no marker the fallback never runs, and without the tolerated
+            # status and the longer deadline a board the run does not even
+            # use fails preflight.
+            self.assertTrue(check.needs_fallback(
+                CommandResult(check.argv, 1, "", "error: unrecognized option\n",
+                              0.01, False)
+            ))
+            self.assertEqual((0, 1), check.accepted_returncodes)
+            self.assertEqual(HOST_VERSION_TIMEOUT_S, check.timeout_s)
+
+    def test_every_shape_of_the_answer_passes(self):
+        check = self.check()
+        for output in (self.V_ANSWER, self.H_ANSWER, self.UNLABELLED_H_ANSWER):
+            with self.subTest(output=output.splitlines()[0]):
+                self.assertEqual("", check.result_failure(self.result(output)))
+
+    def test_a_labelled_answer_does_not_ask_the_older_option(self):
+        # The unlabelled line is left out: it only ever arrives as the
+        # fallback's own answer, which is not asked again.
+        check = self.check()
+        for output in (self.V_ANSWER, self.H_ANSWER):
+            with self.subTest(output=output.splitlines()[0]):
+                self.assertFalse(check.needs_fallback(self.result(output)))
+
+    def test_an_answer_about_no_host_asks_the_older_option(self):
+        result = self.result(self.OLD_V_ANSWER, returncode=1)
+
+        self.assertTrue(self.check().needs_fallback(result))
+
+    def test_a_command_killed_at_its_deadline_is_not_asked_again(self):
+        # The older `-V` reads a board, so it can hang on one; answering the
+        # host version on `-H` afterwards would hide that.
+        timed_out = replace(self.result("", returncode=124), timed_out=True)
+
+        check = self.check()
+        self.assertFalse(check.needs_fallback(timed_out))
+        self.assertIn("timed out", check.result_failure(timed_out))
+
+    def test_a_wrong_revision_is_reported_rather_than_asked_again(self):
+        other = self.V_ANSWER.replace("libubertooth 1.1 (git-test)",
+                                      "libubertooth 1.1 (git-other)")
+        result = self.result(other)
+
+        self.assertIn("identity mismatch", self.check().result_failure(result))
+        self.assertFalse(self.check().needs_fallback(result))
+
+    def test_a_board_that_cannot_be_read_still_passes(self):
+        # -V reads every attached board after the host lines and exits 1 if
+        # one cannot be read; that board may not even be in this run.
+        busy = self.V_ANSWER.replace(
+            "Firmware version: bluetooth_rxtx git-test (API:1.35)",
+            "Firmware version: unavailable, in use by another program",
+        )
+
+        self.assertEqual("", self.check().result_failure(self.result(busy, returncode=1)))
+
+    def test_the_firmware_lines_cannot_stand_in_for_the_host_line(self):
+        # "Firmware build: ubertooth git-test (...)" names the same revision,
+        # so the patterns are anchored to the host tools' own line.
+        firmware_only = self.V_ANSWER.split("libbtbb loaded from", 1)[1]
+
+        self.assertIn("identity mismatch",
+                      self.check().result_failure(self.result(firmware_only)))
+
+    def test_a_modified_source_marker_fails(self):
+        marked = self.V_ANSWER.replace("git-test)", "git-test*)")
+
+        self.assertIn("identity mismatch",
+                      self.check().result_failure(self.result(marked)))
 
 
 class RevisionAbbreviationTests(unittest.TestCase):
@@ -509,7 +649,7 @@ class RevisionAbbreviationTests(unittest.TestCase):
             commit="2fd0d391d99e9b0620146f63f439c1ec74f79861",
             short_commit="2fd0d3912",
         )
-        output = "libubertooth 1.1 (git-1c7f06d621), libbtbb 1.1 (git-2fd0d39)\n"
+        output = "Host tools version: libubertooth 1.1 (git-1c7f06d621), libbtbb 1.1 (git-2fd0d39)\n"
 
         for pattern in host_version_patterns(source, libbtbb):
             self.assertRegex(output, pattern)
