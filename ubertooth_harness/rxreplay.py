@@ -270,9 +270,18 @@ def packet_record_indices(lap: int | None = None) -> list[int]:
 
 # --- output checks ------------------------------------------------------------
 
+# The noise figure and the signal-to-noise ratio beside it are either both
+# figures or both the word `none`: one comes from the other, so a line with one
+# of each is malformed and does not count as a packet. The fixture's records
+# set neither of the status bits that say the board measured this packet's
+# power or estimated its channel's background, so a current ubertooth-rx prints
+# `none` for both (fork 532adc19); a record from a board that does set them
+# prints figures.
+_NOISE_AND_SNR = r"(?:n=-?\d+ snr=-?\d+|n=none snr=none)"
+
 PACKET_LINE = re.compile(
-    r"^systime=(?P<systime>\d+) ch=\s*(?P<ch>\d+) LAP=(?P<lap>[0-9a-f]{6}) "
-    r"err=(?P<err>\d+) clkn=\d+ clk_offset=\d+ s=-?\d+ n=-?\d+ snr=-?\d+$"
+    rf"^systime=(?P<systime>\d+) ch=\s*(?P<ch>\d+) LAP=(?P<lap>[0-9a-f]{{6}}) "
+    rf"err=(?P<err>\d+) clkn=\d+ clk_offset=\d+ s=-?\d+ {_NOISE_AND_SNR}$"
 )
 UAP_LINE = re.compile(r"UAP = 0x(?P<uap>[0-9a-f]+) found after \d+ total packets")
 # libbtbb works the UAP out from the packets' CRCs and says so. Since libbtbb

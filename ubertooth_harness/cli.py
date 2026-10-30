@@ -14,6 +14,7 @@ from ubertooth_harness.build import (
     BuildError,
     Builder,
     homebrew_include_dir,
+    missing_tools,
     plan_build,
     require_tools,
     resolve_python,
@@ -33,7 +34,12 @@ from ubertooth_harness.events import (
 )
 from ubertooth_harness.executor import SubprocessCommandExecutor
 from ubertooth_harness.isolation import IsolationRuntime, IsolationSetupError
-from ubertooth_harness.flash import HarnessError
+from ubertooth_harness.flash import (
+    BuildFlashBoard,
+    BuildFlasher,
+    FlashCancelled,
+    HarnessError,
+)
 from ubertooth_harness import leases as board_leases
 from ubertooth_harness import libbtbbpin
 from ubertooth_harness.manifest import (
@@ -47,7 +53,19 @@ from ubertooth_harness.plan import PlanError, check_runnable, image_label, load_
 from ubertooth_harness import pytools
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.planner import PlanCompiler, PlanningError
-from ubertooth_harness.preflight import PreflightError, PreflightPolicy
+from ubertooth_harness.preflight import (
+    BUILD_AND_FLASH_FIX,
+    FLASH_FIX,
+    NO_FLASH_FIX,
+    PreflightError,
+    PreflightPolicy,
+)
+from ubertooth_harness.power import (
+    PowerControllerError,
+    controller_from_resource,
+    controller_ports,
+    snapshot_ports,
+)
 from ubertooth_harness.resources import FileResourceRegistry, RegistryError
 from ubertooth_harness.report import render_runs, write_report
 from ubertooth_harness.sequencer import NamedTestSequencer, run_started_details
@@ -77,8 +95,9 @@ def _add_build_options(parser: argparse.ArgumentParser, *, optional: bool) -> No
     parser.add_argument(
         "--with-firmware",
         action="store_true",
-        help="also build bluetooth_rxtx firmware (needs arm-none-eabi-gcc); "
-        "the image is recorded, not flashed",
+        help="also build bluetooth_rxtx firmware (needs arm-none-eabi-gcc) and "
+        "record the image; run-suite --build builds it anyway when it flashes "
+        "the boards, which it does unless its --no-flash-build is given",
     )
     parser.add_argument(
         "--with-python",
@@ -130,13 +149,14 @@ def _external_template(args: argparse.Namespace) -> str | None:
 
 @contextlib.contextmanager
 def _signals_cancel(token: CancellationToken):
-    """SIGINT/SIGTERM cancel the token instead of interrupting the process."""
+    """SIGINT/SIGTERM/SIGHUP cancel the token instead of interrupting the process."""
     previous = {}
 
     def request(signum, _frame):
         token.cancel(f"received {signal.Signals(signum).name}")
 
-    for signum in (signal.SIGINT, signal.SIGTERM):
+    # SIGHUP too: a dropped SSH session must not kill a firmware write.
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         previous[signum] = signal.getsignal(signum)
         signal.signal(signum, request)
     try:
@@ -175,11 +195,13 @@ def _build(
         ).run(plan)
 
 
-def _finish_failed_run(publisher, output_dir: Path, reason: str) -> None:
-    """Close a run that failed before its tests started, then write report.md."""
+def _finish_failed_run(
+    publisher, output_dir: Path, reason: str, status: str = "failed"
+) -> None:
+    """Close a run that stopped before its tests started, then write report.md."""
     try:
         publisher.emit(
-            "run_finished", "failed", {"status": "failed", "failure_reason": reason}
+            "run_finished", status, {"status": status, "failure_reason": reason}
         )
     finally:
         write_report(output_dir)
@@ -343,6 +365,12 @@ def _parser() -> argparse.ArgumentParser:
         "applicable on this host and why; build, lease and run nothing",
     )
     _add_build_options(run_suite, optional=True)
+    run_suite.add_argument(
+        "--no-flash-build", action="store_true",
+        help="with --build, do not flash the boards with the build's firmware "
+        "before preflight (flashing is the default when building; it also "
+        "builds the firmware)",
+    )
     _add_lease_options(run_suite)
 
     boards = subparsers.add_parser(
@@ -355,6 +383,15 @@ def _parser() -> argparse.ArgumentParser:
     boards.add_argument("--lease-dir", type=Path, help=argparse.SUPPRESS)
     _add_external_lock_option(boards)
     boards.add_argument("--json", action="store_true", help="machine-readable output")
+
+    power = subparsers.add_parser(
+        "power",
+        help="read a USB power controller's ports (power, data, VBUS, current) "
+        "and the resources mapped to them; changes nothing",
+    )
+    power.add_argument("--hardware", type=Path, required=True)
+    power.add_argument("controller", metavar="ALIAS", help="registered USB power controller")
+    power.add_argument("--json", action="store_true", help="machine-readable output")
 
     lease = subparsers.add_parser(
         "lease",
@@ -613,6 +650,7 @@ def _prepare_run(
             artifacts += (FileIdentity.from_path("test build", built.plan.firmware_image),)
         # Every test command runs the tools just built, not installed ones.
         executor = SubprocessCommandExecutor(_test_environment(sources, built.plan))
+        _flash_build(args, sources, built, executor, publisher, run_dir, leases)
     manifest = build_run_manifest(
         run_id=run_id,
         plan_name=plan.name,
@@ -626,8 +664,42 @@ def _prepare_run(
         build=built.to_manifest() if built else None,
         leases=leases.to_manifest() if leases is not None else (),
     )
-    preflight_checks = preflight_policy.compile(invocations, manifest)
+    if not args.build:
+        fix = BUILD_AND_FLASH_FIX
+    elif args.no_flash_build:
+        fix = NO_FLASH_FIX
+    else:
+        fix = FLASH_FIX
+    preflight_checks = preflight_policy.compile(invocations, manifest, firmware_fix=fix)
     return manifest, preflight_checks, executor, built
+
+
+def _flash_build(args, sources, built, executor, publisher, run_dir, leases) -> None:
+    """Flash the run's boards with the firmware just built, before preflight.
+
+    The default whenever the run builds (#135); --no-flash-build keeps the
+    boards' firmware. The host lock is held while writing and then released,
+    unless the run itself switches power or writes firmware later.
+    """
+    boards = getattr(args, "flash_boards", ())
+    if not boards:
+        reason = (
+            "--no-flash-build" if args.no_flash_build
+            else "no board needs the run's firmware"
+        )
+        publisher.emit("build_flash_finished", "skipped", {
+            "reason": reason, "expected_revision": "", "boards": [],
+        })
+        return
+    ubertooth = next(source for source in sources if source.name == "Ubertooth")
+    with _signals_cancel(CancellationToken()) as token:
+        BuildFlasher(executor).run(
+            boards, built.plan.firmware_image, ubertooth.expected_revision, publisher,
+            output_dir=run_dir, cancellation=token,
+            host_lock=leases is not None and leases.holds_host_lock(),
+        )
+    if leases is not None and not getattr(args, "keep_host_lock", True):
+        leases.release_host_lock()
 
 
 def _test_environment(sources, plan) -> dict:
@@ -721,10 +793,37 @@ def _run_suite(args: argparse.Namespace) -> int:
         raise HarnessError("--with-python requires --build")
     if args.build and not args.libbtbb_source:
         raise HarnessError("--build requires --libbtbb-source and --libbtbb-ref")
+    if args.no_flash_build and not args.build:
+        raise HarnessError("--no-flash-build requires --build")
+    args.flash_boards = ()
+    if args.build and not args.no_flash_build:
+        # The boards whose firmware preflight requires get the run's own
+        # firmware first; that needs the firmware build.
+        args.flash_boards = tuple(
+            BuildFlashBoard(
+                alias,
+                str(registry.get(alias).identity.get("serial", "")).strip().lower(),
+            )
+            for alias in PreflightPolicy(registry, catalog).boards_needing_firmware(invocations)
+        )
+    if args.flash_boards and not args.with_firmware:
+        args.with_firmware = True
+        if not args.dry_run and "arm-none-eabi-gcc" in missing_tools(
+            _detected_platform(), True
+        ):
+            raise HarnessError(
+                "flashing the boards with the run's build (the default with "
+                "--build) needs the firmware build, and arm-none-eabi-gcc is not "
+                "installed; install it, or use --no-flash-build to keep the "
+                "boards' firmware"
+            )
     if args.dry_run:
         return _dry_run(args, catalog, plan, host, invocations, not_applicable)
     artifacts = _parse_artifacts(args.artifact)
     run_id = validate_run_id(args.run_id) if args.run_id else generate_run_id()
+    # Power isolation and firmware-writing tests hold the host lock for the
+    # whole run; flashing the build first holds it only while writing.
+    args.keep_host_lock = board_leases.needs_host_lock(invocations, catalog)
     leases = board_leases.acquire(
         board_leases.boards_for_invocations(invocations, registry),
         board_leases.holder_info(
@@ -734,7 +833,7 @@ def _run_suite(args: argparse.Namespace) -> int:
         directory=args.lease_dir,
         wait_s=args.wait_for_boards * 60,
         # Power isolation and firmware writes hold this host's lock too.
-        host_lock=board_leases.needs_host_lock(invocations, catalog),
+        host_lock=args.keep_host_lock or bool(args.flash_boards),
         external_template=external_template,
     )
     try:
@@ -765,6 +864,13 @@ def _dry_run(args, catalog, plan, host, invocations, not_applicable) -> int:
     )
     print(f"dry run: {plan.name} / {args.suite} on {args.host}; nothing is built or run")
     print(f"host: {capabilities.describe()}")
+    if args.flash_boards:
+        print("flash before preflight with the build's firmware: " + ", ".join(
+            f"{board.alias} ({board.serial})" for board in args.flash_boards
+        ))
+    elif args.build:
+        print("flash before preflight: no ("
+              + ("--no-flash-build" if args.no_flash_build else "no board needs it") + ")")
     runs = omitted = 0
     for invocation in invocations:
         definition = catalog.get(invocation.test_name)
@@ -840,7 +946,11 @@ def _run_leased(
         )
     except BaseException as error:
         if publisher is not None:
-            _finish_failed_run(publisher, run_dir, str(error) or type(error).__name__)
+            # A cancellation during the flash stage ends the run canceled.
+            _finish_failed_run(
+                publisher, run_dir, str(error) or type(error).__name__,
+                "canceled" if isinstance(error, FlashCancelled) else "failed",
+            )
         if isolation is not None:
             isolation.close()
         raise
@@ -963,6 +1073,57 @@ def _boards_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _power_command(args: argparse.Namespace) -> int:
+    registry = FileResourceRegistry.load(args.hardware)
+    resource = registry.get(args.controller)
+    try:
+        # Unarmed: this command can never switch a port.
+        controller = controller_from_resource(resource, allow_real_changes=False)
+        ports = controller_ports(resource)
+        mapped = {
+            board.power["port"]: board.alias
+            for board in registry.resources.values()
+            if board.power.get("controller") == resource.alias
+            and isinstance(board.power.get("port"), int)
+        }
+        controller.connect()
+        try:
+            states = snapshot_ports(controller, ports)
+            firmware = getattr(controller, "firmware_version", None)
+        finally:
+            try:
+                controller.close()
+            except Exception:  # noqa: BLE001 - a read error above is the one to report
+                pass
+    except PowerControllerError as error:
+        raise HarnessError(f"power controller {resource.alias}: {error}") from error
+    rows = [
+        {
+            "port": state.port,
+            "power_enabled": state.power_enabled,
+            "data_enabled": state.data_enabled,
+            "vbus_microvolts": state.vbus_microvolts,
+            "vbus_microamps": state.vbus_microamps,
+            "resource": mapped.get(state.port),
+        }
+        for state in states
+    ]
+    if args.json:
+        print(json.dumps({"controller": resource.alias, "driver": resource.driver,
+                          "firmware_version": firmware, "ports": rows},
+                         indent=2, sort_keys=True))
+        return 0
+    print(f"{resource.alias} ({resource.driver})"
+          + (f", firmware {firmware}" if firmware else ""))
+    for row in rows:
+        volts = "-" if row["vbus_microvolts"] is None else f"{row['vbus_microvolts'] / 1e6:.2f} V"
+        amps = "-" if row["vbus_microamps"] is None else f"{row['vbus_microamps'] / 1e3:.1f} mA"
+        print(f"port {row['port']}: power {'on ' if row['power_enabled'] else 'off'} "
+              f"data {'on ' if row['data_enabled'] else 'off'} "
+              f"VBUS {volts:>7} {amps:>9}  {row['resource'] or ''}".rstrip())
+    return 0
+
+
 def _lease_command(args: argparse.Namespace) -> int:
     command = list(args.command_line)
     if not command:
@@ -1025,6 +1186,10 @@ def main(argv: list[str] | None = None) -> int:
             return _boards_command(args)
         if args.command == "lease":
             return _lease_command(args)
+        if args.command == "power":
+            # Opens a real controller: only from the harness environment.
+            require_harness_environment()
+            return _power_command(args)
         if args.command == "report":
             text = render_runs(args.runs, redact_serials=args.redact_serials, title=args.title)
             if args.output:

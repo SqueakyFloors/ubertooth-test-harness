@@ -329,6 +329,19 @@ button.primary:disabled:hover { background: var(--primary); }
 .live-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; }
 .live-actions .hint { margin: 0; }
 
+/* Per board: the times the firmware's watchdog reset it during this run. */
+.live-boards h3 { margin: 0 0 0.4rem; font-size: 0.95rem; }
+.boards { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.2rem; }
+.board {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem;
+  font-size: 0.85rem; padding: 0.2rem 0.45rem;
+  border-radius: var(--radius-small); border-left: 3px solid transparent;
+}
+.board-name { font-weight: 650; }
+.board-resets { color: var(--muted); font-variant-numeric: tabular-nums; }
+.board-reset { border-left-color: var(--bad-fg); }
+.board .reason { flex-basis: 100%; }
+
 .checklist {
   list-style: none; margin: 0; padding: 0; counter-reset: check;
   display: grid; gap: 0.25rem;
@@ -347,6 +360,7 @@ button.primary:disabled:hover { background: var(--primary); }
 .check-name { flex: 1 1 8rem; min-width: 0; overflow-wrap: anywhere; }
 .check-estimate { flex: none; margin: 0; font-size: 0.8rem; font-variant-numeric: tabular-nums; }
 .check .reason { flex-basis: 100%; padding-left: 2.1rem; font-size: 0.85rem; }
+.check-target { overflow-wrap: anywhere; }
 .check-running {
   background: var(--running-row); border-color: var(--run-line);
   border-left-color: var(--run-fg);

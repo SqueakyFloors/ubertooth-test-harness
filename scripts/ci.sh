@@ -54,15 +54,18 @@ run_test() {
     test "$(command -v python)" = "$py"
     python -c "import json; from ubertooth_harness.environment import capture, require_harness_environment; require_harness_environment(); print(json.dumps(capture(), indent=2))"
 
+    # One process per module, one per core (scripts/test.py), with the ten
+    # slowest tests printed so a slow test shows up in the job log. The plain
+    # `python -m unittest discover -s tests` still runs the same suite.
     step "unit tests"
-    python -m unittest discover -s tests -v
+    python scripts/test.py --durations 10
 
     step "validate plans and resource template"
     for plan in testplans/*.yaml; do
         python -m ubertooth_harness validate-plan "$plan"
     done
     python -c "from ubertooth_harness.resources import FileResourceRegistry; FileResourceRegistry.load('hardware.example.yaml')"
-    for suite in fast slow mac-polling release host; do
+    for suite in fast slow mac-polling release host mac; do
         python -m ubertooth_harness validate-plan "testplans/$suite.yaml" \
             --hardware hardware.example.yaml --suite "$suite"
     done

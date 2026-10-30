@@ -6,7 +6,9 @@ from types import MappingProxyType
 from typing import Callable, Mapping
 
 from ubertooth_harness.cases import CommandCase, FlashCase, guard_roles
-from ubertooth_harness.hostneeds import BLUEZ_TOOLS, NO_NEEDS, Needs, tool_needs
+from ubertooth_harness.hostneeds import (
+    BLUEZ_TOOLS, NO_NEEDS, PLATFORMS, Needs, tool_needs,
+)
 from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
     COMPILE_INFO_PATTERN,
@@ -26,6 +28,10 @@ from ubertooth_harness import (
 class CatalogError(ValueError):
     """A test name or argument does not match the catalog."""
 
+
+# The plan argument that turns the firmware's self-reset count into a
+# pass/fail measure for one test (watchdog.py).
+WATCHDOG_LIMIT_ARGUMENT = "max_watchdog_resets"
 
 _MISSING = object()
 _DURATION_RE = re.compile(r"^([1-9][0-9]*)(ms|s|m|h)$")
@@ -53,8 +59,8 @@ def _platforms(value):
     if not isinstance(value, (list, tuple)) or not value:
         raise CatalogError("platforms must be a non-empty list")
     normalized = tuple(value)
-    if any(item not in ("macos", "linux") for item in normalized):
-        raise CatalogError("platforms may contain only macos and linux")
+    if any(item not in PLATFORMS for item in normalized):
+        raise CatalogError("platforms may contain only " + " and ".join(PLATFORMS))
     if len(set(normalized)) != len(normalized):
         raise CatalogError("platforms must not contain duplicates")
     return normalized
@@ -281,7 +287,11 @@ class TestDefinition:
         return _duration_argument_seconds(arguments)
 
     def test_needs(self, arguments: Mapping) -> tuple[Needs, ...]:
-        """The test-wide needs: the definition's and the plan's platforms."""
+        """The test-wide needs: the definition's and the plan's platforms.
+
+        A step without `platforms:` adds no platform need, so it runs on
+        every platform.
+        """
         needs = [self.needs] if self.needs else []
         if arguments.get("platforms"):
             needs.append(Needs(platforms=tuple(arguments["platforms"])))
@@ -391,6 +401,16 @@ class TestCatalog:
 
 HOSTS = ArgumentRule(_hosts, default="each")
 UBERTOOTH = ArgumentRule(_selector, default="default")
+# Every test accepts `max_watchdog_resets:` (builtin_catalog adds it), so a
+# stability run can make the firmware's self-reset count a pass/fail measure.
+# It is optional: a step that leaves it out has no limit, and a self-reset is
+# only reported (watchdog.py), so the normalized arguments carry it only when
+# the plan sets it.
+MAX_WATCHDOG_RESETS = ArgumentRule(_nonnegative_integer)
+# Every test accepts `platforms:` (builtin_catalog adds it where the test does
+# not declare its own rule). It is optional: a step that leaves it out runs on
+# every platform, so the normalized arguments carry it only when the plan does.
+PLATFORMS_ARGUMENT = ArgumentRule(_platforms)
 DURATION = ArgumentRule(_duration, required=True)
 SAMPLE_EVERY = ArgumentRule(_duration, required=True)
 COVERAGE = ArgumentRule(_coverage, required=True)
@@ -704,17 +724,17 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # Three load runs of four flashes each took 10.4-10.7 s.
     "Flash reliability": _default(Estimate(0, per_count=("flashes", 2.65))),
     "DFU images": _profiles(Estimate(11.7), Estimate(69.0)),
-    # No run record (Linux only, needs power switching): two queries and the
-    # capture, plus up to 5 s removal and 10 s return deadlines with 1 s
-    # settles; about 8 s of power switching is assumed.
-    "Exclusive Ubertooth topology": _default(Estimate(8.0, per_duration=1)),
-    # No passing run yet: about 6 s from the test's start to -n on the Linux
-    # lab host (two resets), plus the result and about 40 reads and restores
-    # of both boards. On fork main 0684c11 a run fails in about 18 s: no
-    # result by the 10 s deadline (fork #26), then a clean cleanup. Before
-    # 0684c11 it took about 69 s: the wedged boards made every cleanup
-    # command time out.
-    "Two-device range test": _default(Estimate(10.0)),
+    # Three runs on the Linux lab host (Acroname USBHub3+, three other boards
+    # powered off, 5 s capture) took 12.5-16.7 s, median 15.2 s: about 1.3 s
+    # to a settled enumeration and switch-off, 1.5 s to confirm the board is
+    # alone, the queries and capture, and under 0.1 s to restore.
+    "Exclusive Ubertooth topology": _default(Estimate(10.0, per_duration=1)),
+    # Nine passing runs on the Linux lab host at fork 699960b (one guard
+    # board) took 11.5-14.9 s, median 13.3 s: about 6 s to -n (two resets),
+    # the result within about 1 s, then the reads and restores of both
+    # boards and the guard checks. Before fork #601 a run failed in about
+    # 18 s (no result by the 10 s deadline, fork #26).
+    "Two-device range test": _default(Estimate(13.5)),
     # ESTIMATE_PENDING_HW
     "Capture known BLE advertiser": _profiles(
         Estimate(25.0, per_duration=5), Estimate(70.0, per_duration=16)
@@ -1200,6 +1220,31 @@ def builtin_catalog() -> TestCatalog:
         ]
     )
     return TestCatalog(
-        replace(definition, estimates=ESTIMATES.get(definition.name))
+        _accept_watchdog_limit(_accept_platforms(
+            replace(definition, estimates=ESTIMATES.get(definition.name))))
         for definition in definitions
     )
+
+
+def _accept_watchdog_limit(definition: TestDefinition) -> TestDefinition:
+    """Accept `max_watchdog_resets:` on every test, so a plan can make the
+    firmware's self-reset count a pass/fail measure for any of them."""
+    if WATCHDOG_LIMIT_ARGUMENT in definition.arguments:
+        return definition
+    arguments = dict(definition.arguments)
+    arguments[WATCHDOG_LIMIT_ARGUMENT] = MAX_WATCHDOG_RESETS
+    return replace(definition, arguments=MappingProxyType(arguments))
+
+
+def _accept_platforms(definition: TestDefinition) -> TestDefinition:
+    """Accept `platforms:` on every test, so a plan can restrict any step.
+
+    Tests that must state their platforms (Flash reliability, Exclusive
+    Ubertooth topology, MAC polling soak) declare their own required rule and
+    keep it.
+    """
+    if "platforms" in definition.arguments:
+        return definition
+    arguments = dict(definition.arguments)
+    arguments["platforms"] = PLATFORMS_ARGUMENT
+    return replace(definition, arguments=MappingProxyType(arguments))

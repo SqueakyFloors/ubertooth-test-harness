@@ -15,18 +15,22 @@ import re
 import sys
 from typing import Iterable, Mapping, Sequence
 
+from ubertooth_harness import targets
 from ubertooth_harness.events import REPORT, RUN_LOG
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.rawlog import NOTE, TAGS, CommandCapture, format_command_record
+from ubertooth_harness.watchdog import wait_counts
 
 
 REDACTED = "<serial>"
 LEGEND = (
     "Times are elapsed since the run started (UTC start in Time above). "
     "Tags: `[C]` command sent, `[O]` stdout, `[E]` stderr, `[R]` command result, "
-    "`[S]` state step, `[I]` power isolation, `[M]` harness record. "
+    "`[S]` state step, `[I]` power isolation, `[M]` harness record, "
+    "`[<alias> >]` a line sent to that known target's serial shell and "
+    "`[<alias> <]` a line it answered. "
     "`+++` opens a step and `---` closes it; `===` marks the run, build, "
-    "preflight, and each test."
+    "flash, preflight, and each test."
 )
 
 
@@ -92,6 +96,13 @@ class _Run:
             if e["event_type"] == "check_finished"
             and e.get("details", {}).get("phase") == "preflight"
         ]
+        # Which known device each test ran against, by invocation (#186).
+        self.known_targets = {
+            e["details"]["invocation_id"]: e["details"]
+            for e in self.events
+            if e["event_type"] == "known_target"
+            and e.get("details", {}).get("invocation_id")
+        }
 
     @property
     def status(self) -> str:
@@ -117,6 +128,9 @@ class _Run:
             details = event.get("details", {})
             if event["event_type"] == "check_started":
                 identities.append(details.get("resource_identity", {}))
+            elif event["event_type"] == "build_flash_started":
+                for board in details.get("boards", []):
+                    add(board.get("serial"))
             elif event["event_type"] == "flash_run_started":
                 add(details.get("serial"))
                 for serial in (*details.get("serials", []), *details.get("guard_serials", [])):
@@ -180,6 +194,10 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
                 f", {summary.get('not_applicable_cases', 0)} cases and "
                 f"{summary.get('not_applicable_tests', 0)} tests not applicable on this host"
             )
+        if summary.get("watchdog_resets"):
+            result += (
+                f", {summary['watchdog_resets']} board self-resets (see Watchdog)"
+            )
         if summary.get("failure_reason"):
             result += f"; {summary['failure_reason']}"
     else:
@@ -232,6 +250,7 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
         rows.append(("Built tools report", build.get("host_version", "")))
     else:
         rows.append(("Built", "no (installed tools)"))
+    rows.append(("Flash", _flash_row(run, bool(build))))
     capabilities = run.capabilities
     if capabilities:
         tools = capabilities.get("bluez_tools")
@@ -331,6 +350,52 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
     return rows
 
 
+def _flash_row(run: _Run, built: bool) -> str:
+    """Whether the run flashed its boards with its own build first (#135)."""
+    finished = next(
+        (e for e in run.events if e["event_type"] == "build_flash_finished"), None
+    )
+    if finished is None:
+        started = any(e["event_type"] == "build_flash_started" for e in run.events)
+        if started:
+            return "**did not finish**"
+        return "no (the run does not build)" if not built else "no"
+    details = finished.get("details", {})
+    status = finished.get("status", "")
+    if status == "skipped":
+        return f"no ({details.get('reason', '')})"
+    boards = "; ".join(
+        f"{item.get('resource')} "
+        + _flash_board_text(item)
+        for item in details.get("boards", [])
+    )
+    text = f"with the build's firmware {details.get('expected_revision', '')}: {boards}"
+    started = next(
+        (e for e in run.events if e["event_type"] == "build_flash_started"), {}
+    )
+    if started.get("details", {}).get("host_lock"):
+        written = any(item.get("written") for item in details.get("boards", []))
+        text += (
+            " (host lock held while writing)" if written else " (host lock held)"
+        )
+    if status != "passed":
+        return f"**{status}**: {details.get('reason', '')}; {text}"
+    return f"yes, verified before preflight; {text}"
+
+
+def _flash_board_text(item: Mapping) -> str:
+    """What happened to one board in the flash stage."""
+    if item.get("written"):
+        return (
+            f"written, was {item.get('before') or 'unreadable'}, "
+            f"now {item.get('after') or 'unknown'}"
+        )
+    if item.get("after"):
+        return f"already ran {item['after']}"
+    # The stage stopped before this board was read or written.
+    return "not written"
+
+
 def _known(value) -> str:
     return "not known" if value is None else "yes" if value else "no"
 
@@ -354,11 +419,120 @@ def _not_applicable_section(run: _Run) -> list[str]:
     return lines
 
 
+def _watchdog_section(run: _Run) -> list[str]:
+    """What the firmware's watchdog record said, per board, and the fork
+    issue to file for a board that reset itself.
+
+    A self-reset is the watchdog working, so it is reported here rather than
+    failing the run; `ubertooth-util -w` is what the run read (watchdog.py).
+    """
+    summary = next(
+        (e.get("details", {}) for e in reversed(run.events)
+         if e["event_type"] == "watchdog_summary"), None
+    )
+    if summary is None:
+        return []
+    lines = [
+        "", "## Watchdog", "",
+        "The firmware resets a board that stops servicing USB or whose mode "
+        "stops looping, and keeps the reason in RAM a reset does not clear. "
+        "A reset is reported, not failed: the board came back by itself. "
+        "Each row holds what that board's last whole record said, and what "
+        "its last read found.", "",
+        "| Board | Serial | Reset itself | Last boot cause | Last read | "
+        "Transfer errors | Radio waits that gave up |", "|---|---|---|---|---|---|---|",
+    ]
+    for board in summary.get("boards", []):
+        waits = board.get("radio_waits")
+        counts = wait_counts(waits) if waits else "not reported"
+        errors = board.get("transfer_errors")
+        lines.append(
+            f"| {_cell(board.get('resource', ''))} | {_cell(board.get('serial', ''))} "
+            f"| {board.get('resets', 0)} | {_cell(board.get('boot_cause') or '–')} "
+            f"| {_cell(board.get('state', ''))} "
+            f"| {'not reported' if errors is None else errors} | {_cell(counts)} |"
+        )
+    warnings = [
+        line
+        for event in run.events if event["event_type"] == "watchdog"
+        for line in event.get("details", {}).get("warnings", [])
+    ]
+    notes = [
+        line
+        for event in run.events if event["event_type"] == "watchdog"
+        for line in event.get("details", {}).get("notes", [])
+    ]
+    for heading, items in (("Warnings", warnings), ("Notes", notes)):
+        if items:
+            lines += ["", f"**{heading}**", ""]
+            lines += [f"- {item}" for item in items]
+    for offer in summary.get("issues", []):
+        issue = offer.get("issue", {})
+        duplicates = offer.get("duplicates", {})
+        lines += [
+            "", f"### Issue to file on {issue.get('repository', 'the fork')}", "",
+            f"Board {_cell(offer.get('resource', ''))} reset itself "
+            f"{offer.get('resets', 0)} time(s). File this, or comment on an open "
+            "issue below if it is the same one.", "",
+        ]
+        matches = duplicates.get("matches") or []
+        if matches:
+            lines += ["Open fork issues matching this mode and wait:", ""]
+            lines += [
+                f"- [#{match.get('number')}]({match.get('url')}) {match.get('title')}"
+                for match in matches
+            ]
+            lines.append("")
+        elif duplicates.get("error"):
+            lines += [
+                f"No duplicate search: {duplicates['error']} "
+                f"(search: `{duplicates.get('terms', '')}`).", "",
+            ]
+        else:
+            lines += [
+                f"No open fork issue matches `{duplicates.get('terms', '')}`.", "",
+            ]
+        # Four backticks: the body carries the `-w` output in a fence of its own.
+        lines += ["````text", f"Title: {issue.get('title', '')}", ""]
+        lines += str(issue.get("body", "")).splitlines()
+        lines.append("````")
+    return lines
+
+
+def _known_target_section(run: _Run) -> list[str]:
+    """One line per test naming the known device it ran against, or none."""
+    if not run.tests or not run.known_targets:
+        return []
+    lines = ["", "## Known targets", "",
+             "Which device the harness drove for each test, so a capture "
+             "against a known device is told apart from one of whatever "
+             "traffic was there. The serial, port, and address are what the "
+             "registry records and the test's own ready case checks; the "
+             "firmware version is the one that device's driver requires, and "
+             "the board's own answer is in the transcript.", ""]
+    for record in run.tests:
+        invocation = record["started"]["details"].get("invocation_id", "")
+        details = run.known_targets.get(invocation)
+        if details is None:
+            # A test the host could not run drove nothing, and a run recorded
+            # before the harness kept this record says nothing either way.
+            continue
+        lines.append(f"- `{invocation}`: {details.get('summary', '')}")
+    return lines
+
+
+def _target_cell(run: _Run, invocation: str) -> str:
+    details = run.known_targets.get(invocation)
+    if details is None:
+        return ""
+    return targets.column(details.get("targets") or ())
+
+
 def _results_table(run: _Run) -> list[str]:
     lines = [
-        "| Test | Host and resources | Result | Failed cases | Skipped cases "
-        "| Not applicable cases | Duration | Reason |",
-        "|---|---|---|---|---|---|---|---|",
+        "| Test | Host and resources | Known target | Result | Failed cases "
+        "| Skipped cases | Not applicable cases | Duration | Reason |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for record in run.tests:
         started = record["started"]
@@ -373,20 +547,37 @@ def _results_table(run: _Run) -> list[str]:
             fd = finished["details"]
             status = finished["status"]
             failed = fd.get("failed_cases", "")
-            guards = fd.get("failed_guard_checks", 0)
-            if guards:
-                # Guard checks are not cases; show them beside the case count.
-                failed = f"{failed} + {guards} guard check{'s' if guards != 1 else ''}"
+            # Guard and watchdog checks are not cases; show them beside the
+            # case count, so a test that failed on one of them does not read
+            # as a failure with nothing failed.
+            for count, what in (
+                (fd.get("failed_guard_checks", 0), "guard"),
+                (fd.get("failed_watchdog_checks", 0), "watchdog"),
+            ):
+                if count:
+                    failed = f"{failed} + {count} {what} check{'s' if count != 1 else ''}"
             skipped = fd.get("skipped_cases", "")
             not_applicable = fd.get("not_applicable_cases", "")
             reason = fd.get("reason", "")
+            # A board that reset itself does not fail the test, so the table
+            # says it happened and the Watchdog section below has the lines
+            # themselves; printing them twice in one report helps nobody.
+            count = fd.get("watchdog_warnings", 0)
+            if count:
+                note = (
+                    f"warning: {count} watchdog warning"
+                    f"{'' if count == 1 else 's'} (see Watchdog)"
+                )
+                reason = f"{reason}; {note}" if reason else note
+        target = _target_cell(run, details.get("invocation_id", ""))
         lines.append(
-            f"| {_cell(details.get('invocation_id'))} | {_cell(where)} | {_cell(status)} "
+            f"| {_cell(details.get('invocation_id'))} | {_cell(where)} "
+            f"| {_cell(target)} | {_cell(status)} "
             f"| {failed} | {skipped} | {not_applicable} | {_duration(started, finished)} "
             f"| {_cell(reason)} |"
         )
     if not run.tests:
-        lines.append("| (no tests started) | | | | | | | |")
+        lines.append("| (no tests started) | | | | | | | | |")
     return lines
 
 
@@ -530,6 +721,19 @@ def _transcript(run: _Run) -> list[str]:
         elif kind == "build_finished":
             close_build_step(event)
             line(event, f"=== BUILD EXIT: {status}{_reason(details)} ===")
+        elif kind == "build_flash_started":
+            line(event, f"=== FLASH: {len(details.get('boards', []))} board(s) with the "
+                        f"build's firmware {details.get('expected_revision', '')} ===")
+        elif kind == "build_flash_board_started":
+            line(event, f"+++ flash {details.get('resource')} ({details.get('serial')}) +++")
+        elif kind == "build_flash_board_finished":
+            line(event, f"--- flash {details.get('resource')} EXIT: {status}, read back "
+                        f"{details.get('after') or 'nothing'}{_reason(details)} ---")
+        elif kind == "build_flash_finished":
+            if status == "skipped":
+                line(event, f"[M] flash before preflight skipped{_reason(details)}")
+            else:
+                line(event, f"=== FLASH EXIT: {status}{_reason(details)} ===")
         elif kind == "preflight_started":
             line(event, "=== PREFLIGHT ===")
         elif kind == "preflight_finished":
@@ -538,6 +742,8 @@ def _transcript(run: _Run) -> list[str]:
             resources = ", ".join(f"{k}={v}" for k, v in details.get("resources", {}).items())
             suffix = f" ({resources})" if resources else ""
             line(event, f"=== TEST {details.get('invocation_id')}: {details.get('test_name')} on {details.get('host')}{suffix} ===")
+        elif kind == "known_target":
+            line(event, f"[M] {details.get('summary', '')}")
         elif kind == "test_finished":
             line(
                 event,
@@ -550,6 +756,22 @@ def _transcript(run: _Run) -> list[str]:
         elif kind == "check_finished":
             name = details.get("check_name") or details.get("case_name") or details.get("check_id")
             line(event, f"--- {name} EXIT: {status}{_reason(details)} ---")
+        elif kind == "watchdog":
+            line(event, f"[M] watchdog {status} ({details.get('stage', '')}): "
+                        f"{details.get('resource', '')} "
+                        f"{details.get('new_resets', 0)} new self-reset(s), "
+                        f"{details.get('resets', '?')} since power-on"
+                        + _reason(details))
+            for warning in details.get("warnings", []):
+                line(event, f"[M] warning: {warning}")
+            for note in details.get("notes", []):
+                line(event, f"[M] note: {note}")
+        elif kind == "watchdog_summary":
+            counts = ", ".join(
+                f"{board.get('resource')} {board.get('resets', 0)}"
+                for board in details.get("boards", [])
+            )
+            line(event, f"[M] watchdog {status}: self-resets by board: {counts}")
         elif kind == "step_finished":
             text = f"[S] {details.get('stage', 'step')} {status}: {details.get('step_name', '')}"
             if details.get("expected") is not None:
@@ -630,7 +852,9 @@ def render_run(events: Sequence[Mapping], *, redact_serials: bool = False, trans
     run = _Run(events)
     lines = [f"# Ubertooth test run `{run.run_id}`", "", "| | |", "|---|---|"]
     lines += [f"| {_cell(key)} | {_cell(value)} |" for key, value in _setup_rows(run)]
-    lines += ["", "## Results", ""] + _results_table(run) + _not_applicable_section(run)
+    lines += ["", "## Results", ""] + _results_table(run)
+    lines += _known_target_section(run) + _not_applicable_section(run)
+    lines += _watchdog_section(run)
     if transcript:
         lines += ["", "## Transcript", "", LEGEND, "", "```text"] + _transcript(run) + ["```"]
     text = "\n".join(lines) + "\n"

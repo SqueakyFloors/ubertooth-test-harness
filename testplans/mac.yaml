@@ -1,0 +1,130 @@
+plan: Ubertooth on macOS
+# What can behave differently on a Mac. The firmware and the radio are the
+# same on every host, so what needs a second board or a peer (the range test,
+# following) stays in the Linux plans, and the command-line refusal matrix
+# runs in the fork's macOS CI. This plan covers
+# the host side that macOS changes: the build, the USB stack (libusb on
+# IOKit: device listing, claiming, DFU detach and re-enumeration), threads,
+# signals and timers, and pipes and files. ubertooth-scan and ubertooth-follow
+# need BlueZ and are left out.
+#
+# Run it with run-suite --build --with-firmware --with-python on the Mac host
+# (the build itself is the first check). Tests without an Ubertooth come
+# first, then single-board tests, then flashing, which rewrites the board.
+suites:
+  mac:
+    # --- Build and install --------------------------------------------------
+
+    # Version lines, -h of every tool, and the Ubertooth count, from the
+    # tools this run built on the Mac.
+    - Host CLI surface:
+        hosts: [Host_Mac]
+
+    # The Python tools the run built: specan-ui -h without a display, and
+    # btle-extcap.
+    - Python tools:
+        hosts: [Host_Mac]
+        coverage: comprehensive
+
+    # --- USB stack: listing, selecting, claiming ----------------------------
+
+    - Ubertooth count:
+        hosts: [Host_Mac]
+        Ubertooth: default
+
+    - Ubertooth identity:
+        hosts: [Host_Mac]
+        Ubertooth: default
+
+    # -U by serial, by serial prefix and by index, -N, and refusals, across
+    # the Mac's boards. Skipped with fewer than two registered Ubertooths.
+    - Multi-board selection:
+        hosts: [Host_Mac]
+        Ubertooth: default
+        coverage: comprehensive
+
+    # Reset (-r) and the board coming back, stop (-S), and every util mode's
+    # start and stop: claiming and releasing the device on macOS.
+    - Ubertooth util modes:
+        hosts: [Host_Mac]
+        Ubertooth: default
+        coverage: comprehensive
+
+    # --- Streaming: threads, signals, timers, pipes and files ---------------
+
+    # Captures for a set time (-t), stopped by the timer and by a signal,
+    # written to a file and to standard output.
+    - Raw receive:
+        hosts: [Host_Mac]
+        Ubertooth: default
+        coverage: comprehensive
+        duration: 3s
+
+    - Classic Bluetooth receive:
+        hosts: [Host_Mac]
+        Ubertooth: default
+        coverage: comprehensive
+        duration: 3s
+
+    - Spectrum analyzer:
+        hosts: [Host_Mac]
+        Ubertooth: default
+        coverage: comprehensive
+        duration: 3s
+
+    # The Wireshark extcap path: interface listing, and a capture through a
+    # FIFO with its link-layer header and channel.
+    - BLE extcap interfaces:
+        hosts: [Host_Mac]
+        Ubertooth: default
+        coverage: comprehensive
+
+    - BLE extcap capture:
+        hosts: [Host_Mac]
+        Ubertooth: default
+        coverage: comprehensive
+        duration: 3s
+
+    # --- One smoke pass of the rest: same firmware, Mac host path ------------
+
+    # Smoke leaves out the full reset into the boot defaults, which is in the
+    # comprehensive profile; add it here once the plan has run on a Mac.
+    - Radio setting transitions:
+        hosts: [Host_Mac]
+        Ubertooth: default
+        coverage: smoke
+
+    - BLE CRC transitions:
+        hosts: [Host_Mac]
+        Ubertooth: default
+        coverage: smoke
+
+    - BLE settings:
+        hosts: [Host_Mac]
+        Ubertooth: default
+        coverage: smoke
+
+    - Debug registers:
+        hosts: [Host_Mac]
+        Ubertooth: default
+        coverage: smoke
+
+    # --- Flashing: DFU detach and re-enumeration on macOS --------------------
+
+    # Writes and reads back the board's firmware, so it comes after every test
+    # that needs the run's firmware.
+    - DFU images:
+        hosts: [Host_Mac]
+        Ubertooth: default
+        coverage: smoke
+
+    # Shorter than the Linux reliability run: the Mac-specific risk is the
+    # detach and re-enumeration path, which 20 alternating flashes exercise.
+    - Flash reliability:
+        hosts: [Host_Mac]
+        platforms: [macos]
+        Ubertooth: default
+        flashes: 20
+        image sequence: [test build, KGV]
+        KGV sha256: e3fcb486c6e0ce7cc991bf6439f6dbc0156ed1229c2b95ebfd02198f9675bb11
+        KGV revision: 2020-12-R1

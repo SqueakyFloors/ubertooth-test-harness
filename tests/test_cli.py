@@ -13,6 +13,8 @@ from unittest.mock import patch
 from ubertooth_harness.cli import main
 from ubertooth_harness.executor import CommandResult
 
+from tests import watchdog_samples
+
 
 class HostVersionExecutor:
     def __init__(self, revision, libbtbb="git-btbb"):
@@ -54,6 +56,8 @@ class FlashDeviceExecutor:
             output = f"Serial No: {command[2]}\n"
         elif command[-1] == "-v":
             output = f"Firmware version: {self.revisions[command[2]]} (API:1.07)\n"
+        elif command[-1] == "-w":
+            output = watchdog_samples.report()
         else:
             raise AssertionError(f"unexpected command {command}")
         if on_output:

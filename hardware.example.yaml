@@ -100,7 +100,12 @@ resources:
       - per-port VBUS switching
 
   # Alternative: Acroname USBHub3+ (ports 0-7, with power/VBUS readback).
-  # To use it, point the Ubertooth power mappings at Hub_Linux1.
+  # To use it, point the Ubertooth power mappings at Hub_Linux1, for example
+  # `power: {controller: Hub_Linux1, port: 0}`, and install BrainStem with
+  # `python3 bootstrap.py --with-acroname`. The serial is the hub's 32-bit
+  # BrainStem serial (0x-prefixed hex or decimal); map each port by switching
+  # it and watching which board leaves USB, never by enumeration order.
+  # `ubertooth-harness power --hardware hardware.yaml Hub_Linux1` reads it.
   Hub_Linux1:
     type: USB power controller
     attached to: Host_Linux

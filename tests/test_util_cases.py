@@ -619,12 +619,17 @@ class LedBlinkSamplerTests(unittest.TestCase):
         self.assertIn("stopped at the sample bound", result.stderr)
 
     def test_a_read_in_flight_is_stopped_at_the_deadline(self):
-        # One read that would take 20 s: SIGTERM at the 1 s deadline, so the
-        # sampler ends within the deadline plus the grace.
-        result = self.run_sampler(["0/0/0"], count=50, deadline=1, delay="20")
+        # One read that would take 20 s: SIGTERM at the deadline, so the
+        # sampler ends within the deadline plus the grace. Three seconds, not
+        # one: the stub has to reach its own trap before the signal arrives,
+        # and on a busy machine starting it took longer than that (its
+        # SIGTERM went unrecorded in a run under the parallel suite, #184).
+        deadline = 3
+        result = self.run_sampler(["0/0/0"], count=50, deadline=deadline,
+                                  delay="20")
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual(1, result.terms)
-        self.assertLess(result.elapsed, 1 + ledblink.GRACE_S + 1)
+        self.assertLess(result.elapsed, deadline + ledblink.GRACE_S + 1)
         self.assertIn("stopped at the deadline (a read was stopped)", result.stderr)
         self.assertEqual([], util_cases.led_samples(result.stdout))
 

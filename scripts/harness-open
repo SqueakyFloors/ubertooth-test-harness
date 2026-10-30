@@ -61,35 +61,13 @@ for arg in "$@"; do
     case $arg in -h|--help) usage; exit 0 ;; esac
 done
 
-config=${HARNESS_OPEN_CONFIG:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/ubertooth-harness/harness-open.conf}
-# The environment wins over the config file, so remember it before sourcing.
-env_host=${HARNESS_HOST-}
-env_jump=${HARNESS_JUMP-}
-env_jump_set=${HARNESS_JUMP+yes}
-env_port=${HARNESS_PORT-}
-if [ -f "$config" ]; then
-    # Sourcing runs whatever the file contains, so accept only a file that is
-    # yours and that no one else can write; $HARNESS_OPEN_CONFIG could
-    # otherwise point at a file another local user controls.
-    [ -O "$config" ] || die "$config is not owned by you; refusing to source it"
-    mode=$(stat -f '%Lp' "$config" 2>/dev/null) || mode=$(stat -c '%a' "$config" 2>/dev/null) || mode=
-    if [ -n "$mode" ] && [ "$(( 0$mode & 0022 ))" -ne 0 ]; then
-        die "$config is writable by others (mode $mode); chmod go-w it"
-    fi
-    # Read it like a shell profile: a failing line inside must not kill this
-    # script without a word, so drop errexit and check the status instead.
-    set +e
-    # The file is the user's own and lives outside the repository, so there
-    # is nothing for a linter to follow.
-    # shellcheck source=/dev/null
-    . "$config"
-    status=$?
-    set -e
-    [ "$status" -eq 0 ] || die "$config failed (status $status); fix it or unset HARNESS_OPEN_CONFIG"
-fi
-[ -z "$env_host" ] || HARNESS_HOST=$env_host
-[ -z "$env_jump_set" ] || HARNESS_JUMP=$env_jump
-[ -z "$env_port" ] || HARNESS_PORT=$env_port
+lib=$(cd "$(dirname "$0")" && pwd -P)/harness-config.sh
+[ -f "$lib" ] || die "$lib is missing; run this script from its checkout"
+# Linted on its own; shellcheck does not need to follow it here.
+# shellcheck source=/dev/null
+. "$lib"
+harness_config_load
+config=$HARNESS_CONFIG_FILE
 
 host=${HARNESS_HOST-}
 jump=${HARNESS_JUMP-}
