@@ -435,9 +435,9 @@ class HostLockCliTests(unittest.TestCase):
         auto = self._lease("UT_0", "--", str(dfu), self._probe(), str(self.lease_dir))
         self.assertEqual(0, auto.returncode, auto.stderr)
         self.assertEqual('"manual"', auto.stdout.strip())
-        # Nobody asked for this one: it says it is holding the lock and why.
-        self.assertIn("holding this host's power/firmware lock", auto.stderr)
+        # Nobody asked for this one: it says what it is taking and why.
         self.assertIn("names ubertooth-dfu", auto.stderr)
+        self.assertIn("power/firmware lock", auto.stderr)
         self.assertFalse(leases.host_lock_state(directory=self.lease_dir)["held"])
 
     def test_lease_takes_the_host_lock_for_a_wrapped_ubertooth_dfu(self):
@@ -457,6 +457,9 @@ class HostLockCliTests(unittest.TestCase):
                 run = self._lease("UT_0", "--", *command)
                 self.assertEqual(0, run.returncode, run.stderr)
                 self.assertEqual('"manual"', run.stdout.strip())
+                # Each wrapped form says why it is taking the lock, as the
+                # bare command does.
+                self.assertIn("names ubertooth-dfu", run.stderr)
                 self.assertFalse(leases.host_lock_state(directory=self.lease_dir)["held"])
 
     def test_which_command_lines_count_as_a_firmware_write(self):

@@ -1134,7 +1134,7 @@ def _power_command(args: argparse.Namespace) -> int:
 _DFU_TOOL = "ubertooth-dfu"
 # A word of a command line, as a shell would split it: the quotes and
 # operators a wrapped command uses are separators, everything else is a word.
-_COMMAND_WORD = re.compile(r"""[^\s'"|&;()<>]+""")
+_COMMAND_WORD = re.compile(r"""[^\s'"`|&;()<>]+""")
 
 
 def _writes_firmware(command: Sequence[str]) -> bool:
@@ -1181,10 +1181,12 @@ def _lease_command(args: argparse.Namespace) -> int:
         host_lock = True
         # Nobody asked for this lock, and holding it makes every other
         # command that switches power or writes firmware wait until this one
-        # exits, so say that it is being held and why.
+        # exits, so say what is being asked for and why. Before the attempt,
+        # which is also when a wait for it starts.
         print(
-            f"note: holding this host's power/firmware lock while the command "
-            f"runs: its command line names {_DFU_TOOL}",
+            "note: this command line names " + _DFU_TOOL + ", so it asks for "
+            "this host's power/firmware lock as well as its boards, and holds "
+            "it until the command exits",
             file=sys.stderr,
         )
     with board_leases.acquire(
