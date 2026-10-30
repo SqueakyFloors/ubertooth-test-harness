@@ -475,6 +475,14 @@
       if (!live.testsStarted && record.timestamp) live.testsStarted = record.timestamp;
       live.byInvocation.set(String(details.invocation_id), item);
       pushLog(`=== TEST ${name} on ${details.host ?? ""} ===`);
+    } else if (kind === "known_target") {
+      // Which device the harness drove for this test, or that it had none;
+      // the controller sends the summary the report shows.
+      // The full line where there is a target; a short one otherwise, so a
+      // suite of plain tests does not repeat a sentence down the column.
+      const found = Array.isArray(details.targets) && details.targets.length > 0;
+      const item = live.byInvocation.get(String(details.invocation_id));
+      if (item) item.target = found ? String(details.summary ?? "") : "no known target";
     } else if (kind === "not_applicable") {
       // Left out before the run: the host cannot run it (not a skip or failure).
       const name = String(details.test_name ?? "");
@@ -565,6 +573,7 @@
         statusBadge(shown), " ", el("span", { className: "check-name", text: item.name }),
         item.estimated_s !== null && item.estimated_s !== undefined
           ? el("span", { className: "hint check-estimate", text: ` (about ${formatSeconds(item.estimated_s)})` }) : null,
+        item.target ? el("span", { className: "reason check-target", text: item.target }) : null,
         item.reason ? el("span", { className: "reason", text: ` — ${item.reason}` }) : null);
     }));
     if (!live.items.length) {

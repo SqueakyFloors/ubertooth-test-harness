@@ -15,6 +15,7 @@ from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.stateful import Step
 import tests.test_transitions as tt
+from tests.executables import write_executable
 from tests.test_python_cases import git
 from tests.test_transitions import SERIAL
 
@@ -276,9 +277,8 @@ class Fixture:
         self.root = Path(directory)
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
-        btle = bin_dir / "ubertooth-btle"
-        btle.write_text(FAKE_BTLE.replace("PYTHON", sys.executable))
-        btle.chmod(0o755)
+        write_executable(bin_dir / "ubertooth-btle",
+                         FAKE_BTLE.replace("PYTHON", sys.executable))
         self.script = self.root / "btle-extcap.py"
         self.script.write_text(script)
         self.path = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
@@ -288,14 +288,22 @@ class Fixture:
         out = io.StringIO()
         env = {"PATH": self.path, "FAKE_BTLE": bug, "FAKE_BOARDS": boards,
                "FAKE_RECORDS": str(records)}
+        # stop_after_records ends a capture that is going to pass as soon as
+        # the records it checks have arrived, and a refused capture ends when
+        # the script does, so the seconds are only a limit for them: a long
+        # one costs nothing and no longer races two Python start-ups on a
+        # busy machine (1.5 s ran out under the parallel suite, 0.5 s before
+        # that). A test that has to reach the limit (no traffic at all, a
+        # capture that is meant to keep running) passes its own seconds, and
+        # so does one that turns on what the fake writes after its third
+        # record, with stop_after_records=None.
         with mock.patch.dict(os.environ, env), redirect_stdout(out), \
                 mock.patch("sys.stderr", io.StringIO()):
             code = extcapcapture.capture(
                 (sys.executable, str(self.script), "--capture", f"--fifo={self.fifo}",
                  *extcap_args),
-                # 1.5 s: two Python start-ups must fit before SIGTERM even on a
-                # loaded runner (0.5 s failed now and then).
-                self.fifo, options.pop("seconds", 1.5), out=print, **options)
+                self.fifo, options.pop("seconds", 15.0), out=print,
+                stop_after_records=options.pop("stop_after_records", 3), **options)
         self.assertGone()
         return code, out.getvalue()
 
@@ -334,10 +342,12 @@ class CaptureTests(unittest.TestCase):
 
     def test_a_stream_longer_than_max_bytes_fails(self):
         # 24-byte header plus 39-byte records: 10 records are 414 bytes.
+        # Past MAX_BYTES the records are dropped unread, so the capture
+        # cannot count its way to ten: it waits out the seconds.
         with mock.patch.object(extcapcapture, "MAX_BYTES", 200):
             code, out = self.fixture().capture(
                 (f"--extcap-interface=ubertooth{SERIAL_A}",), records=10,
-                board=SERIAL_A, channel=37, seconds=1.5)
+                board=SERIAL_A, channel=37, seconds=1.5, stop_after_records=None)
         self.assertEqual(1, code, out)
         self.assertIn("FAIL: the FIFO carried 414 bytes, more than the 200 checked", out)
         self.assertNotIn("truncated", out)
@@ -346,23 +356,26 @@ class CaptureTests(unittest.TestCase):
         with mock.patch.object(extcapcapture, "MAX_BYTES", 414):
             code, out = self.fixture().capture(
                 (f"--extcap-interface=ubertooth{SERIAL_A}",), records=10,
-                board=SERIAL_A, channel=37, seconds=1.5)
+                board=SERIAL_A, channel=37, seconds=1.5, stop_after_records=10)
         self.assertEqual(0, code, out)
         self.assertIn("records: 10 ", out)
 
     def test_failures(self):
         fixture = self.fixture()
+        # The last two turn on what the fake does after its third record, so
+        # they wait for it rather than stopping at a record count.
         cases = {
-            "wrong-channel": "advertising records on RF channel(s) [0], not only 12",
-            "link-type": "link type 192, not 256",
-            "truncated": "truncated",
-            "exits": "btle-extcap exited 1 before the stop",
+            "wrong-channel": ("advertising records on RF channel(s) [0], not only 12", 3),
+            "link-type": ("link type 192, not 256", 3),
+            "truncated": ("truncated", None),
+            "exits": ("btle-extcap exited 1 before the stop", None),
         }
-        for bug, failure in cases.items():
+        for bug, (failure, stop) in cases.items():
             with self.subTest(bug):
                 code, out = fixture.capture(
                     (f"--extcap-interface=ubertooth{SERIAL_A}", "--channel=38"),
-                    bug=bug, board=SERIAL_A, channel=38, seconds=2)
+                    bug=bug, board=SERIAL_A, channel=38, seconds=2,
+                    stop_after_records=stop)
                 self.assertEqual(1, code, out)
                 self.assertRegex(out, rf"(?m)^FAIL: .*{re.escape(failure)}")
                 self.assertNotIn("capture checks passed", out)
@@ -448,6 +461,12 @@ class CaptureTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             extcapcapture.capture(("true",), "/nonexistent/fifo", 1, no_btle=True)
 
+    def test_a_record_count_to_stop_after_must_be_a_count(self):
+        for value in (0, -1, 1.5, True, "2"):
+            with self.subTest(value), self.assertRaisesRegex(ValueError, "1 or more"):
+                extcapcapture.capture(("true",), "/nonexistent/fifo", 1,
+                                      stop_after_records=value)
+
     def test_a_capture_filter_is_warned_about_and_ignored(self):
         code, out = self.fixture().capture(
             (f"--extcap-interface=ubertooth{SERIAL_A}", "--extcap-capture-filter", "x"),
@@ -468,9 +487,10 @@ class CaptureTests(unittest.TestCase):
         self.assertIn("processes left: none", out)
 
     def test_no_traffic_skips_the_close_and_stops_with_sigterm(self):
+        # No record ever arrives, so this one does wait out its seconds.
         code, out = self.fixture().capture(
             (f"--extcap-interface=ubertooth{SERIAL_A}",), board=SERIAL_A, channel=37,
-            close=True, bug="quiet")
+            close=True, bug="quiet", seconds=1.5)
         self.assertEqual(pytools.SKIP_EXIT, code, out)
         self.assertIn("records: 0 ", out)
         self.assertIn("extcap exit: 0 (after SIGTERM)", out)
@@ -483,7 +503,7 @@ class CaptureTests(unittest.TestCase):
         # The capture never reaches the FIFO: a failure, not a skip.
         code, out = self.fixture().capture(
             (f"--extcap-interface=ubertooth{SERIAL_A}",), board=SERIAL_A, channel=37,
-            close=True, bug="quiet", boards="")
+            close=True, bug="quiet", boards="", seconds=1.5)
         self.assertEqual(1, code, out)
         self.assertNotIn("SKIP:", out)
 
@@ -492,12 +512,14 @@ class CaptureTests(unittest.TestCase):
         with mock.patch.object(extcapcapture, "STOP_WAIT_S", 1.0):
             code, out = self.fixture().capture(
                 (f"--extcap-interface=ubertooth{SERIAL_A}",), board=SERIAL_A,
-                channel=37, close=True, records=2)
+                channel=37, close=True, records=2, stop_after_records=2)
         self.assertEqual(1, code, out)
         self.assertIn("FAIL: btle-extcap did not exit within 1s of the FIFO closing", out)
         self.assertIn("processes left: none", out)
 
     def test_refused_mode_fails_a_capture_that_keeps_running(self):
+        # The script captures as it should, which --refused says it must not:
+        # the stop comes at the third record, with the script still running.
         code, out = self.fixture().capture(
             (f"--extcap-interface=ubertooth{SERIAL_A}",), refused=True)
         self.assertEqual(1, code)

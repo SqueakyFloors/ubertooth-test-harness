@@ -86,7 +86,7 @@ refuses to modify an existing directory that lacks the marker, and
 another location.
 
 `run-suite` and `build` refuse to start outside a bootstrapped harness
-environment. Every run manifest (schema version 4)
+environment. Every run manifest (schema version 5)
 records the Python version, implementation, executable and prefix, pip and
 dependency versions, OS and release, and CPU architecture under
 `environment`. Commands below assume the environment is active.
@@ -124,6 +124,11 @@ roles, exact argv, timeouts, and result checks. Every plan item must contain
 exactly one known test name; unknown names, legacy `cmd/check` entries, unknown
 arguments, and invalid values fail during load.
 
+[`docs/tests.md`](docs/tests.md) describes every catalog test: what it does,
+how it produces a known answer, the hardware roles and arguments it needs,
+what passes and fails, and what a pass does not prove. Read it to decide which
+tests a plan should hold.
+
 Every test accepts `platforms:` (`linux`, `macos`, no duplicates) beside its
 `hosts:`, and a test left without it runs on every platform:
 
@@ -133,6 +138,10 @@ Every test accepts `platforms:` (`linux`, `macos`, no duplicates) beside its
       platforms: [linux]
 ```
 
+Every test that binds hardware also accepts `rf:`, which asks for a board by
+where it sits on the bench, one requirement per hardware role (see
+[RF placement](#rf-placement-where-a-board-sits-on-the-bench)).
+
 The two select separately: `hosts:` says which registered hosts the step may
 run on, `platforms:` which of them can run it. A host whose platform the step
 does not list is left out as not applicable (see
@@ -141,6 +150,12 @@ macOS-only, and shared steps and still run on `hosts: each`; a step no named
 host can run fails planning. Three tests must state their platforms and still
 require the argument: `Flash reliability`, `Exclusive Ubertooth topology`,
 and `MAC polling soak`.
+
+[`docs/hardware.md`](docs/hardware.md) describes the bench itself: each device
+type and its role, the firmware each one runs and how it is built, flashed and
+checked, the APIs and protocols the harness depends on, host setup, the known
+limits of a crowded USB host, and a worked bench layout. Read it to set up a
+bench, or to judge what a result was measured on.
 
 `hardware.yaml` is the ignored local resource registry; copy
 [`hardware.example.yaml`](hardware.example.yaml) to start. Register every macOS/Linux computer as a
@@ -155,6 +170,65 @@ roles require explicit aliases; a future explicit `all pairs` policy will be
 separate. Target-runner discovery is
 reconciled as present/missing/unknown before execution and never silently
 reassigns an alias.
+
+### RF placement: where a board sits on the bench
+
+A unit may record its RF placement, so a test can ask for a weak link and a
+report can say what its figures were taken at. `rf:` is set by hand and
+describes the bench; the harness never measures it:
+
+```yaml
+  UT_Linux2:
+    type: Ubertooth
+    attached to: Host_Linux
+    identity:
+      serial: ...
+    rf:
+      antenna: true        # is the antenna attached
+      attenuation_db: 20   # inline attenuation between the board and the air
+      distance_m: 1        # how far from the rest of the bench (optional)
+```
+
+A unit with no `rf:` is taken to be an ordinary one: antenna attached, no
+attenuation, distance not recorded. Keep the numbers current whenever the
+attenuator or the position changes. A `Host` and a `USB power controller` may not
+have a placement: neither has a radio.
+
+A plan asks for a placement per hardware role:
+
+```yaml
+  - Classic Bluetooth receive:
+      hosts: [Host_Linux]
+      coverage: smoke
+      duration: 10s
+      rf:
+        Ubertooth: {min_attenuation_db: 10}
+```
+
+A requirement takes `min_attenuation_db`, `max_attenuation_db`, and `antenna`,
+and it narrows selection before the selector is read. `default` takes the
+host's default only when that board satisfies the requirement, and otherwise
+the lowest-alias board on the host that does; `each` covers the matching
+boards alone; an explicit alias that cannot satisfy the requirement fails
+planning. A host with no board placed for a role is recorded as not applicable,
+naming the requirement and what the host has instead.
+
+Tests whose cases need an ordinary link ask for one themselves, so a plan need
+not: `Classic Bluetooth receive`, `Raw receive`, `BLE extcap capture`,
+`Capture known BLE advertiser`, and `Capture known BLE connection` require
+`antenna: true` with no attenuation, which keeps a capture, a survey, or a
+followed connection off an attenuated board. A plan's `rf:` for a role
+overrides that default.
+
+Every run records the placement of each board it used that records one, in
+`run.jsonl`: on each invocation of the `manifest` record
+(`resource_placements`) and in each `test_started` record (`rf`); a board with no `rf:` is absent, since
+the registry does not say where it sits. What each role asked of its placement
+is recorded beside it (`placement_requirements` and `rf_required`), so the run
+record says why a role got the board it did when the host default was passed
+over or `each` covered fewer boards than the host has. The report shows the placement in an `RF placement` setup row and beside the
+resources of every result, so a range, transmit power, or RSSI figure is read
+next to the attenuation it was taken at.
 
 ### USB power controllers
 
@@ -1037,7 +1111,9 @@ skipped to compensate for a missing installation.
 
 Tests that need a real Bluetooth LE peer use Nordic nRF52840 DKs (PCA10056)
 running the harness's own firmware, [`firmware/nrf52840dk`](firmware/nrf52840dk/README.md)
-(build, flash, shell protocol, pinned SDK and tool versions). Register each
+(build, flash, shell protocol, pinned SDK and tool versions);
+[`docs/hardware.md`](docs/hardware.md) puts them beside the rest of the bench.
+Register each
 one as an `nRF52840 DK` resource with its J-Link serial, its role, and, for
 the `advertiser` role, the BLE address its `status` reports
 ([`hardware.example.yaml`](hardware.example.yaml)):
@@ -1073,7 +1149,11 @@ Host_Linux:
 (8.2.1) and `nrfutil device` (2.23.0), flashes by J-Link serial, and talks to
 the shell on VCOM0 (`/dev/serial/by-id/usb-SEGGER_J-Link_<serial>-if00` on
 Linux; `serial device` in the identity overrides it). Every command fails
-closed with an `error:` line. `Capture known BLE advertiser`
+closed with an `error:` line. A run passes the board's registry alias as
+`--alias`, and each command then writes every line it sends to the shell and
+every line the board answers on standard error, `[DK_Linux0 >] adv start` and
+`[DK_Linux0 <] OK`, so the whole conversation is in the run's record and its
+transcript (see [Known targets](#known-targets)). `Capture known BLE advertiser`
 ([`testplans/ble.yaml`](testplans/ble.yaml)) flashes the DK only when it
 reports another firmware version, from the image given as
 `--artifact "nRF52840 advertiser=PATH/zephyr.hex"`:
@@ -1273,10 +1353,16 @@ a capture case ran, and `output/` when a command printed a lot):
   the summary, whose `watchdog_resets` is the run's total.
 - `report.md`: compiled from `run.jsonl` when the run ends, including failed or
   canceled runs. It lists the setup (commits, host and platform, toolchain,
-  Python, device serials and firmware, artifact hashes) and a results table,
-  then a Watchdog section when any board was read, then the full transcript.
-  A board that reset itself puts its warning in the test's Reason column too,
-  since the test itself passed.
+  Python, device serials and firmware, RF placement, artifact hashes) and a
+  results table, then a Watchdog section when any board was read, then the
+  full transcript. A board that reset itself puts its warning in the test's
+  Reason column too, since the test itself passed.
+
+Where a board the run used records an RF placement
+([RF placement](#rf-placement-where-a-board-sits-on-the-bench)), the manifest
+carries it per invocation as `resource_placements`, each `test_started` record
+repeats it as `rf`, and the report shows it in a setup row and beside the
+resources of every result.
 
 Each transcript line starts with the time elapsed since the run started
 (`HH:MM:SS.mmm`); the report header gives the run's UTC start time, and
@@ -1284,7 +1370,10 @@ run.jsonl keeps absolute UTC times (`2026-10-24T00:18:21.535`, no offset
 suffix). Each line then carries a tag: `[C]` command sent (shell-quoted), `[O]`
 stdout, `[E]` stderr, `[R]` command result (tool, exit code, duration, timeout
 or cancellation), `[S]` state-change step, `[I]` power isolation, `[M]` harness
-record. Section markers are indented to line up with the tagged text:
+record, and, for a line of a known target's serial shell, `[<alias> >]` sent
+to it and `[<alias> <]` answered by it (see [Known
+targets](#known-targets)). Section markers are indented to line up with the
+tagged text:
 `+++ name +++` opens a step and `--- name EXIT: status ---` closes it; `===`
 lines open and close the run, build, preflight, and each test:
 
@@ -1313,10 +1402,11 @@ each of the command's streams goes to a file of its own in the run
 directory as it arrives, from its first byte:
 `output/<command id>.stdout.log` and `output/<command id>.stderr.log`. A file
 holds what the command wrote on that stream, with nothing of the harness's
-own added, so a reader sees what the tool printed. The text is as the harness
-decoded it (UTF-8, any byte that is not valid UTF-8 replaced, as the
-transcript has always shown it), and the SHA-256 is the hash of the file. A
-stream a command never wrote to leaves no file.
+own added, so a reader sees what the tool printed, including a known target's
+shell lines as the driver marked them (`[<alias> >]` and `[<alias> <]`). The
+text is as the harness decoded it (UTF-8, any byte that is not valid UTF-8
+replaced, as the transcript has always shown it), and the SHA-256 is the hash
+of the file. A stream a command never wrote to leaves no file.
 A flash command's files also name its test, for example
 `output/003-Flash-reliability-flash-0001.stdout.log`, because flash command
 IDs repeat in every flash test. The live stream then gets no more output records until the
@@ -1405,6 +1495,35 @@ stopped; other commands are terminated as a process group.
 Commands carry no credentials today. Before adding one that does, redact argv
 and output where events are created; masking only in a display is not enough
 because run.jsonl and report.md are persisted.
+
+### Known targets
+
+Some tests run against a device the harness drives itself, so the run knows
+exactly what was on the air: an nRF52840 DK in one of its roles, or an ESP32
+Classic peer. The rest listen to whatever traffic is there. A run records
+which, once per test, as a `known_target` record, and `report.md` and the web
+GUI both show what it says:
+
+- the results table has a **Known target** column naming the board and its
+  role, or `none`; it is empty for a test the host could not run, and for a
+  run recorded before the harness kept this record;
+- a **Known targets** section gives the whole line per test, for example
+  `Run against known target: nRF52840 DK advertiser DK_Linux0
+  (J-Link 000123456789, /dev/serial/by-id/usb-SEGGER_J-Link_000123456789-if00),
+  requires firmware utdk-1.2.1, BLE address C0:00:00:00:00:01`, and a test
+  with no known target says `No known target: the harness drove no device for
+  this test`, which the GUI shortens to `no known target`;
+- the transcript carries the same line as an `[M]` record where the test
+  starts.
+
+The serial port path is the one registered as `serial device`, or the stable
+`/dev/serial/by-id` path derived from the probe's or bridge's serial on a
+Linux host. The serial, port, and address are what the registry records, and
+the test's own ready case checks them against the board. The firmware version
+is the one that device's driver requires, not one read from the board when
+the record is written: the board's own answer is in the transcript, because
+every line of the conversation with its shell is recorded too
+(`[<alias> >]` out, `[<alias> <]` back).
 
 ### Reports for several runs
 
@@ -1713,7 +1832,9 @@ word and symbol (colour only reinforces it).
   run's build](#flashing-the-boards-with-the-runs-build)); Run starts the whole suite.
 - **Live run:** the suite's tests as a checklist that ticks from the run's
   events (✓ passed, ✗ failed, … running, ○ pending or not run; always text
-  plus symbol), the current stage (building, preflight, tests), elapsed time,
+  plus symbol), under each test the [known target](#known-targets) it ran
+  against or a line saying it had none, the current stage (building,
+  preflight, tests), elapsed time,
   a Cancel button, and the last 200 log lines in a scrolling console panel. A countdown is shown only when
   every test in the suite has an estimate. Every implemented test has a
   catalog estimate (`ESTIMATES` in `ubertooth_harness/catalog.py`) for each
@@ -2132,8 +2253,25 @@ named test covers it, the option combinations still to test, and what is hard
 to test. Use it to pick the next test.
 
 ```sh
-python -m unittest discover -s tests -v
+python scripts/test.py                 # the whole suite, one process per core
+python scripts/test.py --durations 10  # with the ten slowest tests
+python scripts/test.py test_gui -v     # one module, naming each test
 ```
+
+`scripts/test.py` runs each `tests/test_*.py` in a process of its own, as many
+at a time as there are cores, and combines them into one summary with the
+usual exit status; the modules take about a quarter of the wall time they take
+one after another. It needs nothing beyond the standard library, and the suite
+still runs the plain way, which is what to reach for when a single test is
+what matters:
+
+```sh
+python -m unittest discover -s tests
+python -m unittest tests.test_gui.RefTests -v
+```
+
+Every test must pass both ways: a test may not depend on another module's
+state, a fixed port, or a lock file another module uses.
 
 CI runs the suite and validates the long plan with Python 3.12 on Ubuntu 24.04
 and the current macOS (`macos-latest`; see `.github/workflows/test.yml`). The
