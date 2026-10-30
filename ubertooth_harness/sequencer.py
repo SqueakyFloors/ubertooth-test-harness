@@ -272,6 +272,7 @@ class NamedTestSequencer:
         case_id: str,
         manifest: RunManifest,
         output_dir: Path,
+        monitor: WatchdogMonitor | None = None,
     ) -> tuple[str, str]:
         """Run flash reliability as one case; return (failure, status)."""
         owner = {
@@ -285,6 +286,13 @@ class NamedTestSequencer:
             summary = FlashReliabilityRunner(self.executor, clock=self.clock).run(
                 request, publisher, cancellation=token, owner=owner,
                 output_dir=output_dir,
+                # A soak is one case, so the reads between cases never come
+                # round; the flash runner gives them a turn between its
+                # writes instead, where nothing else is running.
+                between_flashes=(
+                    None if monitor is None
+                    else lambda: monitor.poll_if_due(invocation)
+                ),
             )
             failure = "" if summary.passed else f"{case.name}: {summary.failure_reason}"
             status = summary.status
@@ -1359,7 +1367,7 @@ class NamedTestSequencer:
                             if isinstance(case, FlashCase):
                                 failure_text, flash_status = self._run_flash_case(
                                     publisher, token, invocation, case, case_id, manifest,
-                                    output_dir,
+                                    output_dir, monitor,
                                 )
                                 if failure_text:
                                     unsafe = True

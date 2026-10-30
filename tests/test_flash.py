@@ -828,5 +828,75 @@ class AlternatingFlashTests(unittest.TestCase):
                 runner.validate(bad)
 
 
+class BetweenFlashesTests(unittest.TestCase):
+    """The turn the run's periodic reads get during a soak.
+
+    A soak is one case from start to end, so the reads the run makes between
+    cases never come round while it writes; the flash runner calls back
+    between its writes instead.
+    """
+
+    make_step = FlashRunnerTests.make_step
+    prepare_request = FlashRunnerTests.prepare_request
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.directory = self.tmp.name
+        self.clock = FakeClock()
+
+    def build(self, flashes):
+        request, artifacts = self.prepare_request(self.directory, flashes=flashes)
+        self.executor = FakeExecutor(
+            self.clock, {str(a.path): a.expected_revision for a in artifacts.values()}
+        )
+        return request
+
+    def run_request(self, request, hook, cancellation=None):
+        results = Path(self.directory) / "results"
+        publisher = open_run_publisher(results, "test-run", CollectEventSink())
+        return FlashReliabilityRunner(self.executor, clock=self.clock).run(
+            request, publisher, cancellation=cancellation, output_dir=results,
+            between_flashes=hook,
+        )
+
+    def flashes_done(self):
+        return sum(1 for argv, _timeout in self.executor.commands
+                   if argv[0] == "ubertooth-dfu")
+
+    def test_the_hook_runs_between_writes_and_not_around_them(self):
+        request = self.build(3)
+        at = []
+
+        summary = self.run_request(request, lambda: at.append(self.flashes_done()))
+
+        self.assertTrue(summary.passed, summary.failure_reason)
+        # Three writes, two gaps: after each write and its read-backs, never
+        # before the first (the test has just started) or after the last (the
+        # read after the test comes next).
+        self.assertEqual([1, 2], at)
+
+    def test_what_the_hook_spends_does_not_count_against_the_deadline(self):
+        # The reads are the harness's own, so a soak must not fail for them.
+        # Here the whole budget is 2 s and each read takes 10 s.
+        request = replace(self.build(4), total_timeout_s=2.0)
+
+        summary = self.run_request(request, lambda: self.clock.advance(10.0))
+
+        self.assertTrue(summary.passed, summary.failure_reason)
+        self.assertEqual(4, summary.verified_flashes)
+
+    def test_a_cancellation_during_the_hook_stops_before_the_next_write(self):
+        token = CancellationToken()
+        request = self.build(4)
+
+        summary = self.run_request(
+            request, lambda: token.cancel("operator requested"), cancellation=token,
+        )
+
+        self.assertEqual("canceled", summary.status)
+        self.assertEqual(1, self.flashes_done())
+
+
 if __name__ == "__main__":
     unittest.main()

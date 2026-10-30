@@ -297,12 +297,20 @@ class FlashReliabilityRunner:
         cancellation: CancellationToken | None = None,
         owner: Mapping | None = None,
         output_dir: Path,
+        between_flashes: Callable[[], None] | None = None,
     ) -> FlashRunSummary:
         """Run the flash sequence, recording into the run's publisher.
 
         ``output_dir`` is the run directory: a command whose output passes
         the run.jsonl record limits keeps its full output in
         ``output/<command id>.log`` there, as test commands do.
+
+        ``between_flashes`` is called after each write and its read-backs,
+        before the next write, and must only read: this is where the run's
+        periodic checks (the firmware watchdog record) get their turn during a
+        soak that is one case from start to end. Whatever it spends is added
+        back to the whole-test deadline, so a check the harness asked for
+        cannot be what ends the test.
         """
         image_hashes = self._validate_request(request)
         self._owner = dict(owner or {})
@@ -418,6 +426,13 @@ class FlashReliabilityRunner:
                 )
 
         for index in range(request.step.flashes):
+            if index and between_flashes is not None and not token.is_cancelled():
+                # Between two writes, so no command of its own runs beside
+                # one of ours. A cancellation that arrives during it is seen
+                # by the check below, before the next write.
+                paused = self.clock()
+                between_flashes()
+                deadline += max(0.0, self.clock() - paused)
             if token.is_cancelled():
                 status = "canceled"
                 reason = self._cancel_reason(token)

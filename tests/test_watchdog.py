@@ -1,7 +1,12 @@
 """The firmware watchdog monitor: reading `-w`, comparing, and reporting."""
 
+import contextlib
+import hashlib
+import io
 import json
+import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from types import MappingProxyType
@@ -1130,6 +1135,130 @@ class RunRecordTests(unittest.TestCase):
         self.assertEqual("failed", finished["status"])
         self.assertFalse(finished["details"]["stops_run"])
         self.assertIn("max_watchdog_resets (1)", report)
+
+
+class FlashSoakTests(unittest.TestCase):
+    """A flash soak is one case, and is read between its writes."""
+
+    def run_flash_suite(self, interval_s):
+        from unittest.mock import patch
+
+        from ubertooth_harness import cli, sequencer as sequencer_module
+        from tests.test_cli import FlashDeviceExecutor, make_source
+
+        real_monitor = sequencer_module.WatchdogMonitor
+
+        def monitor(*arguments, **options):
+            # The reads are due every three minutes in a run; a test says
+            # when, so the soak's writes are the only thing being measured.
+            return real_monitor(*arguments, **{**options, "interval_s": interval_s})
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, short = make_source(root)
+            test_image = root / "test.dfu"
+            kgv_image = root / "kgv.dfu"
+            test_image.write_bytes(b"test")
+            kgv_image.write_bytes(b"kgv")
+            kgv_hash = hashlib.sha256(kgv_image.read_bytes()).hexdigest()
+            platform = "macos" if sys.platform == "darwin" else "linux"
+            selected = SERIAL
+            guard = "bbbb1111bbbb1111bbbb1111bbbb1111"
+            (root / "plan.yaml").write_text(textwrap.dedent(f"""\
+                plan: flash soak
+                suites:
+                  slow:
+                    - Flash reliability:
+                        hosts: each
+                        platforms: [{platform}]
+                        Ubertooth: default
+                        flashes: 4
+                        image sequence: [test build, KGV]
+                        KGV sha256: {kgv_hash}
+                        KGV revision: 2020-12-R1
+                """))
+            (root / "hardware.yaml").write_text(textwrap.dedent(f"""\
+                resources:
+                  Host_Linux:
+                    type: Host
+                    platform: {platform}
+                    roles: [test target]
+                    defaults: {{Ubertooth: UT_Linux0}}
+                  UT_Linux0:
+                    type: Ubertooth
+                    attached to: Host_Linux
+                    identity: {{serial: {selected}}}
+                  UT_Linux1:
+                    type: Ubertooth
+                    attached to: Host_Linux
+                    identity: {{serial: {guard}}}
+                """))
+            executor = FlashDeviceExecutor(
+                f"git-{short}",
+                {str(test_image.resolve()): f"git-{short}",
+                 str(kgv_image.resolve()): "2020-12-R1"},
+                selected, guard,
+            )
+            with (
+                patch.object(cli, "SubprocessCommandExecutor", return_value=executor),
+                patch.object(sequencer_module, "WatchdogMonitor", monitor),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                code = cli.main([
+                    "run-suite", "--plan", str(root / "plan.yaml"), "--suite", "slow",
+                    "--hardware", str(root / "hardware.yaml"), "--host", "Host_Linux",
+                    "--ubertooth-source", str(source), "--ubertooth-ref", "HEAD",
+                    "--artifact", f"test build={test_image}",
+                    "--artifact", f"KGV={kgv_image}",
+                    "--run-id", "soak", "--output", str(root / "runs"),
+                    "--lease-dir", str(root / "leases"),
+                ])
+            events = [json.loads(line) for line in
+                      (root / "runs" / "soak" / "run.jsonl").read_text().splitlines()]
+        return code, events, executor
+
+    @staticmethod
+    def _writes_and_reads(executor):
+        """Each write and each watchdog read, in the order they ran."""
+        return [
+            "write" if command[0] == "ubertooth-dfu" else "read"
+            for command in executor.commands
+            if command[0] == "ubertooth-dfu" or command[-1] == "-w"
+        ]
+
+    def test_a_soak_is_read_between_its_writes(self):
+        code, events, executor = self.run_flash_suite(interval_s=0.0)
+
+        self.assertEqual(0, code)
+        # The baseline, the read before the case, then one read in each of
+        # the three gaps between the four writes, then the read after the
+        # test and the run-end read.
+        self.assertEqual(
+            ["read", "read", "write", "read", "write", "read", "write", "read",
+             "write", "read", "read"],
+            self._writes_and_reads(executor),
+        )
+        stages = [e["details"]["stage"] for e in events if e["event_type"] == "watchdog"]
+        self.assertEqual(
+            ["baseline"] + ["during the test"] * 4 + ["after the test", "run end"],
+            stages,
+        )
+        # Every read keeps a command ID of its own, so none overwrites
+        # another's record or output file.
+        ids = [e["details"]["command_id"] for e in events
+               if e["event_type"] == "command_started"
+               and e["details"]["argv"][-1] == "-w"]
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_a_soak_shorter_than_the_interval_is_read_at_its_ends_only(self):
+        code, _events, executor = self.run_flash_suite(interval_s=180.0)
+
+        self.assertEqual(0, code)
+        self.assertEqual(
+            ["read", "write", "write", "write", "write", "read", "read"],
+            self._writes_and_reads(executor),
+        )
 
 
 class CatalogTests(unittest.TestCase):

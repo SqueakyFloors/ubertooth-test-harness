@@ -565,7 +565,8 @@ after resolution cannot change an active run.
 
 Once preflight passes, the run reads each bound Ubertooth's firmware watchdog
 record (`ubertooth-util -w`) as its baseline, and again between cases of a
-long test, after each test, and at the end of the run
+long test, between the writes of a flash soak (which is one case however long
+it runs), after each test, and at the end of the run
 ([`ubertooth_harness/watchdog.py`](ubertooth_harness/watchdog.py); README,
 "Firmware watchdog"). A board that reset itself is reported, never failed: the
 watchdog brought it back, and what it points to belongs on the fork, so the
