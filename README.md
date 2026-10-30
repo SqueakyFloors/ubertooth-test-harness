@@ -1318,7 +1318,8 @@ preflight, test or flash command's output (bytes as written to run.jsonl, JSON
 escapes included, so a 4-byte character counts 12). Past the first limits, the
 command's full output, from its first line, goes to `output/<command id>.log`
 in the run directory as it arrives, one `<UTC time> [O]` or `[E]` line per
-output line in arrival order. A flash command's file also names its test, for
+output line in arrival order (or `[<alias> >]` and `[<alias> <]` for a known
+target's shell lines). A flash command's file also names its test, for
 example `output/003-Flash-reliability-flash-0001.log`, because flash command
 IDs repeat in every flash test. The live stream then gets no more output records until the
 command ends; then a `command_output_omitted` record names the file
@@ -1380,8 +1381,8 @@ GUI both show what it says:
   `Run against known target: nRF52840 DK advertiser DK_Linux0
   (J-Link 000123456789, /dev/serial/by-id/usb-SEGGER_J-Link_000123456789-if00),
   requires firmware utdk-1.2.1, BLE address C0:00:00:00:00:01`, and a test
-  with no known target says `No known target: no nRF52840 DK or ESP32 Classic
-  peer took part in this test`;
+  with no known target says `No known target: the harness drove no device for
+  this test`, which the GUI shortens to `no known target`;
 - the transcript carries the same line as an `[M]` record where the test
   starts.
 

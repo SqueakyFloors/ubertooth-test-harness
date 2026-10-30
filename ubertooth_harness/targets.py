@@ -23,6 +23,8 @@ from dataclasses import dataclass
 import re
 from typing import Mapping, Sequence
 
+_HEX_BYTE = re.compile(r"[0-9A-Fa-f]{2}")
+
 NRF52840_DK = "nRF52840 DK"
 ESP32_CLASSIC_PEER = "ESP32 Classic peer"
 
@@ -69,9 +71,7 @@ KINDS: Mapping[str, TargetKind] = {
     ),
 }
 
-NO_TARGET = (
-    "No known target: no " + " or ".join(KINDS) + " took part in this test"
-)
+NO_TARGET = "No known target: the harness drove no device for this test"
 
 
 def device_path(kind: TargetKind, serial: str, platform: str | None) -> str:
@@ -86,9 +86,14 @@ def device_path(kind: TargetKind, serial: str, platform: str | None) -> str:
 
 
 def lap_uap(address: str) -> tuple[str, str]:
-    """The LAP and UAP of a Classic address, as the host tools take them."""
+    """The LAP and UAP of a Classic address, as the host tools take them.
+
+    Empty for anything that is not a 48-bit address written in hex, so a
+    registry entry nobody has validated cannot put a confident LAP in a
+    report.
+    """
     parts = address.split(":")
-    if len(parts) != 6:
+    if len(parts) != 6 or not all(_HEX_BYTE.fullmatch(part) for part in parts):
         return "", ""
     return "".join(parts[3:]).lower(), parts[2].lower()
 
@@ -111,6 +116,9 @@ def describe(target: Mapping) -> str:
     identity = target.get("identity") or {}
     for key, value in identity.items():
         text += f", {key} {value}"
+    # A Classic address also gives the LAP and UAP the host tools take.
+    if target.get("lap"):
+        text += f" (LAP {target['lap']}, UAP {target.get('uap', '')})"
     return text
 
 
@@ -155,14 +163,7 @@ def known_targets(
         identity = resource_identities.get(role) or {}
         serial = identity.get(kind.serial_key, "")
         address = identity.get(kind.address_key, "")
-        known = {}
-        if address:
-            known[kind.address_key] = address
-            if kind.classic:
-                lap, uap = lap_uap(address)
-                if lap:
-                    known[kind.address_key] += f" (LAP {lap}, UAP {uap})"
-        found.append({
+        record = {
             "type": resource_type,
             "role": role,
             "alias": resources.get(role, ""),
@@ -170,8 +171,15 @@ def known_targets(
             "serial_label": kind.serial_label,
             "port": identity.get("serial device") or device_path(kind, serial, platform),
             "firmware_required": kind.firmware,
-            "identity": known,
-        })
+            # The identity as the registry holds it, so a reader of the
+            # record gets the address itself, not a description of it.
+            "identity": {kind.address_key: address} if address else {},
+        }
+        if address and kind.classic:
+            lap, uap = lap_uap(address)
+            if lap:
+                record["lap"], record["uap"] = lap, uap
+        found.append(record)
     return tuple(found)
 
 
@@ -194,8 +202,12 @@ def target_details(
 
 SENT = ">"
 RECEIVED = "<"
+# The alias as the registry accepts it (resources._ALIAS_RE; the same text,
+# because a tag only works if it matches what an alias may be, and
+# tests/test_targets.py keeps the two in step).
+ALIAS = r"[A-Za-z][A-Za-z0-9_-]{0,63}"
 _SHELL_LINE = re.compile(
-    r"^\[(?P<alias>[A-Za-z][A-Za-z0-9_-]{0,63}) (?P<direction>[<>])\] (?P<text>.*)$"
+    rf"^\[(?P<alias>{ALIAS}) (?P<direction>[<>])\] (?P<text>.*)$"
 )
 
 

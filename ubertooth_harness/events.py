@@ -123,7 +123,7 @@ class TerminalEventSink:
     def _flush_partial(self) -> None:
         for name, text in self._partial.items():
             if text:
-                tag = "[E]" if name == "stderr" else "[O]"
+                tag, text = line_tag(name, text)
                 self.stream.write(f"{tag} {text}\n")
         self._partial = {"stdout": "", "stderr": ""}
 

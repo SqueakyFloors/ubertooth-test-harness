@@ -8,6 +8,7 @@ from ubertooth_harness import nrfdk, targets
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.events import open_run_publisher
 from ubertooth_harness.planner import TestInvocation
+from ubertooth_harness import resources
 from ubertooth_harness.rawlog import line_tag
 from ubertooth_harness.report import load_events, render_run
 from ubertooth_harness.sequencer import NamedTestSequencer
@@ -82,6 +83,8 @@ class KnownTargetTests(unittest.TestCase):
 
         self.assertEqual(1, len(found))
         self.assertEqual("ESP32 Classic peer", found[0]["type"])
+        self.assertEqual({"BD_ADDR": "20:50:0D:AA:BB:CC"}, found[0]["identity"])
+        self.assertEqual(("aabbcc", "0d"), (found[0]["lap"], found[0]["uap"]))
         self.assertEqual("0a1b2c3d", found[0]["serial"])
         self.assertEqual(
             "/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_"
@@ -104,10 +107,10 @@ class KnownTargetTests(unittest.TestCase):
             {"Ubertooth": {"serial": "a" * 32}}, platform="linux")
 
         self.assertEqual((), found)
+        self.assertEqual(targets.NO_TARGET, targets.summary(found))
         self.assertEqual(
-            "No known target: no nRF52840 DK or ESP32 Classic peer took part "
-            "in this test",
-            targets.summary(found),
+            "No known target: the harness drove no device for this test",
+            targets.NO_TARGET,
         )
         self.assertEqual("none", targets.column(found))
 
@@ -155,6 +158,13 @@ class ShellLineTests(unittest.TestCase):
                          targets.shell_line("DK_Linux1", targets.SENT, "adv start"))
         self.assertEqual("[DK_Linux1 <] OK",
                          targets.shell_line("DK_Linux1", targets.RECEIVED, "OK"))
+
+    def test_the_tagged_alias_is_the_alias_the_registry_accepts(self):
+        self.assertEqual(f"^{targets.ALIAS}$", resources._ALIAS_RE.pattern)
+
+    def test_an_address_that_is_not_hex_gives_no_lap(self):
+        self.assertEqual(("", ""), targets.lap_uap("zz:50:0D:AA:BB:CC"))
+        self.assertEqual(("", ""), targets.lap_uap("20:50:0D"))
 
     def test_an_unknown_direction_is_refused(self):
         with self.assertRaises(ValueError):
@@ -337,18 +347,13 @@ class ReportSectionTests(unittest.TestCase):
             section,
         )
         self.assertIn("BD_ADDR 20:50:0D:AA:BB:CC (LAP aabbcc, UAP 0d)", section)
-        self.assertIn(
-            "- `003-Host CLI surface`: No known target: no nRF52840 DK or "
-            "ESP32 Classic peer took part in this test",
-            section,
-        )
+        self.assertIn(f"- `003-Host CLI surface`: {targets.NO_TARGET}", section)
 
     def test_the_transcript_marks_each_test_s_known_target(self):
         transcript = self.report.split("```text", 1)[1]
         self.assertIn("[M] Run against known target: nRF52840 DK advertiser "
                       "DK_Linux1 ", transcript)
-        self.assertIn("[M] No known target: no nRF52840 DK or ESP32 Classic "
-                      "peer took part in this test", transcript)
+        self.assertIn(f"[M] {targets.NO_TARGET}", transcript)
 
     def test_every_shell_line_is_in_the_transcript_timestamped_with_its_alias(self):
         transcript = self.report.split("```text", 1)[1]

@@ -351,10 +351,10 @@ class Shell:
         """Send one command; its data lines. ERR or no answer raises."""
         self.port.reset_input_buffer()
         self._buffer = b""
-        if self.log is not None:
-            self.log(targets.SENT, text)
         self.port.write(text.encode("ascii") + b"\r")
         self.port.flush()
+        if self.log is not None:
+            self.log(targets.SENT, text)
         data = []
         for line in self._lines(self.clock() + timeout):
             if line and self.log is not None:
