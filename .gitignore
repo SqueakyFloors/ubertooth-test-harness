@@ -12,3 +12,7 @@ harness-open.conf
 # checked-in source is sdkconfig.defaults.
 firmware/*/sdkconfig
 firmware/*/sdkconfig.old
+
+# scripts/test.py remembers how long each module took, to start the longest
+# first next time.
+tests/.test-durations.json

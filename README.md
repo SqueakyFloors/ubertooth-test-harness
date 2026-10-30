@@ -2123,8 +2123,25 @@ named test covers it, the option combinations still to test, and what is hard
 to test. Use it to pick the next test.
 
 ```sh
-python -m unittest discover -s tests -v
+python scripts/test.py                 # the whole suite, one process per core
+python scripts/test.py --durations 10  # with the ten slowest tests
+python scripts/test.py test_gui -v     # one module, naming each test
 ```
+
+`scripts/test.py` runs each `tests/test_*.py` in a process of its own, as many
+at a time as there are cores, and combines them into one summary with the
+usual exit status; the modules take about a quarter of the wall time they take
+one after another. It needs nothing beyond the standard library, and the suite
+still runs the plain way, which is what to reach for when a single test is
+what matters:
+
+```sh
+python -m unittest discover -s tests
+python -m unittest tests.test_gui.RefTests -v
+```
+
+Every test must pass both ways: a test may not depend on another module's
+state, a fixed port, or a lock file another module uses.
 
 CI runs the suite and validates the long plan with Python 3.12 on Ubuntu 24.04
 and the current macOS (`macos-latest`; see `.github/workflows/test.yml`). The

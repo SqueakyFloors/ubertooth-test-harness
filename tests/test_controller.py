@@ -547,7 +547,11 @@ class RunTests(ControllerTestCase):
             await wait_until(
                 lambda: self.controller.targets["Host_A"].active_run_id is None
             )
-            # One outstanding start request per target.
+            # One outstanding start request per target. The reply timeout is
+            # read when the request arrives, so it is shortened before the
+            # one that has to expire, not after (issue #184); a second is
+            # still far longer than the loopback round trip below needs.
+            self.controller.reply_timeout_s = 1.0
             post, _ = await self.start_run(runner)
             status, payload, _ = await self.http(
                 "POST", "/api/targets/Host_A/runs",
@@ -555,7 +559,6 @@ class RunTests(ControllerTestCase):
             )
             self.assertEqual(409, status)
             self.assertIn("already pending", payload["detail"])
-            self.controller.reply_timeout_s = 0.1
             self.assertEqual(504, (await post)[0])
 
     async def test_invalid_run_requests(self):
