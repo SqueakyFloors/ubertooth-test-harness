@@ -112,6 +112,9 @@ resources:
       # Replace with the serial in the bridge's by-id path.
       bridge serial: "0123456789abcdef0123456789abcdef"
       BD_ADDR: "C8:00:00:00:00:01"
+      # Optional, and checked against the address: the LAP, UAP and device
+      # name the board's own `status` reports.
+      LAP: "000001"
 
   ESP32_Linux1:
     type: ESP32 Classic peer

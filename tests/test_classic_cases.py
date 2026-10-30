@@ -276,11 +276,25 @@ class RegistryTests(unittest.TestCase):
             (f'BD_ADDR: "{ACCEPTOR_ADDRESS}"',
              f'BD_ADDR: "{ACCEPTOR_ADDRESS}"\n      tty: /dev/ttyUSB0', "unknown key"),
             (f'BD_ADDR: "{ACCEPTOR_ADDRESS}"',
+             f'BD_ADDR: "{ACCEPTOR_ADDRESS}"\n      LAP: "2a1b2b"',
+             "LAP is 2a1b2b, but C8:85:41:2A:1B:2A gives 2a1b2a"),
+            (f'BD_ADDR: "{ACCEPTOR_ADDRESS}"',
+             f'BD_ADDR: "{ACCEPTOR_ADDRESS}"\n      name: UT-ESP32-WRONG',
+             "name is UT-ESP32-WRONG"),
+            (f'BD_ADDR: "{ACCEPTOR_ADDRESS}"',
              f'BD_ADDR: "{ACCEPTOR_ADDRESS}"\n      serial device: /dev/ttyUSB0',
              "must be a /dev/serial/by-id/ path"),
         ):
             with self.subTest(new), self.assertRaisesRegex(RegistryError, reason):
                 registry_with(REGISTRY.replace(old, new, 1))
+
+    def test_the_lap_uap_and_name_a_registry_writes_down_are_checked(self):
+        # The lab registry records what the board's status reports; a copy
+        # that agrees with the address is accepted.
+        registry_with(REGISTRY.replace(
+            f'BD_ADDR: "{ACCEPTOR_ADDRESS}"',
+            f'BD_ADDR: "{ACCEPTOR_ADDRESS}"\n      LAP: "2a1b2a"\n'
+            '      UAP: "41"\n      name: UT-ESP32-2A1B2A', 1))
 
     def test_a_peer_must_declare_a_role_the_firmware_has(self):
         # The host names its default by type here, so the role rule is what

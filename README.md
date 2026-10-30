@@ -862,6 +862,10 @@ ESP32_Linux0:
     BD_ADDR: "C8:00:00:00:00:01"
 ```
 
+A registry may also write down the `LAP`, `UAP` and `name` the board's
+`status` reports, for a person reading it; the code derives them from the
+address, and a copy that disagrees is refused as a typo.
+
 One image holds both roles, `acceptor` (the boot role, which listens) and
 `initiator` (which pages, connects, and streams), and one shell command
 switches between them, so no test reflashes a peer. Both boards may declare
