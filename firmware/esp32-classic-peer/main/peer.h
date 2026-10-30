@@ -8,7 +8,7 @@
 
 /* The harness pins this string and reflashes a board that reports anything
  * else, so it changes whenever the shell protocol or the air behavior does. */
-#define UTESP_FW_VERSION "utesp-1.0.0"
+#define UTESP_FW_VERSION "utesp-1.1.0"
 
 enum peer_role {
     PEER_ROLE_ACCEPTOR = 0, /* the boot role: wait for the other board */
@@ -33,6 +33,39 @@ const char *bt_stream(bool on);
 const char *bt_stream_period(unsigned ms);
 const char *bt_stream_payload(unsigned bytes);
 const char *bt_defaults(void);
+const char *bt_sco_start(void);
 
 /* One JSON object, no newline, truncated to fit. */
 void bt_status_json(char *out, size_t len);
+
+/* ---------------------------------------------- the synchronous audio link */
+
+/* Brings up the Hands-Free Profile machinery the audio link needs: the
+ * semaphores, the data path, and the task that sends frames. Called once
+ * from bt_start(); nothing is on the air until sco_start(). */
+const char *sco_init(void);
+
+/* Starts the profile this role needs, and on the initiator pages the peer
+ * and opens the synchronous link. peer_addr is the six-byte address "spp
+ * peer" set, or NULL if it has not been set. The shell reaches this through
+ * bt_sco_start(), which is where the role and that address live. */
+const char *sco_start(enum peer_role role, const uint8_t *peer_addr);
+
+/* Drops the audio link and takes the profile away again. */
+const char *sco_stop(void);
+
+/* The controller's own (e)SCO packet counters, as one JSON object. */
+const char *sco_pkt_stats(char *out, size_t len);
+
+/* What the status line reports about the audio link. The three strings are
+ * fixed literals, so they need no copying. */
+struct sco_view {
+    const char *state;   /* off, ready, slc, on */
+    const char *profile; /* none, ag, hf */
+    const char *codec;   /* none, cvsd, msbc */
+    unsigned handle;
+    unsigned frame_len;
+    uint32_t tx_frames, tx_errors, rx_frames, rx_bad;
+};
+
+void sco_get(struct sco_view *out);
