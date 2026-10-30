@@ -670,6 +670,15 @@ A read during a test covers only the boards that test binds: another test's
 board may be switched off by this one's power isolation, and its resets are
 not this test's to count. The baseline and the run-end read cover every board.
 
+Two limits worth knowing. The reads between cases need a test with more than
+one case, so a test that compiles to a single case — the flash soak is one —
+is read at its start and its end and not in between; that is the one part of
+[#164](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/164)
+still to do, and it needs a read inside the flash loop, which already runs
+commands between flashes. And the firmware records one processor fault, the
+last, so a board that faults the same way twice is reported once: the record
+cannot tell a repeat from the fault it already held.
+
 Two things fail:
 
 - A board that does not answer on USB. It fails its test and stops the run,

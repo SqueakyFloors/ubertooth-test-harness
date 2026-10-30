@@ -377,6 +377,15 @@ class ForkIssueTests(unittest.TestCase):
         self.assertEqual((505,), tuple(match["number"] for match in found.matches))
         self.assertEqual("", found.error)
 
+    def test_a_libusb_error_with_no_wording_of_its_own_is_an_unreachable_board(self):
+        # libubertooth prints libusb's own description and the code; the
+        # refused request carries its code inside "(stalled, libusb -9)" and
+        # is not this.
+        self.assertTrue(watchdog.board_unreachable(samples.READ_FAILED))
+        self.assertTrue(watchdog.board_unreachable(
+            "error: Input/Output Error (libusb -1)\n"))
+        self.assertFalse(watchdog.board_unreachable(samples.FIRMWARE_TOO_OLD))
+
     def test_a_search_that_cannot_run_still_offers_the_issue(self):
         def missing(argv, timeout_s):
             raise OSError("No such file or directory: 'gh'")
@@ -881,6 +890,56 @@ class MonitorTests(unittest.TestCase):
         # The issue names the test the reset happened in.
         self.assertIn("- Test: Soak", offer["issue"]["body"])
         self.assertEqual(1, len(searched))
+
+    def test_each_mode_gets_its_own_issue_counting_its_own_resets(self):
+        follow = "in BLE follow mode, running a control request"
+        promisc = "in BLE promiscuous mode, waiting for a BLE packet or the next hop"
+        monitor, _commands, publisher, _clock = self.monitor({SERIAL: [
+            samples.report(resets=0, boots=1),
+            samples.report(resets=2, boots=3, cause="watchdog", last=follow),
+            samples.report(resets=3, boots=4, cause="watchdog", last=promisc),
+        ]})
+        monitor.baseline()
+        monitor.after_test(invocation())
+        monitor.after_test(invocation())
+
+        monitor.at_run_end()
+
+        (summary,) = [e for e in publisher.events if e[0] == "watchdog_summary"]
+        offers = summary[2]["issues"]
+        self.assertEqual(
+            [("BLE follow", 2), ("BLE promiscuous", 1)],
+            [(offer["issue"]["mode"], offer["resets"]) for offer in offers],
+        )
+        self.assertEqual(3, summary[2]["resets"])
+
+    def test_only_the_first_few_resets_of_a_run_are_searched_for(self):
+        searched = []
+
+        def search(issue):
+            searched.append(issue.search_terms)
+            return watchdog.DuplicateSearch(issue.search_terms)
+
+        reports = [samples.report(resets=0, boots=1)] + [
+            samples.report(resets=n, boots=n + 1, cause="watchdog",
+                           last=f"in mode {n} mode, waiting for something")
+            for n in range(1, watchdog.MAX_SEARCHES + 2)
+        ]
+        monitor, _commands, publisher, _clock = self.monitor(
+            {SERIAL: reports}, search=search)
+        monitor.baseline()
+        for _ in range(watchdog.MAX_SEARCHES + 1):
+            monitor.after_test(invocation())
+
+        monitor.at_run_end()
+
+        (summary,) = [e for e in publisher.events if e[0] == "watchdog_summary"]
+        offers = summary[2]["issues"]
+        self.assertEqual(watchdog.MAX_SEARCHES + 1, len(offers))
+        self.assertEqual(watchdog.MAX_SEARCHES, len(searched))
+        # The issue is still offered; only its search was left out.
+        self.assertIn(f"only the first {watchdog.MAX_SEARCHES}",
+                      offers[-1]["duplicates"]["error"])
 
     def test_a_run_with_no_reset_offers_no_issue_and_searches_for_nothing(self):
         def refuse(issue):

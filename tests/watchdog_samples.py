@@ -62,7 +62,7 @@ READ_TIMED_OUT = (
     "error: watchdog state read failed\n"
 )
 READ_FAILED = (
-    "libUSB Error: No such device (it may have been disconnected): (-4)\n"
+    "error: No such device (it may have been disconnected) (libusb -4)\n"
     "error: watchdog state read failed\n"
 )
 

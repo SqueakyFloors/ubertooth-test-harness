@@ -60,8 +60,10 @@ POLL_INTERVAL_S = 180.0
 # seconds, so the wait ends even where the clock is a test's own.
 RECOVERY_TRIES = 3
 RECOVERY_PAUSE_S = 2.5
-# How long the duplicate search may take.
+# How long the duplicate search may take, and how many a run may run: the
+# searches happen after the last test, and nobody is waiting minutes for them.
 SEARCH_TIMEOUT_S = 20.0
+MAX_SEARCHES = 3
 
 # The reset counter stops here rather than wrapping (the firmware's capture
 # transfer errors and radio waits stop at 65535, which no board has reached).
@@ -142,9 +144,11 @@ _UNREACHABLE = re.compile(
     r"|claiming the USB interface of\b"
     r"|the Ubertooth did not answer in time\b"
     r")"
-    # libubertooth's sink for a libusb error with no wording of its own,
-    # which on a control read means the transport failed.
-    r"|^libUSB Error:"
+    # libubertooth's sink for a libusb error with no wording of its own
+    # ("error: No such device (it may have been disconnected) (libusb -4)"),
+    # which on a control read means the transport failed. The refusal above
+    # carries its code inside "(stalled, libusb -9)", so it is not this.
+    r"|^error: .+ \(libusb -?\d+\)$"
 )
 # The board answered and refused the request itself: the only way firmware
 # says it has no such request. Transient while the host has not noticed the
@@ -754,6 +758,7 @@ class WatchdogMonitor:
         self._resets: dict[str, int] = {board.serial: 0 for board in self.boards}
         self._state: dict[str, str] = {}
         self._issues: dict[tuple, ForkIssue] = {}
+        self._counted: dict[tuple, int] = {}
         self._lost: set[str] = set()
         # Boards whose firmware has shown it has no such request. A board
         # flashed to an image that does have it leaves the set at its next
@@ -924,12 +929,15 @@ class WatchdogMonitor:
         self._resets[board.serial] = self._resets.get(board.serial, 0) + change.new_resets
         if change.reset_itself:
             # Keyed by what the firmware recorded, so a board that reset in
-            # two different modes offers an issue for each.
-            self._issues[(board.serial, record.last_reset_mode, record.last_reset_wait)] = fork_issue(
+            # two different modes offers an issue for each, and each counts
+            # only the resets recorded in its own mode and wait.
+            key = (board.serial, record.last_reset_mode, record.last_reset_wait)
+            self._counted[key] = self._counted.get(key, 0) + change.new_resets
+            self._issues[key] = fork_issue(
                 serial=board.serial,
                 resource=board.resource,
                 record=record,
-                resets=self._resets[board.serial],
+                resets=self._counted[key],
                 build=self.build,
                 test_name=self._test_name,
                 run_id=getattr(self.publisher, "run_id", ""),
@@ -1121,15 +1129,24 @@ class WatchdogMonitor:
                 if key[0] != board.serial:
                     continue
                 # No search on a run that was canceled: the operator is
-                # waiting for it to stop, not for GitHub.
-                found = (
-                    DuplicateSearch(issue.search_terms, error="the run was canceled")
-                    if self.cancelled() else self.search(issue)
-                )
+                # waiting for it to stop, not for GitHub. Bounded in number
+                # too, so a run with many distinct resets does not spend
+                # minutes on searches after its last test.
+                if self.cancelled():
+                    found = DuplicateSearch(
+                        issue.search_terms, error="the run was canceled")
+                elif len(issues) >= MAX_SEARCHES:
+                    found = DuplicateSearch(
+                        issue.search_terms,
+                        error=f"only the first {MAX_SEARCHES} of this run's "
+                              "resets were searched for",
+                    )
+                else:
+                    found = self.search(issue)
                 issues.append({
                     "resource": board.resource,
                     "serial": board.serial,
-                    "resets": self._resets.get(board.serial, 0),
+                    "resets": self._counted.get(key, 0),
                     "issue": issue.to_dict(),
                     "duplicates": found.to_dict(),
                 })
