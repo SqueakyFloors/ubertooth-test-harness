@@ -6,6 +6,7 @@ per-run prefix. Nothing is installed system-wide, and machine setup (system
 packages, udev rules) stays a separate one-time step (the fork's install.sh).
 """
 
+import contextlib
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
@@ -390,6 +391,36 @@ class Builder:
         self.clock = clock or time.monotonic
         self._deadline = None
 
+    @contextlib.contextmanager
+    def _step(self, step_id: str, name: str):
+        """One build step, bracketed by its own started and finished records.
+
+        A step's outcome is not the outcome of its commands: it may accept a
+        command that exited non-zero, and may run a second command when the
+        first did not answer (verify-host-version below). So the step says
+        what it decided itself, in ``build_step_finished``, which is the line
+        report.md and the GUI show. Set ``status`` and ``reason`` on the
+        yielded outcome to say more than "passed"; a BuildError raised inside
+        is the step's failure and its reason.
+        """
+        self.publisher.emit(
+            "build_step_started", "running",
+            {"step_id": step_id, "step_name": name},
+        )
+        outcome = {"status": "passed", "reason": ""}
+        try:
+            yield outcome
+        except BuildError as error:
+            self._finish_step(step_id, name, "failed", str(error))
+            raise
+        self._finish_step(step_id, name, outcome["status"], outcome["reason"])
+
+    def _finish_step(self, step_id: str, name: str, status: str, reason: str) -> None:
+        self.publisher.emit(
+            "build_step_finished", status,
+            {"step_id": step_id, "step_name": name, "reason": reason},
+        )
+
     def _run(self, argv: Sequence[str], timeout_s: float, label: str, cwd=None):
         owner = {"phase": "build", "step_id": label}
         command_id = f"build-{label}"
@@ -445,24 +476,23 @@ class Builder:
                 "print('Python', platform.python_version(), sys.executable)",
             )))
         missing_libraries = []
-        self.publisher.emit(
-            "build_step_started", "running",
-            {"step_id": "toolchain", "step_name": "Read toolchain versions"},
-        )
-        for name, argv in commands:
-            result = self._run(argv, 30.0, f"toolchain-{name}")
-            if result.returncode != 0 or result.timed_out:
-                if argv[0] == "pkg-config" and len(argv) > 2:
-                    missing_libraries.append(argv[-1])
-                    continue
-                raise BuildError(f"cannot read the {name} version: {_first_line(result)}")
-            versions[name] = _first_line(result)
-        if missing_libraries:
-            hint = _INSTALL_HINTS.get(plan.platform, "")
-            raise BuildError(
-                "missing library: " + ", ".join(missing_libraries)
-                + (f"; install with: {hint}" if hint else "")
-            )
+        with self._step("toolchain", "Read toolchain versions"):
+            for name, argv in commands:
+                result = self._run(argv, 30.0, f"toolchain-{name}")
+                if result.returncode != 0 or result.timed_out:
+                    if argv[0] == "pkg-config" and len(argv) > 2:
+                        missing_libraries.append(argv[-1])
+                        continue
+                    raise BuildError(
+                        f"cannot read the {name} version: {_first_line(result)}"
+                    )
+                versions[name] = _first_line(result)
+            if missing_libraries:
+                hint = _INSTALL_HINTS.get(plan.platform, "")
+                raise BuildError(
+                    "missing library: " + ", ".join(missing_libraries)
+                    + (f"; install with: {hint}" if hint else "")
+                )
         return versions
 
     def run(self, plan: BuildPlan) -> BuildResult:
@@ -504,50 +534,65 @@ class Builder:
             return result
 
         for command in plan.commands:
-            self.publisher.emit(
-                "build_step_started", "running",
-                {"step_id": command.step_id, "step_name": command.name},
-            )
-            result = run_step(command, command.argv, command.step_id)
-            if command.step_id == "verify-host-version":
-                host_version = (result.stdout + result.stderr).strip()
-                tried = [(command.argv, result)]
-                if (command.fallback_argv and not result.timed_out
-                        and HOST_VERSION_LABEL not in host_version):
-                    # Nothing answered under the label, so this commit of the
-                    # fork answers the host version on the older option: ask
-                    # that one. A version under the label that is not the
-                    # resolved one is a failure, reported below, and so is a
-                    # command killed at its deadline: the fallback answering
-                    # afterwards would hide that the first command hung.
-                    result = run_step(command, command.fallback_argv,
-                                      f"{command.step_id}-fallback")
+            with self._step(command.step_id, command.name) as step:
+                result = run_step(command, command.argv, command.step_id)
+                if command.step_id == "verify-host-version":
                     host_version = (result.stdout + result.stderr).strip()
-                    tried.append((command.fallback_argv, result))
-                # `-V` goes on to read any attached board and exits 1 if one
-                # cannot be read -- busy, or held by another run. The built
-                # tools' own version is what this step checks, so the line
-                # decides it and the exit status does not. A command killed at
-                # its deadline is still a failed step: it answered and then
-                # hung.
-                if _host_version_matches(plan, host_version) and not result.timed_out:
-                    host_version = _host_version_line(host_version)
+                    tried = [(command.argv, result)]
+                    if (command.fallback_argv and not result.timed_out
+                            and HOST_VERSION_LABEL not in host_version):
+                        # Nothing answered under the label, so this commit of
+                        # the fork answers the host version on the older
+                        # option: ask that one. A version under the label that
+                        # is not the resolved one is a failure, reported
+                        # below, and so is a command killed at its deadline:
+                        # the fallback answering afterwards would hide that
+                        # the first command hung.
+                        result = run_step(command, command.fallback_argv,
+                                          f"{command.step_id}-fallback")
+                        host_version = (result.stdout + result.stderr).strip()
+                        tried.append((command.fallback_argv, result))
+                    # Each command that did not exit 0, named by the option
+                    # asked, for the step's own reason line either way.
+                    failures = "; ".join(
+                        f"{argv[-1]} "
+                        + ("timed out" if attempt.timed_out
+                           else f"exited {attempt.returncode}")
+                        for argv, attempt in tried
+                        if attempt.timed_out or attempt.returncode != 0
+                    )
+                    # `-V` goes on to read any attached board and exits 1 if
+                    # one cannot be read -- busy, or held by another run. The
+                    # built tools' own version is what this step checks, so
+                    # the line decides it and the exit status does not, and
+                    # the step says which exit status it accepted. A command
+                    # killed at its deadline is still a failed step: it
+                    # answered and then hung.
+                    if _host_version_matches(plan, host_version) and not result.timed_out:
+                        host_version = _host_version_line(host_version)
+                        if failures:
+                            step["reason"] = (
+                                f"the version line is the resolved revision; "
+                                f"{failures}, which this step does not check"
+                            )
+                        continue
+                    # Either command may be the real problem, and the reason
+                    # line is what an operator reads.
+                    if failures:
+                        raise BuildError(f"{command.name}: {failures}")
+                    # Both answered, with a version this build did not ask
+                    # for; _run_plan raises below with both revisions.
+                    step["status"] = "failed"
+                    step["reason"] = (
+                        f"not the resolved revision: {host_version or 'no version line'}"
+                    )
                     continue
-                # Both commands, named by the option asked: either may be the
-                # real problem, and the reason line is what an operator reads.
-                failures = "; ".join(
-                    f"{argv[-1]} "
-                    + ("timed out" if attempt.timed_out
-                       else f"exited {attempt.returncode}")
-                    for argv, attempt in tried
-                    if attempt.timed_out or attempt.returncode != 0
-                )
-                if failures:
-                    raise BuildError(f"{command.name}: {failures}")
-                continue
-            if result.timed_out or result.returncode != 0:
-                reason = "timed out" if result.timed_out else f"exited {result.returncode}"
-                raise BuildError(f"{command.name} {reason}")
+                if result.timed_out or result.returncode != 0:
+                    reason = (
+                        "timed out" if result.timed_out
+                        else f"exited {result.returncode}"
+                    )
+                    raise BuildError(f"{command.name} {reason}")
         if not _host_version_matches(plan, host_version):
             raise BuildError(
                 f"built ubertooth-util reports {host_version!r}, expected "

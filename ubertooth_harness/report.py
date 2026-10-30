@@ -735,6 +735,8 @@ def _transcript(run: _Run) -> list[str]:
             record = pending.pop(details.get("command_id", ""), None)
             if record is not None:
                 out.append(_command_record(record["started"], record["outputs"], event, stamp).rstrip("\n"))
+            # A run recorded before the build said how each step ended
+            # (build_step_finished) has only its commands to go on.
             if details.get("phase") == "build" and build_step is not None and status != "passed":
                 build_step[1] = status
             continue
@@ -759,6 +761,15 @@ def _transcript(run: _Run) -> list[str]:
             open_step = details.get("step_name", details.get("step_id", ""))
             line(event, f"+++ {open_step} +++")
             build_step = [open_step, "passed"]
+            continue
+        elif kind == "build_step_finished":
+            # The step's own outcome, which its commands do not give: a step
+            # may accept a command that exited non-zero.
+            name = details.get("step_name") or details.get("step_id", "")
+            if build_step is not None:
+                name = build_step[0]
+                build_step = None
+            line(event, f"--- {name} EXIT: {status}{_reason(details)} ---")
             continue
         elif kind == "build_finished":
             close_build_step(event)

@@ -1010,7 +1010,11 @@ that includes `ubertooth-scan` and `ubertooth-follow` (BlueZ), so their cases
 are always required in a Linux `--build` run, never left out as not
 applicable. The build
 commands are recorded in run.jsonl and appear under `=== BUILD ===` in the
-report. A missing tool or library stops
+report. Each step closes with an outcome of its own, from a
+`build_step_finished` record (`--- <step> EXIT: <status>: <reason> ---`), which
+is not the status of its last command: the host-version step accepts `-V`
+exiting 1 because it read an attached board it does not need, and its reason
+says which exit status it accepted. A missing tool or library stops
 the run first, naming what to install. Ctrl-C cancels the build, and the
 whole build has a one-hour deadline on top of per-command timeouts.
 
