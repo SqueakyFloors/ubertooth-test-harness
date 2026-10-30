@@ -22,7 +22,7 @@ BOOT_LOG = (
 
 class FakePeerFirmware:
     def __init__(self, address="C8:85:41:2A:1B:2A",
-                 version=esp32peer.FIRMWARE_VERSION, start_failure=""):
+                 version=esp32peer.MINIMUM_FIRMWARE, start_failure=""):
         self.address = address
         self.version = version
         self.start_failure = start_failure

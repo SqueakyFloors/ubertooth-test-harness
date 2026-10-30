@@ -915,9 +915,12 @@ python -m ubertooth_harness run-suite \
   --output runs
 ```
 
-Nothing in the harness flashes a peer: a board running another firmware
-version fails the plan's first case, naming the version it reports. Build and
-flash it from `firmware/esp32-classic-peer` at this harness commit.
+Nothing in the harness flashes a peer, so the driver asks for a minimum
+version (`utesp-1.0.0`) rather than an exact one: a later image of the same
+major has these commands and more, and the run record keeps whichever
+version each board reported. An older image, or another major version,
+fails the plan's first case naming what it found; build and flash it from
+`firmware/esp32-classic-peer` at this harness commit.
 
 A peer is leased like an Ubertooth (`ubertooth-harness boards` and `lease`
 list it), keyed by its bridge serial (`esp32-<serial>.lock` in the lease

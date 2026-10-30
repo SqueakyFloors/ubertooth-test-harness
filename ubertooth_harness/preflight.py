@@ -195,7 +195,7 @@ def _peer_check(sequence: int, host: str, resource, expected_revision: str) -> P
         argv=argv,
         expected_patterns=(
             rf"(?m)^peer address: {re.escape(resource.identity['BD_ADDR'].upper())}$",
-            rf"(?m)^peer firmware: {re.escape(esp32peer.FIRMWARE_VERSION)}$",
+            r"(?m)^peer firmware: utesp-\d+\.\d+\.\d+$",
         ),
         expected_revision=expected_revision,
         timeout_s=esp32peer.BOOT_TIMEOUT_S + esp32peer.COMMAND_TIMEOUT_S * 2,

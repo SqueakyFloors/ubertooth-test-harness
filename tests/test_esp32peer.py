@@ -73,11 +73,40 @@ class ShellTests(unittest.TestCase):
         peer_shell.wait_ready()
         self.assertEqual(ACCEPTOR_ADDRESS, peer_shell.status()["address"])
 
-    def test_firmware_of_another_version_is_named_in_the_error(self):
-        peer_shell = shell(FakePeerFirmware(ACCEPTOR_ADDRESS, version="utesp-0.9.0"))
-        with self.assertRaisesRegex(esp32peer.PeerError, "utesp-0.9.0 is not the "
-                                    "firmware the harness expects"):
+    def test_older_firmware_is_refused_and_a_later_1_x_accepted(self):
+        # Nothing flashes a peer, so a later image of the same major, which
+        # has these commands and more, has to be usable.
+        for version, accepted in (("utesp-0.9.0", False), ("utesp-1.0.0", True),
+                                  ("utesp-1.1.0", True), ("utesp-1.0.4", True),
+                                  ("utesp-2.0.0", False)):
+            firmware = FakePeerFirmware(ACCEPTOR_ADDRESS, version=version)
+            peer_shell = shell(firmware)
             peer_shell.wait_ready()
+            with self.subTest(version):
+                if accepted:
+                    self.assertEqual(version,
+                                     esp32peer.check_status(peer_shell.status(),
+                                                            "acceptor")["fw"])
+                else:
+                    with self.assertRaisesRegex(
+                        esp32peer.PeerError,
+                        f"acceptor runs {version}, and the harness needs "
+                        f"{esp32peer.MINIMUM_FIRMWARE} or a later 1.x image"
+                    ):
+                        esp32peer.check_status(peer_shell.status(), "acceptor")
+
+    def test_a_version_that_is_not_a_version_is_reported(self):
+        with self.assertRaisesRegex(esp32peer.PeerError,
+                                    "'utesp-dev' is not a firmware version"):
+            esp32peer.check_firmware("utesp-dev", "acceptor")
+
+    def test_a_board_that_never_says_ready_is_reported(self):
+        firmware = FakePeerFirmware(ACCEPTOR_ADDRESS)
+        port = FakePeerPort(firmware)
+        port.pending.clear()  # the boot notice was lost
+        peer_shell = esp32peer.Shell(port, "acceptor", _CountingClock())
+        with self.assertRaisesRegex(esp32peer.PeerError, "no 'ready' notice within"):
+            peer_shell.wait_ready(2.0)
 
     def test_a_board_whose_bluetooth_did_not_start_says_why(self):
         peer_shell = shell(FakePeerFirmware(ACCEPTOR_ADDRESS,
@@ -155,7 +184,7 @@ class CommandTests(unittest.TestCase):
         out = io.StringIO()
         esp32peer.identify(peer, out)
         text = out.getvalue()
-        self.assertIn(f"acceptor firmware: {esp32peer.FIRMWARE_VERSION}", text)
+        self.assertIn(f"acceptor firmware: {esp32peer.MINIMUM_FIRMWARE}", text)
         self.assertIn(f"acceptor address: {ACCEPTOR_ADDRESS}", text)
         self.assertIn("acceptor LAP: 2a1b2a UAP: 41", text)
 

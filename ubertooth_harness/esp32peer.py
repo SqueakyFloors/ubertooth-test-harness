@@ -53,9 +53,15 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
-# The firmware version the harness expects (firmware/esp32-classic-peer
-# main/peer.h UTESP_FW_VERSION; tests/test_esp32peer.py keeps them in step).
-FIRMWARE_VERSION = "utesp-1.0.0"
+# The oldest firmware whose shell has everything this driver uses
+# (firmware/esp32-classic-peer main/peer.h UTESP_FW_VERSION;
+# tests/test_esp32peer.py keeps them in step).
+#
+# A minimum rather than an exact version, because nothing in the harness
+# flashes a peer: a board carrying a later 1.x image, which has these
+# commands and more, must not fail a run. A different major version, or an
+# older one, does.
+MINIMUM_FIRMWARE = "utesp-1.0.0"
 BAUD = 115200
 ROLES = ("acceptor", "initiator")
 BOOT_ROLE = "acceptor"
@@ -93,7 +99,8 @@ _NOTICE = re.compile(r"^(?:utesp: |[WE] \(\d+\))")
 _BOOT_NOISE = re.compile(
     r"^(?:ets |rst:0x|configsip:|clk_drv:|mode:|load:|entry |"
     r"[\x00-\x08\x0b-\x1f]|$)")
-_READY = re.compile(rf"^utesp: {re.escape(FIRMWARE_VERSION)} ready$")
+_READY = re.compile(r"^utesp: (?P<version>utesp-\S+) ready$")
+_VERSION = re.compile(r"^utesp-(\d+)\.(\d+)\.(\d+)$")
 _START_FAILED = re.compile(r"^utesp: \S+ start failed: (?P<reason>.+)$")
 
 # Every field the firmware's status line carries, with the type it must have.
@@ -109,6 +116,30 @@ _STATUS_KEYS = {
 
 class PeerError(RuntimeError):
     """The peer, its bridge, or the pair did not do what was asked."""
+
+
+def version_parts(version: str, label: str = "peer") -> tuple[int, int, int]:
+    match = _VERSION.fullmatch(str(version).strip())
+    if match is None:
+        raise PeerError(f"{label}: '{version}' is not a firmware version of the "
+                        "form utesp-<major>.<minor>.<patch>")
+    return tuple(int(part) for part in match.groups())
+
+
+def check_firmware(version: str, label: str = "peer",
+                   minimum: str = MINIMUM_FIRMWARE) -> None:
+    """The board's firmware must be ``minimum`` or a later image of its major.
+
+    A later 1.x image has these commands and more, so it is accepted; the
+    exact version is reported either way, and goes in the run record.
+    """
+    found = version_parts(version, label)
+    wanted = version_parts(minimum)
+    if found[0] != wanted[0] or found < wanted:
+        raise PeerError(
+            f"{label} runs {version}, and the harness needs {minimum} or a "
+            f"later {wanted[0]}.x image; build and flash "
+            "firmware/esp32-classic-peer at this harness commit")
 
 
 def normalize_address(value: str) -> str:
@@ -257,14 +288,11 @@ class Shell:
                     raise PeerError(
                         f"{self.label}: Bluetooth did not start: {failed['reason']}")
                 if _READY.match(line):
+                    # Which version it is, is checked with its status, where
+                    # the whole state is read at once.
                     return
-                if line.endswith(" ready"):
-                    raise PeerError(
-                        f"{self.label}: {line.split()[1]} is not the firmware the "
-                        f"harness expects, {FIRMWARE_VERSION}; build and flash "
-                        "firmware/esp32-classic-peer at this harness commit")
-        raise PeerError(f"{self.label}: no '{FIRMWARE_VERSION} ready' notice within "
-                        f"{timeout:g}s of opening the bridge")
+        raise PeerError(f"{self.label}: no 'ready' notice within {timeout:g}s of "
+                        "opening the bridge")
 
     def reset(self) -> None:
         """Reset the board with the bridge's own lines, then wait for boot.
@@ -297,11 +325,8 @@ def parse_status(line: str, label: str = "peer") -> dict:
 
 
 def check_status(status: dict, label: str, address: str | None = None) -> dict:
-    """The board runs the expected firmware, Bluetooth is up, at ``address``."""
-    if status["fw"] != FIRMWARE_VERSION:
-        raise PeerError(
-            f"{label} runs {status['fw']}, the harness expects {FIRMWARE_VERSION}; "
-            "build and flash firmware/esp32-classic-peer at this harness commit")
+    """The board runs usable firmware, Bluetooth is up, at ``address``."""
+    check_firmware(status["fw"], label)
     if not status["bt"]:
         raise PeerError(f"{label}: Bluetooth is not up (status bt is false)")
     if address is not None and status["address"] != normalize_address(address):

@@ -232,7 +232,9 @@ def _identify_step(step_id: str, peer: Mapping, role: str) -> Step:
                 _peer_command("identify", peer, role), timeout_s=PEER_TIMEOUT_S,
                 mutates=True,  # opening the bridge resets the board
                 output_patterns=(
-                    rf"(?m)^{role} firmware: {re.escape(esp32peer.FIRMWARE_VERSION)}$",
+                    # The exact version goes in the run record; the driver
+                    # refuses one too old to drive.
+                    rf"(?m)^{role} firmware: utesp-\d+\.\d+\.\d+$",
                     rf"(?m)^{role} address: {peer['address']}$",
                     rf"(?m)^{role} LAP: {peer['lap']} UAP: {peer['uap']}$",
                 ))
@@ -245,17 +247,17 @@ def _reset_step(step_id: str, peer: Mapping, role: str) -> Step:
 
 
 def _ready_case(acceptor: Mapping, initiator: Mapping) -> StateCase:
-    """Both peers run the expected firmware at their registered addresses."""
+    """Both peers run usable firmware at their registered addresses."""
     return StateCase(
         "peers-ready",
-        f"Both ESP32 peers run {esp32peer.FIRMWARE_VERSION} at their registered "
-        "BD_ADDRs",
+        f"Both ESP32 peers run {esp32peer.MINIMUM_FIRMWARE} or later at their "
+        "registered BD_ADDRs",
         (_identify_step("identify-acceptor", acceptor, ACCEPTOR_ROLE),
          _identify_step("identify-initiator", initiator, INITIATOR_ROLE)),
         (_reset_step("reset-acceptor", acceptor, ACCEPTOR_ROLE),
          _reset_step("reset-initiator", initiator, INITIATOR_ROLE)),
-        expected_state=(f"both peers run {esp32peer.FIRMWARE_VERSION}, in the "
-                        f"{ACCEPTOR_ROLE} role, with nothing streamed"),
+        expected_state=(f"both peers run {esp32peer.MINIMUM_FIRMWARE} or later, "
+                        f"in the {ACCEPTOR_ROLE} role, with nothing streamed"),
         needs=LINUX_ONLY,
     )
 
