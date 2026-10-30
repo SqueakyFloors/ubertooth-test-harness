@@ -12,3 +12,7 @@ harness-open.conf
 # checked-in source is sdkconfig.defaults.
 firmware/*/sdkconfig
 firmware/*/sdkconfig.old
+
+# "idf.py set-target" writes a build directory next to the project unless
+# -B sends it elsewhere. Nothing generated belongs in the repository.
+firmware/*/build/
