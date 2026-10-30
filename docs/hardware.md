@@ -30,9 +30,10 @@ hubs cut the power, and everything else is plumbing.
 ### Ubertooth One
 
 The board the harness tests. A bench needs at least one; most tests use one
-board at a time, the range test and the two-board capture tests use two, and
-`Ubertooth count` and the transition tests read every board registered on the
-host, so all of them have to be attached and answering.
+board at a time, the two-device range test uses two, and `Ubertooth count`,
+the transition tests, and `Flash reliability` read or enumerate every board
+registered on the host, so all of them have to be attached and answering for
+those.
 
 Registered as type `Ubertooth` with its full 32-hex-digit serial. The serial
 has to be the whole thing: libubertooth matches `-U` against the *end* of a
@@ -52,13 +53,14 @@ a different board than the lease was taken on.
 
 `power:` maps the board to a hub port, which is what lets a plan switch other
 boards off (`exclusive Ubertooth`) and what lets a person power-cycle a wedged
-board. A board on a plain hub has no `power:` entry and cannot be in either.
+board. A board on a plain hub has no `power:` entry and can take part in
+neither.
 
-An Ubertooth presents itself on USB as `1d50:6002` in its application
-firmware and `1d50:6003` in its bootloader (DFU); a board whose flash predates
-serial numbers appears as `ffff:0004` in DFU. A board left in its bootloader
-answers no normal command, and the harness treats an unidentified device in an
-exclusive run's enumeration as a failure for that reason.
+An Ubertooth One presents itself on USB as `1d50:6002` in its application
+firmware and `1d50:6003` in its bootloader (DFU). A board left in its
+bootloader answers no normal command, which is why an exclusive run's
+enumeration check treats an unidentified device on the bus as a failure rather
+than ignoring it.
 
 **Transmitting.** The two-board range test transmits on 2.4 GHz from both
 boards, the sender stepping up to PA level 0 (0 dBm). Run it only where
@@ -142,10 +144,10 @@ two identity keys are the ones a run's known-target record reads
 
 Both boards boot as the acceptor and either can be made the initiator, so a
 pair is registered with both roles and a test picks the direction it needs.
-**The initiator pages, so it is the piconet's master and every packet in the
-piconet carries its LAP**; the acceptor's LAP shows up only in the page train.
-A test that needs a particular board's LAP on the air has to make that board
-the initiator.
+**The initiator pages, so the piconet follows its clock and hopping sequence,
+and every packet in the piconet carries its LAP**; the acceptor's LAP shows up
+only in the page train. A test that needs a particular board's LAP on the air
+has to make that board the initiator.
 
 The device name is not settable and does not need to be: it carries the
 board's own LAP (`UT-ESP32-<LAP>`), so it is fixed for the life of the board
@@ -243,10 +245,12 @@ are refused a placement.
 
 A worked weak-link receiver: one Ubertooth on a USB extension about a meter
 from the rest of the bench, with a 20 dB inline attenuator between the board
-and its antenna. Range, transmit power, margin, sensitivity, and RSSI tests
-ask for it with `rf: {Ubertooth: {min_attenuation_db: 10}}`; captures,
-surveys, and follow tests ask for an ordinary link themselves, so they stay
-off it without a plan saying so.
+and its antenna. A plan asks for it per hardware role, for example
+`rf: {Ubertooth: {min_attenuation_db: 10}}`, which is what a range, transmit
+power, margin, sensitivity, or RSSI test wants; no committed plan asks yet, so
+a recorded placement is latent until one does. The other way round is already
+live: captures, surveys, and follow tests require an ordinary link themselves,
+so they stay off an attenuated board with no plan saying so.
 
 **Keep the numbers current.** Swapping the attenuator or moving the board
 without editing `rf:` makes every later report quote the wrong conditions, and
@@ -317,7 +321,7 @@ bench notes, and the run record will match it:
 
 ```sh
 git -C <checkout> rev-parse HEAD
-sha256sum /tmp/utdk-build/zephyr/zephyr.hex
+sha256sum /tmp/utdk-build/zephyr/zephyr.hex          # shasum -a 256 on macOS
 sha256sum /tmp/utesp-build/esp32-classic-peer.bin
 ```
 
@@ -386,6 +390,7 @@ and model back, and addresses ports 0 to 7 through the hub's `usb` entity:
 |---|---|
 | `getPortState` | power in bit 0, USB 2.0 data in bit 1, and USB 3.0 data in bit 3 |
 | `setPowerEnable` / `setPowerDisable` | switches VBUS for one port |
+| `setDataEnable` / `setDataDisable` | switches both data bits of one port |
 | `getPortVoltage` | VBUS in microvolts |
 | `getPortCurrent` | VBUS current in microamps |
 
@@ -499,10 +504,13 @@ controllers stay on the Linux host. See
 ### The USB endpoint budget
 
 This is the limit that bites a crowded bench, and it looks like broken
-hardware. A USB host controller has a fixed number of endpoint contexts: Intel
-xHCI parts of the generation found in small desktop hosts cap active contexts
-at 64 in hardware, so no kernel setting raises it. Once the budget is spent,
-configuring the next device fails and whichever device enumerated last loses.
+hardware. A USB host controller has a fixed number of active endpoint
+contexts, set in the silicon: Intel puts the ceiling at 64 for its Ivy
+Bridge-era xHCI parts, the kind found in small desktop hosts, so no kernel
+setting raises it ([Intel's own answer on the
+limit](https://community.intel.com/t5/Embedded-Intel-Core-Processors/Hardware-limitations-on-USB-endpoints-XHCI/m-p/264563)).
+Once the budget is spent, configuring the next device fails and whichever
+device enumerated last loses.
 
 What the bench's devices cost in non-control endpoints:
 
@@ -571,9 +579,9 @@ plan.
 
 Two protocol facts that look like harness or tool faults and are not:
 
-- **The LAP on the air is the initiator's**, since it pages and so is the
-  master. `-l <the acceptor's LAP>` sees nothing during a link the acceptor
-  did not initiate.
+- **The LAP on the air is the initiator's**, because it pages and the piconet
+  takes its address and clock from it. `-l <the acceptor's LAP>` sees nothing
+  during a link the acceptor did not initiate.
 - **A survey's UAP is a guess** and is often wrong when few packets have been
   heard. Take the UAP from the board's `status` or the registry and pass it
   with `-u`, rather than trusting a short survey.
@@ -585,18 +593,13 @@ One Linux host, two USB host controllers, and one Mac:
 | What | Where | Why |
 |---|---|---|
 | Each Ubertooth | its own port of the Acroname hub, one board per port | a power cycle recovers a wedged board without taking anyone else's board down, and `exclusive Ubertooth` can switch the others off |
-| The weak-link Ubertooth | an Acroname port, on a USB extension about a meter away, 20 dB inline attenuator, `rf:` recording both | gives range, margin, and RSSI tests a real weak link, and keeps captures and surveys away from it |
+| The weak-link Ubertooth | an Acroname port, on a USB extension about a meter away, 20 dB inline attenuator, `rf:` recording both | ready for a range, margin, or RSSI test that wants a weak link, and kept away from captures and surveys by their own requirement |
 | An empty Acroname port or two | left free | room for a spare board, and headroom in the endpoint budget |
 | The nRF52840 DKs | a plain powered hub on the *second* host controller | they need no power cycling, and the J-Links are the heaviest endpoint users on the bench, so they get a budget of their own |
 | The ESP32 bridges | the same hub as the DKs | they need no power cycling either, and they sit next to the DKs in the same budget |
 | The Acroname's control link | the first controller, with the Ubertooths | it must stay reachable while it switches the ports it owns |
 | Mice, keyboards, and anything else | off the bench host, or accepted as spent endpoints | each one costs endpoints that a board or a COM port wants |
 | The Mac's Ubertooths | the Mac, no power controller | macOS steps only; a wedged board there needs a person, so keep its runs short |
-
-The reasoning behind it in one line each: devices that may need a power cycle
-go on the switchable hub, one per port; devices that are endpoint-hungry and
-never need a power cycle go on a hub with its own controller; and anything
-that is not part of the bench comes off it.
 
 A bench with one controller and one hub still works. It gives up the exclusive
 and isolation plans for any board on a plain hub, remote recovery for
