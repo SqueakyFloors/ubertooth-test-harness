@@ -103,6 +103,29 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(["1 packet(s) from C3:11:22:33:44:55 while it advertises on another "
                           "channel than 38"], result.problems)
 
+    def test_the_advertisers_scan_responses_are_counted_not_checked(self):
+        # An ADV_IND advertiser answers any scanner in range, so SCAN_RSPs
+        # from its own address arrive whatever the test does. They carry no
+        # harness payload and are not the type the case asked for.
+        packets = [record(pdu_type=0x0), record(pdu_type=0x0),
+                   record(pdu_type=0x4, data=b"")]
+
+        _header, result = self.check(pcap(packets), payload="c0ffee", chmap="37",
+                                     adv_type="conn", counter_min=5, counter_max=5,
+                                     min_packets=2, max_packets=2)
+
+        self.assertEqual([], result.problems)
+        self.assertEqual((2, 1), (result.matches, result.scan_responses))
+
+    def test_a_scan_response_still_counts_as_a_leak_for_absent(self):
+        # --absent asks whether any of the advertiser's packets reached a
+        # channel it does not advertise on; a scan response is one of them.
+        _header, result = self.check(pcap([record(pdu_type=0x4, data=b"")]),
+                                     channel=38, absent=True)
+
+        self.assertEqual(1, result.matches)
+        self.assertIn("while it advertises on another channel than 38", result.problems[0])
+
     def test_packet_bounds(self):
         _header, result = self.check(pcap([record()] * 4), min_packets=5)
         self.assertIn("fewer than 5", result.problems[0])

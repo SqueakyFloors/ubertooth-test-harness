@@ -26,6 +26,10 @@ Checks (each failure is a ``FAIL:`` line and exit status 1):
   ``--counter-max``;
 - ``--absent``: none of the advertiser's packets at all.
 
+With ``--type``, a SCAN_RSP from the advertiser's own address is counted and
+reported on its own line, not checked: an ADV_IND advertiser must answer a
+scanner in range, and the test does not control who scans.
+
 Only counts and the advertiser's own fields are printed, never another
 device's address or data, so no nearby traffic reaches the run record.
 Exit status 2 is a usage error.
@@ -43,8 +47,10 @@ ADV_ACCESS_ADDRESS = 0x8E89BED6
 ADV_CRC_INIT = 0x555555
 ADV_RF_CHANNEL = {37: 0, 38: 12, 39: 39}
 PDU_TYPES = {"conn": 0x0, "nonconn": 0x2}
+SCAN_RSP = 0x4
 PDU_NAMES = {0x0: "ADV_IND", 0x1: "ADV_DIRECT_IND", 0x2: "ADV_NONCONN_IND",
-             0x3: "SCAN_REQ", 0x4: "SCAN_RSP", 0x5: "CONNECT_IND", 0x6: "ADV_SCAN_IND"}
+             0x3: "SCAN_REQ", SCAN_RSP: "SCAN_RSP", 0x5: "CONNECT_IND",
+             0x6: "ADV_SCAN_IND"}
 LE_PHDR_LEN = 10
 COMPANY_ID = 0xFFFF
 MAGIC = b"UTAD"
@@ -218,6 +224,7 @@ def harness_payload(adv_data: bytes) -> tuple[int, int, bytes] | None:
 class Result:
     records: int = 0
     matches: int = 0
+    scan_responses: int = 0
     counters: list = field(default_factory=list)
     channels: dict = field(default_factory=dict)
     problems: list = field(default_factory=list)
@@ -244,6 +251,15 @@ def check(data: bytes, *, address: str, channel: int, absent: bool = False,
     for record in records:
         packet = parse_advertising(record)
         if packet is None or packet.address != address or not packet.tx_add:
+            continue
+        if not absent and adv_type is not None and packet.pdu_type == SCAN_RSP:
+            # An ADV_IND advertiser is scannable, and must answer a SCAN_REQ
+            # from any scanner in range with a SCAN_RSP from its own address
+            # (Core spec 6.0, Vol 6 Part B 4.4.2.3). The bench has scanners
+            # the test does not control, so those replies arrive at random.
+            # They are not advertising events the case asked for and carry no
+            # harness payload: count them, and leave them out of the checks.
+            result.scan_responses += 1
             continue
         result.matches += 1
         result.channels[packet.rf_channel] = result.channels.get(packet.rf_channel, 0) + 1
@@ -318,6 +334,8 @@ def main(argv=None) -> int:
     print(f"capture: {header}, {result.records} records")
     channels = ", ".join(f"rf channel {rf} x{count}" for rf, count in sorted(result.channels.items()))
     print(f"advertiser packets: {result.matches}" + (f" ({channels})" if channels else ""))
+    if result.scan_responses:
+        print(f"advertiser scan responses, not checked: {result.scan_responses}")
     if result.counters:
         print(f"counters: {min(result.counters)}-{max(result.counters)}")
     for problem in result.problems:
