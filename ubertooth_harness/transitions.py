@@ -7,8 +7,13 @@ Command contracts below come from the Ubertooth fork sources:
   range-test, repeater, TX-test, and LED-specan actions return, so squelch is
   dropped when combined with one of those (xmas runs after squelch); no
   generated case combines them.
-- Set options store a single value, so a repeated set option is
-  last-option-wins. ``-c`` (MHz) and ``-C`` (index) share one value.
+- No option may be given a value twice (opt_check_once() in the fork's
+  opt_parse.c): two values for one setting are refused with ``error: option
+  '-c' given more than once`` and exit 1, before any device is opened, rather
+  than one of them being kept. ``-c`` (MHz) and ``-C`` (index) are one
+  setting written two ways, so giving a value to both is refused as well
+  (``error: -C cannot be combined with -c; ...``). Both used to keep the
+  last value.
 - One argument rule for every host tool (fork 8b58f75 for ``ubertooth-util``,
   0b63b01 for the others): an optional option value may be attached
   (``-c2426``) or given as the next word (``-c 2426``, ``-z -70``). The next
@@ -391,16 +396,22 @@ def _setting_case(serial: str, setting: Setting) -> StateCase:
     )
 
 
+def _repeated_option(option: str) -> str:
+    """What a tool says when one option is given a value twice."""
+    return rf"(?m)^error: option '{re.escape(option)}' given more than once$"
+
+
 def _repeated_case(serial: str, setting: Setting) -> StateCase:
-    last = setting.pick(0)
+    second = setting.pick(0)
     if setting.binary:
         def first(context):
             return require(context, setting.original)
     else:
         first = setting.pick(1)
+    option = setting.set_prefix
     return StateCase(
-        f"{setting.key}-repeated-set-last-wins",
-        f"Repeated {setting.set_prefix} is last-option-wins",
+        f"{setting.key}-repeated-set-refused",
+        f"Repeated {option} is refused",
         (
             _stop(serial, "establish-idle", "Establish idle before reading"),
             setting.read_original(serial),
@@ -410,18 +421,22 @@ def _repeated_case(serial: str, setting: Setting) -> StateCase:
                 lambda context: _util(
                     serial,
                     *setting.set_options(first(context)),
-                    *setting.set_options(last(context)),
+                    *setting.set_options(second(context)),
                 ),
+                expected_returncodes=(1,),
+                output_patterns=(_repeated_option(option),),
                 mutates=True,
                 output_check=nothing_on_stdout,
             ),
             setting.verify(
-                serial, "verify-last", "Verify the last option won",
-                f"{setting.key} after repeated set", last,
+                serial, "verify-unchanged", "Verify the setting is unchanged",
+                f"{setting.key} after the refused command",
+                lambda context: require(context, setting.original),
             ),
         ),
         _cleanup(serial, (setting,)),
-        expected_state=f"last repeated {setting.set_prefix} applied, then restored",
+        expected_state=f"refused (exit 1) with error: option '{option}' given more "
+                       f"than once; {setting.key} unchanged",
     )
 
 
@@ -430,32 +445,43 @@ def _index(mhz: str) -> str:
 
 
 def _mixed_channel_case(serial: str, index_last: bool) -> StateCase:
-    last = CHANNEL.pick(0)
+    """-c and -C are one setting written two ways, so a value given to both
+    names two channels for it and is refused before any device is opened.
+    The second one used to be the one sent. The message names the option that
+    came second."""
+    second = CHANNEL.pick(0)
     first = CHANNEL.pick(1)
     if index_last:
-        case_id, name = "channel-mhz-then-index", "-c then -C: index wins"
+        case_id, name = "channel-mhz-then-index", "-c then -C is refused"
 
         def argv(context):
-            return _util(serial, f"-c{first(context)}", _index(last(context)))
+            return _util(serial, f"-c{first(context)}", _index(second(context)))
     else:
-        case_id, name = "channel-index-then-mhz", "-C then -c: MHz wins"
+        case_id, name = "channel-index-then-mhz", "-C then -c is refused"
 
         def argv(context):
-            return _util(serial, _index(first(context)), f"-c{last(context)}")
+            return _util(serial, _index(first(context)), f"-c{second(context)}")
+    later, earlier = ("-C", "-c") if index_last else ("-c", "-C")
+    refusal = (rf"(?m)^error: {later} cannot be combined with {earlier}; they are "
+               r"the same channel setting written two ways$")
     return StateCase(
         case_id,
         name,
         (
             _stop(serial, "establish-idle", "Establish idle before reading"),
             CHANNEL.read_original(serial),
-            Step("set-mixed", name, argv, mutates=True),
+            Step("set-mixed", name, argv, expected_returncodes=(1,),
+                 output_patterns=(refusal,), mutates=True,
+                 output_check=nothing_on_stdout),
             CHANNEL.verify(
-                serial, "verify-last", "Verify the last channel option won",
-                "channel after mixed set", last,
+                serial, "verify-unchanged", "Verify the channel is unchanged",
+                "channel after the refused command",
+                lambda context: require(context, CHANNEL.original),
             ),
         ),
         _cleanup(serial, (CHANNEL,)),
-        expected_state="-c and -C share one value; the last one applies",
+        expected_state=f"refused (exit 1) because {later} and {earlier} are one "
+                       "setting; the channel unchanged",
     )
 
 
@@ -572,8 +598,8 @@ def _repeated_all_leds_case(serial: str) -> StateCase:
         return "0" if other(context) == "1" else "1"
 
     return StateCase(
-        "all-leds-repeated-set-last-wins",
-        "Repeated -d is last-option-wins",
+        "all-leds-repeated-set-refused",
+        "Repeated -d is refused",
         (
             _stop(serial, "establish-idle", "Establish idle before reading"),
             LEDS.read_original(serial),
@@ -581,16 +607,20 @@ def _repeated_all_leds_case(serial: str) -> StateCase:
                 "set-twice",
                 "Set every LED twice in one command",
                 lambda context: _util(serial, f"-d{first(context)}", f"-d{other(context)}"),
+                expected_returncodes=(1,),
+                output_patterns=(_repeated_option("-d"),),
                 mutates=True,
+                output_check=nothing_on_stdout,
             ),
             LEDS.verify(
-                serial, "verify-last", "Verify the last option won",
-                "leds after repeated set",
-                lambda context: "/".join([other(context)] * 3),
+                serial, "verify-unchanged", "Verify every LED is unchanged",
+                "leds after the refused command",
+                lambda context: require(context, LEDS.original),
             ),
         ),
         _cleanup(serial, (LEDS,)),
-        expected_state="last repeated -d applied to all LEDs, then each LED restored",
+        expected_state="refused (exit 1) with error: option '-d' given more than "
+                       "once; every LED unchanged",
     )
 
 
@@ -867,11 +897,14 @@ def util_composition_cases(arguments, _resources, resource_identities):
     if arguments["coverage"] == "comprehensive":
         covered = {frozenset(case.argv[3:]) for case in cases}
         cases.append(
+            # Two -U name two boards for one command, so it is refused before
+            # either is opened; the last one used to be selected.
             CommandCase(
-                "repeated-device-selection-last-wins",
-                "Repeated -U selects the last device",
+                "repeated-device-selection-refused",
+                "Repeated -U is refused",
                 ("ubertooth-util", "-U", UNUSED_INDEX, "-U", serial, "-s"),
-                (serial_pattern(serial),),
+                (_repeated_option("-U"),),
+                expected_returncodes=(1,),
             )
         )
         labels = {option: label for option, label, _pattern in _QUERY_OPTIONS}
@@ -978,9 +1011,12 @@ def _repeated_crc_case(serial):
     def other(context):
         return "0" if require(context, "original crc") == "1" else "1"
 
+    def original(context):
+        return require(context, "original crc")
+
     return StateCase(
-        "crc-repeated-set-last-wins",
-        "Repeated ubertooth-btle -k is last-option-wins",
+        "crc-repeated-set-refused",
+        "Repeated ubertooth-btle -k is refused",
         (
             _stop(serial, "establish-idle", "Establish idle before reading"),
             _crc_read(serial, "read-original-crc", "Read original CRC", "original crc"),
@@ -988,15 +1024,19 @@ def _repeated_crc_case(serial):
                 "set-twice",
                 "Set CRC twice in one command",
                 lambda context: _btle(
-                    serial, f"-k{require(context, 'original crc')}", f"-k{other(context)}"
+                    serial, f"-k{original(context)}", f"-k{other(context)}"
                 ),
+                expected_returncodes=(1,),
+                output_patterns=(_repeated_option("-k"),),
                 mutates=True,
+                output_check=nothing_on_stdout,
             ),
-            _crc_read(serial, "verify-last", "Verify the last option won",
-                      "crc after repeated set", other),
+            _crc_read(serial, "verify-unchanged", "Verify the CRC setting is unchanged",
+                      "crc after the refused command", original),
         ),
         _cleanup(serial, (), crc=True),
-        expected_state="last repeated -k applied, then original CRC restored",
+        expected_state="refused (exit 1) with error: option '-k' given more than "
+                       "once; the CRC setting unchanged",
     )
 
 
@@ -1093,15 +1133,15 @@ def _capture_case(serial, mode, mode_label, target, capture):
 
 
 def _repeated_capture_case(first, second):
-    """Capture files are first-option-wins; the extra one is never created.
-
-    -q and -c share one PCAP handle, so either after the other is "extra".
+    """-q and -c share one PCAP handle, so either after the other names a
+    second file for one capture: the first one given wins and the extra is
+    only reported, never created. They are different options, so the
+    one-value-each rule does not apply; the same option twice is refused
+    (Refused command lines covers that, with no board).
     """
     def case(serial):
         option_a, label_a, file_a, format_a, link_a = first
         option_b, label_b, file_b, _format_b, _link_b = second
-        if file_a == file_b:
-            file_b = "second-" + file_b
         return StateCase(
             f"capture-repeated-{label_a}-then-{label_b}-first-wins",
             f"Repeated capture {option_a} then {option_b} is first-option-wins",
@@ -1173,7 +1213,7 @@ def _two_handle_capture_case(serial, second="-q"):
 _FORMATS = {item[0]: item for item in _CAPTURE_FORMATS}
 _REPEATED_CAPTURES = tuple(
     _repeated_capture_case(_FORMATS[a], _FORMATS[b])
-    for a, b in (("-r", "-r"), ("-q", "-c"), ("-c", "-q"))
+    for a, b in (("-q", "-c"), ("-c", "-q"))
 )
 
 

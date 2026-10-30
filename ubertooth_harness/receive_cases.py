@@ -327,18 +327,6 @@ def classic_receive_cases(arguments, _resources, resource_identities):
                      files=(("-q", "rx.pcap"),),
                      verify=(_capture_header("verify-capture", "Verify the -q file header",
                                              "rx.pcap", "pcap"),)),
-            _rx_case(serial, n, "rx-capture-repeated-first-wins",
-                     "Repeated -r: the first file is written, the extra ignored", (),
-                     "only the first -r file written",
-                     patterns=(r"Ignoring extra capture file: ",),
-                     files=(("-r", "first.pcapng"), ("-r", "second.pcapng")),
-                     verify=(
-                         _capture_header("verify-first", "Verify the first -r file",
-                                         "first.pcapng", "pcapng"),
-                         _capture_absent("verify-second-absent",
-                                         "Verify the extra -r file was not created",
-                                         "second.pcapng"),
-                     )),
             _rx_case(serial, n, "rx-dump-file", "Packet dump (-d)", (),
                      "-d wrote whole 68-byte BR packet records (none without traffic)",
                      files=(("-d", "rx.dump"),),
@@ -644,14 +632,15 @@ def replay_cases(arguments, _resources, _resource_identities, *, now=None):
         _replay_case("replay-decode-lap", "-i decodes every LAP in the fixture", (
             _fixture_step(base),
             _replay_step("ubertooth-rx -i <fixture>", (),
-                         check=rxreplay.uap_check(full, None)),
+                         check=rxreplay.uap_check(full),
+                         forbidden=(rxreplay.ANY_UAP_NOTE,)),
         ), f"exit 0; {count} packet lines with the fixture's LAPs, errors, and "
            "channels in order; decoy records skipped; no UAP without -l"),
         _replay_case("replay-lap-uap", "-i -l <LAP> derives the UAP", (
             _fixture_step(base),
             _replay_step(f"ubertooth-rx -i <fixture> -l {_A}", ("-l", _A),
-                         check=rxreplay.uap_check(lap_a, rxreplay.UAP_A),
-                         patterns=(_CLK6_ZERO,)),
+                         check=rxreplay.uap_check(lap_a),
+                         patterns=(rxreplay.uap_note(rxreplay.UAP_A), _CLK6_ZERO)),
         ), f"only LAP {_A} lines; UAP {rxreplay.UAP_A:02x} found; CLK6 offset 0"),
         _replay_case("replay-pcapng", "-i -r replays into PCAPNG", (
             _fixture_step(base),
@@ -718,7 +707,8 @@ def replay_cases(arguments, _resources, _resource_identities, *, now=None):
         _replay_case("replay-lap-filter", f"-i -l {_B}: only that LAP", (
             _fixture_step(base),
             _replay_step(f"ubertooth-rx -i <fixture> -l {_B}", ("-l", _B),
-                         check=rxreplay.uap_check(lap_b, None)),
+                         check=rxreplay.uap_check(lap_b),
+                         forbidden=(rxreplay.ANY_UAP_NOTE,)),
         ), f"only LAP {_B} lines (ID packets: no UAP)"),
         _replay_case("replay-uap-given", "-i -l -u with the right UAP", (
             _fixture_step(base),
