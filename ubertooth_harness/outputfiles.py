@@ -516,21 +516,36 @@ class OutsideRun(ValueError):
 def confined(run_dir: Path, path: str) -> Path:
     """``path`` inside ``run_dir``, or raise OutsideRun.
 
-    Every recorded path is relative to the run directory, so a path that is
-    absolute, that climbs out with ``..``, or that reaches outside through a
-    symbolic link is refused rather than opened. A run record is ordinary
-    data, so what it says about a path is checked and not trusted.
+    Every recorded path is relative to the run directory and names a file the
+    run wrote there, so a path that is absolute, that climbs out with ``..``,
+    or that passes through a symbolic link is refused rather than opened. A
+    run record is ordinary data, so what it says about a path is checked and
+    not trusted.
+
+    No symbolic link is followed at all, not only one that leaves the
+    directory: a link inside the run directory would otherwise let a record
+    name one file and be served another, which is exactly what reading only
+    the recorded files is meant to prevent.
     """
     candidate = Path(path)
     if candidate.is_absolute() or ".." in candidate.parts:
         raise OutsideRun(f"{path!r} is not a path inside the run directory")
     root = run_dir.resolve()
-    full = (root / candidate).resolve()
-    if full != root and root not in full.parents:
+    full = root / candidate
+    # Every component below the run directory, the last one included. Checked
+    # before resolving, because resolving replaces a link with its target.
+    component = full
+    while component != root:
+        if component.is_symlink():
+            raise OutsideRun(f"{path!r} passes through a symbolic link")
+        parent = component.parent
+        if parent == component:
+            break
+        component = parent
+    resolved = full.resolve()
+    if resolved != root and root not in resolved.parents:
         raise OutsideRun(f"{path!r} leaves the run directory")
-    if full.is_symlink():
-        raise OutsideRun(f"{path!r} is a symbolic link")
-    return full
+    return resolved
 
 
 def output_file_list(details) -> str:

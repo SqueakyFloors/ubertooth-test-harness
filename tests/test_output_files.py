@@ -290,8 +290,14 @@ class ReadingFilesTests(unittest.TestCase):
             (Path(directory) / "elsewhere.txt").write_text("not yours\n")
             (root / OUTPUT_DIR / "link.stdout.log").symlink_to(
                 Path(directory) / "elsewhere.txt")
-            for path in ("../elsewhere.txt", "/etc/passwd",
-                         f"{OUTPUT_DIR}/link.stdout.log"):
+            # A link that stays inside the run directory is refused too: a
+            # record would otherwise name one file and be served another.
+            (root / "run.jsonl").write_text("{}\n")
+            (root / OUTPUT_DIR / "inside.stdout.log").symlink_to(root / "run.jsonl")
+            (root / "away").symlink_to(Path(directory), target_is_directory=True)
+            for path in ("../elsewhere.txt", "/etc/passwd", "output/../run.jsonl",
+                         f"{OUTPUT_DIR}/link.stdout.log",
+                         f"{OUTPUT_DIR}/inside.stdout.log", "away/elsewhere.txt"):
                 with self.subTest(path=path), self.assertRaises(OutsideRun):
                     confined(root, path)
             self.assertEqual((root / OUTPUT_DIR).resolve(),
