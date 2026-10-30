@@ -58,9 +58,13 @@ def _time(event: Mapping) -> datetime.datetime:
     return moment
 
 
-# Fewest significant digits a numeric serial has (resources._JLINK_SERIAL
-# takes 6 to 12), so masking one width of it cannot mask a short unrelated
-# number such as a packet count.
+# Shortest number masked on its own. A serial is masked wherever it appears,
+# so a short number would be masked inside longer text all over the
+# transcript, and six digits is where that stops being likely. The registry
+# accepts a J-Link serial of 6 to 12 digits, zeros included
+# (resources._JLINK_SERIAL), so one registered as `000123` keeps the width
+# the registry holds masked and leaves the number the tools take (`123`) in
+# the transcript; a SEGGER probe's serial is nine digits or more.
 _SERIAL_MIN_DIGITS = 6
 # How wide udev's by-id name and the registry write a J-Link serial
 # (targets.DK_BY_ID).
@@ -70,12 +74,13 @@ _SERIAL_PADDED_DIGITS = 12
 def _serial_widths(value: str) -> set[str]:
     """The other widths one numeric serial is written in.
 
-    A J-Link serial reaches the run in three spellings of the same number:
-    the registry pads it to 12 digits (``001050210121``), nrfdk.py takes it
-    as a number, so preflight.py puts it on the command line with the
-    leading zeros gone (``1050210121``), and udev's by-id name pads it
-    again. ``--redact-serials`` has to mask each of them, or the serial
-    survives in the transcript.
+    A J-Link serial reaches the run in two spellings of the same number: the
+    registry pads it to 12 digits (``001050210121``), as udev's by-id name
+    does, and nrfdk.py takes it as a number, so preflight.py puts it on the
+    command line with the leading zeros gone (``1050210121``).
+    ``--redact-serials`` has to mask each of them, or the serial survives in
+    the transcript. Any numeric serial is treated this way; a serial written
+    in hex is masked as the registry holds it.
     """
     if not value.isdigit():
         return set()
@@ -142,7 +147,14 @@ class _Run:
         """Every device serial the run names, in every width it is written:
         resources (an Ubertooth's serial, a DK's J-Link serial, an ESP32
         peer's bridge serial), preflight, flash guards, and boards seen by
-        the isolation enumeration checks."""
+        the isolation enumeration checks.
+
+        A device path that carries a serial (a DK's ``serial device``, the
+        ``/dev/serial/by-id`` name) is not one of them: the serial inside it
+        is masked by its own widths, and masking the whole path would turn
+        "port /dev/serial/by-id/usb-SEGGER_J-Link_<serial>-if00" into
+        "port <serial>", which tells the reader less.
+        """
         found = set()
 
         def add(value):
@@ -171,7 +183,7 @@ class _Run:
                     add(serial)
         for identity in identities:
             for key, value in identity.items():
-                if "serial" in key:
+                if "serial" in key and not str(value).startswith("/"):
                     add(value)
         return found
 

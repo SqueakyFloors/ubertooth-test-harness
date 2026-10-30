@@ -12,13 +12,15 @@ SERIAL = "aaaa0000"
 
 def write_run(
     directory: Path, *, finish=True, host="Host_Mac", source=None,
-    dk_serial=None, peer_serial=None,
+    dk_serial=None, peer_serial=None, dk_device=None,
 ):
     publisher = open_run_publisher(directory, directory.name)
     identities = {"Ubertooth": {"serial": SERIAL}}
     if dk_serial:
         identities["advertiser"] = {"jlink serial": dk_serial,
                                     "BLE address": "C0:11:22:33:44:55"}
+        if dk_device:
+            identities["advertiser"]["serial device"] = dk_device
     if peer_serial:
         identities["peer"] = {"bridge serial": peer_serial,
                               "BD_ADDR": "AA:BB:CC:11:22:33"}
@@ -199,6 +201,28 @@ class ReportTests(unittest.TestCase):
             report = render_run(load_events(run / "run.jsonl"), redact_serials=True)
 
             self.assertNotIn("e9c5ba112233", report)
+
+    def test_redaction_masks_the_serial_inside_a_device_path(self):
+        # The by-id name carries the probe's serial, so masking the serial is
+        # enough: replacing the whole path would leave the reader less.
+        path = "/dev/serial/by-id/usb-SEGGER_J-Link_001050210121-if00"
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            write_run(run, finish=False, dk_serial="001050210121",
+                      dk_device=path)
+            publisher = open_run_publisher(run, "run-a")
+            publisher.emit("command_started", "running", {
+                "command_id": "d", "argv": ["nrfdk.py", "identify", "--port", path],
+            })
+            publisher.emit("command_finished", "passed", {
+                "command_id": "d", "returncode": 0, "duration_s": 0.1,
+            })
+
+            report = render_run(load_events(run / "run.jsonl"), redact_serials=True)
+
+            self.assertIn(
+                "/dev/serial/by-id/usb-SEGGER_J-Link_<serial>-if00", report)
+            self.assertNotIn("001050210121", report)
 
     def test_serial_widths_cover_padding_but_not_short_numbers(self):
         from ubertooth_harness.report import _serial_widths
