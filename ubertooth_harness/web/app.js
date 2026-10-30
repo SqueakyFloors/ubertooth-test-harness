@@ -427,7 +427,9 @@
       if (counts && typeof counts === "object") {
         for (const value of Object.values(counts)) if (typeof value === "number") count += value;
       }
-      pushLog(`[... ${count} output lines left out; full output in ${String(details.output_file ?? "")} ...]`);
+      const saved = Array.isArray(details.output_files) ? details.output_files : [];
+      const names = saved.map((file) => String((file && file.path) ?? "")).join(", ");
+      pushLog(`[... ${count} output lines left out; full output in ${names} ...]`);
     }
     if (kind === "build_started") live.stage = "building";
     else if (kind === "preflight_started") live.stage = "preflight";

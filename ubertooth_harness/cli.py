@@ -69,6 +69,7 @@ from ubertooth_harness.power import (
 from ubertooth_harness.resources import FileResourceRegistry, RegistryError
 from ubertooth_harness.report import render_runs, write_report
 from ubertooth_harness.sequencer import NamedTestSequencer, run_started_details
+from ubertooth_harness.validate import validate_command
 from ubertooth_harness.stateful import StateCaseError
 from ubertooth_harness.transitions import guard_boards, ubertooth_roles
 
@@ -419,6 +420,12 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--output", type=Path, required=True,
                        help="new directory for sources, build trees, and the prefix")
     _add_build_options(build, optional=False)
+
+    recheck = subparsers.add_parser(
+        "validate",
+        help="run a finished run's output checks again against its saved files",
+    )
+    recheck.add_argument("run", type=Path, help="a run directory")
 
     report = subparsers.add_parser(
         "report", help="render one Markdown report from one or more run directories"
@@ -1190,6 +1197,8 @@ def main(argv: list[str] | None = None) -> int:
             # Opens a real controller: only from the harness environment.
             require_harness_environment()
             return _power_command(args)
+        if args.command == "validate":
+            return validate_command(args.run, sys.stdout, sys.stderr)
         if args.command == "report":
             text = render_runs(args.runs, redact_serials=args.redact_serials, title=args.title)
             if args.output:

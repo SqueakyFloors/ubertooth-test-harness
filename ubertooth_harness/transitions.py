@@ -1652,7 +1652,8 @@ GUARD_FIRMWARE_PATTERN = (
     r"Firmware version:\s+(?P<value>"
     rf"{IMAGE_NAME_PATTERN}\S+\s+\(API:[0-9a-fA-F]+\.[0-9a-fA-F]+\))"
 )
-_GUARD_API_RE = re.compile(r"\(API:(?P<major>[0-9a-fA-F]+)\.(?P<minor>[0-9a-fA-F]+)\)")
+API_PATTERN = r"\(API:(?P<major>[0-9a-fA-F]+)\.(?P<minor>[0-9a-fA-F]+)\)"
+_GUARD_API_RE = re.compile(API_PATTERN)
 # Same shape the preflight compile-info check requires.
 GUARD_COMPILE_INFO_PATTERN = r"(?P<value>\bubertooth\s+\S+\s+\([^\n]*\S)"
 GUARD_READBACK = (

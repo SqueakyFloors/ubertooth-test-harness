@@ -42,6 +42,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+if __package__ in (None, ""):
+    # Run as a script: make the package importable for the check helpers.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from ubertooth_harness.outputfiles import text_lines  # noqa: E402
+
 # --- Bluetooth baseband encoding ---------------------------------------------
 
 # The 64-bit PN sequence p0..p63 (bit i is p_i) that the sync word is
@@ -298,10 +304,10 @@ def uap_note(uap: int) -> str:
 def packets_check(expected: list[tuple[int, int, int]]):
     """A Step.output_check: exactly these packet lines, in this order."""
 
-    def check(output: str) -> str:
+    def check(output) -> str:
         seen = [
             (int(m["lap"], 16), int(m["err"]), int(m["ch"]))
-            for m in map(PACKET_LINE.match, output.splitlines()) if m
+            for m in map(PACKET_LINE.match, text_lines(output)) if m
         ]
         if seen == expected:
             return ""
@@ -330,11 +336,15 @@ def uap_check(expected: list[tuple[int, int, int]]):
     """
     packets = packets_check(expected)
 
-    def check(output: str) -> str:
+    def check(output) -> str:
         problem = packets(output)
         if problem:
             return problem
-        found = sorted({m["uap"] for m in UAP_LINE.finditer(output)})
+        found = sorted({
+            match["uap"]
+            for line in text_lines(output)
+            for match in UAP_LINE.finditer(line)
+        })
         if found:
             return "libbtbb's note about UAP " + ", ".join(found) + " is on stdout"
         return ""
@@ -343,11 +353,17 @@ def uap_check(expected: list[tuple[int, int, int]]):
 
 
 def survey_check(expected_lines: set[str]):
-    def check(output: str) -> str:
-        lines = output.splitlines()
-        if "Survey Results" not in lines:
+    def check(output) -> str:
+        results = None
+        for line in text_lines(output):
+            if results is None:
+                if line == "Survey Results":
+                    results = set()
+                continue
+            if line:
+                results.add(line)
+        if results is None:
             return "no 'Survey Results' line"
-        results = {line for line in lines[lines.index("Survey Results") + 1:] if line}
         if results != expected_lines:
             return ("survey listed " + ", ".join(sorted(results)) + "; expected "
                     + ", ".join(sorted(expected_lines)))
@@ -356,8 +372,10 @@ def survey_check(expected_lines: set[str]):
     return check
 
 
-def systime_check(output: str, recorded: list[int]) -> str:
-    times = [int(m["systime"]) for m in map(PACKET_LINE.match, output.splitlines()) if m]
+def systime_check(output, recorded: list[int]) -> str:
+    times = [
+        int(m["systime"]) for m in map(PACKET_LINE.match, text_lines(output)) if m
+    ]
     if times != recorded:
         first = times[0] if times else "none"
         return (f"packet lines report systime {first}, the records hold "

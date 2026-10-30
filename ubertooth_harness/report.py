@@ -17,6 +17,7 @@ from typing import Iterable, Mapping, Sequence
 
 from ubertooth_harness.events import REPORT, RUN_LOG
 from ubertooth_harness.executor import CommandResult
+from ubertooth_harness.outputfiles import output_file_list
 from ubertooth_harness.rawlog import NOTE, TAGS, CommandCapture, format_command_record
 from ubertooth_harness.watchdog import wait_counts
 
@@ -554,7 +555,7 @@ def elapsed(origin: datetime.datetime):
 
 
 def _omitted_text(note: Mapping) -> str:
-    """[M] note text for output kept in output/<command id>.log, not run.jsonl."""
+    """[M] note text for output kept in the output/ files, not run.jsonl."""
     summary = note.get("output_omitted") or {}
     lines = summary.get("lines") or {}
     chars = summary.get("chars") or {}
@@ -564,7 +565,7 @@ def _omitted_text(note: Mapping) -> str:
         if lines.get(stream) or chars.get(stream)
     )
     text = (
-        f"full output in {note.get('output_file', '')}; left out of run.jsonl here: "
+        f"full output in {output_file_list(note)}; left out of run.jsonl here: "
         f"{counts or 'nothing'}\n"
     )
     for shape in summary.get("common_shapes") or []:

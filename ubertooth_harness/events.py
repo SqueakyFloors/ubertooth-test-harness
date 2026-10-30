@@ -89,6 +89,10 @@ REPORT = "report.md"
 # The manifest record carries every invocation and identity, so it may exceed
 # the per-event limit; it is still bounded.
 MANIFEST_MAX_BYTES = 1024 * 1024
+# An output_checks record carries one entry per check a command's output was
+# read for, each with its pattern, so a step with many patterns may exceed
+# the per-event limit; it is still bounded.
+OUTPUT_CHECKS_MAX_BYTES = 64 * 1024
 
 
 class JsonlEventSink:
@@ -202,9 +206,12 @@ class TerminalEventSink:
             for part in complete:
                 self.stream.write(f"{tag} {part.rstrip(chr(13))}\n")
         elif event.event_type == "command_output_omitted":
+            from ubertooth_harness.outputfiles import output_file_list
+
             self._flush_partial()
             self.stream.write(
-                f"[M] output left out; full output in {details.get('output_file', '')}\n"
+                "[M] output left out; full output in "
+                f"{output_file_list(details)}\n"
             )
         elif event.event_type == "command_finished":
             from ubertooth_harness.executor import CommandResult

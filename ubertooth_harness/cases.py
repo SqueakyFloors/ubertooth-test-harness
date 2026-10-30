@@ -1,10 +1,10 @@
 """Case types shared by catalog tests and the sequencer."""
 
 from dataclasses import dataclass
-import re
 from typing import Mapping
 
 from ubertooth_harness.hostneeds import NO_NEEDS, Needs
+from ubertooth_harness.outputfiles import SKIP_LINE, output_of
 
 # Role names for the other registered Ubertooths on the host that a guarded
 # test binds and must leave unchanged; the plan-selected board keeps the
@@ -50,7 +50,11 @@ class CommandCase:
             and not result.timed_out
             and not result.cancelled
         ):
-            match = re.search(r"(?m)^SKIP: (.+)$", result.stdout)
+            output = output_of(result)
+            match = output.search(SKIP_LINE, ("stdout",))
+            output.note_pattern("skip-line", self.name, SKIP_LINE, match,
+                                streams=("stdout",),
+                                value=match[1].strip() if match else "")
             if match:
                 return f"{self.name}: skipped, {match[1].strip()}"
         return ""
@@ -62,10 +66,16 @@ class CommandCase:
             return f"{self.name}: command canceled"
         if result.returncode not in self.expected_returncodes:
             return f"{self.name}: command exited {result.returncode}"
-        output = result.stdout + result.stderr
+        output = output_of(result)
         for pattern in self.output_patterns:
-            if not re.search(pattern, output):
-                return f"{self.name}: expected output pattern {pattern!r} was not found"
+            match = output.search(pattern)
+            reason = (
+                "" if match
+                else f"{self.name}: expected output pattern {pattern!r} was not found"
+            )
+            output.note_pattern("expected", self.name, pattern, match, reason=reason)
+            if reason:
+                return reason
         return ""
 
 

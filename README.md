@@ -1260,7 +1260,7 @@ later cancellation does not hide an earlier failure: the run still fails.
 
 A test run is one `run-suite` run of a plan suite. It writes exactly two files
 into `<output>/<run-id>/` (plus `build/` with `--build`, `captures/` when
-a BLE capture case ran, and `output/` when a command printed a lot):
+a capture case ran, and `output/` when a command printed a lot):
 
 - `run.jsonl`: every record, appended and fsynced as it happens. The first
   records are `run_started` and `manifest` (sources, plan and registry hashes,
@@ -1308,28 +1308,33 @@ order, before the `[R]` line. The live terminal stream on stderr uses the same
 Every response is kept, but run.jsonl holds at most the first 200 output
 records or 64 KiB, and the last 50 records or 16 KiB, of each build,
 preflight, test or flash command's output (bytes as written to run.jsonl, JSON
-escapes included, so a 4-byte character counts 12). Past the first limits, the
-command's full output, from its first line, goes to `output/<command id>.log`
-in the run directory as it arrives, one `<UTC time> [O]` or `[E]` line per
-output line in arrival order. A flash command's file also names its test, for
-example `output/003-Flash-reliability-flash-0001.log`, because flash command
+escapes included, so a 4-byte character counts 12). Past the first limits,
+each of the command's streams goes to a file of its own in the run
+directory as it arrives, from its first byte:
+`output/<command id>.stdout.log` and `output/<command id>.stderr.log`. A file
+holds exactly what the command wrote on that stream, with nothing of the
+harness's own added, so its SHA-256 is the hash of that output and a reader
+sees what the tool printed. A stream a command never wrote to leaves no file.
+A flash command's files also name its test, for example
+`output/003-Flash-reliability-flash-0001.stdout.log`, because flash command
 IDs repeat in every flash test. The live stream then gets no more output records until the
-command ends; then a `command_output_omitted` record names the file
-(`output_file`), summarizes what run.jsonl left out (`output_omitted`:
+command ends; then a `command_output_omitted` record names the files
+(`output_files`, each with its path, stream, size, line count, and SHA-256),
+summarizes what run.jsonl left out (`output_omitted`:
 stdout and stderr line and character counts and the ten most common line
 shapes, digit runs replaced by `N`, with their counts) and gives in `received`
 when the left-out output ended; it is followed by the last
 records (each with its arrival time in `received`, starting at a whole line),
 so the GUI failure summary (for a failed test or build) and report.md show how
 the command ended; report.md shows every output record run.jsonl holds.
-`command_finished` repeats `output_file` and `output_omitted`. The newest
+`command_finished` repeats `output_files` and `output_omitted`. The newest
 output, such as the harness's own timeout, cancellation or `OUTPUT SINK ERROR`
 line, is always among the last records. report.md shows the gap as `[M]`
 lines between the first and last lines:
 
 ```text
 00:07:00.120 [E] rx block timestamp 283640 * 100 nanoseconds
-00:07:02.940 [M] full output in output/016-Raw-receive-dump-full-receive.log; left out of run.jsonl here: 6893 stderr lines (309933 characters)
+00:07:02.940 [M] full output in output/016-Raw-receive-dump-full-receive.stderr.log; left out of run.jsonl here: 6893 stderr lines (309933 characters)
 00:07:02.940 [M]   6893 x [E] rx block timestamp N * N nanoseconds
 00:07:02.944 [E] rx block timestamp 290481 * 100 nanoseconds
 00:07:02.951 [R] ubertooth-dump exit 124 in 3.012s, stopped at its planned deadline
@@ -1339,9 +1344,50 @@ This keeps the per-block progress lines `ubertooth-dump` prints on stderr
 (about 2500 a second), the per-block progress of each `ubertooth-dfu` in a
 flash reliability run, compiler output, and long packet listings out of
 run.jsonl: on a release run that cut run.jsonl from 48 MB to about 20 MB, and the dump stderr records
-from 15 MB to 1 MB. Checks still see each command's complete output. Through
+from 15 MB to 1 MB. Through
 the runner service the `output/` files stay in the runner's run directory;
 only run.jsonl records reach the controller.
+
+### Checks read the output files
+
+A check sees each command's complete output however long the command ran. It
+reads the stream from the file a block at a time, so the harness's memory
+does not grow with the stream: an hours-long capture and a two-line answer
+cost the same. `CommandResult.stdout` and `.stderr` keep only the first and
+last 128 KiB of each stream for the live view, with a line between them
+saying how much is missing, so a check must not read them directly. A command
+whose output stayed inside the run.jsonl limits has no file, and the same
+checks read its complete in-memory copy.
+
+Every check that reads output is recorded in an `output_checks` record: its
+kind (an expected pattern, a forbidden one, an observed setting, the
+command's own `SKIP:` line, or a check written as code), the pattern, the
+files it read, whether it matched, and what it matched. The files a case's
+tools wrote (captures, `-d` dumps, and any target device's shell traffic in
+`<name>.serial.log`) are recorded the same way, in an `output_files` record
+with each file's size and SHA-256.
+
+### Re-running a finished run's output checks
+
+```sh
+python -m ubertooth_harness validate runs/<run-id>
+```
+
+`validate` reads the run directory and nothing else: no hardware, no
+network, and it writes nothing. It measures every recorded file again and
+runs every recorded pattern check again over the same bytes, then reports
+
+- a file that is missing, a different size, or a different SHA-256, so the
+  run directory is no longer the one the run produced;
+- a check that now reaches a different verdict, which is what to look at
+  after a check has been fixed, or when auditing a result;
+- the checks it cannot run again. A check written as code
+  (`Step.output_check`, for example the spectrum sweep's sample checks) is
+  one of those: the record holds its verdict, not its logic.
+
+It exits 0 when nothing differs and 1 when something does. A run recorded
+before output checks existed has nothing to re-run, which it says and which
+is not a failure.
 
 Run IDs look like `20261022T203045Z-a1b2c3d4e5f6`; `--run-id` supplies a
 path-safe ID. Records use event schema version 1 (pre-release; no stable

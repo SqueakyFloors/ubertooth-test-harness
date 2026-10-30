@@ -1,6 +1,7 @@
 """Long command output: run.jsonl keeps the first part, output/ keeps it all (#49)."""
 
 import datetime
+import hashlib
 import io
 import json
 import tempfile
@@ -11,13 +12,13 @@ from ubertooth_harness.events import REPORT, RUN_LOG, RunEvent, TerminalEventSin
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.planner import TestInvocation
 from ubertooth_harness.gui import failure_summary
+from ubertooth_harness.outputfiles import OUTPUT_DIR
 from ubertooth_harness.rawlog import (
-    OUTPUT_DIR,
     RECORD_OUTPUT_BYTES,
     RECORD_OUTPUT_EVENTS,
     RECORD_TAIL_EVENTS,
     CappedOutput,
-    CommandOutputLog,
+    CommandOutputFiles,
     OmittedOutput,
     line_shape,
     record_bytes,
@@ -98,7 +99,7 @@ class SpillTests(unittest.TestCase):
             self.assertEqual(
                 ["command_started"] + ["command_output"] * RECORD_OUTPUT_EVENTS
                 + ["command_output_omitted"] + ["command_output"] * RECORD_TAIL_EVENTS
-                + ["command_finished"],
+                + ["command_finished", "output_checks"],
                 kinds,
             )
             recorded = outputs(events, PREFLIGHT)
@@ -115,15 +116,22 @@ class SpillTests(unittest.TestCase):
                                 for e in recorded[:RECORD_OUTPUT_EVENTS]))
 
             done = finished(events, PREFLIGHT)["details"]
-            name = f"{OUTPUT_DIR}/{PREFLIGHT}.log"
-            self.assertEqual(name, done["output_file"])
-            log = (root / name).read_text().splitlines()
-            # Every line, in arrival order, stamped and tagged.
-            self.assertEqual(BLOCKS + 2, len(log))
-            self.assertRegex(log[0], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3} \[O\] Host tools version: libubertooth 1\.1")
-            self.assertEqual([f"[E] {block(n).rstrip()}" for n in range(BLOCKS)],
-                             [line.split(" ", 1)[1] for line in log[1:-1]])
-            self.assertTrue(log[-1].endswith("[O] last stdout line"))
+            out_name = f"{OUTPUT_DIR}/{PREFLIGHT}.stdout.log"
+            err_name = f"{OUTPUT_DIR}/{PREFLIGHT}.stderr.log"
+            saved = {file["stream"]: file for file in done["output_files"]}
+            self.assertEqual([out_name, err_name],
+                             [saved["stdout"]["path"], saved["stderr"]["path"]])
+            # Each file holds its own stream exactly as the command wrote it.
+            self.assertEqual(VERSION + "last stdout line\n",
+                             (root / out_name).read_text())
+            self.assertEqual("".join(block(n) for n in range(BLOCKS)),
+                             (root / err_name).read_text())
+            for file in done["output_files"]:
+                body = (root / file["path"]).read_bytes()
+                self.assertEqual(len(body), file["bytes"])
+                self.assertEqual(hashlib.sha256(body).hexdigest(), file["sha256"])
+            self.assertEqual(2, saved["stdout"]["lines"])
+            self.assertEqual(BLOCKS, saved["stderr"]["lines"])
 
             omitted = done["output_omitted"]
             left_out = BLOCKS - (RECORD_OUTPUT_EVENTS - 1) - (RECORD_TAIL_EVENTS - 1)
@@ -134,12 +142,13 @@ class SpillTests(unittest.TestCase):
                 omitted["common_shapes"],
             )
             note = next(e for e in mine if e["event_type"] == "command_output_omitted")
-            self.assertEqual(name, note["details"]["output_file"])
+            self.assertEqual(done["output_files"], note["details"]["output_files"])
             self.assertEqual(omitted, note["details"]["output_omitted"])
 
             report = (root / REPORT).read_text()
-            self.assertIn(f"[M] full output in {name}; left out of run.jsonl here: "
-                          f"{left_out} stderr lines", report)
+            self.assertIn(f"[M] full output in {out_name}, {err_name}; "
+                          f"left out of run.jsonl here: {left_out} stderr lines",
+                          report)
             self.assertIn(f"[M]   {left_out} x [E] rx block timestamp N * N nanoseconds", report)
             # The note sits between the head and the tail, and the tail ends the record.
             head_line = f"[E] {block(RECORD_OUTPUT_EVENTS - 2).rstrip()}"
@@ -160,7 +169,8 @@ class SpillTests(unittest.TestCase):
                                        "stream": "stderr", "text": block(n)}})
         events.append({"event_type": "command_output_omitted", "status": "running",
                        "details": {"invocation_id": "001", "command_id": "c",
-                                   "output_file": "output/c.log",
+                                   "output_files": [{"path": "output/c.stderr.log",
+                                                     "stream": "stderr"}],
                                    "output_omitted": {"lines": {"stderr": 7}}}})
         events.append({"event_type": "command_output", "status": "running",
                        "details": {"invocation_id": "001", "command_id": "c",
@@ -170,7 +180,7 @@ class SpillTests(unittest.TestCase):
                                    "reason": "boom"}})
         failure = failure_summary({"status": "failed"}, events)[0]
         self.assertEqual(
-            ["[... 7 output lines left out; full output in output/c.log ...]",
+            ["[... 7 output lines left out; full output in output/c.stderr.log ...]",
              "final error"],
             failure["log"][-2:],
         )
@@ -223,7 +233,8 @@ class SpillTests(unittest.TestCase):
             on_disk = (root / RUN_LOG).read_bytes()
             self.assertGreater(len(on_disk), run_bytes)
             done = finished(events, PREFLIGHT)["details"]
-            self.assertEqual(20, (root / done["output_file"]).read_text().count("\U0001F600" * 999))
+            saved = done["output_files"][0]["path"]
+            self.assertEqual(20, (root / saved).read_text().count("\U0001F600" * 999))
 
     def test_short_output_stays_in_run_jsonl_without_an_output_dir(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -231,7 +242,7 @@ class SpillTests(unittest.TestCase):
             summary, events = run(root, FloodExecutor(flood_calls=()))
             self.assertTrue(summary.passed)
             self.assertFalse((root / OUTPUT_DIR).exists())
-            self.assertNotIn("output_file", finished(events, PREFLIGHT)["details"])
+            self.assertNotIn("output_files", finished(events, PREFLIGHT)["details"])
             self.assertEqual([VERSION], [e["details"]["text"] for e in outputs(events, PREFLIGHT)])
 
     def test_output_of_a_non_streaming_executor_is_spilled_too(self):
@@ -241,18 +252,23 @@ class SpillTests(unittest.TestCase):
             summary, events = run(root, FloodExecutor(stream=False, blocks=3000))
             self.assertTrue(summary.passed)
             done = finished(events, PREFLIGHT)["details"]
-            text = (root / done["output_file"]).read_text()
-            self.assertEqual(3000, text.count("[E] rx block timestamp"))
-            self.assertIn("[O] last stdout line", text)
+            saved = {file["stream"]: file["path"] for file in done["output_files"]}
+            self.assertEqual(
+                3000,
+                (root / saved["stderr"]).read_text().count("rx block timestamp"))
+            self.assertIn("last stdout line", (root / saved["stdout"]).read_text())
 
     def test_each_flooding_command_gets_its_own_file(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             _summary, events = run(root, FloodExecutor(flood_calls=(1, 2)))
-            files = sorted(e["details"]["output_file"] for e in events
-                           if e["event_type"] == "command_finished"
-                           and "output_file" in e["details"])
-            self.assertEqual(2, len(set(files)))
+            files = sorted(
+                file["path"] for e in events
+                if e["event_type"] == "command_finished"
+                for file in e["details"].get("output_files", [])
+            )
+            # Two commands flooded, each leaving a stdout and a stderr file.
+            self.assertEqual(4, len(set(files)))
             self.assertEqual(sorted(p.relative_to(root).as_posix()
                                     for p in (root / OUTPUT_DIR).iterdir()), files)
 
@@ -265,13 +281,14 @@ class PartsTests(unittest.TestCase):
         for sequence, (kind, details) in enumerate((
             ("command_started", {"argv": ["ubertooth-dump"]}),
             ("command_output", {"stream": "stderr", "text": "rx block"}),
-            ("command_output_omitted", {"output_file": "output/x.log"}),
+            ("command_output_omitted",
+             {"output_files": [{"path": "output/x.stdout.log", "stream": "stdout"}]}),
             ("command_output", {"stream": "stderr", "text": "last\n"}),
         ), 1):
             sink.emit(RunEvent(1, "run", sequence, "2026-10-25T00:00:00.000",
                                kind, "running", details))
-        self.assertIn("[E] rx block\n[M] output left out; full output in output/x.log\n"
-                      "[E] last\n", stream.getvalue())
+        self.assertIn("[E] rx block\n[M] output left out; full output in "
+                      "output/x.stdout.log\n[E] last\n", stream.getvalue())
         # The browser live view writes the same gap line.
         js = (Path(__file__).resolve().parents[1] / "ubertooth_harness" / "web"
               / "app.js").read_text(encoding="utf-8")
@@ -290,7 +307,7 @@ class PartsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             capped = CappedOutput(
                 lambda stream, text, received: records.append((stream, text, received)),
-                lambda: (Path(directory) / "x.log", "output/x.log"),
+                lambda: CommandOutputFiles(Path(directory), "x"),
             )
             for _ in range(RECORD_OUTPUT_EVENTS):
                 capped.add(moment, "stdout", "head\n")
@@ -305,6 +322,8 @@ class PartsTests(unittest.TestCase):
         # Chunks inside the cut line are dropped; the tail starts at "last line".
         self.assertEqual([("stderr", "last line\n", "2026-10-25T00:00:00.000")], tail)
         self.assertEqual(1, details["output_omitted"]["lines"]["stderr"])
+        self.assertEqual([f"{OUTPUT_DIR}/x.stdout.log", f"{OUTPUT_DIR}/x.stderr.log"],
+                         [file["path"] for file in details["output_files"]])
         # The note gives when the left-out output ended.
         self.assertEqual([dict(details, received="2026-10-25T00:00:00.000")], notes)
 
@@ -331,24 +350,28 @@ class PartsTests(unittest.TestCase):
             summary["common_shapes"][0],
         )
 
-    def test_output_log_writes_partial_lines_on_close_and_never_overwrites(self):
+    def test_each_stream_goes_to_its_own_file_with_its_size_and_hash(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / OUTPUT_DIR / "x.log"
-            moment = datetime.datetime(2026, 10, 25, 1, 2, 3, 456000,
-                                       tzinfo=datetime.timezone.utc)
-            log = CommandOutputLog(path)
-            log.write(moment, "stdout", "one\ntw")
-            log.write(moment, "stderr", "err\n")
-            log.write(moment, "stdout", "o")
-            log.close()
+            root = Path(directory)
+            files = CommandOutputFiles(root, "x")
+            files.write("stdout", "one\ntw")
+            files.write("stderr", "err\n")
+            files.write("stdout", "o")
+            saved = files.close()
             self.assertEqual(
-                "2026-10-25T01:02:03.456 [O] one\n"
-                "2026-10-25T01:02:03.456 [E] err\n"
-                "2026-10-25T01:02:03.456 [O] two\n",
-                path.read_text(),
+                [f"{OUTPUT_DIR}/x.stdout.log", f"{OUTPUT_DIR}/x.stderr.log"],
+                [file.path for file in saved],
             )
-            with self.assertRaises(FileExistsError):
-                CommandOutputLog(path)
+            self.assertEqual("one\ntwo", (root / saved[0].path).read_text())
+            self.assertEqual("err\n", (root / saved[1].path).read_text())
+            # A last line with no line ending still counts.
+            self.assertEqual((7, 2), (saved[0].bytes, saved[0].lines))
+            self.assertEqual(hashlib.sha256(b"one\ntwo").hexdigest(),
+                             saved[0].sha256)
+            # A second command of the same name takes the next free name.
+            again = CommandOutputFiles(root, "x")
+            again.write("stdout", "two\n")
+            self.assertEqual(f"{OUTPUT_DIR}/x-2.stdout.log", again.close()[0].path)
 
 
 if __name__ == "__main__":

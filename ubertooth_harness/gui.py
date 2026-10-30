@@ -35,6 +35,7 @@ from ubertooth_harness.learned import (
     EstimateStore,
 )
 from ubertooth_harness.manifest import ManifestError, _safe_repository
+from ubertooth_harness.outputfiles import output_file_list
 from ubertooth_harness.plan import PlanError, TestStep, load_plan
 from ubertooth_harness.protocol import _git_ref, _name
 
@@ -502,7 +503,7 @@ def omitted_line(details: Mapping) -> str:
     ) if isinstance(lines, dict) else 0
     return _text(
         f"[... {count} output lines left out; full output in "
-        f"{details.get('output_file', '')} ...]"
+        f"{output_file_list(details)} ...]"
     )
 
 
