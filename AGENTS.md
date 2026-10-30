@@ -37,3 +37,8 @@
   in the lab. See "Public text" in `.kiro/steering/branch-and-review.md`.
 - Keep `COVERAGE.md` current: a PR that adds or changes test coverage of a
   CLI option updates its rows in the same PR.
+- Run the unit suite with `python scripts/test.py` (one process per module,
+  one per core; `--durations 10` for the slowest tests). It is what
+  `scripts/ci.sh test` runs. `python -m unittest discover -s tests` runs the
+  same tests serially, and `python -m unittest tests.test_gui -v` one module.
+  A test must pass both ways: nothing may depend on another module's state.
