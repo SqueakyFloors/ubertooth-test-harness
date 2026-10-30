@@ -26,6 +26,7 @@ from ubertooth_harness.gui import failure_summary
 from ubertooth_harness.preflight import PreflightCheck
 from ubertooth_harness.report import load_events, render_run
 
+from tests import watchdog_samples
 from tests.test_cli import make_source
 
 
@@ -106,6 +107,10 @@ class FakeBoards:
                     _locked(self.lease_dir / f"{serial}.lock"),
                 ))
             output = "%MAIN = 0x1234\n"
+        elif command[-1] == "-w":
+            # The run reads each board's firmware watchdog record, before the
+            # flash stage and again at the end (watchdog.py).
+            output = watchdog_samples.report()
         elif command[-1] == "-v":
             serial = command[2]
             if self.silent_reads.get(serial):
