@@ -142,6 +142,21 @@ def _cell(value) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ")
 
 
+# The registry identity key that names a device differs by kind: an Ubertooth
+# has `serial`, an nRF52840 DK its J-Link probe's `jlink serial`, and an ESP32
+# Classic peer its USB bridge's `bridge serial`.
+_IDENTITY_SERIAL_KEYS = ("serial", "jlink serial", "bridge serial")
+
+
+def _identity_serial(identity: Mapping) -> str:
+    """The serial that names this device, whichever kind of device it is."""
+    for key in _IDENTITY_SERIAL_KEYS:
+        value = identity.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
 def _setup_rows(run: _Run) -> list[tuple[str, str]]:
     manifest = run.manifest
     rows = []
@@ -243,7 +258,7 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
         if not alias:
             continue
         device = devices.setdefault(alias, {
-            "serial": start.get("resource_identity", {}).get("serial", ""),
+            "serial": _identity_serial(start.get("resource_identity", {})),
             "firmware": "",
         })
         if details.get("check_name") == "Firmware version":
