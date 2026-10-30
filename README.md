@@ -1496,9 +1496,15 @@ The runner connects to the checked loopback address itself, ignores proxy
 settings, and follows no HTTP redirects.
 
 On every connection the runner sends `register` with its registry host, host
-name, OS identity, Python version, and attached Ubertooth serials, read from
-sysfs the same read-only way power isolation does (no device is opened, so no
-stop is sent; on macOS the serials are `null` with an `enumeration_error`).
+name, OS identity, Python version, and attached Ubertooth serials, read the
+same read-only way power isolation reads them on Linux: from sysfs there, and
+on macOS from the IO registry with `ioreg -p IOUSB -l -w0 -a` (the kernel's
+own record of what it read when each device was enumerated). Neither opens a
+device, so registration cannot send a stop to a board that is capturing. A
+board in its DFU bootloader reports no serial on either platform and is
+listed as `unidentified:<where it is on the bus>:<product id>`. The serials
+are `null`, with an `enumeration_error`, only where neither is available or
+the read failed.
 A `run` request names a git ref and the commit the controller listed for it
 (the runner runs exactly that commit; only when the controller could not list
 refs is the commit `null` and the ref resolved in `--ubertooth-source`), a
@@ -1805,8 +1811,9 @@ Single-node deploy: the controller and one runner run as systemd user services
 of the account that owns the checkout (no sudo needed), the GUI is opened from
 the desktop or through a tunnel. The scripts touch only the checkout's
 `.venv`, the harness data directory, the two user units, and the desktop
-launcher. Linux with systemd only for now; on macOS
-`deploy.sh` stops with an error (launchd is not supported yet).
+launcher. The controller runs on Linux; a Mac test host gets a runner of its
+own, as launchd LaunchAgents, from the same script (see [A Mac test
+host](#a-mac-test-host)).
 
 As the service user, from a clone of this repository (`git pull` it to
 update), with `hardware.yaml` describing the host:
@@ -1838,11 +1845,17 @@ runner (`After=`/`Wants=` the controller) dials
 | `--allow-power-changes` | passed to the runner |
 | `--with-acroname` | bootstrap with the Acroname BrainStem API (`python3 bootstrap.py --with-acroname`), for a USBHub3+ power controller |
 | `--external-board-lock TEMPLATE` | passed to the runner: runs also hold a lab's own per-board lock files ([External board locks](#external-board-locks)); `~/` is expanded here |
-| `--port N` | controller port on `127.0.0.1` (default 8765) |
-| `--no-start` | write the units (and daemon-reload) only |
-| `--uninstall` | stop, disable and remove the two units only; the venv and results stay |
+| `--port N` | controller port on `127.0.0.1` (default 8765); on macOS the port the tunnel forwards at both ends |
+| `--controller-host HOST` | macOS only: the Linux host running the controller |
+| `--controller-jump JUMP` | macOS only: SSH jump host for that connection (`""` for none) |
+| `--no-start` | write the units or agents only (Linux also daemon-reloads) |
+| `--uninstall` | stop and remove this machine's units or agents only; the venv and results stay |
 | `--force` | restart even while a run is active (cancels it) |
 | `--dry-run` | print what it would do, change nothing |
+
+`--ubertooth-repo` is a controller option, so it is refused on macOS;
+`--controller-host` and `--controller-jump` are refused on Linux, where the
+controller is on the same machine.
 
 **libbtbb for Build.** A GUI run with Build checked builds libbtbb too, so by
 default the deployed runner gets one. Without `--libbtbb-source`, deploy
@@ -1929,7 +1942,8 @@ empty `HARNESS_HOST` or `HARNESS_PORT` falls through to the file.
 The config file is `$HARNESS_OPEN_CONFIG`, by default
 `$XDG_CONFIG_HOME/ubertooth-harness/harness-open.conf` (so
 `~/.config/ubertooth-harness/harness-open.conf` unless `XDG_CONFIG_HOME` is
-set), outside the checkout and never committed. It is sourced as shell, so it
+set), outside the checkout and never committed. `deploy.sh` on a Mac reads the
+same file for its tunnel. It is sourced as shell, so it
 must be owned by you and not writable by anyone else; the script refuses it
 otherwise, and reports a file that fails rather than exiting silently.
 
@@ -1953,6 +1967,115 @@ lab host's key is checked against the laptop's `known_hosts`; with
 **Screen sharing** of the lab host's desktop (for example GNOME Remote
 Desktop or VNC, itself through an SSH tunnel) is an alternative when a browser
 on the lab host is easier than a tunnel; it needs no harness changes.
+
+### A Mac test host
+
+Tests that need macOS run on a Mac with its own Ubertooths, and the plans,
+history and GUI stay in the one controller on the Linux host. That controller
+binds `127.0.0.1` and has no authentication, so the Mac reaches it through an
+SSH local forward that launchd keeps up: the key that forward uses is the
+access control, and nothing on the Mac is reachable from the network. The
+forward does bind the Mac's own loopback, so every local user and process
+there can drive the controller through it, exactly as the `ssh -R` case in
+[Controller](#controller) describes; run it only on a Mac whose local users
+you trust. Run `deploy.sh` there as the user who is logged in to the Mac's
+desktop, with a `hardware.yaml` that registers that host and its boards:
+
+```sh
+scripts/deploy.sh --runner-host Host_Mac --ubertooth-source ~/ubertooth \
+    --controller-host lab-host.example --controller-jump jump-host.example
+```
+
+It bootstraps `.venv`, writes `com.ubertooth-harness.tunnel.plist` and
+`com.ubertooth-harness.runner.plist` to `~/Library/LaunchAgents`, and loads
+them with `launchctl bootstrap gui/$(id -u)`. Both have `RunAtLoad` and
+`KeepAlive`, so launchd starts them at login and restarts them whenever they
+exit (no faster than every 10 s), and both write to
+`${XDG_DATA_HOME:-~/.local/share}/ubertooth-harness/logs/` as `runner.log`,
+`runner.err.log`, `tunnel.log` and `tunnel.err.log` (nothing rotates those
+files, and a tunnel that cannot connect writes a line every 10 s, so look
+there first when a target does not come online). The runner's
+`ExitTimeOut` is 180 s, so a stop can cancel an active run and restore its
+boards before launchd kills it. A LaunchAgent inherits almost no environment,
+so each gets a `PATH` of `/opt/homebrew/bin:/usr/local/bin` and the system
+directories, which is what a run with Build checked needs to find CMake,
+pkg-config and libusb.
+
+The tunnel agent runs
+`/usr/bin/ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes
+-o StrictHostKeyChecking=yes -o ControlPath=none -o RemoteCommand=none
+-o ServerAliveInterval=30 -o ServerAliveCountMax=3
+-L 127.0.0.1:PORT:127.0.0.1:PORT [-J JUMP] HOST`, and the runner dials
+`ws://127.0.0.1:PORT/ws/runner` through it, so both ends are loopback, as
+with `scripts/harness-open`. The GUI is then also on this Mac's
+`http://127.0.0.1:PORT/ui/`.
+
+**The key is the access control, so set it up before deploying.** The agent
+runs `ssh` with `BatchMode=yes`: nothing can answer a prompt, so
+
+- the Mac user needs a key the controller host accepts with no passphrase
+  (`ssh-keygen -t ed25519 -f ~/.ssh/harness -N ""`, and an `IdentityFile
+  ~/.ssh/harness` entry for the host in `~/.ssh/config`), and
+- that host's key must already be in the Mac's `~/.ssh/known_hosts`, so
+  connect once by hand first (through the jump host, whose key is needed too).
+  The agent passes `StrictHostKeyChecking=yes`, so an unknown or changed host
+  key stops the tunnel rather than trusting whatever answered.
+
+Give that key only the forward, since it needs no passphrase: one line in the
+controller account's `authorized_keys`, with the port the controller uses,
+
+```
+restrict,port-forwarding,permitopen="127.0.0.1:8765",command="/usr/bin/false" ssh-ed25519 AAAA... harness tunnel
+```
+
+`restrict` turns off agent and X11 forwarding and pty allocation,
+`port-forwarding` puts back the one thing the tunnel needs, `permitopen`
+limits it to the controller's own loopback port, and the forced command means
+the key cannot run anything (the agent's `ssh -N` asks for no command, so the
+forward is unaffected). A key without those restrictions is an ordinary login
+to the controller host, which is more than the tunnel needs.
+
+With `--controller-jump` the same key also authenticates to the jump host, so
+it needs an entry there too, as narrow:
+`restrict,port-forwarding,permitopen="<the lab host>:22"`, which lets it reach
+nothing but the SSH port it relays to.
+
+The agent connects with `-J`, so the jump host must allow that; it has no
+`--two-hop` equivalent (see **From a laptop** above for what that option is
+for). It also passes `-o RemoteCommand=none`, so a host alias whose ssh
+configuration runs a command still works.
+
+Since that configuration is also read by the agent, deploy resolves it first
+with `ssh -G`, which connects to nothing, and refuses to install anything if
+it finds a `LocalForward`, `RemoteForward` or `DynamicForward` of its own for
+this host (the agent would open that too, and it may bind where the network
+can reach it), or if it throws the agent's own forward away with
+`ClearAllForwardings` (which would leave a tunnel forwarding nothing). Keep
+the harness host's stanza to what the connection needs: `HostName`, `User`,
+`IdentityFile`, `ProxyJump`.
+
+The host, jump host and port can come from `--controller-host`,
+`--controller-jump` and `--port`, from `HARNESS_HOST`, `HARNESS_JUMP` and
+`HARNESS_PORT` in the environment, or from the same private config file
+`scripts/harness-open` reads, under the same rules (both scripts share
+[`scripts/harness-config.sh`](scripts/harness-config.sh); see **From a
+laptop** above). An option wins over the environment, which wins over the
+file, and deploy stops rather than guessing a host.
+
+A LaunchAgent runs only while its user is logged in to the Mac's desktop, so
+a test host should log that user in by itself after a reboot: deploy warns
+when the account is not the automatic login user (System Settings > Users &
+Groups > Automatic login). FileVault turns automatic login off in effect,
+since someone must unlock the disk at boot before any login happens, so a Mac
+that must come back on its own cannot have it on. Rerunning changes nothing unless an agent's
+content changed, in which case that agent is booted out and bootstrapped
+again; a deploy that would restart the runner while *this* Mac's target has
+an active run is refused unless `--force` is given. A change to the tunnel
+alone restarts nothing else and is never refused: the runner keeps its run
+going while the controller is away and replays its events when it is back. `--uninstall` boots out
+both agents and removes the two plists. Deploy needs the GUI login domain
+(`launchctl print gui/$(id -u)`); over SSH with nobody logged in, use
+`--no-start` and load the agents from a Terminal on the Mac.
 
 ## Tests
 
@@ -1992,8 +2115,11 @@ repository), ref validation, and statically that the page wires to the
 expected endpoints and has no HTML injection sinks; there is no browser
 automation. The deploy-script tests run `scripts/deploy.sh`,
 `install-desktop-shortcut.sh` and `harness-open` against a temporary home with
-fake `systemctl`, `loginctl`, `ssh` and browser commands (no systemd or
-network), plus `bash -n` and, when installed, `shellcheck`. Provisioning, soak execution, and radio fixtures remain later
+fake `systemctl`, `loginctl`, `launchctl`, `defaults`, `ssh` and browser
+commands (no systemd, launchd or network), plus `bash -n` and, when installed,
+`shellcheck`. A fake `uname` drives the platform, so the macOS deploy and its
+LaunchAgents are tested on either platform; the agents are parsed back with
+`plistlib`, as launchd would read them. Provisioning, soak execution, and radio fixtures remain later
 slices.
 
 ## Repository boundary

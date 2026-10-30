@@ -26,7 +26,11 @@ import time
 from typing import Callable, Mapping
 import urllib.parse
 
-from ubertooth_harness.enumeration import SysfsUbertoothEnumerator, UbertoothEnumerator
+from ubertooth_harness.enumeration import (
+    EnumerationError,
+    UbertoothEnumerator,
+    local_enumerator,
+)
 from ubertooth_harness.environment import capture
 from ubertooth_harness.events import RUN_LOG, generate_run_id
 from ubertooth_harness import leases
@@ -307,7 +311,11 @@ class RunnerService:
             self.connections += 1
             tasks = []
             try:
-                await self._send("register", **self._registration())
+                # Enumeration runs a command (ioreg) on macOS, so it is read
+                # off the event loop: a slow read must not stall heartbeats or
+                # an active run's events.
+                registration = await asyncio.to_thread(self._registration)
+                await self._send("register", **registration)
                 self.log(f"registered with {self.config.controller_url}")
                 tasks.append(asyncio.create_task(self._heartbeat()))
                 if self._run is not None:
@@ -340,12 +348,14 @@ class RunnerService:
         serials = None
         enumeration_error = None
         enumerator = self.enumerator
-        if enumerator is None and sys.platform.startswith("linux"):
-            # Read-only sysfs scan: never opens a device or sends a stop.
-            enumerator = SysfsUbertoothEnumerator()
         if enumerator is None:
-            enumeration_error = f"USB enumeration is not supported on {sys.platform}"
-        else:
+            # Read-only: sysfs on Linux, ioreg on macOS. Neither opens a
+            # device, so neither sends a stop to a board that is capturing.
+            try:
+                enumerator = local_enumerator()
+            except EnumerationError as error:
+                enumeration_error = str(error)
+        if enumerator is not None:
             try:
                 serials = sorted(enumerator.serials())
             except Exception as error:
