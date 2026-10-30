@@ -480,27 +480,38 @@ That is the order the spec's `Set_AFH_Host_Channel_Classification` uses, and
 the order libbtbb prints a recovered map in, so what `ubertooth-afh` prints
 as `AFH map: 0x...` can be compared with this string as it stands.
 
-Set it on the board that leads the piconet, which is the initiator: the
-leader decides the map and announces it to the other board. The acceptor
-takes the command too, because the spec lets either side tell its controller
-what it thinks of the channels, but on this bench only the leader's map
-decides what is on the air.
+Set it on the board that leads the piconet, which is the initiator because it
+pages: the leader decides the map and announces it to the other board. The
+acceptor takes the command too, because the spec lets either side tell its
+controller what it thinks of the channels, but on this bench only the leader's
+map decides what is on the air. Nothing here pins the baseband role, and the
+board does not report it, so a test that depends on which board leads should
+read the LAP on the air, which is the leader's.
 
-Either command answers once the controller has taken the map, so the air has
-changed by the time the shell answers. It works with a link up as well as
+Either command answers once the controller has taken the map, rather than as
+soon as the command was sent. Taken is not yet on the air: the leader then
+announces the map to the other board and the hop sequence follows, so a test
+that has just set a map should give the link a moment and watch the air, not
+assume the next packet is on the new map. It works with a link up as well as
 before one: setting a map during a capture is how a test sees the piconet
 move from one map to another.
 
-A map the spec does not allow is refused and nothing changes:
+Every answer `afh` can give:
 
 | Answer | Why |
 |---|---|
+| `OK` | the controller took the map |
 | `ERR the channel map must be twenty hex digits` | not twenty hex digits |
 | `ERR the top bit of the last byte is reserved and must be zero` | bit 79 is reserved |
 | `ERR a piconet needs at least 20 channels` | fewer than 20 channels marked used |
 | `ERR the controller refused the channel map, status <n>` | the controller said no, with its own status |
+| `ERR the controller did not answer the channel map` | it said nothing for three seconds |
 | `ERR the controller has not answered the last channel map` | an earlier `afh` timed out and is still unanswered; `reset` is the way out |
+| `ERR the stack would not take the channel map` | ESP-IDF refused the call |
+| `ERR bluetooth is not up` | the board's Bluetooth failed to start, which the boot notice says |
 | `ERR afh takes twenty hex digits or off` | the wrong number of words |
+
+A refused map changes nothing.
 
 The 20-channel minimum is the spec's (Core 6.0 Vol 4 Part E 7.3.46, and
 `N_min` in Vol 2 Part B 2.6.3), and nothing in ESP-IDF checks it:
@@ -541,6 +552,11 @@ read `null`, `afh_link_error` is empty, and `afh` still reports what was
 asked for. A link whose AFH the controller reports as off reads the same way
 except that `afh_mode` is `"off"`, because the map means nothing then.
 
+The link map is read first and the rest of the line is gathered after it, so
+on a link that is going down the three link fields can describe a link the
+same line reports as `"connected":false`. The read is also what makes a
+status line with a link up cost a round trip to the controller.
+
 `defaults` puts every channel back, and only sends a command if a map was
 asked for, so `defaults` behaves exactly as it did on a board that has never
 run `afh`. A `reset` or a power cycle leaves the controller hopping over
@@ -568,9 +584,11 @@ next one. A controller that will not answer this command at all costs nothing
 but the `afh_link_error` line: the map that was asked for, and everything
 else `status` reports, is unaffected.
 
-If a controller ever stops answering altogether, `afh` answers `ERR the
-controller did not answer the channel map` after three seconds and keeps
-answering that; `reset` is the way out, as it is for the clock.
+If a controller ever stops answering altogether, the `afh` that was waiting
+answers `ERR the controller did not answer the channel map` after three
+seconds, and every `afh` after it answers `ERR the controller has not
+answered the last channel map` at once, because a late answer must not be
+read as the new map's. `reset` is the way out, as it is for the clock.
 
 ## Extending
 

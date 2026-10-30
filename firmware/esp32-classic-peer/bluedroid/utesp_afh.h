@@ -20,11 +20,10 @@
 
 /* What the controller answered. */
 struct utesp_afh_map {
-    uint8_t status;  /* the HCI status byte: 0 is success */
-    bool complete;   /* the answer carried all of the fields below */
-    uint16_t handle; /* the connection handle the controller echoed back */
-    bool enabled;    /* AFH_Mode: whether the link hops over a map at all.
-                      * The map below means nothing while this is false. */
+    uint8_t status; /* the HCI status byte: 0 is success */
+    bool complete;  /* the answer carried all of the fields below */
+    bool enabled;   /* AFH_Mode: whether the link hops over a map at all.
+                     * The map below means nothing while this is false. */
     uint8_t map[UTESP_AFH_MAP_LEN];
 };
 

@@ -131,8 +131,17 @@ static void addr_text(const esp_bd_addr_t a, char *out)
     sprintf(out, "%02X:%02X:%02X:%02X:%02X:%02X", a[0], a[1], a[2], a[3], a[4], a[5]);
 }
 
-/* Exactly "aa:bb:cc:dd:ee:ff", either case. Hand-checked rather than left to
+/* The byte two hex digits spell, or -1. Hand-checked rather than left to
  * scanf, whose %2x takes a sign and a single digit. */
+static int hex_byte(const char *p)
+{
+    if (!isxdigit((unsigned char)p[0]) || !isxdigit((unsigned char)p[1])) {
+        return -1;
+    }
+    return (int)strtoul((char[3]){p[0], p[1], '\0'}, NULL, 16);
+}
+
+/* Exactly "aa:bb:cc:dd:ee:ff", either case. */
 static bool addr_parse(const char *s, esp_bd_addr_t out)
 {
     if (strlen(s) != 17) {
@@ -140,13 +149,12 @@ static bool addr_parse(const char *s, esp_bd_addr_t out)
     }
     for (int i = 0; i < 6; i++) {
         const char *p = s + i * 3;
-        if (!isxdigit((unsigned char)p[0]) || !isxdigit((unsigned char)p[1])) {
+        int byte = hex_byte(p);
+
+        if (byte < 0 || (i < 5 && p[2] != ':')) {
             return false;
         }
-        if (i < 5 && p[2] != ':') {
-            return false;
-        }
-        out[i] = (uint8_t)strtoul((char[3]){p[0], p[1], '\0'}, NULL, 16);
+        out[i] = (uint8_t)byte;
     }
     return true;
 }
@@ -765,20 +773,19 @@ const char *bt_stream_payload(unsigned bytes)
 
 /* ------------------------------------------------------- the channel map */
 
-/* Exactly twenty hex digits, either case, into the ten bytes of a map.
- * Hand-checked rather than left to scanf, whose %2x takes a sign and a
- * single digit. */
+/* Exactly twenty hex digits, either case, into the ten bytes of a map. */
 static bool afh_parse(const char *s, uint8_t *out)
 {
     if (strlen(s) != AFH_HEX_LEN) {
         return false;
     }
     for (int i = 0; i < AFH_MAP_LEN; i++) {
-        const char *p = s + i * 2;
-        if (!isxdigit((unsigned char)p[0]) || !isxdigit((unsigned char)p[1])) {
+        int byte = hex_byte(s + i * 2);
+
+        if (byte < 0) {
             return false;
         }
-        out[i] = (uint8_t)strtoul((char[3]){p[0], p[1], '\0'}, NULL, 16);
+        out[i] = (uint8_t)byte;
     }
     return true;
 }

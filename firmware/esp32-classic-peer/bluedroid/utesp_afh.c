@@ -24,7 +24,6 @@
 #include "stack/hcimsgs.h"
 
 #include "esp_bt_main.h"
-#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
@@ -34,9 +33,9 @@
 #define READ_AFH_PARAM_LEN 2
 
 /* The answer: event code, parameter length, command credits, and the opcode,
- * then the status, handle, AFH mode, and the ten map bytes. The HCI layer
- * has already refused anything shorter than the opcode by the time the
- * callback runs. */
+ * then the status, handle, AFH mode, and the ten map bytes. The HCI layer has
+ * already refused anything shorter than the opcode by the time the callback
+ * runs. */
 #define EVENT_OPCODE_LEN   5
 #define EVENT_STATUS_LEN   6
 #define EVENT_EXPECTED_LEN (9 + UTESP_AFH_MAP_LEN)
@@ -46,22 +45,18 @@
 #define ANSWER_TIMEOUT_MS 1000
 
 /* One read at a time, the same machinery as the clock read: request_lock
- * makes a reader the owner of the slot below, answer is given when the reply
- * to its command arrives, and slot_lock is held for the moment it takes to
- * write the answer in or to give up on it.
- *
- * Each request gets a number, which rides along in the command's own
- * metadata and comes back with its reply, so the late answer to a read that
- * gave up waiting is dropped rather than handed to the next reader as a
- * fresh one. */
+ * makes a reader the owner of the slot below, answer is given when the
+ * controller's reply arrives, and slot_lock is held for the moment it takes
+ * to write the answer in or to give up on it. Only one command is ever
+ * outstanding, which is what lets a reply be matched to a reader without
+ * numbering them. */
 static bool afh_ready;
 static SemaphoreHandle_t request_lock;
 static SemaphoreHandle_t answer;
 static SemaphoreHandle_t slot_lock;
 static struct {
-    bool waiting;     /* the reader still wants the answer */
-    uint32_t seq;     /* the newest request; numbering starts at 1 */
-    uint32_t pending; /* a request the controller has not replied to, or 0 */
+    bool waiting; /* a reader still wants the answer */
+    bool pending; /* the controller has not replied to the command sent */
     struct utesp_afh_map got;
 } slot;
 
@@ -96,75 +91,46 @@ int utesp_afh_init(void)
     return UTESP_AFH_OK;
 }
 
-/* Hands an answer to the reader waiting for request seq, if it is still
- * waiting, and in any case notes that the controller has replied to that
- * request. */
-static void deliver(uint32_t seq, const struct utesp_afh_map *got)
-{
-    xSemaphoreTake(slot_lock, portMAX_DELAY);
-    if (slot.pending == seq) {
-        slot.pending = 0; /* the controller owes nothing now */
-    }
-    if (slot.waiting && slot.seq == seq) {
-        slot.got = *got;
-        slot.waiting = false;
-        xSemaphoreGive(answer);
-    }
-    xSemaphoreGive(slot_lock);
-}
-
 /* Called from the HCI layer's receive path with the whole Command Complete
- * event, and owns that buffer from here on. */
+ * event, and owns that buffer from here on. The layer has already matched
+ * the event to this command by its opcode and refused anything too short to
+ * hold one. */
 static void afh_complete(BT_HDR *response, void *context)
 {
-    const uint32_t seq = (uint32_t)(uintptr_t)context;
     uint8_t *stream = response->data + response->offset;
     struct utesp_afh_map got;
-    uint16_t opcode = 0;
     uint8_t mode = 0;
 
+    (void)context;
     memset(&got, 0, sizeof(got));
     got.status = HCI_ERR_UNSPECIFIED; /* until the event says otherwise */
 
     /* A controller that refuses the command may answer with the status
      * alone, so each part is read only once it is known to be there. */
-    if (response->len >= EVENT_OPCODE_LEN) {
-        STREAM_SKIP_UINT8(stream); /* event code, HCI_COMMAND_COMPLETE_EVT */
-        STREAM_SKIP_UINT8(stream); /* parameter total length */
-        STREAM_SKIP_UINT8(stream); /* command credits, the HCI layer's own */
-        STREAM_TO_UINT16(opcode, stream);
-    }
+    stream += EVENT_OPCODE_LEN; /* event code, length, credits, and opcode */
     if (response->len >= EVENT_STATUS_LEN) {
         STREAM_TO_UINT8(got.status, stream);
     }
     if (response->len >= EVENT_EXPECTED_LEN) {
-        STREAM_TO_UINT16(got.handle, stream);
+        /* The connection handle comes next; it is the one this read sent,
+         * and the reader has it already. */
+        stream += 2;
         STREAM_TO_UINT8(mode, stream);
         got.enabled = (mode != 0);
         STREAM_TO_ARRAY(got.map, stream, UTESP_AFH_MAP_LEN);
         got.complete = true;
     }
 
-    if (opcode == HCI_READ_AFH_CH_MAP) {
-        deliver(seq, &got);
+    xSemaphoreTake(slot_lock, portMAX_DELAY);
+    slot.pending = false; /* the controller owes nothing now */
+    if (slot.waiting) {
+        slot.got = got;
+        slot.waiting = false;
+        xSemaphoreGive(answer);
     }
+    xSemaphoreGive(slot_lock);
+
     osi_free(response);
-}
-
-/* A Command Status for this command means the controller would not run it.
- * With this callback set the HCI layer leaves the command buffer to it, as
- * Bluedroid's own status handler does. */
-static void afh_refused(uint8_t status, BT_HDR *command, void *context)
-{
-    struct utesp_afh_map got;
-
-    memset(&got, 0, sizeof(got));
-    got.status = status;
-    /* The HCI layer stops tracking a command once it has seen any reply to
-     * it, so this is the only reply there will be, whatever the status says,
-     * and the reader is told now rather than left to time out. */
-    deliver((uint32_t)(uintptr_t)context, &got);
-    HCI_FREE_CMD_BUF(command);
 }
 
 /* Builds the command and waits for its answer. The caller holds
@@ -174,7 +140,6 @@ static int send_read(uint16_t handle, struct utesp_afh_map *out)
     BT_HDR *cmd;
     hci_cmd_metadata_t *metadata;
     uint8_t *pp;
-    uint32_t seq;
     bool owed, answered;
 
     /* A command the controller never replied to still holds its place in the
@@ -183,7 +148,7 @@ static int send_read(uint16_t handle, struct utesp_afh_map *out)
      * nothing useful to do but say the controller is not answering. A board
      * in that state is recovered by "reset". */
     xSemaphoreTake(slot_lock, portMAX_DELAY);
-    owed = slot.pending != 0;
+    owed = slot.pending;
     xSemaphoreGive(slot_lock);
     if (owed) {
         return UTESP_AFH_TIMED_OUT;
@@ -201,33 +166,40 @@ static int send_read(uint16_t handle, struct utesp_afh_map *out)
 
     /* The HCI layer reads the callbacks and the opcode out of the buffer's
      * metadata rather than out of the arguments to transmit_command(), so
-     * they are set here, as Bluedroid's own btu_hcif_send_cmd() sets them. */
+     * they are set here, as Bluedroid's own btu_hcif_send_cmd() sets them.
+     *
+     * No status callback, for the reason the clock read gives: Read AFH
+     * Channel Map is answered with a Command Complete (Core 6.0 Vol 4 Part E
+     * 7.5.5), and a callback here would have to free the command buffer the
+     * HCI layer still reads after the call. If a controller ever did answer
+     * with a Command Status, the layer would free the command and this read
+     * would time out. */
     metadata = HCI_GET_CMD_METAMSG(cmd);
     metadata->opcode = HCI_READ_AFH_CH_MAP;
     metadata->command_complete_cb = afh_complete;
-    metadata->command_status_cb = afh_refused;
+    metadata->command_status_cb = NULL;
 
     /* Any leftover from a read that timed out, so the wait below is this
      * command's. */
     xSemaphoreTake(answer, 0);
     xSemaphoreTake(slot_lock, portMAX_DELAY);
-    seq = ++slot.seq;
-    slot.pending = seq;
+    slot.pending = true;
     slot.waiting = true;
     xSemaphoreGive(slot_lock);
-    metadata->context = (void *)(uintptr_t)seq;
 
-    hci_layer_get_interface()->transmit_command(cmd, afh_complete, afh_refused,
-                                                metadata->context);
+    hci_layer_get_interface()->transmit_command(cmd, afh_complete, NULL, NULL);
 
-    answered = xSemaphoreTake(answer, pdMS_TO_TICKS(ANSWER_TIMEOUT_MS)) == pdTRUE;
+    xSemaphoreTake(answer, pdMS_TO_TICKS(ANSWER_TIMEOUT_MS));
 
+    /* The answer, not the semaphore, decides: one that arrived just as the
+     * wait ran out is still this read's answer. After this nothing is
+     * expected, so a later one is dropped rather than kept for the next
+     * read. */
     xSemaphoreTake(slot_lock, portMAX_DELAY);
+    answered = !slot.waiting;
     if (answered) {
         *out = slot.got;
     }
-    /* Whether it answered or not, nothing is expected now: an answer that
-     * arrives after this is dropped rather than kept for the next read. */
     slot.waiting = false;
     xSemaphoreGive(slot_lock);
 
