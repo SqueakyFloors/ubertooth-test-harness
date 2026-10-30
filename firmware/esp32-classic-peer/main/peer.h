@@ -32,12 +32,7 @@ const char *bt_spp_stop(void);
 const char *bt_stream(bool on);
 const char *bt_stream_period(unsigned ms);
 const char *bt_stream_payload(unsigned bytes);
-const char *bt_tx_power(int min_dbm, int max_dbm);
 const char *bt_defaults(void);
-
-/* Runs one general inquiry, prints a data line per device found, and returns
- * when the controller reports the inquiry over. */
-const char *bt_inquiry(unsigned seconds);
 
 /* One JSON object, no newline, truncated to fit. */
 void bt_status_json(char *out, size_t len);

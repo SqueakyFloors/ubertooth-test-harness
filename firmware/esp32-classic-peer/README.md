@@ -110,15 +110,18 @@ ESP-IDF's own log lines start with `W (` or `E (` and are warnings or errors;
 | `stream <on\|off>` | send the payload while the link is up |
 | `stream period <ms>` | time between writes, 5 to 10000 (default 100) |
 | `stream payload <bytes>` | bytes per write, 8 to 512 (default 100) |
-| `inquiry <seconds>` | one general inquiry, 2 to 60 seconds |
-| `txpower <min> <max>` | transmit power in dBm, from -12, -9, -6, -3, 0, 3, 6, 9 |
 | `defaults` | restore every boot setting and zero the counters |
 | `reset` | answer `OK`, then restart the board |
 
-`spp start` on the initiator and `inquiry` wait for the controller and answer
-when it is done, so a test runs one command at a time and never polls.
-`spp start` answers `ERR connect timed out` after 15 seconds if the peer is
-not there, and `ERR connect refused` if it is but says no.
+Every command that starts something waits for the controller's event and
+answers from it, so a shell answer is never ahead of the radio and a test
+never polls. `spp start` on the initiator answers `ERR connect timed out`
+after 15 seconds if the peer is not there, and `ERR connect refused` if it is
+but says no; on the acceptor it answers only once the server is listening. `spp stop` waits for the link
+to close and the server to stop, and answers `ERR the link did not close` or
+`ERR the server did not stop` rather than claim a stop that did not happen.
+The boot notice comes after the server is listening, so a board that has said
+`ready` is ready.
 
 A bad value answers `ERR` and changes nothing. A command with the wrong
 number of words, or an unknown one, answers `ERR` too; `help` is the only
@@ -139,7 +142,7 @@ mistaken for its own.
 `status` reports every field on one line, whichever role is running:
 
 ```json
-{"role":"initiator","fw":"utesp-1.0.0","bt":true,"address":"20:50:0D:E9:C5:BA","lap":"e9c5ba","uap":"0d","nap":"2050","name":"UT-ESP32-E9C5BA","discoverable":true,"spp_server":false,"connecting":false,"connected":true,"peer":"C8:85:41:2A:1B:2A","remote":"C8:85:41:2A:1B:2A","stream":true,"period_ms":20,"payload_len":200,"counter":1483,"writes":1483,"write_errors":0,"rx_bytes":0,"connects":1,"disconnects":0,"tx_power_dbm":[0,3],"last_err":0}
+{"role":"initiator","fw":"utesp-1.0.0","bt":true,"address":"20:50:0D:E9:C5:BA","lap":"e9c5ba","uap":"0d","nap":"2050","name":"UT-ESP32-E9C5BA","discoverable":true,"spp_server":false,"connecting":false,"connected":true,"peer":"C8:85:41:2A:1B:2A","remote":"C8:85:41:2A:1B:2A","stream":true,"period_ms":20,"payload_len":200,"counter":1483,"writes":1483,"write_errors":0,"rx_bytes":0,"connects":1,"disconnects":0,"last_err":0}
 ```
 
 - `address`: the BD_ADDR, split out as `lap`, `uap` and `nap` as well,
@@ -150,12 +153,11 @@ mistaken for its own.
 - `peer`: what `spp peer` set, empty until it is set; `remote`: the far end
   of the live link, empty when there is none.
 - `counter`: the counter in the payload (below), zeroed when a link comes
-  up; `writes` counts the writes the Bluetooth stack accepted and
-  `write_errors` those it refused, and `rx_bytes` is the bytes this board
-  received. A write accepted at the moment a status line is read may not
-  have reached the air yet, which is why the other side's `rx_bytes` can be
-  one payload behind `writes`.
-- `tx_power_dbm`: the range the controller reports, not what was asked for.
+  up, and steps with `writes`; `writes` and `write_errors` are counted from
+  the stack's own report of each write, not from the call that queued it, so
+  a refused write is counted as one. `rx_bytes` is the bytes this board
+  received. A write still in flight when a status line is read is why the
+  other side's `rx_bytes` can be one payload behind `writes`.
 - `last_err`: the last Bluetooth API error, 0 for none.
 
 ## The pair
@@ -166,15 +168,17 @@ exchange: the page, the connection, the SDP lookup on L2CAP, and the RFCOMM
 session coming up.
 
 With `stream on` the initiator writes `stream payload` bytes every
-`stream period` ms. The first eight bytes are `UTESP` and a little-endian
+`stream period` ms. The period is a floor: one write is with the stack at a
+time, so a link too slow for the period sends fewer, wider-spaced writes
+instead of reporting writes that never went out. The first eight bytes are `UTESP` and a little-endian
 24-bit counter, which steps once per write, so a capture can be matched to
-the run and to the moment inside it. The rest is `U` filler. A write while
-the link is congested is skipped rather than queued, so `writes` counts what
-actually went out.
+the run and to the moment inside it. The rest is `U` filler. A write while the link is congested, or while the
+previous one is still with the stack, is skipped rather than queued.
 
-Both boards are discoverable and connectable from boot, which is what makes
-the pair findable by `inquiry` from either side and by `ubertooth-rx`. Turn
-that off with `disc off` for a test that needs a silent board.
+Both boards are discoverable and connectable from boot, which is what lets
+the initiator find the acceptor's channel and what puts the pair on the air
+for `ubertooth-rx`. Turn it off with `disc off` for a test that needs a
+silent board.
 
 `bt` is false only if Bluetooth failed to come up; the shell still answers
 then, with a zero address, and the boot notice says why.
@@ -184,9 +188,11 @@ then, with a zero address, and the boot notice says why.
 A new role adds its name to `enum peer_role` (`main/peer.h`) and its
 behavior to `bt_peer.c`; `main.c` holds only the shell. Keep every new
 command line-based with the same `OK`/`ERR` endings, so one harness driver
-serves every role. A command that waits for the controller should block and
-answer when it is done, as `spp start` and `inquiry` do, rather than leave a
-test polling `status`.
+serves every role. A command that waits for the controller should block on
+its event and answer from it, as `spp start` and `spp stop` do, rather than
+leave a test polling `status`. There is no `inquiry` and no transmit power
+control: both addresses are fixed and registered, and no planned test sets
+the power, so neither was worth the code.
 
 ## License
 

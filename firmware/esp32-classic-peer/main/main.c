@@ -84,22 +84,6 @@ static bool parse_uint(const char *s, unsigned *out)
     return true;
 }
 
-static bool parse_int(const char *s, int *out)
-{
-    char *end;
-    long v;
-
-    if (!s || !*s) {
-        return false;
-    }
-    v = strtol(s, &end, 10);
-    if (*end != '\0') {
-        return false;
-    }
-    *out = (int)v;
-    return true;
-}
-
 /* "on" or "off". */
 static bool parse_onoff(const char *s, bool *out)
 {
@@ -127,8 +111,6 @@ static void cmd_help(void)
         "stream <on|off>               send payload bytes while connected",
         "stream period <ms>            time between writes, 5-10000",
         "stream payload <bytes>        bytes per write, 8-512",
-        "inquiry <seconds>             one general inquiry, 2-60 seconds",
-        "txpower <min> <max>           dBm, one of -12 -9 -6 -3 0 3 6 9",
         "defaults                      restore every boot setting",
         "reset                         restart the board",
     };
@@ -202,27 +184,14 @@ static void run(int argc, char **argv)
         }
         return;
     }
-    if (argc == 2 && strcmp(c, "inquiry") == 0) {
-        unsigned secs;
-        answer(parse_uint(argv[1], &secs) ? bt_inquiry(secs) : "inquiry takes a number of seconds");
-        return;
-    }
-    if (argc == 3 && strcmp(c, "txpower") == 0) {
-        int lo, hi;
-        if (!parse_int(argv[1], &lo) || !parse_int(argv[2], &hi)) {
-            answer("txpower takes two numbers in dBm");
-        } else {
-            answer(bt_tx_power(lo, hi));
-        }
-        return;
-    }
     if (argc == 1 && strcmp(c, "defaults") == 0) {
         answer(bt_defaults());
         return;
     }
     if (argc == 1 && strcmp(c, "reset") == 0) {
         answer(NULL);
-        vTaskDelay(pdMS_TO_TICKS(100));
+        /* Let the answer leave the UART before the board goes. */
+        uart_wait_tx_done(SHELL_UART, pdMS_TO_TICKS(500));
         esp_restart();
         return;
     }
