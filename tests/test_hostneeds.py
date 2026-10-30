@@ -299,7 +299,9 @@ class SequencerTests(unittest.TestCase):
         self.assertIn("| Host can run | macos (build); BlueZ tools: none; Python tools build: "
                       "no; firmware build: no |", report)
         self.assertIn("| Not applicable cases |", report)
-        self.assertIn("| 001-BlueZ only | Host_Mac | not_applicable | 0 | 0 | 1 |", report)
+        # The Known target cell is empty: a test the host cannot run drove nothing.
+        self.assertIn(
+            "| 001-BlueZ only | Host_Mac |  | not_applicable | 0 | 0 | 1 |", report)
         section = report.split("## Not applicable", 1)[1].split("## Transcript", 1)[0]
         self.assertIn("| Host version | (whole test) | Host_Mac | runs only on Linux", section)
         self.assertIn("| 001-BlueZ only | follow help | Host_Mac | ubertooth-follow is built "

@@ -106,7 +106,7 @@ STATUS_TIMEOUT_S = 30.0
 _CONNCAPTURE = str(Path(conncapture.__file__).resolve())
 
 
-def _pair(resource_identities: Mapping) -> tuple[dict, dict]:
+def _pair(resources: Mapping, resource_identities: Mapping) -> tuple[dict, dict]:
     """The central and the peripheral, from the registry's identities."""
     pair = []
     for role in (CENTRAL_ROLE, PERIPHERAL_ROLE):
@@ -123,7 +123,8 @@ def _pair(resource_identities: Mapping) -> tuple[dict, dict]:
                 f"{TEST_NAME}: {role} BLE address {address} is not a static random "
                 "address (the two top bits must be set)")
         pair.append({"serial": str(serial), "address": address,
-                     "port": identity.get("serial device") or None})
+                     "port": identity.get("serial device") or None,
+                     "alias": resources.get(role, "")})
     central, peripheral = pair
     if central["serial"] == peripheral["serial"]:
         raise StateCaseError(
@@ -276,9 +277,9 @@ def _capture_case(serial, central, peripheral, seconds, *, case_id, name,
     )
 
 
-def known_connection_cases(arguments, _resources, resource_identities):
+def known_connection_cases(arguments, resources, resource_identities):
     serial = _serial(resource_identities, TEST_NAME)
-    central, peripheral = _pair(resource_identities)
+    central, peripheral = _pair(resources, resource_identities)
     seconds = seconds_arg(arguments)
     interval = arguments["interval"]
     update = arguments["update"]

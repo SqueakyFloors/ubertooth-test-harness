@@ -10,6 +10,8 @@ import secrets
 import shlex
 from typing import Callable, Mapping, Protocol, Sequence, TextIO
 
+from ubertooth_harness.rawlog import line_tag
+
 
 EVENT_SCHEMA_VERSION = 1
 _MAX_DETAILS_BYTES = 16 * 1024
@@ -121,7 +123,7 @@ class TerminalEventSink:
     def _flush_partial(self) -> None:
         for name, text in self._partial.items():
             if text:
-                tag = "[E]" if name == "stderr" else "[O]"
+                tag, text = line_tag(name, text)
                 self.stream.write(f"{tag} {text}\n")
         self._partial = {"stdout": "", "stderr": ""}
 
@@ -156,6 +158,8 @@ class TerminalEventSink:
                 )
         elif event.event_type == "manifest":
             self.stream.write("\n[manifest recorded]\n")
+        elif event.event_type == "known_target":
+            self.stream.write(f"[M] {details.get('summary', '')}\n")
         elif event.event_type == "not_applicable":
             what = str(details.get("test_name", ""))
             if details.get("case_name"):
@@ -196,11 +200,11 @@ class TerminalEventSink:
             # Output arrives in chunks that need not end on a line boundary;
             # tag whole lines only.
             name = "stderr" if details.get("stream") == "stderr" else "stdout"
-            tag = "[E]" if name == "stderr" else "[O]"
             text = self._partial[name] + str(details.get("text", ""))
             *complete, self._partial[name] = text.split("\n")
             for part in complete:
-                self.stream.write(f"{tag} {part.rstrip(chr(13))}\n")
+                tag, part = line_tag(name, part.rstrip(chr(13)))
+                self.stream.write(f"{tag} {part}\n")
         elif event.event_type == "command_output_omitted":
             self._flush_partial()
             self.stream.write(
