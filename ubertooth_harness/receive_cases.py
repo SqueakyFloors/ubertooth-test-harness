@@ -140,12 +140,16 @@ def _dump_check(step_id, name, file_name, fmt, *, min_records=0, types="br,keep-
 # reported. -r/-q create BR/EDR PCAPNG/PCAP files (link type 255) at start;
 # -d writes one full 68-byte record per packet found (possibly none).
 
-_PACKET = re.compile(
-    r"^systime=\d+ ch=\s*(?P<ch>\d+) LAP=[0-9a-f]{6} err=(?P<err>\d+) clkn=\d+ "
-    r"clk_offset=\d+ s=-?\d+ n=-?\d+ snr=-?\d+$"
+# The packet line and the survey result line, with the fields a check reads
+# picked out. classic_cases.py reads the LAP from the same two patterns, so a
+# change in what ubertooth-rx prints is one edit, not two.
+PACKET_LINE = re.compile(
+    r"^systime=\d+ ch=\s*(?P<ch>\d+) LAP=(?P<lap>[0-9a-f]{6}) err=(?P<err>\d+) "
+    r"clkn=\d+ clk_offset=\d+ s=-?\d+ n=-?\d+ snr=-?\d+$"
 )
-_SURVEY_LINE = re.compile(
-    r"^\?\?:\?\?:(?:\?\?|[0-9A-F]{2}):[0-9A-F]{2}:[0-9A-F]{2}:[0-9A-F]{2}$"
+SURVEY_LINE = re.compile(
+    r"^\?\?:\?\?:(?:\?\?|[0-9A-F]{2}):"
+    r"(?P<lap>[0-9A-F]{2}:[0-9A-F]{2}:[0-9A-F]{2})$"
 )
 
 
@@ -155,7 +159,7 @@ def packet_check(*, channel=None, max_errors=None, survey=False):
     def check(output: str) -> str:
         lines = output.splitlines()
         problems = []
-        packets = [m for m in map(_PACKET.match, lines) if m]
+        packets = [m for m in map(PACKET_LINE.match, lines) if m]
         if channel is not None:
             other = sorted({int(m["ch"]) for m in packets} - {channel})
             if other:
@@ -169,7 +173,7 @@ def packet_check(*, channel=None, max_errors=None, survey=False):
                 problems.append("no 'Survey Results' line")
             else:
                 results = lines[lines.index("Survey Results") + 1:]
-                bad = [line for line in results if not _SURVEY_LINE.match(line)]
+                bad = [line for line in results if not SURVEY_LINE.match(line)]
                 if bad:
                     problems.append(f"{len(bad)} survey lines that are not piconet addresses")
         return "; ".join(problems)

@@ -209,18 +209,32 @@ class CommandTests(unittest.TestCase):
         self.assertIn("acceptor role: acceptor", out.getvalue())
 
     def test_a_board_that_does_not_come_back_in_its_boot_state_fails(self):
-        class StillStreaming(FakePeerFirmware):
-            def boot(self):
-                lines = super().boot()
-                self.stream = True  # a reset that did not take
-                return lines
+        # Every field of the status has to be a boot value: a release that
+        # left any of them behind would hand the next case a dirty board.
+        for field, value, reason in (
+            ("stream", True, r"stream True, not False"),
+            ("role", "initiator", r"role 'initiator', not 'acceptor'"),
+            ("spp_server", False, r"spp_server False, not True"),
+            ("discoverable", False, r"discoverable False, not True"),
+            ("peer", INITIATOR_ADDRESS, r"peer '20:50:0D:E9:C5:BA', not ''"),
+            ("payload", 300, r"payload_len 300, not 100"),
+            ("period", 10, r"period_ms 10, not 100"),
+            ("writes", 7, r"counter 7, not 0, writes 7, not 0"),
+            ("disconnects", 2, r"disconnects 2, not 0"),
+        ):
+            class Stale(FakePeerFirmware):
+                def boot(self):
+                    lines = super().boot()
+                    setattr(self, field, value)  # a reset that did not take
+                    return lines
 
-        acceptor = StillStreaming(ACCEPTOR_ADDRESS)
-        peer, _ = _peers(acceptor, FakePeerFirmware(INITIATOR_ADDRESS))
-        with self.assertRaisesRegex(esp32peer.PeerError,
-                                    "not in its boot state after a reset: still "
-                                    "streaming"):
-            esp32peer.reset(peer, io.StringIO())
+            peer, _ = _peers(Stale(ACCEPTOR_ADDRESS),
+                             FakePeerFirmware(INITIATOR_ADDRESS))
+            with self.subTest(field), self.assertRaisesRegex(
+                esp32peer.PeerError,
+                "not in its boot state after a reset: " + reason
+            ):
+                esp32peer.reset(peer, io.StringIO())
 
     def test_a_missing_device_is_reported_without_a_traceback(self):
         peer = esp32peer.Peer("/dev/serial/by-id/usb-absent", "acceptor",

@@ -8,6 +8,7 @@ from ubertooth_harness import esp32peer, leases
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.classic_cases import (
     MIN_PACKETS,
+    PAIR_SETUP_S,
     follow_classic_cases,
     known_classic_cases,
     no_piconet_packets,
@@ -133,15 +134,17 @@ class CheckTests(unittest.TestCase):
 class CaptureCaseTests(unittest.TestCase):
 
     def test_smoke_cases(self):
+        # Mandatory preflight already opens each bridge and checks its
+        # version and registered address, so no case repeats that.
         cases = known_classic_cases(arguments("Capture known Classic device"), {},
                                     IDENTITIES)
-        self.assertEqual(["peers-ready", "survey", "sweep"],
-                         [case.case_id for case in cases])
+        self.assertEqual(["survey", "sweep"], [case.case_id for case in cases])
+        self.assertEqual(("linux",), cases[0].needs.platforms)
 
     def test_comprehensive_adds_a_capture_file_and_the_swapped_roles(self):
         cases = known_classic_cases(
             arguments("Capture known Classic device", "comprehensive"), {}, IDENTITIES)
-        self.assertEqual(["peers-ready", "survey", "sweep", "survey-pcapng",
+        self.assertEqual(["survey", "sweep", "survey-pcapng",
                           "survey-roles-swapped"],
                          [case.case_id for case in cases])
         swapped = cases[-1]
@@ -152,20 +155,16 @@ class CaptureCaseTests(unittest.TestCase):
         self.assertEqual(ACCEPTOR_ADDRESS, argv[argv.index("--initiator-address") + 1])
         self.assertIn(rf"(?m)^master LAP: {OTHER_LAP}$", stream.output_patterns)
 
-    def test_the_ready_case_identifies_both_peers_and_resets_them(self):
-        ready = known_classic_cases(arguments("Capture known Classic device"), {},
-                                    IDENTITIES)[0]
-        self.assertEqual(["identify-acceptor", "identify-initiator"],
-                         [step.step_id for step in ready.steps])
-        argv = ready.steps[0].resolve_argv({})
+    def test_the_cleanup_resets_each_peer_through_the_driver(self):
+        case = known_classic_cases(arguments("Capture known Classic device"), {},
+                                   IDENTITIES)[0]
+        reset = {step.step_id: step for step in case.cleanup}["reset-acceptor"]
+        argv = reset.resolve_argv({})
         self.assertTrue(argv[1].endswith("esp32peer.py"))
-        self.assertEqual(["identify", "--device",
+        self.assertEqual(["reset", "--device",
                           esp32peer.default_device(ACCEPTOR_BRIDGE),
                           "--address", ACCEPTOR_ADDRESS, "--role", "acceptor"],
                          list(argv[2:]))
-        self.assertEqual(["reset-acceptor", "reset-initiator"],
-                         [step.step_id for step in ready.cleanup])
-        self.assertEqual(("linux",), ready.needs.platforms)
 
     def test_the_capture_step_runs_the_tool_after_a_double_dash(self):
         cases = {case.case_id: case for case in known_classic_cases(
@@ -177,9 +176,12 @@ class CaptureCaseTests(unittest.TestCase):
         self.assertEqual(
             esp32peer.default_device(INITIATOR_BRIDGE),
             argv[argv.index("--initiator") + 1])
+        # The capture's own floor is the driver's to enforce: it times the
+        # child, where this step's duration is the whole session.
+        self.assertEqual("24.5", argv[argv.index("--min-seconds") + 1])
         # The deadline covers the pair's bring-up as well as the capture.
-        self.assertGreater(step.timeout_s, 25.0 + 60.0)
-        self.assertLess(step.min_duration_s, 25.0)
+        self.assertGreater(step.timeout_s, 25.0 + PAIR_SETUP_S - 1)
+        self.assertEqual(0.0, step.min_duration_s)
         self.assertTrue(step.mutates)
 
     def test_a_capture_file_goes_in_the_cases_capture_directory(self):
@@ -197,7 +199,7 @@ class CaptureCaseTests(unittest.TestCase):
     def test_every_case_resets_both_peers_and_restores_the_board(self):
         for case in known_classic_cases(
             arguments("Capture known Classic device", "comprehensive"), {}, IDENTITIES
-        )[1:]:
+        ):
             with self.subTest(case.case_id):
                 cleanup = [step.step_id for step in case.cleanup]
                 self.assertEqual(["reset-initiator", "reset-acceptor",
@@ -210,7 +212,7 @@ class FollowCaseTests(unittest.TestCase):
     def test_smoke_follows_the_master_and_nothing_else(self):
         cases = follow_classic_cases(arguments("Follow Classic Bluetooth piconet"),
                                      {}, IDENTITIES)
-        self.assertEqual(["peers-ready", "follow-lap-uap", "follow-other-lap"],
+        self.assertEqual(["follow-lap-uap", "follow-other-lap"],
                          [case.case_id for case in cases])
         steps = {case.case_id: {s.step_id: s for s in case.steps} for case in cases}
         follow = steps["follow-lap-uap"]["stream-and-receive"].resolve_argv({})
@@ -222,13 +224,13 @@ class FollowCaseTests(unittest.TestCase):
         cases = follow_classic_cases(
             arguments("Follow Classic Bluetooth piconet", "comprehensive"), {},
             IDENTITIES)
-        self.assertEqual(["peers-ready", "follow-lap-uap", "follow-other-lap",
+        self.assertEqual(["follow-lap-uap", "follow-other-lap",
                           "follow-lap-only", "follow-pcap"],
                          [case.case_id for case in cases])
 
     def test_the_follow_case_checks_the_tools_packet_lines(self):
         case = follow_classic_cases(arguments("Follow Classic Bluetooth piconet"),
-                                    {}, IDENTITIES)[1]
+                                    {}, IDENTITIES)[0]
         check = {s.step_id: s for s in case.steps}["stream-and-receive"].output_check
         self.assertEqual("", check(packets(MASTER_LAP, MIN_PACKETS)))
         self.assertIn("expected at least", check(packets(MASTER_LAP, 1)))
@@ -259,9 +261,11 @@ class IdentityTests(unittest.TestCase):
         path = "/dev/serial/by-id/usb-chosen-if00-port0"
         identities = {**IDENTITIES,
                       "acceptor": {**IDENTITIES["acceptor"], "serial device": path}}
-        step = known_classic_cases(arguments("Capture known Classic device"), {},
-                                   identities)[0].steps[0]
-        self.assertEqual(path, step.resolve_argv({})[4])
+        case = known_classic_cases(arguments("Capture known Classic device"), {},
+                                   identities)[0]
+        step = {s.step_id: s for s in case.steps}["stream-and-receive"]
+        argv = list(step.resolve_argv({}))
+        self.assertEqual(path, argv[argv.index("--acceptor") + 1])
 
 
 class RegistryTests(unittest.TestCase):
@@ -275,12 +279,9 @@ class RegistryTests(unittest.TestCase):
             (f'BD_ADDR: "{ACCEPTOR_ADDRESS}"', 'BD_ADDR: "C8-85"', "requires a 'BD_ADDR'"),
             (f'BD_ADDR: "{ACCEPTOR_ADDRESS}"',
              f'BD_ADDR: "{ACCEPTOR_ADDRESS}"\n      tty: /dev/ttyUSB0', "unknown key"),
-            (f'BD_ADDR: "{ACCEPTOR_ADDRESS}"',
-             f'BD_ADDR: "{ACCEPTOR_ADDRESS}"\n      LAP: "2a1b2b"',
-             "LAP is 2a1b2b, but C8:85:41:2A:1B:2A gives 2a1b2a"),
-            (f'BD_ADDR: "{ACCEPTOR_ADDRESS}"',
-             f'BD_ADDR: "{ACCEPTOR_ADDRESS}"\n      name: UT-ESP32-WRONG',
-             "name is UT-ESP32-WRONG"),
+            ("bridge serial: \"" + ACCEPTOR_BRIDGE + "\"",
+             'bridge serial: "AAAA0000AAAA0000AAAA0000AAAA0000"',
+             "lower-case hex digits"),
             (f'BD_ADDR: "{ACCEPTOR_ADDRESS}"',
              f'BD_ADDR: "{ACCEPTOR_ADDRESS}"\n      serial device: /dev/ttyUSB0',
              "must be a /dev/serial/by-id/ path"),
@@ -288,13 +289,25 @@ class RegistryTests(unittest.TestCase):
             with self.subTest(new), self.assertRaisesRegex(RegistryError, reason):
                 registry_with(REGISTRY.replace(old, new, 1))
 
-    def test_the_lap_uap_and_name_a_registry_writes_down_are_checked(self):
-        # The lab registry records what the board's status reports; a copy
-        # that agrees with the address is accepted.
-        registry_with(REGISTRY.replace(
+    def test_the_lap_and_uap_a_registry_writes_down_are_notes(self):
+        # The lab registry records what the board's status reports, for a
+        # person reading it. The registry takes them as written; the cases
+        # refuse a note that disagrees with the address.
+        text = REGISTRY.replace(
             f'BD_ADDR: "{ACCEPTOR_ADDRESS}"',
             f'BD_ADDR: "{ACCEPTOR_ADDRESS}"\n      LAP: "2a1b2a"\n'
-            '      UAP: "41"\n      name: UT-ESP32-2A1B2A', 1))
+            '      UAP: "41"\n      name: UT-ESP32-2A1B2A', 1)
+        registry_with(text)
+        registry_with(text.replace('LAP: "2a1b2a"', 'LAP: "2a1b2b"', 1))
+        with self.assertRaisesRegex(
+            StateCaseError,
+            "the acceptor's registered LAP is 2a1b2b, but its BD_ADDR "
+            "C8:85:41:2A:1B:2A gives 2a1b2a"
+        ):
+            known_classic_cases(
+                arguments("Capture known Classic device"), {},
+                {**IDENTITIES,
+                 "acceptor": {**IDENTITIES["acceptor"], "LAP": "2a1b2b"}})
 
     def test_a_peer_must_declare_a_role_the_firmware_has(self):
         # The host names its default by type here, so the role rule is what
@@ -312,8 +325,8 @@ class RegistryTests(unittest.TestCase):
         registry = FileResourceRegistry.load(ROOT / "hardware.example.yaml")
         plan = load_plan(ROOT / "testplans" / "classic.yaml")
         catalog = builtin_catalog()
-        for suite, counts in (("classic", (3, 3)), ("classic-comprehensive", (5, 5)),
-                              ("classic-long", (3,))):
+        for suite, counts in (("classic", (2, 2)), ("classic-comprehensive", (4, 4)),
+                              ("classic-long", (2,))):
             invocations = PlanCompiler(catalog, registry).compile(plan, suite)
             self.assertEqual(len(counts), len(invocations))
             for invocation, count in zip(invocations, counts):

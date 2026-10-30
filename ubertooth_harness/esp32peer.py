@@ -65,6 +65,18 @@ MINIMUM_FIRMWARE = "utesp-1.0.0"
 BAUD = 115200
 ROLES = ("acceptor", "initiator")
 BOOT_ROLE = "acceptor"
+# What the firmware's status reports after a reset, from its README: the
+# acceptor role with its server listening and discoverable, no link, nothing
+# streaming, the default stream settings, and every counter zero. The
+# address, LAP, UAP, name, and `bt` are the board's own and are checked
+# separately, by check_status.
+BOOT_STATE = {
+    "role": BOOT_ROLE, "discoverable": True, "spp_server": True,
+    "connecting": False, "connected": False, "peer": "", "remote": "",
+    "stream": False, "period_ms": 100, "payload_len": 100, "counter": 0,
+    "writes": 0, "write_errors": 0, "rx_bytes": 0, "connects": 0,
+    "disconnects": 0, "last_err": 0,
+}
 
 # Payload bounds the firmware enforces (its README, "Shell protocol").
 PERIOD_MIN_MS, PERIOD_MAX_MS = 5, 10000
@@ -103,10 +115,13 @@ _READY = re.compile(r"^utesp: (?P<version>utesp-\S+) ready$")
 _VERSION = re.compile(r"^utesp-(\d+)\.(\d+)\.(\d+)$")
 _START_FAILED = re.compile(r"^utesp: \S+ start failed: (?P<reason>.+)$")
 
-# Every field the firmware's status line carries, with the type it must have.
+# The status fields this driver reads, reports, or checks after a reset,
+# with the type each must have. A later image of the same major may add
+# fields, and does: nothing here minds. `nap` is left out because nothing
+# reads it.
 _STATUS_KEYS = {
     "role": str, "fw": str, "bt": bool, "address": str, "lap": str,
-    "uap": str, "nap": str, "name": str, "discoverable": bool,
+    "uap": str, "name": str, "discoverable": bool,
     "spp_server": bool, "connecting": bool, "connected": bool, "peer": str,
     "remote": str, "stream": bool, "period_ms": int, "payload_len": int,
     "counter": int, "writes": int, "write_errors": int, "rx_bytes": int,
@@ -407,10 +422,11 @@ def status_command(peer: Peer, out=None) -> dict:
 
 
 def reset(peer: Peer, out=None) -> dict:
-    """Reset the board and check it came back in its boot state.
+    """Reset the board and check every field of its status is a boot value.
 
-    This is how a case releases a peer: the boot role listens for a link and
-    streams nothing, and the counters are zero.
+    This is how a case releases a peer, so it has to leave nothing of the
+    previous case behind: not a role, a half-open link, a stream setting, or
+    a counter. Anything that differs from BOOT_STATE is named.
     """
     out = out or sys.stdout
     shell = peer.open()
@@ -419,16 +435,8 @@ def reset(peer: Peer, out=None) -> dict:
         status = check_status(shell.status(), peer.label, peer.address)
     finally:
         shell.close()
-    wrong = []
-    if status["role"] != BOOT_ROLE:
-        wrong.append(f"role {status['role']}")
-    if status["connected"] or status["connecting"]:
-        wrong.append("still connected")
-    if status["stream"]:
-        wrong.append("still streaming")
-    if status["writes"] or status["rx_bytes"]:
-        wrong.append(f"{status['writes']} writes and {status['rx_bytes']} bytes "
-                     "received since boot")
+    wrong = [f"{key} {status[key]!r}, not {value!r}"
+             for key, value in BOOT_STATE.items() if status[key] != value]
     if wrong:
         raise PeerError(f"{peer.label} is not in its boot state after a reset: "
                         + ", ".join(wrong))
@@ -436,19 +444,20 @@ def reset(peer: Peer, out=None) -> dict:
     return status
 
 
-def _run_command(command: Sequence[str], timeout: float) -> int:
+def _run_command(command: Sequence[str], timeout: float) -> tuple[int, float]:
     """Run the thing under test, inheriting our streams, with a deadline.
 
     The child stays in this process's group, so the harness's own deadline
     reaches it; this deadline is the backstop for a command with none of its
     own.
     """
+    started = time.monotonic()
     try:
         child = subprocess.Popen(list(command))
     except OSError as error:
         raise PeerError(f"cannot run {command[0]}: {error}") from error
     try:
-        return child.wait(timeout=timeout)
+        return child.wait(timeout=timeout), time.monotonic() - started
     except subprocess.TimeoutExpired:
         # Interrupt first: a capture tool stops its board and closes its
         # files on SIGINT, which a kill would skip.
@@ -463,7 +472,8 @@ def _run_command(command: Sequence[str], timeout: float) -> int:
 
 def stream(acceptor: Peer, initiator: Peer, command: Sequence[str], *,
            period: int = DEFAULT_PERIOD_MS, payload: int = DEFAULT_PAYLOAD,
-           min_writes: int = 1, timeout: float = 300.0, out=None,
+           min_writes: int = 1, min_seconds: float = 0.0,
+           timeout: float = 300.0, out=None,
            settle_s: float = SETTLE_S) -> int:
     """Hold the pair's link up and streaming while ``command`` runs.
 
@@ -482,8 +492,8 @@ def stream(acceptor: Peer, initiator: Peer, command: Sequence[str], *,
         try:
             return _stream(acceptor, acceptor_shell, initiator, initiator_shell,
                            command, period=period, payload=payload,
-                           min_writes=min_writes, timeout=timeout, out=out,
-                           settle_s=settle_s)
+                           min_writes=min_writes, min_seconds=min_seconds,
+                           timeout=timeout, out=out, settle_s=settle_s)
         finally:
             initiator_shell.close()
     finally:
@@ -503,7 +513,8 @@ def _release(shell: Shell) -> None:
 
 
 def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
-            period, payload, min_writes, timeout, out, settle_s) -> int:
+            period, payload, min_writes, min_seconds, timeout, out,
+            settle_s) -> int:
     acceptor_shell.wait_ready()
     initiator_shell.wait_ready()
     acceptor_status = check_status(acceptor_shell.status(), acceptor.label,
@@ -536,8 +547,8 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         time.sleep(settle_s)
         print("command: " + " ".join(command), file=out)
         out.flush()
-        status = _run_command(command, timeout)
-        print(f"command exit: {status}", file=out)
+        status, seconds = _run_command(command, timeout)
+        print(f"command exit: {status} after {seconds:.1f} s", file=out)
         initiator_shell.command("stream off")
         after_initiator = initiator_shell.status()
         after_acceptor = acceptor_shell.status()
@@ -556,6 +567,9 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
     if after_acceptor["rx_bytes"] < payload:
         problems.append(f"the acceptor received {after_acceptor['rx_bytes']} "
                         "bytes, less than one payload")
+    if seconds < min_seconds:
+        problems.append(f"{command[0]} ran {seconds:.1f} s, less than the "
+                        f"{min_seconds:g} s this test needs: it stopped early")
     if problems:
         raise PeerError("the pair did not stream: " + "; ".join(problems))
     print("pair streamed: yes", file=out)
@@ -583,6 +597,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     pair.add_argument("--payload", type=int, default=DEFAULT_PAYLOAD, help="bytes")
     pair.add_argument("--min-writes", type=int, default=1,
                       help="writes the initiator must report afterwards")
+    pair.add_argument("--min-seconds", type=float, default=0.0,
+                      help="seconds the command must run for, so a capture "
+                           "that stopped early is not taken for a pass")
     pair.add_argument("--timeout", type=float, default=300.0,
                       help="seconds the command may take")
     # Everything after the first -- is the command to run, untouched: its own
@@ -603,7 +620,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 Peer(args.acceptor, "acceptor", args.acceptor_address),
                 Peer(args.initiator, "initiator", args.initiator_address),
                 command, period=args.period, payload=args.payload,
-                min_writes=args.min_writes, timeout=args.timeout)
+                min_writes=args.min_writes, min_seconds=args.min_seconds,
+                timeout=args.timeout)
         peer = Peer(args.device, args.role, args.address)
         if args.command == "identify":
             identify(peer)

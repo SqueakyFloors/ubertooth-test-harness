@@ -48,6 +48,8 @@ from ubertooth_harness.hostneeds import Needs
 from ubertooth_harness.receive_cases import (
     EARLY_EXIT_S,
     EXIT_SLACK_S,
+    PACKET_LINE,
+    SURVEY_LINE,
     _capture_header,
     packet_check,
     seconds_arg,
@@ -85,11 +87,22 @@ MIN_PACKETS = 10
 # Writes the initiator must report afterwards, so a case cannot pass on a
 # link that came up and then sent nothing.
 MIN_WRITES = 50
-# Opening both bridges resets both boards; they boot, start Bluetooth, and
-# then the initiator pages the acceptor and looks its channel up over SDP.
-# The step's deadline adds this to the capture's own duration.
-PAIR_SETUP_S = 60.0
-PEER_TIMEOUT_S = 40.0
+# Everything the driver does around the capture, taken from its own
+# deadlines, so a slow boot or a page that goes unanswered ends in
+# esp32peer.py's own message rather than in the harness calling the step
+# hung: two bridges opened (each resets its board and waits for the boot
+# notice), the settings written, the page and the SDP lookup, the settle,
+# and then both boards reset again to release them.
+PAIR_SETUP_S = (
+    2 * esp32peer.BOOT_TIMEOUT_S                      # both boards boot
+    + 8 * esp32peer.COMMAND_TIMEOUT_S                 # settings and statuses
+    + esp32peer.CONNECT_TIMEOUT_S                     # page and SDP lookup
+    + esp32peer.SETTLE_S
+    + 2 * (esp32peer.BOOT_TIMEOUT_S                   # the two releases
+           + 2 * esp32peer.COMMAND_TIMEOUT_S)
+)
+# One identify or reset: an open with its reset, then a status read.
+PEER_TIMEOUT_S = esp32peer.BOOT_TIMEOUT_S + 4 * esp32peer.COMMAND_TIMEOUT_S
 
 _ESP32PEER = str(Path(esp32peer.__file__).resolve())
 # The peers are reached through /dev/serial/by-id, which is Linux's.
@@ -112,6 +125,15 @@ def _peer(resource_identities: Mapping, role: str, test_name: str) -> dict:
     except esp32peer.PeerError as error:
         raise StateCaseError(f"{test_name}: {role} {error}") from error
     lap, uap = esp32peer.address_parts(address)
+    # A registry may write the LAP and UAP down beside the address, for a
+    # person reading it. A note that disagrees would send this test looking
+    # for the wrong piconet, so it is refused rather than ignored.
+    for key, derived in (("LAP", lap), ("UAP", uap)):
+        written = identity.get(key)
+        if written is not None and written.lower() != derived:
+            raise StateCaseError(
+                f"{test_name}: the {role}'s registered {key} is {written}, but "
+                f"its BD_ADDR {address} gives {derived}")
     return {"serial": serial, "address": address, "device": device,
             "lap": lap, "uap": uap}
 
@@ -130,15 +152,6 @@ def _pair(resource_identities: Mapping, test_name: str) -> tuple[dict, dict]:
 # Output checks
 
 
-# The packet line ubertooth-rx prints for every access code it decodes
-# (the fork's ubertooth_callback.c, cb_br_rx), with its LAP picked out.
-_PACKET_LAP = re.compile(
-    r"^systime=\d+ ch=\s*\d+ LAP=(?P<lap>[0-9a-f]{6}) err=\d+ clkn=\d+ "
-    r"clk_offset=\d+ s=-?\d+ n=-?\d+ snr=-?\d+$")
-# A survey result line: ??:??:<UAP or ??>:<the three LAP bytes>.
-_SURVEY_LAP = re.compile(
-    r"^\?\?:\?\?:(?:\?\?|[0-9A-F]{2}):(?P<lap>[0-9A-F]{2}:[0-9A-F]{2}:[0-9A-F]{2})$")
-
 Check = Callable[[str], str]
 
 
@@ -151,7 +164,7 @@ def _all(*checks: Check) -> Check:
 
 def _packet_laps(output: str) -> list[str]:
     return [match["lap"]
-            for match in map(_PACKET_LAP.match, output.splitlines()) if match]
+            for match in map(PACKET_LINE.match, output.splitlines()) if match]
 
 
 def _survey_laps(output: str) -> set[str]:
@@ -161,7 +174,7 @@ def _survey_laps(output: str) -> set[str]:
         return set()
     found = set()
     for line in lines[lines.index("Survey Results") + 1:]:
-        match = _SURVEY_LAP.match(line)
+        match = SURVEY_LINE.match(line)
         if match:
             found.add(match["lap"].replace(":", "").lower())
     return found
@@ -228,39 +241,10 @@ def _peer_command(command: str, peer: Mapping, role: str) -> tuple[str, ...]:
             "--address", peer["address"], "--role", role)
 
 
-def _identify_step(step_id: str, peer: Mapping, role: str) -> Step:
-    return Step(step_id, f"The {role} answers at its registered BD_ADDR",
-                _peer_command("identify", peer, role), timeout_s=PEER_TIMEOUT_S,
-                mutates=True,  # opening the bridge resets the board
-                output_patterns=(
-                    # The exact version goes in the run record; the driver
-                    # refuses one too old to drive.
-                    rf"(?m)^{role} firmware: utesp-\d+\.\d+\.\d+$",
-                    rf"(?m)^{role} address: {peer['address']}$",
-                    rf"(?m)^{role} LAP: {peer['lap']} UAP: {peer['uap']}$",
-                ))
-
-
 def _reset_step(step_id: str, peer: Mapping, role: str) -> Step:
     return Step(step_id, f"Reset the {role} to the firmware's boot state",
                 _peer_command("reset", peer, role), timeout_s=PEER_TIMEOUT_S,
                 output_patterns=(rf"(?m)^{role} role: {ACCEPTOR_ROLE} ",))
-
-
-def _ready_case(acceptor: Mapping, initiator: Mapping) -> StateCase:
-    """Both peers run usable firmware at their registered addresses."""
-    return StateCase(
-        "peers-ready",
-        f"Both ESP32 peers run {esp32peer.MINIMUM_FIRMWARE} or later at their "
-        "registered BD_ADDRs",
-        (_identify_step("identify-acceptor", acceptor, ACCEPTOR_ROLE),
-         _identify_step("identify-initiator", initiator, INITIATOR_ROLE)),
-        (_reset_step("reset-acceptor", acceptor, ACCEPTOR_ROLE),
-         _reset_step("reset-initiator", initiator, INITIATOR_ROLE)),
-        expected_state=(f"both peers run {esp32peer.MINIMUM_FIRMWARE} or later, "
-                        f"in the {ACCEPTOR_ROLE} role, with nothing streamed"),
-        needs=LINUX_ONLY,
-    )
 
 
 def _capture_path(name):
@@ -284,6 +268,7 @@ def _stream_argv(acceptor, initiator, serial, seconds, options, files):
             "--period", str(STREAM_PERIOD_MS),
             "--payload", str(STREAM_PAYLOAD),
             "--min-writes", str(MIN_WRITES),
+            "--min-seconds", str(seconds - EARLY_EXIT_S),
             "--timeout", str(seconds + EXIT_SLACK_S),
             "--", "ubertooth-rx", "-U", serial, "-t", str(seconds),
         ) + tuple(options) + tuple(capture)
@@ -298,7 +283,7 @@ def _pair_patterns(acceptor, initiator) -> tuple[str, ...]:
         rf"(?m)^master LAP: {initiator['lap']}$",
         rf"(?m)^master UAP: {initiator['uap']}$",
         r"(?m)^link: up to ",
-        r"(?m)^command exit: 0$",
+        r"(?m)^command exit: 0 after \d+\.\d s$",
         r"(?m)^pair streamed: yes$",
     )
 
@@ -314,7 +299,8 @@ def _capture_case(serial, acceptor, initiator, seconds, *, case_id, name,
              + " ".join(tuple(options) + tuple(option for option, _f in files)),
              _stream_argv(acceptor, initiator, serial, seconds, options, files),
              timeout_s=PAIR_SETUP_S + seconds + EXIT_SLACK_S,
-             min_duration_s=seconds - EARLY_EXIT_S,
+             # A floor on the capture's own run belongs to the driver, which
+             # times the child; this step's duration is the whole session.
              mutates=True,
              output_patterns=_pair_patterns(acceptor, initiator),
              output_check=check),
@@ -348,7 +334,6 @@ def known_classic_cases(arguments, _resources, resource_identities):
         return _capture_case(serial, acceptor, initiator, seconds, **options)
 
     cases = [
-        _ready_case(acceptor, initiator),
         capture(case_id="survey",
                 name=f"ubertooth-rx -z lists the pair's master LAP {master}",
                 options=("-z",),
@@ -396,7 +381,6 @@ def follow_classic_cases(arguments, _resources, resource_identities):
         return _capture_case(serial, acceptor, initiator, seconds, **options)
 
     cases = [
-        _ready_case(acceptor, initiator),
         capture(case_id="follow-lap-uap",
                 name=f"ubertooth-rx -l {master} -u {master_uap} reports the "
                      "piconet's packets",

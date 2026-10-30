@@ -9,8 +9,6 @@ from typing import Mapping, Protocol, Sequence
 
 import yaml
 
-from ubertooth_harness.esp32peer import address_parts
-
 
 _ALIAS_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 
@@ -51,10 +49,15 @@ ESP32_CLASSIC_PEER = "ESP32 Classic peer"
 # holds both and `role <name>` switches between them, so a board may declare
 # both; the initiator pages, so it is the piconet master.
 PEER_ROLES = ("acceptor", "initiator")
+# LAP, UAP and name are notes: the lab registry records what the board's
+# status reports, for a person reading it. The code derives the LAP and UAP
+# from the address, and classic_cases.py refuses a note that disagrees.
 _PEER_IDENTITY_KEYS = ("bridge serial", "BD_ADDR", "LAP", "UAP", "name",
                        "serial device")
-# The CP2102N's serial, as it appears in its /dev/serial/by-id path.
-_BRIDGE_SERIAL = re.compile(r"^[0-9a-fA-F]{8,32}$")
+# The CP2102N's serial, as it appears in its /dev/serial/by-id path: lower
+# case, which is how the kernel writes it there. Requiring that one form
+# keeps the lease key and the device path from disagreeing.
+_BRIDGE_SERIAL = re.compile(r"^[0-9a-f]{8,32}$")
 
 
 def _validate_peer(resource) -> None:
@@ -69,7 +72,8 @@ def _validate_peer(resource) -> None:
     if not _BRIDGE_SERIAL.fullmatch(resource.identity.get("bridge serial", "")):
         raise RegistryError(
             f"{ESP32_CLASSIC_PEER} {alias} requires a 'bridge serial' identity "
-            "(8-32 hex digits, the CP2102N's serial)"
+            "(8-32 lower-case hex digits, the CP2102N's serial as its "
+            "/dev/serial/by-id path holds it)"
         )
     # Both boards' addresses are needed: the initiator calls the acceptor's,
     # and every case checks the tool's output against the master's LAP and UAP.
@@ -78,19 +82,6 @@ def _validate_peer(resource) -> None:
             f"{ESP32_CLASSIC_PEER} {alias} requires a 'BD_ADDR' identity "
             "(the address its status reports), like C8:85:41:2A:1B:2A"
         )
-    # LAP, UAP and name are what the board's own status reports. They are
-    # written down because a person reading the registry wants them, and the
-    # code derives them from the address, so a copy that disagrees is a typo
-    # worth catching before a test looks for the wrong piconet.
-    lap, uap = address_parts(resource.identity["BD_ADDR"])
-    expected = {"LAP": lap, "UAP": uap, "name": f"UT-ESP32-{lap.upper()}"}
-    for key, value in expected.items():
-        written = resource.identity.get(key)
-        if written is not None and written.lower() != value.lower():
-            raise RegistryError(
-                f"{ESP32_CLASSIC_PEER} {alias} {key} is {written}, but "
-                f"{resource.identity['BD_ADDR']} gives {value}"
-            )
     device = resource.identity.get("serial device")
     if device is not None and not is_stable_serial_device(device):
         raise RegistryError(
