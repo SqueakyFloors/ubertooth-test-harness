@@ -413,7 +413,7 @@ class PreflightTests(unittest.TestCase):
     def test_firmware_check_accepts_the_application_image_name(self):
         # Fork 730b4f5 (#523): -v names the image ahead of the revision.
         with tempfile.TemporaryDirectory() as directory:
-            _, source, _, checks = self.prepare(directory)
+            _root, source, _manifest, checks = prepare_preflight(directory)
             check = next(c for c in checks if c.name == "Firmware version")
             revision = source.expected_revision
 
