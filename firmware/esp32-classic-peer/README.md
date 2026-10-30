@@ -559,8 +559,10 @@ status line with a link up cost a round trip to the controller.
 
 `defaults` puts every channel back, and only sends a command if a map was
 asked for, so `defaults` behaves exactly as it did on a board that has never
-run `afh`. A `reset` or a power cycle leaves the controller hopping over
-every channel.
+run `afh`. It does that last, after everything else is restored, and answers
+with the reasons in the table above if the channel map is the part that
+failed. A `reset` or a power cycle leaves the controller hopping over every
+channel.
 
 ### How the link's map is read
 

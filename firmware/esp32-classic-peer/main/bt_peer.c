@@ -88,6 +88,7 @@ static struct {
     uint8_t afh_asked[AFH_MAP_LEN]; /* the map the last "afh" sent it */
     esp_bt_status_t afh_status; /* what the controller said about that */
     bool afh_owed;              /* a map the controller has not answered */
+    bool afh_waiting;           /* and a command still waiting for it */
 } st;
 
 static SemaphoreHandle_t st_lock;     /* guards st against the callbacks */
@@ -308,8 +309,14 @@ static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
             memcpy(st.afh, st.afh_asked, AFH_MAP_LEN);
         }
         st.afh_owed = false;
+        /* Only a command still waiting is woken, and the waking happens
+         * under the lock: a late answer to a command that gave up must not
+         * wake the next one, which would take this answer for its own. */
+        if (st.afh_waiting) {
+            st.afh_waiting = false;
+            xSemaphoreGive(afh_ev);
+        }
         UNLOCK();
-        xSemaphoreGive(afh_ev);
         break;
 
     default:
@@ -830,7 +837,7 @@ static const char *afh_apply(const uint8_t *map)
 {
     esp_bt_gap_afh_channels channels;
     esp_bt_status_t status;
-    bool started, owed;
+    bool started, owed, answered;
 
     LOCK();
     started = st.started;
@@ -853,22 +860,32 @@ static const char *afh_apply(const uint8_t *map)
     }
 
     memcpy(channels, map, AFH_MAP_LEN);
-    xSemaphoreTake(afh_ev, 0); /* drop the signal a late answer left */
+    xSemaphoreTake(afh_ev, 0); /* so the wait below is this map's */
+    LOCK();
+    st.afh_waiting = true;
+    UNLOCK();
+
     if (esp_bt_gap_set_afh_channels(channels) != ESP_OK) {
         LOCK();
         st.afh_owed = false; /* nothing went out, so nothing is owed */
+        st.afh_waiting = false;
         UNLOCK();
         return "the stack would not take the channel map";
     }
-    if (xSemaphoreTake(afh_ev, pdMS_TO_TICKS(AFH_TIMEOUT_MS)) != pdTRUE) {
+    xSemaphoreTake(afh_ev, pdMS_TO_TICKS(AFH_TIMEOUT_MS));
+
+    /* The answer, not the semaphore, decides: one that arrived just as the
+     * wait ran out is still this map's answer. */
+    LOCK();
+    answered = !st.afh_waiting;
+    st.afh_waiting = false;
+    status = st.afh_status;
+    UNLOCK();
+    if (!answered) {
         /* The answer may still arrive, so the board goes on owing one, and
          * the map is still this board's to report if it is taken. */
         return "the controller did not answer the channel map";
     }
-
-    LOCK();
-    status = st.afh_status;
-    UNLOCK();
     return status == ESP_BT_STATUS_SUCCESS ? NULL : afh_refused_reason(status);
 }
 
@@ -1015,17 +1032,18 @@ const char *bt_defaults(void)
     put_channels_back = memcmp(st.afh, afh_all, AFH_MAP_LEN) != 0;
     UNLOCK();
 
-    /* Only when a map was asked for. A board that has never set one needs no
-     * command, so "defaults" goes on working exactly as it did even on a
-     * controller that will not take a channel map at all. */
-    if (put_channels_back && (err = afh_apply(afh_all)) != NULL) {
-        return err;
-    }
-
     if ((err = bt_set_discoverable(true)) != NULL) {
         return err;
     }
-    return bt_spp_start();
+    if ((err = bt_spp_start()) != NULL) {
+        return err;
+    }
+
+    /* The channel map goes back last, and only when a map was asked for. A
+     * board that has never set one needs no command at all, and a controller
+     * that will not take the all-channel map cannot leave the rest of the
+     * defaults unapplied. */
+    return put_channels_back ? afh_apply(afh_all) : NULL;
 }
 
 /* The audio link needs the role and the address "spp peer" set, and both

@@ -102,11 +102,13 @@ static void afh_complete(BT_HDR *response, void *context)
     uint8_t mode = 0;
 
     (void)context;
-    memset(&got, 0, sizeof(got));
-    got.status = HCI_ERR_UNSPECIFIED; /* until the event says otherwise */
-
-    /* A controller that refuses the command may answer with the status
+    /* The zeroed status is success, which with complete still false reads as
+     * a short answer: an event with no status byte in it at all is exactly
+     * that, and must not be reported as a refusal the controller never made.
+     *
+     * A controller that refuses the command may answer with the status
      * alone, so each part is read only once it is known to be there. */
+    memset(&got, 0, sizeof(got));
     stream += EVENT_OPCODE_LEN; /* event code, length, credits, and opcode */
     if (response->len >= EVENT_STATUS_LEN) {
         STREAM_TO_UINT8(got.status, stream);
