@@ -571,6 +571,17 @@ class CheckerTests(unittest.TestCase):
         self.assertIn("channel 5", receive_cases.packet_check(channel=39)(out))
         self.assertIn("2 access-code errors", receive_cases.packet_check(max_errors=0)(out))
         self.assertEqual("", receive_cases.packet_check(max_errors=2)(out))
+        # A mode with no background estimate prints the word, not a figure
+        # (fork 532adc19), and the line still counts as a packet.
+        absent = ("systime=1 ch={ch:2d} LAP=9e8b33 err={err} clkn=1 "
+                  "clk_offset=1 s=-4 n=none snr=none")
+        self.assertIn("channel 5", receive_cases.packet_check(channel=39)(
+            absent.format(ch=39, err=0) + "\n" + absent.format(ch=5, err=2) + "\n"))
+        # The ratio comes from the noise, so one of each is a malformed line
+        # and counts as no packet at all.
+        mixed = absent.replace("snr=none", "snr=1")
+        self.assertEqual("", receive_cases.packet_check(channel=39)(
+            mixed.format(ch=5, err=2) + "\n"))
         survey = receive_cases.packet_check(survey=True)
         self.assertEqual("", survey("Survey Results\n??:??:47:9E:8B:33\n"))
         self.assertEqual("", survey("Survey Results\n"))
