@@ -1129,8 +1129,10 @@ squelch, and LEDs.
 comfortably, not an expected capture rate, and it is bench-specific: a weaker
 link or a noisier room can fail it without anything being wrong with the code.
 The test needs two kinds of hardware and a flashable DK, so it cannot run
-anywhere the DK is absent. The DK firmware build is not yet produced by CI
-([#147](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/147)).
+anywhere the DK is absent. The DK firmware image itself comes from a local
+build: CI compiles it (the `Firmware` workflow, `scripts/ci.sh firmware-dk`)
+but publishes nothing, so a run still needs the image passed in as
+`--artifact "nRF52840 advertiser=PATH"`.
 
 ## Capture known BLE connection
 
