@@ -6,6 +6,15 @@ import re
 FIRMWARE_PATTERN = r"Firmware version:\s+\S+"
 COMPILE_INFO_PATTERN = r"\bubertooth\s+\S+\s+\("
 
+# The two other lines of the `-V` answer, which libubertooth prints for every
+# tool (host/libubertooth/src/ubertooth_version.c): the host tools' own
+# version, and the board's build string under its own label. Since fork
+# f898fe5 (SqueakyFloors/ubertooth#813) `-V` is the version command and ends
+# the command, so this answer is the whole of what a command line carrying it
+# prints; the build string used to come out bare, with no label.
+HOST_VERSION_LINE = r"(?m)^Host tools version: libubertooth \S+"
+FIRMWARE_BUILD_LINE = r"(?m)^Firmware build: "
+
 # `ubertooth-util -v` names the image the build came from when the firmware
 # carries an info block ("Firmware version: bluetooth_rxtx git-1c7f06d6
 # (API:1.35)"), and leaves it out when it does not ("Firmware version:

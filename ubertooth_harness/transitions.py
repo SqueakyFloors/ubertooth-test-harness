@@ -33,6 +33,13 @@ Command contracts below come from the Ubertooth fork sources:
   ``-c2426 -c``, ``-c -c2426``, ``-a5 -a``, ``-l1 -l``, ``-d1 -d`` (fork
   5b45b3e, SqueakyFloors/ubertooth#228; before it the later option replaced
   the earlier one and the set was dropped). ``-z`` always kept both.
+- ``-V`` is the version command and ends the command: since fork f898fe5
+  (SqueakyFloors/ubertooth#813) ``ubertooth-util`` prints the host tools'
+  version and the board's firmware version and build, then returns, before
+  any identity query runs. So it does not compose with the other reads, and
+  ``-V -s`` prints no serial line. Its firmware lines carry labels of their
+  own (``Firmware build: ...``), where the old ``-V`` printed the bare build
+  string.
 - ``-z`` (set or read) with a mode option is refused (fork 4ed4a1d).
 - ``-S`` requests idle mode. From idle it changes nothing, so settings persist
   between idle commands. Leaving an active mode (xmas, range test, repeater,
@@ -70,7 +77,10 @@ from ubertooth_harness.cases import ALTERNATED_ROLE_PREFIX, CommandCase, guard_r
 from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
     COMPILE_INFO_PATTERN,
+    FIRMWARE_BUILD_LINE,
     FIRMWARE_PATTERN,
+    HOST_VERSION_LINE,
+    HOST_VERSION_TIMEOUT_S,
     IMAGE_NAME_PATTERN,
     PART_ID_PATTERN,
     serial_pattern,
@@ -841,9 +851,12 @@ def radio_setting_cases(arguments, _resources, resource_identities):
 # ---------------------------------------------------------------------------
 # Read-only same-command compositions
 
+# The reads that compose: each adds its own lines to one command's output.
+# -V is not one of them. Since fork f898fe5 (#813) it is the version command
+# and ends the command before any query runs, so it is covered on its own
+# below instead.
 _QUERY_OPTIONS = (
     ("-v", "firmware", FIRMWARE_PATTERN),
-    ("-V", "compile", COMPILE_INFO_PATTERN),
     ("-s", "serial", None),
     ("-p", "part", PART_ID_PATTERN),
     ("-b", "board", BOARD_ID_PATTERN),
@@ -854,6 +867,33 @@ _QUERY_OPTIONS = (
     ("-d", "all-leds", r"RX LED status : [01]\s+TX LED status : [01]"),
 )
 _USR_LED_LINE = r"USR LED status: [01]"
+# The case id of the -V case, which is not an option composition.
+VERSION_CASE = "version-ends-the-command"
+
+
+def _version_case(serial):
+    """-V beside a query answers the version and nothing else.
+
+    Since fork f898fe5 (#813) -V is the version command: ubertooth-util
+    returns as soon as it has printed the answer, before the identity queries
+    run. So -V -s prints the version answer and no serial line, and the
+    answer carries labels of its own ("Firmware build: ...") rather than the
+    bare build string the old -V printed.
+    """
+    return CommandCase(
+        VERSION_CASE,
+        "-V beside a query answers the version alone",
+        _util(serial, "-V", "-s"),
+        (
+            HOST_VERSION_LINE,
+            FIRMWARE_PATTERN,
+            FIRMWARE_BUILD_LINE,
+            COMPILE_INFO_PATTERN,
+            # -V ended the command, so -s never ran.
+            rf"\A(?![\s\S]*{serial_pattern(serial)})",
+        ),
+        timeout_s=HOST_VERSION_TIMEOUT_S,
+    )
 
 
 def _query_patterns(options, serial):
@@ -880,13 +920,7 @@ def _query_case(case_id, name, options, serial):
 def util_composition_cases(arguments, _resources, resource_identities):
     serial = _serial(resource_identities, "Ubertooth util compositions")
     every = tuple(option for option, _label, _pattern in _QUERY_OPTIONS)
-    cases = [
-        _query_case(
-            "documented-version-composition",
-            "Documented -v -V composition",
-            ("-v", "-V"),
-            serial,
-        ),
+    compositions = [
         _query_case(
             "full-readback-composition",
             "Every read-only report in one command",
@@ -894,8 +928,9 @@ def util_composition_cases(arguments, _resources, resource_identities):
             serial,
         ),
     ]
+    cases = [_version_case(serial), *compositions]
     if arguments["coverage"] == "comprehensive":
-        covered = {frozenset(case.argv[3:]) for case in cases}
+        covered = {frozenset(case.argv[3:]) for case in compositions}
         cases.append(
             # Two -U name two boards for one command, so it is refused before
             # either is opened; the last one used to be selected.

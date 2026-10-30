@@ -57,6 +57,7 @@ from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
     COMPILE_INFO_PATTERN,
     FIRMWARE_PATTERN,
+    HOST_VERSION_TIMEOUT_S,
     PART_ID_PATTERN,
     serial_pattern,
 )
@@ -700,10 +701,11 @@ def range_test_cases(arguments, _resources, resource_identities):
 # the guard boards are only read; the guard checks prove it.
 
 # A listed line carries its report label and the board's index: "Firmware
-# version (0): git-abc (API:1.37)". Compile info has no label of its own, so
-# it keeps the bare "0: <value>" form. Each check says which label it expects
-# per line, so the bare form is only accepted where the tool has no label to
-# print -- otherwise a regression to the old unlabelled listing would pass.
+# version (0): git-abc (API:1.37)". The tool falls back to the bare
+# "0: <value>" form for a report line that does not start with its label, so
+# that form is parsed too; every query the listing can show does carry a
+# label, and each check says which one it expects per line, so a regression to
+# the old unlabelled listing is rejected rather than accepted.
 _LABELLED_LINE = re.compile(r"^(?P<label>[A-Za-z][^(]*?) \((?P<index>\d+)\): (?P<text>.*)$")
 _BARE_LINE = re.compile(r"^(?P<index>\d+): (?P<text>.*)$")
 # Values that stand in for a reading rather than carry one: a board the tool
@@ -730,17 +732,32 @@ def listed_board(index: str, serial: str) -> str:
     return LISTED_BOARD % (index, re.escape(serial))
 
 
-# Report lines per board for -vVspb, in ubertooth-util's report order: the
-# query, its name here, the label it is listed under ("" where the report has
-# none), and the line it must match. This is the one place the harness states
-# the tool's report protocol; the tests derive their fake from it rather than
-# repeating it.
+# Report lines per board for -bvps, in ubertooth-util's report order: the
+# query, its name here, the label it is listed under, and the line it must
+# match. These are the four identity queries the listing can show
+# (QUERY_COUNT in the fork's ubertooth-util.c). -V is not among them: it is
+# the version command, answers for every board itself, and ends the command
+# before the listing is reached (fork f898fe5, SqueakyFloors/ubertooth#813);
+# version_listing_check() below covers that answer. This is the one place the
+# harness states the tool's report protocol; the tests derive their fake from
+# it rather than repeating it.
 _BLOCK_PATTERNS = (
     ("-b", "board ID", "Board ID Number", BOARD_ID_PATTERN),
     ("-v", "firmware", "Firmware version", FIRMWARE_PATTERN),
-    ("-V", "compile info", "", COMPILE_INFO_PATTERN),
     ("-p", "part ID", "Part ID", PART_ID_PATTERN),
     ("-s", "serial", _SERIAL_LABEL, rf"^{_SERIAL_LABEL}: {_SERIAL_RE}$"),
+)
+# The -V answer's own lines, in the order it prints them per board. The host
+# tools' line comes first, once, and the libbtbb path line beside it is not
+# about a board at all.
+_HOST_VERSION_PREFIX = "Host tools version: "
+_LIBBTBB_PATH_PREFIX = "libbtbb loaded from: "
+_VERSION_REPORTS = (
+    ("Firmware version", FIRMWARE_PATTERN),
+    ("Firmware build", COMPILE_INFO_PATTERN),
+)
+_VERSION_LINE = re.compile(
+    r"^(?P<label>Firmware version|Firmware build) \((?P<index>\d+)\): (?P<text>.*)$"
 )
 # The label each identity query is listed under, in report order.
 LISTING_LABELS = tuple((query, label)
@@ -807,8 +824,48 @@ def serial_listing_check(registered):
     return check
 
 
+def version_listing_check(count):
+    """`-V` with several boards: the host tools' version, then the firmware
+    version and build of every board, each labelled with the board's index.
+
+    `-V` is the version command, so it is not part of the identity listing:
+    since fork f898fe5 it ends the command and reports every attached board
+    itself. The answer carries no serial, so which board is which cannot be
+    checked here; the identity listing does that.
+    """
+    def check(stdout):
+        lines = stdout.splitlines()
+        if not lines or not lines[0].startswith(_HOST_VERSION_PREFIX):
+            first = lines[0] if lines else ""
+            return f"the first line is not the host tools' version: {first!r}"
+        reports = [line for line in lines[1:]
+                   if not line.startswith(_LIBBTBB_PATH_PREFIX)]
+        expected = [(label, index, pattern) for index in range(count)
+                    for label, pattern in _VERSION_REPORTS]
+        if len(reports) != len(expected):
+            return (f"{len(reports)} report lines is not "
+                    f"{len(_VERSION_REPORTS)} per board for {count} boards")
+        for line, (label, index, pattern) in zip(reports, expected):
+            match = _VERSION_LINE.match(line)
+            if match is None:
+                return ("line is not '<label> (<index>): <value>': "
+                        f"{line!r}")
+            if (match["label"], int(match["index"])) != (label, index):
+                return (f"expected the {label} of board {index} here, "
+                        f"got {line!r}")
+            value = match["text"]
+            if value.startswith(_UNAVAILABLE):
+                return f"board {index} could not be opened: {line!r}"
+            if value.endswith(_READ_FAILED):
+                return f"board {index} read failed: {line!r}"
+            if not re.search(pattern, _single_board_line(label, value)):
+                return f"board {index} {label} line {line!r} does not match"
+        return ""
+    return check
+
+
 def identity_listing_check(registered):
-    """`-vVspb` listing: per board, in index order, the five report lines."""
+    """`-bvps` listing: per board, in index order, the four report lines."""
     def check(stdout):
         entries, reason = _listing(stdout)
         if reason:
@@ -845,7 +902,11 @@ def _multi_case(serial, case_id, name, steps, expected_state):
 
 
 def _listing_step(step_id, name, argv, check):
-    return Step(step_id, name, argv, output_check=check)
+    # A listing reads every attached board, and -V costs a libusb control
+    # timeout or two for one that does not answer, so the usual 5 s is not
+    # enough on a host with several boards (patterns.py).
+    return Step(step_id, name, argv, timeout_s=HOST_VERSION_TIMEOUT_S,
+                output_check=check)
 
 
 def _single_board_skip(serial):
@@ -925,6 +986,11 @@ def multi_board_cases(arguments, _resources, resource_identities):
     if arguments["coverage"] == "comprehensive":
         every = "".join(option[1] for option in IDENTITY_QUERIES)
         identities = identity_listing_check(registered)
+        versions = version_listing_check(count)
+        per_board = len(_BLOCK_PATTERNS)
+        listed = f"{per_board} labelled report lines per registered board, in index order"
+        version_state = ("the host tools' version, then the firmware version and "
+                         "build of every registered board, in index order")
         cases += [
             _multi_case(
                 serial, "all-lists-every-identity-query",
@@ -932,14 +998,30 @@ def multi_board_cases(arguments, _resources, resource_identities):
                 (_listing_step("list", f"-U all -{every}",
                                ("ubertooth-util", "-U", "all", f"-{every}"),
                                identities),),
-                "five labelled report lines per registered board, in index order",
+                listed,
             ),
             _multi_case(
                 serial, "no-selector-lists-every-identity-query",
                 f"-{every} without -U reports every query for every board",
                 (_listing_step("list", f"-{every} without -U",
                                ("ubertooth-util", f"-{every}"), identities),),
-                "five labelled report lines per registered board, in index order",
+                listed,
+            ),
+            # -V is the version command: it answers for every board itself,
+            # with -U all and with no selector alike, and ends the command.
+            _multi_case(
+                serial, "all-reports-every-board-version",
+                "-U all -V reports the version of every board",
+                (_listing_step("list", "-U all -V",
+                               ("ubertooth-util", "-U", "all", "-V"), versions),),
+                version_state,
+            ),
+            _multi_case(
+                serial, "no-selector-reports-every-board-version",
+                "-V without -U reports the version of every board",
+                (_listing_step("list", "-V without -U", ("ubertooth-util", "-V"),
+                               versions),),
+                version_state,
             ),
             _multi_case(
                 serial, "no-selector-other-option-refused",

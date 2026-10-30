@@ -1246,11 +1246,17 @@ class RunSuiteCliIsolationTests(unittest.TestCase):
                     argv = argv[:1] + argv[3:]
                 # The compile identity of the board the check named. Bare -V
                 # is the host version check, which the base fake answers.
+                # -V is the version command and answers in full wherever it
+                # is asked (fork f898fe5): the host line, then this board's
+                # firmware version and build.
                 if selected and argv == ("ubertooth-util", "-V"):
                     self.commands.append(argv)
-                    return CommandResult(
-                        argv, 0, f"ubertooth {revision} (test@host)\n", "", 0.01, False, False
+                    answer = (
+                        f"Host tools version: libubertooth 1.1 ({revision})\n"
+                        f"Firmware version: {revision} (API:1.07)\n"
+                        f"Firmware build: ubertooth {revision} (test@host)\n"
                     )
+                    return CommandResult(argv, 0, answer, "", 0.01, False, False)
                 result = super().run(argv, **kwargs)
                 return replace(result, stdout=result.stdout.replace("git-test", revision))
 

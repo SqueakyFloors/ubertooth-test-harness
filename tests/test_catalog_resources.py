@@ -140,7 +140,7 @@ class CatalogTests(unittest.TestCase):
             ("ubertooth-util", "-U", "abc123", "-v"), cases[0].argv
         )
         self.assertEqual(
-            ("ubertooth-util", "-U", "abc123", "-vVspb"), cases[-1].argv
+            ("ubertooth-util", "-U", "abc123", "-vspb"), cases[-1].argv
         )
         self.assertTrue(definition.continue_on_case_failure)
 

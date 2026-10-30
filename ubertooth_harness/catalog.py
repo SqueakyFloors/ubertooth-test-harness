@@ -17,7 +17,9 @@ from ubertooth_harness.rf import (
 from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
     COMPILE_INFO_PATTERN,
+    FIRMWARE_BUILD_LINE,
     FIRMWARE_PATTERN,
+    HOST_VERSION_LINE,
     HOST_VERSION_TIMEOUT_S,
     PART_ID_PATTERN,
     serial_pattern,
@@ -608,11 +610,17 @@ def _ubertooth_identity_cases(_arguments, _resources, resource_identities):
         CommandCase(
             "firmware-version", "Firmware version", common + ("-v",), (firmware,)
         ),
+        # -V is the version command, not an identity query: since fork
+        # f898fe5 (SqueakyFloors/ubertooth#813) it answers with the host
+        # tools' version and the board's firmware version and build, then
+        # ends the command. So it is read on its own, and the composition
+        # below asks for the four queries that do compose.
         CommandCase(
             "firmware-compile-info",
             "Firmware compile info",
             common + ("-V",),
-            (compile_info,),
+            (HOST_VERSION_LINE, firmware, FIRMWARE_BUILD_LINE, compile_info),
+            timeout_s=HOST_VERSION_TIMEOUT_S,
         ),
         CommandCase(
             "device-serial", "Device serial", common + ("-s",), (serial_output,)
@@ -622,8 +630,8 @@ def _ubertooth_identity_cases(_arguments, _resources, resource_identities):
         CommandCase(
             "complete-readback-composition",
             "Complete readback composition",
-            common + ("-vVspb",),
-            (firmware, compile_info, serial_output, part, board),
+            common + ("-vspb",),
+            (firmware, serial_output, part, board),
         ),
     )
 

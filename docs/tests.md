@@ -224,10 +224,10 @@ name it.
 **What it does.** Nothing yet: a catalog entry for reading the firmware's
 compile identity from one board.
 
-**Theory of operation.** Not established. `Ubertooth identity` checks
-`ubertooth-util -V` against the compile-info pattern, and the guard readback
-uses the same line, whose build timestamp also catches a reflash of the same
-revision.
+**Theory of operation.** Not established. `Ubertooth identity` checks the
+whole `ubertooth-util -V` answer, the compile-info pattern among it, and the
+guard readback uses the same `Firmware build:` line, whose build timestamp
+also catches a reflash of the same revision.
 
 **Hardware and arguments.** One `Ubertooth`.
 
@@ -285,29 +285,30 @@ name it.
 
 ## Ubertooth identity
 
-**What it does.** Reads the five identity reports from one board, each on its
-own command line, and then all five in one command.
+**What it does.** Reads the identity reports from one board, each on its own
+command line, and then the four that compose in one command.
 
 **Theory of operation.** The registry already knows the board's serial, so the
 `-s` read has a known right answer and proves the command reached the board the
-plan selected rather than whichever board USB offered first. The other four
-reads are checked against the shape the tools print. The composed `-vVspb`
-case then requires all five reports from one command: a parser that drops a
-report when several are asked for passes the single-option cases and fails
-this one.
+plan selected rather than whichever board USB offered first. The other reads
+are checked against the shape the tools print. The composed `-vspb` case then
+requires all four reports from one command: a parser that drops a report when
+several are asked for passes the single-option cases and fails this one. `-V`
+is not in that composition. It is the version command: since fork `f898fe5`
+it prints the host tools' version and the board's firmware version and build,
+then ends the command, so its case asks for the whole of that answer on its
+own.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial. Not
 guarded (every command is read-only and selects by serial).
 
-**Expected outcome.** Six cases: firmware version, firmware compile info,
-device serial, part ID, board ID, and the complete readback composition. A
-case failure does not stop the others.
+**Expected outcome.** Six cases: firmware version, the `-V` answer (host
+version line, firmware version, firmware build), device serial, part ID,
+board ID, and the four-query readback composition. A case failure does not
+stop the others.
 
 **Known limits.** These are readbacks, so a pass says the board answers and
-identifies itself, not that any radio function works. Harness issue
-[#162](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/162) is
-open against the composition case: `-V` now ends the command, so the expected
-`-vVspb` output in the harness is wrong.
+identifies itself, not that any radio function works.
 
 ## Debug register read
 
@@ -338,24 +339,24 @@ command and requires every report asked for.
 that asks for two must print both. A parser bug that lets a later option
 replace an earlier one, or that returns after the first report, shows up as a
 missing line. `-l` and `-d` both print a USR LED line, so that pair requires
-two of them.
+two of them. `-V` is left out of the compositions and gets a case of its own
+that goes the other way: since fork `f898fe5` it is the version command and
+ends the command, so `-V -s` must print the whole version answer and no
+serial line. Asking for it beside the others would hide every query behind
+it.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
 Guarded. `coverage:`.
 
-**Expected outcome.** Smoke runs 2 cases: the documented `-v -V` pair and all
-ten read-only queries in one command. Comprehensive runs 47: the same two,
-every other compatible pair of the ten queries, and a refusal case, since two
-`-U` options name two boards for one command and are refused
-(`error: option '-U' given more than once`, exit 1) rather than the last one
-winning. A case failure does not stop the others.
+**Expected outcome.** Smoke runs 2 cases: `-V -s` answering the version
+alone, and all nine composable read-only queries in one command.
+Comprehensive runs 39: the same two, every compatible pair of the nine
+queries, and a refusal case, since two `-U` options name two boards for one
+command and are refused (`error: option '-U' given more than once`, exit 1)
+rather than the last one winning. A case failure does not stop the others.
 
 **Known limits.** Read-only only: nothing here writes a setting, so it says
 nothing about set-and-read ordering, which `Radio setting transitions` covers.
-Harness issue
-[#162](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/162)
-applies: `-V` now ends the command, so compositions that put other queries
-after it expect the wrong output.
 
 ## Argument validation
 
@@ -574,25 +575,27 @@ passing the pattern.
 Guarded. `coverage:`. On a host with one registered board the test skips
 itself at run time rather than failing planning.
 
-**Expected outcome.** With two boards, smoke runs 3 cases and comprehensive 7;
+**Expected outcome.** With two boards, smoke runs 3 cases and comprehensive 9;
 the index case's step count grows with the number of boards. Smoke: `-U all
 -s` lists every registered board and only those, `-s` without `-U` does the
 same, and `-N` plus one `-U<index> -s` per board agree with the listing.
-Comprehensive adds the five identity queries listed per board in index order,
-both with `-U all` and with no selector, `-C` without `-U` refusing to pick a
-board (exit 1 with `error: multiple Ubertooth devices found; select one with
--U <index|serial>` and one `Device <index>: <serial>` line per board, and no
-channel read), and an index past the last board refused with
+Comprehensive adds the four identity queries listed per board in index
+order, both with `-U all` and with no selector; `-V` reporting every board
+itself, also both ways, as the host version line followed by each board's
+firmware version and build under its index; `-C` without `-U` refusing to
+pick a board (exit 1 with `error: multiple Ubertooth devices found; select
+one with -U <index|serial>` and one `Device <index>: <serial>` line per
+board, and no channel read); and an index past the last board refused with
 `error: no Ubertooth at index N (N attached)`.
 
 **Known limits.** Every command is read-only, so this says nothing about
 selection for a command that writes. The listing order is the USB index order,
 which the registry does not know, so the checks require the right set in index
-order rather than a particular board at a particular index. Harness issues
-[#162](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/162)
-(the identity listing expects output from before `-V` ended the command) and
+order rather than a particular board at a particular index. The `-V` answer
+carries no serial, so which board each of its lines came from is not checked
+there; the identity listing does that. Harness issue
 [#145](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/145)
-are open against the expected wording.
+is open against the extcap listing fixtures.
 
 ## BLE mode conflicts
 
