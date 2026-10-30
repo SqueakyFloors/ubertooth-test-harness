@@ -36,7 +36,9 @@
  * plus a page of a board that is awake takes a second or two; a board that is
  * not there has to time out. */
 #define CONNECT_TIMEOUT_MS 15000
+#define CLOSE_TIMEOUT_MS   2000
 #define INQUIRY_EXTRA_MS   3000
+#define SPP_INIT_TIMEOUT_MS 5000
 
 struct inquiry_result {
     esp_bd_addr_t bda;
@@ -69,12 +71,24 @@ static struct {
     unsigned inq_count;
 } st;
 
-static SemaphoreHandle_t st_lock;    /* guards st against the callbacks */
-static SemaphoreHandle_t connect_ev; /* given when a connection settles */
-static SemaphoreHandle_t inquiry_ev; /* given when an inquiry ends */
+static SemaphoreHandle_t st_lock;     /* guards st against the callbacks */
+static SemaphoreHandle_t link_ev;     /* given when a link opens or closes */
+static SemaphoreHandle_t inquiry_ev;  /* given when an inquiry ends */
+static SemaphoreHandle_t spp_init_ev; /* given once SPP is up */
 
 #define LOCK()   xSemaphoreTake(st_lock, portMAX_DELAY)
 #define UNLOCK() xSemaphoreGive(st_lock)
+
+/* Bluedroid has the address only while it is enabled, and returns NULL
+ * otherwise. The shell must still answer after a failed start, so fall back
+ * to all zeros rather than following that NULL. */
+static const uint8_t *own_addr(void)
+{
+    static const uint8_t none[ESP_BD_ADDR_LEN] = {0};
+    const uint8_t *a = esp_bt_dev_get_address();
+
+    return a ? a : none;
+}
 
 static void addr_text(const esp_bd_addr_t a, char *out)
 {
@@ -114,11 +128,23 @@ static int tx_power_dbm(esp_power_level_t level)
     return (int)level * 3 - 12;
 }
 
+/* The board's own name: fixed for the life of the board, and different from
+ * the other one, with no setup step. */
+static void default_name(char *out, size_t len)
+{
+    const uint8_t *a = own_addr();
+
+    snprintf(out, len, "UT-ESP32-%02X%02X%02X", a[3], a[4], a[5]);
+}
+
 /* ---------------------------------------------------------------- streaming */
 
 /* Sends payload_len bytes every period_ms while the link is up. The first
  * eight bytes are a magic word and a counter, so a capture can be matched to
- * the run and to the moment inside it; the rest is filler. */
+ * the run and to the moment inside it; the rest is filler.
+ *
+ * Reusing one buffer is safe: esp_spp_write() copies the payload into the
+ * Bluetooth task's own message before it returns. */
 static void stream_task(void *arg)
 {
     static uint8_t buf[STREAM_PAYLOAD_MAX];
@@ -151,7 +177,9 @@ static void stream_task(void *arg)
             LOCK();
             if (err == ESP_OK) {
                 st.writes++;
-            } else {
+            } else if (st.connected) {
+                /* A write that failed because the link went down in the
+                 * meantime is not a write error; only count a real one. */
                 st.write_errors++;
                 st.last_err = (int)err;
             }
@@ -224,17 +252,34 @@ static void link_up(uint32_t handle, const esp_bd_addr_t remote)
 
     addr_text(remote, text);
     shell_line("utesp: spp connected %s", text);
-    xSemaphoreGive(connect_ev);
+    xSemaphoreGive(link_ev);
+}
+
+static void connect_failed(int status)
+{
+    LOCK();
+    st.connecting = false;
+    st.last_err = status;
+    UNLOCK();
+    xSemaphoreGive(link_ev);
 }
 
 static void spp_cb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
 {
     switch (event) {
-    case ESP_SPP_INIT_EVT:
-        /* SPP is up; register the server so the acceptor role works from
-         * boot without a command. */
-        esp_spp_start_srv(ESP_SPP_SEC_NONE, ESP_SPP_ROLE_SLAVE, 0, SERVER_NAME);
+    case ESP_SPP_INIT_EVT: {
+        /* SPP is up. Register the server unless a role change has already
+         * made this board the initiator. */
+        bool want_server;
+        LOCK();
+        want_server = (st.role == PEER_ROLE_ACCEPTOR);
+        UNLOCK();
+        if (want_server) {
+            esp_spp_start_srv(ESP_SPP_SEC_NONE, ESP_SPP_ROLE_SLAVE, 0, SERVER_NAME);
+        }
+        xSemaphoreGive(spp_init_ev);
         break;
+    }
 
     case ESP_SPP_START_EVT:
         LOCK();
@@ -252,42 +297,51 @@ static void spp_cb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
             esp_spp_connect(ESP_SPP_SEC_NONE, ESP_SPP_ROLE_MASTER, param->disc_comp.scn[0],
                             peer);
         } else {
-            LOCK();
-            st.connecting = false;
-            st.last_err = (int)param->disc_comp.status;
-            UNLOCK();
-            xSemaphoreGive(connect_ev);
+            connect_failed((int)param->disc_comp.status);
         }
         break;
 
     case ESP_SPP_OPEN_EVT:
-        link_up(param->open.handle, param->open.rem_bda);
+        /* This event reports a refused connection too, so check it. */
+        if (param->open.status == ESP_SPP_SUCCESS) {
+            link_up(param->open.handle, param->open.rem_bda);
+        } else {
+            connect_failed((int)param->open.status);
+        }
         break;
 
     case ESP_SPP_SRV_OPEN_EVT:
-        link_up(param->srv_open.handle, param->srv_open.rem_bda);
+        if (param->srv_open.status == ESP_SPP_SUCCESS) {
+            link_up(param->srv_open.handle, param->srv_open.rem_bda);
+        }
         break;
 
     case ESP_SPP_CL_INIT_EVT:
         if (param->cl_init.status != ESP_SPP_SUCCESS) {
-            LOCK();
-            st.connecting = false;
-            st.last_err = (int)param->cl_init.status;
-            UNLOCK();
-            xSemaphoreGive(connect_ev);
+            connect_failed((int)param->cl_init.status);
         }
         break;
 
-    case ESP_SPP_CLOSE_EVT:
+    case ESP_SPP_CLOSE_EVT: {
+        bool ours;
         LOCK();
-        st.connected = false;
-        st.connecting = false;
-        st.handle = 0;
-        st.disconnects++;
+        /* The server stays registered while a link is up, so a second link
+         * can close; only the live one's close clears the state. */
+        ours = st.connected && param->close.handle == st.handle;
+        if (ours) {
+            st.connected = false;
+            st.connecting = false;
+            st.stream_on = false;
+            st.handle = 0;
+            st.disconnects++;
+        }
         UNLOCK();
-        shell_line("utesp: spp disconnected");
-        xSemaphoreGive(connect_ev);
+        if (ours) {
+            shell_line("utesp: spp disconnected");
+            xSemaphoreGive(link_ev);
+        }
         break;
+    }
 
     case ESP_SPP_DATA_IND_EVT:
         LOCK();
@@ -320,15 +374,17 @@ const char *bt_start(void)
     esp_bt_controller_config_t cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
 
     st_lock = xSemaphoreCreateMutex();
-    connect_ev = xSemaphoreCreateBinary();
+    link_ev = xSemaphoreCreateBinary();
     inquiry_ev = xSemaphoreCreateBinary();
-    if (!st_lock || !connect_ev || !inquiry_ev) {
+    spp_init_ev = xSemaphoreCreateBinary();
+    if (!st_lock || !link_ev || !inquiry_ev || !spp_init_ev) {
         return "out of memory";
     }
 
     st.role = PEER_ROLE_ACCEPTOR;
     st.period_ms = STREAM_PERIOD_MS_DEFAULT;
     st.payload_len = STREAM_PAYLOAD_DEFAULT;
+    strcpy(st.name, "-");
 
     err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -356,10 +412,7 @@ const char *bt_start(void)
         return "callback registration failed";
     }
 
-    /* The default name holds the board's own LAP, so it is fixed for the life
-     * of the board and different from the other one with no setup step. */
-    const uint8_t *a = esp_bt_dev_get_address();
-    snprintf(st.name, sizeof(st.name), "UT-ESP32-%02X%02X%02X", a[3], a[4], a[5]);
+    default_name(st.name, sizeof(st.name));
     if (esp_bt_gap_set_device_name(st.name) != ESP_OK) {
         return "set name failed";
     }
@@ -371,6 +424,11 @@ const char *bt_start(void)
     };
     if (esp_spp_enhanced_init(&spp_cfg) != ESP_OK) {
         return "spp init failed";
+    }
+    /* Do not let the shell run before SPP is up, so no command races the
+     * init callback. */
+    if (xSemaphoreTake(spp_init_ev, pdMS_TO_TICKS(SPP_INIT_TIMEOUT_MS)) != pdTRUE) {
+        return "spp did not come up";
     }
 
     if (esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE) != ESP_OK) {
@@ -396,26 +454,10 @@ const char *bt_set_role(enum peer_role role)
     }
     LOCK();
     st.role = role;
-    st.stream_on = false;
     UNLOCK();
-    return NULL;
-}
-
-const char *bt_set_name(const char *name)
-{
-    size_t n = strlen(name);
-
-    if (n == 0 || n > NAME_LEN_MAX) {
-        return "name must be 1 to 32 characters";
-    }
-    if (esp_bt_gap_set_device_name(name) != ESP_OK) {
-        return "set name failed";
-    }
-    LOCK();
-    strncpy(st.name, name, sizeof(st.name) - 1);
-    st.name[sizeof(st.name) - 1] = '\0';
-    UNLOCK();
-    return NULL;
+    /* The acceptor is defined as a board that is listening, so put the
+     * server back; the initiator has none. */
+    return role == PEER_ROLE_ACCEPTOR ? bt_spp_start() : NULL;
 }
 
 const char *bt_set_discoverable(bool on)
@@ -449,24 +491,21 @@ const char *bt_set_peer(const char *addr_text_in)
 const char *bt_spp_start(void)
 {
     enum peer_role role;
-    bool connected, peer_set;
+    bool connected, peer_set, server_on;
     esp_bd_addr_t peer;
 
     LOCK();
     role = st.role;
     connected = st.connected;
     peer_set = st.peer_set;
+    server_on = st.server_on;
     memcpy(peer, st.peer, ESP_BD_ADDR_LEN);
     UNLOCK();
 
     if (role == PEER_ROLE_ACCEPTOR) {
         /* The server is registered at boot; starting it again is how a test
          * recovers after "spp stop". */
-        bool on;
-        LOCK();
-        on = st.server_on;
-        UNLOCK();
-        if (on) {
+        if (server_on) {
             return NULL;
         }
         if (esp_spp_start_srv(ESP_SPP_SEC_NONE, ESP_SPP_ROLE_SLAVE, 0, SERVER_NAME) != ESP_OK) {
@@ -485,7 +524,7 @@ const char *bt_spp_start(void)
     LOCK();
     st.connecting = true;
     UNLOCK();
-    xSemaphoreTake(connect_ev, 0); /* drop a stale signal */
+    xSemaphoreTake(link_ev, 0); /* drop a stale signal */
 
     /* Ask the peer over SDP which channel its server is on, then call it. */
     if (esp_spp_start_discovery(peer) != ESP_OK) {
@@ -494,17 +533,20 @@ const char *bt_spp_start(void)
         UNLOCK();
         return "sdp lookup failed";
     }
-    if (xSemaphoreTake(connect_ev, pdMS_TO_TICKS(CONNECT_TIMEOUT_MS)) != pdTRUE) {
+    if (xSemaphoreTake(link_ev, pdMS_TO_TICKS(CONNECT_TIMEOUT_MS)) != pdTRUE) {
         LOCK();
         st.connecting = false;
         UNLOCK();
         return "connect timed out";
     }
 
+    /* An incoming link from somewhere else also signals link_ev, so only
+     * a link to the address asked for counts as success. */
+    bool ok;
     LOCK();
-    connected = st.connected;
+    ok = st.connected && memcmp(st.remote, peer, ESP_BD_ADDR_LEN) == 0;
     UNLOCK();
-    return connected ? NULL : "connect refused";
+    return ok ? NULL : "connect refused";
 }
 
 const char *bt_spp_stop(void)
@@ -520,9 +562,10 @@ const char *bt_spp_stop(void)
     UNLOCK();
 
     if (connected) {
+        xSemaphoreTake(link_ev, 0); /* the link coming up left a signal */
         esp_spp_disconnect(handle);
-        /* Wait briefly for the close so "status" right after is honest. */
-        xSemaphoreTake(connect_ev, pdMS_TO_TICKS(2000));
+        /* Wait for the close so "status" right after this is honest. */
+        xSemaphoreTake(link_ev, pdMS_TO_TICKS(CLOSE_TIMEOUT_MS));
     }
     if (server_on) {
         if (esp_spp_stop_srv() != ESP_OK) {
@@ -592,6 +635,7 @@ const char *bt_tx_power(int min_dbm, int max_dbm)
 
 const char *bt_defaults(void)
 {
+    char name[NAME_LEN_MAX + 1];
     const char *err = bt_spp_stop();
 
     if (err) {
@@ -609,12 +653,14 @@ const char *bt_defaults(void)
     st.last_err = 0;
     UNLOCK();
 
-    const uint8_t *a = esp_bt_dev_get_address();
-    char name[NAME_LEN_MAX + 1];
-    snprintf(name, sizeof(name), "UT-ESP32-%02X%02X%02X", a[3], a[4], a[5]);
-    if ((err = bt_set_name(name)) != NULL) {
-        return err;
+    default_name(name, sizeof(name));
+    if (esp_bt_gap_set_device_name(name) != ESP_OK) {
+        return "set name failed";
     }
+    LOCK();
+    strcpy(st.name, name);
+    UNLOCK();
+
     if ((err = bt_set_discoverable(true)) != NULL) {
         return err;
     }
@@ -627,11 +673,12 @@ const char *bt_defaults(void)
 const char *bt_inquiry(unsigned seconds)
 {
     /* The controller counts the inquiry length in 1.28 s units. */
-    uint8_t units = (uint8_t)((seconds * 100 + 127) / 128);
+    uint8_t units;
 
     if (seconds < 2 || seconds > 60) {
         return "inquiry length must be 2 to 60 seconds";
     }
+    units = (uint8_t)((seconds * 100 + 127) / 128);
     if (units < 1) {
         units = 1;
     }
@@ -667,30 +714,38 @@ const char *bt_inquiry(unsigned seconds)
 void bt_status_json(char *out, size_t len)
 {
     char self[18], peer[18], remote[18];
-    const uint8_t *a = esp_bt_dev_get_address();
+    const uint8_t *a = own_addr();
     esp_power_level_t got_min = ESP_PWR_LVL_N12, got_max = ESP_PWR_LVL_P9;
+    int n;
 
     esp_bredr_tx_power_get(&got_min, &got_max);
     addr_text(a, self);
     LOCK();
     addr_text(st.peer, peer);
     addr_text(st.remote, remote);
-    snprintf(out, len,
-             "{\"role\":\"%s\",\"fw\":\"%s\",\"bt\":%s,\"address\":\"%s\","
-             "\"lap\":\"%02x%02x%02x\",\"uap\":\"%02x\",\"nap\":\"%02x%02x\","
-             "\"name\":\"%s\",\"discoverable\":%s,\"spp_server\":%s,"
-             "\"connecting\":%s,\"connected\":%s,\"peer\":\"%s\",\"remote\":\"%s\","
-             "\"stream\":%s,\"period_ms\":%u,\"payload_len\":%u,\"counter\":%" PRIu32 ","
-             "\"writes\":%" PRIu32 ",\"write_errors\":%" PRIu32 ",\"rx_bytes\":%" PRIu32 ","
-             "\"connects\":%" PRIu32 ",\"disconnects\":%" PRIu32 ","
-             "\"tx_power_dbm\":[%d,%d],\"last_err\":%d}",
-             st.role == PEER_ROLE_ACCEPTOR ? "acceptor" : "initiator", UTESP_FW_VERSION,
-             st.started ? "true" : "false", self, a[3], a[4], a[5], a[2], a[0], a[1], st.name,
-             st.discoverable ? "true" : "false", st.server_on ? "true" : "false",
-             st.connecting ? "true" : "false", st.connected ? "true" : "false",
-             st.peer_set ? peer : "", st.connected ? remote : "",
-             st.stream_on ? "true" : "false", st.period_ms, st.payload_len, st.counter,
-             st.writes, st.write_errors, st.rx_bytes, st.connects, st.disconnects,
-             tx_power_dbm(got_min), tx_power_dbm(got_max), st.last_err);
+    n = snprintf(out, len,
+                 "{\"role\":\"%s\",\"fw\":\"%s\",\"bt\":%s,\"address\":\"%s\","
+                 "\"lap\":\"%02x%02x%02x\",\"uap\":\"%02x\",\"nap\":\"%02x%02x\","
+                 "\"name\":\"%s\",\"discoverable\":%s,\"spp_server\":%s,"
+                 "\"connecting\":%s,\"connected\":%s,\"peer\":\"%s\",\"remote\":\"%s\","
+                 "\"stream\":%s,\"period_ms\":%u,\"payload_len\":%u,\"counter\":%" PRIu32 ","
+                 "\"writes\":%" PRIu32 ",\"write_errors\":%" PRIu32 ",\"rx_bytes\":%" PRIu32 ","
+                 "\"connects\":%" PRIu32 ",\"disconnects\":%" PRIu32 ","
+                 "\"tx_power_dbm\":[%d,%d],\"last_err\":%d}",
+                 st.role == PEER_ROLE_ACCEPTOR ? "acceptor" : "initiator", UTESP_FW_VERSION,
+                 st.started ? "true" : "false", self, a[3], a[4], a[5], a[2], a[0], a[1],
+                 st.name, st.discoverable ? "true" : "false", st.server_on ? "true" : "false",
+                 st.connecting ? "true" : "false", st.connected ? "true" : "false",
+                 st.peer_set ? peer : "", st.connected ? remote : "",
+                 st.stream_on ? "true" : "false", st.period_ms, st.payload_len, st.counter,
+                 st.writes, st.write_errors, st.rx_bytes, st.connects, st.disconnects,
+                 tx_power_dbm(got_min), tx_power_dbm(got_max), st.last_err);
     UNLOCK();
+
+    /* Truncated JSON would be a line a driver silently mis-parses. Say so
+     * instead, in JSON a driver can still read. */
+    if (n < 0 || (size_t)n >= len) {
+        snprintf(out, len, "{\"fw\":\"%s\",\"error\":\"status line too long\"}",
+                 UTESP_FW_VERSION);
+    }
 }

@@ -25,7 +25,6 @@ void shell_line(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 const char *bt_start(void);
 
 const char *bt_set_role(enum peer_role role);
-const char *bt_set_name(const char *name);
 const char *bt_set_discoverable(bool on);
 const char *bt_set_peer(const char *addr_text);
 const char *bt_spp_start(void);

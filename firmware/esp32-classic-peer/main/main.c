@@ -24,6 +24,7 @@
 #define SHELL_UART     UART_NUM_0
 #define SHELL_BAUD     115200
 #define SHELL_RX_BUF   1024
+#define SHELL_TX_BUF   2048
 #define SHELL_LINE_MAX 160 /* longest command line accepted */
 #define SHELL_OUT_MAX  768 /* longest answer line, set by the status JSON */
 #define SHELL_WORDS    8
@@ -32,26 +33,26 @@ static SemaphoreHandle_t out_lock;
 
 void shell_line(const char *fmt, ...)
 {
-    char buf[SHELL_OUT_MAX + 2];
+    /* One buffer, held by out_lock, rather than 770 bytes on the caller's
+     * stack: the notices below come from the Bluetooth task, whose stack is
+     * small. */
+    static char buf[SHELL_OUT_MAX + 2];
     va_list ap;
     int n;
 
-    va_start(ap, fmt);
-    n = vsnprintf(buf, sizeof(buf) - 1, fmt, ap);
-    va_end(ap);
-    if (n < 0) {
-        return;
-    }
-    if (n > (int)sizeof(buf) - 2) {
-        n = (int)sizeof(buf) - 2;
-    }
-    buf[n++] = '\n';
-
-    /* The notices come from Bluetooth callbacks, so two writers can meet. */
     if (out_lock) {
         xSemaphoreTake(out_lock, portMAX_DELAY);
     }
-    uart_write_bytes(SHELL_UART, buf, n);
+    va_start(ap, fmt);
+    n = vsnprintf(buf, sizeof(buf) - 1, fmt, ap);
+    va_end(ap);
+    if (n >= 0) {
+        if (n > (int)sizeof(buf) - 2) {
+            n = (int)sizeof(buf) - 2;
+        }
+        buf[n++] = '\n';
+        uart_write_bytes(SHELL_UART, buf, n);
+    }
     if (out_lock) {
         xSemaphoreGive(out_lock);
     }
@@ -118,7 +119,6 @@ static void cmd_help(void)
     static const char *const lines[] = {
         "version                       the firmware version",
         "status                        one JSON line of every field",
-        "name <text>                   Bluetooth device name, 1-32 characters",
         "role <acceptor|initiator>     stop, then take this role",
         "disc <on|off>                 discoverable and connectable",
         "spp peer <aa:bb:cc:dd:ee:ff>  the address the initiator calls",
@@ -148,7 +148,9 @@ static void run(int argc, char **argv)
         return;
     }
     if (argc == 1 && strcmp(c, "status") == 0) {
-        char json[640];
+        /* static: only the shell task gets here, and the task's stack is
+         * better spent on the Bluetooth calls below it. */
+        static char json[SHELL_OUT_MAX];
         bt_status_json(json, sizeof(json));
         shell_line("%s", json);
         answer(NULL);
@@ -157,10 +159,6 @@ static void run(int argc, char **argv)
     if (argc == 1 && strcmp(c, "help") == 0) {
         cmd_help();
         answer(NULL);
-        return;
-    }
-    if (argc == 2 && strcmp(c, "name") == 0) {
-        answer(bt_set_name(argv[1]));
         return;
     }
     if (argc == 2 && strcmp(c, "role") == 0) {
@@ -291,7 +289,7 @@ void app_main(void)
     const char *err;
 
     out_lock = xSemaphoreCreateMutex();
-    ESP_ERROR_CHECK(uart_driver_install(SHELL_UART, SHELL_RX_BUF, 0, 0, NULL, 0));
+    ESP_ERROR_CHECK(uart_driver_install(SHELL_UART, SHELL_RX_BUF, SHELL_TX_BUF, 0, NULL, 0));
     ESP_ERROR_CHECK(uart_param_config(SHELL_UART, &cfg));
 
     err = bt_start();

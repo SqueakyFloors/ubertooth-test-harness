@@ -19,7 +19,9 @@ One image holds both roles, and one command switches between them:
 | `initiator` | looks the peer's SPP channel up over SDP, connects, and streams a payload |
 
 A board that was reset or power-cycled is an acceptor with its server
-listening, so the pair needs setting up on one side only.
+listening, so the pair needs setting up on one side only. `role acceptor`
+puts the server back, and `role initiator` takes it away, so the role name
+always describes what the board is doing.
 
 The channel is opened with no security (`ESP_SPP_SEC_NONE`), so a link needs
 no pairing and a capture holds only the SDP lookup, the connection, and the
@@ -60,8 +62,10 @@ idf.py -B /tmp/utesp-build build
 
 The image is `/tmp/utesp-build/esp32-classic-peer.bin`, about 670 KB, which
 needs the large single-app partition table `sdkconfig.defaults` selects.
-Nothing under `firmware/` is generated: `set-target` writes `sdkconfig` and
-`idf.py -B` keeps every other build product in the build directory.
+`idf.py -B` keeps every build product in the build directory. The one file
+`set-target` does write here is `sdkconfig`, the resolved configuration; it
+is generated from `sdkconfig.defaults` and git-ignored, so edit the defaults
+file, not it.
 
 ## Flash
 
@@ -98,7 +102,6 @@ ESP-IDF's own log lines start with `W (` or `E (` and are warnings or errors;
 | `status` | one JSON line, then `OK` |
 | `version` | the firmware version, then `OK` |
 | `help` | one line per command, then `OK` |
-| `name <text>` | set the Bluetooth device name, 1 to 32 characters |
 | `role <acceptor\|initiator>` | stop, then take this role |
 | `disc <on\|off>` | discoverable and connectable, or neither |
 | `spp peer <aa:bb:cc:dd:ee:ff>` | the address the initiator calls |
@@ -121,14 +124,22 @@ A bad value answers `ERR` and changes nothing. A command with the wrong
 number of words, or an unknown one, answers `ERR` too; `help` is the only
 hint, as there is no usage text.
 
-`name` is not kept across a reset. The default name holds the board's own
-LAP, so it is fixed for the life of the board and different from the other
-one with no setup step at all: `UT-ESP32-<LAP>`.
+The Bluetooth device name is not settable, and does not need to be: it holds
+the board's own LAP, so it is fixed for the life of the board and different
+from the other one with no setup step at all, `UT-ESP32-<LAP>`. Register it
+with the board.
+
+`stream on` needs a live link and answers `ERR no connection to stream on`
+without one, so a test cannot arm it in advance. Streaming stops by itself
+when the link goes down, and `spp stop` and either `role` command stop it
+too. On the initiator, `spp start` counts only a link to the address `spp
+peer` named as success, so an incoming link from somewhere else cannot be
+mistaken for its own.
 
 `status` reports every field on one line, whichever role is running:
 
 ```json
-{"role":"initiator","fw":"utesp-1.0.0","bt":true,"address":"20:50:0D:E9:C5:BA","lap":"e9c5ba","uap":"0d","nap":"2050","name":"UT-ESP32-E9C5BA","discoverable":true,"spp_server":false,"connecting":false,"connected":true,"peer":"C8:85:41:2A:1B:2A","remote":"C8:85:41:2A:1B:2A","stream":true,"period_ms":20,"payload_len":200,"counter":1483,"writes":1483,"write_errors":0,"rx_bytes":0,"connects":1,"disconnects":0,"tx_power_dbm":[-12,9],"last_err":0}
+{"role":"initiator","fw":"utesp-1.0.0","bt":true,"address":"20:50:0D:E9:C5:BA","lap":"e9c5ba","uap":"0d","nap":"2050","name":"UT-ESP32-E9C5BA","discoverable":true,"spp_server":false,"connecting":false,"connected":true,"peer":"C8:85:41:2A:1B:2A","remote":"C8:85:41:2A:1B:2A","stream":true,"period_ms":20,"payload_len":200,"counter":1483,"writes":1483,"write_errors":0,"rx_bytes":0,"connects":1,"disconnects":0,"tx_power_dbm":[0,3],"last_err":0}
 ```
 
 - `address`: the BD_ADDR, split out as `lap`, `uap` and `nap` as well,
@@ -139,8 +150,11 @@ one with no setup step at all: `UT-ESP32-<LAP>`.
 - `peer`: what `spp peer` set, empty until it is set; `remote`: the far end
   of the live link, empty when there is none.
 - `counter`: the counter in the payload (below), zeroed when a link comes
-  up; `writes` and `write_errors` count the initiator's SPP writes, and
-  `rx_bytes` the bytes the other side received.
+  up; `writes` counts the writes the Bluetooth stack accepted and
+  `write_errors` those it refused, and `rx_bytes` is the bytes this board
+  received. A write accepted at the moment a status line is read may not
+  have reached the air yet, which is why the other side's `rx_bytes` can be
+  one payload behind `writes`.
 - `tx_power_dbm`: the range the controller reports, not what was asked for.
 - `last_err`: the last Bluetooth API error, 0 for none.
 
@@ -161,6 +175,9 @@ actually went out.
 Both boards are discoverable and connectable from boot, which is what makes
 the pair findable by `inquiry` from either side and by `ubertooth-rx`. Turn
 that off with `disc off` for a test that needs a silent board.
+
+`bt` is false only if Bluetooth failed to come up; the shell still answers
+then, with a zero address, and the boot notice says why.
 
 ## Extending
 
