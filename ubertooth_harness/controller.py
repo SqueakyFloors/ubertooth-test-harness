@@ -24,7 +24,7 @@ commit listed for that ref, and the runner runs exactly that commit, so a
 stale or differently configured runner checkout cannot substitute another
 one; the commit is recorded in ``run.json``.
 
-Target runners connect to ``/ws/runner`` and speak protocol v2
+Target runners connect to ``/ws/runner`` and speak protocol v3
 (``ubertooth_harness/protocol.py``), decoded strictly. Each run is stored as a
 flat directory ``<results dir>/<run_id>/`` holding ``run.json`` (the
 controller's record), ``run.jsonl`` (the runner's events appended as received,
@@ -196,7 +196,7 @@ class Target:
 
 _RUN_FIELDS = (
     "run_id", "target", "request_id", "ref", "commit", "plan", "suite", "tests",
-    "build",
+    "build", "flash_build",
     "status", "created_at", "finished_at", "exit_code", "reason",
     "runner_run_directory", "report", "report_error", "cancel_requested", "adopted",
     "learned_durations",
@@ -223,6 +223,9 @@ class Run:
     suite: str | None = None
     tests: list = dataclasses.field(default_factory=list)
     build: bool = False
+    # The boards were flashed with the build first (only with build; runs
+    # stored before protocol 3 did not flash).
+    flash_build: bool = False
     status: str = "running"
     created_at: str = dataclasses.field(default_factory=_now)
     finished_at: str | None = None
@@ -797,6 +800,7 @@ class Controller:
                 request_id=message["request_id"], ref=fields["ref"],
                 commit=fields["commit"], plan=fields["plan"], suite=fields["suite"],
                 tests=list(fields["tests"]), build=fields["build"],
+                flash_build=fields["flash_build"],
             )
             self.runs[run_id] = run
             self._persist(run)
@@ -1071,6 +1075,7 @@ class Controller:
     async def start_run(
         self, host: str, *, ref: str, plan: str, suite: str,
         tests: list[str], build: bool, commit: str | None = None,
+        flash_build: bool = True,
     ) -> Run:
         # Checked first: everything after it runs without yielding until the
         # request is recorded as pending.
@@ -1090,7 +1095,8 @@ class Controller:
         request_id = uuid.uuid4().hex
         fields = dict(
             ref=ref, commit=commit, plan=plan, suite=suite, tests=list(tests),
-            build=build,
+            # Flashing applies only to a run that builds (#135).
+            build=build, flash_build=bool(build and flash_build),
         )
         try:
             text = encode_controller_message("run", request_id=request_id, **fields)
@@ -1303,7 +1309,7 @@ ENDPOINTS = {
     "GET /api/runs/{run_id}/report.md": "the run's report",
     "POST /api/runs/{run_id}/cancel": "cancel an active run: {reason}",
     "WS /ws/live": "live target and run updates (?run_id=ID adds that run's events)",
-    "WS /ws/runner": "target runner protocol v2",
+    "WS /ws/runner": "target runner protocol v3",
 }
 
 
@@ -1321,6 +1327,8 @@ def create_app(controller: Controller):
         suite: str
         tests: list[str] = Field(default_factory=list)
         build: bool = False
+        # Flash the boards with the build first: the default when building.
+        flash_build: bool = True
 
     class CancelRequest(BaseModel):
         model_config = ConfigDict(extra="forbid", strict=True)
@@ -1401,6 +1409,7 @@ def create_app(controller: Controller):
         run = await controller.start_run(
             host, ref=request.ref, plan=request.plan, suite=request.suite,
             tests=request.tests, build=request.build, commit=request.commit,
+            flash_build=request.flash_build,
         )
         return {"run": run.view()}
 

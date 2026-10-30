@@ -510,8 +510,8 @@ class FailureSummaryTests(ControllerTestCase):
         # has finished on this target, so the catalog estimate stands.
         self.assertEqual(
             [{"invocation_id": f"00{n}-Exclusive Ubertooth topology",
-              "test_name": "Exclusive Ubertooth topology", "estimated_s": 13.0,
-              "catalog_estimated_s": 13.0, "estimate_source": "catalog",
+              "test_name": "Exclusive Ubertooth topology", "estimated_s": 15.0,
+              "catalog_estimated_s": 15.0, "estimate_source": "catalog",
               "estimate_samples": 0, "estimate_scaled": False}
              for n in (1, 2)],
             payload["invocations"],

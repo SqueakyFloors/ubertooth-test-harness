@@ -122,7 +122,7 @@ class FlashSpillTests(unittest.TestCase):
                 "details": {"invocation_id": "003-Flash", "test_name": "Flash"},
             }]
             log_tail = failure_summary({}, failed)[0]["log"]
-            self.assertEqual("Firmware version: git-kgv (API:1.07)", log_tail[-1])
+            self.assertEqual("Firmware version: bluetooth_rxtx git-kgv (API:1.07)", log_tail[-1])
 
 
 class BuildSpillTests(unittest.TestCase):

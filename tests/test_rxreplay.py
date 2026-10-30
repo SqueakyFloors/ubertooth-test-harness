@@ -201,7 +201,9 @@ class ReplayRx:
                 records.pop()
             else:
                 records[-1] = records[-1] + bytes(RECORD - len(records[-1]))
-        lines, found, dumped, uap_seen = [], [], [], {}
+        # libbtbb's notes go to stderr since libbtbb bf878df2 (piconet_note);
+        # the packet and survey lines are the tool's own, on stdout.
+        lines, notes, found, dumped, uap_seen = [], [], [], [], {}
         for index, record in enumerate(records):
             if "decoys" in self.bugs:
                 record = record[:4] + bytes([0, 0, record[6] % 79]) + record[7:]
@@ -219,16 +221,16 @@ class ReplayRx:
                 if "-z" in options or (lap is not None and uap is None):
                     shown = packet["uap"] ^ (1 if "wrong-uap" in self.bugs else 0)
                     if "no-uap" not in self.bugs:
-                        lines.append(f"Correct CRC! UAP = 0x{shown:x} found after "
+                        notes.append(f"Correct CRC! UAP = 0x{shown:x} found after "
                                      f"{len(found)} total packets.")
-                        lines.append("CLK6 = 0x0 found after 1 total packets.")
+                        notes.append("CLK6 = 0x0 found after 1 total packets.")
                 elif uap is not None:
                     if int(uap, 16) == packet["uap"] or "wrong-u-confirms" in self.bugs:
                         if "u-fails" in self.bugs:
-                            lines.append("failed to confirm UAP")
+                            notes.append("failed to confirm UAP")
                         else:
-                            lines.append("CLK6 = 0x0 found after 2 total packets.")
-                            lines.append("26523 initial CLK1-27 candidates")
+                            notes.append("CLK6 = 0x0 found after 2 total packets.")
+                            notes.append("26523 initial CLK1-27 candidates")
         if "-z" in options:
             lines.append("Survey Results")
             for survey_lap in dict.fromkeys(int(line.split("LAP=")[1][:6], 16)
@@ -242,7 +244,8 @@ class ReplayRx:
                     lines.append(f"??:??:??:{text}")
         self._write_outputs(options, found, dumped)
         return self._result(command, 1 if partial else 0,
-                            "".join(line + "\n" for line in lines), notice + partial)
+                            "".join(line + "\n" for line in lines),
+                            notice + partial + "".join(note + "\n" for note in notes))
 
     def _write_outputs(self, options, found, dumped):
         link = 1 if "link-type" in self.bugs else 255
@@ -478,15 +481,41 @@ class CheckTests(unittest.TestCase):
         swapped = [want[1], want[0]] + want[2:]
         self.assertIn("packet line 1", check(self.lines(swapped)))
 
+    # The fixture's records claim no background estimate, so a current
+    # ubertooth-rx prints the word instead of a figure (fork 532adc19).
+    NONE_LINE = ("systime={t} ch={ch:2d} LAP={lap:06x} err={err} clkn=1 "
+                 "clk_offset=2 s=-1 n=none snr=none")
+
+    def test_packets_check_takes_an_absent_noise_figure(self):
+        want = rxreplay.expected_packets()
+        output = "".join(
+            self.NONE_LINE.format(t=5, lap=lap, err=err, ch=ch) + "\n"
+            for lap, err, ch in want
+        )
+        self.assertEqual("", rxreplay.packets_check(want)(output))
+
+    def test_a_line_with_one_figure_and_one_word_is_not_a_packet(self):
+        # The ratio comes from the noise, so one of each is a malformed line.
+        want = rxreplay.expected_packets()
+        for noise, snr in (("none", "1"), ("-2", "none")):
+            line = self.NONE_LINE.replace("n=none", f"n={noise}").replace(
+                "snr=none", f"snr={snr}")
+            output = "".join(
+                line.format(t=5, lap=lap, err=err, ch=ch) + "\n"
+                for lap, err, ch in want
+            )
+            self.assertIn("0 packet lines", rxreplay.packets_check(want)(output))
+
     def test_uap_and_survey_checks(self):
         want = rxreplay.expected_packets(lap=rxreplay.LAP_A)
-        check = rxreplay.uap_check(want, 0x6B)
-        good = self.lines(want) + "Correct CRC! UAP = 0x6b found after 4 total packets.\n"
-        self.assertEqual("", check(good))
-        self.assertIn("reported UAP none", check(self.lines(want)))
-        self.assertIn("reported UAP 6b, 6c", check(
-            good + "UAP = 0x6c found after 9 total packets.\n"))
-        self.assertIn("reported UAP 6b", rxreplay.uap_check(want, None)(good))
+        check = rxreplay.uap_check(want)
+        note = "Correct CRC! UAP = 0x6b found after 4 total packets.\n"
+        # The note belongs on stderr, which this check does not see.
+        self.assertEqual("", check(self.lines(want)))
+        self.assertIn("note about UAP 6b is on stdout", check(self.lines(want) + note))
+        self.assertRegex(note, rxreplay.uap_note(0x6B))
+        self.assertRegex(note, rxreplay.ANY_UAP_NOTE)
+        self.assertNotRegex(note, rxreplay.uap_note(0x6C))
         survey = rxreplay.survey_check({"??:??:6B:5A:3C:96"})
         self.assertEqual("", survey("x\nSurvey Results\n??:??:6B:5A:3C:96\n"))
         self.assertIn("no 'Survey Results'", survey(""))
