@@ -503,19 +503,21 @@ def _known_target_section(run: _Run) -> list[str]:
     """One line per test naming the known device it ran against, or none."""
     if not run.tests or not run.known_targets:
         return []
-    lines = ["", "### Known targets", "",
+    lines = ["", "## Known targets", "",
              "Which device the harness drove for each test, so a capture "
              "against a known device is told apart from one of whatever "
-             "traffic was there.", ""]
+             "traffic was there. The serial, port, and address are what the "
+             "registry records and the test's own ready case checks; the "
+             "firmware version is the one that device's driver requires, and "
+             "the board's own answer is in the transcript.", ""]
     for record in run.tests:
         invocation = record["started"]["details"].get("invocation_id", "")
         details = run.known_targets.get(invocation)
-        summary = (
-            details.get("summary") if details
-            # Runs recorded before the harness kept this record.
-            else "not recorded"
-        )
-        lines.append(f"- `{invocation}`: {summary}")
+        if details is None:
+            # A test the host could not run drove nothing, and a run recorded
+            # before the harness kept this record says nothing either way.
+            continue
+        lines.append(f"- `{invocation}`: {details.get('summary', '')}")
     return lines
 
 

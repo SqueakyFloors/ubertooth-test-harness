@@ -18,15 +18,15 @@ DK_ROLES = {"Ubertooth": "Ubertooth", "advertiser": targets.NRF52840_DK}
 DK_RESOURCES = {"Ubertooth": "UT_Linux0", "advertiser": "DK_Linux1"}
 DK_IDENTITIES = {
     "Ubertooth": {"serial": "a" * 32},
-    "advertiser": {"jlink serial": "001050210121",
-                   "BLE address": "C0:7D:CD:95:52:86"},
+    "advertiser": {"jlink serial": "000123456789",
+                   "BLE address": "C0:00:00:00:00:01"},
 }
 
 PEER_ROLES = {"Ubertooth": "Ubertooth", "initiator": targets.ESP32_CLASSIC_PEER}
 PEER_RESOURCES = {"Ubertooth": "UT_Linux0", "initiator": "ESP32_Linux1"}
 PEER_IDENTITIES = {
     "Ubertooth": {"serial": "a" * 32},
-    "initiator": {"bridge serial": "48fed635", "BD_ADDR": "20:50:0D:E9:C5:BA"},
+    "initiator": {"bridge serial": "0a1b2c3d", "BD_ADDR": "20:50:0D:AA:BB:CC"},
 }
 
 
@@ -42,6 +42,10 @@ class FirmwareVersionTests(unittest.TestCase):
         header = (ROOT / "firmware" / "esp32-classic-peer" / "main" / "peer.h").read_text()
         self.assertIn(f'#define UTESP_FW_VERSION "{targets.PEER_FIRMWARE}"', header)
 
+    def test_the_peer_s_device_path_is_the_one_its_firmware_readme_documents(self):
+        readme = (ROOT / "firmware" / "esp32-classic-peer" / "README.md").read_text()
+        self.assertIn(targets.PEER_BY_ID.replace("{serial}", "<serial>"), readme)
+
 
 class KnownTargetTests(unittest.TestCase):
 
@@ -55,19 +59,19 @@ class KnownTargetTests(unittest.TestCase):
                 "type": "nRF52840 DK",
                 "role": "advertiser",
                 "alias": "DK_Linux1",
-                "serial": "001050210121",
+                "serial": "000123456789",
                 "serial_label": "J-Link",
-                "port": "/dev/serial/by-id/usb-SEGGER_J-Link_001050210121-if00",
-                "firmware": targets.DK_FIRMWARE,
-                "identity": {"BLE address": "C0:7D:CD:95:52:86"},
+                "port": "/dev/serial/by-id/usb-SEGGER_J-Link_000123456789-if00",
+                "firmware_required": targets.DK_FIRMWARE,
+                "identity": {"BLE address": "C0:00:00:00:00:01"},
             },
             found[0],
         )
         self.assertEqual(
             "Run against known target: nRF52840 DK advertiser DK_Linux1 "
-            "(J-Link 001050210121, "
-            "/dev/serial/by-id/usb-SEGGER_J-Link_001050210121-if00), "
-            f"firmware {targets.DK_FIRMWARE}, BLE address C0:7D:CD:95:52:86",
+            "(J-Link 000123456789, "
+            "/dev/serial/by-id/usb-SEGGER_J-Link_000123456789-if00), "
+            f"requires firmware {targets.DK_FIRMWARE}, BLE address C0:00:00:00:00:01",
             targets.summary(found),
         )
         self.assertEqual("DK_Linux1 (advertiser)", targets.column(found))
@@ -78,18 +82,18 @@ class KnownTargetTests(unittest.TestCase):
 
         self.assertEqual(1, len(found))
         self.assertEqual("ESP32 Classic peer", found[0]["type"])
-        self.assertEqual("48fed635", found[0]["serial"])
+        self.assertEqual("0a1b2c3d", found[0]["serial"])
         self.assertEqual(
             "/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_"
-            "48fed635-if00-port0",
+            "Controller_0a1b2c3d-if00-port0",
             found[0]["port"],
         )
         self.assertEqual(
             "Run against known target: ESP32 Classic peer initiator ESP32_Linux1 "
-            "(bridge 48fed635, /dev/serial/by-id/"
-            "usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_48fed635-if00-port0), "
-            f"firmware {targets.PEER_FIRMWARE}, "
-            "BD_ADDR 20:50:0D:E9:C5:BA (LAP e9c5ba, UAP 0d)",
+            "(bridge 0a1b2c3d, /dev/serial/by-id/"
+            "usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_0a1b2c3d-if00-port0), "
+            f"requires firmware {targets.PEER_FIRMWARE}, "
+            "BD_ADDR 20:50:0D:AA:BB:CC (LAP aabbcc, UAP 0d)",
             targets.summary(found),
         )
         self.assertEqual("ESP32_Linux1 (initiator)", targets.column(found))
@@ -129,9 +133,9 @@ class KnownTargetTests(unittest.TestCase):
         resources = {"Ubertooth": "UT_Linux0", "central": "DK_Linux1",
                      "peripheral": "DK_Linux2"}
         identities = {
-            "central": {"jlink serial": "001050210121",
+            "central": {"jlink serial": "000123456789",
                         "BLE address": "C0:00:00:00:00:02"},
-            "peripheral": {"jlink serial": "001050204517",
+            "peripheral": {"jlink serial": "000123456790",
                            "BLE address": "C0:00:00:00:00:03"},
         }
 
@@ -220,7 +224,7 @@ class SequencerRecordTests(unittest.TestCase):
             [{key: target[key] for key in ("alias", "role", "type")}
              for target in details["targets"]],
         )
-        self.assertIn("BLE address C0:7D:CD:95:52:86", details["summary"])
+        self.assertIn("BLE address C0:00:00:00:00:01", details["summary"])
 
     def test_a_test_with_only_an_ubertooth_records_that_it_had_no_target(self):
         event_type, status, details = self._record(
@@ -319,20 +323,20 @@ class ReportSectionTests(unittest.TestCase):
         self.assertIn("| none |", rows[2])
 
     def test_the_known_targets_section_describes_every_test(self):
-        section = self.report.split("### Known targets", 1)[1].split("## Transcript", 1)[0]
+        section = self.report.split("## Known targets", 1)[1].split("## Transcript", 1)[0]
         self.assertIn(
             "- `001-Capture known BLE advertiser`: Run against known target: "
-            "nRF52840 DK advertiser DK_Linux1 (J-Link 001050210121, "
-            "/dev/serial/by-id/usb-SEGGER_J-Link_001050210121-if00), "
-            f"firmware {targets.DK_FIRMWARE}, BLE address C0:7D:CD:95:52:86",
+            "nRF52840 DK advertiser DK_Linux1 (J-Link 000123456789, "
+            "/dev/serial/by-id/usb-SEGGER_J-Link_000123456789-if00), "
+            f"requires firmware {targets.DK_FIRMWARE}, BLE address C0:00:00:00:00:01",
             section,
         )
         self.assertIn(
             "- `002-Classic traffic`: Run against known target: ESP32 Classic "
-            "peer initiator ESP32_Linux1 (bridge 48fed635,",
+            "peer initiator ESP32_Linux1 (bridge 0a1b2c3d,",
             section,
         )
-        self.assertIn("BD_ADDR 20:50:0D:E9:C5:BA (LAP e9c5ba, UAP 0d)", section)
+        self.assertIn("BD_ADDR 20:50:0D:AA:BB:CC (LAP aabbcc, UAP 0d)", section)
         self.assertIn(
             "- `003-Host CLI surface`: No known target: no nRF52840 DK or "
             "ESP32 Classic peer took part in this test",
@@ -380,7 +384,7 @@ class OlderRunTests(unittest.TestCase):
             })
             report = render_run(load_events(run / "run.jsonl"))
 
-            self.assertNotIn("### Known targets", report)
+            self.assertNotIn("## Known targets", report)
             # The column is there, with nothing recorded for the test.
             self.assertIn("| Known target |", report)
             self.assertRegex(report, r"(?m)^\| 001-Host CLI surface \| Host_Mac \|  \|")

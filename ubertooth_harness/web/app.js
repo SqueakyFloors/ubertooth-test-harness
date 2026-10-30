@@ -479,7 +479,6 @@
       const summary = String(details.summary ?? "");
       const item = live.byInvocation.get(String(details.invocation_id));
       if (item) item.target = summary;
-      if (summary) pushLog(summary);
     } else if (kind === "not_applicable") {
       // Left out before the run: the host cannot run it (not a skip or failure).
       const name = String(details.test_name ?? "");

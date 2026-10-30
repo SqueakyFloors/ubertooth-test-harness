@@ -436,7 +436,9 @@ class NamedTestSequencer:
         A test driven against an nRF52840 DK or an ESP32 Classic peer knows
         exactly what was on the air; the rest listen to whatever is there.
         One record per test says which, so report.md and the GUI read the
-        same thing (targets.py).
+        same thing (targets.py). It holds what the registry and the test
+        definition say, which is what the run is about to drive; what the
+        board itself answered is in the test's own records.
         """
         platform = None
         if self.registry is not None:
@@ -1261,7 +1263,6 @@ class NamedTestSequencer:
                         "arguments": dict(invocation.arguments),
                     },
                 )
-                self._record_known_targets(publisher, invocation, definition)
                 cases = (
                     planned_cases[invocation.invocation_id]
                     if invocation.invocation_id in planned_cases
@@ -1295,6 +1296,9 @@ class NamedTestSequencer:
                         },
                     )
                     continue
+                # After the not-applicable exit: a test the host cannot run
+                # drove nothing, so it gets no known-target record at all.
+                self._record_known_targets(publisher, invocation, definition)
                 case_failures = []
                 case_statuses = []
                 skipped_cases = 0

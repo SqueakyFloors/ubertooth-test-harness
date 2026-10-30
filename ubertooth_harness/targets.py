@@ -31,13 +31,14 @@ ESP32_CLASSIC_PEER = "ESP32 Classic peer"
 # nrfutil pads a J-Link serial to 12 digits in the name it reports.
 DK_BY_ID = "/dev/serial/by-id/usb-SEGGER_J-Link_{serial:012d}-if00"
 PEER_BY_ID = ("/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_"
-              "{serial}-if00-port0")
+              "Controller_{serial}-if00-port0")
 
-# The firmware version each driver requires of its target: nrfdk.py flashes a
-# DK that reports anything else, and the Classic peer firmware reports this
-# from its `version` command (firmware/nrf52840dk/src/roles.h and
-# firmware/esp32-classic-peer/main/peer.h; tests/test_targets.py keeps them in
-# step with those sources).
+# The firmware version each driver requires of its target, which is what a
+# record says: not a version read from the board, which the run has not asked
+# for when the record is written. nrfdk.py flashes a DK that reports anything
+# else, so its ready case is what proves the board runs this
+# (firmware/nrf52840dk/src/roles.h and firmware/esp32-classic-peer/main/peer.h;
+# tests/test_targets.py keeps them in step with those sources).
 DK_FIRMWARE = "utdk-1.2.1"
 PEER_FIRMWARE = "utesp-1.0.0"
 
@@ -49,7 +50,7 @@ class TargetKind:
     serial_key: str  # registry identity key that names the device
     serial_label: str  # how that serial is introduced in the summary
     address_key: str  # registry identity key of its known address
-    firmware: str
+    firmware: str  # the version its driver requires, not one read from it
     by_id: str
     # A Classic (BR/EDR) address also gives the LAP and UAP that
     # `ubertooth-rx -l` and `-u` take, so the summary spells them out.
@@ -105,8 +106,8 @@ def describe(target: Mapping) -> str:
     text = f"{target.get('type', '')} {target.get('role', '')} {target.get('alias', '')}"
     if where:
         text += f" ({where})"
-    if target.get("firmware"):
-        text += f", firmware {target['firmware']}"
+    if target.get("firmware_required"):
+        text += f", requires firmware {target['firmware_required']}"
     identity = target.get("identity") or {}
     for key, value in identity.items():
         text += f", {key} {value}"
@@ -126,7 +127,11 @@ def column(targets: Sequence[Mapping]) -> str:
     """The summary table's cell: which known target, or none."""
     if not targets:
         return "none"
-    return ", ".join(f"{target['alias']} ({target['role']})" for target in targets)
+    # A stored run.jsonl is read as it was written, so a record missing a
+    # field must not break the whole report.
+    return ", ".join(
+        f"{target.get('alias', '')} ({target.get('role', '')})" for target in targets
+    )
 
 
 def known_targets(
@@ -164,7 +169,7 @@ def known_targets(
             "serial": serial,
             "serial_label": kind.serial_label,
             "port": identity.get("serial device") or device_path(kind, serial, platform),
-            "firmware": kind.firmware,
+            "firmware_required": kind.firmware,
             "identity": known,
         })
     return tuple(found)

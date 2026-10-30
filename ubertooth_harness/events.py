@@ -10,6 +10,8 @@ import secrets
 import shlex
 from typing import Callable, Mapping, Protocol, Sequence, TextIO
 
+from ubertooth_harness.rawlog import line_tag
+
 
 EVENT_SCHEMA_VERSION = 1
 _MAX_DETAILS_BYTES = 16 * 1024
@@ -197,8 +199,6 @@ class TerminalEventSink:
         elif event.event_type == "command_output":
             # Output arrives in chunks that need not end on a line boundary;
             # tag whole lines only.
-            from ubertooth_harness.rawlog import line_tag
-
             name = "stderr" if details.get("stream") == "stderr" else "stdout"
             text = self._partial[name] + str(details.get("text", ""))
             *complete, self._partial[name] = text.split("\n")

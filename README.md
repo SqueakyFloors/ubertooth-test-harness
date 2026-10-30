@@ -1374,22 +1374,25 @@ which, once per test, as a `known_target` record, and `report.md` and the web
 GUI both show what it says:
 
 - the results table has a **Known target** column naming the board and its
-  role, or `none`;
-- a **Known targets** list under the table gives the whole line per test, for
-  example `Run against known target: nRF52840 DK advertiser DK_Linux0
+  role, or `none`; it is empty for a test the host could not run, and for a
+  run recorded before the harness kept this record;
+- a **Known targets** section gives the whole line per test, for example
+  `Run against known target: nRF52840 DK advertiser DK_Linux0
   (J-Link 000123456789, /dev/serial/by-id/usb-SEGGER_J-Link_000123456789-if00),
-  firmware utdk-1.2.1, BLE address C0:00:00:00:00:01`, and a test with no
-  known target says `No known target: no nRF52840 DK or ESP32 Classic peer
-  took part in this test`;
+  requires firmware utdk-1.2.1, BLE address C0:00:00:00:00:01`, and a test
+  with no known target says `No known target: no nRF52840 DK or ESP32 Classic
+  peer took part in this test`;
 - the transcript carries the same line as an `[M]` record where the test
   starts.
 
 The serial port path is the one registered as `serial device`, or the stable
 `/dev/serial/by-id` path derived from the probe's or bridge's serial on a
-Linux host. The firmware version is the one the device's driver requires and
-verifies; the board's own answer is in the transcript, because every line of
-the conversation with its shell is recorded too (`[<alias> >]` out,
-`[<alias> <]` back).
+Linux host. The serial, port, and address are what the registry records, and
+the test's own ready case checks them against the board. The firmware version
+is the one that device's driver requires, not one read from the board when
+the record is written: the board's own answer is in the transcript, because
+every line of the conversation with its shell is recorded too
+(`[<alias> >]` out, `[<alias> <]` back).
 
 ### Reports for several runs
 
