@@ -46,6 +46,16 @@ self-reset is reported and judged by a person, not failed
 `Exclusive Ubertooth topology`, and `MAC polling soak` must state their
 platforms.
 
+**RF placement.** Every test with a hardware role also accepts `rf:`, one
+requirement per role, which says what the role's placement on the bench must
+be: `antenna`, `min_attenuation_db`, and `max_attenuation_db`
+([`rf.py`](../ubertooth_harness/rf.py)). The placement itself is recorded by
+hand in the registry and never measured, so this is how a plan asks for a
+weak or distant link, or keeps a test off an attenuated board. A test whose
+cases need an ordinary link declares that as its own default, so a plan does
+not have to; the plan's `rf:` overrides the default role by role. The sections
+below name the default where a test has one.
+
 **Coverage profiles.** A test with a `coverage:` argument takes `smoke` or
 `comprehensive`. Smoke keeps one case per behavior; comprehensive adds the
 combinations, the edge values, and the cases that pin specific fork fixes, so
@@ -780,7 +790,8 @@ a BR/EDR PCAPNG or PCAP header with link type 255, or whole 68-byte records.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
 Guarded. `coverage:` and a required `duration:`, which becomes the `-t`
-value.
+value. The Ubertooth defaults to needing an ordinary link (antenna attached,
+no attenuation), so the planner keeps these cases off an attenuated board.
 
 **Expected outcome.** Smoke runs 3 cases: a survey (`-z -t`) that ends by
 itself and lists its results, a `-r` PCAPNG capture, and the AFH no-packets
@@ -818,7 +829,8 @@ a mode change. Alternating them and requiring that no capture holds anything
 from the mode before it is a direct check for leftover buffered packets.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
-Guarded. `coverage:` and a required `duration:`.
+Guarded. `coverage:` and a required `duration:`. The Ubertooth defaults to
+needing an ordinary link.
 
 **Expected outcome.** Smoke runs 3 cases: full records to a file, the `-b`
 bitstream to a file, and an E-GO receive run on 2440 MHz. Comprehensive runs
@@ -1052,7 +1064,8 @@ through the board rather than the output, since the channel reaches
 `ubertooth-btle`.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
-Guarded. `coverage:` and a required `duration:`.
+Guarded. `coverage:` and a required `duration:`. The Ubertooth defaults to
+needing an ordinary link.
 
 **Expected outcome.** Smoke runs 1 case: a DLT 256 PCAP stream on the FIFO
 until SIGTERM, with no process left behind, on the default advertising channel
@@ -1092,9 +1105,10 @@ apart, a leak is a real fault rather than noise.
 (nRF52840 DK) with a registered J-Link serial and a static random BLE
 address. `coverage:`, a required `duration:`, `interval:` (20-10240 ms,
 default 100), and `payload:` (1-12 bytes of hex, or `none`, default
-`c0ffee`). The test writes DK firmware: the first case flashes the DK when it
-runs anything but the version the harness pins, so the run holds the host
-lock.
+`c0ffee`). The Ubertooth defaults to needing an ordinary link (antenna
+attached, no attenuation). The test writes DK firmware: the first case flashes
+the DK when it runs anything but the version the harness pins, so the run
+holds the host lock.
 
 **Expected outcome.** Smoke runs 6 cases: the DK is confirmed to run the
 pinned firmware at its registered address; `ubertooth-btle -n -q` sees it on
@@ -1143,7 +1157,8 @@ address. `coverage:`, a required `duration:`, `interval:` (the interval the
 central connects at, default 30 ms), and `update:` (the interval it then asks
 for, default 60 ms). The duration is constrained: it must be longer than the
 5 s reconnection cycle and shorter than twice it, so the capture spans exactly
-one reconnection. Writes DK firmware, so the run holds the host lock.
+one reconnection. The Ubertooth defaults to needing an ordinary link. Writes
+DK firmware, so the run holds the host lock.
 
 **Expected outcome.** Smoke runs 2 cases: both DKs confirmed on the pinned
 firmware at their registered addresses, and `ubertooth-btle -f -r` holding the
