@@ -198,14 +198,29 @@ class RegistryPlacementTests(unittest.TestCase):
             ):
                 registry(directory, broken)
 
-    def test_a_host_cannot_have_a_placement(self):
+    def test_a_unit_with_no_radio_cannot_have_a_placement(self):
         hosted = HARDWARE.replace(
             "roles: [controller, test target]",
             "roles: [controller, test target]\n    rf: {attenuation_db: 20}",
         )
+        controlled = HARDWARE + """  Hub_Linux0:
+    type: USB power controller
+    attached to: Host_Linux
+    identity: {serial: "0x12345678"}
+    driver: acroname BrainStem USBHub3+
+    capabilities: [per-port VBUS switching, power readback]
+    rf: {attenuation_db: 20}
+"""
         with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaisesRegex(RegistryError, "cannot have an rf placement"):
+            with self.assertRaisesRegex(
+                RegistryError, "Host_Linux is a Host and cannot have an rf placement"
+            ):
                 registry(directory, hosted)
+            with self.assertRaisesRegex(
+                RegistryError,
+                "Hub_Linux0 is a USB power controller and cannot have an rf placement",
+            ):
+                registry(directory, controlled)
 
     def test_placed_lists_only_the_boards_that_satisfy_a_requirement(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -483,10 +498,13 @@ suites:
         self.assertEqual(
             {"Ubertooth": NORMAL_LINK}, dict(definition.placement_requirements({}))
         )
-        asked = PlacementRequirement(min_attenuation_db=10)
+        arguments = definition.normalize_arguments({
+            "coverage": "smoke", "duration": "3s",
+            "rf": {"Ubertooth": {"min_attenuation_db": 10}},
+        })
         self.assertEqual(
-            {"Ubertooth": asked},
-            dict(definition.placement_requirements({"rf": {"Ubertooth": asked}})),
+            {"Ubertooth": PlacementRequirement(min_attenuation_db=10)},
+            dict(definition.placement_requirements(arguments)),
         )
         self.assertEqual(
             {}, dict(builtin_catalog().get("Ubertooth identity").placement_requirements({}))
@@ -652,3 +670,113 @@ class PlacementReportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlacementSerializationTests(unittest.TestCase):
+    """A plan's `rf:` has to survive the manifest and run.jsonl as JSON."""
+
+    def arguments(self):
+        return builtin_catalog().get("Classic Bluetooth receive").normalize_arguments({
+            "coverage": "smoke", "duration": "3s",
+            "rf": {"Ubertooth": {"min_attenuation_db": 10}},
+        })
+
+    def test_a_plan_requirement_is_kept_as_a_plain_record(self):
+        self.assertEqual(
+            {"Ubertooth": {"min_attenuation_db": 10.0}},
+            {role: dict(record) for role, record in self.arguments()["rf"].items()},
+        )
+
+    def test_the_manifest_of_a_plan_with_rf_can_be_written(self):
+        from tests.test_sequencer import run_contract
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            invocation = TestInvocation(
+                "001-Classic Bluetooth receive", "Classic Bluetooth receive",
+                "Host_Mac", self.arguments(), {"Ubertooth": "UT_Mac0"},
+            )
+            manifest, _checks = run_contract(root, invocation)
+            path = root / "manifest.json"
+            manifest.write_atomic(path)
+
+            recorded = json.loads(path.read_text())
+            self.assertEqual(
+                {"Ubertooth": {"min_attenuation_db": 10.0}},
+                recorded["invocations"][0]["arguments"]["rf"],
+            )
+
+    def test_the_run_log_of_a_plan_with_rf_can_be_written(self):
+        from tests.test_sequencer import CollectSink, FakeExecutor, run_contract
+        from ubertooth_harness.sequencer import NamedTestSequencer
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            invocation = TestInvocation(
+                "001-Host version", "Host version", "Host_Mac",
+                MappingProxyType({"rf": self.arguments()["rf"]}), {},
+            )
+            manifest, checks = run_contract(root, invocation)
+
+            NamedTestSequencer(FakeExecutor(), event_sink=CollectSink()).run(
+                (invocation,), root, run_id="named-run", manifest=manifest,
+                preflight_checks=checks,
+            )
+
+            started = next(
+                json.loads(line)
+                for line in (root / "run.jsonl").read_text().splitlines()
+                if json.loads(line)["event_type"] == "test_started"
+            )
+            self.assertEqual(
+                {"Ubertooth": {"min_attenuation_db": 10.0}},
+                started["details"]["arguments"]["rf"],
+            )
+
+    def test_a_recorded_placement_of_the_wrong_shape_does_not_stop_a_report(self):
+        for bad in ("20 dB", 20, ["a"], None):
+            with self.subTest(bad=bad):
+                self.assertIsInstance(describe(bad), str)
+
+
+class PlacementRoleTests(unittest.TestCase):
+    """A placement-matching unit that cannot take the role is not a candidate."""
+
+    HARDWARE = HARDWARE + """  DK_Linux1:
+    type: nRF52840 DK
+    attached to: Host_Linux
+    roles: [peripheral]
+    identity: {jlink serial: "000123456790", BLE address: "C0:00:00:00:00:03"}
+    rf: {attenuation_db: 20}
+"""
+
+    def test_placed_can_require_the_role_as_well(self):
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = registry(directory, self.HARDWARE)
+            asked = PlacementRequirement(min_attenuation_db=10)
+
+            self.assertEqual(
+                ("DK_Linux1",),
+                loaded.placed("Host_Linux", "nRF52840 DK", asked),
+            )
+            self.assertEqual(
+                (), loaded.placed("Host_Linux", "nRF52840 DK", asked, "advertiser")
+            )
+
+    def test_the_host_is_not_applicable_rather_than_failing_the_whole_suite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                PlanningError,
+                "no selected host can run it: Host_Linux: no nRF52840 DK on this "
+                "host has attenuation of at least 10 dB for the advertiser",
+            ):
+                compile_suite(directory, """plan: rf
+suites:
+  fast:
+    - Capture known BLE advertiser:
+        hosts: [Host_Linux]
+        coverage: smoke
+        duration: 5s
+        rf:
+          advertiser: {min_attenuation_db: 10}
+""", self.HARDWARE)

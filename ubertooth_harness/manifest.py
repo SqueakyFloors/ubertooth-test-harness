@@ -363,7 +363,7 @@ class InvocationIdentity:
             "id": self.id,
             "test_name": self.test_name,
             "host": self.host,
-            "arguments": _json_value(self.arguments),
+            "arguments": json_value(self.arguments),
             "resources": dict(self.resources),
             "resource_identities": {
                 role: dict(identity)
@@ -371,15 +371,20 @@ class InvocationIdentity:
             },
             "power_isolation": [dict(action) for action in self.power_isolation],
             "exclusive_ubertooth": self.exclusive_ubertooth,
-            "resource_placements": _json_value(self.resource_placements),
+            "resource_placements": json_value(self.resource_placements),
         }
 
 
-def _json_value(value):
+def json_value(value):
+    """The same value as plain JSON types, whatever wrappers it carries.
+
+    Normalized test arguments nest read-only mappings (an `rf:` requirement
+    per hardware role), and ``json.dump`` refuses a ``mappingproxy``.
+    """
     if isinstance(value, Mapping):
-        return {str(key): _json_value(item) for key, item in value.items()}
+        return {str(key): json_value(item) for key, item in value.items()}
     if isinstance(value, (tuple, list)):
-        return [_json_value(item) for item in value]
+        return [json_value(item) for item in value]
     return value
 
 

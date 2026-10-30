@@ -176,7 +176,10 @@ def _identity_serial(identity: Mapping) -> str:
 def _resource_text(details: Mapping) -> str:
     """role=alias for every bound resource, with its RF placement where the
     registry records one, so a result reads next to what it was taken at."""
-    placements = details.get("rf") or {}
+    placements = details.get("rf")
+    # A record written by another version of the harness may hold anything.
+    if not isinstance(placements, Mapping):
+        placements = {}
     return ", ".join(
         f"{role}={alias}"
         + (f" [{describe_placement(placements[role])}]" if role in placements else "")

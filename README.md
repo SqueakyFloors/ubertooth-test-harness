@@ -86,7 +86,7 @@ refuses to modify an existing directory that lacks the marker, and
 another location.
 
 `run-suite` and `build` refuse to start outside a bootstrapped harness
-environment. Every run manifest (schema version 4)
+environment. Every run manifest (schema version 5)
 records the Python version, implementation, executable and prefix, pip and
 dependency versions, OS and release, and CPU architecture under
 `environment`. Commands below assume the environment is active.
@@ -180,8 +180,8 @@ describes the bench; the harness never measures it:
 
 A unit with no `rf:` is taken to be an ordinary one: antenna attached, no
 attenuation, distance not recorded. Keep the numbers current whenever the
-attenuator or the position changes. Only attached hardware may have a
-placement; a `Host` may not.
+attenuator or the position changes. A `Host` and a `USB power controller` may not
+have a placement: neither has a radio.
 
 A plan asks for a placement per hardware role:
 
@@ -209,9 +209,10 @@ not: `Classic Bluetooth receive`, `Raw receive`, `BLE extcap capture`,
 followed connection off an attenuated board. A plan's `rf:` for a role
 overrides that default.
 
-Every run records the placement of each board it used, in `manifest.json`
-(`resource_placements` per invocation) and in each `test_started` record of
-`run.jsonl`. The report shows it in an `RF placement` setup row and beside the
+Every run records the placement of each board it used that records one, in
+`manifest.json` (`resource_placements` per invocation) and in each
+`test_started` record of `run.jsonl`; a board with no `rf:` is absent, since
+the registry does not say where it sits. The report shows it in an `RF placement` setup row and beside the
 resources of every result and transcript heading, so a range, transmit power,
 or RSSI figure is read next to the attenuation it was taken at.
 

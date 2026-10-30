@@ -136,6 +136,8 @@ def describe(recorded: Placement | Mapping | None) -> str:
         return f"{DEFAULT_PLACEMENT.describe()} (not recorded)"
     if isinstance(recorded, Placement):
         return recorded.describe()
+    if not isinstance(recorded, Mapping):
+        return str(recorded)
     try:
         return placement(recorded).describe()
     except PlacementError:

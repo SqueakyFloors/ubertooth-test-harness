@@ -20,6 +20,9 @@ from ubertooth_harness.rf import (
 
 _ALIAS_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 
+# Resource types with no radio, which may not record an RF placement.
+PLACELESS_TYPES = ("Host", "USB power controller")
+
 
 class RegistryError(ValueError):
     """Resource configuration or selection is invalid."""
@@ -191,6 +194,13 @@ class FileResourceRegistry:
     def _validate(self) -> None:
         identities = {}
         for resource in self.resources.values():
+            if resource.rf is not None and resource.type in PLACELESS_TYPES:
+                # A placement describes a radio on the bench; a computer and
+                # a hub have none, and no test selects either by placement.
+                raise RegistryError(
+                    f"resource {resource.alias} is a {resource.type} and cannot "
+                    "have an rf placement"
+                )
             if resource.type == "Host":
                 if resource.platform not in ("linux", "macos"):
                     raise RegistryError(
@@ -198,10 +208,6 @@ class FileResourceRegistry:
                     )
                 if resource.attached_to is not None:
                     raise RegistryError(f"host {resource.alias} cannot be attached")
-                if resource.rf is not None:
-                    # A placement describes a radio on the bench; a computer
-                    # has none, and a test would never select by it.
-                    raise RegistryError(f"host {resource.alias} cannot have an rf placement")
             else:
                 if resource.attached_to not in self.resources:
                     raise RegistryError(
@@ -346,13 +352,23 @@ class FileResourceRegistry:
         )
 
     def placed(
-        self, host: str, resource_type: str, placement: PlacementRequirement
+        self,
+        host: str,
+        resource_type: str,
+        placement: PlacementRequirement,
+        role: str | None = None,
     ) -> tuple[str, ...]:
-        """Those of them whose RF placement satisfies the requirement."""
+        """Those of them whose RF placement satisfies the requirement.
+
+        With a role, only those that may also be bound to it, so a caller
+        asking whether the host can place a role gets the same answer
+        ``resolve_hardware`` will give.
+        """
         return tuple(
             alias
             for alias in self.hardware(host, resource_type)
             if placement.matches(self.get(alias).rf)
+            and self._takes_role(self.get(alias), role)
         )
 
     def _placements(self, aliases) -> str:

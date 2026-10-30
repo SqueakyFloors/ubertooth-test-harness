@@ -163,7 +163,7 @@ class PlanCompiler:
             if selector not in ("default", "each"):
                 continue
             resource_type = definition.hardware_roles[role]
-            if self.registry.placed(host, resource_type, placement):
+            if self.registry.placed(host, resource_type, placement, role):
                 continue
             registered = self.registry.hardware(host, resource_type)
             have = "; ".join(

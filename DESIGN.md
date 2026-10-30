@@ -330,8 +330,9 @@ A placement is set by hand and describes the bench; nothing measures or
 infers it, and a unit with no `rf:` is read as an ordinary one (antenna
 attached, no attenuation, distance not recorded). That default is what makes
 `max_attenuation_db: 0` select the ordinary receivers without every registry
-having to spell `rf:` out on each of them. A `Host` is refused a placement: a
-computer has no radio, and no test would select by it.
+having to spell `rf:` out on each of them. A `Host` and a `USB power
+controller` are refused a placement: neither has a radio, and no test selects
+either by placement.
 
 A test states what it needs of the unit bound to each hardware role as a
 `PlacementRequirement` (`antenna`, `min_attenuation_db`,
@@ -348,8 +349,9 @@ with a reason naming the requirement and the placement of every unit of that
 type on the host, so a report says what was missing rather than silently
 selecting a board that cannot show what the test is for.
 
-Placement is recorded, never re-derived: the planner puts the placement of
-every bound unit that has one on the invocation
+Placement is recorded, never re-derived, and only where the registry states
+it: the planner puts the placement of every bound unit that has one on the
+invocation
 (`TestInvocation.resource_placements`), the manifest carries it per invocation
 (`resource_placements`, manifest schema 5), the sequencer repeats it in each
 `test_started` record, and the report shows it in a setup row and beside the

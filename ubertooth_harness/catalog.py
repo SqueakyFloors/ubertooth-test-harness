@@ -11,6 +11,7 @@ from ubertooth_harness.hostneeds import (
 )
 from ubertooth_harness.rf import (
     NORMAL_LINK, PlacementError, PlacementRequirement,
+    requirement as rf_requirement,
     requirements as rf_requirements,
 )
 from ubertooth_harness.patterns import (
@@ -193,9 +194,16 @@ def _coverage(value):
 
 def _rf(value):
     try:
-        return MappingProxyType(dict(rf_requirements(value)))
+        asked = rf_requirements(value)
     except PlacementError as error:
         raise CatalogError(str(error)) from error
+    # Normalized arguments are written to the manifest and run.jsonl as JSON,
+    # and are read back from a manifest (the GUI), so a requirement is kept
+    # as the plain record it validated to; the planner reads it back with
+    # placement_requirements().
+    return MappingProxyType({
+        role: MappingProxyType(want.to_dict()) for role, want in asked.items()
+    })
 
 
 @dataclass(frozen=True)
@@ -300,7 +308,10 @@ class TestDefinition:
         defaults = self.rf_defaults or {}
         wanted = {}
         for role in self.hardware_roles or {}:
-            placement = requested.get(role, defaults.get(role))
+            if role in requested:
+                placement = rf_requirement(requested[role])
+            else:
+                placement = defaults.get(role)
             if placement:
                 wanted[role] = placement
         return MappingProxyType(wanted)
