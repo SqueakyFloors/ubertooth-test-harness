@@ -261,8 +261,12 @@ bytes, and `sco_rx_bad` counts the frames the controller marked as damaged.
 number a capture can be checked against:
 
 ```json
-{"rx_total":2000,"rx_correct":2000,"rx_err":0,"rx_none":0,"rx_lost":0,"tx_total":2000,"tx_discarded":0}
+{"rx_total":4057,"rx_correct":4037,"rx_err":0,"rx_none":20,"rx_lost":0,"tx_total":4059,"tx_discarded":0}
 ```
+
+That is a measured 30-second link: 4059 packets each way, which is one every
+7.4 ms, so the controller opened an eSCO link on a 7.5 ms interval. 120-byte
+frames of 16-bit samples at that rate is the 64 kbit/s a CVSD link carries.
 
 ### The packet type is not selectable, and is not reported
 
@@ -292,7 +296,9 @@ this firmware does not pretend otherwise. In ESP-IDF v5.5.6:
   counters above, and `status` reports all four.
 
 An Ubertooth capture is the way to see the packet type on the air, which is
-the direction the fork's tests want anyway.
+the direction the fork's tests want anyway. The link is easy to find there:
+`ubertooth-rx -l e9c5ba -u 0d -t 30` read 168 packets of the piconet while
+an audio link was up, and 0 in the same 30 seconds with the boards idle.
 
 The codec is a build-time choice, not a run-time one, for the same reason:
 `CONFIG_BT_HFP_WBS_ENABLE` decides whether mSBC is offered at all. This image
