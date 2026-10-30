@@ -47,7 +47,8 @@ it through an SSH tunnel; nothing is exposed on the network.
 
 4. **Run something:** in Run setup pick a git ref (for example `main`), a plan
    (`host` needs no board and is a safe first run), the target, keep "Build the
-   ref on the target first" ticked, and press Run. The Live run card ticks off
+   ref on the target first" and "Flash the firmware to the boards first"
+   ticked, and press Run. The Live run card ticks off
    each test; History keeps every run with its `report.md`.
 
 If it does not connect:
@@ -251,7 +252,9 @@ between the host's default board (sender) and `UT_Linux1` (responder). The
 test transmits: both boards send on 2.4 GHz, the sender at every PA level up
 to 0 dBm. Run it only where that is allowed, for example with the boards in a
 shielded box or on an RF-isolated bench. Both boards need firmware built from the commit under
-test (flash the `--build --with-firmware` image first, as for any device test):
+test; a `--build` run flashes both with its own build before preflight, as
+for any device test (see [Flashing the boards with the run's
+build](#flashing-the-boards-with-the-runs-build)):
 
 ```sh
 python -m ubertooth_harness run-suite \
@@ -408,7 +411,7 @@ run.
 |---|---|---|
 | BlueZ (`ubertooth-scan`, `ubertooth-follow`) | `Host CLI surface` scan and follow `-h`; every `follow` and `scan` case of `Refused command lines` | macOS (no BlueZ): Linux only; on Linux, a run that uses installed tools without them on `PATH` (a Linux `--build` configures with `REQUIRE_ALL=ON` and fails unless both are in the run prefix, so its cases are required) |
 | Python tools build | `Python tools` `ubertooth-specan-ui -h` | the run has no `--build --with-python` |
-| firmware build | `DFU image checks` `sign-test-build` | the run has no `--build --with-firmware` and no `--artifact "test build=PATH"` |
+| firmware build | `DFU image checks` `sign-test-build` | the run has no `--build --with-firmware` and no `--artifact "test build=PATH"` (a `--build` run that flashes its boards builds the firmware anyway, so the case applies there) |
 | platform | plan entries with `platforms:` (Flash reliability, Exclusive Ubertooth topology, MAC polling soak; the `exclusive` and `mac-polling` plans list Linux only) | the host's platform is not listed |
 
 Runtime skips remain only for what running the command alone can tell: a
@@ -648,8 +651,13 @@ python -m ubertooth_harness run-suite --plan testplans/fast.yaml --suite fast \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref feature/my-change \
   --libbtbb-source /path/to/libbtbb \
   --libbtbb-ref bf878df27e131dd8ab56bb3497918eb9a83f607b \
-  --build [--with-firmware] [--with-python[=PYTHON]] --output runs
+  --build [--no-flash-build] [--with-firmware] [--with-python[=PYTHON]] \
+  --output runs
 ```
+
+A `--build` run also flashes its boards with the firmware it built before
+preflight, unless `--no-flash-build`; see [Flashing the boards with the run's
+build](#flashing-the-boards-with-the-runs-build).
 
 The examples here and the default in `scripts/ci.sh` use one commit of the
 [`SqueakyFloors/libbtbb`](https://github.com/SqueakyFloors/libbtbb) fork: the
@@ -710,9 +718,9 @@ its packages are used). The installed `ubertooth-specan-ui` and
 manifest records its path and version. specan-ui itself needs numpy, qtpy, and
 a Qt binding (PyQt5/6 or PySide2/6) in that interpreter. `--with-firmware`
 also builds `bluetooth_rxtx.dfu` with the built `ubertooth-dfu`; the image is
-hashed into the manifest, not flashed. The built `ubertooth-util -V` must
-report both resolved revisions on its `Host tools version:` line, without a
-modified-source `*`.
+hashed into the manifest (a run that flashes its boards builds it even
+without the option). The built `ubertooth-util -V` must report both resolved
+revisions on its `Host tools version:` line, without a modified-source `*`.
 
 The manifest records the toolchain (CMake, C compiler, pkg-config, libusb,
 BlueZ on Linux, the ARM compiler when building firmware, and the Python with
@@ -733,6 +741,58 @@ whole build has a one-hour deadline on top of per-command timeouts.
 Install the build prerequisites and udev rules once per machine, for example
 with the fork's [`install.sh`](https://github.com/SqueakyFloors/ubertooth/blob/main/install.sh). The harness never runs it or installs anything
 system-wide.
+
+### Flashing the boards with the run's build
+
+Preflight refuses to test tools against firmware from another commit, so on a
+shared bench a board flashed by someone else fails every run. A `--build` run
+therefore flashes its boards with the `bluetooth_rxtx.dfu` it just built,
+after the build and before the manifest and preflight ([#135](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/135)). It is the
+default whenever the run builds; `--no-flash-build` keeps the boards'
+firmware (preflight then checks it as before), and a run without `--build`
+cannot flash. Flashing implies the firmware build, so it needs
+`arm-none-eabi-gcc`; without it the run is refused before anything starts,
+naming `--no-flash-build`.
+
+- Which boards: every Ubertooth whose firmware revision preflight requires,
+  in run order (`PreflightPolicy.boards_needing_firmware`). Guard-only boards
+  are not flashed, because preflight only requires their firmware API to be
+  no older than the host tools'; boards a firmware-writing test (`Flash
+  reliability`, `DFU images`) writes itself are not flashed either. A plan
+  that uses no Ubertooth (the `host` plan) flashes nothing and needs no ARM
+  compiler.
+- How: one board at a time, `ubertooth-util -U <serial> -v` first (a board
+  that already reports the build's revision is not written), then
+  `ubertooth-dfu -U <serial> -d <image> -r` (25 s), then `-v` again until it
+  reports the build's revision (up to 3 reads, 5 s each, 1 s apart, while the
+  board re-enumerates). The image's SHA-256 is checked again before each
+  write. The whole stage has a deadline of 10 s plus 48 s per board, and a
+  write only starts with its whole 25 s left: a write cut off part-way would
+  leave the board in its bootloader, so a board that cannot be written in the
+  time left is not written at all, and the stage says so.
+- The first failure stops the run before preflight, with the reason (the
+  `ubertooth-dfu` exit, a board that does not answer after the write, or the
+  revision it reports instead), in `run_finished` and the GUI failure
+  summary. Cancellation (Ctrl-C, SIGTERM, SIGHUP, the GUI's Cancel) lets a
+  write in progress finish, stops after it, and ends the run as canceled,
+  not failed; a fault that arrives with a cancellation is still a failure.
+- Locks: the run takes the [host lock](#the-host-lock) with its board leases
+  (host lock first), holds it while writing, and releases it once every board
+  is verified, unless the run itself switches power or writes firmware later.
+  The board leases are held for the whole run, as always.
+- Record: `build_flash_started`, then per board `build_flash_board_started`
+  and `build_flash_board_finished` (status `skipped` for a board already on
+  the build's revision, `flashed`, `failed` or `canceled`; revision before
+  and after, written or not), each command as `command_started`/`command_finished` with phase
+  `flash`, and `build_flash_finished` (status `skipped` with the reason when
+  the run builds but does not flash). report.md has a "Flash" row and an
+  `=== FLASH ===` section in the transcript.
+
+When preflight finds a board on other firmware, its reason names both
+revisions and the fix, for example `Firmware version: UT_Linux0 runs
+git-a8e65d9, the tools are git-7388776: flash it with this build (the default
+when building)`; a run without `--build` says to build and flash it, and a
+`--no-flash-build` run to leave that option out.
 
 ## Source identity, manifest, and mandatory preflight
 
@@ -878,8 +938,11 @@ the host lock, `<lease dir>/host-power.lock`, the same kind of `flock` lease
 (released by the kernel when the holder exits, so it never goes stale): a
 `run-suite` with power isolation (StarTech or Acroname) or an exclusive
 Ubertooth check, `Flash reliability`, or `DFU images` holds it for the whole
-run, and `lease` holds it for its command with `--host-lock`, or always when
-the command is `ubertooth-dfu`. A second such command on the host fails at
+run, a `--build` run that flashes its boards with its own build takes it with
+its leases before the build and releases it after the flash stage (so it is
+held for the build as well, and two such runs on one host do not start at the
+same time), and `lease` holds it for its command with `--host-lock`, or always
+when the command is `ubertooth-dfu`. A second such command on the host fails at
 once, before any build or device command, and names the holder (owner, run,
 command, pid, and since when); `--wait-for-boards` waits for it as for a
 board. `ubertooth-harness boards` shows it as `host lock`, and the run report
@@ -1227,7 +1290,10 @@ A `run` request names a git ref and the commit the controller listed for it
 (the runner runs exactly that commit; only when the controller could not list
 refs is the commit `null` and the ref resolved in `--ubertooth-source`), a
 plan in `--plans-dir` (`fast` is `testplans/fast.yaml`), a suite, optional
-exact test names, and whether to `--build`. When the commit (or ref) is not
+exact test names, whether to `--build`, and, with `build`, whether to flash
+the boards with that build first (`flash_build`; false passes
+`--no-flash-build`, see [Flashing the boards with the run's
+build](#flashing-the-boards-with-the-runs-build)). When the commit (or ref) is not
 in `--ubertooth-source` yet, typically because it was pushed after the
 checkout was last fetched, the run fetches it once from the checkout's remote
 (`origin`, or the remote a `remote/name` ref names) within 60 s and resolves
@@ -1264,8 +1330,9 @@ run.jsonl, so the controller deduplicates by `(run_id, sequence)`. SIGINT,
 SIGTERM, or SIGHUP stops the runner after cancelling and waiting for an
 active run.
 
-Messages are JSON objects with `"version": 2` and a `type` (version 2 added
-the run's `commit`; a version 1 runner or controller is refused); each type has an
+Messages are JSON objects with `"version": 3` and a `type` (version 2 added
+the run's `commit`, version 3 its `flash_build`; a runner or controller of
+another version is refused); each type has an
 exact field set, and anything else (unknown version or type, a missing or
 extra field, a wrong value) gets `protocol_error` and is not acted on. The
 schema is in [`ubertooth_harness/protocol.py`](ubertooth_harness/protocol.py)
@@ -1373,7 +1440,10 @@ word and symbol (colour only reinforces it).
 - **Run setup:** git ref (default branch, branches and tags from
   `/api/refs`), plan and suite (from `/api/plans`, with the suite's tests;
   only runnable plans are offered, and plans of planned tests such as
-  `backlog` are named as not runnable), target, and whether to build the ref first; Run starts the whole suite.
+  `backlog` are named as not runnable), target, whether to build the ref first,
+  and "Flash the firmware to the boards first" (ticked by default; disabled,
+  with a note, while Build is unticked; see [Flashing the boards with the
+  run's build](#flashing-the-boards-with-the-runs-build)); Run starts the whole suite.
 - **Live run:** the suite's tests as a checklist that ticks from the run's
   events (✓ passed, ✗ failed, … running, ○ pending or not run; always text
   plus symbol), the current stage (building, preflight, tests), elapsed time,
@@ -1418,13 +1488,13 @@ Endpoints (JSON unless noted; `GET /` lists them):
 | `GET /api/refs` | `{"repository", "refs": [{"name", "kind", "commit"}], "fetched_at"}` from `git ls-remote` (`kind` is `default`, `branch` or `tag`); 503 if it cannot be listed |
 | `GET /api/plans` | every `<plan>.yaml` in `--plans-dir` with its suites, test names, per-test `estimated_s` (the catalog estimate of one invocation with the step's arguments, else null) and `per_board` (runs once per selected board), the suite total when every test has one, `per_board_tests`, and `runnable` (the plan's `runnable` flag; false for plans of planned tests and for a plan that does not load); a plan that does not load is listed with its `error` |
 | `GET /api/targets`, `GET /api/targets/{host}` | registry: host, hostname, OS, Python, Ubertooth serials, last heartbeat, `online`/`offline`, connected, active run |
-| `POST /api/targets/{host}/runs` | start a run with the protocol `run` fields: `{"ref", "commit": null, "plan", "suite", "tests": [], "build": false}` (`commit`, optional, is the full commit the caller saw listed for `ref`); 201 with the run (including the `commit` sent to the runner), 409 busy, offline, rejected by the runner, or `ref` moved away from `commit`, 422 invalid, a ref not in `/api/refs` (full commit IDs are accepted), or a name listing several commits, 504 no answer |
+| `POST /api/targets/{host}/runs` | start a run with the protocol `run` fields: `{"ref", "commit": null, "plan", "suite", "tests": [], "build": false, "flash_build": true}` (`commit`, optional, is the full commit the caller saw listed for `ref`; `flash_build` applies only with `build` and is recorded false without it); 201 with the run (including the `commit` sent to the runner), 409 busy, offline, rejected by the runner, or `ref` moved away from `commit`, 422 invalid, a ref not in `/api/refs` (full commit IDs are accepted), or a name listing several commits, 504 no answer |
 | `GET /api/runs[?target=HOST]` | runs, newest first |
 | `GET /api/runs/{run_id}` | status, every event, the failure summary (`failures`), and `invocations`: from the run's manifest, every planned invocation on the target with `invocation_id`, `test_name` and `estimated_s` (null before the manifest record) |
 | `GET /api/runs/{run_id}/report.md` | the run's report (Markdown) |
 | `POST /api/runs/{run_id}/cancel` | `{"reason": ""}`; 202 once the runner accepts |
 | `WS /ws/live[?run_id=ID]` | browser stream: a `snapshot`, then `target` and `run` updates, plus that run's `event` records; a browser 1000 updates behind is closed with 1013 `live stream overflowed` (reconnect for a new snapshot) |
-| `WS /ws/runner` | target runner protocol v2 |
+| `WS /ws/runner` | target runner protocol v3 |
 
 Every request and WebSocket handshake must carry `Host: 127.0.0.1:PORT` or
 `localhost:PORT` and, if it has an `Origin`, that same origin (runner
@@ -1437,7 +1507,7 @@ manifest record); a malformed or out-of-place message is counted on the
 target and ignored, and a first message that is not a valid `register`
 closes the connection. A target is `offline` after three heartbeat intervals
 without a valid message, and runs cannot be started on it: only a message that
-decodes as protocol v2 resets the offline timer, and malformed messages do
+decodes as protocol v3 resets the offline timer, and malformed messages do
 not. The controller allows one
 outstanding start request per target and refuses a target whose runner reports
 an active run. Each run is a flat directory `<results dir>/<run_id>/` with
@@ -1530,13 +1600,14 @@ them refuses while the controller reports an active run; `--force` restarts
 anyway.
 
 The runner protocol has no version negotiation: the controller and runner
-must speak the same version, and protocol v2 (which added the listed commit
-to `run`) is a hard break from v1. A v1 runner is refused at `register` (the
+must speak the same version: protocol v2 (which added the listed commit to
+`run`) and v3 (which added `flash_build`) are each a hard break from the
+version before. An older runner is refused at `register` (the
 controller closes the connection, code 1008), and since it did register it
 reconnects after the shortest backoff (0.5 s) and is refused again,
 indefinitely; its log shows `registered with ...` then `controller connection
-closed` over and over, and the target never comes online. A v2 runner against
-a v1 controller is refused the same way. `deploy.sh` installs both services
+closed` over and over, and the target never comes online. A newer runner
+against an older controller is refused the same way. `deploy.sh` installs both services
 from the same checkout and restarts both when its commit changes, so a
 single-node deploy is always matched; a runner started by hand (or on another
 machine) must be updated and restarted together with the controller.

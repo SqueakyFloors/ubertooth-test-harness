@@ -435,6 +435,8 @@ class RunnerService:
         argv += [f"--test={name}" for name in message["tests"]]
         if message["build"]:
             argv.append("--build")
+            if not message["flash_build"]:
+                argv.append("--no-flash-build")
         if self.config.allow_power_changes:
             argv.append("--allow-power-changes")
         if self.config.external_board_lock is not None:
