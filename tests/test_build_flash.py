@@ -71,7 +71,15 @@ class FakeBoards:
         self.commands.append(command)
         assert timeout_s > 0, command
         returncode = 0
-        if command == ("ubertooth-util", "-H"):
+        if command == ("ubertooth-util", "-V"):
+            # The host tools' own version, printed before any board is looked
+            # for. This is the host version check's first question; `-H` below
+            # is the fallback for older fork commits.
+            output = (
+                f"Host tools version: libubertooth 1.1 ({self.host_revision}), "
+                f"libbtbb 1.0 ({self.host_revision})\n"
+            )
+        elif command == ("ubertooth-util", "-H"):
             output = (
                 f"libubertooth 1.1 ({self.host_revision}), "
                 f"libbtbb 1.0 ({self.host_revision})\n"
