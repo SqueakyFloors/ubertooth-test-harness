@@ -12,9 +12,10 @@ guards: read before and after every case, never written.
 Since fork 6fee30c (SqueakyFloors/ubertooth#198, #199, fixed by e8edd15;
 #200, fixed by 9d710fe) -d checks the whole image before the board leaves its
 application: a bad image, including a suffix for another vendor or product, is
-refused with exit 1 and "Signature check failed, firmware will not be
-updated" before a device is opened. -s refuses a .bin that already ends in a
-DFU suffix and writes nothing, and -s and -d only read their input.
+refused before a device is opened, with exit 1 and one line naming the file,
+what is wrong with it, and that the firmware was left alone. -s refuses a
+.bin that already ends in a DFU suffix and writes nothing, and -s and -d only
+read their input.
 
 SqueakyFloors/ubertooth#267 (6fee30c, fixed in 89d9197): -d <image> -r
 writes and resets correctly but exits 1 ("Detach failed") and skips "Verified
@@ -56,8 +57,6 @@ _REVISION_PATTERN = (
 _PROGRAMMING = r"firmware programming attempt"
 # ...and this one once the image is accepted, before it opens a device.
 _DEVICE_OPENED = r"DFU \+\d+\.\d+s: operation started"
-# check_download_image(): every refused image ends with this line.
-_REFUSED = r"Signature check failed, firmware will not be updated"
 # A write, a read-back. Helper steps that run device commands take their
 # timeout from dfuimage.step_timeout_s (its own per-command timeouts and the
 # guard count), so a slow cleanup is never killed mid-flash.
@@ -65,6 +64,14 @@ WRITE_TIMEOUT_S = 45.0
 READ_TIMEOUT_S = 35.0
 # A line of a command record the helper prints (rawlog format, UTC stamp).
 _RECORD_LINE = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3} \[")
+
+
+def _refused(file_name: str, reason: str) -> str:
+    """check_download_image(): a refused image gets one line naming the file,
+    what is wrong with it, and that the board was left alone. ``reason`` is a
+    pattern; the DFU image checks test covers every reason one by one."""
+    return (rf"(?m)^error: \S*{re.escape(file_name)}: {reason}; "
+            r"firmware will not be updated$")
 
 
 def _image(context):
@@ -230,13 +237,18 @@ def _write_read_back_case(serial, guards):
 # -d <bad image> -r: refused before any block is written; the board keeps its
 # firmware and stays in its application.
 
+# Cutting the suffix out of firmware bytes leaves bLength whatever byte
+# landed there, so the number it reports is not pinned.
+_SUFFIX_LENGTH = r"Unknown DFU suffix length: \d+"
 _REJECTIONS = (
-    ("corrupt", "reject-corrupt", "Refuse an image with a wrong CRC", r"CRC mismatch"),
-    ("truncated", "reject-truncated", "Refuse a truncated image", None),
-    ("no-suffix", "reject-no-suffix", "Refuse a binary without a DFU suffix", None),
-    ("text", "reject-text", "Refuse a text file", None),
+    ("corrupt", "reject-corrupt", "Refuse an image with a wrong CRC",
+     r"CRC mismatch: calculated: 0x[0-9a-f]+, found: 0x[0-9a-f]+"),
+    ("truncated", "reject-truncated", "Refuse a truncated image", _SUFFIX_LENGTH),
+    ("no-suffix", "reject-no-suffix", "Refuse a binary without a DFU suffix",
+     _SUFFIX_LENGTH),
+    ("text", "reject-text", "Refuse a text file", _SUFFIX_LENGTH),
     ("bad-signature", "reject-bad-signature", "Refuse a suffix without the UFD signature",
-     r"DFU Signature mismatch"),
+     r"DFU Signature mismatch: not a DFU file"),
     # The suffix must name 1d50:6003 since e8edd15 (SqueakyFloors/ubertooth#199).
     ("wrong-vendor", "reject-wrong-vendor", "Refuse a suffix for another vendor ID",
      r"DFU suffix is for USB vendor 0x1234, not 0x1d50: this image is for another device"),
@@ -255,7 +267,7 @@ def _reject_case(serial, guards, kind, case_id, name, pattern):
         Step("attempt", f"ubertooth-dfu -d {bad} -r",
              _tool("ubertooth-dfu", "-U", serial, "-d", _file(bad), "-r"),
              timeout_s=WRITE_TIMEOUT_S, mutates=True, expected_returncodes=(1,),
-             output_patterns=(_REFUSED,) + ((pattern,) if pattern else ()),
+             output_patterns=(_refused(bad, pattern),),
              forbidden_patterns=(_DEVICE_OPENED, _PROGRAMMING, r"Verified firmware revision")),
         # Still in the application since e8edd15 (SqueakyFloors/ubertooth#198).
         _helper_step("after", "Board in its application, flash unchanged", "after-reject",
