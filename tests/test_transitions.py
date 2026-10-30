@@ -48,8 +48,8 @@ def setUpModule():
 # ---------------------------------------------------------------------------
 # The host tools' getopt and value parsing (fork opt_parse.c), for the fakes.
 
-UTIL_OPTIONS = "U:hnmefiIprsStvbl::a::C::c::d::q::z::9VNxH"
-BTLE_OPTIONS = "a::r:hfnpU:v::A:s:t:x:c:q:jJiI"
+UTIL_OPTIONS = "U:hnmefiIprsStvbl::a::C::c::d::q::z::9VNx"
+BTLE_OPTIONS = "a::r:hfnpU:k::A:s:t:x:c:q:jJiI"
 UTIL_VALUES = {
     "l": ("USR LED state", 0, 1, ""),
     "d": ("all-LED state", 0, 1, ""),
@@ -240,7 +240,7 @@ class FakeUbertooth:
 
     def _btle(self, command, options, on_output):
         """ubertooth-btle main() at fork main 3b22c95, for the options the
-        cases use: getopt with the next-word rule for -a and -v, value checks,
+        cases use: getopt with the next-word rule for -a and -k, value checks,
         the one argument rule, then the API check and the mode."""
         def fail(message, stdout=""):
             return self._result(command, 1, stdout, message + "\n" if message else "", on_output)
@@ -248,7 +248,7 @@ class FakeUbertooth:
         def next_value(option):
             if not self.next_word:
                 return None
-            return {"a": not_option, "v": decimal}.get(option)
+            return {"a": not_option, "k": decimal}.get(option)
 
         pairs, leftover, error = getopt(options, BTLE_OPTIONS, next_value)
         if error:
@@ -256,7 +256,7 @@ class FakeUbertooth:
         crc = None  # None: not given, "q": read, "0"/"1": set
         get_aa = set_aa = None
         for option, value in pairs:
-            if option == "v":
+            if option == "k":
                 if value is None:
                     crc = "q"
                 elif parse_int(value, 0, 1) is None:
@@ -534,8 +534,8 @@ class HostVersionPassthrough:
         self.device = device
 
     def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
-        if tuple(argv) == ("ubertooth-util", "-H"):
-            output = "libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
+        if tuple(argv) == ("ubertooth-util", "-V"):
+            output = "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
             return CommandResult(tuple(argv), 0, output, "", 0.01, False)
         return self.device.run(
             argv,
@@ -804,7 +804,7 @@ class TransitionExecutionTests(unittest.TestCase):
         for event in effective:
             self.assertEqual("1", event.details["expected"])
             self.assertEqual("1", event.details["observed"])
-            self.assertEqual(["ubertooth-btle", "-U", SERIAL, "-v"], event.details["argv"])
+            self.assertEqual(["ubertooth-btle", "-U", SERIAL, "-k"], event.details["argv"])
 
     def test_continuous_mode_deadline_reports_stopped_not_failed(self):
         _summary, events = run_test("BLE CRC transitions", FakeUbertooth(crc="1"))
@@ -888,7 +888,7 @@ class TransitionExecutionTests(unittest.TestCase):
         self.assertIn("cleanup failed: Restore original channel", summary.failure_reason)
 
     def test_unknown_original_skips_restore_without_hiding_read_failure(self):
-        device = FakeUbertooth(fail=lambda argv: argv == ("ubertooth-btle", "-U", SERIAL, "-v"))
+        device = FakeUbertooth(fail=lambda argv: argv == ("ubertooth-btle", "-U", SERIAL, "-k"))
 
         summary, events = run_test("BLE CRC transitions", device)
 
@@ -897,7 +897,7 @@ class TransitionExecutionTests(unittest.TestCase):
         self.assertNotIn("cleanup failed", summary.failure_reason)
         restore = steps(events, step_id="restore-crc")
         self.assertEqual("skipped", restore[0].status)
-        self.assertFalse(any(command[-1] in ("-v0", "-v1") for command in device.commands))
+        self.assertFalse(any(command[-1] in ("-k0", "-k1") for command in device.commands))
 
     def test_cancellation_during_mode_still_runs_cleanup(self):
         token = CancellationToken()
@@ -1391,7 +1391,7 @@ class TransitionExecutionTests(unittest.TestCase):
         device = FakeUbertooth(
             crc="1",
             cancel_on=lambda argv: "-n" in argv,
-            fail=lambda argv: argv == ("ubertooth-btle", "-U", SERIAL, "-v1"),
+            fail=lambda argv: argv == ("ubertooth-btle", "-U", SERIAL, "-k1"),
         )
 
         summary, events = run_test("BLE CRC transitions", device, cancellation=token)
@@ -1404,7 +1404,7 @@ class TransitionExecutionTests(unittest.TestCase):
         token = CancellationToken()
         device = FakeUbertooth(
             crc="1",
-            cancel_on=lambda argv: argv[-1] == "-v0",
+            cancel_on=lambda argv: argv[-1] == "-k0",
         )
 
         summary, events = run_test("BLE CRC transitions", device, cancellation=token)
@@ -1578,7 +1578,7 @@ class OptionRuleTests(unittest.TestCase):
                                   coverage="comprehensive")
         self.assertTrue(passed.passed, passed.failure_reason)
         sets = [tuple(e.details["argv"][3:]) for e in steps(events, step_id="set")]
-        self.assertEqual([("-v", "1"), ("-v", "0")], sets)
+        self.assertEqual([("-k", "1"), ("-k", "0")], sets)
 
         for device in (FakeUbertooth(crc="1", next_word=False),
                        FakeUbertooth(crc="1", next_word=False, reject_strays=False)):
