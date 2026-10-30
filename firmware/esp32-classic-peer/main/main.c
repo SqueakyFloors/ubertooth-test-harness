@@ -193,7 +193,7 @@ static void run(int argc, char **argv)
         } else if (argc == 2 && strcmp(argv[1], "stop") == 0) {
             answer(sco_stop());
         } else if (argc == 2 && strcmp(argv[1], "stats") == 0) {
-            /* static for the same reason as the status line below. */
+            /* static for the same reason as the status line above. */
             static char json[SHELL_OUT_MAX];
             const char *err = sco_pkt_stats(json, sizeof(json));
             if (!err) {

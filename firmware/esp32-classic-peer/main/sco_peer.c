@@ -54,9 +54,10 @@
 #define STATS_TIMEOUT_MS     2000
 
 /* The cap on one audio frame. The link's real frame size comes from the audio
- * state event and is checked against this; a CVSD link over HCI asked for 120
+ * state event and is checked against it; a CVSD link over HCI asked for 120
  * bytes of 16-bit samples when measured, and this leaves room for a wider
- * one without putting a large buffer in static memory. */
+ * one. A link whose frame size is larger than this carries no audio and says
+ * so, rather than filling part of a frame. */
 #define FRAME_MAX 240
 
 /* How long the sender waits for the next frame to arrive before sending one
@@ -177,7 +178,10 @@ static void send_frame(void)
     err = (role == PEER_ROLE_INITIATOR) ? esp_hf_ag_audio_data_send(handle, buf)
                                         : esp_hf_client_audio_data_send(handle, buf);
     if (err != ESP_OK) {
-        /* A send that was refused never took the buffer. */
+        /* A send that was refused never took the buffer: every failure
+         * return in esp_hf_ag_audio_data_send() (and the client's) is taken
+         * before btc_hf_ag_audio_data_send() hands the buffer to the
+         * Bluetooth task, so freeing it here is right and necessary. */
         if (role == PEER_ROLE_INITIATOR) {
             esp_hf_ag_audio_buff_free(buf);
         } else {
@@ -189,8 +193,12 @@ static void send_frame(void)
     if (err == ESP_OK) {
         sc.tx_frames++;
         /* The counter steps only for a frame that went out, so it never
-         * gains a gap and always matches tx_frames. */
-        sc.counter++;
+         * gains a gap. Only if it is still the one this frame carried: a
+         * link that came up while the frame was with the stack has reset it
+         * to zero, and that restart is what a capture reads. */
+        if (sc.counter == counter) {
+            sc.counter = counter + 1;
+        }
     } else {
         sc.tx_errors++;
     }
@@ -268,6 +276,12 @@ static void audio_changed(int state, uint16_t handle, uint16_t frame_len,
                state == ESP_HF_AUDIO_STATE_CONNECTED_MSBC);
     bool usable = up && frame_len >= 4 && frame_len <= FRAME_MAX;
 
+    if (state == ESP_HF_AUDIO_STATE_CONNECTING) {
+        /* Nothing has changed yet, and in particular a link already up must
+         * keep its handle and frame size. */
+        return;
+    }
+
     LOCK();
     sc.audio = up;
     /* Keep the handle and the frame size only while there is a link to use
@@ -280,14 +294,10 @@ static void audio_changed(int state, uint16_t handle, uint16_t frame_len,
     sc.msbc = up && state == ESP_HF_AUDIO_STATE_CONNECTED_MSBC;
     if (up) {
         sc.counter = 0;
-        sc.stats_dead = false;
         memcpy(sc.remote, remote, ESP_BD_ADDR_LEN);
     }
     UNLOCK();
 
-    if (state == ESP_HF_AUDIO_STATE_CONNECTING) {
-        return; /* not an answer to anything yet */
-    }
     shell_line("utesp: sco %s", up ? "connected" : "disconnected");
     if (up && !usable) {
         shell_line("utesp: sco frame size %u unusable, sending no audio", frame_len);
@@ -469,6 +479,20 @@ static const char *profile_wait(bool starting)
                : "the profile refused to stop";
 }
 
+/* Records a profile as this module's to stop. Called the moment the init
+ * call is accepted and before waiting for its event: the init may land after
+ * the wait gives up, and a profile nobody owns is one nothing will ever
+ * stop, so the next role would start the other one on top of it, which
+ * ESP-IDF says cannot work. Not called any earlier than that, because a
+ * profile that was never initialized must not be deinitialized either. */
+static void profile_owned(enum peer_role role)
+{
+    LOCK();
+    sc.profile_up = true;
+    sc.role = role;
+    UNLOCK();
+}
+
 /* Starts the profile this role needs. Only one may run at a time, which
  * ESP-IDF's own documentation states, so the role decides. */
 static const char *profile_start(enum peer_role role)
@@ -476,22 +500,15 @@ static const char *profile_start(enum peer_role role)
     const char *err;
 
     xSemaphoreTake(prof_ev, 0);
-    /* The profile is recorded as ours the moment the init call is accepted,
-     * before waiting for its event. The init may well land after the wait
-     * gives up, and a profile nobody owns is one nothing will ever stop:
-     * the next role would start the other one on top of it, which ESP-IDF
-     * says cannot work. Every failure below leaves this set so the caller's
-     * profile_stop() has something to stop. */
-    LOCK();
-    sc.profile_up = true;
-    sc.role = role;
-    UNLOCK();
 
     if (role == PEER_ROLE_INITIATOR) {
-        if (esp_hf_ag_register_callback(ag_cb) != ESP_OK ||
-            esp_hf_ag_init() != ESP_OK) {
+        if (esp_hf_ag_register_callback(ag_cb) != ESP_OK) {
             return "audio gateway init failed";
         }
+        if (esp_hf_ag_init() != ESP_OK) {
+            return "audio gateway init failed";
+        }
+        profile_owned(role);
         if ((err = profile_wait(true)) != NULL) {
             return err;
         }
@@ -499,10 +516,13 @@ static const char *profile_start(enum peer_role role)
             return "audio callback registration failed";
         }
     } else {
-        if (esp_hf_client_register_callback(hf_cb) != ESP_OK ||
-            esp_hf_client_init() != ESP_OK) {
+        if (esp_hf_client_register_callback(hf_cb) != ESP_OK) {
             return "hands-free init failed";
         }
+        if (esp_hf_client_init() != ESP_OK) {
+            return "hands-free init failed";
+        }
+        profile_owned(role);
         if ((err = profile_wait(true)) != NULL) {
             return err;
         }
@@ -599,8 +619,10 @@ static const char *profile_stop(void)
 
 const char *sco_start(enum peer_role role, const uint8_t *peer_addr)
 {
+    esp_bd_addr_t peer;
     const char *err;
-    bool audio;
+    bool audio, slc, have_profile;
+    unsigned frame_len;
 
     if (!sc.ready) {
         return "the audio link is not available on this board";
@@ -608,17 +630,26 @@ const char *sco_start(enum peer_role role, const uint8_t *peer_addr)
 
     LOCK();
     audio = sc.audio;
+    slc = sc.slc;
+    /* The profile this role needs may already be running, from an earlier
+     * "sco start" on this board. Keeping it is not just quicker: taking it
+     * away would drop a service level connection the other board brought
+     * up, so a second "sco start" would destroy the link it is asked for. */
+    have_profile = sc.profile_up && sc.role == role;
     UNLOCK();
     if (audio) {
         return "the audio link is already up";
     }
 
-    if ((err = sco_stop()) != NULL) {
-        return err;
-    }
-    if ((err = profile_start(role)) != NULL) {
-        profile_stop();
-        return err;
+    if (!have_profile) {
+        if ((err = sco_stop()) != NULL) {
+            return err;
+        }
+        if ((err = profile_start(role)) != NULL) {
+            profile_stop();
+            return err;
+        }
+        slc = false;
     }
 
     if (role == PEER_ROLE_ACCEPTOR) {
@@ -631,29 +662,34 @@ const char *sco_start(enum peer_role role, const uint8_t *peer_addr)
         profile_stop();
         return "set the peer address first with \"spp peer\"";
     }
+    memcpy(peer, peer_addr, ESP_BD_ADDR_LEN);
     LOCK();
-    memcpy(sc.peer, peer_addr, ESP_BD_ADDR_LEN);
+    memcpy(sc.peer, peer, ESP_BD_ADDR_LEN);
     UNLOCK();
 
-    xSemaphoreTake(slc_ev, 0);
-    if (esp_hf_ag_slc_connect(sc.peer) != ESP_OK) {
-        profile_stop();
-        return "service level connect failed";
-    }
-    if (xSemaphoreTake(slc_ev, pdMS_TO_TICKS(SLC_TIMEOUT_MS)) != pdTRUE) {
-        profile_stop();
-        return "service level connect timed out";
-    }
-    LOCK();
-    err = sc.slc ? NULL : "the peer refused the service level connection";
-    UNLOCK();
-    if (err) {
-        profile_stop();
-        return err;
+    /* An earlier "sco start" may have left the service level connection up
+     * with only the audio link gone; then there is nothing to page for. */
+    if (!slc) {
+        xSemaphoreTake(slc_ev, 0);
+        if (esp_hf_ag_slc_connect(peer) != ESP_OK) {
+            profile_stop();
+            return "service level connect failed";
+        }
+        if (xSemaphoreTake(slc_ev, pdMS_TO_TICKS(SLC_TIMEOUT_MS)) != pdTRUE) {
+            profile_stop();
+            return "service level connect timed out";
+        }
+        LOCK();
+        err = sc.slc ? NULL : "the peer refused the service level connection";
+        UNLOCK();
+        if (err) {
+            profile_stop();
+            return err;
+        }
     }
 
     xSemaphoreTake(audio_ev, 0);
-    if (esp_hf_ag_audio_connect(sc.peer) != ESP_OK) {
+    if (esp_hf_ag_audio_connect(peer) != ESP_OK) {
         profile_stop();
         return "audio connect failed";
     }
@@ -663,10 +699,19 @@ const char *sco_start(enum peer_role role, const uint8_t *peer_addr)
     }
     LOCK();
     audio = sc.audio;
+    frame_len = sc.frame_len;
     UNLOCK();
     if (!audio) {
         profile_stop();
         return "the controller did not open a synchronous link";
+    }
+    /* A link this firmware cannot fill carries no audio pattern, which is
+     * the whole point of asking for it, so it is a failed start and not a
+     * link left half working. The notice from audio_changed() gives the
+     * size. */
+    if (frame_len == 0) {
+        sco_stop();
+        return "the link asked for a frame size this firmware cannot fill";
     }
     return NULL;
 }
@@ -735,11 +780,12 @@ const char *sco_pkt_stats(char *out, size_t len)
         return "no audio link to count packets on";
     }
     /* A request that went unanswered may still be in flight, and a reply
-     * carries nothing to tell it from the next request's. Rather than risk
-     * answering one request with another's counters, the command is refused
-     * until the link is made again, which is a clean slate. */
+     * carries nothing to tell it from the next request's - not even across
+     * a new link, since nothing says the stack drops the old one. Rather
+     * than risk answering one request with another's counters, the command
+     * is refused for the rest of this boot. */
     if (dead) {
-        return "a packet-counter request went unanswered; make the link again";
+        return "a packet-counter request went unanswered; reset the board";
     }
 
     xSemaphoreTake(stats_ev, 0);

@@ -226,7 +226,15 @@ wrong otherwise: `ERR service level connect timed out`, `ERR the peer refused
 the service level connection`, `ERR audio connect timed out`, or `ERR the
 controller did not open a synchronous link`. `role` and `defaults` take the
 audio link down, because it belongs to a role; `spp stop` does not, as the
-two links are separate.
+two links are separate. Those two answer `ERR` and change nothing else if the
+audio link will not stop, rather than half applying themselves.
+
+A second `sco start` for the role a board is already in keeps the profile and
+the service level connection it has, and opens only what is missing, so a
+retry cannot pull down the link it is asking for. A frame size this firmware
+cannot fill is a failed start: the link carries no pattern, so `sco start`
+answers `ERR the link asked for a frame size this firmware cannot fill` and
+puts the profile away.
 
 These commands block the shell while the controller works, so a driver's read
 timeout has to allow for the worst case. Counting the tidying up a failure
@@ -237,6 +245,10 @@ audio link, then up to 3.5 s to put the profile back), about 10 seconds for
 the profile), and about 15 seconds for `role` and `defaults`, which stop the
 audio link and then the SPP side. Allow 35 seconds and nothing will time out.
 A link to a board that is awake takes four or five seconds in practice.
+
+If `sco stop` keeps answering `ERR`, the profile is still the firmware's to
+stop and `role` and `defaults` will keep refusing with it. `reset` is the way
+out; the SPP side goes on working in the meantime.
 
 ### The audio pattern
 
