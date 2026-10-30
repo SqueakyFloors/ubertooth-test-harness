@@ -303,6 +303,31 @@ python -m ubertooth_harness run-suite \
   --output runs --allow-power-changes
 ```
 
+[`testplans/mac.yaml`](testplans/mac.yaml) is the macOS plan, for a Mac
+host (`Host_Mac` in the registry). The firmware and radio are the same on every
+host, so it leaves out what the Linux plans already prove about a board pair
+(the range test and following) and the command-line refusal matrix, which the
+fork's macOS CI runs. It covers what macOS changes on the host side: the build
+(run it with `--build --with-firmware --with-python`), the USB stack (`-N`,
+`-r` and the board coming back, util mode start and stop, DFU detach and 20
+alternating flashes; the listing and `-U` by index come from `Multi-board
+selection`, which skips itself on a host with one registered board), and
+streaming (timed and signal-stopped captures to files and standard output,
+specan, and the extcap FIFO), plus one smoke pass of the radio-setting, CRC,
+BLE settings and debug register tests. `ubertooth-scan` and `ubertooth-follow`
+need BlueZ and are not in it. `Flash reliability` alternates the run's build
+with the KGV release image, so the run also needs `--artifact "KGV=<kgv.dfu>"`:
+
+```
+.venv/bin/python -m ubertooth_harness run-suite --plan testplans/mac.yaml \
+  --suite mac --hardware hardware.yaml --host Host_Mac \
+  --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
+  --build --with-firmware --with-python \
+  --artifact "KGV=/path/to/kgv.dfu" --output runs
+```
+
+It runs once a Mac runner exists.
+
 [`testplans/range.yaml`](testplans/range.yaml) runs the `Two-device range test`
 between the host's default board (sender) and `UT_Linux1` (responder). The
 test transmits: both boards send on 2.4 GHz, the sender at every PA level up

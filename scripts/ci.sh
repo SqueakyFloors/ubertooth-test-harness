@@ -62,7 +62,7 @@ run_test() {
         python -m ubertooth_harness validate-plan "$plan"
     done
     python -c "from ubertooth_harness.resources import FileResourceRegistry; FileResourceRegistry.load('hardware.example.yaml')"
-    for suite in fast slow mac-polling release host; do
+    for suite in fast slow mac-polling release host mac; do
         python -m ubertooth_harness validate-plan "testplans/$suite.yaml" \
             --hardware hardware.example.yaml --suite "$suite"
     done
