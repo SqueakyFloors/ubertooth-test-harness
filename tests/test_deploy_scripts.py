@@ -686,7 +686,7 @@ class MacDeployTest(unittest.TestCase):
             "--plans-dir", f"{self.lab.checkout}/testplans",
             "--output", f"{self.lab.data_dir}/runner/runs",
             "--libbtbb-source", str(self.lab.libbtbb),
-            "--libbtbb-ref", HARNESS_PIN,
+            "--libbtbb-ref", FORK_PIN,
         ], runner["ProgramArguments"])
         self.assertEqual(TUNNEL_LABEL, tunnel["Label"])
         self.assertEqual([
