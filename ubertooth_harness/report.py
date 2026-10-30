@@ -58,6 +58,33 @@ def _time(event: Mapping) -> datetime.datetime:
     return moment
 
 
+# Fewest significant digits a numeric serial has (resources._JLINK_SERIAL
+# takes 6 to 12), so masking one width of it cannot mask a short unrelated
+# number such as a packet count.
+_SERIAL_MIN_DIGITS = 6
+# How wide udev's by-id name and the registry write a J-Link serial
+# (targets.DK_BY_ID).
+_SERIAL_PADDED_DIGITS = 12
+
+
+def _serial_widths(value: str) -> set[str]:
+    """The other widths one numeric serial is written in.
+
+    A J-Link serial reaches the run in three spellings of the same number:
+    the registry pads it to 12 digits (``001050210121``), nrfdk.py takes it
+    as a number, so preflight.py puts it on the command line with the
+    leading zeros gone (``1050210121``), and udev's by-id name pads it
+    again. ``--redact-serials`` has to mask each of them, or the serial
+    survives in the transcript.
+    """
+    if not value.isdigit():
+        return set()
+    number = value.lstrip("0")
+    if len(number) < _SERIAL_MIN_DIGITS or len(number) > _SERIAL_PADDED_DIGITS:
+        return set()
+    return {number, number.rjust(_SERIAL_PADDED_DIGITS, "0")}
+
+
 class _Run:
     """Facts about one run, gathered from its records."""
 
@@ -112,13 +139,16 @@ class _Run:
         return self.finished["status"]
 
     def serials(self) -> set[str]:
-        """Every device serial the run names: resources, preflight, flash
-        guards, and boards seen by the isolation enumeration checks."""
+        """Every device serial the run names, in every width it is written:
+        resources (an Ubertooth's serial, a DK's J-Link serial, an ESP32
+        peer's bridge serial), preflight, flash guards, and boards seen by
+        the isolation enumeration checks."""
         found = set()
 
         def add(value):
             if isinstance(value, str) and value:
                 found.update((value, value.lower()))
+                found.update(_serial_widths(value))
 
         identities = [
             identity

@@ -10,8 +10,18 @@ from ubertooth_harness.report import load_events, render_run, render_runs, write
 SERIAL = "aaaa0000"
 
 
-def write_run(directory: Path, *, finish=True, host="Host_Mac", source=None):
+def write_run(
+    directory: Path, *, finish=True, host="Host_Mac", source=None,
+    dk_serial=None, peer_serial=None,
+):
     publisher = open_run_publisher(directory, directory.name)
+    identities = {"Ubertooth": {"serial": SERIAL}}
+    if dk_serial:
+        identities["advertiser"] = {"jlink serial": dk_serial,
+                                    "BLE address": "C0:11:22:33:44:55"}
+    if peer_serial:
+        identities["peer"] = {"bridge serial": peer_serial,
+                              "BD_ADDR": "AA:BB:CC:11:22:33"}
     publisher.emit("run_started", "running", {"plan_name": "Plan", "suite": "fast", "host": host})
     publisher.emit("manifest", "passed", {"manifest": {
         "host": host,
@@ -21,7 +31,7 @@ def write_run(directory: Path, *, finish=True, host="Host_Mac", source=None):
                      "expected_revision": "git-aaaaaaa", "repository": "repo",
                      **(source or {})}],
         "artifacts": [],
-        "invocations": [{"resource_identities": {"Ubertooth": {"serial": SERIAL}}}],
+        "invocations": [{"resource_identities": identities}],
         "environment": {"os": {"system": "Darwin", "architecture": "arm64"}},
     }})
     publisher.emit("test_started", "running", {
@@ -147,6 +157,58 @@ class ReportTests(unittest.TestCase):
 
             self.assertNotIn("cccc2222", report)
             self.assertNotIn(SERIAL, report)
+
+    def test_redaction_masks_a_dk_jlink_serial_in_both_widths(self):
+        # The registry pads a J-Link serial to 12 digits and preflight puts it
+        # on nrfdk.py's command line as a number, so the report holds both.
+        registered, as_a_number = "001050210121", "1050210121"
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            write_run(run, finish=False, dk_serial=registered)
+            publisher = open_run_publisher(run, "run-a")
+            publisher.emit("command_started", "running", {
+                "command_id": "d",
+                "argv": ["python", "nrfdk.py", "identify", "--jlink", as_a_number],
+            })
+            publisher.emit("command_output", "running", {
+                "command_id": "d", "stream": "stdout",
+                "text": f"J-Link serial: {as_a_number}\n",
+            })
+            publisher.emit("command_finished", "passed", {
+                "command_id": "d", "returncode": 0, "duration_s": 0.1,
+            })
+
+            report = render_run(load_events(run / "run.jsonl"), redact_serials=True)
+
+            self.assertNotIn(as_a_number, report)
+            self.assertNotIn(registered, report)
+            self.assertIn("--jlink <serial>", report)
+
+    def test_redaction_masks_an_esp32_peer_bridge_serial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            write_run(run, finish=False, peer_serial="e9c5ba112233")
+            publisher = open_run_publisher(run, "run-a")
+            publisher.emit("command_started", "running", {
+                "command_id": "p", "argv": ["esp32-peer", "--serial", "e9c5ba112233"],
+            })
+            publisher.emit("command_finished", "passed", {
+                "command_id": "p", "returncode": 0, "duration_s": 0.1,
+            })
+
+            report = render_run(load_events(run / "run.jsonl"), redact_serials=True)
+
+            self.assertNotIn("e9c5ba112233", report)
+
+    def test_serial_widths_cover_padding_but_not_short_numbers(self):
+        from ubertooth_harness.report import _serial_widths
+
+        self.assertEqual({"1050210121", "001050210121"}, _serial_widths("001050210121"))
+        self.assertEqual({"1050210121", "001050210121"}, _serial_widths("1050210121"))
+        # Too few digits to mask safely: it could be any number in the
+        # transcript. Hex serials are masked as they are written.
+        self.assertEqual(set(), _serial_widths("12345"))
+        self.assertEqual(set(), _serial_widths("aaaa0000"))
 
     def test_report_shows_every_recorded_output_record(self):
         # run.jsonl output is capped when recorded (rawlog.RECORD_*), so the
