@@ -938,8 +938,9 @@ refused by the `-z` rule, and `-f`, which must be refused as an unrecognized
 option. Comprehensive runs 14, adding three modes at once, a repeated mode,
 `-z` with two modes (where the mode refusal comes first), a stray word, `-N`
 with `-i` (where `-N` prints the count and the command carries on to `-i`,
-which finds no board), and `-U all` with `-i`, which gives the `-U all`
-refusal alone.
+which finds no board and says `error: no Ubertooth devices found`, the line
+every tool gives for a selection that found nothing since fork `753269b`), and
+`-U all` with `-i`, which gives the `-U all` refusal alone.
 
 **Known limits.** As with `Refused command lines`, a fork from before the
 no-devices switch makes the case skip. Nothing here shows what `-i` does when
@@ -1014,10 +1015,11 @@ listing DLT 256, and `--extcap-config` offering channels 37-39 with 37 as the
 default. Comprehensive runs 20, adding an older `ubertooth<index>` interface
 name, the refusals when no interface is given or the interface is not an
 Ubertooth, `--capture` without `--fifo` refused before `ubertooth-btle` runs,
-an unknown option refused with no usage text after the message,
-`--extcap-version` accepted and ignored in all three forms Wireshark uses, and
-the options Wireshark sends only for features this plugin does not advertise,
-which must be refused like any unknown option.
+an unknown option refused with `error: unrecognized option '--extcap-bogus'`
+and no usage text after it (the wording every tool here shares since fork
+`5310a5d`), `--extcap-version` accepted and ignored in all three forms
+Wireshark uses, and the options Wireshark sends only for features this plugin
+does not advertise, which must be refused like any unknown option.
 
 **Known limits.** No display and no board, so the spectrum GUI itself is not
 exercised; its argument checks are still untested. Nothing here shows that
