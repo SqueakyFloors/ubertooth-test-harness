@@ -53,8 +53,9 @@ static struct {
     bool connecting; /* an outgoing connection is on its way */
     bool connected;
     uint32_t handle;
-    bool acl_up;         /* a baseband link to the peer is up */
-    uint16_t acl_handle; /* its connection handle, which the clock read needs */
+    unsigned acl_links;  /* live baseband links; the clock read needs one */
+    bool acl_known;      /* and needs to know which, see gap_cb() */
+    uint16_t acl_handle;
     esp_bd_addr_t peer;   /* what "spp peer" set: who the initiator calls */
     esp_bd_addr_t remote; /* the far end of the live link */
     bool peer_set;
@@ -232,13 +233,21 @@ static void connect_failed(int status)
  * HCI_Read_Clock needs to name a piconet, and this event is the only place
  * an application is told it; the SPP and audio handles are the profiles'
  * own, not this one. */
+/* These two events are also the only honest way to count the links, which
+ * matters because the board is connectable: something else in the room can
+ * open a second one. "The piconet" then means nothing, and a board that has
+ * been down to two links and back to one no longer knows which handle the
+ * survivor is. Both cases read as no piconet rather than as a guess; one
+ * link, opened while there were none, is the bench's case and the only one
+ * the clock is read for. */
 static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
 {
     switch (event) {
     case ESP_BT_GAP_ACL_CONN_CMPL_STAT_EVT:
         if (param->acl_conn_cmpl_stat.stat == ESP_BT_STATUS_SUCCESS) {
             LOCK();
-            st.acl_up = true;
+            st.acl_links++;
+            st.acl_known = st.acl_links == 1;
             st.acl_handle = param->acl_conn_cmpl_stat.handle;
             UNLOCK();
         }
@@ -246,10 +255,11 @@ static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
 
     case ESP_BT_GAP_ACL_DISCONN_CMPL_STAT_EVT:
         LOCK();
-        /* A board can be left with a second link's close while its own is
-         * still up, so only the live one's close clears the handle. */
-        if (st.acl_up && st.acl_handle == param->acl_disconn_cmpl_stat.handle) {
-            st.acl_up = false;
+        if (st.acl_links) {
+            st.acl_links--;
+        }
+        if (st.acl_links != 1) {
+            st.acl_known = false;
         }
         UNLOCK();
         break;
@@ -841,7 +851,7 @@ const char *bt_clock_json(char *out, size_t len)
 
     LOCK();
     started = st.started;
-    in_piconet = st.acl_up;
+    in_piconet = st.acl_links == 1 && st.acl_known;
     acl_handle = st.acl_handle;
     UNLOCK();
     if (!started) {

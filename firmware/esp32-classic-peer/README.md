@@ -374,9 +374,11 @@ speech on does not start lying.
   microseconds, so it advances 3200 times a second and wraps about every
   23.3 hours.
 - `piconet`: the clock of the piconet the board's link belongs to, which is
-  the piconet leader's native clock. The initiator pages, so it is the
-  leader, and on that board the two numbers are the same counter read twice.
-  Both boards of a pair report the same piconet clock.
+  the piconet leader's native clock. Both boards of a pair report the same
+  piconet clock, whichever of them is the leader. The initiator pages, so it
+  starts as the leader, and while it is, its two numbers are the same
+  counter read twice; the link policy allows a role switch, so do not rely
+  on that half.
 - `accuracy`: the largest error the piconet clock may have, in the same
   units as the clock itself, so one tick is 312.5 microseconds. 65535 means
   the controller does not know. The spec sets it to zero for a native read,
@@ -396,13 +398,16 @@ so on the leader the two numbers can differ by a tick or two.
 With no link there is no piconet: `piconet`, `accuracy` and `handle` read
 `null`, `native` still reads, and `t_us` and `read_us` are the native read's.
 A link that goes down while the command is in flight reads the same way, as
-no piconet rather than as a failure.
+no piconet rather than as a failure. So does a board with more than one
+baseband link, where "the piconet" would be a guess: these boards are
+connectable, so something else in the room can open one.
 A controller that refuses a read answers `ERR the controller refused the
 clock read, status 0x<hh>` and prints no line, rather than an answer with a
 hole in it. If a controller ever stops answering altogether, the command
-that was sent keeps its place in the host's pending list, so later reads
-answer `ERR the controller did not answer the clock read` until the board is
-reset.
+that was sent keeps its place in the host's pending list and holds the one
+command credit the host has, which stalls every Bluetooth command and not
+just this one; later reads answer `ERR the controller did not answer the
+clock read`, and `reset` is the way back.
 
 ### How the command is sent
 

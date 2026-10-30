@@ -9,4 +9,3 @@ project(esp32-classic-peer)
 # component's own include path. ESP-IDF's own tree is not touched.
 idf_component_get_property(utesp_bt_lib bt COMPONENT_LIB)
 target_sources(${utesp_bt_lib} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/bluedroid/utesp_clock.c")
-target_include_directories(${utesp_bt_lib} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/bluedroid")
