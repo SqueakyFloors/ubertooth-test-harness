@@ -1062,9 +1062,10 @@ Comprehensive runs 5, adding `--extcap-version` with the value as the next
 word and a stray word, which must be refused with nothing listed.
 
 **Known limits.** It checks the listing, not that a capture from any listed
-interface works; `BLE extcap capture` does that. Harness issue
-[#145](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/145) is
-open: the vendored unit-test fixtures predate the labeled listing.
+interface works; `BLE extcap capture` does that. A real run always uses the
+script out of the resolved fork commit, so what the unit tests pin is the
+pairing of that script with the `ubertooth-util` of the same era: a mismatch
+lists nothing, which is what a host with no board also looks like.
 
 ## BLE extcap capture
 
