@@ -69,6 +69,15 @@ def revision_pattern(expected: str) -> str:
     return "git-(?:" + "|".join(alternatives) + ")"
 
 
+def same_revision(expected: str, reported: str) -> bool:
+    """Whether ``reported`` names the same commit as ``expected``.
+
+    The two can be abbreviations of different lengths of one commit, so this
+    is the comparison to use instead of ``==`` on revision strings.
+    """
+    return re.fullmatch(revision_pattern(expected), reported) is not None
+
+
 def firmware_version_pattern(expected: str) -> str:
     """`ubertooth-util -v` output for the application image built from ``expected``.
 
