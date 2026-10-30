@@ -275,6 +275,8 @@
       suite: $("suite").value,
       tests: [],
       build: $("build").checked,
+      // Flashing applies only to a run that builds.
+      flash_build: $("build").checked && $("flash-build").checked,
     };
     if (!host || !body.ref || !body.plan || !body.suite) {
       status.textContent = "Choose a ref, plan, suite and target first.";
@@ -714,8 +716,17 @@
     });
   }
 
+  // Flash needs Build: disabled, with a note, while Build is unticked.
+  function syncFlashBuild() {
+    const build = $("build").checked;
+    $("flash-build").disabled = !build;
+    $("flash-build-note").hidden = build;
+  }
+
   function start() {
     $("run-form").addEventListener("submit", submitRun);
+    $("build").addEventListener("change", syncFlashBuild);
+    syncFlashBuild();
     $("refs-reload").addEventListener("click", loadRefs);
     $("plan").addEventListener("change", renderSuites);
     $("suite").addEventListener("change", renderSuiteTests);

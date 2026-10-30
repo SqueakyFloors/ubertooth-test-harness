@@ -21,7 +21,10 @@
   `ubertooth-harness boards` first; never use or reflash a board someone else
   holds. Anything that switches USB power or writes firmware also holds the
   host lock (`run-suite` takes it itself; use `lease --host-lock` for a manual
-  power change; `ubertooth-dfu` under `lease` takes it automatically).
+  power change; `ubertooth-dfu` under `lease` takes it automatically). Where
+  the host's own scripts lock boards with per-board files, leases take those
+  too (`--external-board-lock` / `UBERTOOTH_HARNESS_EXTERNAL_BOARD_LOCK`;
+  README "External board locks").
 - A power cycle or manual recovery may gather diagnostics but never converts a
   failed reliability run into a pass.
 - Local development servers must bind to `127.0.0.1`. Do not add a remotely

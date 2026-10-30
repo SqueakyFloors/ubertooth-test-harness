@@ -40,7 +40,7 @@ import struct
 import subprocess
 import sys
 import time
-from typing import Callable, Sequence
+from typing import Callable, NamedTuple, Sequence
 import zlib
 
 if __package__ in (None, ""):
@@ -55,6 +55,17 @@ SUFFIX_LENGTH = 16
 VENDOR = 0x1D50
 PRODUCT = 0x6003
 BCD_DFU = 0x0100
+# The firmware info block every image from the fork carries, 64 bytes at a
+# fixed offset just past the vector table (host/libubertooth/src/
+# ubertooth_interface.h, firmware/common/fw_info.c). ubertooth-dfu reads it
+# straight out of a file to name the image and the revision, and refuses a
+# file that has none, so an image the harness builds has to carry one.
+FW_INFO_OFFSET = 0x100
+FW_INFO_LENGTH = 64
+FW_INFO_MAGIC = b"UBTFINFO"
+FW_INFO_FORMAT = 1
+FW_INFO_IMAGE_LEN = 16
+FW_INFO_REVISION_LEN = 32
 # check_suffix() in ubertooth-dfu.c accepts both; sign() writes 0x0100.
 ACCEPTED_BCD_DFU = (0x0100, 0x0101)
 SIGNATURE = b"UFD"
@@ -70,11 +81,17 @@ BAD_KINDS = (
 # More images ``make`` writes for the DFU image checks test, from a valid
 # image: the first six must be refused, the last two accepted.
 EDGE_KINDS = (
-    "empty", "short", "suffix-only", "long-suffix-length", "dfu-2.0", "no-marker",
+    "empty", "short", "suffix-only", "long-suffix-length", "dfu-2.0", "no-fw-info",
     "dfu-1.1", "wildcard",
 )
 # The synthetic image ``synth`` writes when a run has no firmware build.
 SYNTHETIC_REVISION = "harness-synthetic"
+SYNTHETIC_IMAGE_NAME = "harness"
+# The API version the synthetic block reports. It is not any version the
+# tools speak, so ubertooth-dfu warns that the image and the tools report
+# different ones; a synthetic image is not built for a board, so the harness
+# does not track the fork's number here.
+SYNTHETIC_API_VERSION = 0
 
 _VERSION_RE = FIRMWARE_VERSION_RE
 
@@ -118,16 +135,68 @@ def with_suffix(body: bytes, *, vendor=VENDOR, product=PRODUCT, bcd=BCD_DFU,
     return data + struct.pack("<I", dfu_crc(data))
 
 
+class FwInfo(NamedTuple):
+    """A firmware info block read out of an image."""
+    image: str
+    revision: str
+    api_version: int
+
+
+def fw_info_block(image_name: str = SYNTHETIC_IMAGE_NAME,
+                  revision: str = SYNTHETIC_REVISION,
+                  api_version: int = SYNTHETIC_API_VERSION) -> bytes:
+    """The 64-byte firmware info block, laid out as the fork reads it.
+
+    Both strings are zero-padded to their field, so a reader must not take
+    one that fills its field as terminated.
+    """
+    if len(image_name) > FW_INFO_IMAGE_LEN or len(revision) > FW_INFO_REVISION_LEN:
+        raise ValueError(f"'{image_name}' or '{revision}' does not fit the block")
+    return (FW_INFO_MAGIC
+            + struct.pack("<HH", FW_INFO_FORMAT, api_version)
+            + bytes(4)
+            + image_name.encode().ljust(FW_INFO_IMAGE_LEN, b"\0")
+            + revision.encode().ljust(FW_INFO_REVISION_LEN, b"\0"))
+
+
+def fw_info(image: bytes) -> FwInfo | None:
+    """The firmware info block ``image`` carries, or None when it has none.
+
+    This is dfu_read_image_info() plus ubertooth_fw_info_parse() in the fork:
+    the magic, a known format version, and two strings that are non-empty and
+    printable.
+    """
+    block = image[FW_INFO_OFFSET:FW_INFO_OFFSET + FW_INFO_LENGTH]
+    if len(block) < FW_INFO_LENGTH or block[:len(FW_INFO_MAGIC)] != FW_INFO_MAGIC:
+        return None
+    format_version, api_version = struct.unpack("<HH", block[8:12])
+    if format_version != FW_INFO_FORMAT:
+        return None
+
+    def text(field: bytes) -> str | None:
+        value = field.split(b"\0")[0]
+        if not value or any(byte < 0x20 or byte > 0x7E for byte in value):
+            return None
+        return value.decode()
+
+    name = text(block[16:16 + FW_INFO_IMAGE_LEN])
+    revision = text(block[32:32 + FW_INFO_REVISION_LEN])
+    if name is None or revision is None:
+        return None
+    return FwInfo(name, revision, api_version)
+
+
 def synthetic_binary(revision: str = SYNTHETIC_REVISION) -> bytes:
     """A deterministic stand-in firmware binary for runs without a build.
 
-    It carries the ``ubertooth <revision> (`` marker ``-d ... -r`` reads the
-    expected revision from, between filler bytes, and is not a whole number
-    of 256-byte blocks. It is never written to a board.
+    It carries a firmware info block naming ``revision`` at the fixed offset
+    ``-d`` reads it from, between filler bytes, and is not a whole number of
+    256-byte blocks. It is never written to a board.
     """
-    filler = bytes((index * 37 + 11) % 251 for index in range(4000))
-    marker = f"ubertooth {revision} (synthetic image for host-only checks)\0".encode()
-    return filler[:2048] + marker + filler[2048:]
+    filler = bytearray((index * 37 + 11) % 251 for index in range(4000))
+    block = fw_info_block(revision=revision)
+    filler[FW_INFO_OFFSET:FW_INFO_OFFSET + FW_INFO_LENGTH] = block
+    return bytes(filler)
 
 
 def make_edge(kind: str, image: bytes) -> bytes:
@@ -144,8 +213,12 @@ def make_edge(kind: str, image: bytes) -> bytes:
         return with_suffix(body[:64], length=200)
     if kind == "dfu-2.0":
         return with_suffix(body, bcd=0x0200)
-    if kind == "no-marker":
-        return with_suffix(body.replace(b"ubertooth ", b"Ubertooth "))
+    if kind == "no-fw-info":
+        # The suffix stays valid; only the block's magic is wiped, so the
+        # file passes every suffix check and is refused for not being an
+        # image from this tree.
+        start, end = FW_INFO_OFFSET, FW_INFO_OFFSET + len(FW_INFO_MAGIC)
+        return with_suffix(body[:start] + bytes(len(FW_INFO_MAGIC)) + body[end:])
     if kind == "dfu-1.1":
         return with_suffix(body, bcd=0x0101)
     if kind == "wildcard":
