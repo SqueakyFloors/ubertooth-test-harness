@@ -143,9 +143,10 @@ def _cell(value) -> str:
 
 
 # The registry identity key that names a device differs by kind: an Ubertooth
-# has `serial`, an nRF52840 DK its J-Link probe's `jlink serial`, and an ESP32
-# Classic peer its USB bridge's `bridge serial`.
-_IDENTITY_SERIAL_KEYS = ("serial", "jlink serial", "bridge serial")
+# has `serial`, an nRF52840 DK its J-Link probe's `jlink serial`. The keys are
+# listed rather than matched on the word "serial", which would also pick up a
+# DK's `serial device` and print a /dev/serial/by-id path.
+_IDENTITY_SERIAL_KEYS = ("serial", "jlink serial")
 
 
 def _identity_serial(identity: Mapping) -> str:
