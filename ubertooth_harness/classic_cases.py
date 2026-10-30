@@ -43,14 +43,13 @@ import re
 import sys
 from typing import Callable, Mapping
 
-from ubertooth_harness import esp32peer
+from ubertooth_harness import capturefile, esp32peer
 from ubertooth_harness.hostneeds import Needs
 from ubertooth_harness.receive_cases import (
     EARLY_EXIT_S,
     EXIT_SLACK_S,
     PACKET_LINE,
     SURVEY_LINE,
-    _capture_header,
     packet_check,
     seconds_arg,
 )
@@ -105,6 +104,10 @@ PAIR_SETUP_S = (
 PEER_TIMEOUT_S = esp32peer.BOOT_TIMEOUT_S + 4 * esp32peer.COMMAND_TIMEOUT_S
 
 _ESP32PEER = str(Path(esp32peer.__file__).resolve())
+_CAPTURE_CHECKER = str(Path(capturefile.__file__).resolve())
+# Link type libbtbb writes for a BR/EDR capture.
+LINKTYPE_BREDR = capturefile.LINKTYPE_BLUETOOTH_BREDR_BB
+CHECK_TIMEOUT_S = 30.0
 # The peers are reached through /dev/serial/by-id, which is Linux's.
 LINUX_ONLY = Needs(platforms=("linux",))
 
@@ -130,7 +133,7 @@ def _peer(resource_identities: Mapping, role: str, test_name: str) -> dict:
     # for the wrong piconet, so it is refused rather than ignored.
     for key, derived in (("LAP", lap), ("UAP", uap)):
         written = identity.get(key)
-        if written is not None and written.lower() != derived:
+        if written is not None and str(written).lower() != derived:
             raise StateCaseError(
                 f"{test_name}: the {role}'s registered {key} is {written}, but "
                 f"its BD_ADDR {address} gives {derived}")
@@ -202,7 +205,12 @@ def piconet_packets(lap: str, minimum: int, *, only: bool) -> Check:
 
 
 def no_piconet_packets(lap: str) -> Check:
-    """No packet line at all, for a ``-l`` run on a LAP that is not on the air."""
+    """No packet line at all, for a ``-l`` run on a LAP that is not on the air.
+
+    Exact absence is safe even though ``-e`` allows two bit errors by
+    default: an access code is 64 bits, so ambient traffic matching this
+    LAP's within two bits is not something a run will see.
+    """
     def check(output: str) -> str:
         laps = _packet_laps(output)
         if laps:
@@ -251,6 +259,37 @@ def _capture_path(name):
     def path(context):
         return str(Path(require(context, CAPTURE_DIR_KEY)) / name)
     return path
+
+
+def _written_packets(minimum: int) -> Check:
+    """The capture file holds packets, not just a header."""
+    def check(output: str) -> str:
+        match = re.search(r"(?m)^Capture format: .*, packets: (\d+)$", output)
+        if match is None:
+            return "the checker did not report a packet count"
+        if int(match[1]) < minimum:
+            return (f"the capture holds {match[1]} packets, expected at least "
+                    f"{minimum}")
+        return ""
+    return check
+
+
+def _capture_file_step(step_id, name, file_name, fmt, minimum):
+    """Check the file's format, link type, and that the piconet is in it.
+
+    `Classic Bluetooth receive` already checks what -r and -q write with no
+    traffic at all; this is the same file with a known piconet on the air, so
+    the packet count is the point.
+    """
+    return Step(
+        step_id, name,
+        lambda context: (sys.executable, _CAPTURE_CHECKER,
+                         _capture_path(file_name)(context), "--packets"),
+        timeout_s=CHECK_TIMEOUT_S,
+        output_patterns=(rf"(?m)^Capture format: {fmt}, link type: "
+                         rf"{LINKTYPE_BREDR}, packets: \d+$",),
+        output_check=_written_packets(minimum),
+    )
 
 
 def _stream_argv(acceptor, initiator, serial, seconds, options, files):
@@ -351,11 +390,14 @@ def known_classic_cases(arguments, _resources, resource_identities):
             name=f"ubertooth-rx -z -r (PCAPNG) lists LAP {master} and writes a file",
             options=("-z",),
             check=_all(packet_check(survey=True), survey_lists(master)),
-            expected_state=f"the survey results list LAP {master}; -r wrote a "
-                           "pcapng file with link type 255",
+            expected_state=(f"the survey results list LAP {master}; -r wrote a "
+                            f"pcapng file with link type {LINKTYPE_BREDR} and "
+                            f"{MIN_PACKETS}+ packets in it"),
             files=(("-r", "survey.pcapng"),),
-            verify=(_capture_header("verify-capture", "Verify the -r file header",
-                                    "survey.pcapng", "pcapng"),)))
+            verify=(_capture_file_step(
+                "verify-capture",
+                "The -r file is a BR/EDR pcapng and holds the packets",
+                "survey.pcapng", "pcapng", MIN_PACKETS),)))
         # Which board is master is decided by which one pages, so binding the
         # pair the other way round moves the LAP on the air to the other board.
         cases.append(_capture_case(
@@ -407,9 +449,12 @@ def follow_classic_cases(arguments, _resources, resource_identities):
                  "piconet's packets",
             options=("-l", master, "-u", master_uap),
             check=piconet_packets(master, MIN_PACKETS, only=True),
-            expected_state=f"{MIN_PACKETS}+ packet lines with LAP {master}; -q "
-                           "wrote a pcap file with link type 255",
+            expected_state=(f"{MIN_PACKETS}+ packet lines with LAP {master}; -q "
+                            f"wrote a pcap file with link type {LINKTYPE_BREDR} "
+                            f"and {MIN_PACKETS}+ packets in it"),
             files=(("-q", "follow.pcap"),),
-            verify=(_capture_header("verify-capture", "Verify the -q file header",
-                                    "follow.pcap", "pcap"),)))
+            verify=(_capture_file_step(
+                "verify-capture",
+                "The -q file is a BR/EDR pcap and holds the packets",
+                "follow.pcap", "pcap", MIN_PACKETS),)))
     return tuple(cases)

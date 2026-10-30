@@ -317,11 +317,12 @@ class Shell:
         into its application. The board is then in its boot state, so this is
         also how a case releases one.
         """
+        self.port.reset_input_buffer()
+        self._buffer = b""
         self.port.dtr = False
         self.port.rts = True
         time.sleep(RESET_PULSE_S)
         self.port.rts = False
-        self._buffer = b""
         self.wait_ready()
 
 

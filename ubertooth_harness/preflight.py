@@ -276,7 +276,7 @@ class PreflightPolicy:
         checks = []
         sequence = 0
         seen_hosts = set()
-        seen_ubertooths = set()
+        seen_devices = set()
         for invocation in invocations:
             if invocation.host not in seen_hosts:
                 seen_hosts.add(invocation.host)
@@ -299,26 +299,26 @@ class PreflightPolicy:
                 )
             for alias in invocation.resources.values():
                 resource = self.registry.get(alias)
-                if resource.type == NRF52840_DK and alias not in seen_ubertooths:
+                if resource.type == NRF52840_DK and alias not in seen_devices:
                     # Its probe and VCOM0 port; the test itself flashes and
                     # verifies the role firmware (advertiser_cases.py).
-                    seen_ubertooths.add(alias)
+                    seen_devices.add(alias)
                     sequence += 1
                     checks.append(_dk_check(sequence, invocation.host, resource,
                                             ubertooth_source.expected_revision))
                     continue
                 if (resource.type == ESP32_CLASSIC_PEER
-                        and alias not in seen_ubertooths):
+                        and alias not in seen_devices):
                     # Its bridge and the firmware behind it; the test itself
                     # brings the pair up (classic_cases.py).
-                    seen_ubertooths.add(alias)
+                    seen_devices.add(alias)
                     sequence += 1
                     checks.append(_peer_check(sequence, invocation.host, resource,
                                               ubertooth_source.expected_revision))
                     continue
-                if resource.type != "Ubertooth" or alias in seen_ubertooths:
+                if resource.type != "Ubertooth" or alias in seen_devices:
                     continue
-                seen_ubertooths.add(alias)
+                seen_devices.add(alias)
                 serial = resource.identity.get("serial")
                 if not serial:
                     raise PreflightError(

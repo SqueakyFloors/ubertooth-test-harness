@@ -112,6 +112,9 @@ def board_key(alias: str, identity: Mapping) -> str:
 # J-Link serial and by USB bridge serial. Both keys are prefixed, so neither
 # can clash with an Ubertooth's bare 32 hex digits or with the host lock; a
 # CP2102N bridge serial is 32 hex digits itself.
+# A key becomes a file name, so it may hold nothing that would reach
+# another directory or need quoting.
+_LOCK_NAME = re.compile(r"^[0-9A-Za-z_.:+-]{1,64}$")
 DK_TYPE = "nRF52840 DK"
 PEER_TYPE = "ESP32 Classic peer"
 LEASED_TYPES = ("Ubertooth", DK_TYPE, PEER_TYPE)
@@ -128,8 +131,11 @@ def resource_key(resource) -> str:
             )
         return f"nrf52840dk-{int(serial)}"
     if resource.type == PEER_TYPE:
-        serial = str(resource.identity.get("bridge serial", "") or "").strip().lower()
-        if not serial or not all(digit in "0123456789abcdef" for digit in serial):
+        # Taken as registered: the same string names the device path, so a
+        # board leased under one spelling and opened under another would be
+        # two things at once.
+        serial = str(resource.identity.get("bridge serial", "") or "").strip()
+        if not serial or not _LOCK_NAME.fullmatch(serial):
             raise LeaseError(
                 f"{resource.alias} needs a 'bridge serial' in the hardware registry "
                 f"to be leased; registered '{serial}'"

@@ -922,6 +922,18 @@ version each board reported. An older image, or another major version,
 fails mandatory preflight naming what it found; build and flash it from
 `firmware/esp32-classic-peer` at this harness commit.
 
+The `classic` suite of [`testplans/classic.yaml`](testplans/classic.yaml) is
+the smoke run above, `classic-comprehensive` adds the capture files and the
+role exchange, and `classic-long` is the bounded long variant: the same two
+follow cases over a five-minute capture each, which is what shows that a
+receive run and the pair's link hold up for minutes rather than seconds. The
+sampling soak, `Classic Bluetooth receive soak`, is still a backlog entry;
+sampling is what it waits for, not traffic.
+
+Because the comprehensive coverage exchanges the two roles, both peers a plan
+binds must declare both: the registry's role list is what a plan picks a board
+by, and one image holds both roles anyway.
+
 A peer is leased like an Ubertooth (`ubertooth-harness boards` and `lease`
 list it), keyed by its bridge serial (`esp32-<serial>.lock` in the lease
 directory). As with the DKs, a lab that guards boards with its own per-board

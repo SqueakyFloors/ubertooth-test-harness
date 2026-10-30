@@ -273,15 +273,14 @@ class RegistryTests(unittest.TestCase):
     def test_peer_registry_rules(self):
         registry_with(REGISTRY)
         for old, new, reason in (
-            (f'bridge serial: "{ACCEPTOR_BRIDGE}"', "bridge serial: not-hex",
+            (f'bridge serial: "{ACCEPTOR_BRIDGE}"', 'bridge serial: "a/b"',
+             "requires a 'bridge serial'"),
+            (f'bridge serial: "{ACCEPTOR_BRIDGE}"', 'bridge serial: ""',
              "requires a 'bridge serial'"),
             (f'      BD_ADDR: "{ACCEPTOR_ADDRESS}"\n', "", "requires a 'BD_ADDR'"),
             (f'BD_ADDR: "{ACCEPTOR_ADDRESS}"', 'BD_ADDR: "C8-85"', "requires a 'BD_ADDR'"),
             (f'BD_ADDR: "{ACCEPTOR_ADDRESS}"',
              f'BD_ADDR: "{ACCEPTOR_ADDRESS}"\n      tty: /dev/ttyUSB0', "unknown key"),
-            ("bridge serial: \"" + ACCEPTOR_BRIDGE + "\"",
-             'bridge serial: "AAAA0000AAAA0000AAAA0000AAAA0000"',
-             "lower-case hex digits"),
             (f'BD_ADDR: "{ACCEPTOR_ADDRESS}"',
              f'BD_ADDR: "{ACCEPTOR_ADDRESS}"\n      serial device: /dev/ttyUSB0',
              "must be a /dev/serial/by-id/ path"),
@@ -308,6 +307,18 @@ class RegistryTests(unittest.TestCase):
                 arguments("Capture known Classic device"), {},
                 {**IDENTITIES,
                  "acceptor": {**IDENTITIES["acceptor"], "LAP": "2a1b2b"}})
+
+    def test_a_bridge_serial_is_taken_as_the_board_reports_it(self):
+        # udev puts the USB iSerial string in the by-id name as the device
+        # gives it, and a CP210x serial can be reprogrammed to any string,
+        # so the case and the length are the board's to choose.
+        for serial in ("AAAA0000AAAA0000AAAA0000AAAA0000", "0001", "esp-A.1"):
+            with self.subTest(serial):
+                registry = registry_with(REGISTRY.replace(ACCEPTOR_BRIDGE, serial, 1))
+                peer = registry.get("ESP32_Linux0")
+                self.assertEqual(serial, peer.identity["bridge serial"])
+                self.assertEqual(f"esp32-{serial}", leases.resource_key(peer))
+                self.assertIn(serial, esp32peer.default_device(serial))
 
     def test_a_peer_must_declare_a_role_the_firmware_has(self):
         # The host names its default by type here, so the role rule is what

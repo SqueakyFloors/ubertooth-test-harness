@@ -54,10 +54,13 @@ PEER_ROLES = ("acceptor", "initiator")
 # from the address, and classic_cases.py refuses a note that disagrees.
 _PEER_IDENTITY_KEYS = ("bridge serial", "BD_ADDR", "LAP", "UAP", "name",
                        "serial device")
-# The CP2102N's serial, as it appears in its /dev/serial/by-id path: lower
-# case, which is how the kernel writes it there. Requiring that one form
-# keeps the lease key and the device path from disagreeing.
-_BRIDGE_SERIAL = re.compile(r"^[0-9a-f]{8,32}$")
+# The bridge's serial as its /dev/serial/by-id name carries it. udev takes
+# that from the USB iSerial string as the device reports it, and a CP210x
+# serial can be reprogrammed to any string, so the case and the length are
+# the board's to choose: only the characters a by-id name can hold are
+# required here. It is used verbatim, in the device path and in the lease
+# key, so what is registered is what is looked for.
+_BRIDGE_SERIAL = re.compile(r"^[0-9A-Za-z_.:+-]{1,64}$")
 
 
 def _validate_peer(resource) -> None:
@@ -71,9 +74,9 @@ def _validate_peer(resource) -> None:
         )
     if not _BRIDGE_SERIAL.fullmatch(resource.identity.get("bridge serial", "")):
         raise RegistryError(
-            f"{ESP32_CLASSIC_PEER} {alias} requires a 'bridge serial' identity "
-            "(8-32 lower-case hex digits, the CP2102N's serial as its "
-            "/dev/serial/by-id path holds it)"
+            f"{ESP32_CLASSIC_PEER} {alias} requires a 'bridge serial' identity: "
+            "the serial as its /dev/serial/by-id name holds it (letters, "
+            "digits, and _.:+- only)"
         )
     # Both boards' addresses are needed: the initiator calls the acceptor's,
     # and every case checks the tool's output against the master's LAP and UAP.
