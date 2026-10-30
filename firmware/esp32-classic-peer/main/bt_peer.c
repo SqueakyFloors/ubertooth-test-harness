@@ -28,6 +28,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
+#include "utesp_clock.h"
 
 #define STREAM_PERIOD_MS_DEFAULT 100
 #define STREAM_PAYLOAD_DEFAULT   100
@@ -443,6 +444,11 @@ const char *bt_start(void)
     if (sco_err) {
         shell_line("utesp: audio link unavailable: %s", sco_err);
     }
+    /* Same again for the clock read: a board whose SPP side works is worth
+     * having even if this did not come up, and "clock" says so itself. */
+    if (utesp_clock_init() != UTESP_CLOCK_OK) {
+        shell_line("utesp: clock read unavailable");
+    }
     st.started = true;
     return NULL;
 }
@@ -755,4 +761,107 @@ void bt_status_json(char *out, size_t len)
         snprintf(out, len, "{\"fw\":\"%s\",\"error\":\"status line too long\"}",
                  UTESP_FW_VERSION);
     }
+}
+
+/* ------------------------------------------------------------- the clocks */
+
+/* Which board's address names the piconet to read the clock of: the far end
+ * of the live SPP link, or of the audio link when that is the only one. Both
+ * are the same board when both links are up. */
+static bool link_addr(esp_bd_addr_t out)
+{
+    bool have;
+
+    LOCK();
+    have = st.connected;
+    if (have) {
+        memcpy(out, st.remote, ESP_BD_ADDR_LEN);
+    }
+    UNLOCK();
+    return have ? true : sco_remote_addr(out);
+}
+
+static const char *read_failure(int result)
+{
+    switch (result) {
+    case UTESP_CLOCK_NOT_READY:
+        return "the clock read is not available";
+    case UTESP_CLOCK_NO_MEMORY:
+        return "out of memory";
+    case UTESP_CLOCK_TIMED_OUT:
+        return "the controller did not answer the clock read";
+    default:
+        return "the clock read failed";
+    }
+}
+
+/* A controller that refuses the read is reported with the status it gave,
+ * rather than as an empty answer. Only the shell task gets here, so the one
+ * buffer is enough. */
+static const char *refused(uint8_t status)
+{
+    static char reason[64];
+
+    snprintf(reason, sizeof(reason), "the controller refused the clock read, status 0x%02x",
+             status);
+    return reason;
+}
+
+const char *bt_clock_json(char *out, size_t len)
+{
+    struct utesp_clock native, piconet;
+    const struct utesp_clock *reported;
+    esp_bd_addr_t remote;
+    char piconet_fields[80];
+    bool started, in_piconet;
+    int result;
+    int n;
+
+    LOCK();
+    started = st.started;
+    UNLOCK();
+    if (!started) {
+        return "bluetooth is not up";
+    }
+
+    if ((result = utesp_clock_read(NULL, false, &native)) != UTESP_CLOCK_OK) {
+        return read_failure(result);
+    }
+    if (native.status != 0) {
+        return refused(native.status);
+    }
+
+    in_piconet = link_addr(remote);
+    if (in_piconet) {
+        result = utesp_clock_read(remote, true, &piconet);
+        if (result == UTESP_CLOCK_NO_LINK) {
+            /* The link went down between the two reads. */
+            in_piconet = false;
+        } else if (result != UTESP_CLOCK_OK) {
+            return read_failure(result);
+        } else if (piconet.status != 0) {
+            return refused(piconet.status);
+        }
+    }
+
+    if (in_piconet) {
+        snprintf(piconet_fields, sizeof(piconet_fields),
+                 "\"piconet\":%" PRIu32 ",\"accuracy\":%u,\"handle\":%u", piconet.clock,
+                 piconet.accuracy, piconet.handle);
+    } else {
+        snprintf(piconet_fields, sizeof(piconet_fields),
+                 "\"piconet\":null,\"accuracy\":null,\"handle\":null");
+    }
+
+    /* The two reads are separate commands, so the timestamp and the latency
+     * are those of the piconet read, the one a test lines up against a
+     * capture; with no piconet they are the native read's. */
+    reported = in_piconet ? &piconet : &native;
+    n = snprintf(out, len,
+                 "{\"native\":%" PRIu32 ",%s,\"t_us\":%" PRId64 ",\"read_us\":%" PRId64 "}",
+                 native.clock, piconet_fields, reported->answered_us, reported->read_us);
+    if (n < 0 || (size_t)n >= len) {
+        return "the clock line does not fit";
+    }
+    return NULL;
 }

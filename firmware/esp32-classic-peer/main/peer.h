@@ -8,7 +8,7 @@
 
 /* The harness pins this string and reflashes a board that reports anything
  * else, so it changes whenever the shell protocol or the air behavior does. */
-#define UTESP_FW_VERSION "utesp-1.1.0"
+#define UTESP_FW_VERSION "utesp-1.2.0"
 
 enum peer_role {
     PEER_ROLE_ACCEPTOR = 0, /* the boot role: wait for the other board */
@@ -38,6 +38,10 @@ const char *bt_sco_start(void);
 /* One JSON object, no newline, truncated to fit. */
 void bt_status_json(char *out, size_t len);
 
+/* The board's clocks as one JSON object, or a reason the read failed. The
+ * piconet fields are null when the board is in no piconet. */
+const char *bt_clock_json(char *out, size_t len);
+
 /* ---------------------------------------------- the synchronous audio link */
 
 /* Brings up the Hands-Free Profile machinery the audio link needs: the
@@ -56,6 +60,12 @@ const char *sco_stop(void);
 
 /* The controller's own (e)SCO packet counters, as one JSON object. */
 const char *sco_pkt_stats(char *out, size_t len);
+
+/* The address of the far end of the audio link's service level connection,
+ * six bytes, or false if there is none. The clock read needs an address to
+ * find the piconet by, and a board can have an audio link with no SPP
+ * link. */
+bool sco_remote_addr(uint8_t *out);
 
 /* Zeroes the frame counters, for "defaults". */
 void sco_zero_counters(void);
