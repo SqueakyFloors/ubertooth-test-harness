@@ -24,7 +24,7 @@ from ubertooth_harness.events import (
 from ubertooth_harness.enumeration import EnumerationError
 from ubertooth_harness.executor import CommandExecutor, CommandResult
 from ubertooth_harness.isolation import IsolationRuntime, IsolationSetupError
-from ubertooth_harness.manifest import ManifestError, RunManifest
+from ubertooth_harness.manifest import ManifestError, RunManifest, json_value
 from ubertooth_harness.planner import TestInvocation, alternated_roles
 from ubertooth_harness.power import PowerControllerError
 from ubertooth_harness.preflight import PreflightCheck
@@ -1260,7 +1260,9 @@ class NamedTestSequencer:
                         "description": definition.description,
                         "host": invocation.host,
                         "resources": dict(invocation.resources),
-                        "arguments": dict(invocation.arguments),
+                        "rf": json_value(invocation.resource_placements),
+                        "rf_required": json_value(invocation.placement_requirements),
+                        "arguments": json_value(invocation.arguments),
                     },
                 )
                 cases = (

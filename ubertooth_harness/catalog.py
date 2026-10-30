@@ -9,6 +9,11 @@ from ubertooth_harness.cases import CommandCase, FlashCase, guard_roles
 from ubertooth_harness.hostneeds import (
     BLUEZ_TOOLS, NO_NEEDS, PLATFORMS, Needs, tool_needs,
 )
+from ubertooth_harness.rf import (
+    NORMAL_LINK, PlacementError, PlacementRequirement,
+    requirement as rf_requirement,
+    requirements as rf_requirements,
+)
 from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
     COMPILE_INFO_PATTERN,
@@ -187,6 +192,20 @@ def _coverage(value):
         raise CatalogError(str(error)) from error
 
 
+def _rf(value):
+    try:
+        asked = rf_requirements(value)
+    except PlacementError as error:
+        raise CatalogError(str(error)) from error
+    # Normalized arguments are written to the manifest and run.jsonl as JSON,
+    # and are read back from a manifest (the GUI), so a requirement is kept
+    # as the plain record it validated to; the planner reads it back with
+    # placement_requirements().
+    return MappingProxyType({
+        role: MappingProxyType(want.to_dict()) for role, want in asked.items()
+    })
+
+
 @dataclass(frozen=True)
 class ArgumentRule:
     validator: Callable
@@ -272,6 +291,32 @@ class TestDefinition:
     # Expected wall time by coverage profile (DEFAULT_PROFILE for a test
     # without a coverage argument); see ESTIMATES.
     estimates: Mapping[str, Estimate] | None = None
+    # The RF placement each hardware role needs when the plan does not say
+    # (rf.py): a capture or a survey asks for NORMAL_LINK, so the planner
+    # keeps it off an attenuated board. The plan's `rf:` overrides it per role.
+    rf_defaults: Mapping[str, PlacementRequirement] | None = None
+
+    def placement_requirements(
+        self, arguments: Mapping
+    ) -> Mapping[str, PlacementRequirement]:
+        """The placement every hardware role must satisfy for these arguments.
+
+        The plan's ``rf:`` for a role, else the test's own default for it;
+        roles with neither are absent, and any resource may take them.
+        """
+        requested = arguments.get("rf") or {}
+        defaults = self.rf_defaults or {}
+        wanted = {}
+        for role in self.hardware_roles or {}:
+            if role in requested:
+                # Normalizing the argument validated this record, so reading
+                # it back cannot fail.
+                placement = rf_requirement(requested[role])
+            else:
+                placement = defaults.get(role)
+            if placement:
+                wanted[role] = placement
+        return MappingProxyType(wanted)
 
     def estimated_seconds(self, arguments: Mapping) -> float | None:
         """Expected seconds of one invocation with these normalized arguments.
@@ -315,6 +360,16 @@ class TestDefinition:
                 normalized[name] = rule.default
             elif rule.required:
                 raise CatalogError(f"{self.name}: missing required argument '{name}'")
+        if "rf" in normalized:
+            # An rf requirement selects the resource bound to one hardware
+            # role, so a role the test does not have could never be applied.
+            unknown = sorted(set(normalized["rf"]) - set(self.hardware_roles or {}))
+            if unknown:
+                raise CatalogError(
+                    f"{self.name}.rf: unknown hardware role(s) "
+                    f"{', '.join(unknown)}; this test binds "
+                    + (", ".join(self.hardware_roles or {}) or "no hardware")
+                )
         if self.check_arguments is not None:
             try:
                 self.check_arguments(normalized)
@@ -411,6 +466,9 @@ MAX_WATCHDOG_RESETS = ArgumentRule(_nonnegative_integer)
 # not declare its own rule). It is optional: a step that leaves it out runs on
 # every platform, so the normalized arguments carry it only when the plan does.
 PLATFORMS_ARGUMENT = ArgumentRule(_platforms)
+# Every test that binds hardware accepts `rf:` (builtin_catalog adds it), one
+# placement requirement per hardware role. Optional, like `platforms:`.
+RF_ARGUMENT = ArgumentRule(_rf)
 DURATION = ArgumentRule(_duration, required=True)
 SAMPLE_EVERY = ArgumentRule(_duration, required=True)
 COVERAGE = ArgumentRule(_coverage, required=True)
@@ -743,6 +801,21 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "Capture known BLE connection": _profiles(
         Estimate(30.0, per_duration=2), Estimate(60.0, per_duration=4)
     ),
+})
+
+
+# Tests whose cases need an ordinary link: they listen for ambient traffic or
+# hold a live connection with a peer, so an attenuated board would cost them
+# the very packets they check for. A plan may still override this per role.
+RF_DEFAULTS: Mapping[str, Mapping[str, PlacementRequirement]] = MappingProxyType({
+    name: MappingProxyType({"Ubertooth": NORMAL_LINK})
+    for name in (
+        "Classic Bluetooth receive",
+        "Raw receive",
+        "BLE extcap capture",
+        "Capture known BLE advertiser",
+        "Capture known BLE connection",
+    )
 })
 
 
@@ -1220,10 +1293,24 @@ def builtin_catalog() -> TestCatalog:
         ]
     )
     return TestCatalog(
-        _accept_watchdog_limit(_accept_platforms(
-            replace(definition, estimates=ESTIMATES.get(definition.name))))
+        _accept_rf(_accept_watchdog_limit(_accept_platforms(
+            replace(
+                definition,
+                estimates=ESTIMATES.get(definition.name),
+                rf_defaults=RF_DEFAULTS.get(definition.name),
+            ))))
         for definition in definitions
     )
+
+
+def _accept_rf(definition: TestDefinition) -> TestDefinition:
+    """Accept `rf:` on every test that binds hardware, so a plan can ask for
+    a placement for any of its roles. A test that binds none cannot."""
+    if not definition.hardware_roles or "rf" in definition.arguments:
+        return definition
+    arguments = dict(definition.arguments)
+    arguments["rf"] = RF_ARGUMENT
+    return replace(definition, arguments=MappingProxyType(arguments))
 
 
 def _accept_watchdog_limit(definition: TestDefinition) -> TestDefinition:
