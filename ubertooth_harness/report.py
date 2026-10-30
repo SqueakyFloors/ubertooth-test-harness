@@ -19,10 +19,7 @@ from ubertooth_harness import targets
 from ubertooth_harness.events import REPORT, RUN_LOG
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.rawlog import NOTE, TAGS, CommandCapture, format_command_record
-from ubertooth_harness.rf import (
-    describe as describe_placement,
-    describe_required as describe_requirement,
-)
+from ubertooth_harness.rf import describe as describe_placement
 from ubertooth_harness.watchdog import wait_counts
 
 
@@ -191,37 +188,29 @@ def _resource_text(details: Mapping) -> str:
 
 
 def _placement_rows(run: _Run) -> list[tuple[str, str]]:
-    """The RF placement of every board the run used, and what each test asked
-    of it: between them they say why a role got the board it did."""
-    placed, required = {}, {}
+    """One row naming the RF placement of every board the run used.
+
+    What each role asked of its placement is per invocation, so it stays in
+    the run record (`placement_requirements`, `rf_required`) rather than
+    being restated here: a plan with several steps of one test can ask
+    different things of the same role.
+    """
+    placed = {}
     for invocation in run.manifest.get("invocations") or []:
         resources = invocation.get("resources") or {}
         for role, record in (invocation.get("resource_placements") or {}).items():
             alias = resources.get(role)
             if alias:
                 placed[alias] = record
-        for role, record in (invocation.get("placement_requirements") or {}).items():
-            required.setdefault(
-                (invocation.get("test_name", ""), role), record
-            )
-    rows = []
-    if placed:
-        rows.append((
-            "RF placement",
-            "; ".join(
-                f"{alias}: {describe_placement(record)}"
-                for alias, record in sorted(placed.items())
-            ),
-        ))
-    if required:
-        rows.append((
-            "RF required",
-            "; ".join(
-                f"{test} {role}: {describe_requirement(record)}"
-                for (test, role), record in sorted(required.items())
-            ),
-        ))
-    return rows
+    if not placed:
+        return []
+    return [(
+        "RF placement",
+        "; ".join(
+            f"{alias}: {describe_placement(record)}"
+            for alias, record in sorted(placed.items())
+        ),
+    )]
 
 
 def _setup_rows(run: _Run) -> list[tuple[str, str]]:

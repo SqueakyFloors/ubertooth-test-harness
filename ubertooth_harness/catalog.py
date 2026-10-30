@@ -309,6 +309,8 @@ class TestDefinition:
         wanted = {}
         for role in self.hardware_roles or {}:
             if role in requested:
+                # Normalizing the argument validated this record, so reading
+                # it back cannot fail.
                 placement = rf_requirement(requested[role])
             else:
                 placement = defaults.get(role)

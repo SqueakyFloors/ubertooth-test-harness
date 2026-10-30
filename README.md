@@ -210,15 +210,14 @@ followed connection off an attenuated board. A plan's `rf:` for a role
 overrides that default.
 
 Every run records the placement of each board it used that records one, in
-`manifest.json` (`resource_placements` per invocation) and in each
-`test_started` record of `run.jsonl`; a board with no `rf:` is absent, since
+`run.jsonl`: on each invocation of the `manifest` record
+(`resource_placements`) and in each `test_started` record (`rf`); a board with no `rf:` is absent, since
 the registry does not say where it sits. What each role asked of its placement
-is recorded beside it (`placement_requirements`, and `rf_required` in
-`run.jsonl`), so a report explains why a role got the board it did when the
-host default was passed over or `each` covered fewer boards than the host has. The report shows the placement in an `RF placement` setup row, what was asked
-in an `RF required` row, and the placement again beside the resources of every
-result, so a range, transmit power, or RSSI figure is read next to the
-attenuation it was taken at.
+is recorded beside it (`placement_requirements` and `rf_required`), so the run
+record says why a role got the board it did when the host default was passed
+over or `each` covered fewer boards than the host has. The report shows the placement in an `RF placement` setup row and beside the
+resources of every result, so a range, transmit power, or RSSI figure is read
+next to the attenuation it was taken at.
 
 ### USB power controllers
 
@@ -1350,7 +1349,7 @@ Where a board the run used records an RF placement
 ([RF placement](#rf-placement-where-a-board-sits-on-the-bench)), the manifest
 carries it per invocation as `resource_placements`, each `test_started` record
 repeats it as `rf`, and the report shows it in a setup row and beside the
-resources of every result and transcript heading.
+resources of every result.
 
 Each transcript line starts with the time elapsed since the run started
 (`HH:MM:SS.mmm`); the report header gives the run's UTC start time, and

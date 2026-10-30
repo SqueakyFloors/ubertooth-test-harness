@@ -363,9 +363,8 @@ RSSI figures can then be read against the attenuation they were taken at, and
 two runs at different attenuations cannot be confused for one another.
 
 What each role asked of its placement is recorded beside it
-(`TestInvocation.placement_requirements`, `rf_required` in `test_started`, an
-`RF required` setup row), whether the plan asked or the test's own default
-did. Without it a narrowed selection has no explanation in the run record: a
+(`TestInvocation.placement_requirements`, `rf_required` in `test_started`),
+whether the plan asked or the test's own default did. Without it a narrowed selection has no explanation in the run record: a
 host default passed over, or a unit `each` left out because its placement does
 not match, would read as an arbitrary choice.
 

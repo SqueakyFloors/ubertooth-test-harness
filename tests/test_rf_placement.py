@@ -698,16 +698,16 @@ class PlacementReportTests(unittest.TestCase):
             report = write_report(run).read_text()
 
             self.assertIn("| RF placement | UT_Linux1: 20 dB, antenna, 1 m away |", report)
-            self.assertIn(
-                "| RF required | Raw receive Ubertooth: attenuation of at least "
-                "10 dB |",
-                report,
-            )
+            # Not pinned past the resources cell: the results table gains
+            # columns, and this test is about the one cell.
             self.assertIn(
                 "| 001-Raw receive | Host_Linux (Ubertooth=UT_Linux1 "
-                "[20 dB, antenna, 1 m away]) | passed |",
+                "[20 dB, antenna, 1 m away]) |",
                 report,
             )
+            # Not restated in a setup row: a plan may ask different things of
+            # one role in different steps, so it stays per invocation.
+            self.assertNotIn("RF required", report)
             # Not repeated on every transcript heading: it cannot change
             # within a run, and the setup row and the result cell carry it.
             self.assertIn(
@@ -715,7 +715,6 @@ class PlacementReportTests(unittest.TestCase):
                 "(Ubertooth=UT_Linux1) ===",
                 report,
             )
-
 
 
 class PlacementSerializationTests(unittest.TestCase):
@@ -856,6 +855,7 @@ suites:
         rf:
           advertiser: {min_attenuation_db: 10}
 """, self.HARDWARE)
+
 
 if __name__ == "__main__":
     unittest.main()
