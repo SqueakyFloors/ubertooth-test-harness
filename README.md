@@ -212,9 +212,13 @@ overrides that default.
 Every run records the placement of each board it used that records one, in
 `manifest.json` (`resource_placements` per invocation) and in each
 `test_started` record of `run.jsonl`; a board with no `rf:` is absent, since
-the registry does not say where it sits. The report shows it in an `RF placement` setup row and beside the
-resources of every result and transcript heading, so a range, transmit power,
-or RSSI figure is read next to the attenuation it was taken at.
+the registry does not say where it sits. What each role asked of its placement
+is recorded beside it (`placement_requirements`, and `rf_required` in
+`run.jsonl`), so a report explains why a role got the board it did when the
+host default was passed over or `each` covered fewer boards than the host has. The report shows the placement in an `RF placement` setup row, what was asked
+in an `RF required` row, and the placement again beside the resources of every
+result, so a range, transmit power, or RSSI figure is read next to the
+attenuation it was taken at.
 
 ### USB power controllers
 

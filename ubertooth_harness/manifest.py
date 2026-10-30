@@ -336,6 +336,9 @@ class InvocationIdentity:
     # so a reader knows what attenuation and distance the run's numbers were
     # taken at. Empty when no board the run used records a placement.
     resource_placements: Mapping[str, Mapping] = MappingProxyType({})
+    # What each role's placement had to satisfy, so a report can say why a
+    # role got the resource it did (planner.TestInvocation).
+    placement_requirements: Mapping[str, Mapping] = MappingProxyType({})
 
     @classmethod
     def from_invocation(cls, invocation: TestInvocation) -> "InvocationIdentity":
@@ -356,6 +359,7 @@ class InvocationIdentity:
             ),
             invocation.exclusive_ubertooth,
             _frozen(dict(invocation.resource_placements)),
+            _frozen(dict(invocation.placement_requirements)),
         )
 
     def to_dict(self) -> dict:
@@ -372,6 +376,7 @@ class InvocationIdentity:
             "power_isolation": [dict(action) for action in self.power_isolation],
             "exclusive_ubertooth": self.exclusive_ubertooth,
             "resource_placements": json_value(self.resource_placements),
+            "placement_requirements": json_value(self.placement_requirements),
         }
 
 

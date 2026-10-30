@@ -340,10 +340,13 @@ A test states what it needs of the unit bound to each hardware role as a
 test's own `rf_defaults`. Captures, surveys, and tests that hold a live
 connection default to an ordinary link, so the planner keeps them off an
 attenuated board; a plan's `rf:` overrides that per role. The requirement
-narrows `ResourceRegistry.resolve_hardware` before the selector is read:
-`default` prefers the host's default and otherwise takes the lowest-alias
-unit that satisfies the requirement, `each` covers the matching units alone,
-and an explicit alias that cannot satisfy it is a planning error. A host with
+narrows `ResourceRegistry.resolve_hardware` before the selector is read, and
+is filtered by the role as well, so a unit that could never take the role is
+not offered as the one that satisfies the placement: `default` prefers the
+host's default and otherwise takes the lowest-alias unit that satisfies the
+requirement, `each` covers the matching units alone, and an explicit alias
+that cannot satisfy it is a planning error (its role is checked first, since
+that is a different mistake). A host with
 no matching unit is left out as not applicable (`hostneeds.NotApplicable`),
 with a reason naming the requirement and the placement of every unit of that
 type on the host, so a report says what was missing rather than silently
@@ -355,10 +358,16 @@ invocation
 (`TestInvocation.resource_placements`), the manifest carries it per invocation
 (`resource_placements`, manifest schema 5), the sequencer repeats it in each
 `test_started` record, and the report shows it in a setup row and beside the
-resources of every result row and transcript heading. A run's range, transmit
-power, sensitivity, and RSSI figures can then be read against the attenuation
-they were taken at, and two runs at different attenuations cannot be confused
-for one another.
+resources of every result row. A run's range, transmit power, sensitivity, and
+RSSI figures can then be read against the attenuation they were taken at, and
+two runs at different attenuations cannot be confused for one another.
+
+What each role asked of its placement is recorded beside it
+(`TestInvocation.placement_requirements`, `rf_required` in `test_started`, an
+`RF required` setup row), whether the plan asked or the test's own default
+did. Without it a narrowed selection has no explanation in the run record: a
+host default passed over, or a unit `each` left out because its placement does
+not match, would read as an arbitrary choice.
 
 ### Power-controller boundary
 

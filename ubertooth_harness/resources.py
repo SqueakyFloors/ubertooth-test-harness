@@ -122,9 +122,14 @@ class ResourceRegistry(Protocol):
         """Every resource of this type attached to the host, by alias."""
 
     def placed(
-        self, host: str, resource_type: str, placement: PlacementRequirement
+        self,
+        host: str,
+        resource_type: str,
+        placement: PlacementRequirement,
+        role: str | None = None,
     ) -> tuple[str, ...]:
-        """Those of them whose RF placement satisfies the requirement."""
+        """Those of them whose RF placement satisfies the requirement, and
+        which may be bound to ``role`` when one is given."""
 
     def resolve_hardware(
         self,
@@ -389,16 +394,21 @@ class FileResourceRegistry:
         if host_resource.type != "Host":
             raise RegistryError(f"resource {host} is not a Host")
         eligible = self.hardware(host, resource_type)
-        if placement:
-            # A requirement narrows the choice before the selector is read:
-            # 'default' takes the host's default only when it satisfies the
-            # requirement, and 'each' covers the matching boards alone.
-            matching = self.placed(host, resource_type, placement)
-            if not matching:
-                raise RegistryError(
-                    f"host {host} has no {resource_type} with "
-                    f"{placement.describe()} ({self._placements(eligible)})"
-                )
+        # A requirement narrows the choice before the selector is read:
+        # 'default' takes the host's default only when it satisfies the
+        # requirement, and 'each' covers the matching resources alone.
+        # Role-filtered, so a resource that could never take the role is not
+        # offered as the one that satisfies the placement.
+        matching = (
+            self.placed(host, resource_type, placement, role) if placement else ()
+        )
+
+        def refuse_unplaced():
+            raise RegistryError(
+                f"host {host} has no {resource_type} with "
+                f"{placement.describe()} ({self._placements(eligible)})"
+            )
+
         if selector == "default":
             # A test that binds several resources of one type (the connection
             # pair's central and peripheral) needs a default per role, so the
@@ -416,25 +426,23 @@ class FileResourceRegistry:
                     f"default {alias} is not a {resource_type} attached to {host}"
                 )
             if placement and alias not in matching:
+                if not matching:
+                    refuse_unplaced()
                 # The host's default is not placed as this role needs, so the
                 # lowest-alias resource that is takes the role instead. The
-                # run record and the report name the one that was used.
-                usable = [
-                    other for other in matching if self._takes_role(self.get(other), role)
-                ]
-                if not usable:
-                    raise RegistryError(
-                        f"host {host} has no {resource_type} with "
-                        f"{placement.describe()} that can take the {role} role "
-                        f"({self._placements(matching)})"
-                    )
-                alias = usable[0]
+                # run record and the report name the resource used and the
+                # requirement it was chosen for.
+                alias = matching[0]
             self._declares_role(self.get(alias), role)
             return (alias,)
         if selector == "each":
             if not eligible:
                 raise RegistryError(f"host {host} has no {resource_type} resources")
-            return matching if placement else eligible
+            if not placement:
+                return eligible
+            if not matching:
+                refuse_unplaced()
+            return matching
         if selector in ("any", "random"):
             raise RegistryError(f"ambiguous selector '{selector}' is unsupported")
         resource = self.get(selector)
@@ -442,14 +450,16 @@ class FileResourceRegistry:
             raise RegistryError(
                 f"resource {selector} is not a {resource_type} attached to {host}"
             )
+        # The role first: a resource excluded from `matching` for its role
+        # would otherwise be refused for its placement, which is not why.
+        self._declares_role(resource, role)
         if placement and selector not in matching:
             # An explicit alias the plan asked for: a placement it cannot
-            # satisfy is a mistake in the plan, not a board to swap out.
+            # satisfy is a mistake in the plan, not a resource to swap out.
             raise RegistryError(
                 f"resource {selector} does not have {placement.describe()} "
                 f"(it has {describe_placement(resource.rf)})"
             )
-        self._declares_role(resource, role)
         return (selector,)
 
     @staticmethod

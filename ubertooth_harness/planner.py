@@ -58,6 +58,13 @@ class TestInvocation:
     resource_placements: Mapping[str, Mapping] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    # What each role's placement had to satisfy, by role, whether the plan
+    # asked for it or the test's own default did. Recorded because it is why
+    # a role got the resource it did: a host default passed over, or a board
+    # `each` left out, is otherwise invisible in the run record.
+    placement_requirements: Mapping[str, Mapping] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
 
 @dataclass(frozen=True)
@@ -283,6 +290,10 @@ class PlanCompiler:
                                 resources=resources,
                                 resource_identities=identities,
                                 resource_placements=self._placements(resources),
+                                placement_requirements=MappingProxyType({
+                                    role: MappingProxyType(want.to_dict())
+                                    for role, want in wanted.items()
+                                }),
                                 power_isolation=power_isolation,
                                 exclusive_ubertooth=exclusive,
                             )

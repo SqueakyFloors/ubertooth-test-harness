@@ -144,6 +144,16 @@ def describe(recorded: Placement | Mapping | None) -> str:
         return ", ".join(f"{key}={value}" for key, value in sorted(recorded.items()))
 
 
+def describe_required(record: Mapping | None) -> str:
+    """Plain text for a recorded requirement, tolerating a foreign record."""
+    if not isinstance(record, Mapping):
+        return str(record)
+    try:
+        return requirement(record).describe()
+    except PlacementError:
+        return ", ".join(f"{key}={value}" for key, value in sorted(record.items()))
+
+
 @dataclass(frozen=True)
 class PlacementRequirement:
     """What a test needs of the placement of the unit bound to one role."""

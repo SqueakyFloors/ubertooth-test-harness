@@ -1260,10 +1260,8 @@ class NamedTestSequencer:
                         "description": definition.description,
                         "host": invocation.host,
                         "resources": dict(invocation.resources),
-                        "rf": {
-                            role: dict(record)
-                            for role, record in invocation.resource_placements.items()
-                        },
+                        "rf": json_value(invocation.resource_placements),
+                        "rf_required": json_value(invocation.placement_requirements),
                         "arguments": json_value(invocation.arguments),
                     },
                 )

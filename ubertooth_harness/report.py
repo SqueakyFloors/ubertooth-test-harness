@@ -19,7 +19,10 @@ from ubertooth_harness import targets
 from ubertooth_harness.events import REPORT, RUN_LOG
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.rawlog import NOTE, TAGS, CommandCapture, format_command_record
-from ubertooth_harness.rf import describe as describe_placement
+from ubertooth_harness.rf import (
+    describe as describe_placement,
+    describe_required as describe_requirement,
+)
 from ubertooth_harness.watchdog import wait_counts
 
 
@@ -188,23 +191,37 @@ def _resource_text(details: Mapping) -> str:
 
 
 def _placement_rows(run: _Run) -> list[tuple[str, str]]:
-    """One row naming the RF placement of every board the run used."""
-    placed = {}
+    """The RF placement of every board the run used, and what each test asked
+    of it: between them they say why a role got the board it did."""
+    placed, required = {}, {}
     for invocation in run.manifest.get("invocations") or []:
         resources = invocation.get("resources") or {}
         for role, record in (invocation.get("resource_placements") or {}).items():
             alias = resources.get(role)
             if alias:
                 placed[alias] = record
-    if not placed:
-        return []
-    return [(
-        "RF placement",
-        "; ".join(
-            f"{alias}: {describe_placement(record)}"
-            for alias, record in sorted(placed.items())
-        ),
-    )]
+        for role, record in (invocation.get("placement_requirements") or {}).items():
+            required.setdefault(
+                (invocation.get("test_name", ""), role), record
+            )
+    rows = []
+    if placed:
+        rows.append((
+            "RF placement",
+            "; ".join(
+                f"{alias}: {describe_placement(record)}"
+                for alias, record in sorted(placed.items())
+            ),
+        ))
+    if required:
+        rows.append((
+            "RF required",
+            "; ".join(
+                f"{test} {role}: {describe_requirement(record)}"
+                for (test, role), record in sorted(required.items())
+            ),
+        ))
+    return rows
 
 
 def _setup_rows(run: _Run) -> list[tuple[str, str]]:
@@ -775,7 +792,7 @@ def _transcript(run: _Run) -> list[str]:
         elif kind == "preflight_finished":
             line(event, f"=== PREFLIGHT EXIT: {status}{_reason(details)} ===")
         elif kind == "test_started":
-            resources = _resource_text(details)
+            resources = ", ".join(f"{k}={v}" for k, v in details.get("resources", {}).items())
             suffix = f" ({resources})" if resources else ""
             line(event, f"=== TEST {details.get('invocation_id')}: {details.get('test_name')} on {details.get('host')}{suffix} ===")
         elif kind == "known_target":

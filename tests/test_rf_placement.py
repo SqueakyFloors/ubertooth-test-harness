@@ -558,6 +558,44 @@ suites:
             # UT_Linux0 and UT_Linux2 record no placement, so neither appears.
             self.assertEqual([guard], list(invocation.resource_placements))
 
+    def test_what_each_role_asked_of_its_placement_is_recorded(self):
+        # Why a role got the resource it did: a run that passed over the host
+        # default, or left a board out of `each`, is otherwise unexplained.
+        with tempfile.TemporaryDirectory() as directory:
+            compiled = compile_suite(directory, """plan: rf
+suites:
+  fast:
+    - Raw receive:
+        hosts: [Host_Linux]
+        Ubertooth: each
+        coverage: smoke
+        duration: 3s
+""")
+
+            self.assertEqual(
+                {"Ubertooth": {"antenna": True, "max_attenuation_db": 0.0}},
+                {role: dict(record) for role, record
+                 in compiled.invocations[0].placement_requirements.items()},
+            )
+            recorded = InvocationIdentity.from_invocation(
+                compiled.invocations[0]
+            ).to_dict()
+            self.assertEqual(
+                {"Ubertooth": {"antenna": True, "max_attenuation_db": 0.0}},
+                recorded["placement_requirements"],
+            )
+
+    def test_a_test_with_no_requirement_records_none(self):
+        with tempfile.TemporaryDirectory() as directory:
+            compiled = compile_suite(directory, """plan: rf
+suites:
+  fast:
+    - Ubertooth identity:
+        hosts: [Host_Linux]
+""")
+
+            self.assertEqual({}, dict(compiled.invocations[0].placement_requirements))
+
     def test_the_manifest_record_carries_the_placements(self):
         invocation = TestInvocation(
             "001-Ubertooth identity", "Ubertooth identity", "Host_Linux", {},
@@ -626,10 +664,14 @@ class PlacementReportTests(unittest.TestCase):
             "host": "Host_Linux", "plan_name": "Plan", "suite": "fast",
             "sources": [], "artifacts": [],
             "invocations": [{
+                "test_name": "Raw receive",
                 "resources": {"Ubertooth": "UT_Linux1"},
                 "resource_placements": {
                     "Ubertooth": {"antenna": True, "attenuation_db": 20.0,
                                   "distance_m": 1.0},
+                },
+                "placement_requirements": {
+                    "Ubertooth": {"min_attenuation_db": 10.0},
                 },
             }],
             "environment": {},
@@ -657,19 +699,23 @@ class PlacementReportTests(unittest.TestCase):
 
             self.assertIn("| RF placement | UT_Linux1: 20 dB, antenna, 1 m away |", report)
             self.assertIn(
+                "| RF required | Raw receive Ubertooth: attenuation of at least "
+                "10 dB |",
+                report,
+            )
+            self.assertIn(
                 "| 001-Raw receive | Host_Linux (Ubertooth=UT_Linux1 "
                 "[20 dB, antenna, 1 m away]) | passed |",
                 report,
             )
+            # Not repeated on every transcript heading: it cannot change
+            # within a run, and the setup row and the result cell carry it.
             self.assertIn(
                 "=== TEST 001-Raw receive: Raw receive on Host_Linux "
-                "(Ubertooth=UT_Linux1 [20 dB, antenna, 1 m away]) ===",
+                "(Ubertooth=UT_Linux1) ===",
                 report,
             )
 
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class PlacementSerializationTests(unittest.TestCase):
@@ -763,6 +809,36 @@ class PlacementRoleTests(unittest.TestCase):
                 (), loaded.placed("Host_Linux", "nRF52840 DK", asked, "advertiser")
             )
 
+    def test_each_and_default_both_skip_a_matching_unit_that_cannot_take_the_role(self):
+        # A DK placed as asked but registered for another role must not be
+        # offered for this one, by either selector.
+        asked = PlacementRequirement(min_attenuation_db=10)
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = registry(directory, self.HARDWARE)
+
+            for selector in ("each", "default"):
+                with self.subTest(selector=selector):
+                    with self.assertRaisesRegex(
+                        RegistryError,
+                        "host Host_Linux has no nRF52840 DK with attenuation of "
+                        "at least 10 dB",
+                    ):
+                        loaded.resolve_hardware(
+                            "Host_Linux", "nRF52840 DK", selector, "advertiser", asked
+                        )
+
+    def test_an_explicit_alias_is_refused_for_its_role_not_its_placement(self):
+        asked = PlacementRequirement(min_attenuation_db=10)
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = registry(directory, self.HARDWARE)
+
+            with self.assertRaisesRegex(
+                RegistryError, "DK_Linux1 declares the role\\(s\\) peripheral, not advertiser"
+            ):
+                loaded.resolve_hardware(
+                    "Host_Linux", "nRF52840 DK", "DK_Linux1", "advertiser", asked
+                )
+
     def test_the_host_is_not_applicable_rather_than_failing_the_whole_suite(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(
@@ -780,3 +856,6 @@ suites:
         rf:
           advertiser: {min_attenuation_db: 10}
 """, self.HARDWARE)
+
+if __name__ == "__main__":
+    unittest.main()
