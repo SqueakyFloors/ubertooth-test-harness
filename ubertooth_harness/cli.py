@@ -123,6 +123,22 @@ def _add_lease_options(parser: argparse.ArgumentParser) -> None:
     )
     # Tests and unusual hosts only; the default is shared by every agent.
     parser.add_argument("--lease-dir", type=Path, help=argparse.SUPPRESS)
+    _add_external_lock_option(parser)
+
+
+def _add_external_lock_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--external-board-lock", metavar="TEMPLATE",
+        help="also hold each board's own lock file from another tool on this "
+        "host: an absolute path with {serial} (the board's lock key: an "
+        "Ubertooth's full 32-hex serial), e.g. "
+        "'/var/lock/board-{serial}.lock'; default "
+        f"${board_leases.EXTERNAL_LOCK_ENV}; '' turns it off",
+    )
+
+
+def _external_template(args: argparse.Namespace) -> str | None:
+    return board_leases.external_lock_template(args.external_board_lock)
 
 
 @contextlib.contextmanager
@@ -359,6 +375,7 @@ def _parser() -> argparse.ArgumentParser:
     boards.add_argument("--hardware", type=Path, required=True)
     boards.add_argument("--host", help="only boards attached to this host")
     boards.add_argument("--lease-dir", type=Path, help=argparse.SUPPRESS)
+    _add_external_lock_option(boards)
     boards.add_argument("--json", action="store_true", help="machine-readable output")
 
     lease = subparsers.add_parser(
@@ -430,6 +447,7 @@ def _parser() -> argparse.ArgumentParser:
     runner.add_argument(
         "--heartbeat-interval", type=float, default=10.0, metavar="SECONDS",
     )
+    _add_external_lock_option(runner)
 
     controller = subparsers.add_parser(
         "controller",
@@ -528,6 +546,7 @@ def _runner(args: argparse.Namespace) -> int:
         libbtbb_ref=args.libbtbb_ref,
         allow_power_changes=args.allow_power_changes,
         heartbeat_interval_s=args.heartbeat_interval,
+        external_board_lock=args.external_board_lock,
     ))
     host = FileResourceRegistry.load(service.config.hardware).get(args.host)
     if host.type != "Host":
@@ -702,6 +721,8 @@ def _parse_artifacts(values: list[str]) -> tuple[FileIdentity, ...]:
 
 
 def _run_suite(args: argparse.Namespace) -> int:
+    # A bad template fails before anything else, dry run included.
+    external_template = _external_template(args)
     catalog = builtin_catalog()
     plan = load_plan(args.plan, catalog)
     registry = FileResourceRegistry.load(args.hardware)
@@ -798,6 +819,7 @@ def _run_suite(args: argparse.Namespace) -> int:
         wait_s=args.wait_for_boards * 60,
         # Power isolation and firmware writes hold this host's lock too.
         host_lock=args.keep_host_lock or bool(args.flash_boards),
+        external_template=external_template,
     )
     try:
         return _run_leased(
@@ -976,6 +998,7 @@ def _registered_boards(registry, host: str | None = None):
 
 
 def _boards_command(args: argparse.Namespace) -> int:
+    external_template = _external_template(args)
     registry = FileResourceRegistry.load(args.hardware)
     hosts = [resource.alias for resource in registry.hosts()]
     if args.host:
@@ -991,7 +1014,8 @@ def _boards_command(args: argparse.Namespace) -> int:
         )
     registered = _registered_boards(registry, args.host)
     states = board_leases.board_states(
-        [board for board, problem in registered if problem is None], directory=args.lease_dir
+        [board for board, problem in registered if problem is None], directory=args.lease_dir,
+        external_template=external_template,
     )
     states += [
         {"resource": alias, "key": None, "held": False, "holder": {}, "unleasable": problem}
@@ -1003,15 +1027,34 @@ def _boards_command(args: argparse.Namespace) -> int:
         print(json.dumps(states, indent=2, sort_keys=True))
         return 0
     for state in states:
+        external = state.get("external") or {}
         if state.get("unleasable"):
             print(f"{state['resource']:<12} not leasable: {state['unleasable']}")
-        elif state["held"]:
+        elif state["held"] and state["holder"]:
             holder = state["holder"]
             since = board_leases.held_for(holder)
             detail = board_leases.describe_holder(holder)
             print(f"{state['resource']:<12} held  {detail}" + (f" (for {since})" if since else ""))
+            if external.get("held") and not external.get("error"):
+                # Two parties hold the board; name the other one too.
+                print(f"{'':<12} and   " + board_leases.describe_external(
+                    Path(external["lock"]), external.get("holder", "")
+                ))
+        elif external.get("held"):
+            if external.get("error"):
+                print(f"{state['resource']:<12} held  outside the harness: "
+                      f"{external['lock']} (cannot be read, so taken as held)")
+            else:
+                detail = board_leases.describe_external(
+                    Path(external["lock"]), external.get("holder", "")
+                )
+                print(f"{state['resource']:<12} held  {detail}")
+        elif state["held"]:
+            print(f"{state['resource']:<12} held  {board_leases.describe_holder({})}")
         else:
             print(f"{state['resource']:<12} free")
+        if external.get("error"):
+            print(f"{'':<12} warning: cannot read external lock: {external['error']}")
     return 0
 
 
@@ -1019,6 +1062,7 @@ def _lease_command(args: argparse.Namespace) -> int:
     command = list(args.command_line)
     if not command:
         raise HarnessError("lease needs a command after --")
+    external_template = _external_template(args)
     registry = FileResourceRegistry.load(args.hardware)
     boards = []
     for alias in args.boards:
@@ -1035,6 +1079,7 @@ def _lease_command(args: argparse.Namespace) -> int:
         directory=args.lease_dir,
         wait_s=args.wait_for_boards * 60,
         host_lock=host_lock,
+        external_template=external_template,
     ) as held:
         # The command inherits the locks, so the boards stay leased until it
         # exits even if this process is killed first.

@@ -29,6 +29,7 @@ import urllib.parse
 from ubertooth_harness.enumeration import SysfsUbertoothEnumerator, UbertoothEnumerator
 from ubertooth_harness.environment import capture
 from ubertooth_harness.events import RUN_LOG, generate_run_id
+from ubertooth_harness import leases
 from ubertooth_harness.libbtbbpin import FORK_PIN
 from ubertooth_harness.protocol import (
     MAX_INBOUND_MESSAGE_BYTES,
@@ -139,6 +140,9 @@ class RunnerConfig:
     libbtbb_ref: str | None = None
     allow_power_changes: bool = False
     heartbeat_interval_s: float = DEFAULT_HEARTBEAT_INTERVAL_S
+    # --external-board-lock for every run-suite child; None leaves the
+    # children to $UBERTOOTH_HARNESS_EXTERNAL_BOARD_LOCK, '' turns it off.
+    external_board_lock: str | None = None
     initial_backoff_s: float = DEFAULT_INITIAL_BACKOFF_S
     max_backoff_s: float = DEFAULT_MAX_BACKOFF_S
     # Extra environment for the run-suite child (tests put fake tools on PATH).
@@ -182,8 +186,17 @@ class RunnerService:
             raise RunnerConfigError(
                 "--libbtbb-source and --libbtbb-ref must be supplied together"
             )
+        try:
+            # Checked here (the option, else the environment the children
+            # inherit) so a bad template stops the runner, not every run.
+            external = leases.external_lock_template(config.external_board_lock)
+        except leases.LeaseError as error:
+            raise RunnerConfigError(str(error)) from error
         self.config = dataclasses.replace(
             config,
+            external_board_lock=(
+                (external or "") if config.external_board_lock is not None else None
+            ),
             hardware=Path(config.hardware).expanduser().resolve(),
             ubertooth_source=Path(config.ubertooth_source).expanduser().resolve(),
             output=Path(config.output).expanduser().resolve(),
@@ -426,6 +439,8 @@ class RunnerService:
                 argv.append("--no-flash-build")
         if self.config.allow_power_changes:
             argv.append("--allow-power-changes")
+        if self.config.external_board_lock is not None:
+            argv.append(f"--external-board-lock={self.config.external_board_lock}")
         environment = dict(os.environ)
         environment.update(self.config.child_environment or {})
         try:
