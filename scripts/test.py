@@ -207,6 +207,10 @@ def _save_durations(outcomes: list[Outcome]) -> None:
 
 def _signal_group(child, number: int) -> None:
     """Signal a child and everything it started; it leads its own group."""
+    if child.returncode is not None:
+        # Waited for already: its number is free and may lead someone
+        # else's group by now.
+        return
     try:
         os.killpg(child.pid, number)
     except (OSError, ProcessLookupError):
@@ -224,22 +228,18 @@ def _stop(children) -> None:
     children = list(children)
     for child in children:
         _signal_group(child, signal.SIGTERM)
-    try:
-        time.sleep(STOP_WAIT_S)
-    except KeyboardInterrupt:
-        pass  # Interrupted again: do not wait, kill now.
-    while True:
-        try:
-            for child in children:
-                _signal_group(child, signal.SIGKILL)
-            return
-        except KeyboardInterrupt:
-            continue
+    time.sleep(STOP_WAIT_S)
+    for child in children:
+        _signal_group(child, signal.SIGKILL)
 
 
 def _interrupt() -> None:
     """Close the run to new children and stop the ones running."""
     global _stopping
+    # Nothing interrupts the stop itself: a second Ctrl-C part way through
+    # would leave children running and the run waiting for them.
+    for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(number, signal.SIG_IGN)
     with _lock:
         _stopping = True
         children = list(_running)
@@ -314,7 +314,8 @@ def _start(module: str, verbosity: int, timeout: float = TIMEOUT_S) -> Outcome:
             except subprocess.TimeoutExpired:
                 errors += "(something still holds the output pipe open)\n"
         finally:
-            _running.discard(child)
+            with _lock:
+                _running.discard(child)
         outcome = Outcome(module, time.monotonic() - started)
         outcome.output = output + errors
         if timed_out:
@@ -428,26 +429,31 @@ def main(argv=None) -> int:
 
     started = time.monotonic()
     outcomes = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+    # Not a with block: leaving one waits for every thread, and an interrupt
+    # has to end the run now, not when the last child would have finished.
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=jobs)
+    try:
         running = {pool.submit(_start, module, verbosity): module
                    for module in modules}
-        try:
-            for future in concurrent.futures.as_completed(running):
-                outcome = future.result()
-                outcomes.append(outcome)
-                print(f"{outcome.status():>4} {outcome.seconds:6.1f}s "
-                      f"{outcome.tests:4d} tests  {outcome.module}",
-                      file=sys.stderr, flush=True)
-        except KeyboardInterrupt:
-            # The children lead their own sessions, so neither the terminal's
-            # interrupt nor a signal sent to this process reaches them; they
-            # are stopped outright, or leaving this block would wait for
-            # every one of them.
-            for future in running:
-                future.cancel()
-            print("\ninterrupted", file=sys.stderr, flush=True)
-            _interrupt()
-            return 1
+        for future in concurrent.futures.as_completed(running):
+            outcome = future.result()
+            outcomes.append(outcome)
+            print(f"{outcome.status():>4} {outcome.seconds:6.1f}s "
+                  f"{outcome.tests:4d} tests  {outcome.module}",
+                  file=sys.stderr, flush=True)
+    except KeyboardInterrupt:
+        # The children lead their own sessions, so neither the terminal's
+        # interrupt nor a signal sent to this process reaches them.
+        print("\ninterrupted", file=sys.stderr, flush=True)
+        _interrupt()
+        # The threads are still in a read of a child that has just been
+        # killed; one of those reads could outlive the interrupt (a command
+        # a test started outside the group still holds the pipe), and there
+        # is nothing left to write out, so the run ends here.
+        sys.stderr.flush()
+        os._exit(1)
+    finally:
+        pool.shutdown(wait=False)
     seconds = time.monotonic() - started
 
     outcomes.sort(key=lambda outcome: outcome.module)

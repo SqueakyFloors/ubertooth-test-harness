@@ -135,7 +135,9 @@ class ChildTests(unittest.TestCase):
     def child(self, returncode, output="", errors="", report=None):
         """A stand-in child process, in place of a real one."""
         class Child:
-            pid = os.getpid()  # never signaled: it ends on its own here
+            # No such process, so a stop of this stand-in cannot reach
+            # anything of this test run's own.
+            pid = 2 ** 30
 
             def __init__(self, argv):
                 self.argv = argv

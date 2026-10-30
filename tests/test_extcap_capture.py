@@ -461,6 +461,11 @@ class CaptureTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             extcapcapture.capture(("true",), "/nonexistent/fifo", 1, no_btle=True)
 
+    def test_a_record_count_to_stop_after_must_be_a_count(self):
+        with self.assertRaisesRegex(ValueError, "1 or more"):
+            extcapcapture.capture(("true",), "/nonexistent/fifo", 1,
+                                  stop_after_records=0)
+
     def test_a_capture_filter_is_warned_about_and_ignored(self):
         code, out = self.fixture().capture(
             (f"--extcap-interface=ubertooth{SERIAL_A}", "--extcap-capture-filter", "x"),
