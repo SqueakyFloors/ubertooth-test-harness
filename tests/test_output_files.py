@@ -15,8 +15,11 @@ from ubertooth_harness.executor import (
     SubprocessCommandExecutor,
 )
 from ubertooth_harness.outputfiles import (
+    MAX_BLOCK_CHARS,
     OUTPUT_DIR,
     TARGET_SERIAL_STREAM,
+    OutsideRun,
+    confined,
     CommandOutput,
     LineSource,
     OutputCheck,
@@ -189,6 +192,36 @@ class StreamToFilesTests(unittest.TestCase):
                 hashlib.sha256(path.read_bytes()).hexdigest(), saved.sha256)
 
 
+    def test_a_short_stream_beside_a_flooding_one_is_whole_in_its_own_file(self):
+        # stdout printed two lines before stderr flooded. Both files must hold
+        # their stream in full, so a check over both reads the same bytes
+        # live and offline (no stream is left half in memory).
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _summary, events = run_once(root, StreamExecutor())
+            saved = {file["stream"]: file
+                     for file in finished(events, PREFLIGHT)["output_files"]}
+            self.assertEqual(VERSION + "END OF STREAM\n",
+                             (root / saved["stdout"]["path"]).read_text())
+            checks = next(e for e in events if e["event_type"] == "output_checks"
+                          and e["details"]["command_id"] == PREFLIGHT)
+            # The check over both streams names both files, in its read order.
+            self.assertEqual([saved["stdout"]["path"], saved["stderr"]["path"]],
+                             checks["details"]["checks"][0]["files"])
+            self.assertEqual((), validate_run(root).differences)
+
+    def test_a_stream_with_no_line_endings_is_read_in_bounded_blocks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "x.log"
+            # One "line" far longer than a block, with no line ending at all.
+            path.write_text("x" * (4 * MAX_BLOCK_CHARS) + "needle",
+                            encoding="utf-8")
+            blocks = list(LineSource((path,)))
+            self.assertTrue(all(len(block) <= MAX_BLOCK_CHARS for block in blocks))
+            self.assertGreater(len(blocks), 1)
+            self.assertIsNotNone(search_parts((path,), r"needle"))
+
+
 class ReadingFilesTests(unittest.TestCase):
 
     def test_lines_can_be_read_more_than_once_and_drop_line_endings(self):
@@ -248,6 +281,21 @@ class ReadingFilesTests(unittest.TestCase):
             self.assertEqual(("expected", True, "git-1234abc"),
                              (recorded.kind, recorded.found, recorded.matched))
             self.assertEqual((f"{OUTPUT_DIR}/c.stdout.log",), recorded.files)
+
+
+    def test_a_recorded_path_that_leaves_the_run_is_refused_before_it_is_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "run"
+            (root / OUTPUT_DIR).mkdir(parents=True)
+            (Path(directory) / "elsewhere.txt").write_text("not yours\n")
+            (root / OUTPUT_DIR / "link.stdout.log").symlink_to(
+                Path(directory) / "elsewhere.txt")
+            for path in ("../elsewhere.txt", "/etc/passwd",
+                         f"{OUTPUT_DIR}/link.stdout.log"):
+                with self.subTest(path=path), self.assertRaises(OutsideRun):
+                    confined(root, path)
+            self.assertEqual((root / OUTPUT_DIR).resolve(),
+                             confined(root, OUTPUT_DIR))
 
 
 class ValidateTests(unittest.TestCase):
@@ -358,7 +406,7 @@ class ValidateTests(unittest.TestCase):
             }) + "\n")
             code, text = self.validated(root)
             self.assertEqual(1, code)
-            self.assertIn("leaves the run directory", text)
+            self.assertIn("is not a path inside the run directory", text)
 
     def test_the_record_round_trips(self):
         check = OutputCheck("expected", "Firmware", r"git-\S+", ("stdout",),

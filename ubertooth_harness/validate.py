@@ -27,6 +27,8 @@ from ubertooth_harness.events import RUN_LOG
 from ubertooth_harness.outputfiles import (
     OutputCheck,
     OutputFile,
+    OutsideRun,
+    confined,
     measure,
     saved_files,
     search_parts,
@@ -130,12 +132,15 @@ def check_files(run_dir: Path, events: Sequence[dict]) -> Iterator[FileResult]:
 
 
 def _file_problem(run_dir: Path, saved: OutputFile) -> str:
-    path = run_dir / saved.path
-    if ".." in Path(saved.path).parts or Path(saved.path).is_absolute():
-        return "the recorded path leaves the run directory"
+    try:
+        path = confined(run_dir, saved.path)
+    except OutsideRun as error:
+        return str(error)
     if not path.is_file():
         return "missing from the run directory"
-    now = measure(path, saved.stream, relative_to=run_dir,
+    # ``confined`` resolved the path, so the run directory is resolved too
+    # (on macOS /var is a link to /private/var).
+    now = measure(path, saved.stream, relative_to=run_dir.resolve(),
                   count_lines=saved.lines > 0)
     if now.bytes != saved.bytes:
         return f"{now.bytes} bytes now, {saved.bytes} when the run recorded it"
@@ -157,14 +162,24 @@ def rerun_check(
             "its logic is not",
         )
     if check.files:
-        # The files the live check read, in the order it read them.
-        missing = [name for name in check.files if not (run_dir / name).is_file()]
+        # The files the live check read, in the order it read them. The
+        # record is data, so each path is confined to the run directory
+        # before it is opened.
+        parts = []
+        missing = []
+        for name in check.files:
+            try:
+                path = confined(run_dir, name)
+            except OutsideRun as error:
+                return CheckResult(command_id, check, str(error), "")
+            if not path.is_file():
+                missing.append(name)
+            parts.append(path)
         if missing:
             return CheckResult(
                 command_id, check,
                 "the file it read is missing: " + ", ".join(missing), "",
             )
-        parts = [run_dir / name for name in check.files]
     else:
         streams = recorded.get(command_id) or {}
         parts = [streams.get(stream, "") for stream in check.streams]

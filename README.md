@@ -1312,9 +1312,11 @@ escapes included, so a 4-byte character counts 12). Past the first limits,
 each of the command's streams goes to a file of its own in the run
 directory as it arrives, from its first byte:
 `output/<command id>.stdout.log` and `output/<command id>.stderr.log`. A file
-holds exactly what the command wrote on that stream, with nothing of the
-harness's own added, so its SHA-256 is the hash of that output and a reader
-sees what the tool printed. A stream a command never wrote to leaves no file.
+holds what the command wrote on that stream, with nothing of the harness's
+own added, so a reader sees what the tool printed. The text is as the harness
+decoded it (UTF-8, any byte that is not valid UTF-8 replaced, as the
+transcript has always shown it), and the SHA-256 is the hash of the file. A
+stream a command never wrote to leaves no file.
 A flash command's files also name its test, for example
 `output/003-Flash-reliability-flash-0001.stdout.log`, because flash command
 IDs repeat in every flash test. The live stream then gets no more output records until the

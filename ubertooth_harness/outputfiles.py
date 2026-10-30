@@ -55,6 +55,10 @@ SEARCH_OVERLAP_CHARS = 8 * 1024
 # Lines a pattern may cover in search_lines; the longest the harness has is
 # the four-line range test result.
 LINE_SPAN = 8
+# The most one block, or one line, may grow to. A stream with no line endings
+# (a binary dump a tool wrote to stdout) has no line to end a block at, so
+# without this a single read would take the whole file.
+MAX_BLOCK_CHARS = READ_BLOCK_CHARS + SEARCH_OVERLAP_CHARS
 # Blocks for hashing, in bytes.
 HASH_BLOCK_BYTES = 1024 * 1024
 
@@ -144,7 +148,10 @@ class StreamFile:
 
     Flushed after every chunk, so a run that is interrupted keeps everything
     received so far. The size, line count, and SHA-256 are computed while
-    writing, so no second pass over a multi-gigabyte stream is needed.
+    writing, so no second pass over a multi-gigabyte stream is needed, and
+    they describe the file: the command's output as the harness read it,
+    decoded as UTF-8 with any byte that is not valid UTF-8 replaced, which is
+    the same text the transcript and the checks have always seen.
     """
 
     def __init__(self, path: Path, stream: str, *, relative_to: Path):
@@ -182,21 +189,35 @@ class StreamFile:
 
 
 def _blocks(part) -> Iterator[str]:
-    """``part`` (a Path to read, or text already in memory) in line-aligned
-    blocks of about READ_BLOCK_CHARS characters."""
+    """``part`` (a Path to read, or text already in memory) in blocks of about
+    READ_BLOCK_CHARS characters, ending at a line ending where there is one.
+
+    A block is extended to the end of its line, so a ``$`` at the end of a
+    block is a real line ending and not the edge of the block. The extension
+    is bounded: a stream with no line endings at all, such as a binary dump
+    on stdout, would otherwise be read in one piece.
+    """
     if isinstance(part, str):
         yield part
         return
     with part.open(encoding="utf-8", errors="replace", newline="") as handle:
+        carried = ""
         while True:
-            block = handle.read(READ_BLOCK_CHARS)
+            block = carried + handle.read(READ_BLOCK_CHARS)
+            carried = ""
             if not block:
                 return
-            if not block.endswith("\n"):
-                # Finish the line, so a '$' at the end of a block is a real
-                # line ending and not the edge of the block.
-                rest = handle.readline()
-                block += rest
+            while not block.endswith("\n") and len(block) < MAX_BLOCK_CHARS:
+                more = handle.read(READ_BLOCK_CHARS)
+                if not more:
+                    break
+                cut = more.find("\n")
+                if cut < 0:
+                    block += more
+                    continue
+                block += more[:cut + 1]
+                carried = more[cut + 1:]
+                break
             yield block
 
 
@@ -220,6 +241,12 @@ class LineSource:
                 *complete, pending = pending.split("\n")
                 for line in complete:
                     yield line.rstrip("\r")
+                while len(pending) > MAX_BLOCK_CHARS:
+                    # A line longer than this is given to the check in pieces,
+                    # so a stream with no line endings costs no more memory
+                    # than any other.
+                    yield pending[:MAX_BLOCK_CHARS]
+                    pending = pending[MAX_BLOCK_CHARS:]
         if pending:
             yield pending.rstrip("\r")
 
@@ -480,6 +507,30 @@ def saved_files(details) -> tuple[OutputFile, ...]:
     return tuple(
         OutputFile.from_dict(value) for value in listed if isinstance(value, dict)
     )
+
+
+class OutsideRun(ValueError):
+    """A recorded path does not name a file inside the run directory."""
+
+
+def confined(run_dir: Path, path: str) -> Path:
+    """``path`` inside ``run_dir``, or raise OutsideRun.
+
+    Every recorded path is relative to the run directory, so a path that is
+    absolute, that climbs out with ``..``, or that reaches outside through a
+    symbolic link is refused rather than opened. A run record is ordinary
+    data, so what it says about a path is checked and not trusted.
+    """
+    candidate = Path(path)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise OutsideRun(f"{path!r} is not a path inside the run directory")
+    root = run_dir.resolve()
+    full = (root / candidate).resolve()
+    if full != root and root not in full.parents:
+        raise OutsideRun(f"{path!r} leaves the run directory")
+    if full.is_symlink():
+        raise OutsideRun(f"{path!r} is a symbolic link")
+    return full
 
 
 def output_file_list(details) -> str:

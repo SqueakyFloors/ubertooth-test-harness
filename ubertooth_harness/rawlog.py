@@ -137,10 +137,12 @@ class _LineSplitter:
 class CommandOutputFiles:
     """A command's full output: one file per stream, exactly as it arrived.
 
-    ``output/<command id>.stdout.log`` and ``.stderr.log`` hold the bytes the
-    command wrote, with nothing of the harness's own added, so a check reading
-    one of them sees what the command printed and its SHA-256 is the hash of
-    that output. Each file is opened on its stream's first chunk, so a command
+    ``output/<command id>.stdout.log`` and ``.stderr.log`` hold what the
+    command wrote on that stream, with nothing of the harness's own added, so
+    a check reading one of them sees what the command printed. The text is as
+    the harness decoded it (UTF-8, any byte that is not valid UTF-8 replaced,
+    as the transcript has always shown it), and the SHA-256 is the hash of
+    the file. Each file is opened on its stream's first chunk, so a command
     that writes nothing to stderr leaves no stderr file.
     """
 
