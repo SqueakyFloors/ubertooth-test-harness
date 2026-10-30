@@ -104,7 +104,7 @@ class EnvironmentIdentityTests(unittest.TestCase):
             manifest.write_atomic(path)
             recorded = json.loads(path.read_text())
 
-        self.assertEqual(4, MANIFEST_SCHEMA_VERSION)
+        self.assertEqual(5, MANIFEST_SCHEMA_VERSION)
         self.assertEqual(MANIFEST_SCHEMA_VERSION, recorded["schema_version"])
         self.assertEqual(capture(), recorded["environment"])
 

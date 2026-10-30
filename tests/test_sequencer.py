@@ -153,6 +153,7 @@ class SequencerTests(unittest.TestCase):
                     "check_finished",
                     "preflight_finished",
                     "test_started",
+                    "known_target",
                     "check_started",
                     "command_started",
                     "command_output",

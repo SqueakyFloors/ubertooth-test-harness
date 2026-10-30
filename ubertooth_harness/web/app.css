@@ -365,6 +365,7 @@ button.primary:disabled:hover { background: var(--primary); }
 .check-name { flex: 1 1 8rem; min-width: 0; overflow-wrap: anywhere; }
 .check-estimate { flex: none; margin: 0; font-size: 0.8rem; font-variant-numeric: tabular-nums; }
 .check .reason { flex-basis: 100%; padding-left: 2.1rem; font-size: 0.85rem; }
+.check-target { overflow-wrap: anywhere; }
 .check-running {
   background: var(--running-row); border-color: var(--run-line);
   border-left-color: var(--run-fg);

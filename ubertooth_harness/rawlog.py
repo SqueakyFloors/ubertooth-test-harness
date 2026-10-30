@@ -8,6 +8,8 @@ elapsed time since the run started) and a tag::
     [E] a line the command wrote to stderr
     [R] the result: command name, exit code, duration, and any timeout or
         cancellation
+    [<alias> >] a line sent to that known target's serial shell, and
+    [<alias> <] a line it answered (targets.shell_line)
 
 A command that printed one line is two lines; the response follows the result::
 
@@ -35,6 +37,7 @@ from ubertooth_harness.outputfiles import (
     OutputFile,
     StreamFile,
 )
+from ubertooth_harness.targets import shell_tag
 
 
 def _stamp(moment: datetime.datetime) -> str:
@@ -95,6 +98,23 @@ def _output_lines(
 # Pseudo stream for harness [M] notes placed among a command's output lines.
 NOTE = "note"
 TAGS = {"stdout": "[O]", "stderr": "[E]", NOTE: "[M]"}
+
+
+def line_tag(stream: str, text: str) -> tuple[str, str]:
+    """The tag and text of one output line.
+
+    A driver talking to a known target writes each line of that conversation
+    on stderr already marked with the board's alias (targets.shell_line), so
+    it is tagged with that alias rather than as plain stderr. The saved output
+    files keep the line as the driver wrote it, marker included; this is for
+    the transcript and the live views.
+    """
+    if stream == "stderr":
+        tagged = shell_tag(text)
+        if tagged is not None:
+            return tagged
+    return TAGS[stream], text
+
 
 # Per-command limits on the output records kept in run.jsonl (#49): the first
 # RECORD_OUTPUT_EVENTS records or RECORD_OUTPUT_BYTES, and the last
@@ -444,9 +464,11 @@ def format_command_record(
         out.append(f"{fmt(finished)} {summary}; no output")
     elif len(lines) == 1:
         _moment, stream, text = lines[0]
-        out.append(f"{fmt(finished)} {summary}; {TAGS[stream]} {text}")
+        tag, text = line_tag(stream, text)
+        out.append(f"{fmt(finished)} {summary}; {tag} {text}")
     else:
         for moment, stream, text in lines:
-            out.append(f"{fmt(moment)} {TAGS[stream]} {text}")
+            tag, text = line_tag(stream, text)
+            out.append(f"{fmt(moment)} {tag} {text}")
         out.append(f"{fmt(finished)} {summary}")
     return "\n".join(out) + "\n"

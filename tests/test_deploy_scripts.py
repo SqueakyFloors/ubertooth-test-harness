@@ -17,13 +17,14 @@ import re
 import shutil
 import signal
 import socket
-import stat
 import subprocess
 import sys
 import tempfile
 import textwrap
 import time
 import unittest
+
+from tests.executables import write_executable
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -125,9 +126,7 @@ FORK_PIN = "fork-pin"
 
 
 def _write_exe(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    write_executable(path, text)
 
 
 def _tree(root: Path) -> dict:

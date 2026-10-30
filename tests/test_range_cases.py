@@ -283,7 +283,12 @@ class RangeResultCheckTests(unittest.TestCase):
 class RangePollScriptTests(unittest.TestCase):
     """The real RANGE_POLL shell loop against a stand-in ubertooth-util."""
 
-    def run_poll(self, script, deadline="2", interval="0.05"):
+    # The default deadline is generous: the loop exits as soon as the stand-in
+    # reports a result, so a long deadline costs nothing, while a short one
+    # ends the poll before the reads a test is counting on when the machine is
+    # busy (it ran out at 2 s under a parallel suite, issue #184). The test
+    # that waits the deadline out sets its own.
+    def run_poll(self, script, deadline="20", interval="0.05"):
         with tempfile.TemporaryDirectory() as directory:
             tool = Path(directory) / "ubertooth-util"
             count = Path(directory) / "count"
@@ -294,7 +299,7 @@ class RangePollScriptTests(unittest.TestCase):
             tool.chmod(tool.stat().st_mode | stat.S_IEXEC)
             return subprocess.run(
                 ("sh", "-c", util_cases.RANGE_POLL, str(tool), A, deadline, interval),
-                capture_output=True, text=True, timeout=20, check=False,
+                capture_output=True, text=True, timeout=40, check=False,
                 env={**os.environ, "LC_ALL": "C"})
 
     def test_reads_until_a_result_and_logs_each_change_once(self):

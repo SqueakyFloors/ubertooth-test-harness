@@ -282,11 +282,22 @@ class _Reader:
 
 
 def capture(argv, fifo, seconds, *, board=None, channel=None, refused=False,
-            no_btle=False, close=False, out=print) -> int:
+            no_btle=False, close=False, stop_after_records=None, out=print) -> int:
     """Run argv (the extcap script) against fifo; print the checks; 0, 1, or
-    pytools.SKIP_EXIT (--close with no record to close the FIFO after)."""
+    pytools.SKIP_EXIT (--close with no record to close the FIFO after).
+
+    stop_after_records ends the capture as soon as that many records have
+    arrived, instead of waiting out seconds, which is then only a limit. The
+    capture cases do not set it (a case captures for its duration); the
+    harness's own tests do, so that they wait for the records they check
+    rather than for the clock (issue #184).
+    """
     if no_btle and not refused:
         raise ValueError("no_btle needs refused")
+    if stop_after_records is not None and (
+            not isinstance(stop_after_records, int)
+            or isinstance(stop_after_records, bool) or stop_after_records < 1):
+        raise ValueError("stop_after_records is a count of records, 1 or more")
     failures = []
     started = os.path.join(os.path.dirname(os.path.abspath(fifo)), BTLE_STARTED)
     if no_btle and os.path.lexists(started):
@@ -305,7 +316,7 @@ def capture(argv, fifo, seconds, *, board=None, channel=None, refused=False,
                         shim, started, os.environ.get("PATH", os.defpath)))
                 returncode, stopped, children, quiet = _run(
                     argv, reader, seconds, errors, failures, refused, out,
-                    close=close, env=env)
+                    close=close, env=env, stop_after_records=stop_after_records)
                 errors.seek(0)
                 diagnostics = errors.read().decode(errors="replace")
         finally:
@@ -404,7 +415,7 @@ def capture(argv, fifo, seconds, *, board=None, channel=None, refused=False,
 
 
 def _run(argv, reader, seconds, errors, failures, refused, out, *, close=False,
-         env=None):
+         env=None, stop_after_records=None):
     """Returns (exit status, stopped, children, quiet): quiet when --close
     had no record to close the FIFO after, so SIGTERM ended the capture."""
     out("extcap command: " + " ".join(argv))
@@ -419,6 +430,9 @@ def _run(argv, reader, seconds, errors, failures, refused, out, *, close=False,
             next_scan = time.monotonic() + CHILD_SCAN_S
         if not reader.read():
             time.sleep(POLL_S)
+        elif (stop_after_records is not None
+                and parse_stream(bytes(reader.data)).records >= stop_after_records):
+            break
     stopped = process.poll() is None
     quiet = close and stopped and not parse_stream(bytes(reader.data)).records
     if stopped and close and not quiet:
