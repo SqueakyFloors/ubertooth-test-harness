@@ -1,0 +1,60 @@
+plan: Classic Bluetooth piconet capture
+suites:
+  # Needs a Linux host with an Ubertooth and two ESP32 Classic peers
+  # registered with the acceptor and initiator roles and their BD_ADDRs
+  # (hardware.example.yaml). The two peers hold a Serial Port Profile link
+  # and stream over it; the Ubertooth only receives. The peers must already
+  # run firmware/esp32-classic-peer: unlike the DK cases, nothing here
+  # flashes them, and a board running another version fails the first case
+  # with the version it reports. Other registered Ubertooths on the host are
+  # guarded (read only).
+  #
+  # 25 s per capture is what the bench needs for a useful count: the
+  # Ubertooth sweeps 79 channels and decodes about one packet of the piconet
+  # a second.
+  classic:
+    - Capture known Classic device:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        coverage: smoke
+        duration: 25s
+
+    - Follow Classic Bluetooth piconet:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        coverage: smoke
+        duration: 25s
+
+  classic-comprehensive:
+    - Capture known Classic device:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        coverage: comprehensive
+        duration: 25s
+
+    - Follow Classic Bluetooth piconet:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        coverage: comprehensive
+        duration: 25s
+
+  # The bounded long variant: the same cases over a capture long enough to
+  # show that a receive run holds up, rather than that it starts. One board
+  # session, not a soak with sampling (Classic Bluetooth receive soak, which
+  # is still a backlog entry, is the sampling one).
+  classic-long:
+    - Follow Classic Bluetooth piconet:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        coverage: smoke
+        duration: 10m

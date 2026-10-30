@@ -15,11 +15,12 @@ from ubertooth_harness.patterns import (
     PART_ID_PATTERN,
     serial_pattern,
 )
+from ubertooth_harness.resources import ESP32_CLASSIC_PEER
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
-    advertiser_cases, connection_cases, dfu_cases, dfu_host_cases, python_cases,
-    receive_cases, refusal_cases, tool_cases, transitions, util_cases,
-    util_refusal_cases,
+    advertiser_cases, classic_cases, connection_cases, dfu_cases, dfu_host_cases,
+    python_cases, receive_cases, refusal_cases, tool_cases, transitions,
+    util_cases, util_refusal_cases,
 )
 
 
@@ -723,6 +724,15 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "Capture known BLE connection": _profiles(
         Estimate(30.0, per_duration=2), Estimate(60.0, per_duration=4)
     ),
+    # Each capture case opens both ESP32 bridges, which resets both boards,
+    # and waits for the link: about 13 s before its capture starts, plus the
+    # board reads around it. Two capture cases in smoke, four comprehensive.
+    "Capture known Classic device": _profiles(
+        Estimate(40.0, per_duration=2), Estimate(80.0, per_duration=4)
+    ),
+    "Follow Classic Bluetooth piconet": _profiles(
+        Estimate(40.0, per_duration=2), Estimate(80.0, per_duration=4)
+    ),
 })
 
 
@@ -1056,6 +1066,45 @@ def builtin_catalog() -> TestCatalog:
             writes_firmware=True,
         ),
         TestDefinition(
+            "Capture known Classic device",
+            "ubertooth-rx finds two registered ESP32 Classic peers streaming over "
+            "a Serial Port Profile link: the survey lists the piconet master's "
+            "LAP, an unfiltered run reports its packets, and swapping the peers' "
+            "roles moves the LAP on the air to the other board",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH,
+                "acceptor": ArgumentRule(_selector, default="default"),
+                "initiator": ArgumentRule(_selector, default="default"),
+                "coverage": COVERAGE, "duration": DURATION,
+            }),
+            MappingProxyType({
+                "Ubertooth": "Ubertooth",
+                "acceptor": ESP32_CLASSIC_PEER, "initiator": ESP32_CLASSIC_PEER,
+            }),
+            command_builder=classic_cases.known_classic_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+        ),
+        TestDefinition(
+            "Follow Classic Bluetooth piconet",
+            "ubertooth-rx -l and -u follow the piconet two registered ESP32 "
+            "Classic peers make and report its packets, and report nothing for "
+            "the LAP of the peer that is not the master",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH,
+                "acceptor": ArgumentRule(_selector, default="default"),
+                "initiator": ArgumentRule(_selector, default="default"),
+                "coverage": COVERAGE, "duration": DURATION,
+            }),
+            MappingProxyType({
+                "Ubertooth": "Ubertooth",
+                "acceptor": ESP32_CLASSIC_PEER, "initiator": ESP32_CLASSIC_PEER,
+            }),
+            command_builder=classic_cases.follow_classic_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+        ),
+        TestDefinition(
             "CLI usage smoke",
             "Exercise host tool usage paths",
             MappingProxyType({"hosts": HOSTS}),
@@ -1162,10 +1211,6 @@ def builtin_catalog() -> TestCatalog:
             ),
             _device_test(
                 "Recover AFH map", "Recover a Classic Bluetooth AFH map",
-                extra={"piconet": ArgumentRule(_required_text, required=True)},
-            ),
-            _device_test(
-                "Follow Classic Bluetooth piconet", "Follow a registered piconet",
                 extra={"piconet": ArgumentRule(_required_text, required=True)},
             ),
             TestDefinition(

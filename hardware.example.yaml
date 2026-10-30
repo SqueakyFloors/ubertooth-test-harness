@@ -10,6 +10,10 @@ resources:
       nRF52840 DK: DK_Linux0
       central: DK_Linux1
       peripheral: DK_Linux2
+      # The Classic pair: which ESP32 listens and which one pages.
+      ESP32 Classic peer: ESP32_Linux0
+      acceptor: ESP32_Linux0
+      initiator: ESP32_Linux1
 
   Host_Mac:
     type: Host
@@ -84,6 +88,38 @@ resources:
     power:
       controller: Hub_Linux1
       port: 6
+
+  # ESP32 Classic Bluetooth peers (ESP32-WROOM-32E) running the harness peer
+  # firmware (firmware/esp32-classic-peer). These two hold a Serial Port
+  # Profile link to each other while the Ubertooth listens, so a Classic
+  # (BR/EDR) test has traffic from a known address on demand.
+  #
+  # Identify each by the serial of its CP2102N USB to UART bridge, which is
+  # also what names its /dev/serial/by-id path; set `serial device` to
+  # override that path. Never name one by /dev/ttyUSB<n>: that is assignment
+  # order and the two boards swap. `BD_ADDR` is the address its `status`
+  # reports (the chip's factory MAC plus two, stable per board), and the LAP
+  # and UAP that `ubertooth-rx -l` and `-u` take come from it.
+  #
+  # Both boards run one image that holds both roles, so both may declare
+  # both: a case decides which one pages, and the one that pages is the
+  # piconet master whose LAP is on the air.
+  ESP32_Linux0:
+    type: ESP32 Classic peer
+    attached to: Host_Linux
+    roles: [acceptor, initiator]
+    identity:
+      # Replace with the serial in the bridge's by-id path.
+      bridge serial: "0123456789abcdef0123456789abcdef"
+      BD_ADDR: "C8:00:00:00:00:01"
+
+  ESP32_Linux1:
+    type: ESP32 Classic peer
+    attached to: Host_Linux
+    roles: [acceptor, initiator]
+    identity:
+      bridge serial: "fedcba9876543210fedcba9876543210"
+      BD_ADDR: "C8:00:00:00:00:02"
 
   # StarTech managed hub: switched through its built-in FTDI management
   # controller, which sits on downstream port 4; only ports 1-3 are DUT ports.

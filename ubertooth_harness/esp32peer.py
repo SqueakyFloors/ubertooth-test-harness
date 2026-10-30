@@ -1,0 +1,596 @@
+"""Drive an ESP32 Classic Bluetooth peer running the harness's peer firmware.
+
+The firmware is in ``firmware/esp32-classic-peer`` (see its README for the
+build and the shell protocol). A board is reached through its CP2102N USB to
+UART bridge, named by the stable ``/dev/serial/by-id`` path of that bridge's
+serial. Run as a script by the Classic cases::
+
+    python esp32peer.py identify --device PATH [--address ADDR]
+    python esp32peer.py status   --device PATH
+    python esp32peer.py reset    --device PATH [--address ADDR]
+    python esp32peer.py stream   --acceptor PATH --initiator PATH
+                                 [--acceptor-address ADDR]
+                                 [--initiator-address ADDR]
+                                 [--period MS] [--payload BYTES]
+                                 [--min-writes N] [--timeout S]
+                                 -- COMMAND [ARGUMENT ...]
+
+**Opening the bridge resets the board.** DTR and RTS are wired to the chip's
+EN and IO0 pins on these dev boards, and the kernel asserts both when the
+first process opens the port, whatever pyserial then asks for. So anything
+the board was told in an earlier invocation is gone, and a two-board session
+cannot be built out of several commands the way the DK's is.
+
+``stream`` is the answer to that: it holds both ports open for one whole
+session. It brings the Serial Port Profile link up, runs ``COMMAND`` while
+the pair streams, stops the pair, and reports what the two boards did. The
+command it runs is the thing under test (``ubertooth-rx ...``), so its
+standard output is passed straight through; this module's own report goes on
+standard error, as ``key: value`` lines for the cases' patterns.
+
+The initiator pages, so it is the piconet master and its LAP is the one on
+the air. ``master LAP`` and ``master UAP`` name it, which is what
+``ubertooth-rx -l`` and ``-u`` take.
+
+Every command fails closed: a port that cannot be opened, a board that does
+not answer, an ``ERR`` reply, firmware of another version, an address that is
+not the registered one, a link that did not come up or did not stay up, or a
+pair that sent nothing prints ``error: <why>`` on stderr and exits 1. Exit
+status 2 is a usage error. Otherwise ``stream`` exits with the status of the
+command it ran.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from typing import Callable, Sequence
+
+# The firmware version the harness expects (firmware/esp32-classic-peer
+# main/peer.h UTESP_FW_VERSION; tests/test_esp32peer.py keeps them in step).
+FIRMWARE_VERSION = "utesp-1.0.0"
+BAUD = 115200
+ROLES = ("acceptor", "initiator")
+BOOT_ROLE = "acceptor"
+
+# Payload bounds the firmware enforces (its README, "Shell protocol").
+PERIOD_MIN_MS, PERIOD_MAX_MS = 5, 10000
+PAYLOAD_MIN, PAYLOAD_MAX = 8, 512
+DEFAULT_PERIOD_MS = 20
+DEFAULT_PAYLOAD = 200
+
+COMMAND_TIMEOUT_S = 5.0
+# Opening the port resets the board; it then has to boot and start Bluetooth
+# before the shell answers. About 1.5 s on the bench, with room to spare.
+BOOT_TIMEOUT_S = 20.0
+# `spp start` on the initiator pages the acceptor, looks its channel up over
+# SDP, and answers from the controller's event. The firmware gives up after
+# 15 s, so this has to outlast that to read its ERR rather than time out.
+CONNECT_TIMEOUT_S = 25.0
+# `spp stop` waits for the link to close and the server to stop.
+STOP_TIMEOUT_S = 10.0
+# Seconds the reset pulse holds EN low, as esptool's hard reset does.
+RESET_PULSE_S = 0.1
+POLL_S = 0.05
+# Time for the first writes to reach the air before the command starts.
+SETTLE_S = 1.0
+# Time an overrunning command gets to stop itself after SIGINT.
+INTERRUPT_TIMEOUT_S = 10.0
+
+_LINUX_BY_ID = ("/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_"
+                "Controller_{serial}-if00-port0")
+_ADDRESS = re.compile(r"^[0-9A-F]{2}(?::[0-9A-F]{2}){5}$")
+# What the board says by itself: its own notices, ESP-IDF's warnings and
+# errors, and the ROM's boot log, which appears after every reset.
+_NOTICE = re.compile(r"^(?:utesp: |[WE] \(\d+\))")
+_BOOT_NOISE = re.compile(
+    r"^(?:ets |rst:0x|configsip:|clk_drv:|mode:|load:|entry |"
+    r"[\x00-\x08\x0b-\x1f]|$)")
+_READY = re.compile(rf"^utesp: {re.escape(FIRMWARE_VERSION)} ready$")
+_START_FAILED = re.compile(r"^utesp: \S+ start failed: (?P<reason>.+)$")
+
+# Every field the firmware's status line carries, with the type it must have.
+_STATUS_KEYS = {
+    "role": str, "fw": str, "bt": bool, "address": str, "lap": str,
+    "uap": str, "nap": str, "name": str, "discoverable": bool,
+    "spp_server": bool, "connecting": bool, "connected": bool, "peer": str,
+    "remote": str, "stream": bool, "period_ms": int, "payload_len": int,
+    "counter": int, "writes": int, "write_errors": int, "rx_bytes": int,
+    "connects": int, "disconnects": int, "last_err": int,
+}
+
+
+class PeerError(RuntimeError):
+    """The peer, its bridge, or the pair did not do what was asked."""
+
+
+def normalize_address(value: str) -> str:
+    """A BD_ADDR as the firmware prints it: upper case, colon separated."""
+    text = str(value).strip().upper()
+    if not _ADDRESS.fullmatch(text):
+        raise PeerError(f"BD_ADDR must look like C8:85:41:2A:1B:2A, got {value!r}")
+    return text
+
+
+def address_parts(address: str) -> tuple[str, str]:
+    """The LAP and UAP of ``address``, as ubertooth-rx -l and -u take them.
+
+    The LAP is the lowest three bytes and the UAP the one above them
+    (ubertooth-rx(1), DISCOVERING UNDISCOVERABLE DEVICES), both lower case
+    hex with no separators.
+    """
+    octets = normalize_address(address).split(":")
+    return "".join(octets[3:]).lower(), octets[2].lower()
+
+
+def default_device(bridge_serial: str) -> str:
+    """The bridge's stable by-id path, from the CP2102N's serial.
+
+    /dev/ttyUSB<n> is assignment order, and the two boards swap between
+    boots, so the by-id path is the only safe way to name one. The path is
+    Linux's, which is where the peers are: the cases that use them declare
+    Linux, and a registry may name another path with `serial device`.
+    """
+    serial = str(bridge_serial).strip()
+    if not serial:
+        raise PeerError("a bridge serial is needed to find the board's port")
+    return _LINUX_BY_ID.format(serial=serial)
+
+
+def period_ms(value) -> int:
+    number = int(value)
+    if not PERIOD_MIN_MS <= number <= PERIOD_MAX_MS:
+        raise PeerError(f"stream period must be {PERIOD_MIN_MS}-{PERIOD_MAX_MS} ms")
+    return number
+
+
+def payload_bytes(value) -> int:
+    number = int(value)
+    if not PAYLOAD_MIN <= number <= PAYLOAD_MAX:
+        raise PeerError(f"stream payload must be {PAYLOAD_MIN}-{PAYLOAD_MAX} bytes")
+    return number
+
+
+# --------------------------------------------------------------------------
+# Shell
+
+
+class Shell:
+    """Line protocol: one command line out; data lines, then OK or ERR <why>.
+
+    The board also sends notices of its own at any time (``utesp: ...``), and
+    the ROM prints a boot log after every reset. Both are skipped here, so a
+    caller sees only the answer to what it asked.
+    """
+
+    def __init__(self, port, label: str = "peer", clock=time.monotonic):
+        self.port = port
+        self.label = label
+        self.clock = clock
+        self.notices: list[str] = []
+        self._buffer = b""
+
+    @classmethod
+    def open(cls, path: str, label: str = "peer") -> "Shell":
+        try:
+            import serial  # pyserial, imported lazily
+        except ImportError as error:
+            raise PeerError("pyserial is not installed in this interpreter") from error
+        port = serial.Serial()
+        port.port = path
+        port.baudrate = BAUD
+        port.timeout = POLL_S
+        port.write_timeout = 1.0
+        port.exclusive = True
+        # IO0 must stay high so the chip boots its application rather than
+        # the serial bootloader. The open resets the board either way.
+        port.dtr = False
+        port.rts = False
+        try:
+            port.open()
+        except Exception as error:  # pyserial raises SerialException or OSError
+            raise PeerError(f"cannot open {path}: {error}") from error
+        return cls(port, label)
+
+    def close(self) -> None:
+        self.port.close()
+
+    def _lines(self, deadline: float):
+        while True:
+            while b"\n" in self._buffer:
+                raw, self._buffer = self._buffer.split(b"\n", 1)
+                yield raw.decode("utf-8", "replace").strip("\r \t\x00")
+            if self.clock() >= deadline:
+                return
+            chunk = self.port.read(256)
+            if chunk:
+                self._buffer += chunk
+
+    def _note(self, line: str) -> None:
+        self.notices.append(line)
+
+    def command(self, text: str, timeout: float = COMMAND_TIMEOUT_S) -> list[str]:
+        """Send one command; return its data lines. ERR or silence raises."""
+        self.port.reset_input_buffer()
+        self._buffer = b""
+        self.port.write(text.encode("ascii") + b"\n")
+        self.port.flush()
+        data = []
+        for line in self._lines(self.clock() + timeout):
+            if _NOTICE.match(line):
+                self._note(line)
+                continue
+            if _BOOT_NOISE.match(line):
+                continue
+            if line == "OK":
+                return data
+            if line.startswith("ERR"):
+                raise PeerError(
+                    f"{self.label}: '{text}' refused: {line[3:].strip() or 'ERR'}")
+            data.append(line)
+        raise PeerError(f"{self.label}: no answer to '{text}' within {timeout:g}s"
+                        + (f" (last line {data[-1]!r})" if data else ""))
+
+    def status(self, timeout: float = COMMAND_TIMEOUT_S) -> dict:
+        lines = self.command("status", timeout)
+        for line in reversed(lines):
+            if line.startswith("{"):
+                return parse_status(line, self.label)
+        raise PeerError(f"{self.label}: status printed no JSON line")
+
+    def wait_ready(self, timeout: float = BOOT_TIMEOUT_S) -> None:
+        """Wait for the boot notice the firmware sends once Bluetooth is up."""
+        for line in self._lines(self.clock() + timeout):
+            if _BOOT_NOISE.match(line):
+                continue
+            if _NOTICE.match(line):
+                self._note(line)
+                failed = _START_FAILED.match(line)
+                if failed:
+                    raise PeerError(
+                        f"{self.label}: Bluetooth did not start: {failed['reason']}")
+                if _READY.match(line):
+                    return
+                if line.endswith(" ready"):
+                    raise PeerError(
+                        f"{self.label}: {line.split()[1]} is not the firmware the "
+                        f"harness expects, {FIRMWARE_VERSION}; build and flash "
+                        "firmware/esp32-classic-peer at this harness commit")
+        raise PeerError(f"{self.label}: no '{FIRMWARE_VERSION} ready' notice within "
+                        f"{timeout:g}s of opening the bridge")
+
+    def reset(self) -> None:
+        """Reset the board with the bridge's own lines, then wait for boot.
+
+        RTS pulls EN low through the dev board's auto-reset transistors while
+        DTR leaves IO0 high, which is esptool's hard reset: the chip restarts
+        into its application. The board is then in its boot state, so this is
+        also how a case releases one.
+        """
+        self.port.dtr = False
+        self.port.rts = True
+        time.sleep(RESET_PULSE_S)
+        self.port.rts = False
+        self._buffer = b""
+        self.wait_ready()
+
+
+def parse_status(line: str, label: str = "peer") -> dict:
+    try:
+        status = json.loads(line)
+    except ValueError as error:
+        raise PeerError(f"{label}: status is not JSON: {line[:80]!r}") from error
+    if not isinstance(status, dict):
+        raise PeerError(f"{label}: status is not a JSON object")
+    for key, kind in _STATUS_KEYS.items():
+        value = status.get(key)
+        if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
+            raise PeerError(f"{label}: status has no valid '{key}'")
+    return status
+
+
+def check_status(status: dict, label: str, address: str | None = None) -> dict:
+    """The board runs the expected firmware, Bluetooth is up, at ``address``."""
+    if status["fw"] != FIRMWARE_VERSION:
+        raise PeerError(
+            f"{label} runs {status['fw']}, the harness expects {FIRMWARE_VERSION}; "
+            "build and flash firmware/esp32-classic-peer at this harness commit")
+    if not status["bt"]:
+        raise PeerError(f"{label}: Bluetooth is not up (status bt is false)")
+    if address is not None and status["address"] != normalize_address(address):
+        raise PeerError(f"{label} reports BD_ADDR {status['address']}, the registry "
+                        f"says {normalize_address(address)}")
+    lap, uap = address_parts(status["address"])
+    if (status["lap"], status["uap"]) != (lap, uap):
+        raise PeerError(f"{label} reports LAP {status['lap']} UAP {status['uap']}, "
+                        f"which do not belong to {status['address']}")
+    return status
+
+
+# --------------------------------------------------------------------------
+# Reporting
+
+
+def _report(out, label: str, status: dict) -> None:
+    print(f"{label} firmware: {status['fw']}", file=out)
+    print(f"{label} address: {status['address']}", file=out)
+    print(f"{label} LAP: {status['lap']} UAP: {status['uap']}", file=out)
+    print(f"{label} role: {status['role']} name: {status['name']}", file=out)
+
+
+def _report_traffic(out, label: str, status: dict) -> None:
+    print(f"{label} traffic: writes {status['writes']} errors "
+          f"{status['write_errors']} received {status['rx_bytes']} bytes "
+          f"connects {status['connects']} disconnects {status['disconnects']}",
+          file=out)
+
+
+# --------------------------------------------------------------------------
+# Operations
+
+
+@dataclass
+class Peer:
+    device: str
+    label: str
+    address: str | None = None
+    # Opens the shell on ``device``; tests pass a fake.
+    opener: Callable[[str, str], Shell] | None = None
+
+    def open(self) -> Shell:
+        if self.opener is not None:
+            return self.opener(self.device, self.label)
+        if not os.path.exists(self.device):
+            raise PeerError(f"{self.device} does not exist: is the {self.label}'s "
+                            "USB bridge attached?")
+        return Shell.open(self.device, self.label)
+
+
+def identify(peer: Peer, out=None) -> dict:
+    """Report the board behind this bridge: version, address, LAP, UAP, role."""
+    out = out or sys.stdout
+    shell = peer.open()
+    try:
+        shell.wait_ready()
+        status = check_status(shell.status(), peer.label, peer.address)
+    finally:
+        shell.close()
+    print(f"{peer.label} device: {peer.device}", file=out)
+    _report(out, peer.label, status)
+    return status
+
+
+def status_command(peer: Peer, out=None) -> dict:
+    out = out or sys.stdout
+    shell = peer.open()
+    try:
+        shell.wait_ready()
+        status = check_status(shell.status(), peer.label, peer.address)
+    finally:
+        shell.close()
+    print(json.dumps(status, sort_keys=True), file=out)
+    _report(out, peer.label, status)
+    _report_traffic(out, peer.label, status)
+    return status
+
+
+def reset(peer: Peer, out=None) -> dict:
+    """Reset the board and check it came back in its boot state.
+
+    This is how a case releases a peer: the boot role listens for a link and
+    streams nothing, and the counters are zero.
+    """
+    out = out or sys.stdout
+    shell = peer.open()
+    try:
+        shell.reset()
+        status = check_status(shell.status(), peer.label, peer.address)
+    finally:
+        shell.close()
+    wrong = []
+    if status["role"] != BOOT_ROLE:
+        wrong.append(f"role {status['role']}")
+    if status["connected"] or status["connecting"]:
+        wrong.append("still connected")
+    if status["stream"]:
+        wrong.append("still streaming")
+    if status["writes"] or status["rx_bytes"]:
+        wrong.append(f"{status['writes']} writes and {status['rx_bytes']} bytes "
+                     "received since boot")
+    if wrong:
+        raise PeerError(f"{peer.label} is not in its boot state after a reset: "
+                        + ", ".join(wrong))
+    _report(out, peer.label, status)
+    return status
+
+
+def _run_command(command: Sequence[str], timeout: float) -> int:
+    """Run the thing under test, inheriting our streams, with a deadline.
+
+    The child stays in this process's group, so the harness's own deadline
+    reaches it; this deadline is the backstop for a command with none of its
+    own.
+    """
+    try:
+        child = subprocess.Popen(list(command))
+    except OSError as error:
+        raise PeerError(f"cannot run {command[0]}: {error}") from error
+    try:
+        return child.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # Interrupt first: a capture tool stops its board and closes its
+        # files on SIGINT, which a kill would skip.
+        child.send_signal(signal.SIGINT)
+        try:
+            child.wait(timeout=INTERRUPT_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait()
+        raise PeerError(f"{command[0]} did not finish within {timeout:g}s")
+
+
+def stream(acceptor: Peer, initiator: Peer, command: Sequence[str], *,
+           period: int = DEFAULT_PERIOD_MS, payload: int = DEFAULT_PAYLOAD,
+           min_writes: int = 1, timeout: float = 300.0, out=None,
+           settle_s: float = SETTLE_S) -> int:
+    """Hold the pair's link up and streaming while ``command`` runs.
+
+    Both ports are opened first, which resets both boards, so the pair starts
+    from the firmware's boot state however an earlier case left it.
+    """
+    out = out or sys.stderr
+    period = period_ms(period)
+    payload = payload_bytes(payload)
+    if acceptor.device == initiator.device:
+        raise PeerError("the acceptor and the initiator are the same bridge; a "
+                        "Classic link needs two boards")
+    acceptor_shell = acceptor.open()
+    try:
+        initiator_shell = initiator.open()
+        try:
+            return _stream(acceptor, acceptor_shell, initiator, initiator_shell,
+                           command, period=period, payload=payload,
+                           min_writes=min_writes, timeout=timeout, out=out,
+                           settle_s=settle_s)
+        finally:
+            initiator_shell.close()
+    finally:
+        acceptor_shell.close()
+
+
+def _release(shell: Shell) -> None:
+    """Leave a board in its boot state, whatever the session did to it.
+
+    Failures here are swallowed: the caller is already reporting what went
+    wrong, and the case's cleanup resets both boards in any event.
+    """
+    try:
+        shell.reset()
+    except PeerError:
+        pass
+
+
+def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
+            period, payload, min_writes, timeout, out, settle_s) -> int:
+    acceptor_shell.wait_ready()
+    initiator_shell.wait_ready()
+    acceptor_status = check_status(acceptor_shell.status(), acceptor.label,
+                                  acceptor.address)
+    initiator_status = check_status(initiator_shell.status(), initiator.label,
+                                   initiator.address)
+    if acceptor_status["address"] == initiator_status["address"]:
+        raise PeerError("both bridges lead to one board: they report the same "
+                        f"BD_ADDR {acceptor_status['address']}")
+    _report(out, acceptor.label, acceptor_status)
+    _report(out, initiator.label, initiator_status)
+    # The initiator pages, so it is the master and its LAP is on the air.
+    print(f"master LAP: {initiator_status['lap']}", file=out)
+    print(f"master UAP: {initiator_status['uap']}", file=out)
+    print(f"stream: {payload} bytes every {period} ms", file=out)
+    try:
+        initiator_shell.command("role initiator")
+        initiator_shell.command(f"spp peer {acceptor_status['address']}")
+        initiator_shell.command(f"stream period {period}")
+        initiator_shell.command(f"stream payload {payload}")
+        initiator_shell.command("spp start", CONNECT_TIMEOUT_S)
+        initiator_shell.command("stream on")
+        linked = initiator_shell.status()
+        if not linked["connected"] or linked["remote"] != acceptor_status["address"]:
+            raise PeerError(
+                f"the link is not up to {acceptor_status['address']} after 'spp "
+                f"start' (remote {linked['remote'] or 'none'})")
+        print(f"link: up to {linked['remote']} at "
+              f"{time.strftime('%H:%M:%SZ', time.gmtime())}", file=out)
+        time.sleep(settle_s)
+        print("command: " + " ".join(command), file=out)
+        out.flush()
+        status = _run_command(command, timeout)
+        print(f"command exit: {status}", file=out)
+        initiator_shell.command("stream off")
+        after_initiator = initiator_shell.status()
+        after_acceptor = acceptor_shell.status()
+    finally:
+        _release(initiator_shell)
+        _release(acceptor_shell)
+    _report_traffic(out, initiator.label, after_initiator)
+    _report_traffic(out, acceptor.label, after_acceptor)
+    problems = []
+    if after_initiator["disconnects"]:
+        problems.append(f"the link went down {after_initiator['disconnects']} "
+                        "time(s) while the command ran")
+    if after_initiator["writes"] < min_writes:
+        problems.append(f"the initiator reported {after_initiator['writes']} "
+                        f"writes, fewer than the {min_writes} this test needs")
+    if after_acceptor["rx_bytes"] < payload:
+        problems.append(f"the acceptor received {after_acceptor['rx_bytes']} "
+                        "bytes, less than one payload")
+    if problems:
+        raise PeerError("the pair did not stream: " + "; ".join(problems))
+    print("pair streamed: yes", file=out)
+    return status
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="esp32peer.py",
+                                     description=__doc__.splitlines()[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+    for name in ("identify", "status", "reset"):
+        one = sub.add_parser(name)
+        one.add_argument("--device", required=True,
+                         help="the bridge's /dev/serial/by-id path")
+        one.add_argument("--address", help="the registered BD_ADDR")
+        one.add_argument("--role", default="peer", choices=ROLES + ("peer",),
+                         help="what to call this board in the report")
+    pair = sub.add_parser("stream")
+    pair.add_argument("--acceptor", required=True, help="the listening board's bridge")
+    pair.add_argument("--initiator", required=True,
+                      help="the paging board's bridge; it is the piconet master")
+    pair.add_argument("--acceptor-address", help="the acceptor's registered BD_ADDR")
+    pair.add_argument("--initiator-address", help="the initiator's registered BD_ADDR")
+    pair.add_argument("--period", type=int, default=DEFAULT_PERIOD_MS, help="ms")
+    pair.add_argument("--payload", type=int, default=DEFAULT_PAYLOAD, help="bytes")
+    pair.add_argument("--min-writes", type=int, default=1,
+                      help="writes the initiator must report afterwards")
+    pair.add_argument("--timeout", type=float, default=300.0,
+                      help="seconds the command may take")
+    # Everything after the first -- is the command to run, untouched: its own
+    # options (-U, -t, -z) must not be read as this script's.
+    options = list(sys.argv[1:] if argv is None else argv)
+    command = []
+    if "--" in options:
+        split = options.index("--")
+        options, command = options[:split], options[split + 1:]
+    args = parser.parse_args(options)
+    if args.command == "stream" and not command:
+        parser.error("stream needs the command to run after --")
+    if args.command != "stream" and command:
+        parser.error(f"{args.command} takes no command after --")
+    try:
+        if args.command == "stream":
+            return stream(
+                Peer(args.acceptor, "acceptor", args.acceptor_address),
+                Peer(args.initiator, "initiator", args.initiator_address),
+                command, period=args.period, payload=args.payload,
+                min_writes=args.min_writes, timeout=args.timeout)
+        peer = Peer(args.device, args.role, args.address)
+        if args.command == "identify":
+            identify(peer)
+        elif args.command == "reset":
+            reset(peer)
+        else:
+            status_command(peer)
+    except PeerError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

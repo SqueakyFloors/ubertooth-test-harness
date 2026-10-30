@@ -108,14 +108,17 @@ def board_key(alias: str, identity: Mapping) -> str:
     return serial
 
 
-# nRF52840 DKs (BLE test devices) are leased too, by J-Link serial; their
-# keys cannot clash with an Ubertooth's 32 hex digits or the host lock.
+# nRF52840 DKs (BLE test devices) and ESP32 Classic peers are leased too, by
+# J-Link serial and by USB bridge serial. Both keys are prefixed, so neither
+# can clash with an Ubertooth's bare 32 hex digits or with the host lock; a
+# CP2102N bridge serial is 32 hex digits itself.
 DK_TYPE = "nRF52840 DK"
-LEASED_TYPES = ("Ubertooth", DK_TYPE)
+PEER_TYPE = "ESP32 Classic peer"
+LEASED_TYPES = ("Ubertooth", DK_TYPE, PEER_TYPE)
 
 
 def resource_key(resource) -> str:
-    """Lock-file key of a leasable registry resource (Ubertooth or DK)."""
+    """Lock-file key of a leasable resource (Ubertooth, DK, or ESP32 peer)."""
     if resource.type == DK_TYPE:
         serial = str(resource.identity.get("jlink serial", "") or "").strip()
         if not serial.isdigit():
@@ -124,6 +127,14 @@ def resource_key(resource) -> str:
                 f"to be leased; registered '{serial}'"
             )
         return f"nrf52840dk-{int(serial)}"
+    if resource.type == PEER_TYPE:
+        serial = str(resource.identity.get("bridge serial", "") or "").strip().lower()
+        if not serial or not all(digit in "0123456789abcdef" for digit in serial):
+            raise LeaseError(
+                f"{resource.alias} needs a 'bridge serial' in the hardware registry "
+                f"to be leased; registered '{serial}'"
+            )
+        return f"esp32-{serial}"
     return board_key(resource.alias, resource.identity)
 
 

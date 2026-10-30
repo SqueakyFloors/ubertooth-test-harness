@@ -11,14 +11,18 @@ from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.cases import GUARD_ROLE_PREFIX
 from ubertooth_harness.manifest import ManifestError, RunManifest
 from ubertooth_harness.planner import TestInvocation
-from ubertooth_harness import nrfdk
+from ubertooth_harness import esp32peer, nrfdk
 from ubertooth_harness.patterns import (
     HOST_VERSION_TIMEOUT_S,
     compile_info_pattern,
     firmware_version_pattern,
     revision_pattern,
 )
-from ubertooth_harness.resources import NRF52840_DK, ResourceRegistry
+from ubertooth_harness.resources import (
+    ESP32_CLASSIC_PEER,
+    NRF52840_DK,
+    ResourceRegistry,
+)
 from ubertooth_harness.stateful import StateCaseError
 from ubertooth_harness.transitions import firmware_api, format_api, host_api_version
 
@@ -168,6 +172,36 @@ def _dk_check(sequence: int, host: str, resource, expected_revision: str) -> Pre
     )
 
 
+_ESP32PEER = str(Path(esp32peer.__file__).resolve())
+
+
+def _peer_check(sequence: int, host: str, resource, expected_revision: str) -> PreflightCheck:
+    """esp32peer.py identify: the bridge is there and the board answers.
+
+    Opening the bridge resets the board, so this also leaves it in the
+    firmware's boot state before the run.
+    """
+    serial = resource.identity["bridge serial"]
+    device = (resource.identity.get("serial device")
+              or esp32peer.default_device(serial))
+    argv = (sys.executable, _ESP32PEER, "identify", "--device", device,
+            "--address", resource.identity["BD_ADDR"])
+    return PreflightCheck(
+        check_id=f"preflight-{sequence:03d}-esp32-classic-peer",
+        name="ESP32 Classic peer",
+        host=host,
+        resource_alias=resource.alias,
+        resource_identity=MappingProxyType(dict(resource.identity)),
+        argv=argv,
+        expected_patterns=(
+            rf"(?m)^peer address: {re.escape(resource.identity['BD_ADDR'].upper())}$",
+            rf"(?m)^peer firmware: {re.escape(esp32peer.FIRMWARE_VERSION)}$",
+        ),
+        expected_revision=expected_revision,
+        timeout_s=esp32peer.BOOT_TIMEOUT_S + esp32peer.COMMAND_TIMEOUT_S * 2,
+    )
+
+
 class PreflightPolicy:
     """Create the non-optional minimum checks for selected local resources."""
 
@@ -272,6 +306,15 @@ class PreflightPolicy:
                     sequence += 1
                     checks.append(_dk_check(sequence, invocation.host, resource,
                                             ubertooth_source.expected_revision))
+                    continue
+                if (resource.type == ESP32_CLASSIC_PEER
+                        and alias not in seen_ubertooths):
+                    # Its bridge and the firmware behind it; the test itself
+                    # brings the pair up (classic_cases.py).
+                    seen_ubertooths.add(alias)
+                    sequence += 1
+                    checks.append(_peer_check(sequence, invocation.host, resource,
+                                              ubertooth_source.expected_revision))
                     continue
                 if resource.type != "Ubertooth" or alias in seen_ubertooths:
                     continue

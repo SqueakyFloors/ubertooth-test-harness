@@ -220,9 +220,9 @@ Combinations: `--padding` without `--wifi`, `--wifi` with `-l`/`-u`: Not covered
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
 | `-h` | help | Covered | Host CLI surface (exit 0) |
-| `-l <LAP>` | LAP to decode | Partial | Raw receive replay: `-i -l` keeps only that LAP's lines and derives the UAP from the fixture (smoke); `-l` with ID packets only gives no UAP, `-l -q` captures only that LAP (comprehensive). Live use needs a BR/EDR piconet |
-| `-u <UAP>` | UAP to decode | Partial | Raw receive replay (comprehensive): `-i -l -u` with the right UAP confirms it (CLK6 0, hop reversal starts), a wrong UAP confirms nothing. Following a live piconet needs one |
-| `-z` | survey mode | Covered | Classic Bluetooth receive (smoke): `-z -t N` exits 0 after N s; `Survey Results` and piconet address lines. Raw receive replay (comprehensive): `-i -z` lists exactly the fixture's two piconets, one with its UAP |
+| `-l <LAP>` | LAP to decode | Covered | Raw receive replay: `-i -l` keeps only that LAP's lines and derives the UAP from the fixture (smoke); `-l` with ID packets only gives no UAP, `-l -q` captures only that LAP (comprehensive). Follow Classic Bluetooth piconet (`classic` plan, needs two ESP32 Classic peers): live, `-l <master LAP> -u <master UAP>` reports three or more packet lines and none of another LAP, `-l` alone recovers the UAP from the air (comprehensive), and `-l`/`-u` for the peer that is not the master reports nothing. Earlier note: live use needs a BR/EDR piconet |
+| `-u <UAP>` | UAP to decode | Covered | Raw receive replay (comprehensive): `-i -l -u` with the right UAP confirms it (CLK6 0, hop reversal starts), a wrong UAP confirms nothing. Follow Classic Bluetooth piconet (`classic` plan): live, the registered master's UAP follows its piconet and the other peer's reports nothing (a survey's inferred UAP can be wrong, so the cases take it from the registry) |
+| `-z` | survey mode | Covered | Classic Bluetooth receive (smoke): `-z -t N` exits 0 after N s; `Survey Results` and piconet address lines. Raw receive replay (comprehensive): `-i -z` lists exactly the fixture's two piconets, one with its UAP. Capture known Classic device (`classic` plan): live, the survey lists the LAP of the piconet two registered ESP32 peers make, and lists the other board's instead when their roles are swapped |
 | `-i <file>` | input file instead of a device | Covered | Raw receive replay, no Ubertooth (smoke, also in CI): a synthetic fixture (`rxreplay.py`) decodes to the exact LAP/error/channel lines, decoy records (LE, DISCARD, channel 79) skipped. Comprehensive: empty file exits 0 with no lines; a cut last record is decoded up to the cut, then reported ("ends in a partial record: 58 of 68 bytes, ignored"), exit 1; a missing file exits 1 ("error: <file>: No such file or directory", fork `5ac22a8`); lines carry the recorded systime ([ubertooth#202](https://github.com/SqueakyFloors/ubertooth/issues/202)); a directory exits 1 with "error: reading <file> failed: Is a directory" ([ubertooth#203](https://github.com/SqueakyFloors/ubertooth/issues/203)); fixed in `a55ac89`, after 3b22c95 |
 | `-c <ch>` | fixed BT channel | Covered | Classic Bluetooth receive (comprehensive): `-c 39`, every packet on channel 39. `-c 79` is refused (0-78, [ubertooth#155](https://github.com/SqueakyFloors/ubertooth/issues/155)): Refused command lines uses it as the bad value; the usage's "Default: 39" is wrong, the default sweeps ([ubertooth#186](https://github.com/SqueakyFloors/ubertooth/issues/186)) |
 | `-e <0-4>` | max access-code errors | Covered | Classic Bluetooth receive (comprehensive): `-e 0` and `-e 4`, no packet over the limit. Raw receive replay (comprehensive): the fixture's one-bit-error access code is reported as `err=1` by default and dropped with `-e 0`. `-e 5` is accepted ([ubertooth#155](https://github.com/SqueakyFloors/ubertooth/issues/155)) |
@@ -426,10 +426,12 @@ A test that fails cleanly (device verified restored, guards unchanged) no longer
 - **Leaves the application firmware:** `ubertooth-util -i` and
   `ubertooth-dfu -d` or `-u` without `-r`. They need a recovery path (USB power cycle,
   DFU/ISP reflash). The Reset into invalid application backlog item covers part of this.
-- **Needs an RF peer:** BR/EDR piconet (live `ubertooth-rx -l -u`; Raw
-  receive replay covers the decode from a synthetic file,
-  `ubertooth-afh`, `ubertooth-follow`), BLE connection (`ubertooth-btle -f/-p`
-  with real traffic, `-t`), E-GO skateboard, Uberducky.
+- **Needs an RF peer:** `ubertooth-afh` and `ubertooth-follow` against a
+  piconet (the two ESP32 Classic peers now make one, so live `ubertooth-rx
+  -l -u` is covered by Follow Classic Bluetooth piconet; no AFH or follow case
+  is written yet, [#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)),
+  BLE connection (`ubertooth-btle -f/-p` with real traffic, `-t`), E-GO
+  skateboard, Uberducky.
 - **Needs a host Bluetooth adapter / BlueZ:** `ubertooth-scan`, `ubertooth-follow` (Linux).
 - **Needs a second Ubertooth:** the `ubertooth-util -n`/`-e`/`-m` range test
   (Two-device range test, `range` plan), `-U all` and no-selector listing
@@ -467,6 +469,11 @@ Next, harness work:
     (`ble` plan) with an nRF52840 DK running `firmware/nrf52840dk`. Implemented (#89): the
     two-board range test (`range` plan); it fails until fork
     [ubertooth#26](https://github.com/SqueakyFloors/ubertooth/issues/26) is fixed.
+    Implemented (#88): Capture known Classic device and Follow Classic
+    Bluetooth piconet (`classic` plan) with two ESP32 Classic peers running
+    `firmware/esp32-classic-peer`. Recover AFH map and Bluetooth inquiry scan
+    are still backlog entries: the piconet is there now, but `ubertooth-afh`
+    needs a case and `ubertooth-scan` needs a host Bluetooth adapter.
     The fixtures each needs are tracked as `hardware needed` issues: BLE
     advertiser [#86](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/86),
     BLE connection [#87](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/87),

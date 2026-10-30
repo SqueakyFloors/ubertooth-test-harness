@@ -8,11 +8,11 @@ suites:
         eero: required
         Ubertooth: default
 
+    # Still waiting on hardware (#88): the ESP32 peers give us a piconet, so
+    # `ubertooth-afh -l -u` has something to recover a map from, but no case
+    # is written yet. `Follow Classic Bluetooth piconet` has moved to the
+    # classic plan now that the peers are on the bench.
     - Recover AFH map:
-        piconet: required
-        Ubertooth: default
-
-    - Follow Classic Bluetooth piconet:
         piconet: required
         Ubertooth: default
 
@@ -52,6 +52,9 @@ suites:
         duration: 15m
         sample every: 5s
 
+    # Sampling over a long run is what is missing here, not the traffic: the
+    # classic plan's `classic-long` suite is the bounded long variant that
+    # the ESP32 peers made possible.
     - Classic Bluetooth receive soak:
         hosts: each
         Ubertooth: default
