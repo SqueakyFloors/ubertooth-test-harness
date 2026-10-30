@@ -29,7 +29,7 @@ WORK=${CI_TEMP:-${RUNNER_TEMP:-$(mktemp -d)}}
 # one of another libbtbb, or one made before the pin landed, needs
 # LIBBTBB_REF as well or the build stops at "unable to resolve libbtbb ref".
 LIBBTBB_URL=https://github.com/SqueakyFloors/libbtbb.git
-LIBBTBB_PIN=b32cf5adde496548057fdf6ea7c852378ad7411a
+LIBBTBB_PIN=2fd0d391d99e9b0620146f63f439c1ec74f79861
 
 step() { printf '\n=== ci: %s ===\n' "$1"; }
 
@@ -104,7 +104,13 @@ run_build() {
         --libbtbb-source "$bb" --libbtbb-ref "${LIBBTBB_REF:-$LIBBTBB_PIN}" \
         --with-python --output "$WORK/build" > "$WORK/build.json"
     cat "$WORK/build.json"
-    "$WORK/build/prefix/bin/ubertooth-util" -H
+    # -V prints the host tools' version, then reads every attached board and
+    # exits 1 if one cannot be read. Only the version line is wanted here, so
+    # the status is not what decides, as in the build step itself: a busy
+    # board on a lab host must not abort the job.
+    "$WORK/build/prefix/bin/ubertooth-util" -V > "$WORK/host-version.txt" 2>&1 || true
+    cat "$WORK/host-version.txt"
+    grep -q '^Host tools version: ' "$WORK/host-version.txt"
     test -z "$(git -C "$ut" status --porcelain)"
 
     step "host-only tests with the built tools (no Ubertooth)"

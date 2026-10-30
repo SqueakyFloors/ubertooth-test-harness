@@ -134,9 +134,11 @@ class SourceRevision:
     requested_ref: str
     commit: str
     short_commit: str
-    # The branch or tag name ``requested_ref`` (then a commit) was listed
-    # for, when the caller chose the commit by name elsewhere (the target
-    # runner passes the controller's ref). Recorded only, never resolved.
+    # The name ``requested_ref`` (then a commit) was chosen by, when the
+    # caller resolved the commit elsewhere: the branch or tag the target
+    # runner passes from the controller, or ``fork-pin`` for the libbtbb a
+    # run took from the Ubertooth commit's own install.sh. Recorded only,
+    # never resolved.
     ref_name: str | None = None
 
     @property

@@ -61,8 +61,8 @@ class FakeTools:
     def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
         command = tuple(argv)
         self.commands.append(command)
-        if command == ("ubertooth-util", "-H"):
-            return self._result(command, 0, "libubertooth 1.1 (git-test), libbtbb 1.0\n")
+        if command == ("ubertooth-util", "-V"):
+            return self._result(command, 0, "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0\n")
         if command[0] == sys.executable:
             assert Path(command[1]).name == "refusal.py", command
             if command[2] == "probe":

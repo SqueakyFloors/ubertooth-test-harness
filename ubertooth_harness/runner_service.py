@@ -33,6 +33,7 @@ from ubertooth_harness.enumeration import (
 )
 from ubertooth_harness.environment import capture
 from ubertooth_harness.events import RUN_LOG, generate_run_id
+from ubertooth_harness.libbtbbpin import FORK_PIN
 from ubertooth_harness.protocol import (
     MAX_INBOUND_MESSAGE_BYTES,
     ProtocolError,
@@ -213,10 +214,11 @@ class RunnerService:
 
     def build_status(self) -> str:
         if self.can_build:
-            return (
-                f"builds enabled: libbtbb {self.config.libbtbb_ref} from "
-                f"{self.config.libbtbb_source}"
-            )
+            ref = self.config.libbtbb_ref
+            if ref == FORK_PIN:
+                # Resolved per run, so this runner follows the fork's pin.
+                ref = f"{FORK_PIN} (the LIBBTBB_REF of each commit it builds)"
+            return f"builds enabled: libbtbb {ref} from {self.config.libbtbb_source}"
         return f"builds disabled: {_NO_BUILD}"
 
     def request_stop(self) -> None:

@@ -5,6 +5,7 @@ Offline: the fork is a throwaway local git repository, never a clone.
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import io
 import json
@@ -254,6 +255,124 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
         code, _, err = self._main("--ubertooth-ref", "no-such-ref", "--libbtbb-ref", OLD)
         self.assertEqual(0, code)
         self.assertIn("cannot read install.sh", err)
+
+
+class ForkPinRefTests(unittest.TestCase):
+    """`--libbtbb-ref fork-pin` builds the libbtbb the commit under test pins.
+
+    Two throwaway repositories: a libbtbb with two commits, and a fork whose
+    install.sh pins a different one of them at each of two commits. Resolving
+    the same fork-pin value at each commit must give that commit's own pin, so
+    a long-lived runner follows a pin bump without being redeployed (#139).
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.libbtbb = root / "libbtbb"
+        self.libbtbb.mkdir()
+        _git(self.libbtbb, "init", "-q", "-b", "master")
+        self.first, self.second = (
+            self._commit(self.libbtbb, "lell.c", text) for text in ("one\n", "two\n")
+        )
+        # A branch and a tag that both resolve here, so a pin naming one is
+        # refused for being a name, not for being unresolvable.
+        _git(self.libbtbb, "tag", "v1.0")
+        self.fork = root / "ubertooth"
+        self.fork.mkdir()
+        _git(self.fork, "init", "-q", "-b", "main")
+        self.unpinned = self._commit(self.fork, "README", "no pin yet\n")
+        self.pins_first = self._commit(self.fork, "install.sh", _install_sh(self.first))
+        self.pins_second = self._commit(self.fork, "install.sh", _install_sh(self.second))
+
+    def _commit(self, repo: Path, name: str, text: str) -> str:
+        (repo / name).write_text(text)
+        _git(repo, "add", name)
+        _git(repo, "commit", "-q", "-m", f"{name}: {text.strip()}")
+        return _git(repo, "rev-parse", "HEAD")
+
+    def _resolve(self, ubertooth_ref: str, libbtbb_ref: str = libbtbbpin.FORK_PIN):
+        args = argparse.Namespace(
+            ubertooth_source=self.fork, ubertooth_ref=ubertooth_ref,
+            libbtbb_source=self.libbtbb, libbtbb_ref=libbtbb_ref,
+        )
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            sources = cli._resolve_sources(args)
+        return sources, err.getvalue()
+
+    def test_each_commit_gets_the_libbtbb_it_pins(self):
+        for ubertooth_commit, pinned in (
+            (self.pins_first, self.first), (self.pins_second, self.second)
+        ):
+            with self.subTest(ubertooth=ubertooth_commit[:7]):
+                sources, note = self._resolve(ubertooth_commit)
+                libbtbb = sources[1]
+                self.assertEqual(pinned, libbtbb.commit)
+                # Recorded as the commit it resolved to, named fork-pin.
+                self.assertEqual(pinned, libbtbb.requested_ref)
+                self.assertEqual("fork-pin", libbtbb.ref_name)
+                self.assertIn(f"libbtbb ref 'fork-pin' is {pinned}", note)
+                self.assertIn(f"Ubertooth {ubertooth_commit[:7]}", note)
+                # The run records the pin check as a match, not drift.
+                self.assertEqual("passed", check_sources(sources).status)
+
+    def test_a_named_ref_is_still_used_as_given(self):
+        sources, note = self._resolve(self.pins_second, libbtbb_ref="master")
+        self.assertEqual(("master", self.second, None),
+                         (sources[1].requested_ref, sources[1].commit, sources[1].ref_name))
+        self.assertEqual("", note)
+
+    def test_a_commit_without_a_pin_says_so(self):
+        # No install.sh at all, and an install.sh without the pin: the same
+        # refusal, since neither commit says which libbtbb it wants.
+        no_pin = self._commit(self.fork, "install.sh", "#!/bin/sh\necho hi\n")
+        for commit in (self.unpinned, no_pin):
+            with self.subTest(ubertooth=commit[:7]):
+                with self.assertRaises(cli.ManifestError) as raised:
+                    self._resolve(commit)
+                self._assertRefusal(raised.exception, commit,
+                                    "sets no LIBBTBB_REF")
+
+    def test_a_pin_that_is_not_a_commit_says_so(self):
+        variable = self._commit(self.fork, "install.sh", 'LIBBTBB_REF="${REF}"\n')
+        with self.assertRaises(cli.ManifestError) as raised:
+            self._resolve(variable)
+        self._assertRefusal(raised.exception, variable, "not a literal commit")
+
+    def _assertRefusal(self, error, ubertooth_commit: str, problem: str) -> None:
+        """Every refusal names the option, the commit, the problem, and both
+        ways to name a libbtbb ref instead."""
+        message = str(error)
+        self.assertIn("--libbtbb-ref fork-pin", message)
+        self.assertIn(f"Ubertooth {ubertooth_commit[:7]}", message)
+        self.assertIn(problem, message)
+        self.assertIn("name a libbtbb ref with --libbtbb-ref", message)
+        self.assertIn("redeploy the runner", message)
+
+    def test_a_pin_that_can_move_is_refused_not_resolved(self):
+        # fork-pin is a promise of one exact commit, so a branch or tag name
+        # is refused rather than built at whatever it points to today.
+        for name in ("master", "v1.0"):
+            with self.subTest(pin=name):
+                moving = self._commit(self.fork, "install.sh", _install_sh(name))
+                self.assertIsNotNone(
+                    _git(self.libbtbb, "rev-parse", "--verify", f"{name}^{{commit}}"),
+                    "the name must resolve, so the refusal is about the name",
+                )
+                with self.assertRaises(cli.ManifestError) as raised:
+                    self._resolve(moving)
+                self._assertRefusal(raised.exception, moving,
+                                    f"sets LIBBTBB_REF={name}, which is not a commit")
+
+    def test_a_pin_the_libbtbb_checkout_lacks_is_reported(self):
+        missing = self._commit(self.fork, "install.sh", _install_sh("b" * 40))
+        with self.assertRaises(cli.ManifestError) as raised:
+            self._resolve(missing)
+        # Resolved like any other ref: fetched if possible, else refused.
+        self.assertIn("unable to resolve libbtbb ref", str(raised.exception))
+        self.assertIn("b" * 40, str(raised.exception))
 
 
 class CiScriptTests(_ForkRepo, unittest.TestCase):

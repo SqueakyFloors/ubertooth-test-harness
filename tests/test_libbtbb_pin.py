@@ -18,6 +18,7 @@ REPO = Path(__file__).resolve().parents[1]
 CI_SH = REPO / "scripts" / "ci.sh"
 README = REPO / "README.md"
 FORK_URL = "https://github.com/SqueakyFloors/libbtbb.git"
+FORK_PIN = "fork-pin"
 
 
 def _pin() -> str:
@@ -52,10 +53,12 @@ class LibbtbbPinTests(unittest.TestCase):
     def test_readme_examples_name_the_same_pin(self):
         text = README.read_text(encoding="utf-8")
         # Stop at a backtick (the option table) or a `]` (an optional-argument
-        # example), so only the ref itself is compared.
+        # example), so only the ref itself is compared. `REF` is the
+        # placeholder in option tables; `fork-pin` is the value that resolves
+        # per run from the Ubertooth commit under test, not a commit.
         refs = set(re.findall(r"--libbtbb-ref ([^\s`\]]+)", text))
 
-        self.assertEqual({_pin()}, refs - {"REF"})
+        self.assertEqual({_pin()}, refs - {"REF", FORK_PIN})
 
 
 if __name__ == "__main__":

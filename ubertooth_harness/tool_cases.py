@@ -682,15 +682,15 @@ def btle_settings_cases(arguments, _resources, resource_identities):
                cleanup=_cleanup(serial, RESTORED_SETTINGS, crc=True)[:-1]
                + _aa_restore(serial) + (_identity(serial),)),
             _btle_case(serial, "error-allowance-bounds", "-x0 and -x32 are accepted", (
-                Step("x0", "-x0 with a CRC read", _btle(serial, "-x0", "-v"),
+                Step("x0", "-x0 with a CRC read", _btle(serial, "-x0", "-k"),
                      output_patterns=(CRC_PATTERN,)),
-                Step("x32", "-x32 with a CRC read", _btle(serial, "-x32", "-v"),
+                Step("x32", "-x32 with a CRC read", _btle(serial, "-x32", "-k"),
                      output_patterns=(CRC_PATTERN,)),
             ), expected_state="both bounds accepted; nothing changed"),
-            # -a used to return before -v (SqueakyFloors/ubertooth#171, fixed
+            # -a used to return before the CRC read (SqueakyFloors/ubertooth#171, fixed
             # in 09e9a46).
-            _btle_case(serial, "access-address-with-crc", "-a -v reports both", (
-                Step("read-both", "Read access address and CRC", _btle(serial, "-a", "-v"),
+            _btle_case(serial, "access-address-with-crc", "-a -k reports both", (
+                Step("read-both", "Read access address and CRC", _btle(serial, "-a", "-k"),
                      output_patterns=(_AA_PATTERN, CRC_PATTERN),
                      forbidden_patterns=(r"systime=",)),
             ), expected_state="access address and CRC both reported, no sniffing"),

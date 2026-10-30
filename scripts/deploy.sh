@@ -51,10 +51,10 @@
 #   --libbtbb-source DIR      libbtbb checkout the runner builds from (default:
 #                             a clone of the libbtbb fork that deploy keeps in
 #                             DATA/sources/libbtbb, cloned once, then fetched)
-#   --libbtbb-ref REF         libbtbb commit the runner builds (default: the
-#                             LIBBTBB_REF pin in install.sh on the Ubertooth
-#                             checkout's origin/main, else the harness's own
-#                             pin, LIBBTBB_PIN in scripts/ci.sh)
+#   --libbtbb-ref REF         libbtbb commit the runner builds (default
+#                             fork-pin: the LIBBTBB_REF each Ubertooth commit
+#                             sets in its own install.sh, resolved per run, so
+#                             a pin bump on the fork needs no redeploy)
 #   --no-libbtbb              no libbtbb: the runner cannot build, and refuses
 #                             runs that ask for a build
 #   --allow-power-changes     passed to the runner (lets runs switch USB power)
@@ -74,6 +74,9 @@ RUNNER_UNIT=ubertooth-harness-runner.service
 RUNNER_LABEL=com.ubertooth-harness.runner
 TUNNEL_LABEL=com.ubertooth-harness.tunnel
 LIBBTBB_URL=https://github.com/SqueakyFloors/libbtbb.git
+# run-suite resolves this per run from the Ubertooth commit under test, so a
+# pin bump on the fork reaches a long-lived runner without a redeploy (#139).
+LIBBTBB_REF_DEFAULT=fork-pin
 # Hard limit on each clone or fetch deploy makes.
 GIT_TIMEOUT_S=60
 # launchd respawns a KeepAlive agent no faster than this.
@@ -465,20 +468,6 @@ net_git() {
     fi
 }
 
-# The literal LIBBTBB_REF commit install.sh sets on the Ubertooth checkout's
-# origin/main (fetched first); nothing when it cannot be read.
-fork_libbtbb_pin() {
-    local text
-    # Runs inside $(...): everything but the pin goes to stderr.
-    if ! net_git -C "$ubertooth_source" fetch --quiet origin main >&2; then
-        say "warning: could not fetch origin main in $ubertooth_source; reading the pin from what it has" >&2
-    fi
-    text=$(git -C "$ubertooth_source" show origin/main:install.sh 2>/dev/null) || return 0
-    printf '%s\n' "$text" |
-        sed -n "s/^LIBBTBB_REF=[\"']\{0,1\}\([0-9a-fA-F]\{7,40\}\)[\"']\{0,1\}[[:space:]]*\(#.*\)\{0,1\}\$/\1/p" |
-        head -n 1
-}
-
 setup_libbtbb() {
     if [ "$no_libbtbb" = 1 ]; then
         say "libbtbb: none (--no-libbtbb); the runner cannot build and refuses runs that ask for a build"
@@ -503,14 +492,10 @@ setup_libbtbb() {
         fi
     fi
     if [ -z "$libbtbb_ref" ]; then
-        libbtbb_ref=$(fork_libbtbb_pin)
-        if [ -n "$libbtbb_ref" ]; then
-            say "libbtbb: ref $libbtbb_ref, the LIBBTBB_REF pin in install.sh on origin/main of $ubertooth_source"
-        else
-            libbtbb_ref=$(sed -n 's/^LIBBTBB_PIN=\([0-9a-f]\{40\}\)$/\1/p' "$ROOT/scripts/ci.sh" 2>/dev/null | head -n 1)
-            [ -n "$libbtbb_ref" ] || die "no libbtbb ref: install.sh on origin/main of $ubertooth_source has no literal LIBBTBB_REF and $ROOT/scripts/ci.sh has no LIBBTBB_PIN; pass --libbtbb-ref REF or --no-libbtbb"
-            say "libbtbb: ref $libbtbb_ref, the harness's pin (LIBBTBB_PIN in scripts/ci.sh): no literal LIBBTBB_REF in install.sh on origin/main of $ubertooth_source"
-        fi
+        # Each run reads the pin from the Ubertooth commit it builds, so the
+        # deployed runner follows the fork's pin with no redeploy.
+        libbtbb_ref=$LIBBTBB_REF_DEFAULT
+        say "libbtbb: ref $libbtbb_ref, the LIBBTBB_REF each Ubertooth commit sets in its own install.sh"
     else
         say "libbtbb: ref $libbtbb_ref (--libbtbb-ref)"
     fi
