@@ -12,8 +12,9 @@ so which plans use a test belongs in
 [`testplans/`](../testplans), not here.
 
 Companions: [`COVERAGE.md`](../COVERAGE.md) is the same ground organized by CLI
-option, and tells you which option still has no test; [`DESIGN.md`](../DESIGN.md)
-describes the harness itself.
+option, and tells you which option still has no test;
+[`hardware.md`](hardware.md) describes the devices these tests bind, and the
+firmware they run; [`DESIGN.md`](../DESIGN.md) describes the harness itself.
 
 ## How to read a section
 

@@ -37,6 +37,12 @@
   in the lab. See "Public text" in `.kiro/steering/branch-and-review.md`.
 - Keep `COVERAGE.md` current: a PR that adds or changes test coverage of a
   CLI option updates its rows in the same PR.
+- Keep `docs/hardware.md` current: a PR that changes the bench hardware, any
+  device's firmware, or a helper script under `scripts/lab/` updates it in the
+  same PR. That covers a new or retired device type, a firmware version or
+  toolchain bump, a change to a protocol or API the harness depends on, a host
+  setup step, a newly found limit, and a prebuilt image (record its source
+  commit and SHA-256). Reviewers check for it.
 - Keep `docs/tests.md` current: a PR that adds a catalog test, removes one, or
   changes what a test checks updates that test's section in the same PR.
   Section headings are the catalog names exactly, so a missing section is easy

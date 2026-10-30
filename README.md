@@ -151,6 +151,12 @@ host can run fails planning. Three tests must state their platforms and still
 require the argument: `Flash reliability`, `Exclusive Ubertooth topology`,
 and `MAC polling soak`.
 
+[`docs/hardware.md`](docs/hardware.md) describes the bench itself: each device
+type and its role, the firmware each one runs and how it is built, flashed and
+checked, the APIs and protocols the harness depends on, host setup, the known
+limits of a crowded USB host, and a worked bench layout. Read it to set up a
+bench, or to judge what a result was measured on.
+
 `hardware.yaml` is the ignored local resource registry; copy
 [`hardware.example.yaml`](hardware.example.yaml) to start. Register every macOS/Linux computer as a
 `Host`, then attach typed resources such as `UT_Linux0`, `DK_Linux0`, and
@@ -1105,7 +1111,9 @@ skipped to compensate for a missing installation.
 
 Tests that need a real Bluetooth LE peer use Nordic nRF52840 DKs (PCA10056)
 running the harness's own firmware, [`firmware/nrf52840dk`](firmware/nrf52840dk/README.md)
-(build, flash, shell protocol, pinned SDK and tool versions). Register each
+(build, flash, shell protocol, pinned SDK and tool versions);
+[`docs/hardware.md`](docs/hardware.md) puts them beside the rest of the bench.
+Register each
 one as an `nRF52840 DK` resource with its J-Link serial, its role, and, for
 the `advertiser` role, the BLE address its `status` reports
 ([`hardware.example.yaml`](hardware.example.yaml)):
