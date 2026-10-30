@@ -224,10 +224,18 @@ def requirement(raw: Mapping) -> PlacementRequirement:
     for name in ("min_attenuation_db", "max_attenuation_db"):
         if raw.get(name) is not None:
             bounds[name] = _decibels(raw[name], f"rf {name}")
-    return PlacementRequirement(
+    asked = PlacementRequirement(
         antenna=None if antenna is None else _flag(antenna, "rf antenna"),
         **bounds,
     )
+    if not asked:
+        # Every key empty (`min_attenuation_db:` with nothing after it) would
+        # otherwise read as "any placement" and quietly drop the test's own
+        # requirement as well, so a weak-link plan would select any board.
+        raise PlacementError(
+            "an rf requirement must set at least one of " + ", ".join(REQUIREMENT_KEYS)
+        )
+    return asked
 
 
 def requirements(raw: Mapping) -> Mapping[str, PlacementRequirement]:

@@ -115,6 +115,18 @@ class PlacementTests(unittest.TestCase):
         with self.assertRaisesRegex(PlacementError, "unknown key"):
             requirement({"attenuation_db": 20})
 
+    def test_a_requirement_that_asks_for_nothing_is_refused(self):
+        # `min_attenuation_db:` with nothing after it would otherwise read as
+        # "any placement" and drop the test's own requirement with it, so a
+        # weak-link plan would quietly select any board.
+        for raw in ({"min_attenuation_db": None}, {"antenna": None},
+                    {"max_attenuation_db": None, "min_attenuation_db": None}):
+            with self.subTest(raw=raw):
+                with self.assertRaisesRegex(
+                    PlacementError, "must set at least one of"
+                ):
+                    requirement(raw)
+
     def test_a_board_with_no_rf_counts_as_an_ordinary_one(self):
         # This is what lets `max_attenuation_db: 0` select the normal boards
         # without every registry having to spell out `rf:` on each of them.
@@ -437,6 +449,20 @@ suites:
         hosts: [Host_Linux]
         rf:
           Ubertooth: {min_attenuation_db: 10}
+""")
+
+    def test_an_empty_rf_requirement_is_refused_rather_than_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(PlanError, "must set at least one of"):
+                plan(directory, """plan: rf
+suites:
+  fast:
+    - Classic Bluetooth receive:
+        hosts: [Host_Linux]
+        coverage: smoke
+        duration: 3s
+        rf:
+          Ubertooth: {min_attenuation_db:}
 """)
 
     def test_an_rf_requirement_that_cannot_hold_is_refused_at_load(self):
