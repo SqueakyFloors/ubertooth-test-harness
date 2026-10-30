@@ -60,11 +60,11 @@ from ubertooth_harness.gui import (
     security_headers,
 )
 from ubertooth_harness.learned import STORE_FILE, EstimateStore
-from ubertooth_harness.outputfiles import saved_output
 from ubertooth_harness.report import write_report
 from ubertooth_harness.runfiles import (
     PAGE_BYTES,
     OutputFileError,
+    listing,
     read_output_page,
 )
 from ubertooth_harness.protocol import (
@@ -1458,16 +1458,16 @@ def create_app(controller: Controller):
     @app.get("/api/runs/{run_id}/files")
     async def get_run_files(run_id: str):
         run = controller.get_run(run_id)
-        events = await asyncio.to_thread(controller.read_events, run)
-        return {"files": [saved.to_dict() for saved in saved_output(events)]}
+        # Read from run.jsonl a line at a time (runfiles.saved_in), so a
+        # soak's log is not parsed into memory to list a few files.
+        return {"files": await asyncio.to_thread(listing, run.directory)}
 
     @app.get("/api/runs/{run_id}/file")
     async def get_run_file(run_id: str, path: str, offset: int = 0, limit: int = PAGE_BYTES):
         run = controller.get_run(run_id)
-        events = await asyncio.to_thread(controller.read_events, run)
         try:
             return await asyncio.to_thread(
-                read_output_page, run.directory, events, path, offset, limit
+                read_output_page, run.directory, path, offset, limit
             )
         except OutputFileError as error:
             raise ControllerError(error.detail, error.status) from error

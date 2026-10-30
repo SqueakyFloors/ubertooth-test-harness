@@ -17,10 +17,10 @@ Nothing here writes, creates, or deletes anything.
 """
 
 from pathlib import Path
-from typing import Mapping, Sequence
 
 from ubertooth_harness import outputfiles
-from ubertooth_harness.outputfiles import OutsideRun, saved_output
+from ubertooth_harness.events import RUN_LOG
+from ubertooth_harness.outputfiles import OutsideRun, output_records, saved_output
 
 # Bytes of a file returned in one page, and the most a caller may ask for.
 # A page is read and decoded in full, so this bounds what one request costs.
@@ -37,10 +37,42 @@ class OutputFileError(ValueError):
         self.status = status
 
 
-def _recorded(events: Sequence[Mapping], path: str):
-    for saved in saved_output(events):
-        if saved.file.path == path:
-            return saved.file
+def saved_in(run_dir: Path) -> tuple:
+    """The files a run recorded, read from its run.jsonl a line at a time.
+
+    Each one says whether this host can read it: through the runner service
+    the ``output/`` files stay in the runner's run directory and only
+    run.jsonl reaches the controller, so for a run the controller did not
+    carry out the list is complete but the files are elsewhere.
+    """
+    log = run_dir / RUN_LOG
+    if not log.is_file():
+        return ()
+    saved = saved_output(output_records(log))
+    return tuple(
+        (item, _readable(run_dir, item.file.path)) for item in saved
+    )
+
+
+def _readable(run_dir: Path, path: str) -> bool:
+    try:
+        return confined(run_dir, path).is_file()
+    except OutputFileError:
+        return False
+
+
+def listing(run_dir: Path) -> list[dict]:
+    """The run's files for the GUI, each marked readable on this host."""
+    return [
+        {**item.to_dict(), "readable": readable}
+        for item, readable in saved_in(run_dir)
+    ]
+
+
+def _recorded(run_dir: Path, path: str):
+    for item, _readable_here in saved_in(run_dir):
+        if item.file.path == path:
+            return item.file
     return None
 
 
@@ -63,7 +95,6 @@ def confined(directory: Path, path: str) -> Path:
 
 def read_output_page(
     directory: Path,
-    events: Sequence[Mapping],
     path: str,
     offset: int = 0,
     limit: int = PAGE_BYTES,
@@ -75,12 +106,22 @@ def read_output_page(
     a multi-byte character; those bytes are replaced rather than refused, so a
     reader paging through a file never hits an error at a boundary.
     """
-    recorded = _recorded(events, path)
+    recorded = _recorded(directory, path)
     if recorded is None:
         raise OutputFileError(f"run has no saved output file {path!r}")
     if offset < 0 or limit < 1:
         raise OutputFileError("offset must be 0 or more and limit 1 or more", 400)
-    full = confined(directory, path)
+    try:
+        full = confined(directory, path)
+    except OutputFileError as error:
+        if error.status == 404:
+            # Recorded, but not on this host: through the runner service the
+            # files stay in the runner's run directory.
+            raise OutputFileError(
+                f"{path!r} was saved on the target, not here; it is in the "
+                "target's own run directory", 404,
+            ) from error
+        raise
     size = full.stat().st_size
     length = min(limit, MAX_PAGE_BYTES)
     with full.open("rb") as handle:

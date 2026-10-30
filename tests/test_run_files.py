@@ -13,6 +13,7 @@ from ubertooth_harness.runfiles import (
     PAGE_BYTES,
     OutputFileError,
     confined,
+    listing,
     read_output_page,
 )
 
@@ -145,13 +146,27 @@ class PageTests(unittest.TestCase):
     def setUp(self):
         self._directory = tempfile.TemporaryDirectory()
         self.root = write_run(Path(self._directory.name))
-        self.events = run_events()
 
     def tearDown(self):
         self._directory.cleanup()
 
     def page(self, path, offset=0, limit=PAGE_BYTES):
-        return read_output_page(self.root, self.events, path, offset, limit)
+        return read_output_page(self.root, path, offset, limit)
+
+    def test_a_file_the_controller_does_not_have_is_listed_but_not_read(self):
+        # Through the runner service the output/ files stay on the target.
+        (self.root / STDOUT_FILE).unlink()
+        listed = {item["path"]: item["readable"] for item in listing(self.root)}
+        self.assertEqual({STDOUT_FILE: False, STDERR_FILE: True,
+                          CAPTURE_FILE: True}, listed)
+        with self.assertRaises(OutputFileError) as caught:
+            self.page(STDOUT_FILE)
+        self.assertEqual(404, caught.exception.status)
+        self.assertIn("saved on the target", caught.exception.detail)
+
+    def test_a_run_with_no_log_lists_nothing(self):
+        (self.root / RUN_LOG).unlink()
+        self.assertEqual([], listing(self.root))
 
     def test_a_page_names_where_it_sits_in_the_file(self):
         page = self.page(STDOUT_FILE, 0, 100)
@@ -219,13 +234,18 @@ class ConfinementTests(unittest.TestCase):
         self.assertEqual(400, caught.exception.status)
         self.assertIn("inside the run directory", caught.exception.detail)
 
-    def test_a_symlink_out_of_the_run_directory_is_not_followed(self):
-        link = self.root / OUTPUT_DIR / "link.stdout.log"
-        link.symlink_to(Path(self._directory.name) / "elsewhere.txt")
-        with self.assertRaises(OutputFileError) as caught:
-            confined(self.root, f"{OUTPUT_DIR}/link.stdout.log")
-        self.assertEqual(400, caught.exception.status)
-        self.assertIn("leaves the run directory", caught.exception.detail)
+    def test_a_symlink_is_never_followed_even_inside_the_run_directory(self):
+        out = self.root / OUTPUT_DIR
+        (out / "link.stdout.log").symlink_to(
+            Path(self._directory.name) / "elsewhere.txt")
+        # A link that stays inside would let a record name one file and be
+        # served another, so it is refused as well.
+        (out / "inside.stdout.log").symlink_to(self.root / RUN_LOG)
+        for name in ("link.stdout.log", "inside.stdout.log"):
+            with self.subTest(name=name), self.assertRaises(OutputFileError) as caught:
+                confined(self.root, f"{OUTPUT_DIR}/{name}")
+            self.assertEqual(400, caught.exception.status)
+            self.assertIn("symbolic link", caught.exception.detail)
 
     def test_a_symlink_to_a_directory_out_of_the_run_is_not_followed(self):
         outside = Path(self._directory.name) / "outside"
@@ -235,6 +255,7 @@ class ConfinementTests(unittest.TestCase):
         with self.assertRaises(OutputFileError) as caught:
             confined(self.root, "away/x.log")
         self.assertEqual(400, caught.exception.status)
+        self.assertIn("symbolic link", caught.exception.detail)
 
     def test_a_directory_and_a_missing_file_are_refused(self):
         for path in (OUTPUT_DIR, f"{OUTPUT_DIR}/absent.log"):
@@ -278,6 +299,10 @@ class WebAssetTests(unittest.TestCase):
         self.assertIn("check-files", self.js)
         self.assertIn("openOutputFile", self.js)
         self.assertIn("/files`", self.js)
+
+    def test_a_file_that_stayed_on_the_target_is_listed_but_not_a_link(self):
+        self.assertIn("file.readable === false", self.js)
+        self.assertIn("(on the target)", self.js)
 
 
 class RouteTests(ControllerTestCase):
@@ -324,6 +349,16 @@ class RouteTests(ControllerTestCase):
                     "GET", f"/api/runs/{run_id}/file?path={path}")
                 self.assertIn(status, (400, 404), payload)
                 self.assertNotIn("root:", json.dumps(payload))
+
+    async def test_a_recorded_symlink_does_not_serve_another_file(self):
+        run_id = await self.stored_run()
+        link = self.results / run_id / OUTPUT_DIR / "002-command-1.stdout.log"
+        link.unlink()
+        link.symlink_to(self.results / run_id / RUN_LOG)
+        status, payload, _ = await self.http(
+            "GET", f"/api/runs/{run_id}/file?path={STDOUT_FILE}")
+        self.assertEqual(400, status, payload)
+        self.assertNotIn("run_started", json.dumps(payload))
 
     async def test_a_run_that_is_not_there_is_refused(self):
         status, _payload, _ = await self.http("GET", "/api/runs/absent/files")

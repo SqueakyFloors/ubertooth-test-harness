@@ -570,15 +570,26 @@
     return el("ul", { className: "check-files" }, ...files.map((file) => {
       const checks = Array.isArray(file.checks) ? file.checks : [];
       const failed = checks.filter((check) => check && check.reason).length;
+      const name = String(file.path).replace(/^output\//, "");
+      const about = `${file.stream} · ${fileSize(file.bytes)} · ${checks.length} check`
+        + `${checks.length === 1 ? "" : "s"}`
+        + (failed ? `, ${failed} failed` : "");
+      // A run the controller did not carry out itself keeps its output files
+      // on the target, so the list is complete but there is nothing to open.
+      if (file.readable === false) {
+        return el("li", {}, el("span", {
+          className: failed ? "hint file-failed" : "hint",
+          title: `${about} · saved on the target, not on the controller`,
+          text: `${name} (on the target)`,
+        }));
+      }
       return el("li", {},
         el("button", {
           type: "button",
           className: failed ? "link file-failed" : "link",
-          title: `${file.stream} · ${fileSize(file.bytes)} · ${checks.length} check`
-            + `${checks.length === 1 ? "" : "s"}`
-            + (failed ? `, ${failed} failed` : ""),
+          title: about,
           onclick: () => openOutputFile(live.run_id, String(file.path), 0),
-          text: String(file.path).replace(/^output\//, ""),
+          text: name,
         }));
     }));
   }

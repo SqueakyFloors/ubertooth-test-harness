@@ -19,6 +19,7 @@ the same checks again against the saved files.
 import collections
 from dataclasses import dataclass, field
 import hashlib
+import json
 from pathlib import Path
 import re
 from typing import Iterable, Iterator, Mapping, Sequence
@@ -607,31 +608,56 @@ def _owner(details) -> dict:
     return {key: details[key] for key in _OWNER_KEYS if key in details}
 
 
-def saved_output(events: Sequence[Mapping]) -> tuple[SavedOutput, ...]:
+def output_records(path: Path) -> Iterator[dict]:
+    """The file and check records in a run.jsonl, one line at a time.
+
+    Only these two kinds of record are kept, so listing a run's files costs
+    the size of that list rather than the size of the whole log: a soak's
+    run.jsonl is tens of megabytes and the list is a few kilobytes. A line
+    that is not JSON is skipped, as the report and the controller skip it.
+    """
+    with path.open(encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and event.get("event_type") in (
+                *FILE_EVENTS, CHECKS_EVENT
+            ):
+                yield event
+
+
+def saved_output(events) -> tuple[SavedOutput, ...]:
     """Every saved file a run recorded, in the order the run produced them.
 
     Each file carries the checks whose record names it. A file named by no
     check carries none: a capture, or a stream no check read.
     """
+    # One pass, so ``events`` may be a generator reading run.jsonl a line at
+    # a time (output_records). The checks are collected as they come and
+    # attached at the end, since a command's checks are recorded after its
+    # files.
     by_path: dict[str, list[OutputCheck]] = {}
-    for event in events:
-        if event.get("event_type") != CHECKS_EVENT:
-            continue
-        for value in (event.get("details") or {}).get("checks") or []:
-            check = OutputCheck.from_dict(value)
-            for name in check.files:
-                by_path.setdefault(name, []).append(check)
-    saved = []
+    found: list[tuple[OutputFile, dict]] = []
     seen = set()
     for event in events:
-        if event.get("event_type") not in FILE_EVENTS:
-            continue
+        kind = event.get("event_type")
         details = event.get("details") or {}
-        for file in saved_files(details):
-            if file.path in seen:
-                continue
-            seen.add(file.path)
-            saved.append(SavedOutput(
-                file, _owner(details), tuple(by_path.get(file.path, ()))
-            ))
-    return tuple(saved)
+        if kind == CHECKS_EVENT:
+            for value in details.get("checks") or []:
+                check = OutputCheck.from_dict(value)
+                for name in check.files:
+                    by_path.setdefault(name, []).append(check)
+        elif kind in FILE_EVENTS:
+            for file in saved_files(details):
+                if file.path in seen:
+                    continue
+                seen.add(file.path)
+                found.append((file, _owner(details)))
+    return tuple(
+        SavedOutput(file, owner, tuple(by_path.get(file.path, ())))
+        for file, owner in found
+    )
