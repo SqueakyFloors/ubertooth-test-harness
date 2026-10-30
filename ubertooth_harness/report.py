@@ -555,19 +555,42 @@ def _size(count: int) -> str:
     return f"{count} bytes"
 
 
+def _check_failed(check) -> bool:
+    """Did this recorded check come out against the run?
+
+    Not every kind records a reason when it fails: a step that failed on an
+    observed setting, or on a missing ``SKIP:`` line, says so in its own
+    step record and leaves the check's reason empty. So what the check
+    found decides as well.
+    """
+    if check.reason:
+        return True
+    if check.found is None:
+        return False
+    return not check.found if check.kind != "forbidden" else check.found
+
+
 def _checks_cell(saved) -> str:
     """The checks that read one file, and how they came out."""
     if not saved.checks:
         return "none"
-    failed = [check for check in saved.checks if check.reason]
+    failed = [check for check in saved.checks if _check_failed(check)]
     kinds = {}
     for check in saved.checks:
         kinds[check.kind] = kinds.get(check.kind, 0) + 1
     counts = ", ".join(f"{count} {kind}" for kind, count in sorted(kinds.items()))
     if not failed:
         return f"{counts}: all passed"
-    named = "; ".join(f"{check.name}: {check.reason}" for check in failed[:3])
-    return f"{counts}: {len(failed)} failed ({named})"
+    named = "; ".join(
+        f"{check.name}: {check.reason or _not_found(check)}" for check in failed[:3]
+    )
+    return f"{counts}: {len(failed)} against the run ({named})"
+
+
+def _not_found(check) -> str:
+    if check.kind == "forbidden":
+        return f"{check.pattern!r} was found"
+    return f"{check.pattern!r} was not found"
 
 
 def _output_files_section(run: _Run) -> list[str]:
@@ -580,13 +603,19 @@ def _output_files_section(run: _Run) -> list[str]:
     saved = outputfiles.saved_output(run.events)
     if not saved:
         return []
+    names = {
+        record["started"]["details"].get("invocation_id"):
+            record["started"]["details"].get("test_name", "")
+        for record in run.tests
+    }
     lines = ["", "## Output files", ""]
     groups: dict[str, list] = {}
     for item in saved:
         groups.setdefault(item.group, []).append(item)
     for group, items in groups.items():
+        named = names.get(group)
         lines += [
-            f"### {group}", "",
+            f"### {group}" + (f": {named}" if named else ""), "",
             "| File | Stream | Size | Lines | SHA-256 | Checks |",
             "|---|---|---|---|---|---|",
         ]

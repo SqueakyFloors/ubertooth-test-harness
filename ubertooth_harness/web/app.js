@@ -31,10 +31,6 @@
     // ref option value ("<kind>:<name>") -> {name, kind, commit} as listed
     refOptions: new Map(),
     selected: null, // run_id shown in the live view
-    // run_id -> [{path, stream, bytes, lines, sha256, owner, checks}] as the
-    // run recorded them, and the page of the file open in the viewer.
-    files: new Map(),
-    openFile: null, // {run_id, path, offset}
     live: null, // {run_id, seen:Set, events:[], items:[], byInvocation:Map, log:[], partial, stage}
     socket: null,
     retry: 1000,
@@ -338,7 +334,6 @@
       for (const record of data.events) addEvent(runId, record, false);
       // Now that the run's plan is known, lay out its checklist and replay.
       rebuildChecklist();
-      await loadOutputFiles(runId);
     } catch (error) {
       $("cancel-status").textContent = `Cannot load run: ${error.message}`;
     }
@@ -524,125 +519,6 @@
     if (render) renderLive();
   }
 
-  // ----- saved output files ----------------------------------------------
-  //
-  // The files the run saved are listed from its own records (so the list
-  // costs nothing to build) and read a page at a time, because one file can
-  // be a soak's whole output. The viewer is deliberately unlike the log
-  // tail: black on white in a fixed-width font, because it shows a saved
-  // file and not a live stream.
-
-  function fileSize(count) {
-    const units = [["GiB", 1 << 30], ["MiB", 1 << 20], ["KiB", 1 << 10]];
-    for (const [name, step] of units) {
-      if (count >= step) return `${(count / step).toFixed(1)} ${name}`;
-    }
-    return `${count} bytes`;
-  }
-
-  async function loadOutputFiles(runId) {
-    try {
-      const data = await api("GET", `${runPath(runId)}/files`);
-      if (!Array.isArray(data.files)) return;
-      state.files.set(runId, data.files);
-      renderLive();
-    } catch (error) {
-      // An older run, or a controller that has no files for it: the
-      // checklist simply shows no links.
-    }
-  }
-
-  function filesOf(runId, invocationId) {
-    const files = state.files.get(runId) || [];
-    return files.filter((file) => {
-      const owner = (file && file.owner) || {};
-      return String(owner.invocation_id ?? "") === String(invocationId ?? "");
-    });
-  }
-
-  // One link per file this test saved. A file a check failed on is marked,
-  // so a reader looking at a failed test knows which one to open.
-  function fileList(item) {
-    const live = state.live;
-    if (!live || !item.invocation_id) return null;
-    const files = filesOf(live.run_id, item.invocation_id);
-    if (!files.length) return null;
-    return el("ul", { className: "check-files" }, ...files.map((file) => {
-      const checks = Array.isArray(file.checks) ? file.checks : [];
-      const failed = checks.filter((check) => check && check.reason).length;
-      const name = String(file.path).replace(/^output\//, "");
-      const about = `${file.stream} · ${fileSize(file.bytes)} · ${checks.length} check`
-        + `${checks.length === 1 ? "" : "s"}`
-        + (failed ? `, ${failed} failed` : "");
-      // A run the controller did not carry out itself keeps its output files
-      // on the target, so the list is complete but there is nothing to open.
-      if (file.readable === false) {
-        return el("li", {}, el("span", {
-          className: failed ? "hint file-failed" : "hint",
-          title: `${about} · saved on the target, not on the controller`,
-          text: `${name} (on the target)`,
-        }));
-      }
-      return el("li", {},
-        el("button", {
-          type: "button",
-          className: failed ? "link file-failed" : "link",
-          title: about,
-          onclick: () => openOutputFile(live.run_id, String(file.path), 0),
-          text: name,
-        }));
-    }));
-  }
-
-  async function openOutputFile(runId, path, offset) {
-    $("live-file").hidden = false;
-    $("file-status").textContent = "Loading…";
-    const query = `path=${encodeURIComponent(path)}&offset=${Math.max(0, offset)}`;
-    try {
-      const page = await api("GET", `${runPath(runId)}/file?${query}`);
-      state.openFile = { run_id: runId, path, page };
-      renderOutputFile();
-    } catch (error) {
-      state.openFile = null;
-      $("file-view").textContent = "";
-      $("file-about").textContent = path;
-      $("file-status").textContent = `Cannot read this file: ${error.message}`;
-    }
-  }
-
-  function renderOutputFile() {
-    const open = state.openFile;
-    if (!open) {
-      $("live-file").hidden = true;
-      return;
-    }
-    const page = open.page;
-    const first = page.offset + 1;
-    const last = page.offset + page.length;
-    $("file-about").textContent =
-      `${open.path} · ${page.stream} · ${fileSize(page.file_bytes)}`
-      + (page.lines ? ` · ${page.lines} lines` : "")
-      + ` · SHA-256 ${page.sha256}`;
-    $("file-status").textContent = page.length
-      ? `bytes ${first}–${last} of ${page.file_bytes}`
-      : "this file is empty";
-    $("file-previous").disabled = page.offset <= 0;
-    $("file-next").disabled = Boolean(page.eof);
-    const view = $("file-view");
-    view.textContent = String(page.text ?? "");
-    view.scrollTop = 0;
-  }
-
-  function pageOutputFile(direction) {
-    const open = state.openFile;
-    if (!open) return;
-    const step = open.page.page_bytes || 1;
-    const offset = direction < 0
-      ? Math.max(0, open.page.offset - step)
-      : open.page.offset + (open.page.length || step);
-    openOutputFile(open.run_id, open.path, offset);
-  }
-
   function itemStatus(item, run) {
     if (!run || run.status === "running") return item.status;
     if (item.status === "pending") return "not run";
@@ -698,8 +574,7 @@
         item.estimated_s !== null && item.estimated_s !== undefined
           ? el("span", { className: "hint check-estimate", text: ` (about ${formatSeconds(item.estimated_s)})` }) : null,
         item.target ? el("span", { className: "reason check-target", text: item.target }) : null,
-        item.reason ? el("span", { className: "reason", text: ` — ${item.reason}` }) : null,
-        fileList(item));
+        item.reason ? el("span", { className: "reason", text: ` — ${item.reason}` }) : null);
     }));
     if (!live.items.length) {
       $("checklist").replaceChildren(el("li", {
@@ -904,12 +779,6 @@
     $("plan").addEventListener("change", renderSuites);
     $("suite").addEventListener("change", renderSuiteTests);
     $("cancel-button").addEventListener("click", cancelRun);
-    $("file-previous").addEventListener("click", () => pageOutputFile(-1));
-    $("file-next").addEventListener("click", () => pageOutputFile(1));
-    $("file-close").addEventListener("click", () => {
-      state.openFile = null;
-      renderOutputFile();
-    });
     renderTargetSelect();
     loadRefs();
     loadPlans();

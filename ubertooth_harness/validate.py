@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Iterator, Sequence, TextIO
 
 from ubertooth_harness.events import RUN_LOG
+from ubertooth_harness import outputfiles
 from ubertooth_harness.outputfiles import (
     OutputCheck,
     OutputFile,
@@ -34,9 +35,10 @@ from ubertooth_harness.outputfiles import (
     search_parts,
 )
 
-# Event types the re-run reads.
-CHECKS_EVENT = "output_checks"
-FILES_EVENTS = ("command_finished", "output_files")
+# Event types the re-run reads; outputfiles.py defines them, so a new one
+# is added in one place.
+CHECKS_EVENT = outputfiles.CHECKS_EVENT
+FILES_EVENTS = outputfiles.FILE_EVENTS
 
 
 class ValidateError(ValueError):
