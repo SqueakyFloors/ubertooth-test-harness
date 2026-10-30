@@ -403,11 +403,10 @@ baseband link, where "the piconet" would be a guess: these boards are
 connectable, so something else in the room can open one.
 A controller that refuses a read answers `ERR the controller refused the
 clock read, status 0x<hh>` and prints no line, rather than an answer with a
-hole in it. If a controller ever stops answering altogether, the command
-that was sent keeps its place in the host's pending list and holds the one
-command credit the host has, which stalls every Bluetooth command and not
-just this one; later reads answer `ERR the controller did not answer the
-clock read`, and `reset` is the way back.
+hole in it. A controller that stops answering altogether is a different
+case: the command it never answered keeps its place in the host's pending
+list, so later reads answer `ERR the controller did not answer the clock
+read` without sending anything more, and `reset` is the way back.
 
 ### How the command is sent
 
