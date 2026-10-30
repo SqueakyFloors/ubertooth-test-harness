@@ -259,7 +259,7 @@ python -m ubertooth_harness run-suite \
   --hardware hardware.yaml --host Host_Linux \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
   --libbtbb-source /path/to/libbtbb \
-  --libbtbb-ref b32cf5adde496548057fdf6ea7c852378ad7411a \
+  --libbtbb-ref 2fd0d391d99e9b0620146f63f439c1ec74f79861 \
   --build --output runs
 ```
 
@@ -299,9 +299,8 @@ The host surface runs help/parser checks for all eleven always-built
 executables and retains each tool's result. It also runs `-h` on the BlueZ-only
 `ubertooth-scan` and `ubertooth-follow`, which are not applicable (left out
 before the run, see [Host requirements](#host-requirements)) where they are not
-built, and checks the host version line from `ubertooth-util
---host-version` and from `-V` on `ubertooth-rx`, `ubertooth-tx`, and
-`ubertooth-afh`. `Ubertooth count` checks that `ubertooth-util -N` equals the
+built, and checks the host version line of `-V` on `ubertooth-util`,
+`ubertooth-rx`, `ubertooth-tx`, and `ubertooth-afh`. `Ubertooth count` checks that `ubertooth-util -N` equals the
 registered Ubertooths on the host (the selected board plus its guards), so an
 unregistered or missing board fails it. Because it uses guards, the fast and
 release plans need every registered board attached and readable, like the
@@ -322,7 +321,7 @@ python -m ubertooth_harness run-suite --plan testplans/host.yaml --suite host \
   --hardware host-only.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
   --libbtbb-source /path/to/libbtbb \
-  --libbtbb-ref b32cf5adde496548057fdf6ea7c852378ad7411a \
+  --libbtbb-ref 2fd0d391d99e9b0620146f63f439c1ec74f79861 \
   --build --output runs
 ```
 
@@ -350,7 +349,8 @@ application firmware. Each combination must be refused, exit 1, with the fork's
 message before any board lookup (no switch note), so a regression that accepted
 one would find no board instead of stranding it. `-f` (DFU), removed in fork
 `db5649b`, must be refused as an unknown option. The
-cleanup step runs `ubertooth-util -H`, which opens no device.
+cleanup step runs `ubertooth-util -V`, whose host version line needs no
+board.
 
 `DFU image checks` runs `ubertooth-dfu -d <image> -r` and `-s` the same way,
 with the same skip. `-d` checks the whole image before it opens a device, so
@@ -436,10 +436,10 @@ python -m ubertooth_harness run-suite \
 | Test | `smoke` (fast plan) | `comprehensive` (release plan) |
 |------|---------------------|--------------------------------|
 | `Ubertooth util compositions` | `-v -V` and every read-only report in one command | adds every other compatible read-only pair and repeated `-U` (last wins) |
-| `Argument validation` | one rejected argument per tool (`util -c2401`, `btle -x33`, `ego -l0`, `ducky -A36`, `rx -u` without `-l`, `specan -l 2401`, and a stray word for `afh`, `debug`, `dfu`, `dump`, `tx`) | every rejected argument in `REJECTIONS` (64): out-of-range, non-numeric, or partly numeric `util -c -C -a -z -l -d -q` values, attached or as the next word (`-q` takes 20-120, so `-q19`, `-q121`, and `-q183` are refused), `util -z` with `-I`, `-q`, or `-x`, `-U all` with a setter or mode, bad advertising index, bad MAC/BD address, `-x33`, `-l0`/`-l49`, survey with an address, `specan` bad or reversed range, `btle -a zzzz` and `-v 2`; a stray word on every built tool (fork's one argument rule: after a set or a mode, a bare `-`, after `--`, a next word that is not a value such as `util -a 7x`) refused with `error: unexpected argument`; each must exit 1 with the tool's own error, start no mode, and leave channel, squelch, LEDs, PA, and CRC unchanged |
+| `Argument validation` | one rejected argument per tool (`util -c2401`, `btle -x33`, `ego -l0`, `ducky -A36`, `rx -u` without `-l`, `specan -l 2401`, and a stray word for `afh`, `debug`, `dfu`, `dump`, `tx`) | every rejected argument in `REJECTIONS` (64): out-of-range, non-numeric, or partly numeric `util -c -C -a -z -l -d -q` values, attached or as the next word (`-q` takes 20-120, so `-q19`, `-q121`, and `-q183` are refused), `util -z` with `-I`, `-q`, or `-x`, `-U all` with a setter or mode, bad advertising index, bad MAC/BD address, `-x33`, `-l0`/`-l49`, survey with an address, `specan` bad or reversed range, `btle -a zzzz` and `-k 2`; a stray word on every built tool (fork's one argument rule: after a set or a mode, a bare `-`, after `--`, a next word that is not a value such as `util -a 7x`) refused with `error: unexpected argument`; each must exit 1 with the tool's own error, start no mode, and leave channel, squelch, LEDs, PA, and CRC unchanged |
 | `Radio setting transitions` | channel, PA level, squelch across an idle stop and an active-mode stop; `-c 2426` (value as the next word) and `-a0` (PA level 0) read back; setters (`-z <n>` too), `-S` and `-r` print nothing on stdout, their progress lines on stderr (fork #326) | adds USR LED; repeated `-c`, `-C`, `-a`, `-z`, `-l`, `-d` (last wins); mixed `-c`/`-C` in both orders; `-C`, `-a`, `-z`, `-l`, `-d` values and `-a 0` as the next word, and `-c -a -z -d -l` next-word values in one command, each read back; `-a9 -v` refused with exit 1 before the report; full reset `-r` from PA 0 returns boot defaults; a set and a read of the same value in one command (`-c<MHz> -c`, `-c -c<MHz>`, `-a<level> -a`, `-l<state> -l`, `-d<state> -d`) sets it and reports the new value (fork #228, fixed in 5b45b3e) |
-| `BLE CRC transitions` | CRC enabled during `-n` and `-f` on channel 37; one `-n` capture per format (`-r` PCAPNG, `-q` PCAP, `-c` PPI) | both CRC values x both modes x channels 37/38/39; both CRC values x both modes x each capture format; repeated `-v` (last wins); `-v 1` and `-v 0` as the next word; repeated capture files `-r -r`, `-q -c`, `-c -q` (first wins, extra file never created); `-r` with `-q` and with `-c` (separate handles, both written) |
-| `BLE settings` | set and read back the access address, attached and as the next word (`-a <address>`); set, mask, and clear the follow target | adds `ubertooth-util -r` resets the access address to 8e89bed6; `-x0`/`-x32`; `-a -v` reports both and `-azzzz` is rejected (fork #171, fixed in 09e9a46); stopping a bounded receive-only `-p` run resets LEDs, channel, and squelch (PA kept) |
+| `BLE CRC transitions` | CRC enabled during `-n` and `-f` on channel 37; one `-n` capture per format (`-r` PCAPNG, `-q` PCAP, `-c` PPI) | both CRC values x both modes x channels 37/38/39; both CRC values x both modes x each capture format; `-k 1` and `-k 0` as the next word; repeated `-k` (which the fork now refuses, [#160](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/160)); repeated capture files `-r -r`, `-q -c`, `-c -q` (first wins, extra file never created); `-r` with `-q` and with `-c` (separate handles, both written) |
+| `BLE settings` | set and read back the access address, attached and as the next word (`-a <address>`); set, mask, and clear the follow target | adds `ubertooth-util -r` resets the access address to 8e89bed6; `-x0`/`-x32`; `-a -k` reports both and `-azzzz` is rejected (fork #171, fixed in 09e9a46); stopping a bounded receive-only `-p` run resets LEDs, channel, and squelch (PA kept) |
 | `Debug registers` | register list `0x02,0x01,0x00` in order, nothing changed | adds a range, a reversed range, `-v0`/`-v1`/`-v2` output, rejected `-r 0x100` and `-v3`; a successful read exits 0 (`-r 0x01` and the range fail on fork builds before #164's fix, 89afc1c) |
 | `Spectrum analyzer` | one full-band sweep (`duration` long): every frequency 2402-2480 reported, none outside, int8 RSSI, and nothing but samples on stdout (`Ubertooth stopped` is on stderr, fork #326) | adds narrow, single, and top-of-band ranges, `-g`, `-G`, `-v`, and `-d` (binary file checked by `specandump.py`); `-d -x.bin` writes the file `-x.bin`, not stdout (fork #231, fixed in 053363a); on Linux, `-d /dev/full` says `error: writing samples failed` once and exits 1 by itself (fork #326; not applicable on macOS); ranges after a different range report no stale samples (fork #173, fixed in 20bcf11); stopping a bounded run with `-S` turns the preset LEDs off and resets channel 2441 MHz and squelch -120, PA kept (fork #191, fixed in aa4f620) |
 | `Spectrum RSSI sanity` | fast plan, one bounded full-band `ubertooth-specan` sweep (`duration` long) that must also pass the Spectrum analyzer sweep checks: every frequency's lowest reading (its noise floor) is -115 to -80 dBm (up to 5 of the 79 may stay above -80 dBm, a continuous emitter), the mean reading is negative (below -54 dBm), and there are at least three distinct readings. The tool prints the CC2400 RSSI register, dBm + 54 (specan-ui adds -54). Needs no signal source | no comprehensive profile |
@@ -592,13 +592,13 @@ Before the first case the test records a baseline for each guard with
 read-only queries only: `ubertooth-util -U <serial>` with `-v` (firmware
 revision and API), `-V` (firmware compile info, whose build timestamp also
 catches a reflash of the same revision), `-C` (channel), `-a` (PA level), `-z`
-(squelch), and `-d` (LEDs), then `ubertooth-btle -U <serial> -v` (CRC).
+(squelch), and `-d` (LEDs), then `ubertooth-btle -U <serial> -k` (CRC).
 `ubertooth-util` never checks the firmware API, but `ubertooth-btle` does, and
 it sends a stop to firmware whose API is older than the host tools'
 (`ubertooth_check_api` in the fork's
 [`host/libubertooth/src/ubertooth.c`](https://github.com/SqueakyFloors/ubertooth/blob/main/host/libubertooth/src/ubertooth.c)).
-So the CRC read runs only when the same check's `-v` read showed an API no
-older than the host tools' (no host tool reports it, so the harness reads
+So the CRC read runs only when the same check's `ubertooth-util -v` read showed
+an API no older than the host tools' (no host tool reports it, so the harness reads
 `UBERTOOTH_API_VERSION` from the resolved Ubertooth source and refuses guarded
 tests if it cannot). Otherwise the read is refused without running and the
 baseline fails: the guard firmware API is too old to read CRC safely. The harness
@@ -643,7 +643,7 @@ python -m ubertooth_harness run-suite --plan testplans/fast.yaml --suite fast \
   --hardware hardware.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref feature/my-change \
   --libbtbb-source /path/to/libbtbb \
-  --libbtbb-ref b32cf5adde496548057fdf6ea7c852378ad7411a \
+  --libbtbb-ref 2fd0d391d99e9b0620146f63f439c1ec74f79861 \
   --build [--with-firmware] [--with-python[=PYTHON]] --output runs
 ```
 
@@ -670,6 +670,23 @@ can be deliberate.
 Only libbtbb's C library is installed and linked (`-DENABLE_PYTHON=OFF` skips
 its Python tools): the Ubertooth tools need nothing else from it.
 
+`--libbtbb-ref fork-pin` builds that pin instead of naming a commit: the run
+reads `LIBBTBB_REF` from `install.sh` at the Ubertooth commit it resolved and
+builds exactly that libbtbb, so each commit is tested against the libbtbb it
+asks for. The run prints the commit it took (`note: libbtbb ref 'fork-pin'
+is ...`) and records it in the manifest as that commit, named `fork-pin`, so
+report.md shows `` `fork-pin` at `<commit>` ``. It is refused, naming the
+Ubertooth commit, the problem, and both ways to name a libbtbb ref instead
+(the option, or a redeploy of the runner), when that commit has no
+`install.sh` or sets no `LIBBTBB_REF` (an older fork commit), when the pin is
+built from a shell variable, and when it is a name that can move rather than
+a commit, since `fork-pin` is a promise of one exact commit. Every run
+resolves it, build or not, because the libbtbb a run records is checked
+against the tools' own version line. This is what a long-lived runner is
+deployed with, so a pin bump on the fork reaches it without a redeploy;
+`scripts/ci.sh` keeps naming the commit, since comparing it with the fork's
+is the point of its check.
+
 `--libbtbb-ref` can still name any ref, with one limit: the harness passes no
 `-DCMAKE_POLICY_VERSION_MINIMUM`, so a libbtbb declaring
 `cmake_minimum_required` below 3.5 — upstream `master` at the time of writing
@@ -689,8 +706,9 @@ its packages are used). The installed `ubertooth-specan-ui` and
 manifest records its path and version. specan-ui itself needs numpy, qtpy, and
 a Qt binding (PyQt5/6 or PySide2/6) in that interpreter. `--with-firmware`
 also builds `bluetooth_rxtx.dfu` with the built `ubertooth-dfu`; the image is
-hashed into the manifest, not flashed. The built `ubertooth-util -H` must
-report both resolved revisions, without a modified-source `*`.
+hashed into the manifest, not flashed. The built `ubertooth-util -V` must
+report both resolved revisions on its `Host tools version:` line, without a
+modified-source `*`.
 
 The manifest records the toolchain (CMake, C compiler, pkg-config, libusb,
 BlueZ on Linux, the ARM compiler when building firmware, and the Python with
@@ -719,7 +737,10 @@ ref may name a branch, tag, or commit; the CLI resolves it without switching the
 checkout and records the full immutable commit plus the repository and short
 build revision. Dirty or untracked source content is rejected. Supply
 `--libbtbb-source` and `--libbtbb-ref` together when validating an exact
-companion build. When `--ubertooth-ref` is a commit chosen by name elsewhere
+companion build; `--libbtbb-ref fork-pin` takes that commit from the
+Ubertooth commit's own `install.sh` (see [Building the resolved
+revision](#building-the-resolved-revision)). When `--ubertooth-ref` is a
+commit chosen by name elsewhere
 (the target runner passes the commit the controller listed),
 `--ubertooth-ref-name NAME` records that branch or tag name next to it in the
 manifest (`ref_name`) and report.md; it is never resolved. Repeat `--artifact NAME=PATH` to hash build products into the
@@ -935,8 +956,8 @@ lines open and close the run, build, preflight, and each test:
 ```text
 00:00:10.438     === PREFLIGHT ===
 00:00:10.439     +++ Host version +++
-00:00:10.439 [C] ubertooth-util -H
-00:00:10.465 [R] ubertooth-util exit 0 in 0.025s; [O] libubertooth 1.1 (git-be97109), libbtbb 1.0 (git-84ab41f)
+00:00:10.439 [C] ubertooth-util -V
+00:00:10.465 [R] ubertooth-util exit 0 in 0.025s; [O] Host tools version: libubertooth 1.1 (git-be97109), libbtbb 1.0 (git-84ab41f)
 00:00:10.465     --- Host version EXIT: passed ---
 00:00:10.466     === PREFLIGHT EXIT: passed ===
 00:00:10.466     === TEST 002-Host CLI surface: Host CLI surface on Host_Mac ===
@@ -1126,7 +1147,7 @@ python -m ubertooth_harness runner \
   --hardware hardware.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth \
   [--libbtbb-source /path/to/libbtbb \
-   --libbtbb-ref b32cf5adde496548057fdf6ea7c852378ad7411a] \
+   --libbtbb-ref 2fd0d391d99e9b0620146f63f439c1ec74f79861] \
   [--plans-dir testplans] [--allow-power-changes] \
   --output runs
 ```
@@ -1157,10 +1178,14 @@ working tree, `HEAD` and local branches stay as they are, and a dirty
 checkout is still refused first. If the fetch fails, or the remote does not
 have the commit either, the run ends with `run_error` naming the ref, the
 remote and why. The `--libbtbb-ref` commit is fetched into
-`--libbtbb-source` the same way. A runner started without
+`--libbtbb-source` the same way. `--libbtbb-ref` is passed to every run as
+given, so `fork-pin` (what `scripts/deploy.sh` sets by default, see [Building
+the resolved revision](#building-the-resolved-revision)) makes each run build
+the libbtbb its own Ubertooth commit pins. A runner started without
 `--libbtbb-source`/`--libbtbb-ref` cannot build: it says so in its log at
 startup (`builds disabled: ...`; with them, `builds enabled: libbtbb REF from
-DIR`), and answers a `run` with `build` set with `run_rejected` and that
+DIR`, or `fork-pin (the LIBBTBB_REF of each commit it builds)`), and answers a
+`run` with `build` set with `run_rejected` and that
 reason, which the GUI shows as "Not started: runner rejected the run: ...",
 instead of starting a run that fails at once. The runner starts `run-suite` in this harness
 environment with a new run ID, answers `run_accepted`, and forwards every
@@ -1463,7 +1488,7 @@ runner (`After=`/`Wants=` the controller) dials
 | `--plans-dir DIR` | plans for the GUI and the runner (default `testplans/`) |
 | `--ubertooth-repo URL` | repository whose refs the GUI offers (default the public fork) |
 | `--libbtbb-source DIR` | libbtbb checkout the runner builds from (default: deploy's own clone of the [libbtbb fork](https://github.com/SqueakyFloors/libbtbb), see below) |
-| `--libbtbb-ref REF` | libbtbb commit the runner builds (default: the fork's pin, see below) |
+| `--libbtbb-ref REF` | libbtbb commit the runner builds (default `fork-pin`: the pin of each Ubertooth commit it builds, see below) |
 | `--no-libbtbb` | no libbtbb: the runner cannot build and refuses runs with Build checked |
 | `--allow-power-changes` | passed to the runner |
 | `--port N` | controller port on `127.0.0.1` (default 8765) |
@@ -1480,15 +1505,14 @@ time and fetches it (branches and tags) on every later deploy; a path there
 that is not a git clone is refused, and a failed clone stops the deploy
 before any unit is written (pass `--libbtbb-source` or `--no-libbtbb`). A
 `--libbtbb-source` you name is used as it is, never cloned or fetched by
-deploy. Without `--libbtbb-ref`, deploy fetches `main` into the
-`--ubertooth-source` checkout's `origin/main` and uses the literal
-`LIBBTBB_REF` commit its `install.sh` sets there, the libbtbb the fork is
-built against; when that cannot be read it falls back to the harness's own
-copy of the pin (`LIBBTBB_PIN` in `scripts/ci.sh`, see [Building the resolved
-revision](#building-the-resolved-revision)). Either way it prints which ref it
-chose and where from. Each clone or fetch is limited to 60 s and never
-prompts for credentials. `--no-libbtbb` deploys a runner without libbtbb,
-which refuses Build runs up front with a clear reason.
+deploy. Without `--libbtbb-ref`, the runner gets `fork-pin`, so every run
+builds the libbtbb the Ubertooth commit it was asked for pins in its own
+`install.sh` (see [Building the resolved
+revision](#building-the-resolved-revision)): deploy reads no pin itself, and a
+pin bump on the fork reaches the runner with no redeploy. Name a commit with
+`--libbtbb-ref` to hold every run to one libbtbb instead. Each clone or fetch
+is limited to 60 s and never prompts for credentials. `--no-libbtbb` deploys a
+runner without libbtbb, which refuses Build runs up front with a clear reason.
 
 Rerunning with the same options changes nothing. A unit is rewritten, and its
 service restarted, only when its content changes; the units record the

@@ -117,8 +117,8 @@ class ReplayRx:
     def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
         command = tuple(argv)
         self.commands.append(command)
-        if command == ("ubertooth-util", "-H"):
-            return self._result(command, 0, "libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n")
+        if command == ("ubertooth-util", "-V"):
+            return self._result(command, 0, "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n")
         if command[0] == sys.executable and command[1].endswith(".py"):
             module = {"rxreplay.py": rxreplay, "capturefile.py": capturefile,
                       "rxdump.py": rxdump}[Path(command[1]).name]

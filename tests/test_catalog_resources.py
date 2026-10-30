@@ -57,7 +57,7 @@ class CatalogTests(unittest.TestCase):
         test = catalog.get("Host version")
 
         self.assertEqual("Host version", test.name)
-        self.assertEqual(("ubertooth-util", "-H"), test.command({}))
+        self.assertEqual(("ubertooth-util", "-V"), test.command({}))
         with self.assertRaises(CatalogError):
             catalog.get("host_version")
 
@@ -218,7 +218,7 @@ suites:
 suites:
   fast:
     - id: old
-      cmd: ubertooth-util -H
+      cmd: ubertooth-util -V
 """,
             )
 

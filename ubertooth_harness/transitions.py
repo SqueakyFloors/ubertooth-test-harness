@@ -13,7 +13,7 @@ Command contracts below come from the Ubertooth fork sources:
   0b63b01 for the others): an optional option value may be attached
   (``-c2426``) or given as the next word (``-c 2426``, ``-z -70``). The next
   word is taken only if it looks like a value for that option (digits for
-  ``ubertooth-util -l -a -c -C -d -q`` and ``ubertooth-btle -v``, digits with an
+  ``ubertooth-util -l -a -c -C -d -q`` and ``ubertooth-btle -k``, digits with an
   optional ``-`` for ``-z``, any word not starting with ``-`` for
   ``ubertooth-btle -a`` and ``ubertooth-ducky -q``), so a following option is
   never swallowed (``-c -b`` is two queries). Without a value the option reads.
@@ -35,9 +35,9 @@ Command contracts below come from the Ubertooth fork sources:
   squelch -120, LEDs off. PA level is kept; only RX/TX mode entry writes it.
   ``-r`` reboots to the same boot defaults, including PA level 7.
 - ``ubertooth-btle -n``/``-f`` set the advertising channel and LE modulation,
-  start the mode, then apply ``-v[01]``; on exit the tool stops the mode, which
+  start the mode, then apply ``-k[01]``; on exit the tool stops the mode, which
   runs the idle reset (including modulation back to basic rate).
-  ``ubertooth-btle -v`` reads the CRC setting without starting a mode.
+  ``ubertooth-btle -k`` reads the CRC setting without starting a mode.
 - ``-l`` sets the USR LED; ``-d`` sets USR, RX, and TX together and reports
   all three. No option sets RX or TX alone, so an LED state with RX != TX can
   be read but not written back.
@@ -900,7 +900,7 @@ def _crc_read(serial, step_id, name, key, expected=None):
     return Step(
         step_id,
         name,
-        _btle(serial, "-v"),
+        _btle(serial, "-k"),
         observe=Observation(key, CRC_PATTERN, expected, CRC_VALUES),
     )
 
@@ -910,7 +910,7 @@ def _crc_restore(serial):
         Step(
             "restore-crc",
             "Restore original CRC",
-            lambda context: _btle(serial, f"-v{require(context, 'original crc')}"),
+            lambda context: _btle(serial, f"-k{require(context, 'original crc')}"),
             mutates=True,
         ),
         _crc_read(
@@ -938,7 +938,7 @@ def _crc_case(serial, mode, mode_label, target, adv_index):
             Step(
                 "preset-opposite",
                 "Preset opposite CRC before mode",
-                _btle(serial, f"-v{opposite}"),
+                _btle(serial, f"-k{opposite}"),
                 mutates=True,
             ),
             _crc_read(
@@ -951,7 +951,7 @@ def _crc_case(serial, mode, mode_label, target, adv_index):
             Step(
                 "mode",
                 f"Sniff in {mode_label} mode with CRC {state}",
-                _btle(serial, mode, f"-A{adv_index}", f"-v{target}"),
+                _btle(serial, mode, f"-A{adv_index}", f"-k{target}"),
                 timeout_s=MODE_TIMEOUT_S,
                 mutates=True,
                 continuous=True,
@@ -980,7 +980,7 @@ def _repeated_crc_case(serial):
 
     return StateCase(
         "crc-repeated-set-last-wins",
-        "Repeated ubertooth-btle -v is last-option-wins",
+        "Repeated ubertooth-btle -k is last-option-wins",
         (
             _stop(serial, "establish-idle", "Establish idle before reading"),
             _crc_read(serial, "read-original-crc", "Read original CRC", "original crc"),
@@ -988,7 +988,7 @@ def _repeated_crc_case(serial):
                 "set-twice",
                 "Set CRC twice in one command",
                 lambda context: _btle(
-                    serial, f"-v{require(context, 'original crc')}", f"-v{other(context)}"
+                    serial, f"-k{require(context, 'original crc')}", f"-k{other(context)}"
                 ),
                 mutates=True,
             ),
@@ -996,7 +996,7 @@ def _repeated_crc_case(serial):
                       "crc after repeated set", other),
         ),
         _cleanup(serial, (), crc=True),
-        expected_state="last repeated -v applied, then original CRC restored",
+        expected_state="last repeated -k applied, then original CRC restored",
     )
 
 
@@ -1060,7 +1060,7 @@ def _capture_case(serial, mode, mode_label, target, capture):
             Step(
                 "preset-opposite",
                 "Preset opposite CRC before mode",
-                _btle(serial, f"-v{opposite}"),
+                _btle(serial, f"-k{opposite}"),
                 mutates=True,
             ),
             _crc_read(serial, "verify-preset", "Verify opposite CRC before mode",
@@ -1069,7 +1069,7 @@ def _capture_case(serial, mode, mode_label, target, capture):
                 "mode",
                 f"Sniff in {mode_label} mode with CRC {state}, capturing {option}",
                 lambda context: _btle(
-                    serial, mode, "-A37", f"-v{target}",
+                    serial, mode, "-A37", f"-k{target}",
                     option, _capture_path(file_name)(context),
                 ),
                 timeout_s=MODE_TIMEOUT_S,
@@ -1178,20 +1178,20 @@ _REPEATED_CAPTURES = tuple(
 
 
 def _next_word_crc_case(serial, target):
-    """ubertooth-btle -v 0 / -v 1: the value as the next word (fork 0b63b01)."""
+    """ubertooth-btle -k 0 / -k 1: the value as the next word (fork 0b63b01)."""
     opposite = "0" if target == "1" else "1"
     state = "enabled" if target == "1" else "disabled"
     return StateCase(
         f"crc-{state}-next-word-value",
-        f"ubertooth-btle -v {target} as the next word sets CRC {state}",
+        f"ubertooth-btle -k {target} as the next word sets CRC {state}",
         (
             _stop(serial, "establish-idle", "Establish idle before reading"),
             _crc_read(serial, "read-original-crc", "Read original CRC", "original crc"),
             Step("preset-opposite", "Preset opposite CRC (attached value)",
-                 _btle(serial, f"-v{opposite}"), mutates=True),
+                 _btle(serial, f"-k{opposite}"), mutates=True),
             _crc_read(serial, "verify-preset", "Verify opposite CRC",
                       "crc after preset", opposite),
-            Step("set", f"Set CRC with -v {target}", _btle(serial, "-v", target),
+            Step("set", f"Set CRC with -k {target}", _btle(serial, "-k", target),
                  output_patterns=(CRC_PATTERN,),
                  forbidden_patterns=(r"unexpected argument", r"systime="),
                  mutates=True),
@@ -1199,7 +1199,7 @@ def _next_word_crc_case(serial, target):
                       "crc after set", target),
         ),
         _cleanup(serial, (), crc=True),
-        expected_state=f"CRC {state} by -v {target}; original CRC restored",
+        expected_state=f"CRC {state} by -k {target}; original CRC restored",
     )
 
 
@@ -1387,13 +1387,13 @@ REJECTIONS = (
               r"error: squelch level must be -128 to 127 \(got -129\)"),
     Rejection("btle-stray", "ubertooth-btle", ("stray",), _stray("stray")),
     Rejection("btle-stray-bare-dash", "ubertooth-btle", ("-",), _stray("-")),
-    Rejection("btle-stray-after-crc-query", "ubertooth-btle", ("-v", "stray"),
+    Rejection("btle-stray-after-crc-query", "ubertooth-btle", ("-k", "stray"),
               _stray("stray")),
     Rejection("btle-stray-dash-after-access-address", "ubertooth-btle", ("-a", "-"),
               _stray("-")),
     Rejection("btle-next-word-bad-access-address", "ubertooth-btle", ("-a", "zzzz"),
               r"error: access address must be 1-8 hex digits \(got zzzz\)"),
-    Rejection("btle-next-word-crc-2", "ubertooth-btle", ("-v", "2"),
+    Rejection("btle-next-word-crc-2", "ubertooth-btle", ("-k", "2"),
               r"error: CRC verify mode must be 0-1 \(got 2\)"),
     Rejection("afh-stray", "ubertooth-afh", ("stray",), _stray("stray"), smoke=True),
     Rejection("debug-stray", "ubertooth-debug", ("-r", "0x00", "stray"), _stray("stray"),
@@ -1779,7 +1779,7 @@ def _guard_crc_step(board: GuardBoard, key, expected, firmware_key):
     return Step(
         f"{board.slug}-{GUARD_CRC_KEY}",
         f"{board.role} {GUARD_CRC_KEY}",
-        _btle(board.serial, "-v"),
+        _btle(board.serial, "-k"),
         observe=Observation(key, CRC_PATTERN, expected, CRC_VALUES),
         refuse=_btle_api_refusal(board, firmware_key),
     )

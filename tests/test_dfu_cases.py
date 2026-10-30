@@ -85,8 +85,8 @@ class FakeDfuBoard:
     # -- executor ------------------------------------------------------
     def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
         command = tuple(argv)
-        if command == ("ubertooth-util", "-H"):
-            return self._result(command, 0, "libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n")
+        if command == ("ubertooth-util", "-V"):
+            return self._result(command, 0, "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n")
         self.commands.append(command)
         if command[:2] == (sys.executable, dfu_cases._CHECKER):
             out = io.StringIO()
@@ -255,13 +255,13 @@ def run_dfu(board, image_bytes, *, coverage="smoke", artifact=True, change_image
             created_at="2026-10-22T00:00:00+00:00",
         )
         check = PreflightCheck("preflight-001-host-version", "Host version", "Host_Linux",
-                               None, {}, ("ubertooth-util", "-H"),
+                               None, {}, ("ubertooth-util", "-V"),
                                (r"libubertooth\s+\S+\s+\(git\-test\)",), REVISION)
         if change_image:
             original_run = board.run
 
             def run(argv, **kwargs):
-                if tuple(argv) == ("ubertooth-util", "-H"):
+                if tuple(argv) == ("ubertooth-util", "-V"):
                     image.write_bytes(image_bytes + b"x")
                 return original_run(argv, **kwargs)
             board.run = run
@@ -499,7 +499,7 @@ class DfuRunTests(unittest.TestCase):
         self.assertFalse(summary.passed)
         self.assertIn("test_build image changed", summary.failure_reason)
         self.assertEqual([], [c for c in board.commands if c[0] != "ubertooth-util"
-                              or "-H" not in c])
+                              or "-V" not in c])
         refused = [e for e in events if e.event_type == "check_finished"
                    and e.details.get("phase") == "test"]
         self.assertEqual("not_run", refused[0].details["cleanup_status"])
@@ -533,7 +533,7 @@ class DfuRunTests(unittest.TestCase):
         refused = [e for e in events if e.event_type == "check_finished"
                    and e.details.get("phase") == "test"]
         self.assertEqual("not_run", refused[0].details["cleanup_status"])
-        self.assertEqual([], [c for c in board.commands if "-H" not in c])
+        self.assertEqual([], [c for c in board.commands if "-V" not in c])
 
 
 class DfuHelperRecordTests(unittest.TestCase):

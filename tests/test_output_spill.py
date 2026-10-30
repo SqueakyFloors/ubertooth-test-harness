@@ -27,7 +27,7 @@ from ubertooth_harness.sequencer import NamedTestSequencer
 from tests.test_sequencer import run_contract
 
 
-VERSION = "libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
+VERSION = "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
 BLOCKS = 1000
 
 
@@ -36,7 +36,7 @@ def block(n: int) -> str:
 
 
 class FloodExecutor:
-    """ubertooth-util -H answering with the version, then a flood of
+    """ubertooth-util -V answering with the version, then a flood of
     per-block stderr lines like ubertooth-dump prints (one chunk each)."""
 
     def __init__(self, flood_calls=(1,), stream=True, blocks=BLOCKS):
@@ -120,7 +120,7 @@ class SpillTests(unittest.TestCase):
             log = (root / name).read_text().splitlines()
             # Every line, in arrival order, stamped and tagged.
             self.assertEqual(BLOCKS + 2, len(log))
-            self.assertRegex(log[0], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3} \[O\] libubertooth 1\.1")
+            self.assertRegex(log[0], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3} \[O\] Host tools version: libubertooth 1\.1")
             self.assertEqual([f"[E] {block(n).rstrip()}" for n in range(BLOCKS)],
                              [line.split(" ", 1)[1] for line in log[1:-1]])
             self.assertTrue(log[-1].endswith("[O] last stdout line"))
