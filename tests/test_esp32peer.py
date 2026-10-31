@@ -76,10 +76,22 @@ class ShellTests(unittest.TestCase):
 
     def test_older_firmware_is_refused_and_a_later_1_x_accepted(self):
         # Nothing flashes a peer, so a later image of the same major, which
-        # has these commands and more, has to be usable.
-        for version, accepted in (("utesp-0.9.0", False), ("utesp-1.0.0", True),
-                                  ("utesp-1.1.0", True), ("utesp-1.0.4", True),
-                                  ("utesp-2.0.0", False)):
+        # has these commands and more, has to be usable. The versions are
+        # built around the minimum rather than written out, so that moving the
+        # pin does not turn this into a test of last month's pin.
+        major, minor, patch = (int(part) for part
+                              in esp32peer.MINIMUM_FIRMWARE.split("-")[1].split("."))
+        name = "utesp-%d.%d.%d".__mod__
+        cases = [(name((major, minor, patch)), True),
+                 (name((major, minor, patch + 1)), True),
+                 (name((major, minor + 1, 0)), True),
+                 (name((major - 1, 9, 0)), False),
+                 (name((major + 1, 0, 0)), False)]
+        if minor:
+            cases.append((name((major, minor - 1, 9)), False))
+        if patch:
+            cases.append((name((major, minor, patch - 1)), False))
+        for version, accepted in cases:
             firmware = FakePeerFirmware(ACCEPTOR_ADDRESS, version=version)
             peer_shell = shell(firmware)
             peer_shell.wait_ready()
