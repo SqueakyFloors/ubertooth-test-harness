@@ -721,11 +721,15 @@ _SERIAL_LABEL = "Serial No"
 MULTIPLE_BOARDS = r"(?m)^" + re.escape(
     "error: multiple Ubertooth devices found; select one with -U <index|serial>"
 ) + r"$"
+# One board of that refusal's list, as a whole line, indented by the two
+# spaces libubertooth prints ("  Device %d: %s\n").
+LISTED_BOARD = r"(?m)^ {2}Device %s: %s$"
 
 
 def listed_board(index: str, serial: str) -> str:
-    """One board of that refusal's list, as a whole line."""
-    return rf"(?m)^ +Device {index}: {re.escape(serial)}$"
+    return LISTED_BOARD % (index, re.escape(serial))
+
+
 # Report lines per board for -vVspb, in ubertooth-util's report order: the
 # query, its name here, the label it is listed under ("" where the report has
 # none), and the line it must match. This is the one place the harness states
