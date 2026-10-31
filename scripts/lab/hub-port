@@ -77,10 +77,13 @@ HARDWARE_ENV = "UBERTOOTH_HARNESS_HARDWARE"
 # across a build and a flash stage, so a recovery that waits a couple of
 # minutes is better than one that gives up at once; --wait changes it.
 HOST_LOCK_WAIT_S = 120.0
-# The harness's own "wait for it" advice, which names an option this command
-# does not have. Dropped from a busy-lock message, which then carries only
-# this command's own advice.
-_WAIT_HINT = re.compile(r";?\s*use --wait-for-boards MINUTES to wait for it\.?")
+# The harness's own "wait for it" advice, in each of the forms it takes for a
+# busy board and a busy host lock. It names an option this command does not
+# have, so it is dropped and the message carries only this command's advice.
+_WAIT_HINT = re.compile(
+    r";?\s*(?:retry when it ends, or )?use --wait-for-boards MINUTES"
+    r"(?: to wait for it)?\.?"
+)
 SETTLE_S = 0.5
 # VBUS takes about 0.55 s to fall below 0.1 V with a device attached
 # (docs/hardware.md), so a switch-off read any sooner prints a stale voltage.
@@ -187,6 +190,11 @@ def switch(controller, port: int, action: str, seconds: float, sleep=time.sleep)
     finally:
         if not on:
             try:
+                # A driver that failed a write may have closed its link (the
+                # StarTech one does, on any I/O error), and the restore would
+                # then fail on a closed link. connect() costs nothing when the
+                # link is already open.
+                controller.connect()
                 controller.set_power_enabled(port, True)
                 print(
                     f"note: port {port} was switched back on after the cycle "

@@ -644,6 +644,28 @@ class HubPortSwitches(Bench):
             hub_port.switch(self.controller, 4, "cycle", 5.0, sleep=lambda _s: None)
         self.assertTrue(self.controller.powered[4], "the port was left off")
 
+    def test_a_restore_reconnects_a_driver_that_closed_its_link(self):
+        """The StarTech driver closes its link on any write error."""
+        from ubertooth_harness.power import PowerControllerError
+
+        attempts = []
+        real = self.controller.set_power_enabled
+
+        def closes_on_failure(port, enabled):
+            attempts.append(enabled)
+            if enabled and attempts.count(True) == 1:
+                self.controller.connected = False  # as close() leaves it
+                raise PowerControllerError("write refused")
+            real(port, enabled)  # raises AssertionError if still disconnected
+
+        self.controller.connect()
+        self.controller.set_power_enabled = closes_on_failure
+        err = io.StringIO()
+        with self.assertRaises(PowerControllerError), redirect_stderr(err):
+            hub_port.switch(self.controller, 4, "cycle", 0.0, sleep=lambda _s: None)
+        self.assertIn("switched back on", err.getvalue())
+        self.assertTrue(self.controller.powered[4], "the port was left off")
+
     def test_an_interrupted_cycle_still_leaves_the_port_on(self):
         """Ctrl-C in the wait must not leave a device without power."""
         def interrupt(_seconds):
@@ -785,6 +807,10 @@ class HubPortSwitches(Bench):
         self.assertEqual(2, status)
         self.assertEqual([], self.controller.calls)
         self.assertIn("a run", err)
+        self.assertIn("--wait SECONDS", err)
+        # The host lock's message has its own wording; neither form may leave
+        # an option this command does not accept in the advice.
+        self.assertNotIn("--wait-for-boards", err)
 
 
 class LabFiles(unittest.TestCase):
