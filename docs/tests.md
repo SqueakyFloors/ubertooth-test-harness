@@ -682,8 +682,9 @@ read while it repeats, before the sender starts and again after the test, so a
 failure tells a wedged repeater from a wedged sender.
 
 **Hardware and arguments.** Two Ubertooths as `sender` and `responder`, each
-named by an explicit alias with a full 32-hex-digit serial or chosen by RF
-placement, and `host:` must name one host rather than `each`. `allow RF
+named by an explicit alias or chosen by RF placement, and both needing a full
+32-hex-digit serial in the registry either way. `host:` must name one host
+rather than `each`. `allow RF
 transmission: true` is required: both boards transmit, the sender at every PA
 level up to 0 dBm. `maximum PA level:` (0-7, default 7) is the highest level
 the plan accepts for a pass. Guarded.
@@ -702,14 +703,22 @@ an attenuator (`min_attenuation_db: 10`, `max_attenuation_db: 20`) and the
 sender in the open (`max_attenuation_db: 0`), which also keeps the roles apart
 on a bench whose default board is the attenuated one. Because the step names
 one host, a bench with no such board fails planning, with the requirement and
-each board's placement in the message. Its `maximum PA level` of 2 was
-measured in that orientation: a responder a meter away behind 20 dB answered a
-sender in the open in five round trips, whose ten PA levels (a request and a
-reply each) were all 0 or 1, so 2 is the observed maximum plus one level. The
-upper bound on the placement is there because 20 dB is the only value
-measured, and the antenna is pinned because a board with none would be weaker
-still; distance cannot be pinned, since an `rf` requirement has no distance
-key.
+each board's placement in the message.
+
+Its `maximum PA level` is the same 3 as the ordinary suite. On the bench, a
+responder a meter away behind 20 dB answered a sender in the open in five
+round trips whose ten PA levels, a request and a reply each, were all 0 or 1,
+and five round trips with the roles swapped reported one level 2. So the
+attenuated link stayed within the existing bound rather than narrowing it. A
+tighter ceiling would rest on five hand-driven round trips in one
+orientation, and the harness has not judged this step yet, so the bound stays
+where the ordinary suite has it.
+
+The placement is bounded above because 20 dB is the only value measured, and
+the antenna is pinned because a board with none would be weaker still.
+Distance cannot be pinned, since an `rf` requirement has no distance key, so
+a board at this attenuation but much further away is still selected and may
+need a higher level.
 
 **Known limits.** On an ordinary bench the boards sit centimeters apart, so a
 working link gets through at a low PA level and a pass at level 0 says little

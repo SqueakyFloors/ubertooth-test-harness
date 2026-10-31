@@ -1,7 +1,6 @@
 """Two-device range test against a fake sender/responder pair of the fork."""
 
 import os
-import re
 import stat
 import subprocess
 import tempfile
@@ -592,7 +591,7 @@ suites:
                 {"antenna": True, "max_attenuation_db": 0.0},
                 dict(item.placement_requirements["sender"]),
             )
-            self.assertEqual(2, item.arguments["maximum PA level"])
+            self.assertEqual(3, item.arguments["maximum PA level"])
 
     def test_the_weak_link_suite_needs_a_board_placed_for_it(self):
         # The suite names one host, so a bench with no attenuated board
