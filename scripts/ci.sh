@@ -39,7 +39,30 @@ LIBBTBB_PIN=bf878df27e131dd8ab56bb3497918eb9a83f607b
 
 step() { printf '\n=== ci: %s ===\n' "$1"; }
 
+# Bluetooth piconet roles are central and peripheral, never master/slave
+# (AGENTS.md). Only names we do not own are allowed through: libbtbb's and
+# git's `master` branch, and ESP-IDF's ESP_SPP_ROLE_* constants. AGENTS.md and
+# this file are excluded by name, because the rule and the check have to name
+# the words they forbid. The search is plain grep rather than git grep so it
+# also works in the exported tree scripts/local-ci.sh runs in.
+ROLE_TERMS_ALLOW='libbtbb|upstream `master`|branch:master|"master",|ESP_SPP_ROLE_'
+
+check_role_terms() {
+    step "Bluetooth role terms"
+    if grep -rIiE 'master|slave' . --exclude=ci.sh --exclude=AGENTS.md \
+            --exclude-dir=.git --exclude-dir=.venv --exclude-dir=__pycache__ \
+            --exclude-dir=runs | grep -vE "$ROLE_TERMS_ALLOW"; then
+        echo "error: the lines above say master/slave; write central/peripheral" \
+             "for Bluetooth piconet roles, or, if the line holds an external" \
+             "name we do not own, add it to ROLE_TERMS_ALLOW in scripts/ci.sh" >&2
+        return 1
+    fi
+    echo "no master/slave outside the allowed external names"
+}
+
 run_test() {
+    check_role_terms
+
     step "bootstrap"
     "$PYTHON" bootstrap.py | tee "$WORK/first.log"
     grep -q "bootstrap: created" "$WORK/first.log"

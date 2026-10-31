@@ -599,7 +599,7 @@ _REPLAY = str(Path(rxreplay.__file__).resolve())
 _FIXTURE = "replay.bin"
 _A, _B = f"{rxreplay.LAP_A:06x}", f"{rxreplay.LAP_B:06x}"
 # libbtbb's UAP and CLK6 progress lines; with the fixture's clocks the
-# receiver clock is the master clock, so the CLK1-6 offset is 0.
+# receiver clock is the central's clock, so the CLK1-6 offset is 0.
 _CLK6_ZERO = r"CLK6 = 0x0 found after \d+ total packets"
 _ANY_FOUND = r"(?:UAP|CLK6) = 0x[0-9a-f]+ found after"
 _UAP_NEEDS_LAP = r"error: -u <UAP> requires -l <LAP>"

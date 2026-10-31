@@ -80,7 +80,7 @@ def hec(header10: int, uap: int) -> int:
 
 
 def whitening(clock: int, length: int) -> list[int]:
-    """Whitening bits for a packet sent at master clock CLK (CLK1-6 used).
+    """Whitening bits for a packet sent at central clock CLK (CLK1-6 used).
 
     The LFSR D^7+D^4+1 is loaded with CLK1..CLK6 and a one in the top cell.
     """
@@ -158,7 +158,7 @@ FIXTURE_AGE_S = 3600            # record times are this long before generation
 class Record:
     lap: int | None             # None: no access code at all
     channel: int
-    clock: int                  # master CLK (312.5 us units)
+    clock: int                  # central CLK (312.5 us units)
     kind: str = "poll"          # poll, dh1 (header and CRC-checked payload), id
     flip: int | None = None     # sync-word bit to invert (an access-code error)
     pkt_type: int = BR_PACKET
@@ -167,7 +167,7 @@ class Record:
 
 
 def _records() -> tuple[Record, ...]:
-    # Master slots (CLK1-0 = 0); the clock steps vary. Headers alone leave
+    # Central slots (CLK1-0 = 0); the clock steps vary. Headers alone leave
     # CLK6 ambiguous, so the DH1 CRC is what pins the UAP.
     a = [
         (3, 0x2468, "poll"), (17, 0x246C, "poll"), (40, 0x2478, "poll"),

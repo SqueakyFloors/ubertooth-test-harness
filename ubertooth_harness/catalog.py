@@ -1197,7 +1197,7 @@ def builtin_catalog() -> TestCatalog:
         TestDefinition(
             "Capture known Classic device",
             "ubertooth-rx finds two registered ESP32 Classic peers streaming over "
-            "a Serial Port Profile link: the survey lists the piconet master's "
+            "a Serial Port Profile link: the survey lists the piconet central's "
             "LAP, an unfiltered run reports its packets, and swapping the peers' "
             "roles moves the LAP on the air to the other board",
             MappingProxyType({
@@ -1218,7 +1218,7 @@ def builtin_catalog() -> TestCatalog:
             "Follow Classic Bluetooth piconet",
             "ubertooth-rx -l and -u follow the piconet two registered ESP32 "
             "Classic peers make and report its packets, and report nothing for "
-            "the LAP of the peer that is not the master",
+            "the LAP of the peer that is not the central",
             MappingProxyType({
                 "hosts": HOSTS, "Ubertooth": UBERTOOTH,
                 "acceptor": ArgumentRule(_selector, default="default"),

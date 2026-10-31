@@ -1341,8 +1341,8 @@ them. `coverage:` and a required `duration:`; the pair streams 200 bytes every
 `/dev/serial/by-id`. Nothing flashes a peer, so each board must already run
 `utesp-1.0.0` or a later 1.x image, which mandatory preflight checks.
 
-**Expected outcome.** Smoke runs 2 cases: `ubertooth-rx -z` lists the master's
-LAP in its survey results, and a run with no target reports at least ten
+**Expected outcome.** Smoke runs 2 cases: `ubertooth-rx -z` lists the
+central's LAP in its survey results, and a run with no target reports at least ten
 packet lines carrying it. Comprehensive runs 4, adding the survey into PCAPNG
 (where the file must hold packets, not just a header) and the same survey with
 the peers' roles exchanged, which must list the other board's LAP and not the
@@ -1364,7 +1364,7 @@ to report this one alone.
 
 **What it does.** The same two peers hold the same link, and
 `ubertooth-rx -l`/`-u` has to follow that piconet and report its packets, and
-nothing for the board that is not its master.
+nothing for the board that is not its central.
 
 **Theory of operation.** `-l` asks libbtbb for one access code, so a packet
 line this test sees should carry the LAP it asked for and no other: that makes
@@ -1384,9 +1384,9 @@ the tool while the pair streams.
 and two ESP32 Classic peers as `acceptor` and `initiator`, `coverage:`, a
 required `duration:`, Linux only.
 
-**Expected outcome.** Smoke runs 2 cases: `-l <master LAP> -u <master UAP>`
+**Expected outcome.** Smoke runs 2 cases: `-l <central LAP> -u <central UAP>`
 reports at least ten packet lines and none of another LAP, and `-l`/`-u` for
-the peer that is not the master reports no packet at all. Comprehensive runs
+the peer that is not the central reports no packet at all. Comprehensive runs
 4, adding `-l` without `-u` and `-l -u -q` into PCAP, where the file must hold
 packets as well as a header. The cleanup is the same: both peers reset, the
 Ubertooth restored.

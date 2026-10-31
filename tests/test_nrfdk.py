@@ -384,9 +384,9 @@ class CommandLineTests(unittest.TestCase):
         except ImportError:
             self.skipTest("pyserial is not installed")
         self.firmware = FakeFirmware()
-        self.master, slave = os.openpty()
-        self.path = os.ttyname(slave)
-        self.slave = slave
+        self.pty, tty = os.openpty()
+        self.path = os.ttyname(tty)
+        self.tty = tty
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self.serve, daemon=True)
         self.thread.start()
@@ -394,25 +394,25 @@ class CommandLineTests(unittest.TestCase):
     def tearDown(self):
         self.stop.set()
         self.thread.join(timeout=2)
-        os.close(self.master)
-        os.close(self.slave)
+        os.close(self.pty)
+        os.close(self.tty)
 
     def serve(self):
         import select
         line = b""
         while not self.stop.is_set():
-            ready, _, _ = select.select([self.master], [], [], 0.05)
+            ready, _, _ = select.select([self.pty], [], [], 0.05)
             if not ready:
                 continue
             try:
-                data = os.read(self.master, 256)
+                data = os.read(self.pty, 256)
             except OSError:
                 return
             line += data
             while b"\r" in line:
                 raw, line = line.split(b"\r", 1)
                 for answer in self.firmware.handle(raw.decode().strip("\n")):
-                    os.write(self.master, answer.encode() + b"\r\n")
+                    os.write(self.pty, answer.encode() + b"\r\n")
 
     def main(self, *argv):
         out, err = io.StringIO(), io.StringIO()

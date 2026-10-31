@@ -6,13 +6,13 @@ Ubertooth listens. The Ubertooth only receives. That gives these cases
 something a check can be written against: BR/EDR traffic from an address the
 registry knows.
 
-The initiator pages, so it is the piconet master, and every packet in the
+The initiator pages, so it is the piconet central, and every packet in the
 piconet carries its LAP (ubertooth-rx(1), DISCOVERING UNDISCOVERABLE
 DEVICES). The acceptor's LAP is on the air only during the page train, which
 is over before a capture starts. Two things follow, and the cases check both:
 
-- ``ubertooth-rx -z`` lists the master's LAP in its survey results, and
-  ``-l <master LAP> -u <master UAP>`` reports packets for that piconet;
+- ``ubertooth-rx -z`` lists the central's LAP in its survey results, and
+  ``-l <central LAP> -u <central UAP>`` reports packets for that piconet;
 - the same run with the acceptor's LAP and UAP reports none.
 
 A survey's UAP is inferred from a handful of packets and can come out wrong,
@@ -28,7 +28,7 @@ boards and drop the link. Instead ``esp32peer.py stream`` holds both ports
 for the whole session and runs ``ubertooth-rx`` itself, passing the tool's
 output through unchanged on standard output. The tool's command line is
 therefore visible in the step's argv after ``--``, and the pair's own report
-(firmware versions, both BD_ADDRs, the master's LAP and UAP, writes and bytes
+(firmware versions, both BD_ADDRs, the central's LAP and UAP, writes and bytes
 received) is on standard error, where the step's patterns check it and the
 run record keeps it.
 
@@ -79,7 +79,7 @@ INITIATOR_ROLE = "initiator"
 # Ubertooth meets this piconet's packets on every channel it sweeps.
 STREAM_PERIOD_MS = 20
 STREAM_PAYLOAD = 200
-# Packet lines a capture of the master's piconet must hold. The Ubertooth
+# Packet lines a capture of the central's piconet must hold. The Ubertooth
 # sweeps 79 channels and decodes only the access codes it happens to land on,
 # so the count varies widely: eight 25 s runs on the bench gave 50 to 189
 # lines of this piconet. This is a floor a working receive clears with room
@@ -222,7 +222,7 @@ def no_piconet_packets(lap: str) -> Check:
         laps = _packet_laps(output)
         if laps:
             return (f"{len(laps)} packet lines (LAP {laps[0]}), expected none: "
-                    f"{lap} is not the piconet master's LAP")
+                    f"{lap} is not the piconet central's LAP")
         return ""
     return check
 
@@ -242,7 +242,7 @@ def survey_omits(lap: str) -> Check:
     """The survey results do not name ``lap``."""
     def check(output) -> str:
         if lap in _survey_laps(output):
-            return f"the survey listed LAP {lap}, which is not the master's"
+            return f"the survey listed LAP {lap}, which is not the central's"
         return ""
     return check
 
@@ -333,8 +333,8 @@ def _pair_patterns(acceptor, initiator) -> tuple[str, ...]:
     return (
         rf"(?m)^acceptor address: {acceptor['address']}$",
         rf"(?m)^initiator address: {initiator['address']}$",
-        rf"(?m)^master LAP: {initiator['lap']}$",
-        rf"(?m)^master UAP: {initiator['uap']}$",
+        rf"(?m)^central LAP: {initiator['lap']}$",
+        rf"(?m)^central UAP: {initiator['uap']}$",
         r"(?m)^link: up to ",
         r"(?m)^command exit: 0 after \d+\.\d s$",
         r"(?m)^pair streamed: yes$",
@@ -377,34 +377,34 @@ def _capture_case(serial, acceptor, initiator, seconds, *, case_id, name,
 
 
 def known_classic_cases(arguments, resources, resource_identities):
-    """Capture known Classic device: a survey and a sweep find the master."""
+    """Capture known Classic device: a survey and a sweep find the central."""
     serial = _serial(resource_identities, CAPTURE_TEST_NAME)
     acceptor, initiator = _pair(resource_identities, CAPTURE_TEST_NAME, resources)
     seconds = seconds_arg(arguments)
-    master = initiator["lap"]
+    central = initiator["lap"]
 
     def capture(**options):
         return _capture_case(serial, acceptor, initiator, seconds, **options)
 
     cases = [
         capture(case_id="survey",
-                name=f"ubertooth-rx -z lists the pair's master LAP {master}",
+                name=f"ubertooth-rx -z lists the pair's central LAP {central}",
                 options=("-z",),
-                check=_all(packet_check(survey=True), survey_lists(master)),
-                expected_state=f"the survey results list LAP {master}"),
+                check=_all(packet_check(survey=True), survey_lists(central)),
+                expected_state=f"the survey results list LAP {central}"),
         capture(case_id="sweep",
                 name="ubertooth-rx with no target reports the pair's packets",
                 options=(),
-                check=piconet_packets(master, MIN_PACKETS, only=False),
-                expected_state=f"{MIN_PACKETS}+ packet lines with LAP {master}"),
+                check=piconet_packets(central, MIN_PACKETS, only=False),
+                expected_state=f"{MIN_PACKETS}+ packet lines with LAP {central}"),
     ]
     if arguments["coverage"] == "comprehensive":
         cases.append(capture(
             case_id="survey-pcapng",
-            name=f"ubertooth-rx -z -r (PCAPNG) lists LAP {master} and writes a file",
+            name=f"ubertooth-rx -z -r (PCAPNG) lists LAP {central} and writes a file",
             options=("-z",),
-            check=_all(packet_check(survey=True), survey_lists(master)),
-            expected_state=(f"the survey results list LAP {master}; -r wrote a "
+            check=_all(packet_check(survey=True), survey_lists(central)),
+            expected_state=(f"the survey results list LAP {central}; -r wrote a "
                             f"pcapng file with link type {LINKTYPE_BREDR} and "
                             f"{MIN_PACKETS}+ packets in it"),
             files=(("-r", "survey.pcapng"),),
@@ -412,40 +412,41 @@ def known_classic_cases(arguments, resources, resource_identities):
                 "verify-capture",
                 "The -r file is a BR/EDR pcapng and holds the packets",
                 "survey.pcapng", "pcapng", MIN_PACKETS),)))
-        # Which board is master is decided by which one pages, so binding the
-        # pair the other way round moves the LAP on the air to the other board.
+        # Which board is the central is decided by which one pages, so binding
+        # the pair the other way round moves the LAP on the air to the other
+        # board.
         cases.append(_capture_case(
             serial, initiator, acceptor, seconds, case_id="survey-roles-swapped",
             name=f"With the roles swapped the survey lists LAP {acceptor['lap']}, "
-                 f"not {master}",
+                 f"not {central}",
             options=("-z",),
             check=_all(packet_check(survey=True), survey_lists(acceptor["lap"]),
-                       survey_omits(master)),
+                       survey_omits(central)),
             expected_state=f"the survey results list LAP {acceptor['lap']} and "
-                           f"not {master}"))
+                           f"not {central}"))
     return tuple(cases)
 
 
 def follow_classic_cases(arguments, resources, resource_identities):
-    """Follow Classic Bluetooth piconet: -l and -u follow the master only."""
+    """Follow Classic Bluetooth piconet: -l and -u follow the central only."""
     serial = _serial(resource_identities, FOLLOW_TEST_NAME)
     acceptor, initiator = _pair(resource_identities, FOLLOW_TEST_NAME, resources)
     seconds = seconds_arg(arguments)
-    master, master_uap = initiator["lap"], initiator["uap"]
+    central, central_uap = initiator["lap"], initiator["uap"]
 
     def capture(**options):
         return _capture_case(serial, acceptor, initiator, seconds, **options)
 
     cases = [
         capture(case_id="follow-lap-uap",
-                name=f"ubertooth-rx -l {master} -u {master_uap} reports the "
+                name=f"ubertooth-rx -l {central} -u {central_uap} reports the "
                      "piconet's packets",
-                options=("-l", master, "-u", master_uap),
-                check=piconet_packets(master, MIN_PACKETS, only=True),
-                expected_state=f"{MIN_PACKETS}+ packet lines, all with LAP {master}"),
+                options=("-l", central, "-u", central_uap),
+                check=piconet_packets(central, MIN_PACKETS, only=True),
+                expected_state=f"{MIN_PACKETS}+ packet lines, all with LAP {central}"),
         capture(case_id="follow-other-lap",
                 name=f"ubertooth-rx -l {acceptor['lap']} -u {acceptor['uap']} "
-                     "reports nothing: that board is not the master",
+                     "reports nothing: that board is not the central",
                 options=("-l", acceptor["lap"], "-u", acceptor["uap"]),
                 check=no_piconet_packets(acceptor["lap"]),
                 expected_state=f"no packet line with LAP {acceptor['lap']}"),
@@ -453,17 +454,17 @@ def follow_classic_cases(arguments, resources, resource_identities):
     if arguments["coverage"] == "comprehensive":
         cases.append(capture(
             case_id="follow-lap-only",
-            name=f"ubertooth-rx -l {master} recovers the UAP itself",
-            options=("-l", master),
-            check=piconet_packets(master, MIN_PACKETS, only=True),
-            expected_state=f"{MIN_PACKETS}+ packet lines, all with LAP {master}"))
+            name=f"ubertooth-rx -l {central} recovers the UAP itself",
+            options=("-l", central),
+            check=piconet_packets(central, MIN_PACKETS, only=True),
+            expected_state=f"{MIN_PACKETS}+ packet lines, all with LAP {central}"))
         cases.append(capture(
             case_id="follow-pcap",
-            name=f"ubertooth-rx -l {master} -u {master_uap} -q (PCAP) writes the "
+            name=f"ubertooth-rx -l {central} -u {central_uap} -q (PCAP) writes the "
                  "piconet's packets",
-            options=("-l", master, "-u", master_uap),
-            check=piconet_packets(master, MIN_PACKETS, only=True),
-            expected_state=(f"{MIN_PACKETS}+ packet lines with LAP {master}; -q "
+            options=("-l", central, "-u", central_uap),
+            check=piconet_packets(central, MIN_PACKETS, only=True),
+            expected_state=(f"{MIN_PACKETS}+ packet lines with LAP {central}; -q "
                             f"wrote a pcap file with link type {LINKTYPE_BREDR} "
                             f"and {MIN_PACKETS}+ packets in it"),
             files=(("-q", "follow.pcap"),),
