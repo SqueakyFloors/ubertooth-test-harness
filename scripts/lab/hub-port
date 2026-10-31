@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+"""Switch one port of a registered USB power controller, by hand.
+
+    hub-port <controller> on    <port>
+    hub-port <controller> off   <port>
+    hub-port <controller> cycle <port> [seconds]
+
+This is the manual recovery path for a device that has stopped answering: its
+port goes off, then on, and it enumerates again. A harness run switches power
+itself and needs none of this.
+
+Reading changes nothing and belongs to the harness:
+
+    ubertooth-harness power --hardware <registry> <controller>
+
+The controller is a registry alias, so the hub's serial, its driver, and which
+ports it has come from the registry and nothing is built in. The driver and
+the port range are whatever the registry says: 0 to 7 on an Acroname
+USBHub3+, 1 to 3 on a StarTech managed hub.
+
+It holds the harness's host power/firmware lock while it switches, so it can
+never overlap a run that is flashing or switching power, and it refuses a port
+whose registered device someone is holding, naming the holder, so it cannot
+cut power under another run or another person. `--force` switches without
+holding the device, for one that is wedged and whose holder has given up on
+it; it cannot then say who holds it.
+
+Switch only the port of the device you are recovering. Taking a port down
+takes its device off the bus, and on a host near its USB endpoint limit a
+device that leaves may not come back (see docs/hardware.md). Cycle once, then
+look; do not loop.
+
+Exit status is 0 when the port was switched and read back, and 2 otherwise,
+which is what the harness CLI exits on an error of its own. A cycle whose
+power-on fails tries once more to leave the port on, and says whether that
+worked.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import signal
+import sys
+import time
+from pathlib import Path
+
+# This directory and the checkout, so the harness package and the shared
+# helpers beside this file are importable; see the note in `hold`.
+_HERE = Path(__file__).resolve().parent
+sys.path[:0] = [str(_HERE), str(_HERE.parents[1])]
+
+try:
+    from ubertooth_harness import leases
+    from ubertooth_harness.environment import (
+        HarnessEnvironmentError,
+        require_harness_environment,
+    )
+    from ubertooth_harness.power import (
+        PowerControllerError,
+        controller_from_resource,
+        controller_ports,
+        snapshot_ports,
+    )
+    from ubertooth_harness.resources import FileResourceRegistry, RegistryError
+
+    from _bench import bench_lock_board, board as device_board
+except ImportError:  # run from outside the harness environment
+    sys.exit(
+        "hub-port: run this from the harness environment "
+        "(python3 bootstrap.py, then .venv/bin/python scripts/lab/hub-port ...)"
+    )
+
+HARDWARE_ENV = "UBERTOOTH_HARNESS_HARDWARE"
+# How long to wait for the host lock and the device. A run holds the host lock
+# across a build and a flash stage, so a recovery that waits a couple of
+# minutes is better than one that gives up at once; --wait changes it.
+HOST_LOCK_WAIT_S = 120.0
+# The harness's own "wait for it" advice, in each of the forms it takes for a
+# busy board and a busy host lock. It names an option this command does not
+# have, so it is dropped and the message carries only this command's advice.
+_WAIT_HINT = re.compile(
+    r";?\s*(?:retry when it ends, or )?use --wait-for-boards MINUTES"
+    r"(?: to wait for it)?\.?"
+)
+SETTLE_S = 0.5
+# VBUS takes about 0.55 s to fall below 0.1 V with a device attached
+# (docs/hardware.md), so a switch-off read any sooner prints a stale voltage.
+OFF_SETTLE_S = 1.0
+DEFAULT_CYCLE_S = 2.0
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="hub-port",
+        description="Switch one port of a registered USB power controller.",
+        epilog="Read the ports with: ubertooth-harness power --hardware H ALIAS",
+    )
+    parser.add_argument("controller", metavar="ALIAS", help="registered USB power controller")
+    parser.add_argument("action", choices=("on", "off", "cycle"))
+    parser.add_argument("port", type=int, help="downstream port number")
+    parser.add_argument(
+        "seconds", nargs="?", type=float, default=None,
+        help=f"how long the port stays off in a cycle (default {DEFAULT_CYCLE_S:g}); "
+             "only 'cycle' takes it",
+    )
+    parser.add_argument(
+        "--hardware", type=Path, default=os.environ.get(HARDWARE_ENV) or None,
+        help=f"resource registry (default ${HARDWARE_ENV})",
+    )
+    parser.add_argument(
+        "--lease-dir", type=Path, default=None,
+        help=f"harness lease directory (default ${leases.LEASE_DIR_ENV})",
+    )
+    parser.add_argument(
+        "--owner", default=None,
+        help=f"how you are named in another holder's error (default ${leases.OWNER_ENV})",
+    )
+    parser.add_argument(
+        "--external-board-lock", metavar="TEMPLATE", default=None,
+        help="the bench's own per-device lock files, so a device held only "
+             f"there is seen too (default ${leases.EXTERNAL_LOCK_ENV})",
+    )
+    parser.add_argument(
+        "--wait", type=float, default=HOST_LOCK_WAIT_S, metavar="SECONDS",
+        help="how long to wait for the device and the host lock "
+             f"(default {HOST_LOCK_WAIT_S:g}); 0 reports the holder at once",
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="switch the port even though its device is held; for a wedged "
+             "device whose holder has given up on it",
+    )
+    args = parser.parse_args(argv)
+    if args.hardware is None:
+        parser.error(f"no registry; pass --hardware or set ${HARDWARE_ENV}")
+    if args.seconds is not None and args.action != "cycle":
+        # Accepting it and ignoring it would read as though it had an effect.
+        parser.error(f"'{args.action}' takes no seconds; only 'cycle' waits")
+    if args.seconds is None:
+        args.seconds = DEFAULT_CYCLE_S
+    if not 0.0 <= args.seconds <= 60.0:
+        parser.error("seconds must be between 0 and 60")
+    if args.wait < 0:
+        parser.error("--wait cannot be negative")
+    return args
+
+
+def device_on_port(registry, controller_alias: str, port: int):
+    """The registered device mapped to this port of this controller, if any."""
+    for resource in registry.resources.values():
+        power = resource.power or {}
+        if power.get("controller") == controller_alias and power.get("port") == port:
+            return resource
+    return None
+
+
+def describe(state) -> str:
+    volts = "-" if state.vbus_microvolts is None else f"{state.vbus_microvolts / 1e6:.2f} V"
+    amps = "-" if state.vbus_microamps is None else f"{state.vbus_microamps / 1e3:.1f} mA"
+    return (
+        f"port {state.port}: power {'on ' if state.power_enabled else 'off'} "
+        f"data {'on ' if state.data_enabled else 'off'} VBUS {volts:>7} {amps:>9}"
+    )
+
+
+def switch(controller, port: int, action: str, seconds: float, sleep=time.sleep) -> None:
+    """Switch the port, and never leave a cycle's port off.
+
+    Once VBUS is off, every way out of this function goes through the restore:
+    a refused write, a failed read-back, or a Ctrl-C during the wait. A port
+    left off is the one failure that leaves the bench worse than it was found.
+    """
+    if action != "cycle":
+        controller.set_power_enabled(port, action == "on")
+        # The driver reads every write back, so this wait is only for the
+        # device: VBUS and current need a moment to mean anything.
+        sleep(OFF_SETTLE_S if action == "off" else SETTLE_S)
+        return
+
+    # Armed before the write, not after it: a signal delivered between the two
+    # would otherwise escape with the port off.
+    on = False
+    try:
+        controller.set_power_enabled(port, False)
+        sleep(seconds)
+        controller.set_power_enabled(port, True)
+        on = True
+    finally:
+        if not on:
+            try:
+                # A driver that failed a write may have closed its link (the
+                # StarTech one does, on any I/O error), and the restore would
+                # then fail on a closed link. connect() costs nothing when the
+                # link is already open.
+                controller.connect()
+                controller.set_power_enabled(port, True)
+                print(
+                    f"note: port {port} was switched back on after the cycle "
+                    "did not finish",
+                    file=sys.stderr,
+                )
+            except PowerControllerError as error:
+                # Reported, not raised: whatever stopped the cycle is the more
+                # useful thing to let through, and raising here would hide it.
+                print(
+                    f"error: port {port} is OFF and could not be switched "
+                    f"back on: {error}",
+                    file=sys.stderr,
+                )
+    sleep(SETTLE_S)
+
+
+def _cancel(signum, _frame):
+    """Turn a signal into an exception, so a cycle's restore path runs.
+
+    The maintainer's laptop drops its SSH sessions when it sleeps, which
+    SIGHUPs whatever was running. Without this, that during a cycle's
+    off-window would leave the port off.
+    """
+    raise KeyboardInterrupt(f"signal {signum}")
+
+
+def main(argv: list[str] | None = None, *, sleep=time.sleep) -> int:
+    args = parse_args(list(sys.argv[1:] if argv is None else argv))
+    for number in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(number, _cancel)
+    try:
+        # This opens a real controller and changes power, so it runs only in
+        # the bootstrapped harness environment, as `ubertooth-harness power`
+        # does. Reported like any other refusal, not as a traceback.
+        require_harness_environment()
+        registry = FileResourceRegistry.load(args.hardware)
+        resource = registry.get(args.controller)
+        ports = controller_ports(resource)
+        if args.port not in ports:
+            raise PowerControllerError(
+                f"{resource.alias} ({resource.driver}) has no port {args.port}; "
+                "its switchable ports are " + ", ".join(str(p) for p in ports)
+            )
+        template = leases.external_lock_template(args.external_board_lock)
+        # The device on this port is *held*, not merely checked: a check and a
+        # later switch leave a window in which a run can take the device and
+        # have its power cut. An empty port has nothing to hold.
+        device = device_on_port(registry, resource.alias, args.port)
+        boards = []
+        if device is not None and not args.force:
+            # Both of its lock names, exactly as `hold` takes them, so a bench
+            # script holding either one is met here too.
+            boards = [device_board(device)]
+            second = bench_lock_board(device)
+            if second is not None:
+                boards.append(second)
+        if device is not None and args.force:
+            print(
+                f"note: switching port {args.port} without holding "
+                f"{device.alias}, which may be in use (--force)",
+                file=sys.stderr,
+            )
+        controller = controller_from_resource(resource, allow_real_changes=True)
+    except (RegistryError, PowerControllerError, leases.LeaseError,
+            HarnessEnvironmentError) as error:
+        return _fail(error)
+
+    try:
+        with leases.acquire(
+            boards,
+            leases.holder_info(
+                run_id=None, owner=args.owner,
+                purpose=f"hub-port {args.action} {resource.alias} port {args.port}",
+            ),
+            directory=args.lease_dir,
+            wait_s=args.wait,
+            host_lock=True,
+            external_template=template,
+        ):
+            controller.connect()
+            try:
+                switch(controller, args.port, args.action, args.seconds, sleep=sleep)
+                for state in snapshot_ports(controller, (args.port,)):
+                    print(describe(state))
+            finally:
+                try:
+                    controller.close()
+                except PowerControllerError:
+                    pass  # the switch result above is what matters
+    except leases.LeaseError as error:
+        # Whoever holds the device, or the host lock, is named in the message.
+        # The harness's message ends by naming its own wait option, which
+        # this command does not have; its own advice replaces that, so a
+        # reader is not given two different options to try.
+        return _fail(
+            f"{_WAIT_HINT.sub('', str(error)).rstrip('; ')}; wait longer with "
+            "--wait SECONDS, or, if the device itself is wedged and its holder "
+            "has given up on it, --force"
+        )
+    except PowerControllerError as error:
+        return _fail(f"{resource.alias}: {error}")
+    except KeyboardInterrupt:
+        # The port was restored on the way out; say so, not a traceback.
+        return _fail("canceled")
+    return 0
+
+
+def _fail(error) -> int:
+    """Report like the harness CLI does, and exit as it does (2)."""
+    print(f"hub-port: error: {error}", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

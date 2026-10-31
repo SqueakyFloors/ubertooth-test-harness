@@ -155,7 +155,10 @@ and `MAC polling soak`.
 type and its role, the firmware each one runs and how it is built, flashed and
 checked, the APIs and protocols the harness depends on, host setup, the known
 limits of a crowded USB host, and a worked bench layout. Read it to set up a
-bench, or to judge what a result was measured on.
+bench, or to judge what a result was measured on. The by-hand helpers that go
+with it are in [`scripts/lab/`](scripts/lab/README.md): `hold` holds devices
+by serial for one command, and `hub-port` switches a hub port to recover one
+that has stopped answering.
 
 `hardware.yaml` is the ignored local resource registry; copy
 [`hardware.example.yaml`](hardware.example.yaml) to start. Register every macOS/Linux computer as a
@@ -1659,7 +1662,17 @@ is masked only where it stands alone, so it cannot mask part of a count. A
 serial port path keeps its shape with the serial inside it masked
 (`/dev/serial/by-id/usb-SEGGER_J-Link_<serial>-if00`), whether the registry
 held that path or the harness found it. Any standalone 32-hex-digit token is
-masked too, since that is the shape of an Ubertooth serial.
+masked too, since that is the shape of an Ubertooth serial. Where output was
+cut inside a serial, which either output cap can do, the piece the cut left
+behind is masked as well: a run of 8 hex digits or more that a serial the run
+names holds, or, for a board the run never names, a run of 24 to 31 digits
+carrying both letters and digits, which is a serial and little else. Left to
+read are a whole git SHA or digest, a narrower piece, and a long run of
+digits or of letters alone (a counter, a bit string, a field of zeros) that
+no serial the run names holds. The cost of the width rule is that a SHA an
+output cap cut that short reads as `<serial>` too. Redaction is this page
+only: a run's own `report.md`, which carries the transcript, is always
+written with its serials.
 
 ## Flash reliability
 
