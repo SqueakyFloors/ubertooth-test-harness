@@ -547,12 +547,17 @@ still shows up there rather than leaving `status` reporting the map before
 it.
 
 With no one link there is no link map: `afh_link`, `afh_link_used` and
-`afh_mode` read `null`, `afh_link_error` is empty, and `afh` still reports
+`afh_mode` read `null` and `afh_link_error` is empty, and `afh` still reports
 what was asked for. That covers a board with no link and a board with more
 than one, which is no one piconet, exactly as the clock read treats it; these
 boards are connectable, so something else in the room can open the second
 one. A link whose AFH the controller reports as off reads the same way except
 that `afh_mode` is `"off"`, because the map means nothing then.
+
+An empty `afh_link_error` therefore means nothing went wrong, and anything
+else is a reason: a board that has a link the controller will not answer
+about reads `the controller does not know this link`, which is not the same
+as having no link, and a link that changed under the read says so too.
 
 The link map is read first and the rest of the line is gathered after it, so
 on a link that is going down the three link fields can describe a link the

@@ -972,9 +972,11 @@ static void afh_status_fields(char *out, size_t len)
         /* Outside the lock: this waits on the controller. */
         result = utesp_afh_read(handle, &link);
         if (result == UTESP_AFH_NO_LINK) {
-            /* The link went down between learning the handle and the read,
-             * which is the same news as having no link at all. */
+            /* The board has a link the controller does not know by that
+             * handle. Saying so beats reporting it as no link at all, which
+             * is a different thing and reads as nothing being wrong. */
             in_piconet = false;
+            error = "the controller does not know this link";
         } else if (result != UTESP_AFH_OK) {
             in_piconet = false;
             error = afh_read_failure(result);
@@ -990,6 +992,9 @@ static void afh_status_fields(char *out, size_t len)
         LOCK();
         in_piconet = st.acl_known && st.acl_handle == handle;
         UNLOCK();
+        if (!in_piconet) {
+            error = "the board's link changed while the map was read";
+        }
     }
 
     if (in_piconet && link.enabled) {
