@@ -444,16 +444,21 @@ python -m ubertooth_harness run-suite \
 ```
 
 The plan's second suite, `range-weak-link`, runs the same test with the
-weak-link receiver answering. It asks for the responder by RF placement
-(`rf: {responder: {min_attenuation_db: 10}}`) rather than by alias, so it runs
-wherever a board records at least 10 dB of attenuation and is reported not
-applicable, naming what was missing, where none does. Its `maximum PA level`
-is the same 3 as the main suite, which is what the bench measured: with a
-board a meter away behind a 20 dB attenuator, ten round trips, both orders
-alternated, all got through at PA level 0 to 2. At this distance 20 dB does
-not yet raise the level a link needs, so what the suite pins is that the link
-still closes with the attenuated board selected, and that the run records
-which board that was and at what placement.
+weak-link receiver answering. It chooses both boards by RF placement rather
+than by alias: the responder behind an attenuator
+(`responder: {min_attenuation_db: 10, max_attenuation_db: 20}`) and the sender
+in the open (`sender: {max_attenuation_db: 0, antenna: true}`), which also
+keeps the two apart on a bench whose default board is the attenuated one. The
+suite needs such a board; because it names one host, a bench with none fails
+planning, with the requirement and each board's placement in the message.
+
+Its `maximum PA level` of 2 is measured in that orientation: with the
+responder a meter away behind 20 dB and the sender in the open, ten round
+trips got through at PA level 0 or 1 every time, so 2 is the observed maximum
+plus one level of headroom, tighter than the 3 the main suite allows. The
+placement is bounded above as well, because 20 dB is the only value measured:
+more attenuation needs a higher level, which would make this ceiling wrong
+rather than strict.
 
 On current fork main the test passes: the sender gets a clean round trip and
 `-m` reports request and reply PA levels and copy numbers (fixed by

@@ -15,24 +15,30 @@ suites:
         # through at the lowest levels.
         maximum PA level: 3
 
-  # The same test with the weak-link receiver answering: the responder is
-  # chosen by its RF placement rather than by alias, so this suite runs
-  # wherever a board records at least 10 dB of attenuation and is reported
-  # not applicable, naming what was missing, where none does.
+  # The same test with the weak-link receiver answering: both roles are
+  # chosen by RF placement rather than by alias, the responder behind an
+  # attenuator and the sender in the open. Naming both keeps them apart on a
+  # bench whose default board is the attenuated one, where two `default`
+  # selectors would resolve to it and planning would fail.
   #
-  # The level is the same 3 as above because that is what the bench
-  # measured: with a board 1 m away behind a 20 dB attenuator, ten round
-  # trips (both orders, alternated) all got through at PA level 0 to 2. So
-  # 20 dB at this distance does not yet make the PA level mean more than it
-  # does without it; what this suite pins is that the link still closes, and
-  # that the attenuated board is the one selected and recorded. Narrowing
-  # the level needs more attenuation than the bench has today.
+  # This suite needs such a board: it names one host, so a bench with none
+  # fails planning, naming the requirement and what each board is placed as.
+  # Delete the suite, or the whole plan, on a bench without one.
+  #
+  # The level is measured, in this orientation: with the responder a meter
+  # away behind 20 dB, ten round trips with the sender in the open got
+  # through at PA level 0 or 1 every time, so 2 is the observed maximum plus
+  # one level of headroom. That is tighter than the 3 the main suite allows.
+  # The placement is bounded above as well, because 20 dB is the only value
+  # measured: more attenuation needs a higher level, and would make this
+  # ceiling wrong rather than strict.
   range-weak-link:
     - Two-device range test:
         host: Host_Linux
         sender: default
         responder: default
         rf:
-          responder: {min_attenuation_db: 10}
+          sender: {max_attenuation_db: 0, antenna: true}
+          responder: {min_attenuation_db: 10, max_attenuation_db: 20}
         allow RF transmission: true
-        maximum PA level: 3
+        maximum PA level: 2

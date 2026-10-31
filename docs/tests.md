@@ -681,12 +681,12 @@ ran rather than just showing what `-r` left behind. The responder's LEDs are
 read while it repeats, before the sender starts and again after the test, so a
 failure tells a wedged repeater from a wedged sender.
 
-**Hardware and arguments.** Two Ubertooths as `sender` and `responder`, both
-required as explicit aliases with full 32-hex-digit serials, and `host:` must
-name one host rather than `each`. `allow RF transmission: true` is required:
-both boards transmit, the sender at every PA level up to 0 dBm. `maximum PA
-level:` (0-7, default 7) is the highest level the plan accepts for a pass.
-Guarded.
+**Hardware and arguments.** Two Ubertooths as `sender` and `responder`, each
+named by an explicit alias with a full 32-hex-digit serial or chosen by RF
+placement, and `host:` must name one host rather than `each`. `allow RF
+transmission: true` is required: both boards transmit, the sender at every PA
+level up to 0 dBm. `maximum PA level:` (0-7, default 7) is the highest level
+the plan accepts for a pass. Guarded.
 
 **Expected outcome.** One case of 35 steps. It passes when the sender's `-m`
 reports four result lines with request and reply PA levels at or below
@@ -696,10 +696,23 @@ at 2441 MHz once the test ends by itself; `-S` returns the repeater to idle;
 and every setting of both boards is restored. A reply that differs from the
 request fails with the byte and the field it belongs to named.
 
-**Known limits.** The boards sit centimeters apart on a bench, so a working
-link gets through at a low PA level and a pass at level 0 says little about
-range. What `maximum PA level` buys is a tighter bound than "it worked at full
-power". An occasional `mismatch on byte 0` is a known fork behavior
+**Weak-link responder.** `range.yaml`'s second suite, `range-weak-link`,
+chooses both boards by RF placement instead of by alias: the responder behind
+an attenuator (`min_attenuation_db: 10`, `max_attenuation_db: 20`) and the
+sender in the open (`max_attenuation_db: 0`), which also keeps the roles apart
+on a bench whose default board is the attenuated one. Because the step names
+one host, a bench with no such board fails planning, with the requirement and
+each board's placement in the message. Its `maximum PA level` of 2 was
+measured in that orientation: a responder a meter away behind 20 dB answered a
+sender in the open at PA level 0 or 1 in ten round trips, so 2 is the observed
+maximum plus one level. The upper bound on the placement is there because 20
+dB is the only value measured; more attenuation needs a higher level.
+
+**Known limits.** On an ordinary bench the boards sit centimeters apart, so a
+working link gets through at a low PA level and a pass at level 0 says little
+about range. What `maximum PA level` buys is a tighter bound than "it worked at
+full power", and the weak-link suite above tightens it further. An occasional
+`mismatch on byte 0` is a known fork behavior
 ([ubertooth#677](https://github.com/SqueakyFloors/ubertooth/issues/677)). The
 test needs a second board, so it cannot run on a single-board host.
 
