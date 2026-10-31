@@ -10,6 +10,15 @@ whose output stayed small enough for run.jsonl has no file, and its
 ``CommandOutput`` reads the complete in-memory copy instead; either way the
 check sees the same bytes it would have seen before.
 
+A pattern is matched against the whole stream while the stream fits in
+WHOLE_STREAM_CHARS, which is what it meant before any of this and covers
+every command but the few that stream for minutes or hours. Past that it is
+matched a window of lines at a time, so the search costs the same for a
+soak's output as for a two-line answer; a pattern that can only be answered
+by the whole stream (anchored to its start or end, or reaching across lines)
+is refused there rather than answered from a window, because that answer
+could be wrong.
+
 Every check that reads output records what it read (its pattern, the streams,
 and what it found) in ``CommandOutput.checks``. The sequencer writes those
 records to run.jsonl, which is what lets ``ubertooth-harness validate`` run
@@ -21,7 +30,7 @@ from dataclasses import dataclass, field
 import hashlib
 from pathlib import Path
 import re
-from typing import Iterable, Iterator, Sequence
+from typing import Iterable, Iterator, Mapping, Sequence
 
 OUTPUT_DIR = "output"
 STREAMS = ("stdout", "stderr")
@@ -49,16 +58,24 @@ def stream_for(path: Path) -> str:
 # A file is read back in blocks of about this many characters, extended to
 # the next line ending, so memory stays flat however long the stream ran.
 READ_BLOCK_CHARS = 256 * 1024
-# How far a pattern may reach back across a block boundary. Every pattern the
-# harness searches for matches inside one line, far below this.
-SEARCH_OVERLAP_CHARS = 8 * 1024
-# Lines a pattern may cover in search_lines; the longest the harness has is
-# the four-line range test result.
-LINE_SPAN = 8
+# Lines a pattern may cover, and the characters they may hold between them,
+# when a stream is too long to search as one text. The longest pattern the
+# harness searches for covers four lines (the range test result); the rest
+# match inside one.
+LINE_SPAN = 16
+WINDOW_CHARS = 256 * 1024
+# The most a search reads as one text. Under this a pattern is matched
+# against the whole stream, exactly as it was before a command's output went
+# to a file; the streams that pass it are the long ones, which are checked by
+# line patterns and by counts.
+WHOLE_STREAM_CHARS = 8 * 1024 * 1024
+# What makes a pattern one that only the whole stream can answer.
+_WHOLE_STREAM = re.compile(r"\\A|\\Z|\\z|\[\\s\\S\]|\(\?[aiLmsux]*s")
 # The most one block, or one line, may grow to. A stream with no line endings
 # (a binary dump a tool wrote to stdout) has no line to end a block at, so
-# without this a single read would take the whole file.
-MAX_BLOCK_CHARS = READ_BLOCK_CHARS + SEARCH_OVERLAP_CHARS
+# without this a single read would take the whole file; a longer line reaches
+# a check in pieces.
+MAX_BLOCK_CHARS = 2 * READ_BLOCK_CHARS
 # Blocks for hashing, in bytes.
 HASH_BLOCK_BYTES = 1024 * 1024
 
@@ -101,6 +118,8 @@ class OutputFile:
 
     @classmethod
     def from_dict(cls, value) -> "OutputFile":
+        if not isinstance(value, Mapping):
+            return cls(path="", stream="", bytes=0, lines=0, sha256="")
         return cls(
             path=str(value.get("path", "")),
             stream=str(value.get("stream", "")),
@@ -234,50 +253,88 @@ class LineSource:
         self._parts = tuple(parts)
 
     def __iter__(self) -> Iterator[str]:
+        return (text for text, _starts_line in self.pieces())
+
+    def pieces(self) -> Iterator[tuple[str, bool]]:
+        """Each line, and whether it starts one.
+
+        A line longer than MAX_BLOCK_CHARS arrives in pieces, so a stream
+        with no line endings costs no more memory than any other; only the
+        first piece starts a line, which is what keeps a pattern anchored
+        with ``^`` from matching at a piece boundary.
+        """
         pending = ""
+        starts_line = True
         for part in self._parts:
             for block in _blocks(part):
                 pending += block
                 *complete, pending = pending.split("\n")
                 for line in complete:
-                    yield line.rstrip("\r")
+                    yield line.rstrip("\r"), starts_line
+                    starts_line = True
                 while len(pending) > MAX_BLOCK_CHARS:
-                    # A line longer than this is given to the check in pieces,
-                    # so a stream with no line endings costs no more memory
-                    # than any other.
-                    yield pending[:MAX_BLOCK_CHARS]
+                    yield pending[:MAX_BLOCK_CHARS], starts_line
+                    starts_line = False
                     pending = pending[MAX_BLOCK_CHARS:]
         if pending:
-            yield pending.rstrip("\r")
+            yield pending.rstrip("\r"), starts_line
 
 
 def find_lines(source, pattern, *, span: int = LINE_SPAN) -> Iterator[re.Match]:
     """Every match of ``pattern`` in a line source, in order.
 
-    For a check that is given lines but reads a pattern covering a few
-    consecutive lines, such as the three-line LED status block or the
-    four-line range test result. The lines pass through a window of ``span``
-    lines, and a match is reported by the window whose first line it starts
-    in, so each one is reported once and memory stays flat. A pattern
-    covering more than ``span`` lines is not found.
+    The lines pass through a window of ``span`` of them (and at most
+    WINDOW_CHARS characters), and a match is reported by the window whose
+    first line it starts in, so each one is reported once and memory stays
+    flat however long the stream is. ``^`` and ``$`` therefore mean the start
+    and the end of a line, which is what every pattern the harness searches
+    for means by them; a pattern covering more than ``span`` lines is not
+    found.
+
+    ``pattern`` may be a compiled pattern, so a caller keeps whichever flags
+    it was compiled with.
     """
     expression = re.compile(pattern)
     window: collections.deque = collections.deque()
-    for line in text_lines(source):
-        window.append(line)
-        if len(window) <= span:
+    held = 0
+    for piece in _pieces(source):
+        window.append(piece)
+        held += len(piece[0]) + 1
+        if len(window) <= span and held <= WINDOW_CHARS:
             continue
         yield from _matches_starting_in_first(expression, window)
-        window.popleft()
+        held -= len(window.popleft()[0]) + 1
     while window:
         yield from _matches_starting_in_first(expression, window)
         window.popleft()
 
 
+def _pieces(source) -> Iterator[tuple[str, bool]]:
+    """``source`` as (text, starts a line) pairs; see LineSource.pieces."""
+    if isinstance(source, LineSource):
+        return source.pieces()
+    return ((line, True) for line in text_lines(source))
+
+
+# Stands before a window that begins inside an over-long line, so that a
+# '^' cannot match there: the search starts after it, and only a newline
+# before a position makes it a line start.
+_NOT_A_LINE_START = "\x00"
+
+
 def _matches_starting_in_first(expression, window) -> Iterator[re.Match]:
-    first = len(window[0])
-    for match in expression.finditer("\n".join(window)):
-        if match.start() > first:
+    text, starts_line = window[0]
+    first = len(text)
+    joined = "\n".join(piece for piece, _s in window)
+    if starts_line:
+        yield from (m for m in expression.finditer(joined) if m.start() <= first)
+        return
+    # The window begins in the middle of a line the stream never ended, so
+    # its first position is not a line start. An unanchored pattern may
+    # still match there, which is why the guard is a character rather than
+    # a skipped match.
+    for match in expression.finditer(_NOT_A_LINE_START + joined, 1):
+        if match.start() > first + 1:
             return
         yield match
 
@@ -291,49 +348,58 @@ def search_lines(source, pattern, *, span: int = LINE_SPAN) -> re.Match | None:
     return next(find_lines(source, pattern, span=span), None)
 
 
-def search_parts(parts: Sequence, pattern: str) -> re.Match | None:
-    """Search the parts' concatenation for ``pattern``, a block at a time.
+class TooLongToSearch(ValueError):
+    """The pattern needs the whole stream, and the stream is too long for it."""
 
-    What is carried from one block to the next starts at a line start, and a
-    block ends at a line ending where the stream has one, so a pattern
-    anchored with ``^`` or ``$`` sees the same line starts and ends it would
-    see in the whole text. A match reaching back no further than
-    SEARCH_OVERLAP_CHARS across a block boundary is still found; a longer one
-    is not.
+
+def needs_whole_stream(pattern: str) -> bool:
+    """Can this pattern only be answered by the whole stream at once?
+
+    One anchored to the stream's start or end (``\\A``, ``\\Z``, ``\\z``), or
+    reaching across lines (``[\\s\\S]``, the ``s`` flag), means something
+    about the output as a whole: the harness uses such patterns to say a
+    listing is exactly these lines, or that no traceback appears anywhere.
+    A window of lines cannot answer them, and answering from a window would
+    pass a check that should fail.
     """
-    expression = re.compile(pattern)
-    buffer = ""
-    at_line_start = True
+    return _WHOLE_STREAM.search(pattern) is not None
+
+
+def _read_up_to(parts: Sequence, limit: int) -> tuple[str, bool]:
+    """The parts' text, and whether that is all of it."""
+    pieces = []
+    held = 0
     for part in parts:
         for block in _blocks(part):
-            buffer += block
-            if len(buffer) < READ_BLOCK_CHARS + SEARCH_OVERLAP_CHARS:
-                continue
-            match = expression.search(buffer)
-            if match is not None:
-                return match
-            buffer, at_line_start = _carry(buffer)
-            if not at_line_start:
-                # No line ending to cut at: searching on would offer a false
-                # line start to an anchored pattern, so give up the overlap
-                # rather than the meaning of the pattern.
-                buffer = ""
-                at_line_start = False
-    return expression.search(buffer) if buffer or at_line_start else None
+            pieces.append(block)
+            held += len(block)
+            if held > limit:
+                return "", False
+    return "".join(pieces), True
 
 
-def _carry(buffer: str) -> tuple[str, bool]:
-    """The tail of ``buffer`` to search with the next block, from a line start.
+def search_parts(parts: Sequence, pattern, *, span: int = LINE_SPAN) -> re.Match | None:
+    """The first match of ``pattern`` in the parts' text, read in order.
 
-    Returns ("", False) when the last SEARCH_OVERLAP_CHARS hold no line
-    ending, which is a stream with no line structure for a pattern to anchor
-    to.
+    A stream within WHOLE_STREAM_CHARS is searched as one text, which is what
+    every pattern means and what the harness did before a command's output
+    went to a file. A longer one is searched a window of lines at a time
+    (``find_lines``), so a soak's output costs no more memory than a
+    two-line answer; a pattern that needs the whole stream raises
+    TooLongToSearch rather than be answered from a window, since that answer
+    could be wrong.
     """
-    tail = buffer[-SEARCH_OVERLAP_CHARS:]
-    cut = tail.find("\n")
-    if cut < 0:
-        return "", False
-    return tail[cut + 1:], True
+    expression = re.compile(pattern)
+    text, whole = _read_up_to(parts, WHOLE_STREAM_CHARS)
+    if whole:
+        return expression.search(text)
+    if needs_whole_stream(expression.pattern):
+        raise TooLongToSearch(
+            f"{expression.pattern!r} must be matched against the whole output, "
+            f"which is longer than the {WHOLE_STREAM_CHARS} characters the "
+            "harness reads at once"
+        )
+    return search_lines(LineSource(parts), expression, span=span)
 
 
 @dataclass(frozen=True)
@@ -393,6 +459,9 @@ class OutputCheck:
 
     @classmethod
     def from_dict(cls, value) -> "OutputCheck":
+        # A run record is data: anything but a mapping describes no check.
+        if not isinstance(value, Mapping):
+            return cls(kind="", name="")
         return cls(
             kind=str(value.get("kind", "")),
             name=str(value.get("name", "")),
@@ -459,7 +528,14 @@ class CommandOutput:
         return LineSource(self._parts((stream,)))
 
     def search(self, pattern: str, streams: Sequence[str] = STREAMS) -> re.Match | None:
-        """The first match of ``pattern`` in the streams' concatenation."""
+        """The first match of ``pattern`` in the streams, read in order.
+
+        Raises TooLongToSearch when the pattern can only be answered by the
+        whole stream and the stream is longer than the harness reads at once
+        (``search_parts``). No pattern the harness searches for is both of
+        those, so the run records it as a failure rather than the harness
+        guessing an answer.
+        """
         return search_parts(self._parts(streams), pattern)
 
     def record(self, check: OutputCheck) -> OutputCheck:
@@ -529,11 +605,17 @@ def output_of(source) -> CommandOutput:
 
 
 def saved_files(details) -> tuple[OutputFile, ...]:
-    """The output file records in one run.jsonl event's details."""
+    """The output file records in one run.jsonl event's details.
+
+    A record is data, so anything in the list that is not a file record, or
+    that names no path, is left out rather than raising while a report is
+    being written.
+    """
     listed = details.get("output_files") or details.get("files") or ()
-    return tuple(
-        OutputFile.from_dict(value) for value in listed if isinstance(value, dict)
-    )
+    if not isinstance(listed, (list, tuple)):
+        return ()
+    saved = (OutputFile.from_dict(value) for value in listed)
+    return tuple(file for file in saved if file.path)
 
 
 class OutsideRun(ValueError):
