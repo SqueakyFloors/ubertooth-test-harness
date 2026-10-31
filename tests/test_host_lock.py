@@ -118,8 +118,9 @@ class HostLockTests(unittest.TestCase):
 
         def recording(path, mode, **kwargs):
             # Resource locks only: the takeover lock orders a takeover
-            # against an attempt and is not one of the boards.
-            if Path(path).name != leases.TAKEOVER_LOCK:
+            # against an attempt, and a queue ticket is a place in a queue
+            # (tests/test_lease_queue.py); neither is one of the boards.
+            if Path(path).name.endswith(".lock") and Path(path).name != leases.TAKEOVER_LOCK:
                 order.append(Path(path).name)
             return real(path, mode, **kwargs)
 

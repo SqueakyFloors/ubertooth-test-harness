@@ -276,7 +276,11 @@ class ExternalLockTests(_Fixture):
         real = leases._try_lock
 
         def recording(path, mode, **kwargs):
-            order.append(str(Path(path).relative_to(self.root)))
+            # A queue ticket is a place in a queue, not a resource lock
+            # (tests/test_lease_queue.py); the takeover lock stays, since
+            # where it sits is part of the order this checks.
+            if leases.TICKET_DIR not in Path(path).parts:
+                order.append(str(Path(path).relative_to(self.root)))
             return real(path, mode, **kwargs)
 
         with mock.patch.object(leases, "_try_lock", recording):
