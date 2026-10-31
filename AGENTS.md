@@ -37,10 +37,11 @@
   tests. Never master/slave. Two things stay as they are: names we do not own
   (another repository's `master` branch, quoted upstream output, spec titles,
   and third-party API identifiers such as ESP-IDF's `ESP_SPP_ROLE_MASTER`),
-  and a pattern that has to match the Ubertooth fork's own output, which keeps
-  matching what the fork prints today and accepts both wordings while the fork
-  changes over. `scripts/ci.sh test` checks this; both kinds of exception go
-  in its `ROLE_TERMS_ALLOW` allowlist, which it names in its failure message.
+  and, should one ever be needed, a pattern that has to match the Ubertooth
+  fork's own output: it keeps matching what the fork prints and accepts both
+  wordings while the fork changes over. The harness has no such pattern today.
+  `scripts/ci.sh test` checks the rule; an exception of either kind goes in its
+  `ROLE_TERMS_ALLOW` allowlist, which it names in its failure message.
 - This repository is public: never name lab machines (host names, SSH aliases,
   IP addresses, `user@host` strings, lab home paths) or other systems running
   in the lab. See "Public text" in `.kiro/steering/branch-and-review.md`.

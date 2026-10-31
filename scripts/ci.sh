@@ -47,7 +47,7 @@ step() { printf '\n=== ci: %s ===\n' "$1"; }
 # second occurrence on the same line still fails. AGENTS.md and this file are
 # skipped, because the rule and the check have to name the words they forbid.
 ROLE_TERMS='master|slave'
-ROLE_TERMS_ALLOW='`master`|"branch:master"|libbtbb-ref master|LIBBTBB_BRANCH = "master"|ESP_SPP_ROLE_MASTER,|ESP_SPP_ROLE_SLAVE,'
+ROLE_TERMS_ALLOW='`master` branch|"branch:master"|libbtbb-ref master|LIBBTBB_BRANCH = "master"|ESP_SPP_ROLE_MASTER,|ESP_SPP_ROLE_SLAVE,'
 
 check_role_terms() {
     step "Bluetooth role terms"
