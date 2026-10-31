@@ -88,9 +88,15 @@ without a bump, `nrfdk.py ensure` leaves the old image on every board that
 already reports this version. A change that leaves the image identical, such
 as a comment, needs no bump and the step passes. Both builds compile a copy
 of the sources at one path in the SDK workspace, so a difference in the image
-is a difference in the sources; when the images do differ, the base sources
-are built a second time, and a difference there is reported as a build that
-does not repeat itself rather than as a missing bump.
+is a difference in the sources; two builds of one tree gave byte-identical
+images when this was measured in CI on 2026-10-31. When the images do differ,
+each side is built once more, and a difference there is reported as a build
+that does not repeat itself rather than as a missing bump.
+
+Both builds use the SDK and the toolchain image this directory pins, so a
+comparison cannot see what moving `NCS_VERSION` did to the image. A new
+toolchain builds a new image, so that needs the version bump as a source
+change does, and the step says so rather than comparing.
 
 ## Flash
 

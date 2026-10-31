@@ -2440,7 +2440,9 @@ builds the base branch's sources and fails when the image changed while
 reports another version, so that change would never reach a board that
 already runs this one. The images decide and not the files, so a comment or
 formatting change leaves the image identical and asks for no bump; a build
-that does not repeat itself is reported as that rather than as a missing bump.
+that does not repeat itself is reported as that rather than as a missing bump;
+and a bump of `NCS_VERSION`, which both builds would use and the comparison
+could not see, asks for the version bump by itself.
 That image and the SDK workspace are gigabytes, so the workflow runs only on a
 change under `firmware/nrf52840dk` (or to `scripts/ci.sh`), weekly, and on
 request, and it is not a required check. `scripts/ci.sh firmware-dk` is the

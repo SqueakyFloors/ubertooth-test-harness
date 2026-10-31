@@ -38,8 +38,10 @@ jobs:
   # file to runner setup only.
   nrf52840dk:
     runs-on: ubuntu-24.04
-    # Three builds at most: this tree, the base branch, and a repeat of the
-    # base when the two images differ.
+    # Four builds at most: this tree, the base branch, and a repeat of each
+    # where the two images differ. One build, with the SDK workspace made
+    # from scratch, took about 4 minutes of this job's 45 before the
+    # comparison was added (measured 2026-10-31).
     timeout-minutes: 60
     steps:
     # The whole history, so the base branch is there to build and compare

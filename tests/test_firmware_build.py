@@ -35,6 +35,16 @@ WORKFLOW = ROOT / ".github" / "workflows" / "firmware.yml"
 FIRMWARE = ROOT / "firmware" / "nrf52840dk"
 NCS_VERSION = (FIRMWARE / "NCS_VERSION").read_text().strip()
 BOARD = "nrf52840dk/nrf52840"
+# Whether a comparison against a git ref can be tested here: the suite also
+# runs from a tree exported with git archive (scripts/local-ci.sh), which has
+# no history to resolve a ref against.
+HAS_HISTORY = subprocess.run(
+    ("git", "-C", str(ROOT), "cat-file", "-e", "HEAD:firmware/nrf52840dk/src/roles.h"),
+    capture_output=True,
+).returncode == 0 and not subprocess.run(
+    ("git", "-C", str(ROOT), "status", "--porcelain", "firmware/nrf52840dk"),
+    capture_output=True, text=True,
+).stdout.strip()
 
 # Writes the image west build would produce when the command is a build, and
 # records every command. $FAKE_HEX_PAYLOAD is the image every build leaves;
@@ -51,6 +61,10 @@ FAKE_DOCKER = textwrap.dedent("""\
             builds=$((builds + 1))
             printf '%s\\n' "$builds" > "$FAKE_BUILDS"
             eval "payload=\\${FAKE_HEX_PAYLOAD_$builds:-\\$FAKE_HEX_PAYLOAD}"
+            # The sources this build compiled, for a test to look at: the
+            # command ends with the directory west build is given.
+            all=$*
+            (cd "${all##* -s }" && find . -type f | sort) > "$FAKE_BUILDS.$builds"
             mkdir -p "$(dirname "$FAKE_HEX")"
             cp "$payload" "$FAKE_HEX" ;;
     esac
@@ -98,17 +112,29 @@ class FirmwareStepTests(unittest.TestCase):
         return str(hex_file(self.directory / f"{name}.hex",
                             filler * 8 + version.encode() + filler * 8))
 
-    def base_sources(self, version=None):
+    def base_sources(self, version=None, sdk=None):
         """A copy of the DK firmware sources to compare against, with another
-        UTDK_FW_VERSION where one is asked for."""
+        UTDK_FW_VERSION or NCS_VERSION where one is asked for.
+
+        It also carries a file of its own, so a test can tell which sources a
+        build compiled.
+        """
         base = self.directory / "base"
         shutil.copytree(FIRMWARE, base)
+        (base / "src" / "base-only.c").write_text("/* only in the base */\n")
         if version:
             header = base / "src" / "roles.h"
             header.write_text(re.sub(
                 r'(#define UTDK_FW_VERSION ")[^"]+', rf"\g<1>{version}",
                 header.read_text()))
+        if sdk:
+            (base / "NCS_VERSION").write_text(f"{sdk}\n")
         return base
+
+    def compiled(self, build: int) -> list[str]:
+        """The files the nth build found in the sources it was given."""
+        listing = self.directory / f"builds.{build}"
+        return listing.read_text().splitlines() if listing.exists() else []
 
     def commands(self):
         return self.log.read_text().splitlines() if self.log.exists() else []
@@ -240,10 +266,11 @@ class FirmwareStepTests(unittest.TestCase):
         self.assertEqual(2, len(builds), builds)
         self.assertIn(f"-s {self.workspace}/utdk-src", builds[1])
         self.assertIn("the image is the one", result.stdout)
-        # This tree's image is the one left in the build directory.
-        self.assertEqual(
-            Path(self.image("image")).read_bytes(),
-            (self.workspace / "utdk-build" / "zephyr" / "zephyr.hex").read_bytes())
+        # The second build compiled the base sources, not this tree's again.
+        self.assertNotIn("./src/base-only.c", self.compiled(1))
+        self.assertIn("./src/base-only.c", self.compiled(2))
+        # The workspace is left holding this tree's sources.
+        self.assertFalse((self.workspace / "utdk-src" / "src" / "base-only.c").exists())
 
     def test_a_changed_image_without_a_version_bump_fails(self):
         # What #210 is about: `nrfdk.py ensure` would leave the old image on
@@ -253,15 +280,17 @@ class FirmwareStepTests(unittest.TestCase):
 
         result = self.run_step(DK_BASE_SRC=str(base),
                                FAKE_HEX_PAYLOAD_2=other,
-                               FAKE_HEX_PAYLOAD_3=other)
+                               FAKE_HEX_PAYLOAD_4=other)
 
         self.assertEqual(1, result.returncode, result.stdout)
         self.assertIn(f"UTDK_FW_VERSION is still {nrfdk.FIRMWARE_VERSION}",
                       result.stderr)
         self.assertIn("bump it in firmware/nrf52840dk/src/roles.h", result.stderr)
-        # The base sources were built twice: once to compare, once to show
-        # the difference is the change and not the build.
-        self.assertEqual(3, len(self.builds()), self.builds())
+        # Each side was built twice, to show the difference is the change and
+        # not the build: this tree, the base, then each again.
+        self.assertEqual(4, len(self.builds()), self.builds())
+        self.assertNotIn("./src/base-only.c", self.compiled(3))
+        self.assertIn("./src/base-only.c", self.compiled(4))
         self.assertNotIn("firmware-dk passed", result.stdout)
 
     def test_a_version_bump_needs_no_comparison(self):
@@ -275,9 +304,9 @@ class FirmwareStepTests(unittest.TestCase):
             f"UTDK_FW_VERSION moved from utdk-1.0.0 to {nrfdk.FIRMWARE_VERSION}",
             result.stdout)
 
-    def test_a_build_that_does_not_repeat_itself_is_reported_as_that(self):
-        # Two builds of one tree must give one image, or a difference between
-        # two trees says nothing about the change.
+    def test_a_tree_that_does_not_repeat_itself_is_reported_as_that(self):
+        # This tree's own build is the one that changed between its two
+        # builds, so the verdict is the build and not a missing bump.
         base = self.base_sources()
 
         result = self.run_step(DK_BASE_SRC=str(base),
@@ -285,26 +314,58 @@ class FirmwareStepTests(unittest.TestCase):
                                FAKE_HEX_PAYLOAD_3=self.image("three", filler=b"\x22"))
 
         self.assertEqual(1, result.returncode, result.stdout)
-        self.assertIn("two builds of the same sources gave different images",
-                      result.stderr)
+        self.assertIn("two builds of this tree gave different images", result.stderr)
         self.assertNotIn("bump it", result.stderr)
+        self.assertEqual(3, len(self.builds()), self.builds())
 
+    def test_a_base_that_does_not_repeat_itself_is_reported_as_that(self):
+        base = self.base_sources()
+        other = self.image("two", filler=b"\x11")
+
+        result = self.run_step(DK_BASE_SRC=str(base),
+                               FAKE_HEX_PAYLOAD_2=other,
+                               FAKE_HEX_PAYLOAD_4=self.image("four", filler=b"\x22"))
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn(f"two builds of {base} gave different images", result.stderr)
+        self.assertNotIn("bump it", result.stderr)
+        self.assertEqual(4, len(self.builds()), self.builds())
+
+    def test_an_sdk_bump_without_a_version_bump_fails(self):
+        # Both builds use the SDK this tree pins, so the comparison cannot
+        # see what a new toolchain did to the image; it builds a new image,
+        # which a board already running this version would never be flashed
+        # with.
+        base = self.base_sources(sdk="v3.0.0")
+
+        result = self.run_step(DK_BASE_SRC=str(base))
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn(f"nRF Connect SDK moved from v3.0.0 to {NCS_VERSION}",
+                      result.stderr)
+        self.assertIn("bump it in firmware/nrf52840dk/src/roles.h", result.stderr)
+        self.assertEqual(1, len(self.builds()), self.builds())
+
+    @unittest.skipUnless(HAS_HISTORY, "needs this repository's git history")
     def test_the_base_sources_can_come_from_a_git_ref(self):
         result = self.run_step(DK_BASE_REF="HEAD")
 
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-        self.assertIn("the image against HEAD", result.stdout)
-        # HEAD's sources, exported from this repository to be built.
+        self.assertIn("the image is the one HEAD builds", result.stdout)
+        # HEAD's sources, exported from this repository and built.
         self.assertTrue(
             (self.workspace / "base-firmware" / "firmware" / "nrf52840dk"
              / "src" / "roles.h").exists(), result.stdout)
+        self.assertEqual(2, len(self.builds()), self.builds())
 
-    def test_a_ref_this_tree_cannot_resolve_is_not_compared(self):
-        # scripts/local-ci.sh tests an exported tree, which has no history.
+    def test_a_ref_that_does_not_resolve_fails_the_step(self):
+        # The ref was asked for, so a missing one means the history the
+        # comparison needs is not there; skipping would pass a pull request
+        # nobody checked.
         result = self.run_step(DK_BASE_REF="no-such-ref")
 
-        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-        self.assertIn("does not resolve to a tree holding", result.stdout)
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("does not resolve to a tree holding", result.stderr)
         self.assertEqual(1, len(self.builds()), self.builds())
 
     def test_the_firmware_build_is_not_part_of_the_other_check_sets(self):
@@ -337,7 +398,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(0, checkout["with"]["fetch-depth"])
         build = next(step for step in steps
                      if step.get("run") == "sh scripts/ci.sh firmware-dk")
-        self.assertIn("github.base_ref", build["env"]["DK_BASE_REF"])
+        # The whole expression: the base branch on a pull request, and
+        # nothing on a push, the schedule, or a dispatch, where there is no
+        # other commit to compare against.
+        self.assertEqual(
+            "${{ github.base_ref && format('origin/{0}', github.base_ref) || '' }}",
+            build["env"]["DK_BASE_REF"])
 
     def test_the_job_runs_the_shared_check_and_leaves_the_tree_clean(self):
         steps = self.workflow["jobs"]["nrf52840dk"]["steps"]
