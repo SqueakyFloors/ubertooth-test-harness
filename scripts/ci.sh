@@ -276,6 +276,7 @@ run_firmware_dk() {
     # nothing about the change between them. Measured in CI on 2026-10-31:
     # two builds of one tree gave byte-identical images.
     dk_image_repeats() {
+        step "the image $2 builds a second time"
         dk_sources "$1"
         ncs "west build -p always --no-sysbuild -b $NCS_BOARD -d $build -s $src"
         cmp -s "$3" "$hex" && return 0
@@ -294,9 +295,13 @@ run_firmware_dk() {
     compare_dk_image() {
         base=$1
         label=$2
+        step "the image against $label"
         here=$(dk_fw_version "$repo/$DK_FIRMWARE")
         there=$(dk_fw_version "$base")
-        step "the image against $label"
+        # Any difference reflashes every board that runs the base's image,
+        # which is what the comparison is about. A version reused from an
+        # older release would not reach a board still carrying that old
+        # image, which nothing here can see.
         if [ "$here" != "$there" ]; then
             echo "UTDK_FW_VERSION moved from $there to $here, so every board is" \
                  "reflashed; the images are not compared"

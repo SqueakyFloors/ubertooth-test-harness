@@ -64,7 +64,8 @@ FAKE_DOCKER = textwrap.dedent("""\
             # The sources this build compiled, for a test to look at: the
             # command ends with the directory west build is given.
             all=$*
-            (cd "${all##* -s }" && find . -type f | sort) > "$FAKE_BUILDS.$builds"
+            sources=${all##* -s }
+            (cd "${sources%% *}" && find . -type f | sort) > "$FAKE_BUILDS.$builds"
             mkdir -p "$(dirname "$FAKE_HEX")"
             cp "$payload" "$FAKE_HEX" ;;
     esac
@@ -134,7 +135,10 @@ class FirmwareStepTests(unittest.TestCase):
     def compiled(self, build: int) -> list[str]:
         """The files the nth build found in the sources it was given."""
         listing = self.directory / f"builds.{build}"
-        return listing.read_text().splitlines() if listing.exists() else []
+        files = listing.read_text().splitlines() if listing.exists() else []
+        # An empty listing would make every assertion on it vacuous.
+        self.assertIn("./src/roles.h", files, f"build {build}: {files}")
+        return files
 
     def commands(self):
         return self.log.read_text().splitlines() if self.log.exists() else []
@@ -346,7 +350,18 @@ class FirmwareStepTests(unittest.TestCase):
         self.assertIn("bump it in firmware/nrf52840dk/src/roles.h", result.stderr)
         self.assertEqual(1, len(self.builds()), self.builds())
 
-    @unittest.skipUnless(HAS_HISTORY, "needs this repository's git history")
+    def test_a_directory_of_sources_wins_over_a_ref(self):
+        base = self.base_sources()
+
+        result = self.run_step(DK_BASE_SRC=str(base), DK_BASE_REF="no-such-ref")
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn(f"the image against {base}", result.stdout)
+        self.assertNotIn("no-such-ref", result.stdout + result.stderr)
+
+    @unittest.skipUnless(
+        HAS_HISTORY,
+        "needs this repository's git history, with firmware/nrf52840dk clean")
     def test_the_base_sources_can_come_from_a_git_ref(self):
         result = self.run_step(DK_BASE_REF="HEAD")
 
@@ -398,12 +413,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(0, checkout["with"]["fetch-depth"])
         build = next(step for step in steps
                      if step.get("run") == "sh scripts/ci.sh firmware-dk")
-        # The whole expression: the base branch on a pull request, and
+        # The whole expression: the commit a pull request is against, and
         # nothing on a push, the schedule, or a dispatch, where there is no
-        # other commit to compare against.
-        self.assertEqual(
-            "${{ github.base_ref && format('origin/{0}', github.base_ref) || '' }}",
-            build["env"]["DK_BASE_REF"])
+        # other commit to compare against. The base commit rather than the
+        # branch, which can advance while the job waits.
+        self.assertEqual("${{ github.event.pull_request.base.sha }}",
+                         build["env"]["DK_BASE_REF"])
 
     def test_the_job_runs_the_shared_check_and_leaves_the_tree_clean(self):
         steps = self.workflow["jobs"]["nrf52840dk"]["steps"]
