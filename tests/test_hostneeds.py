@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -131,7 +132,44 @@ class NeedsTests(unittest.TestCase):
                          (mac.bluez_tools, mac.python_tools, mac.firmware_build))
         self.assertEqual(
             {"host": "Host_Mac", "platform": "macos", "basis": "build", "bluez_tools": [],
-             "python_tools": False, "firmware_build": False}, mac.to_dict())
+             "python_tools": False, "firmware_build": False,
+             "host_tools": sorted(mac.host_tools)}, mac.to_dict())
+
+    def test_a_host_without_a_host_tool_runs_none_of_its_cases(self):
+        # tshark is not the fork's and nothing here installs it, so whether
+        # the host has it is known before anything runs: the DK is not
+        # flashed to find out (#148).
+        definition = builtin_catalog().get("BLE extcap in tshark")
+        arguments = {"hosts": "each", "Ubertooth": "default", "advertiser": "default",
+                     "coverage": "smoke", "duration": "15s"}
+        cases = definition.command_cases(
+            arguments, {"Ubertooth": "U1", "advertiser": "DK1"},
+            {"Ubertooth": {"serial": "1111222233334444"},
+             "advertiser": {"jlink serial": "1050000001",
+                            "BLE address": "C3:11:22:33:44:55"}})
+        self.assertTrue(cases)
+
+        without = HostCapabilities("Host_Linux", "linux", frozenset(BLUEZ_TOOLS),
+                                   python_tools=True, firmware_build=True,
+                                   host_tools=frozenset())
+        runnable, left_out = split_cases(cases, without)
+
+        self.assertEqual([], list(runnable))
+        self.assertEqual(len(cases), len(left_out))
+        self.assertEqual("tshark is not installed on Host_Linux", left_out[0][1])
+        # The first case is the one that would flash the DK.
+        self.assertEqual("advertiser-ready", left_out[0][0].case_id)
+        self.assertEqual(
+            "tshark installed", definition.needs.describe(),
+            "the whole test declares it too, so --dry-run says so")
+
+        with_it = replace(without, host_tools=frozenset({"tshark"}))
+        self.assertEqual((len(cases), 0), (len(split_cases(cases, with_it)[0]),
+                                           len(split_cases(cases, with_it)[1])))
+
+    def test_an_unknown_host_tool_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "not a known host tool: wireshark"):
+            Needs(host_tools=("wireshark",))
 
     def test_split_cases_keeps_order(self):
         cases = builtin_catalog().get("Host CLI surface").command_cases({}, {}, {})

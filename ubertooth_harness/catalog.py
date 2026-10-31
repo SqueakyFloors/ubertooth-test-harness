@@ -25,7 +25,7 @@ from ubertooth_harness.patterns import (
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
     advertiser_cases, connection_cases, dfu_cases, dfu_host_cases, python_cases,
-    receive_cases, refusal_cases, tool_cases, transitions, util_cases,
+    receive_cases, refusal_cases, tool_cases, transitions, tshark_cases, util_cases,
     util_refusal_cases,
 )
 
@@ -785,6 +785,10 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "BLE extcap capture": _profiles(
         Estimate(1.3, per_duration=1), Estimate(10.2, per_duration=6)
     ),
+    # ESTIMATE_PENDING_HW: the DK check and one capture, then three.
+    "BLE extcap in tshark": _profiles(
+        Estimate(25.0, per_duration=1), Estimate(35.0, per_duration=3)
+    ),
     # Three load runs of four flashes each took 10.4-10.7 s.
     "Flash reliability": _default(Estimate(0, per_count=("flashes", 2.65))),
     "DFU images": _profiles(Estimate(11.7), Estimate(69.0)),
@@ -819,6 +823,7 @@ RF_DEFAULTS: Mapping[str, Mapping[str, PlacementRequirement]] = MappingProxyType
         "Classic Bluetooth receive",
         "Raw receive",
         "BLE extcap capture",
+        "BLE extcap in tshark",
         "Capture known BLE advertiser",
         "Capture known BLE connection",
     )
@@ -1107,6 +1112,27 @@ def builtin_catalog() -> TestCatalog:
             command_builder=python_cases.extcap_capture_cases,
             continue_on_case_failure=True,
             guards_other_ubertooths=True,
+        ),
+        TestDefinition(
+            "BLE extcap in tshark",
+            "real tshark installs btle-extcap, captures through it from a "
+            "registered nRF52840 DK advertiser, and its own dissector decodes "
+            "the DK's address: with a capture filter it cannot apply, and "
+            "stopped with SIGINT partway",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH,
+                "advertiser": ArgumentRule(_selector, default="default"),
+                "coverage": COVERAGE, "duration": DURATION,
+            }),
+            MappingProxyType({"Ubertooth": "Ubertooth", "advertiser": "nRF52840 DK"}),
+            command_builder=tshark_cases.extcap_tshark_cases,
+            # A host without tshark runs none of it, and --dry-run says so.
+            needs=tshark_cases.NEEDS,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+            # Its first case flashes the DK when the board runs another
+            # firmware version, so the run holds the host lock.
+            writes_firmware=True,
         ),
         TestDefinition(
             "Capture known BLE advertiser",
