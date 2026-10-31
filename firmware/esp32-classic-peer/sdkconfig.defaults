@@ -9,6 +9,25 @@ CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y
 CONFIG_BTDM_CTRL_MODE_BLE_ONLY=n
 CONFIG_BTDM_CTRL_MODE_BTDM=n
 
+# The Hands-Free Profile is how ESP-IDF lets an application open a
+# synchronous (SCO/eSCO) link. Both roles are built in; only one runs at a
+# time, which is what the board's role decides.
+CONFIG_BT_HFP_ENABLE=y
+CONFIG_BT_HFP_AG_ENABLE=y
+CONFIG_BT_HFP_CLIENT_ENABLE=y
+
+# Audio over HCI, not the board's PCM pins: there is no codec chip here, and
+# the frames have to reach the application, which is what sends the known
+# pattern.
+CONFIG_BT_HFP_AUDIO_DATA_PATH_HCI=y
+CONFIG_BT_HFP_USE_EXTERNAL_CODEC=y
+
+# Narrow-band speech only. Wide-band speech would have the two boards settle
+# on mSBC, and then the bytes the application hands over are the bytes on the
+# air, so it would have to produce real mSBC frames. With CVSD the controller
+# does the coding and the application hands over plain 16-bit samples.
+CONFIG_BT_HFP_WBS_ENABLE=n
+
 # Bluedroid with Classic does not fit the default 1 MB app partition.
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
