@@ -38,9 +38,10 @@ registered on the host, so all of them have to be attached and answering for
 those.
 
 Registered as type `Ubertooth` with its full 32-hex-digit serial. The serial
-has to be the whole thing: libubertooth matches `-U` against the *end* of a
-serial and takes the first board that matches, so a short serial can select
-a different board than the lease was taken on.
+has to be the whole thing: libubertooth treats an all-digit `-U` value as a USB
+index and matches anything else case-insensitively against the *start* of a
+serial, so a short serial is a prefix that another board may answer to, and a
+lease could be taken on one board while the tool opens another.
 
 ```yaml
   UT_Linux0:

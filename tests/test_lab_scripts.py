@@ -629,6 +629,21 @@ class HubPortSwitches(Bench):
         with self.assertRaises(KeyboardInterrupt):
             hub_port._cancel(15, None)
 
+    def test_a_signal_right_after_the_off_write_still_leaves_the_port_on(self):
+        """The restore guard is armed before the write, not after it."""
+        real = self.controller.set_power_enabled
+
+        def off_then_interrupt(port, enabled):
+            real(port, enabled)
+            if not enabled:
+                raise KeyboardInterrupt  # delivered as the write returns
+
+        self.controller.connect()
+        self.controller.set_power_enabled = off_then_interrupt
+        with self.assertRaises(KeyboardInterrupt), redirect_stderr(io.StringIO()):
+            hub_port.switch(self.controller, 4, "cycle", 5.0, sleep=lambda _s: None)
+        self.assertTrue(self.controller.powered[4], "the port was left off")
+
     def test_an_interrupted_cycle_still_leaves_the_port_on(self):
         """Ctrl-C in the wait must not leave a device without power."""
         def interrupt(_seconds):
@@ -698,6 +713,10 @@ class HubPortSwitches(Bench):
         self.assertIn("UT0", err)
         self.assertIn("bob", err)
         self.assertIn("--force", err)
+        self.assertIn("--wait SECONDS", err)
+        # Not two different wait options in one message: the harness's own
+        # advice names an option this command does not have.
+        self.assertNotIn("--wait-for-boards", err)
 
     def test_the_device_is_held_while_its_port_is_switched(self):
         seen = {}

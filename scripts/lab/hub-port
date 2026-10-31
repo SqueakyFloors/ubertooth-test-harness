@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import signal
 import sys
 import time
@@ -76,6 +77,10 @@ HARDWARE_ENV = "UBERTOOTH_HARNESS_HARDWARE"
 # across a build and a flash stage, so a recovery that waits a couple of
 # minutes is better than one that gives up at once; --wait changes it.
 HOST_LOCK_WAIT_S = 120.0
+# The harness's own "wait for it" advice, which names an option this command
+# does not have. Dropped from a busy-lock message, which then carries only
+# this command's own advice.
+_WAIT_HINT = re.compile(r";?\s*use --wait-for-boards MINUTES to wait for it\.?")
 SETTLE_S = 0.5
 # VBUS takes about 0.55 s to fall below 0.1 V with a device attached
 # (docs/hardware.md), so a switch-off read any sooner prints a stale voltage.
@@ -171,9 +176,11 @@ def switch(controller, port: int, action: str, seconds: float, sleep=time.sleep)
         sleep(OFF_SETTLE_S if action == "off" else SETTLE_S)
         return
 
-    controller.set_power_enabled(port, False)
+    # Armed before the write, not after it: a signal delivered between the two
+    # would otherwise escape with the port off.
     on = False
     try:
+        controller.set_power_enabled(port, False)
         sleep(seconds)
         controller.set_power_enabled(port, True)
         on = True
@@ -272,12 +279,13 @@ def main(argv: list[str] | None = None, *, sleep=time.sleep) -> int:
                     pass  # the switch result above is what matters
     except leases.LeaseError as error:
         # Whoever holds the device, or the host lock, is named in the message.
-        # The message names whichever lock was busy, the device's or the
-        # host's, so the advice has to fit both: this command's wait is
-        # --wait SECONDS, whatever option the harness text mentions.
+        # The harness's message ends by naming its own wait option, which
+        # this command does not have; its own advice replaces that, so a
+        # reader is not given two different options to try.
         return _fail(
-            f"{error}; wait longer with --wait SECONDS, or, if the device "
-            "itself is wedged and its holder has given up on it, --force"
+            f"{_WAIT_HINT.sub('', str(error)).rstrip('; ')}; wait longer with "
+            "--wait SECONDS, or, if the device itself is wedged and its holder "
+            "has given up on it, --force"
         )
     except PowerControllerError as error:
         return _fail(f"{resource.alias}: {error}")
