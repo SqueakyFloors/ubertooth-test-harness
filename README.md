@@ -1493,8 +1493,7 @@ registered and as the number the tools take, so a DK's J-Link serial does not
 survive as the `--jlink 1050210121` the harness passes. A width short enough
 to read as an ordinary number (the `123` of a serial registered as `000123`)
 is masked only where it stands alone, so it cannot mask part of a count. A
-serial port path
-keeps its shape with the serial inside it masked
+serial port path keeps its shape with the serial inside it masked
 (`/dev/serial/by-id/usb-SEGGER_J-Link_<serial>-if00`), whether the registry
 held that path or the harness found it. Any standalone 32-hex-digit token is
 masked too, since that is the shape of an Ubertooth serial.
