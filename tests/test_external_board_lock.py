@@ -255,7 +255,10 @@ class ExternalLockTests(_Fixture):
         real = leases._try_lock
 
         def recording(path, mode, **kwargs):
-            order.append(str(Path(path).relative_to(self.root)))
+            # Resource locks only: the takeover lock orders a takeover
+            # against an attempt and is not one of the boards.
+            if Path(path).name != leases.TAKEOVER_LOCK:
+                order.append(str(Path(path).relative_to(self.root)))
             return real(path, mode, **kwargs)
 
         with mock.patch.object(leases, "_try_lock", recording):

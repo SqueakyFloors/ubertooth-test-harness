@@ -394,6 +394,47 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
         self.assertEqual(
             os.stat(path).st_ino, os.fstat(held.leases[0].fd).st_ino)
 
+    def test_the_takeover_lock_is_taken_before_any_board(self):
+        order = []
+        real = leases._try_lock
+
+        def recording(path, mode, **kwargs):
+            order.append(Path(path).name)
+            return real(path, mode, **kwargs)
+
+        with mock.patch.object(leases, "_try_lock", recording):
+            leases.acquire([A], holder("agent-1"), directory=self.dir).release()
+        self.assertEqual([leases.TAKEOVER_LOCK, f"{A.key}.lock"], order)
+
+    def test_no_lease_is_taken_while_a_takeover_is_in_progress(self):
+        # The takeover lock, held exclusively: an attempt must not take a
+        # lock that a takeover may be about to remove under it.
+        fd = os.open(self.dir / leases.TAKEOVER_LOCK, os.O_RDWR | os.O_CREAT, 0o644)
+        self.raw.append(fd)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with self.assertRaises(leases.LeaseError) as caught:
+            self.take()
+        self.assertIn("taking over a stale lease", str(caught.exception))
+        self.assertFalse((self.dir / f"{A.key}.lock").exists())
+
+    def test_a_takeover_is_left_for_later_while_an_attempt_is_running(self):
+        # The other side of that lock: while any command is between taking a
+        # lock and checking it (it holds the takeover lock shared), a stale
+        # lease file stays where it is.
+        path = self.hold(A, dead_holder())
+        shared = os.open(self.dir / leases.TAKEOVER_LOCK, os.O_RDWR | os.O_CREAT, 0o644)
+        self.raw.append(shared)
+        fcntl.flock(shared, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        with self.assertRaises(leases.LeaseError) as caught:
+            self.take()
+        self.assertIn("UT_0 is in use", str(caught.exception))
+        self.assertEqual([], self.notes)
+        self.assertEqual("gone-agent", leases.read_holder(path)["owner"])
+        # Once that command is done, the next one takes the board over.
+        os.close(self.raw.pop())
+        self.take().release()
+        self.assertEqual(1, len(self.notes))
+
     def test_boards_reports_a_stale_lease_without_removing_it(self):
         path = self.hold(A, dead_holder())
         state = leases.board_states([A], directory=self.dir)[0]

@@ -1382,11 +1382,12 @@ Taking it over (/home/.../leases/05f0....lock).
 ```
 
 A lease recorded on another host is left alone (a pid there means nothing
-here), as is a pid the system has since given to an unrelated process, and
-two commands cannot take over the same board at once
-(`<lease dir>/takeover.lock`). A command also checks, after locking, that its
-lock file is still the board's, so a takeover decided a moment earlier can
-never leave two commands each holding a file for one board.
+here), as is a pid the system has since given to an unrelated process.
+`<lease dir>/takeover.lock` orders a takeover against everything else: a
+takeover holds it exclusively, and every command holds it shared while it
+takes its locks and checks them, so a lease file is never removed while a
+command is taking it and two commands can never end up holding one board
+through two lock files.
 
 What a takeover does not promise: something still holds the lock, or the
 kernel would have dropped it, and that something may still be using the
