@@ -25,7 +25,7 @@ WORK=${CI_TEMP:-${RUNNER_TEMP:-$(mktemp -d)}}
 # libbtbb comes from this project's fork at a pinned commit, so a push to
 # libbtbb cannot change a harness build. It is the commit the Ubertooth fork
 # pins for its own builds (fork issue #320), so a harness run builds the
-# libbtbb the fork is built and tested against, not upstream master.
+# libbtbb the fork is built and tested against, not upstream's `master` branch.
 # This pin is the harness's own copy, deliberately: the harness never calls
 # the fork's installer. It must match the fork's (LIBBTBB_REF in the fork's
 # install.sh, also in its .github/workflows/build.yml); the build step warns
