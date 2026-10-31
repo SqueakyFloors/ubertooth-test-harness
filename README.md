@@ -823,9 +823,10 @@ The fork's firmware resets a board that stops servicing USB or whose mode
 stops looping, and keeps the reason in a corner of RAM a reset does not clear.
 `ubertooth-util -U <serial> -w` reads that record. Every run reads it on each
 Ubertooth it binds, guards included: after preflight (the baseline), between
-cases once three minutes have passed since the last read, after each test, and
-once more at the end of the run. The reads are read-only and never run beside
-another command.
+cases once three minutes have passed since the last read, between the writes
+of a flash soak on the same three minutes, after each test, and once more at
+the end of the run. The reads are read-only and never run beside another
+command.
 
 A self-reset is the watchdog working, so the run **reports** it. A read whose
 unrequested reset count has risen since the baseline, or that recorded a new
@@ -858,13 +859,16 @@ A read during a test covers only the boards that test binds: another test's
 board may be switched off by this one's power isolation, and its resets are
 not this test's to count. The baseline and the run-end read cover every board.
 
-Two limits worth knowing. The reads between cases need a test with more than
-one case, so a test that compiles to a single case — the flash soak is one —
-is read at its start and its end and not in between; that is the one part of
-[#164](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/164)
-still to do, and it needs a read inside the flash loop, which already runs
-commands between flashes. And the firmware records one processor fault, the
-last, so a board that faults the same way twice is reported once: the record
+The reads between cases need a test with more than one case. `Flash
+reliability` compiles to a single case however many flashes it runs, so its
+reads happen between its writes instead: the flash runner gives the monitor a
+turn after each write and its read-backs, where no other command is running,
+and the time a read takes is added back to the test's deadline so a check the
+harness asked for cannot be what ends a soak. A test that is one case and
+writes no firmware is still read at its start and its end only.
+
+One limit worth knowing: the firmware records one processor fault, the last,
+so a board that faults the same way twice is reported once, because the record
 cannot tell a repeat from the fault it already held.
 
 Two things fail:

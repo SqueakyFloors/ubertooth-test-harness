@@ -1275,7 +1275,11 @@ verifies, so preflight checks only the board's serial and not its revision,
 and the test must be the last one on that board in the suite.
 
 **Expected outcome.** One case, run by the flash runner rather than as a
-command line. It passes when every requested write completed and verified. It
+command line. Because it is one case however many flashes it runs, the run's
+firmware watchdog reads happen between its writes rather than between cases,
+on the same three-minute interval, so a long soak reports a board that reset
+itself while it is still running; what a read takes is added back to the
+test's deadline. It passes when every requested write completed and verified. It
 fails and stops at the first mismatch: a write that did not take, a revision
 that does not match the image just written, a guard board whose revision
 changed or that disappeared, a per-flash write over 25 s, or the whole-test
