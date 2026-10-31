@@ -723,20 +723,22 @@ need a higher level.
 **Known limits.** On an ordinary bench the boards sit centimeters apart, so a
 working link gets through at a low PA level and a pass at level 0 says little
 about range. What `maximum PA level` buys is a tighter bound than "it worked at
-full power", and the weak-link suite above tightens it further. An occasional
-`mismatch on byte 0` is a known fork behavior
+full power"; the weak-link suite keeps that same bound and changes which board
+answers, not the number. An occasional `mismatch on byte 0` is a known fork
+behavior
 ([ubertooth#677](https://github.com/SqueakyFloors/ubertooth/issues/677)). The
 test needs a second board, so it cannot run on a single-board host.
 
-The `range-weak-link` suite fails on fork main today, at the step that asserts
-`-n` prints nothing on standard output: a repeater slow enough to miss the
-first progress interval makes `-n` print `waiting for the repeater...` there
-instead of on standard error
+**The `range-weak-link` suite fails on every run on fork main today**, at the
+step that asserts `-n` prints nothing on standard output: a repeater slow
+enough to miss the first progress interval makes `-n` print `waiting for the
+repeater...` there instead of on standard error
 ([ubertooth#1026](https://github.com/SqueakyFloors/ubertooth/issues/1026)). A
 repeater at bench distance answers too quickly to reach that path, which is
 why only the weak-link run shows it. The run stops there, before `-m` is read,
-so `maximum PA level: 2` has not yet been judged by the check itself: the ten
-PA levels behind it come from driving `-e`, `-n`, and `-m` by hand.
+so this suite has never judged a PA level; the ten levels above come from
+driving `-e`, `-n`, and `-m` by hand. It is committed so that the fork fix is
+verified by a suite rather than by a one-off script.
 
 ## BLE monitor
 

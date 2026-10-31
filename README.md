@@ -445,8 +445,9 @@ python -m ubertooth_harness run-suite \
 
 The plan's second suite, `range-weak-link`, runs the same test with the
 weak-link receiver answering, choosing both boards by RF placement rather than
-by alias. It needs a board that records attenuation, and it fails on current
-fork main for a reason worth reading:
+by alias: a responder recorded at 10 to 20 dB of attenuation with its antenna
+attached, and an unattenuated sender. It fails on current fork main for a
+reason worth reading:
 [docs/tests.md](docs/tests.md#two-device-range-test) has the measurement, the
 selection, and what it is waiting on.
 

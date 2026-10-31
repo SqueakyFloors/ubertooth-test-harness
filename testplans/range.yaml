@@ -16,20 +16,16 @@ suites:
         maximum PA level: 3
 
   # The same test with the weak-link receiver answering: both roles are
-  # chosen by RF placement rather than by alias, the responder behind an
-  # attenuator and the sender in the open. Naming both keeps them apart on a
-  # bench whose default board is the attenuated one, where two `default`
-  # selectors would resolve to it and planning would fail.
+  # chosen by RF placement rather than by alias, which also keeps them apart
+  # on a bench whose default board is the attenuated one. The suite names one
+  # host, so a bench with no board placed for the responder fails planning,
+  # naming the requirement and what each board is placed as.
   #
-  # This suite needs such a board: it names one host, so a bench with none
-  # fails planning, naming the requirement and what each board is placed as.
-  # Delete the suite, or the whole plan, on a bench without one.
-  #
-  # The level is the same 3 as above, which the bench measurement stayed
-  # within rather than narrowed: a tighter bound would rest on five
-  # hand-driven round trips in one orientation, and no harness run has
-  # judged this step yet. docs/tests.md records the numbers and what the
-  # suite is still waiting on.
+  # The level is the same 3 as above: the bench measurement stayed within
+  # that bound rather than narrowing it. Less attenuation than the 20 dB
+  # measured only makes the link stronger, so the bound holds across the
+  # range the requirement accepts. docs/tests.md has the numbers, and what
+  # this suite is still waiting on before it can pass.
   range-weak-link:
     - Two-device range test:
         host: Host_Linux
