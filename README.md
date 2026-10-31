@@ -1725,10 +1725,6 @@ shapes, digit runs replaced by `N`, with their counts) and gives in `received`
 when the left-out output ended; it is followed by the last
 records (each with its arrival time in `received`, starting at a whole line),
 so the GUI failure summary (for a failed test or build) and report.md show how
-<<<<<<< HEAD
-the command ended; report.md shows every output record run.jsonl holds.
-`command_finished` repeats `output_files` and `output_omitted`. The newest
-=======
 the command ended; report.md shows every output record run.jsonl holds. A
 command recorded before these limits existed left no file and no
 `command_output_omitted` record, so run.jsonl holds all of its output;
@@ -1736,8 +1732,7 @@ rendering report.md for such a run caps it the same way instead, to the first
 200 records or 64 KiB and the last 50 records or 16 KiB, counted in characters
 rendered rather than the bytes a record takes in run.jsonl, with one `[M]`
 line for the gap (`<n> more characters of output are in run.jsonl`).
-`command_finished` repeats `output_file` and `output_omitted`. The newest
->>>>>>> origin/main
+`command_finished` repeats `output_files` and `output_omitted`. The newest
 output, such as the harness's own timeout, cancellation or `OUTPUT SINK ERROR`
 line, is always among the last records. report.md shows the gap as `[M]`
 lines between the first and last lines:
@@ -1777,7 +1772,6 @@ tools wrote (captures, `-d` dumps, and any target device's shell traffic in
 `<name>.serial.log`) are recorded the same way, in an `output_files` record
 with each file's size and SHA-256.
 
-<<<<<<< HEAD
 Each file the run saved is listed in report.md's **Output files** section,
 grouped by test (and under `build` or `preflight` for a file those phases
 saved): its path, stream, size, line count, SHA-256, and the checks that read
@@ -1785,8 +1779,7 @@ it with their results. A check counts against the run when it recorded a
 reason, when an expected pattern or an observed setting was not found, or
 when a forbidden pattern was.
 
-=======
->>>>>>> origin/main
+
 ### Re-running a finished run's output checks
 
 ```sh
