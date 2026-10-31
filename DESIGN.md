@@ -346,11 +346,13 @@ not offered as the one that satisfies the placement: `default` prefers the
 host's default and otherwise takes the lowest-alias unit that satisfies the
 requirement, `each` covers the matching units alone, and an explicit alias
 that cannot satisfy it is a planning error (its role is checked first, since
-that is a different mistake). A host with
-no matching unit is left out as not applicable (`hostneeds.NotApplicable`),
-with a reason naming the requirement and the placement of every unit of that
-type on the host, so a report says what was missing rather than silently
-selecting a board that cannot show what the test is for.
+that is a different mistake). A host with no matching unit is left out as not
+applicable (`hostneeds.NotApplicable`), with a reason naming the requirement
+and the placement of every unit of that type on the host, so a report says
+what was missing rather than silently selecting a board that cannot show what
+the test is for. On a step that names one host rather than `each`, as the
+`range-weak-link` suite does, there is no other host to fall back to, so that
+same reason fails planning instead.
 
 Placement is recorded, never re-derived, and only where the registry states
 it: the planner puts the placement of every bound unit that has one on the

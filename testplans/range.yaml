@@ -28,8 +28,9 @@ suites:
   #
   # The level is the same 3 as above, and for the same reason: it is the
   # bound this test already carries on this bench, not a figure derived from
-  # the weak-link runs, whose highest value was 2. The suite does not narrow
-  # it. What it adds is which board answers.
+  # the weak-link runs, which reached 1 in this orientation. The suite does
+  # not narrow it; what it adds is which board answers. docs/tests.md has the
+  # numbers and what the suite is still waiting on.
   range-weak-link:
     - Two-device range test:
         host: Host_Linux

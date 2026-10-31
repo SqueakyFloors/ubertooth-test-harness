@@ -446,10 +446,12 @@ python -m ubertooth_harness run-suite \
 The plan's second suite, `range-weak-link`, runs the same test with the
 weak-link receiver answering, choosing both boards by RF placement rather than
 by alias: a responder recorded at exactly the 20 dB the bench measured, with
-its antenna attached, and an unattenuated sender. It fails on current fork main for a
-reason worth reading:
-[docs/tests.md](docs/tests.md#two-device-range-test) has the measurement, the
-selection, and what it is waiting on.
+its antenna attached, and an unattenuated sender. It does not pass on current fork main:
+it stops at the step that asserts `-n` prints nothing on standard output,
+which a repeater slower than the first progress interval makes it do
+([ubertooth#1026](https://github.com/SqueakyFloors/ubertooth/issues/1026)).
+[docs/tests.md](docs/tests.md#two-device-range-test) has the measurement and
+the selection.
 
 On current fork main the `range` suite passes: the sender gets a clean round trip and
 `-m` reports request and reply PA levels and copy numbers (fixed by

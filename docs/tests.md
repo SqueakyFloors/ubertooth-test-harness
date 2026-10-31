@@ -734,9 +734,9 @@ recorded run, at 20 dB and about a meter, failed at the step that asserts `-n`
 prints nothing on standard output: `-n` prints `waiting for the repeater...`
 there instead of on standard error
 ([ubertooth#1026](https://github.com/SqueakyFloors/ubertooth/issues/1026)).
-That line appears only once the first progress interval has passed, so any
-repeater slower than it reaches the path and a repeater at bench distance does
-not, which is why the ordinary suite never showed it. The run stops there,
+That line appears only once the first progress interval has passed. A
+repeater at bench distance answers before then, so the ordinary suite never
+reaches it; one a meter away behind 20 dB does not. The run stops there,
 before `-m` is read, so this suite has never judged a result; the PA levels
 above come from driving `-e`, `-n`, and `-m` by hand. It is committed so the
 fork fix is verified by a suite rather than by a one-off script.
