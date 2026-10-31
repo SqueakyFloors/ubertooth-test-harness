@@ -798,6 +798,41 @@ class LabFiles(unittest.TestCase):
                 self.assertIn("usage:", result.stdout)
                 self.assertNotIn("harness environment", result.stderr)
 
+    def test_it_holds_a_device_run_as_a_user_runs_it(self):
+        """End to end as a shell invokes it: no PYTHONPATH, another directory.
+
+        The in-process tests cannot catch this, because the delegate is a
+        child process with an environment of its own.
+        """
+        with tempfile.TemporaryDirectory() as elsewhere:
+            root = Path(elsewhere)
+            registry = root / "hardware.yaml"
+            registry.write_text(REGISTRY, encoding="utf-8")
+            leases_dir = root / "leases"
+            leases_dir.mkdir()
+            environment = dict(os.environ)
+            environment.pop("PYTHONPATH", None)
+            environment.pop("UBERTOOTH_HARNESS_HARDWARE", None)
+            result = subprocess.run(
+                [
+                    sys.executable, str(HOLD),
+                    "--hardware", str(registry),
+                    "--lease-dir", str(leases_dir),
+                    "--wait-for-boards", "0",
+                    "UT0", "--", sys.executable, "-c", "print('held')",
+                ],
+                capture_output=True, text=True, env=environment,
+                cwd=elsewhere, timeout=120,
+            )
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("held", result.stdout)
+
+    def test_the_delegate_can_import_the_harness(self):
+        environment = hold.child_environment({"PATH": "/usr/bin"})
+        self.assertIn(str(REPO), environment["PYTHONPATH"])
+        kept = hold.child_environment({"PYTHONPATH": "/somewhere"})
+        self.assertEqual(f"{REPO}{os.pathsep}/somewhere", kept["PYTHONPATH"])
+
     def test_a_usage_error_exits_like_argparse_does(self):
         environment = dict(os.environ)
         environment.pop("PYTHONPATH", None)

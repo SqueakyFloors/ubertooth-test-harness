@@ -198,6 +198,22 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     return args, command
 
 
+def child_environment(environ=None) -> dict:
+    """The environment for the delegate, with the checkout importable.
+
+    This process put the checkout on its own `sys.path`; a child does not
+    inherit that, so `python -m ubertooth_harness` in the delegate would not
+    find the package unless the checkout happens to be the working directory.
+    """
+    environment = dict(os.environ if environ is None else environ)
+    root = str(_HERE.parents[1])
+    existing = environment.get("PYTHONPATH", "")
+    environment["PYTHONPATH"] = (
+        root + os.pathsep + existing if existing else root
+    )
+    return environment
+
+
 def harness_lease_argv(args, aliases, command) -> list[str]:
     """The `ubertooth-harness lease` command line this delegates to."""
     argv = [
@@ -248,7 +264,8 @@ def main(argv: list[str] | None = None) -> int:
     if not extra:
         return leases.exit_status(
             subprocess.call(
-                harness_lease_argv(args, [r.alias for r in resources], command)
+                harness_lease_argv(args, [r.alias for r in resources], command),
+                env=child_environment(),
             )
         )
 
