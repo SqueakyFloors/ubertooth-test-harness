@@ -1,0 +1,62 @@
+plan: Classic Bluetooth piconet capture
+suites:
+  # Needs a Linux host with an Ubertooth and two ESP32 Classic peers
+  # registered with the acceptor and initiator roles and their BD_ADDRs
+  # (hardware.example.yaml). The two peers hold a Serial Port Profile link
+  # and stream over it; the Ubertooth only receives. The peers must already
+  # run firmware/esp32-classic-peer utesp-1.0.0 or a later 1.x image: unlike
+  # the DK cases, nothing here flashes them, and a board running something
+  # older fails mandatory preflight with the version it reports. Other
+  # registered Ubertooths on the host are guarded (read only).
+  #
+  # 25 s per capture is what the bench needs for a useful count: the
+  # Ubertooth sweeps 79 channels and decodes about one packet of the piconet
+  # a second.
+  classic:
+    - Capture known Classic device:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        coverage: smoke
+        duration: 25s
+
+    - Follow Classic Bluetooth piconet:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        coverage: smoke
+        duration: 25s
+
+  classic-comprehensive:
+    - Capture known Classic device:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        coverage: comprehensive
+        duration: 25s
+
+    - Follow Classic Bluetooth piconet:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        coverage: comprehensive
+        duration: 25s
+
+  # The bounded long variant: the same two smoke cases over a capture long
+  # enough to show that a receive run holds up, rather than that it starts.
+  # Two captures of five minutes each, so about eleven minutes with the
+  # bring-ups; the boards are held throughout. It is not a soak with
+  # sampling: `Classic Bluetooth receive soak` is still a backlog entry, and
+  # the sampling is what it is waiting for.
+  classic-long:
+    - Follow Classic Bluetooth piconet:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        coverage: smoke
+        duration: 5m

@@ -1172,7 +1172,10 @@ def _lease_command(args: argparse.Namespace) -> int:
     for alias in args.boards:
         resource = registry.get(alias)
         if resource.type not in board_leases.LEASED_TYPES:
-            raise HarnessError(f"resource {alias} is not an Ubertooth or an nRF52840 DK")
+            raise HarnessError(
+                f"resource {alias} is not leasable; leasable types are "
+                + ", ".join(board_leases.LEASED_TYPES)
+            )
         boards.append(board_leases.Board(alias, board_leases.resource_key(resource)))
     # A manual firmware write (or DFU read-back) must not overlap another
     # command's power changes or writes on this host.

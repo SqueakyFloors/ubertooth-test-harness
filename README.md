@@ -665,6 +665,8 @@ python -m ubertooth_harness run-suite \
 | `Two-device range test` | no `coverage` argument; `range` plan; two registered boards on one host (`sender`, `responder`; the same board in both roles is refused), `allow RF transmission: true`: both boards reset (so neither has an old result) and set to 2410 MHz, `-e` on the responder, which must then answer USB with its RX LED on and still be at 2410 MHz before `-n` on the sender (so a failure tells a wedged repeater from a wedged sender), then the sender's `-m` is read until a result appears (10 s deadline) and must give request and reply PA levels at most `maximum PA level` (0-7, default 7; the plan sets 3) and copy numbers 0-15; a mismatch fails, naming the field that differs; the sender is idle afterwards (LEDs off, back to 2441 MHz: the idle reset ran); the responder still answers USB with its RX LED on, keeps no result, and `-S` stops it (LEDs off, back to 2441 MHz); channel, PA, squelch, LEDs and CRC of both boards restored, other registered boards guarded. Passes on fork main since fork #601 (fork #26, #483), about 9 runs in 10 on a bench pair; the rest fail with `mismatch on byte 0` (fork #677) | no comprehensive profile |
 | `Capture known BLE advertiser` | `ble` plan; an Ubertooth and an nRF52840 DK with the `advertiser` role on one host (see [BLE test devices](#ble-test-devices-nrf52840-dk)): the DK is flashed with `firmware/nrf52840dk` when it reports another version, and must report its registered address; for each of channels 37, 38 and 39 the DK advertises (`ADV_NONCONN_IND`, `interval`, `payload` tag) on that channel only and `ubertooth-btle -n -A<channel> -q` captures for `duration`: at least a fifth of its advertising events and no more than its interval allows, every one on that channel's RF channel, CRC right, from its address, with the harness payload (magic, channel map, tag) and a counter between the DK's counters before and after; `-n -A37` while it advertises on 38 holds none of its packets; `-f -A37 -r` (PCAPNG) holds them too; the DK is stopped and returned to its boot settings, the Ubertooth's channel, squelch and LEDs restored, other registered boards guarded | adds every listen/advertise channel pair that must hold nothing, `-f -A38`/`-A39`, `ADV_IND` (which is scannable, so the advertiser's own scan responses to scanners nearby are counted and only their channel is checked), advertising on all three channels, a 1000 ms interval (packet bound), and no tag |
 | `Capture known BLE connection` | `ble` plan, `connection` suite; an Ubertooth and two nRF52840 DKs, one with the `central` role and one with the `peripheral` role, on one host (see [BLE test devices](#ble-test-devices-nrf52840-dk)): both DKs are flashed with `firmware/nrf52840dk` when they report another version and must report their registered addresses; the peripheral advertises connectable, the central connects at `interval` with a 251-byte data length, writes 244 bytes every 100 ms, asks for `update` once connected, and remakes the link every 4 s; `ubertooth-btle -f -r` captures for `duration` and the capture must hold one CONNECT_IND between the two addresses with exactly that interval, latency 0 and a 4 s supervision timeout, a hop increment of 5-16, every data channel in the channel map, at least five packets on the connection's access address with correct CRCs, and at least one longer than the 27 bytes a link without Data Length Extension allows; both DKs are left idle in the advertiser role, the Ubertooth's channel, squelch and LEDs restored, other registered boards guarded | adds the same with `-q` (PCAP) and a case pinning the wrong connection information libbtbb records in a PCAPNG ([libbtbb#21](https://github.com/SqueakyFloors/libbtbb/issues/21)), which fails when that is fixed |
+| `Capture known Classic device` | `classic` plan; an Ubertooth and two ESP32 Classic peers with the `acceptor` and `initiator` roles on one host (see [Classic test devices](#classic-test-devices-esp32-classic-peers)): both peers must already run `firmware/esp32-classic-peer`, which mandatory preflight checks by asking each one to identify itself; `esp32peer.py stream` then brings a Serial Port Profile link up between them, streams 200 bytes every 20 ms, and runs `ubertooth-rx` for `duration` while it holds. `ubertooth-rx -z` must list the piconet master's LAP in its survey results, and a run with no target must report at least ten packet lines carrying that LAP; the master is whichever peer pages, so its LAP is the initiator's. Afterwards the pair must report a link that never went down and at least fifty writes, both peers are reset to the firmware's boot state, the Ubertooth's channel, squelch and LEDs are restored, and other registered boards are guarded | adds `-z -r` (PCAPNG with link type 255) and the same survey with the peers' roles swapped, which must list the other board's LAP and not the first one's |
+| `Follow Classic Bluetooth piconet` | `classic` plan; the same two peers and the same bring-up: `ubertooth-rx -l <master LAP> -u <master UAP>` must report at least ten packet lines and none of another LAP (libbtbb is asked for one access code), and `-l`/`-u` for the peer that is *not* the master must report no packet at all | adds `-l` without `-u` (the UAP is recovered from the air) and `-l -u -q` (PCAP with link type 255) |
 | `DFU images` | writes the selected board's firmware; slow plan (not fast): `-d <test image> -r`, then `-u -r` reads back the image padded with 0xff; `-s` on the image without its suffix gives the build's `.dfu` | `firmware` plan (not release): adds `-s` refusing a `.dfu`; seven bad images (wrong CRC, truncated, no suffix, text, no `UFD`, wrong vendor, wrong product) refused before a device is opened (fork #198, #199, fixed in e8edd15), the board still in its application with the same flash (read back); `-s` refuses a suffixed `.bin` and accepts a read-only one (fork #200, fixed in 9d710fe). At 6fee30c `-d <image> -r` exits 1 after a good flash (fork #267, fixed in 89d9197), so the write cases fail there |
 | `BLE mode conflicts` | no `coverage` argument; release plan | every combination of `ubertooth-btle -f -n -p` must be rejected before sniffing |
 | `Ubertooth util conflicts` | no `coverage` argument; requires `allow RF transmission: true`; release plan | every pair of `-q -n -e -t -x -I` must be rejected with the fork's `error: options ... cannot be combined` before a mode starts |
@@ -1219,6 +1221,113 @@ locks](#external-board-locks)); the DK's file is the one named after its lock
 key, `board-nrf52840dk-<J-Link serial without leading zeros>.lock` for the
 template `<lab lock dir>/board-{serial}.lock`. Hold such a lock only for the
 run, so other users of the DK get their turn.
+
+## Classic test devices (ESP32 Classic peers)
+
+Tests that need real Classic Bluetooth (BR/EDR) traffic use two
+ESP32-WROOM-32E boards running the harness's own peer firmware,
+[`firmware/esp32-classic-peer`](firmware/esp32-classic-peer/README.md)
+(build, flash, shell protocol, versions). They are the Classic counterpart of
+the DKs: the two boards hold a Serial Port Profile link to each other and
+stream a payload across it, so a test has BR/EDR traffic from an address it
+knows, on demand, with no third-party device involved. The Ubertooth only
+receives.
+
+Register each board as an `ESP32 Classic peer` with the serial of its CP2102N
+USB to UART bridge and the BD_ADDR its `status` reports
+([`hardware.example.yaml`](hardware.example.yaml)):
+
+```yaml
+ESP32_Linux0:
+  type: ESP32 Classic peer
+  attached to: Host_Linux
+  roles: [acceptor, initiator]
+  identity:
+    bridge serial: "0123456789abcdef0123456789abcdef"
+    BD_ADDR: "C8:00:00:00:00:01"
+```
+
+A registry may also write down the `LAP`, `UAP` and `name` the board's
+`status` reports, for a person reading it; the code derives them from the
+address, and a copy that disagrees is refused as a typo.
+
+One image holds both roles, `acceptor` (the boot role, which listens) and
+`initiator` (which pages, connects, and streams), and one shell command
+switches between them, so no test reflashes a peer. Both boards may declare
+both roles; a host picks which one listens and which one pages:
+
+```yaml
+Host_Linux:
+  type: Host
+  defaults:
+    ESP32 Classic peer: ESP32_Linux0
+    acceptor: ESP32_Linux0
+    initiator: ESP32_Linux1
+```
+
+**The LAP on the air is the master's, and the master is whichever board
+pages.** The initiator pages, so every packet in the piconet carries the
+initiator's LAP; the acceptor's LAP is on the air only during the page train,
+which is over before a capture starts. That is why these cases take the LAP
+and UAP from the initiator's registered BD_ADDR, and why exchanging the two
+bindings moves the piconet to the other address.
+
+`ubertooth_harness/esp32peer.py` drives a peer. It opens the bridge by its
+stable path (`/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_<serial>-if00-port0`,
+derived from the bridge serial unless the identity names a `serial device`),
+waits for the firmware's boot notice, and speaks its line shell: `status`
+(one JSON line with the BD_ADDR, LAP and UAP), `role`, `spp peer`,
+`spp start`, `stream`, `spp stop`. `reset` restarts the board with the
+bridge's own RTS line, which is how a case releases one. Every command fails
+closed with an `error:` line.
+
+**Opening the bridge resets the board.** DTR and RTS are wired to the chip's
+EN and IO0 pins, and the kernel asserts both when the port is first opened,
+so the pair cannot be set up in one command and captured in the next, the way
+a DK's can. `esp32peer.py stream` is the answer: it holds both ports for one
+whole session, brings the link up, runs the tool under test while the pair
+streams, stops the pair, and reports what both boards did. The tool's own
+output is passed straight through on standard output, and the pair's report
+(both BD_ADDRs, the master's LAP and UAP, writes, bytes received) is on
+standard error, so a case checks the tool's output exactly as it would
+without the peers:
+
+```sh
+python -m ubertooth_harness run-suite \
+  --plan testplans/classic.yaml --suite classic \
+  --hardware hardware.yaml --host Host_Linux \
+  --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
+  --output runs
+```
+
+Nothing in the harness flashes a peer, so the driver asks for a minimum
+version (`utesp-1.0.0`) rather than an exact one: a later image of the same
+major has these commands and more, and the run record keeps whichever
+version each board reported. An older image, or another major version,
+fails mandatory preflight naming what it found; build and flash it from
+`firmware/esp32-classic-peer` at this harness commit.
+
+The `classic` suite of [`testplans/classic.yaml`](testplans/classic.yaml) is
+the smoke run above, `classic-comprehensive` adds the capture files and the
+role exchange, and `classic-long` is the bounded long variant: the same two
+follow cases over a five-minute capture each, which is what shows that a
+receive run and the pair's link hold up for minutes rather than seconds. The
+sampling soak, `Classic Bluetooth receive soak`, is still a backlog entry;
+sampling is what it waits for, not traffic.
+
+Because the comprehensive coverage exchanges the two roles, both peers a plan
+binds must declare both: the registry's role list is what a plan picks a board
+by, and one image holds both roles anyway.
+
+A peer is leased like an Ubertooth (`ubertooth-harness boards` and `lease`
+list it), keyed by its bridge serial (`esp32-<serial>.lock` in the lease
+directory). As with the DKs, a lab that guards boards with its own per-board
+lock files must hold both bridges' lock files around the run until the
+harness takes external board locks
+([#123](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/123)).
+
+The peers have no switchable power on this bench, so nothing power-cycles
+one: a board that stops answering needs someone at it.
 
 ## Sharing boards: leases
 

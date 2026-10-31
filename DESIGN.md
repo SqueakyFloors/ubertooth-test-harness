@@ -807,6 +807,52 @@ before relying on reset-into-new-image for unattended runs.
 
 ---
 
+### 3e. Test radios: nRF52840 DKs and ESP32 Classic peers
+
+The Ubertooth is receive-only in every test, so anything that has to be
+captured must be transmitted by hardware the harness owns. Two kinds are
+registered as typed resources, each driven by one module and one firmware
+image that holds every role, so no test reflashes a radio to change what it
+does:
+
+| Resource type | Radio | Driver | Firmware |
+|---|---|---|---|
+| `nRF52840 DK` | Bluetooth LE | `ubertooth_harness/nrfdk.py` | `firmware/nrf52840dk` |
+| `ESP32 Classic peer` | Classic Bluetooth (BR/EDR) | `ubertooth_harness/esp32peer.py` | `firmware/esp32-classic-peer` |
+
+Both speak the same line shell over a serial port — one command line in,
+data lines out, then one `OK` or `ERR <reason>`, with `status` on a single
+JSON line — so a reader of one driver can read the other. Both are leased
+like an Ubertooth, under a prefixed key (`nrf52840dk-<J-Link serial>`,
+`esp32-<bridge serial>`), and both are checked in preflight by asking the
+board to identify itself.
+
+They differ in one way that shapes how a case is written. **A DK keeps its
+state when its serial port is closed; an ESP32 does not.** On an ESP32 dev
+board DTR and RTS are wired to the chip's EN and IO0 pins, and the kernel
+asserts both when a process first opens the bridge, so every open resets the
+board. A BLE case can therefore set the DK advertising in one step and
+capture in the next, as `advertiser_cases.py` does; a Classic case cannot,
+because the capture step's own `status` read would drop the link it is
+capturing.
+
+So `esp32peer.py stream` holds both bridges for one whole session: it brings
+the Serial Port Profile link up, runs the tool under test as a child while
+the pair streams, stops the pair, and reports what both boards did. The tool
+keeps standard output to itself and the pair's report goes to standard error,
+which keeps the case's checks on the tool's real output
+(`classic_cases.py`). The same wiring gives a reliable release: a reset pulse
+on RTS leaves the board in the firmware's boot state, which is what every
+Classic case's cleanup does.
+
+One consequence is worth stating because it decides what a case can assert:
+in a Classic piconet the LAP on the air is the **master's**, and the master
+is whichever board paged. The initiator pages, so the initiator's LAP and UAP
+are what `ubertooth-rx -l` and `-u` take, and exchanging the two role
+bindings moves the piconet to the other board's address.
+
+---
+
 ## 4. Web GUI (controller)
 
 Implemented: `/ui/` on the controller, vanilla JavaScript in

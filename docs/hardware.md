@@ -156,9 +156,11 @@ The device name is not settable and does not need to be: it carries the
 board's own LAP (`UT-ESP32-<LAP>`), so it is fixed for the life of the board
 and different from the other one with no setup step.
 
-No catalog test binds a peer yet, so a registry entry for one is inert today:
-the pair is driven by hand over its shell, and the cases that will use it are
-in flight.
+`Capture known Classic device` and `Follow Classic Bluetooth piconet` bind a
+pair, through [`esp32peer.py`](../ubertooth_harness/esp32peer.py). Nothing in
+the harness flashes a peer, so the driver asks for `utesp-1.0.0` or a later
+1.x image rather than an exact version, and each board's own version goes in
+the run record. A peer is leased like a board, under `esp32-<bridge serial>`.
 
 ### Acroname USBHub3+
 

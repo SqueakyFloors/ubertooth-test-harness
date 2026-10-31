@@ -235,7 +235,10 @@ def _cell(value) -> str:
 # has `serial`, an nRF52840 DK its J-Link probe's `jlink serial`. The keys are
 # listed rather than matched on the word "serial", which would also pick up a
 # DK's `serial device` and print a /dev/serial/by-id path.
-_IDENTITY_SERIAL_KEYS = ("serial", "jlink serial")
+# An Ubertooth is named by its own serial, a DK by its J-Link probe's, and
+# an ESP32 Classic peer by its USB bridge's: a peer has no serial of its
+# own, and the bridge serial is what the registry and the lab lease it by.
+_IDENTITY_SERIAL_KEYS = ("serial", "jlink serial", "bridge serial")
 
 
 def _identity_serial(identity: Mapping) -> str:
@@ -392,8 +395,9 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
         alias = start.get("resource")
         if not alias:
             continue
+        identity = start.get("resource_identity", {})
         device = devices.setdefault(alias, {
-            "serial": _identity_serial(start.get("resource_identity", {})),
+            "serial": _identity_serial(identity),
             "firmware": "",
         })
         if details.get("check_name") == "Firmware version":
