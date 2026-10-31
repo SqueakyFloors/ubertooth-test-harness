@@ -40,32 +40,43 @@ LIBBTBB_PIN=bf878df27e131dd8ab56bb3497918eb9a83f607b
 step() { printf '\n=== ci: %s ===\n' "$1"; }
 
 # Bluetooth piconet roles are central and peripheral, never the older words
-# (AGENTS.md). Only the external names this project does not own are allowed:
-# libbtbb's and git's `master` branch and ESP-IDF's ESP_SPP_ROLE_* constants.
-# Each allowed form is deleted from the line before the line is judged, so
-# another occurrence on the same line still fails. The allowed forms are
-# matched exactly where the search is case-insensitive, so an odd spelling
-# fails rather than slips through. AGENTS.md and this file are skipped,
-# because the rule and the check have to name the words they forbid.
+# (AGENTS.md). Only the external names this project does not own are allowed,
+# each written here as it appears in the tree: libbtbb's and git's `master`
+# branch, and ESP-IDF's two SPP role constants. A line is judged on its text
+# with every allowed form deleted, so the path is never read as content and a
+# second occurrence on the same line still fails. AGENTS.md and this file are
+# skipped, because the rule and the check have to name the words they forbid.
 ROLE_TERMS='master|slave'
-ROLE_TERMS_ALLOW='"master"|`master`|libbtbb-ref master|branch:master|ESP_SPP_ROLE_(MASTER|SLAVE)'
+ROLE_TERMS_ALLOW='`master`|"branch:master"|libbtbb-ref master|LIBBTBB_BRANCH = "master"|ESP_SPP_ROLE_MASTER,|ESP_SPP_ROLE_SLAVE,'
 
 check_role_terms() {
     step "Bluetooth role terms"
-    lines=$WORK/role-terms.txt
-    # Tracked files where git is here, so a scratch file in a working tree is
-    # nobody's failure; every file otherwise, which is what the tree
-    # scripts/local-ci.sh exports holds. Either way a search that errors ends
-    # the run instead of reading as a clean tree.
-    if git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
-        git grep -nIiE "$ROLE_TERMS" -- ':!scripts/ci.sh' ':!AGENTS.md' \
-            > "$lines" || [ $? = 1 ]
-    else
-        grep -rIiE "$ROLE_TERMS" . --exclude=ci.sh --exclude=AGENTS.md \
-            --exclude-dir=.git --exclude-dir=.venv --exclude-dir=__pycache__ \
-            > "$lines" || [ $? = 1 ]
+    if [ ! -f AGENTS.md ] || [ ! -f scripts/ci.sh ]; then
+        echo "error: run scripts/ci.sh from the repository root" >&2
+        return 1
     fi
-    if sed -E "s@$ROLE_TERMS_ALLOW@@g" "$lines" | grep -iE "$ROLE_TERMS" >&2; then
+    out=$WORK/role-terms
+    if [ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)" ]; then
+        # Tracked files, so a scratch file in a working tree is nobody's
+        # failure. Only at the top level, where the pathspecs mean what they say.
+        git grep -nIiE "$ROLE_TERMS" -- ':!scripts/ci.sh' ':!AGENTS.md' \
+            > "$out.lines" || [ $? = 1 ]
+    else
+        # Every file, which is what the tree scripts/local-ci.sh exports holds.
+        grep -rnIiE "$ROLE_TERMS" . --exclude=ci.sh --exclude=AGENTS.md \
+            --exclude-dir=.git --exclude-dir=.venv --exclude-dir=__pycache__ \
+            > "$out.lines" || [ $? = 1 ]
+    fi
+    # One command each, so a step that errors ends the run instead of leaving
+    # an empty file that reads as a clean tree.
+    sed -E 's/^[^:]*:[0-9]+://' "$out.lines" > "$out.text"
+    sed -E "s@$ROLE_TERMS_ALLOW@@g" "$out.text" > "$out.judged"
+    grep -niE "$ROLE_TERMS" "$out.judged" > "$out.hits" || [ $? = 1 ]
+    if [ -s "$out.hits" ]; then
+        # The file's own lines, found by their position in the search output,
+        # so a reader can search for what they see.
+        awk -F: 'NR == FNR { bad[$1]; next } FNR in bad' \
+            "$out.hits" "$out.lines" >&2
         echo "error: the lines above name a Bluetooth piconet role with an old" \
              "word; write central or peripheral. If the line holds an external" \
              "name this project does not own, or a pattern that has to match" \

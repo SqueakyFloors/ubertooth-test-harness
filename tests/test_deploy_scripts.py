@@ -46,6 +46,9 @@ USER = pwd.getpwuid(os.getuid()).pw_name
 # Placeholders: no real lab host or SSH alias belongs in this repository.
 LAB_HOST = "lab-host.example"
 JUMP_HOST = "jump-host.example"
+# libbtbb's default branch: that repository's name for it, not ours to
+# rename, and what a ref that is a branch name looks like here.
+LIBBTBB_BRANCH = "master"
 
 # Each fake logs "<name> <args>" to $FAKE_LOG.
 LOGGING_FAKE = '#!/bin/sh\nprintf "%s\\n" "$(basename "$0") $*" >> "$FAKE_LOG"\n'
@@ -408,14 +411,15 @@ class DeployTest(unittest.TestCase):
         self.assertOk(self.lab.deploy(
             "--port", "9123",
             "--ubertooth-repo", "https://example.org/ubertooth.git",
-            "--libbtbb-source", str(libbtbb), "--libbtbb-ref", "master",
+            "--libbtbb-source", str(libbtbb), "--libbtbb-ref", LIBBTBB_BRANCH,
         ))
         controller = (self.lab.unit_dir / CONTROLLER_UNIT).read_text(encoding="utf-8")
         runner = (self.lab.unit_dir / RUNNER_UNIT).read_text(encoding="utf-8")
         self.assertIn(" controller --port 9123 ", controller)
         self.assertIn(" --ubertooth-repo https://example.org/ubertooth.git\n", controller)
         self.assertIn(" --controller ws://127.0.0.1:9123/ws/runner ", runner)
-        self.assertIn(f" --libbtbb-source {libbtbb} --libbtbb-ref master", runner)
+        self.assertIn(f" --libbtbb-source {libbtbb} --libbtbb-ref {LIBBTBB_BRANCH}",
+                      runner)
         # A named libbtbb is the operator's: deploy neither clones nor fetches it.
         self.assertFalse([c for c in self.lab.git_commands() if c.startswith(f"git -C {libbtbb}")])
         self.assertFalse([c for c in self.lab.git_commands() if " clone " in c])
@@ -479,7 +483,7 @@ class DeployTest(unittest.TestCase):
         self.assertIn("libbtbb: none (--no-libbtbb)", result.stdout)
         self.assertEqual([], self.lab.git_commands())
         self.assertFalse(self.lab.libbtbb.exists())
-        result = self.lab.deploy("--no-libbtbb", "--libbtbb-ref", "master")
+        result = self.lab.deploy("--no-libbtbb", "--libbtbb-ref", LIBBTBB_BRANCH)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("--no-libbtbb cannot be combined", result.stderr)
 
