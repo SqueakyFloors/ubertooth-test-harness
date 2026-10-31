@@ -16,6 +16,7 @@ from ubertooth_harness.catalog import (
 )
 from ubertooth_harness.events import (
     MANIFEST_MAX_BYTES,
+    OUTPUT_CHECKS_MAX_BYTES,
     open_run_publisher,
     EventPublisher,
     EventSink,
@@ -28,6 +29,12 @@ from ubertooth_harness.manifest import ManifestError, RunManifest, json_value
 from ubertooth_harness.planner import TestInvocation, alternated_roles
 from ubertooth_harness.power import PowerControllerError
 from ubertooth_harness.preflight import PreflightCheck
+from ubertooth_harness.outputfiles import (
+    TARGET_SERIAL_STREAM,
+    CommandOutput,
+    measure,
+    stream_for,
+)
 from ubertooth_harness.rawlog import record_output
 from ubertooth_harness.resources import RegistryError
 from ubertooth_harness import targets
@@ -59,6 +66,10 @@ from ubertooth_harness.stateful import (
     artifact_key,
 )
 from ubertooth_harness import transitions
+
+# File records per output_files event; each is about 180 bytes, so a batch
+# stays well inside the event limit (events.OUTPUT_CHECKS_MAX_BYTES).
+CASE_FILES_PER_RECORD = 100
 
 
 @dataclass(frozen=True)
@@ -489,8 +500,9 @@ class NamedTestSequencer:
         A command whose output passes the per-command record limits
         (rawlog.RECORD_*) keeps its first and last output records in
         run.jsonl, with a ``command_output_omitted`` record between them, and
-        its full output in ``output/<command id>.log``; ``command_finished``
-        names the file and summarizes what was left out.
+        each of its streams in full in ``output/<command id>.<stream>.log``;
+        ``command_finished`` names the files and summarizes what was left
+        out.
         """
         details = dict(owner)
         details.update({"command_id": command_id, "argv": list(argv)})
@@ -524,7 +536,80 @@ class NamedTestSequencer:
         })
         finished.update(spilled)
         publisher.emit("command_finished", command_status, finished)
+        if isinstance(result.output, CommandOutput):
+            result.output.owner = {
+                **owner, "command_id": command_id, "argv": list(argv),
+            }
         return result
+
+    @staticmethod
+    def _record_case_files(
+        publisher: EventPublisher, owner: Mapping, output_dir: Path, directory
+    ) -> None:
+        """Record the files a case left in its own directory.
+
+        These are the captures its tools wrote (a PCAP, a PCAPNG, a ``-d``
+        dump) and any target device's shell traffic. Each one's size and
+        SHA-256 go in the run record, so the report lists it beside the
+        command output files and an audit can tell it is still the file the
+        run produced. Lines are counted only for a target's traffic; a
+        capture is binary.
+        """
+        if not directory:
+            return
+        path = Path(directory)
+        if not path.is_dir():
+            return
+        files = []
+        for found in sorted(path.rglob("*")):
+            if not found.is_file():
+                continue
+            stream = stream_for(found)
+            files.append(measure(
+                found, stream, relative_to=output_dir,
+                count_lines=stream == TARGET_SERIAL_STREAM,
+            ))
+        # A case that wrote many files would not fit in one record, and an
+        # event over the limit would abort the run after its cleanup had
+        # already finished, so they go in batches.
+        for start in range(0, len(files), CASE_FILES_PER_RECORD):
+            batch = files[start:start + CASE_FILES_PER_RECORD]
+            publisher.emit(
+                "output_files", "passed",
+                {**owner, "files": [saved.to_dict() for saved in batch]},
+                max_bytes=OUTPUT_CHECKS_MAX_BYTES,
+            )
+
+    @staticmethod
+    def _record_output_checks(publisher: EventPublisher, *results) -> None:
+        """Record what each check read from the command's output.
+
+        One ``output_checks`` record per command holds the files the checks
+        read and, for each check, its pattern and what it found.
+        ``ubertooth-harness validate <run dir>`` runs them again against the
+        same files, so a run can be audited or re-judged after a check is
+        fixed. The record is written after the checks have run, which is why
+        it is a record of its own rather than part of ``command_finished``.
+        """
+        for result in results:
+            output = result.output if result is not None else None
+            if not isinstance(output, CommandOutput) or not output.checks:
+                continue
+            # The command's own files are in its command_finished record,
+            # and each check names the files it read, so this record carries
+            # the checks only.
+            publisher.emit(
+                "output_checks",
+                "failed" if any(c.reason for c in output.checks) else "passed",
+                {
+                    **output.owner,
+                    "checks": [check.to_dict() for check in output.checks],
+                },
+                max_bytes=OUTPUT_CHECKS_MAX_BYTES,
+            )
+            # Emptied so a second call for the same command records nothing:
+            # the preflight asks twice when its fallback command runs.
+            output.checks.clear()
 
     def _run_state_step(
         self,
@@ -584,6 +669,7 @@ class NamedTestSequencer:
             output_dir=output_dir,
         )
         outcome = step.evaluate(result, context)
+        self._record_output_checks(publisher, result)
         if (
             step.observe is not None
             and outcome.observed is not None
@@ -749,6 +835,9 @@ class NamedTestSequencer:
                 # A value the case may have changed cannot be written back.
                 cleanup_failures.append(skipped)
 
+        self._record_case_files(
+            publisher, owner, output_dir, context.get(CAPTURE_DIR_KEY)
+        )
         reasons = []
         if step_failure:
             reasons.append(step_failure)
@@ -1186,6 +1275,7 @@ class NamedTestSequencer:
                 output_dir=output_dir,
             )
             failure = check.result_failure(result)
+            self._record_output_checks(publisher, result)
             if failure and check.needs_fallback(result):
                 # The command left the question unanswered, so this fork
                 # commit answers it on the older option: ask that one, and
@@ -1207,6 +1297,7 @@ class NamedTestSequencer:
                     failure = (
                         f"{asked}; then {' '.join(check.fallback_argv)}: {failure}"
                     )
+            self._record_output_checks(publisher, result)
             if failure:
                 status = "canceled" if result.cancelled else "failed"
                 publisher.emit(
@@ -1448,6 +1539,7 @@ class NamedTestSequencer:
                             )
                             missing = case.missing_tool(result)
                             case_failure = "" if missing else case.result_failure(result)
+                            self._record_output_checks(publisher, result)
                             case_status = (
                                 "canceled" if result.cancelled
                                 else "skipped" if missing

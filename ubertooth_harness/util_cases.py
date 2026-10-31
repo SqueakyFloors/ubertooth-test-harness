@@ -57,6 +57,7 @@ import sys
 from pathlib import Path
 
 from ubertooth_harness import ledblink
+from ubertooth_harness.outputfiles import find_lines, search_lines, text_lines
 from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
     COMPILE_INFO_PATTERN,
@@ -153,10 +154,10 @@ def led_blink_sampler_argv(serial: str) -> tuple[str, ...]:
     )
 
 
-def led_samples(stdout: str) -> list[str]:
+def led_samples(stdout) -> list[str]:
     return [
         "/".join(match.group("usr", "rx", "tx"))
-        for match in re.finditer(LEDS.pattern, stdout)
+        for match in find_lines(stdout, LEDS.pattern)
     ]
 
 
@@ -166,7 +167,7 @@ def _sample_count(samples) -> str:
     return ""
 
 
-def blink_check(stdout: str) -> str:
+def blink_check(stdout) -> str:
     """Identify is running: whole-on and whole-off samples both appear."""
     samples = led_samples(stdout)
     if not samples:
@@ -178,7 +179,7 @@ def blink_check(stdout: str) -> str:
 
 
 def steady_check(expected: str, what: str):
-    def check(stdout: str) -> str:
+    def check(stdout) -> str:
         samples = led_samples(stdout)
         reason = _sample_count(samples)
         if reason:
@@ -192,7 +193,7 @@ def steady_check(expected: str, what: str):
     return check
 
 
-def any_samples_check(stdout: str) -> str:
+def any_samples_check(stdout) -> str:
     return _sample_count(led_samples(stdout))
 
 
@@ -502,28 +503,39 @@ def range_field(byte: int) -> str:
     return "a byte the firmware does not compare"
 
 
-def range_poll_check(stdout: str) -> str:
+def range_poll_check(stdout) -> str:
     """The poll log: a result passes; a mismatch or no result names why."""
-    reads = re.findall(r"(?m)^read \d+: (.*)$", stdout)
-    mismatch = re.search(r"mismatch on byte (\d+)", stdout)
+    last_read = ""
+    mismatch = None
+    answered = False
+    deadline = ""
+    for line in text_lines(stdout):
+        read = re.match(r"^read \d+: (.*)$", line)
+        if read is not None:
+            last_read = read[1]
+        if mismatch is None:
+            mismatch = re.search(r"mismatch on byte (\d+)", line)
+        if "request PA level" in line:
+            answered = True
+        if re.match(r"^no range test result within ", line):
+            deadline = line
     if mismatch is not None:
         byte = int(mismatch[1])
         return (f"the reply differs from the request at byte {byte} "
                 f"({range_field(byte)})")
-    if "request PA level" in stdout:
+    if answered:
         return ""
-    deadline = re.search(r"(?m)^no range test result within .*$", stdout)
-    summary = deadline[0] if deadline else "the poll ended without a result"
-    last = reads[-1] if reads else "no read logged"
-    return f"{summary}; last read: {last}"
+    summary = deadline or "the poll ended without a result"
+    return f"{summary}; last read: {last_read or 'no read logged'}"
 
 
 def range_result_check(maximum_pa: int):
     """Sender -m: the four result lines, levels 0..maximum_pa, copies 0..15."""
-    def check(stdout: str) -> str:
-        match = re.search(RANGE_RESULT, stdout)
+    def check(stdout) -> str:
+        match = search_lines(stdout, RANGE_RESULT)
         if match is None:
-            first = stdout.strip().splitlines()[0] if stdout.strip() else "nothing"
+            first = next((line for line in text_lines(stdout) if line.strip()),
+                         "nothing")
             return f"no range test result (stdout: {first!r})"
         values = {name: int(value) for name, value in match.groupdict().items()}
         problems = []
@@ -778,7 +790,7 @@ def _listing(stdout):
     a listing line, or when a line stands in for a reading the tool could not
     take."""
     entries = []
-    for line in stdout.splitlines():
+    for line in text_lines(stdout):
         match = _LABELLED_LINE.match(line)
         label = match["label"] if match is not None else ""
         if match is None:
@@ -844,7 +856,7 @@ def version_listing_check(count):
     be checked here; the identity listing does that.
     """
     def check(stdout):
-        lines = stdout.splitlines()
+        lines = list(text_lines(stdout))
         # The answer opens with the host tools' two lines, in that order and
         # once each (libubertooth's ubertooth_print_host_version()); the
         # boards follow. Fixed rather than filtered, so an answer that

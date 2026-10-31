@@ -11,6 +11,7 @@ from ubertooth_harness.rawlog import (
     RECORD_OUTPUT_BYTES,
     RECORD_PIECE_CHARS,
     CappedOutput,
+    CommandOutputFiles,
     record_bytes,
 )
 from ubertooth_harness.report import (
@@ -95,8 +96,7 @@ def capped_events(text: str, stream: str = "stderr") -> list[dict]:
             command_event(next(moments), "command_output", "running", details))
 
     with tempfile.TemporaryDirectory() as spill:
-        capped = CappedOutput(
-            record, lambda: (Path(spill) / "c.log", "output/c.log"))
+        capped = CappedOutput(record, lambda: CommandOutputFiles(Path(spill), "c"))
         capped.add(_START, stream, text)
         details = capped.finish(lambda note: records.append(command_event(
             next(moments), "command_output_omitted", "running", note)))

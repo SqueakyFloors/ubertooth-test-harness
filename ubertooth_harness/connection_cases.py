@@ -47,6 +47,7 @@ from ubertooth_harness.advertiser_cases import (
     _dk,
     _dk_idle,
 )
+from ubertooth_harness.outputfiles import search_lines
 from ubertooth_harness.receive_cases import seconds_arg
 from ubertooth_harness.stateful import (
     StateCase,
@@ -186,8 +187,8 @@ def _central_did_the_work(update_ms: int):
     different interval accepted: the capture checks the CONNECT_IND, which is
     written before any update.
     """
-    def check(stdout: str) -> str:
-        match = _TRAFFIC.search(stdout)
+    def check(stdout) -> str:
+        match = search_lines(stdout, _TRAFFIC)
         if match is None:
             return "the central reported no traffic line"
         counts = {name: int(value) for name, value in match.groupdict().items()}
@@ -198,7 +199,7 @@ def _central_did_the_work(update_ms: int):
         if counts["updates"] < 1:
             return (f"the central's {update_ms} ms connection parameter update "
                     "was never accepted")
-        asked = _UPDATE.search(stdout)
+        asked = search_lines(stdout, _UPDATE)
         if asked is None:
             return "the central reported no update line"
         if int(asked["ms"]) != update_ms:

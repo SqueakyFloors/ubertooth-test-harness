@@ -42,10 +42,11 @@ from pathlib import Path
 import re
 import sys
 from types import MappingProxyType
-from typing import Callable, Mapping
+from typing import Callable, Iterable, Mapping
 
 from ubertooth_harness import capturefile, esp32peer
 from ubertooth_harness.hostneeds import Needs
+from ubertooth_harness.outputfiles import text_lines
 from ubertooth_harness.receive_cases import (
     EARLY_EXIT_S,
     EXIT_SLACK_S,
@@ -158,28 +159,31 @@ def _pair(resource_identities: Mapping, test_name: str,
 # Output checks
 
 
-Check = Callable[[str], str]
+# A Step.output_check: it is given the command's stdout lines and returns a
+# failure reason, or "" when the output is acceptable.
+Check = Callable[[Iterable[str]], str]
 
 
 def _all(*checks: Check) -> Check:
-    def check(output: str) -> str:
+    def check(output) -> str:
         reasons = [reason for reason in (one(output) for one in checks) if reason]
         return "; ".join(reasons)
     return check
 
 
-def _packet_laps(output: str) -> list[str]:
+def _packet_laps(output) -> list[str]:
     return [match["lap"]
-            for match in map(PACKET_LINE.match, output.splitlines()) if match]
+            for match in map(PACKET_LINE.match, text_lines(output)) if match]
 
 
-def _survey_laps(output: str) -> set[str]:
+def _survey_laps(output) -> set[str]:
     """The LAPs of the survey results, in the form -l takes."""
-    lines = output.splitlines()
-    if "Survey Results" not in lines:
-        return set()
     found = set()
-    for line in lines[lines.index("Survey Results") + 1:]:
+    results = False
+    for line in text_lines(output):
+        if not results:
+            results = line == "Survey Results"
+            continue
         match = SURVEY_LINE.match(line)
         if match:
             found.add(match["lap"].replace(":", "").lower())
@@ -193,7 +197,7 @@ def piconet_packets(lap: str, minimum: int, *, only: bool) -> Check:
     libbtbb for one access code, so nothing else should decode. An
     unfiltered run reports whatever is in range, so it is not held to that.
     """
-    def check(output: str) -> str:
+    def check(output) -> str:
         laps = _packet_laps(output)
         mine = [found for found in laps if found == lap]
         problems = []
@@ -214,7 +218,7 @@ def no_piconet_packets(lap: str) -> Check:
     default: an access code is 64 bits, so ambient traffic matching this
     LAP's within two bits is not something a run will see.
     """
-    def check(output: str) -> str:
+    def check(output) -> str:
         laps = _packet_laps(output)
         if laps:
             return (f"{len(laps)} packet lines (LAP {laps[0]}), expected none: "
@@ -225,7 +229,7 @@ def no_piconet_packets(lap: str) -> Check:
 
 def survey_lists(lap: str) -> Check:
     """The survey results name ``lap``."""
-    def check(output: str) -> str:
+    def check(output) -> str:
         found = _survey_laps(output)
         if lap in found:
             return ""
@@ -236,7 +240,7 @@ def survey_lists(lap: str) -> Check:
 
 def survey_omits(lap: str) -> Check:
     """The survey results do not name ``lap``."""
-    def check(output: str) -> str:
+    def check(output) -> str:
         if lap in _survey_laps(output):
             return f"the survey listed LAP {lap}, which is not the master's"
         return ""
@@ -271,7 +275,7 @@ def _capture_path(name):
 
 def _written_packets(minimum: int) -> Check:
     """The capture file holds packets, not just a header."""
-    def check(output: str) -> str:
+    def check(output) -> str:
         match = re.search(r"(?m)^Capture format: .*, packets: (\d+)$", output)
         if match is None:
             return "the checker did not report a packet count"

@@ -35,6 +35,7 @@ import time
 from pathlib import Path
 
 from ubertooth_harness import capturefile, rxdump, rxreplay, stalecheck
+from ubertooth_harness.outputfiles import text_lines
 from ubertooth_harness.stateful import (
     CAPTURE_DIR_KEY,
     Observation,
@@ -165,26 +166,36 @@ SURVEY_LINE = re.compile(
 def packet_check(*, channel=None, max_errors=None, survey=False):
     """A Step.output_check for ubertooth-rx stdout."""
 
-    def check(output: str) -> str:
-        lines = output.splitlines()
+    def check(output) -> str:
         problems = []
-        packets = [m for m in map(PACKET_LINE.match, lines) if m]
+        channels = set()
+        worst = 0
+        results_seen = False
+        bad_results = 0
+        for line in text_lines(output):
+            match = PACKET_LINE.match(line)
+            if match is not None:
+                # Packet lines count wherever they are, as they did before
+                # the survey block was read in the same pass.
+                channels.add(int(match["ch"]))
+                worst = max(worst, int(match["err"]))
+            elif results_seen:
+                if not SURVEY_LINE.match(line):
+                    bad_results += 1
+            elif line == "Survey Results":
+                results_seen = True
         if channel is not None:
-            other = sorted({int(m["ch"]) for m in packets} - {channel})
+            other = sorted(channels - {channel})
             if other:
                 problems.append(f"packets on channel {other[0]}, not {channel}")
-        if max_errors is not None:
-            worst = max((int(m["err"]) for m in packets), default=0)
-            if worst > max_errors:
-                problems.append(f"a packet with {worst} access-code errors (max {max_errors})")
+        if max_errors is not None and worst > max_errors:
+            problems.append(f"a packet with {worst} access-code errors (max {max_errors})")
         if survey:
-            if "Survey Results" not in lines:
+            if not results_seen:
                 problems.append("no 'Survey Results' line")
-            else:
-                results = lines[lines.index("Survey Results") + 1:]
-                bad = [line for line in results if not SURVEY_LINE.match(line)]
-                if bad:
-                    problems.append(f"{len(bad)} survey lines that are not piconet addresses")
+            elif bad_results:
+                problems.append(
+                    f"{bad_results} survey lines that are not piconet addresses")
         return "; ".join(problems)
 
     return check
@@ -262,13 +273,19 @@ def afh_no_packets_pattern(seconds):
 
 def afh_r_check(minimum):
     def check(output):
-        lines = [line for line in output.splitlines() if line.strip()]
-        good = [line for line in lines if _AFH_R_LINE.match(line)]
+        total = 0
+        good = 0
+        for line in text_lines(output):
+            if not line.strip():
+                continue
+            total += 1
+            if _AFH_R_LINE.match(line):
+                good += 1
         problems = []
-        if len(good) < minimum:
-            problems.append(f"{len(good)} map lines, expected at least {minimum}")
-        if len(good) != len(lines):
-            problems.append(f"{len(lines) - len(good)} lines that are not '<time> <map>'")
+        if good < minimum:
+            problems.append(f"{good} map lines, expected at least {minimum}")
+        if good != total:
+            problems.append(f"{total - good} lines that are not '<time> <map>'")
         return "; ".join(problems)
     return check
 
@@ -417,19 +434,27 @@ _EGO_PACKET = re.compile(r"^time=\d+ delta_t=-?\d+\.\d{6} ms freq=(?P<f>\d+) ?$"
 
 def ego_check(frequency, length):
     def check(output):
-        lines = output.splitlines()
         problems = []
-        for index, line in enumerate(lines):
+        # The data bytes of a packet are on the line after its header, so
+        # each line is judged against the header before it.
+        header = None
+        for line in text_lines(output):
+            if header is not None:
+                data = line.split()
+                if len(data) != length:
+                    problems.append(f"a packet with {len(data)} bytes, not {length}")
+                    break
+                header = None
             match = _EGO_PACKET.match(line)
             if match is None:
                 continue
             if int(match["f"]) != frequency:
                 problems.append(f"a packet on {match['f']} MHz, not {frequency}")
                 break
-            data = lines[index + 1].split() if index + 1 < len(lines) else []
-            if len(data) != length:
-                problems.append(f"a packet with {len(data)} bytes, not {length}")
-                break
+            header = match
+        if header is not None and not problems:
+            # A header with no line after it: no data bytes at all.
+            problems.append(f"a packet with 0 bytes, not {length}")
         return "; ".join(problems)
     return check
 

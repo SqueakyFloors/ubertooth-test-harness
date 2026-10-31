@@ -20,13 +20,19 @@ from ubertooth_harness.patterns import (
     revision_pattern,
     same_revision,
 )
+from ubertooth_harness.outputfiles import output_of
 from ubertooth_harness.resources import (
     ESP32_CLASSIC_PEER,
     NRF52840_DK,
     ResourceRegistry,
 )
 from ubertooth_harness.stateful import StateCaseError
-from ubertooth_harness.transitions import firmware_api, format_api, host_api_version
+from ubertooth_harness.transitions import (
+    API_PATTERN,
+    firmware_api,
+    format_api,
+    host_api_version,
+)
 
 
 class PreflightError(ValueError):
@@ -88,12 +94,14 @@ class PreflightCheck:
             return f"{self.name}: command canceled"
         if result.returncode not in self.accepted_returncodes:
             return f"{self.name}: command exited {result.returncode}"
-        output = result.stdout + result.stderr
+        output = output_of(result)
         for pattern in self.expected_patterns:
-            if not re.search(pattern, output):
+            present = output.search(pattern)
+            output.note_pattern("expected", self.name, pattern, present)
+            if present is None:
                 target = self.resource_alias or self.host
                 found = _FIRMWARE_REVISION.get(self.name)
-                match = found.search(output) if found else None
+                match = output.search(found.pattern) if found else None
                 # Name both revisions and how to fix it (#135). Only when they
                 # really differ: a board on the right commit but another image
                 # (btbr, a bench image) also fails this check, and saying it
@@ -113,7 +121,10 @@ class PreflightCheck:
                     f"output does not match {pattern}"
                 )
         if self.minimum_api is not None:
-            api = firmware_api(output)
+            reported = output.search(API_PATTERN)
+            output.note_pattern("observed", f"{self.name} API", API_PATTERN,
+                                reported)
+            api = firmware_api(reported[0]) if reported else None
             if api is None or api < self.minimum_api:
                 found = "unreadable" if api is None else format_api(api)
                 serial = self.resource_identity.get("serial", "")
@@ -135,8 +146,7 @@ class PreflightCheck:
         # first command hung.
         if result.cancelled or result.timed_out:
             return False
-        output = result.stdout + result.stderr
-        return re.search(self.fallback_when_missing, output) is None
+        return output_of(result).search(self.fallback_when_missing) is None
 
 
 # `-V` is the version command in every tool the fork builds from C, and its

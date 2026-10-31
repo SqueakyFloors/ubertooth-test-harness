@@ -425,13 +425,17 @@ class TestDefinition:
             return f"{self.name}: command canceled"
         if result.returncode not in self.expected_returncodes:
             return f"{self.name}: command exited {result.returncode}"
-        if self.output_pattern and not re.search(
-            self.output_pattern, result.stdout + result.stderr
-        ):
-            return (
+        if self.output_pattern:
+            output = output_of(result)
+            match = output.search(self.output_pattern)
+            reason = (
+                "" if match else
                 f"{self.name}: expected output pattern "
                 f"{self.output_pattern!r} was not found"
             )
+            output.note_pattern("expected", self.name, self.output_pattern,
+                                match, reason=reason)
+            return reason
         return ""
 
 

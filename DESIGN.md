@@ -226,10 +226,31 @@ additionally emits `command_started`, bounded incremental `command_output`
 chunks tagged `stdout`/`stderr`, and `command_finished`. run.jsonl keeps only
 the first and last output records of a command that prints a lot (200 records
 or 64 KiB, then 50 records or 16 KiB), with a `command_output_omitted` record
-between them; that command's full output goes to `output/<command id>.log` in
-the run directory, the only other per-command file. Stdout and stderr are drained concurrently before process
+between them; that command's streams go to `output/<command id>.stdout.log`
+and `.stderr.log` in the run directory as they arrive, the only other
+per-command files. Stdout and stderr are drained concurrently before process
 completion, timeout, or cancellation, so a CLI or GUI displays the command as
 it happens without deadlocking a noisy child.
+
+Output is checked from those files, not from memory. The in-memory copy of
+each stream in `CommandResult` is bounded (`executor.MEMORY_WINDOW_CHARS`),
+which is what keeps a mode that streams for hours from growing the harness;
+a check reads the file a block at a time instead
+(`outputfiles.CommandOutput`). A command whose output stayed inside the
+run.jsonl limits has no file and the same checks read its complete in-memory
+copy, so a check behaves the same either way.
+
+Checks are recorded, so they can be run again without hardware. Each command
+gets one `output_checks` record naming the files its checks read and, per
+check, its kind, its pattern, whether it matched, and what it matched; a case
+gets an `output_files` record for the captures and target serial logs it
+wrote, each with its size and SHA-256. `ubertooth-harness validate <run dir>`
+(`validate.py`) measures every recorded file again and re-runs every recorded
+pattern over the same bytes, reporting a file that changed, a check that now
+reaches a different verdict, and the checks it cannot repeat. A check written
+as code (`Step.output_check`) is one of those: its record holds its verdict,
+not its logic, which is the price of letting a case express a count or a
+shape that no pattern can.
 
 A durable fsynced JSONL sink is always present; composite sinks allow the same
 event to feed a future live controller/GUI stream without coupling presentation
