@@ -221,6 +221,15 @@ class HoldLockKeys(Bench):
         self.assertEqual(UT_SERIAL, hold.lock_key(registry.get("UT0")))
         # One rule, so the two scripts can never name a lock differently.
         self.assertIs(hold.lock_key, hub_port.device_board.__globals__["lock_key"])
+
+    def test_an_ubertooth_is_resolved_by_serial_but_not_by_its_radio_address(self):
+        """A BLE address or a BD_ADDR is not a device name."""
+        from ubertooth_harness.resources import RegistryError
+
+        registry = self.load_registry()
+        for address in ("C0:00:00:00:00:01", "00:11:22:33:44:55"):
+            with self.subTest(address=address), self.assertRaises(RegistryError):
+                hold.resolve(registry, address)
         self.assertEqual("nrf52840dk-123456789", hold.lock_key(registry.get("DK0")))
         self.assertEqual(f"esp32-{BRIDGE}", hold.lock_key(registry.get("ESP0")))
 
@@ -243,6 +252,13 @@ class HoldArguments(Bench):
     def parse(self, argv):
         return hold.parse_args(argv)
 
+    def refuse(self, argv):
+        """The status and the message of a usage error."""
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as caught, redirect_stderr(err):
+            hold.parse_args(argv)
+        return caught.exception.code, err.getvalue()
+
     def test_the_command_after_the_separator_is_untouched(self):
         args, command = self.parse(
             ["--hardware", str(self.registry), "UT0", "--", "echo", "--hardware", "x"]
@@ -251,12 +267,20 @@ class HoldArguments(Bench):
         self.assertEqual("UT0", args.devices)
 
     def test_no_separator_is_a_usage_error(self):
-        with self.assertRaises(SystemExit):
-            self.parse(["UT0", "echo", "hi"])
+        status, message = self.refuse(["UT0", "echo", "hi"])
+        self.assertEqual(2, status)
+        self.assertIn("usage:", message)
 
     def test_no_command_after_the_separator_is_an_error(self):
-        with self.assertRaises(SystemExit):
-            self.parse(["--hardware", str(self.registry), "UT0", "--"])
+        status, message = self.refuse(["--hardware", str(self.registry), "UT0", "--"])
+        self.assertEqual(2, status)
+        self.assertIn("no command after --", message)
+
+    def test_help_only_counts_as_the_first_word(self):
+        """`hold UT0 mytool -h` is the tool's help, and needs a separator."""
+        status, message = self.refuse(["UT0", "mytool", "-h"])
+        self.assertEqual(2, status)
+        self.assertIn("usage:", message)
 
     def test_the_registry_may_come_from_the_environment(self):
         os.environ["UBERTOOTH_HARNESS_HARDWARE"] = str(self.registry)
@@ -266,15 +290,15 @@ class HoldArguments(Bench):
 
     def test_with_no_registry_it_says_how_to_give_one(self):
         os.environ.pop("UBERTOOTH_HARNESS_HARDWARE", None)
-        with self.assertRaises(SystemExit) as caught:
-            self.parse(["UT0", "--", "true"])
-        self.assertIn("UBERTOOTH_HARNESS_HARDWARE", str(caught.exception))
+        status, message = self.refuse(["UT0", "--", "true"])
+        self.assertEqual(2, status)
+        self.assertIn("UBERTOOTH_HARNESS_HARDWARE", message)
 
     def test_a_negative_wait_is_refused(self):
-        with self.assertRaises(SystemExit):
-            self.parse(
-                ["--hardware", str(self.registry), "--wait-for-boards", "-1", "UT0", "--", "true"]
-            )
+        status, _ = self.refuse(
+            ["--hardware", str(self.registry), "--wait-for-boards", "-1", "UT0", "--", "true"]
+        )
+        self.assertEqual(2, status)
 
     def test_the_delegated_lease_command_carries_every_option(self):
         args, command = self.parse([
@@ -385,9 +409,11 @@ class HoldRuns(Bench):
                 )
 
     def test_an_ubertooth_needs_only_one_lock_name(self):
-        registry = self.load_registry()
-        board = registry.get("UT0")
-        self.assertEqual("", hold.plain_serial(board))  # no second name to take
+        import _bench
+
+        board = self.load_registry().get("UT0")
+        self.assertEqual("", _bench.plain_serial(board))  # no second name
+        self.assertIsNone(_bench.bench_lock_board(board))
 
     def test_a_peer_is_held_here_and_its_external_lock_is_taken(self):
         external = self.locks / f"board-esp32-{BRIDGE}.lock"
@@ -598,6 +624,11 @@ class HubPortSwitches(Bench):
         self.assertEqual(0, status)
         self.assertTrue(seen["host_lock"].get("held"))
 
+    def test_a_signal_during_a_cycle_is_turned_into_a_cancellation(self):
+        """A dropped SSH session must not leave a port off."""
+        with self.assertRaises(KeyboardInterrupt):
+            hub_port._cancel(15, None)
+
     def test_an_interrupted_cycle_still_leaves_the_port_on(self):
         """Ctrl-C in the wait must not leave a device without power."""
         def interrupt(_seconds):
@@ -739,24 +770,43 @@ class HubPortSwitches(Bench):
 
 class LabFiles(unittest.TestCase):
     def test_both_scripts_are_executable_and_compile(self):
-        for path in (HOLD, HUB_PORT):
+        for path in (HOLD, HUB_PORT):  # _bench.py is imported, not run
             with self.subTest(script=path.name):
                 self.assertTrue(os.access(path, os.X_OK), f"{path.name} is not executable")
                 # compile() rather than py_compile, which would write bytecode
                 # into the checkout.
                 compile(path.read_text(encoding="utf-8"), str(path), "exec")
 
-    def test_help_works_without_a_registry(self):
+    def test_the_documented_command_works_from_any_directory(self):
+        """How the README says to run them: the interpreter and the path, no more.
+
+        No PYTHONPATH and a working directory that is not the checkout, which
+        is what a user has.
+        """
         for path in (HOLD, HUB_PORT):
             with self.subTest(script=path.name):
-                environment = dict(os.environ, PYTHONPATH=str(REPO))
+                environment = dict(os.environ)
+                environment.pop("PYTHONPATH", None)
                 environment.pop("UBERTOOTH_HARNESS_HARDWARE", None)
-                result = subprocess.run(
-                    [sys.executable, str(path), "--help"],
-                    capture_output=True, text=True, env=environment, timeout=60,
-                )
+                with tempfile.TemporaryDirectory() as elsewhere:
+                    result = subprocess.run(
+                        [sys.executable, str(path), "--help"],
+                        capture_output=True, text=True, env=environment,
+                        cwd=elsewhere, timeout=60,
+                    )
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertIn("usage:", result.stdout)
+                self.assertNotIn("harness environment", result.stderr)
+
+    def test_a_usage_error_exits_like_argparse_does(self):
+        environment = dict(os.environ)
+        environment.pop("PYTHONPATH", None)
+        result = subprocess.run(
+            [sys.executable, str(HOLD), "UT0", "no-separator"],
+            capture_output=True, text=True, env=environment, timeout=60,
+        )
+        self.assertEqual(2, result.returncode)
+        self.assertIn("usage:", result.stderr)
 
     def test_the_udev_rule_names_the_acroname_vendor_and_a_group(self):
         text = RULES.read_text(encoding="utf-8")
@@ -773,7 +823,7 @@ class LabFiles(unittest.TestCase):
             r"|\b0x[0-9a-f]{8}\b",           # a hub's BrainStem serial
             re.IGNORECASE,
         )
-        for path in (HOLD, HUB_PORT, RULES, LAB / "README.md"):
+        for path in (HOLD, HUB_PORT, RULES, LAB / "_bench.py", LAB / "README.md"):
             with self.subTest(file=path.name):
                 for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
                     self.assertIsNone(

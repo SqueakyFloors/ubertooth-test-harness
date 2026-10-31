@@ -11,12 +11,13 @@ any bench. See [`docs/hardware.md`](../../docs/hardware.md) for what a bench
 is made of and [`hardware.example.yaml`](../../hardware.example.yaml) for the
 registry.
 
-Run them with the harness environment's interpreter, from the root of a
-checkout:
+Run them with the harness environment's interpreter. The path to the script is
+all they need, from any working directory:
 
 ```sh
-python3 bootstrap.py                      # once
+python3 bootstrap.py                      # once, in the checkout
 .venv/bin/python scripts/lab/hold --help
+~/checkout/.venv/bin/python ~/checkout/scripts/lab/hub-port --help
 ```
 
 Set the two paths once and the commands stay short:
@@ -86,7 +87,8 @@ It holds the port's registered device as well, so it cannot cut power under
 another run or another person, and a device already held is reported with its
 holder's name rather than switched. `--wait SECONDS` sets how long it waits
 for either lock (two minutes by default, since a run holds the host lock
-across a build and a flash); `--wait 0` reports the holder at once. `--force`
+across a build and a flash); `--wait 0` reports the holder after about a
+second rather than waiting. `--force`
 switches without holding the device, which is what a wedged device whose
 holder has given up on it needs. A cycle whose power-on fails tries once more
 rather than leaving the port off.

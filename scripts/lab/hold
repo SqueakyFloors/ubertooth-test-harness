@@ -38,10 +38,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-# The shared bench helpers sit beside this script. Running it as a script puts
-# this directory on the path already; loading it by path (as the tests do)
-# does not, so it is added either way.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Run as a script, sys.path[0] is this directory, not the checkout, so neither
+# the harness package nor the shared helpers beside this file are importable.
+# Both are added here, which is what makes the documented command work from
+# any working directory.
+_HERE = Path(__file__).resolve().parent
+sys.path[:0] = [str(_HERE), str(_HERE.parents[1])]
 
 try:
     from ubertooth_harness import leases
@@ -51,7 +53,7 @@ try:
     from ubertooth_harness.cli import _writes_firmware as writes_firmware
     from ubertooth_harness.resources import FileResourceRegistry, RegistryError
 
-    from _bench import HELD_TYPES, bench_lock_board, board, lock_key, plain_serial
+    from _bench import bench_lock_board, board, lock_key
 except ImportError:  # run from outside the harness environment
     sys.exit(
         "hold: run this from the harness environment "
@@ -66,12 +68,17 @@ MIN_PREFIX = 4
 
 
 def _identity_values(resource) -> list[str]:
-    """The serials of a resource, as a bench note or a tool would print them."""
+    """The serials of a resource, as a bench note or a tool would print them.
+
+    Serials only. A radio address is also in the identity, and it is not a
+    device name: matching it would accept `hold <a BLE address>`, which no
+    document promises and which reads as a mistake.
+    """
     values = []
     for key, value in resource.identity.items():
         text = str(value or "").strip()
-        if not text or key == "serial device":
-            continue  # a device path is not a name anyone types
+        if not text or "serial" not in key or key == "serial device":
+            continue
         values.append(text)
         if text.isdigit():
             values.append(text.lstrip("0"))  # nrfutil's form of a J-Link serial
@@ -122,18 +129,26 @@ def _and(resources) -> str:
 HELP_FLAGS = ("-h", "--help")
 
 
+def _usage(message: str) -> int:
+    """Report a usage error and give argparse's own exit status for one."""
+    print(f"hold: {message}", file=sys.stderr)
+    return 2
+
+
 def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     """Options and devices before `--`, the command after it."""
     if "--" in argv:
         split = argv.index("--")
         before, command = argv[:split], argv[split + 1:]
-    elif any(flag in argv for flag in HELP_FLAGS):
+    elif argv[:1] and argv[0] in HELP_FLAGS:
+        # Only as the first word: `hold UT0 mytool -h` means the tool's help,
+        # and with no `--` that is a usage error, not this script's help.
         before, command = argv, []  # argparse prints the help and exits 0
     else:
-        raise SystemExit(
-            "hold: usage: hold [options] <device>[,<device>...] -- "
-            "<command> [arg...] (-h for the options)"
-        )
+        raise SystemExit(_usage(
+            "usage: hold [options] <device>[,<device>...] -- <command> [arg...]"
+            " (-h for the options)"
+        ))
     parser = argparse.ArgumentParser(
         prog="hold", add_help=True,
         description="Hold lab devices by serial for the length of one command.",
@@ -173,16 +188,13 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     )
     args = parser.parse_args(before)
     if not command:
-        raise SystemExit("hold: no command after --")
-    if args.devices.startswith("-"):
-        # A misplaced option would otherwise be held as a device name.
-        raise SystemExit(f"hold: '{args.devices}' is not a device name; options go before it")
+        raise SystemExit(_usage("no command after --"))
     if args.hardware is None:
-        raise SystemExit(
-            f"hold: no registry; pass --hardware or set ${HARDWARE_ENV}"
-        )
+        raise SystemExit(_usage(
+            f"no registry; pass --hardware or set ${HARDWARE_ENV}"
+        ))
     if args.wait_for_boards < 0:
-        raise SystemExit("hold: --wait-for-boards cannot be negative")
+        raise SystemExit(_usage("--wait-for-boards cannot be negative"))
     return args, command
 
 

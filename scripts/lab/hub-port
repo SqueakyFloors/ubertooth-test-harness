@@ -40,12 +40,15 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import sys
 import time
 from pathlib import Path
 
-# The shared bench helpers sit beside this script; see the note in `hold`.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# This directory and the checkout, so the harness package and the shared
+# helpers beside this file are importable; see the note in `hold`.
+_HERE = Path(__file__).resolve().parent
+sys.path[:0] = [str(_HERE), str(_HERE.parents[1])]
 
 try:
     from ubertooth_harness import leases
@@ -74,6 +77,9 @@ HARDWARE_ENV = "UBERTOOTH_HARNESS_HARDWARE"
 # minutes is better than one that gives up at once; --wait changes it.
 HOST_LOCK_WAIT_S = 120.0
 SETTLE_S = 0.5
+# VBUS takes about 0.55 s to fall below 0.1 V with a device attached
+# (docs/hardware.md), so a switch-off read any sooner prints a stale voltage.
+OFF_SETTLE_S = 1.0
 DEFAULT_CYCLE_S = 2.0
 
 
@@ -95,7 +101,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--hardware", type=Path, default=os.environ.get(HARDWARE_ENV) or None,
         help=f"resource registry (default ${HARDWARE_ENV})",
     )
-    parser.add_argument("--lease-dir", type=Path, default=None, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--lease-dir", type=Path, default=None,
+        help=f"harness lease directory (default ${leases.LEASE_DIR_ENV})",
+    )
     parser.add_argument(
         "--owner", default=None,
         help=f"how you are named in another holder's error (default ${leases.OWNER_ENV})",
@@ -159,7 +168,7 @@ def switch(controller, port: int, action: str, seconds: float, sleep=time.sleep)
         controller.set_power_enabled(port, action == "on")
         # The driver reads every write back, so this wait is only for the
         # device: VBUS and current need a moment to mean anything.
-        sleep(SETTLE_S)
+        sleep(OFF_SETTLE_S if action == "off" else SETTLE_S)
         return
 
     controller.set_power_enabled(port, False)
@@ -188,8 +197,20 @@ def switch(controller, port: int, action: str, seconds: float, sleep=time.sleep)
     sleep(SETTLE_S)
 
 
+def _cancel(signum, _frame):
+    """Turn a signal into an exception, so a cycle's restore path runs.
+
+    The maintainer's laptop drops its SSH sessions when it sleeps, which
+    SIGHUPs whatever was running. Without this, that during a cycle's
+    off-window would leave the port off.
+    """
+    raise KeyboardInterrupt(f"signal {signum}")
+
+
 def main(argv: list[str] | None = None, *, sleep=time.sleep) -> int:
     args = parse_args(list(sys.argv[1:] if argv is None else argv))
+    for number in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(number, _cancel)
     try:
         # This opens a real controller and changes power, so it runs only in
         # the bootstrapped harness environment, as `ubertooth-harness power`
@@ -251,10 +272,12 @@ def main(argv: list[str] | None = None, *, sleep=time.sleep) -> int:
                     pass  # the switch result above is what matters
     except leases.LeaseError as error:
         # Whoever holds the device, or the host lock, is named in the message.
+        # The message names whichever lock was busy, the device's or the
+        # host's, so the advice has to fit both: this command's wait is
+        # --wait SECONDS, whatever option the harness text mentions.
         return _fail(
-            f"{error}; wait for it, or pass --force if the device is wedged "
-            "and its holder has given up on it"
-            if boards else error
+            f"{error}; wait longer with --wait SECONDS, or, if the device "
+            "itself is wedged and its holder has given up on it, --force"
         )
     except PowerControllerError as error:
         return _fail(f"{resource.alias}: {error}")
