@@ -199,9 +199,12 @@ BAD_OPTION_EXTCAP = {
 }
 # What a board whose serial could not be read says where the serial would be,
 # since fork 201c3c4; before it the whole line was "<index>: <unavailable>".
-# ubertooth-util exits 1 for such a board, so UTIL_PARTIAL_STATUS goes with it.
+# ubertooth-util exits 1 for such a board, so UTIL_PARTIAL_STATUS goes with
+# it; EXTCAP_PARTIAL_STATUS is the script's own answer to that, which is a
+# different decision that happens to be the same number.
 LABELLED_UNAVAILABLE = "unavailable, in use by another program"
 UTIL_PARTIAL_STATUS = 1
+EXTCAP_PARTIAL_STATUS = 1
 
 
 def bare_listing(*serials):
@@ -237,8 +240,10 @@ def labelled_listing(*serials):
 # the "no Ubertooth devices found" carve-out in list_interfaces() (which is
 # why the stderr it passes on is not weighed here), the -V option, and the
 # stream and exit-status work of #806, #890, #919, #925, #927, #937 and #980
-# are not modelled, and report_bad_option()'s other four outcomes come out in
-# the words of the one these cases make.
+# are not modelled; nor are the line main synthesizes when a failed listing
+# diagnosed itself with nothing, and its handling of a tool that could not be
+# started at all. report_bad_option()'s other four outcomes come out in the
+# words of the one these cases make.
 BARE_INTERFACE_LINE = r"""r'(\d+): ([0-9a-fA-F]+)$'"""
 LABELLED_INTERFACE_LINE = r"""r'Serial No \((\d+)\): ([0-9a-fA-F]+)$'"""
 _D04F79E_LISTING = '''def list_interfaces():
@@ -277,6 +282,10 @@ assert LABELLED_INTERFACE_LINE in EXTCAP and BARE_INTERFACE_LINE not in EXTCAP
 assert "usage(sys.stderr)" not in EXTCAP
 assert "unrecognized option '--%s'" in EXTCAP
 assert "unrecognized option" not in EXTCAP_D04F79E
+# The hand-written older fixture reads the bare listing too, so the era guard
+# can tell what it is: a drifted literal would leave it unclassified and the
+# guard would quietly stop checking its pairing.
+assert BARE_INTERFACE_LINE in EXTCAP_71E1A8A
 COMPREHENSIVE_INTERFACES = (
     "extcap-interfaces", "extcap-interfaces-serials", "extcap-interfaces-version",
     "extcap-interfaces-version-word", "extcap-interfaces-stray-word",
@@ -292,8 +301,10 @@ def git(*args, cwd):
                           capture_output=True, text=True).stdout.strip()
 
 
-_LABELLED_SERIAL_LINE = re.compile(r"\ASerial No \(\d+\): \S")
-_BARE_SERIAL_LINE = re.compile(r"\A\d+: \S")
+_SERIAL_LINES = {
+    "labelled": re.compile(r"Serial No \(\d+\): \S.*"),
+    "bare": re.compile(r"\d+: \S.*"),
+}
 
 
 def _script_listing_era(extcap):
@@ -308,24 +319,19 @@ def _script_listing_era(extcap):
 
 
 def _output_listing_era(util_output):
-    """Which listing a stub ubertooth-util prints, from its lines, each of
-    which has to be a whole listing record of one form or the other.
+    """Which listing a stub ubertooth-util prints, from the listing records
+    among its lines. Each record is matched whole; a line that is not one, a
+    diagnostic say, is passed over rather than deciding the era.
 
-    Returns None where there is no era to compare: an empty listing, output
-    that is not a listing at all (a diagnostic, say), or a mix of the two
-    forms, which no ubertooth-util prints and so is nobody's era.
+    Returns None where there is no era to compare: output with no record in
+    it, and output with records of both forms, which no ubertooth-util
+    prints and so belongs to nobody's era.
     """
-    eras = set()
-    for line in util_output.splitlines():
-        text = line.strip()
-        if not text:
-            continue
-        if _LABELLED_SERIAL_LINE.match(text):
-            eras.add("labelled")
-        elif _BARE_SERIAL_LINE.match(text):
-            eras.add("bare")
-        else:
-            return None
+    eras = {
+        era for era, record in _SERIAL_LINES.items()
+        for line in util_output.splitlines()
+        if record.fullmatch(line.strip())
+    }
     return eras.pop() if len(eras) == 1 else None
 
 
@@ -544,8 +550,13 @@ class ExtcapInterfaceCaseTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as directory:
                 with self.assertRaisesRegex(AssertionError, "different eras"):
                     FakeFork(directory, util_output, extcap)
-        # Output with no listing in it belongs to no era, so it is allowed
-        # with either script: an empty listing, and a diagnostic.
+        # A listing record decides the era wherever it appears, so a
+        # diagnostic beside one does not let a mismatch through.
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(AssertionError, "different eras"):
+                FakeFork(directory, "note: x\n" + bare_listing(SERIAL_A), EXTCAP)
+        # Output with no record in it belongs to no era, so it is allowed
+        # with either script: an empty listing, and a diagnostic alone.
         for util_output in ("", "error: no Ubertooth devices found\n"):
             with tempfile.TemporaryDirectory() as directory:
                 FakeFork(directory, util_output, EXTCAP)
@@ -578,7 +589,7 @@ class ExtcapInterfaceCaseTests(unittest.TestCase):
         self.assertEqual(
             f"interface {{value=ubertooth{SERIAL_A}}}"
             f"{{display=Ubertooth One {SERIAL_A}}}\n", result.stdout)
-        self.assertEqual(UTIL_PARTIAL_STATUS, result.returncode)
+        self.assertEqual(EXTCAP_PARTIAL_STATUS, result.returncode)
         self.assertIn("exited 1", case.result_failure(result))
 
     def test_case_sets(self):

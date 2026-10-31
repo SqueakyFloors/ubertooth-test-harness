@@ -1065,7 +1065,9 @@ word and a stray word, which must be refused with nothing listed.
 interface works; `BLE extcap capture` does that. An attached board whose
 serial cannot be read fails the test rather than being passed over, even when
 it is not a registered board: it is left out of the listing, and the call
-still exits 1 for it, which is what the plugin gives Wireshark. A real run
+still exits 1 for it. Wireshark throws away everything a call that failed
+printed, so one board it cannot open costs the user the capture list
+entirely, which is why the behavior is worth pinning. A real run
 always uses the script out of the resolved fork commit, so what the unit
 tests pin is the pairing of that script with the `ubertooth-util` of the same
 era: a mismatch lists nothing, which is what a host with no board also looks
