@@ -367,7 +367,7 @@ speech on does not start lying.
 `clock` answers with one JSON line:
 
 ```json
-{"native":15243776,"piconet":15243776,"accuracy":0,"handle":129,"t_us":41237655,"read_us":697}
+{"native":4942,"piconet":4946,"accuracy":65535,"handle":129,"t_us":2119521,"read_us":750}
 ```
 
 - `native`: this board's own clock (CLKN). It is 28 bits in units of 312.5
@@ -381,8 +381,9 @@ speech on does not start lying.
   on that half.
 - `accuracy`: the largest error the piconet clock may have, in the same
   units as the clock itself, so one tick is 312.5 microseconds. 65535 means
-  the controller does not know. The spec sets it to zero for a native read,
-  which is why the one reported is the piconet read's.
+  the controller does not know, which is what these boards' controllers say.
+  The spec sets it to zero for a native read, which is why the one reported
+  is the piconet read's.
 - `handle`: the connection handle of the baseband link, as the controller
   echoed it back.
 - `t_us`: microseconds since this board booted, monotonic, taken when the
@@ -393,7 +394,10 @@ speech on does not start lying.
   the answer reaching the host.
 
 The two clocks are two separate commands, a fraction of a millisecond apart,
-so on the leader the two numbers can differ by a tick or two.
+so on the leader the two numbers differ by a tick or two: in the line above,
+one read took 750 microseconds and the two values are 4 ticks, 1.25
+milliseconds, apart. On a follower the native clock is the board's own and
+has nothing to do with the piconet's.
 
 With no link there is no piconet: `piconet`, `accuracy` and `handle` read
 `null`, `native` still reads, and `t_us` and `read_us` are the native read's.
