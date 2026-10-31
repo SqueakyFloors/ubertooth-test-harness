@@ -758,7 +758,7 @@ def _transcript(run: _Run) -> list[str]:
             line(event, "=== BUILD ===")
         elif kind == "build_step_started":
             close_build_step(event)
-            open_step = details.get("step_name", details.get("step_id", ""))
+            open_step = details.get("step_name") or details.get("step_id", "")
             line(event, f"+++ {open_step} +++")
             build_step = [open_step, "passed", details.get("step_id")]
             continue

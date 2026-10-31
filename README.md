@@ -1016,9 +1016,9 @@ report. Each step closes with an outcome of its own, from a
 its last command: the host-version step reads the version line and not the
 exit status, so `-V` exiting 1 because of an attached board this build does
 not need leaves the step passed, with a reason saying so. A missing tool or
-library stops
-the run first, naming what to install. Ctrl-C cancels the build, and the
-whole build has a one-hour deadline on top of per-command timeouts.
+library stops the run first, naming what to install. Ctrl-C cancels the
+build, and the whole build has a one-hour deadline on top of per-command
+timeouts.
 
 `python -m ubertooth_harness build` does the same build without running tests.
 

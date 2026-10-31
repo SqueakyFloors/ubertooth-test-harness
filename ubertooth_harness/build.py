@@ -364,11 +364,12 @@ def _host_version_line(text: str) -> str:
 # A step's or the build's reason is a sentence, and it lands in a one-line
 # marker in the transcript. The bound is a backstop: a reason built from a
 # tool's output or from a cancellation message someone else wrote must still
-# fit the record (as sequencer bounds a case's reason for the same reason).
+# fit the record. It is well under the limit a case's reason uses
+# (sequencer._MAX_REASON_CHARS), because this one is a marker, not a report.
 _MAX_MARKER_REASON_CHARS = 500
 
 
-def _one_line_reason(reason) -> str:
+def _one_line_reason(reason: object) -> str:
     """One bounded line, whatever the reason was built from.
 
     A line break becomes "; " rather than a space, so a reason built from
@@ -624,7 +625,9 @@ class Builder:
                     if failures:
                         raise BuildError(f"{command.name}: {failures}")
                     # Both answered, with a version this build did not ask
-                    # for; _run_plan raises below with both revisions. The
+                    # for; _run_plan raises below with both revisions, and
+                    # this is the last of plan.commands (plan_build), so no
+                    # step runs after one that failed here. The
                     # reason carries one line, not the whole of -V: the
                     # firmware lines it prints under the version would break
                     # the step's own marker in the transcript.
