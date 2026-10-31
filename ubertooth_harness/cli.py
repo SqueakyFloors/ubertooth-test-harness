@@ -1063,7 +1063,7 @@ def _boards_command(args: argparse.Namespace) -> int:
                 print(f"{'':<12} stale: {state['stale']}; "
                       + ("the next command that wants it takes it over"
                          if state.get("takeover")
-                         else "it stays held while that session is running"))
+                         else "it stays held until somebody clears it"))
             if external.get("held") and not external.get("error"):
                 # Two parties hold the board; name the other one too.
                 print(f"{'':<12} and   " + board_leases.describe_external(

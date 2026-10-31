@@ -1359,7 +1359,9 @@ ubertooth-harness lease --hardware hardware.yaml --owner "agent #14" UT_Mac0 -- 
 
 `lease` holds the named boards for exactly as long as the command runs; the
 command inherits the locks, so they stay held even if the harness process is
-killed first. Use it for every manual Ubertooth command on a shared host.
+killed first (and once that process is gone, the next command that wants the
+board may take it over: see "Stale leases" below). Use it for every manual
+Ubertooth command on a shared host.
 
 ### Stale leases: a session that is gone
 
@@ -1397,15 +1399,15 @@ loudly rather than quietly sharing the board; a wrapper that only held the
 lock while doing something else costs nothing. That is the trade the bench
 wants: the board comes back, and the note says what to look for. When the
 record's process group is still running, the note names it, because a
-leftover command from that session may still be talking to the board:
-`ps -g <group>` shows what to stop. That signal only covers the session the
-command ran in, so a leftover that left it (`setsid`, a daemon) is reported
-as gone.
+leftover command that session started may still be talking to the board:
+`pgrep -g <group>` shows what to stop. That signal only covers the process
+group the command ran in, so a leftover that left it (`setsid`, a daemon) is
+reported as gone.
 
-A board is taken over once per command: a second stale lease on the same
-board within one wait is left alone, so a lock file that keeps coming back
-cannot make a command loop. Such a board's error says the command that took
-it is gone, as the host lock's does below.
+A takeover costs a poll round like any other busy lock, so a lease file that
+keeps coming back cannot make a command spin. A board whose lease could not
+be taken over (another command was taking one over at that moment) is
+reported with the same explanation the host lock gets below.
 
 The host lock is never taken over. It is the only thing that keeps USB power
 changes and firmware writes on a host from overlapping, and what still holds
@@ -1418,8 +1420,8 @@ error: this host's power/firmware lock is in use: held by agent, lease:
 ubertooth-dfu -U ... -d ..., pid 4471, since ... UTC (.../host-power.lock);
 the command that took it is gone: its process (pid 4471) is gone, and so is
 the process group it ran in (4471); it is never taken over, because a
-firmware write or a power change of that session may still be running: look
-for one, and remove the lock file once you know there is none
+firmware write or a power change it started may still be running: look for
+one, and remove the lock file once you know there is none
 ```
 
 `boards` marks such a lease and removes nothing itself:

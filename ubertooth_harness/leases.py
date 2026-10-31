@@ -32,9 +32,9 @@ its file could be a firmware write in flight. So its error says that the
 command which took it is gone and what to look for, and a person decides;
 a board interrupted mid-write is the one outcome worth waiting to avoid.
 
-A board's takeover happens once per command: a second stale lease on the
-same board within one wait is left alone, so a lock file that keeps coming
-back cannot make a command loop.
+A takeover costs a poll round like any other busy lock, so a lease file that
+keeps coming back cannot make a command spin: every round either sleeps or
+reaches the deadline.
 
 What keeps a takeover narrow: a lease recorded on another host is left alone
 (a pid there means nothing here), and ``<lease dir>/takeover.lock`` orders a
@@ -44,10 +44,11 @@ locks. So a lease file is never removed while a command is taking it, and two
 commands can never end up holding one board through two lock files. A pid
 that the system has given to an unrelated process in the meantime reads as
 alive, so the lease is left alone, as before. When the record's process group
-is still running, the note names it: a leftover command from that session may
-still be talking to the board, and ``ps -g <group>`` is how to see it. That
-signal only covers the session the command ran in, so a leftover that left it
-(``setsid``, a daemon) is reported as gone; and a host whose name changes
+process group are still running, the note names it: a leftover command that
+session started may still be talking to the board, and ``pgrep -g <group>``
+is how to see it. That signal only covers the process group the command ran
+in, so a leftover that left it (``setsid``, a daemon) is reported as gone;
+and a host whose name changes
 under it (a Mac that renames itself on a new network) makes its own earlier
 leases read as another host's, which costs the report, never safety.
 
@@ -343,9 +344,11 @@ def holder_info(*, run_id: str | None, owner: str | None, purpose: str) -> dict:
         "run_id": run_id,
         "purpose": purpose,
         "pid": os.getpid(),
-        # The process group this command leads or belongs to. A command that
-        # inherits the lock runs in it, so it tells a later command whether
-        # anything from this session is still running (see the docstring).
+        # The process group this command leads or belongs to. The command
+        # that inherits the lock runs in it too, so it tells a later command
+        # whether anything that session started is still running. A group,
+        # not a session id: a group is what a command and its children
+        # share, and what `pgrep -g` reads (see the docstring).
         "pgid": os.getpgrp(),
         "user": getpass.getuser(),
         "hostname": socket.gethostname(),
@@ -403,16 +406,16 @@ def lease_liveness(holder: Mapping, *, hostname: str | None = None) -> tuple[str
 
     The kinds are ``live`` (the recorded process is still there, or nothing
     can be told about it), ``stale`` (it is gone, and so is the session it
-    ran in), ``orphan`` (it is gone but other processes of its session are
-    still running), ``foreign`` (the record is from another host, where a pid
-    means nothing) and ``unknown`` (no record to go on, for example a lease
-    file a release has emptied).
+    ran in), ``orphan`` (it is gone but other processes of its process group
+    are still running), ``foreign`` (the record is from another host, where a
+    pid means nothing) and ``unknown`` (no record to go on, for example a
+    lease file a release has emptied).
 
-    The process group only tells us about the session the command ran in: a
-    process that left it (``setsid``, a daemon) is invisible here, so
-    ``stale`` means nothing of that session is left, not that nothing holds
-    the lock. What holds the lock is always some process; see the takeover in
-    the module docstring.
+    The recorded group is the process group the command ran in, which is
+    where the command it started runs too. A process that left that group
+    (``setsid``, a daemon) is invisible here, so ``stale`` means nothing of
+    that group is left, not that nothing holds the lock. What holds the lock
+    is always some process; see the takeover in the module docstring.
     """
     if not holder:
         return "unknown", "its lock file records no holder"
@@ -431,9 +434,9 @@ def lease_liveness(holder: Mapping, *, hostname: str | None = None) -> tuple[str
     group = _group_exists(holder.get("pgid"))
     if group is True:
         return "orphan", (
-            f"its process (pid {pid}) is gone, but other processes of the same "
-            f"session are still running (process group {holder['pgid']}); one of "
-            f"them may still be using the board, so check 'ps -g {holder['pgid']}'"
+            f"its process (pid {pid}) is gone, but other processes of its "
+            f"process group ({holder['pgid']}) are still running; one of them may "
+            f"still be using the board, so check 'pgrep -g {holder['pgid']}'"
         )
     if group is None:
         # A lease from a harness that did not record the group yet, or a
@@ -449,15 +452,15 @@ def takeover_allowed(board: Board, kind: str) -> bool:
     """Whether a lease in this state may be taken over.
 
     A board's lease is taken over once the command that took it is gone,
-    whether or not its session is still running: the USB device is what
+    whether or not its process group still runs: the USB device is what
     really keeps two commands off one board, so a leftover capture makes the
     next device command fail loudly rather than quietly share the board.
 
     The host lock is never taken over. It is the only thing that keeps USB
     power changes and firmware writes on a host from overlapping, and what
     still holds its file could be a firmware write in flight: a process that
-    left the recorded session, or one of a session the record does not name
-    at all (a lease file from a harness that recorded no process group).
+    left the recorded group, or one of a group the record does not name at
+    all (a lease file from a harness that recorded no process group).
     Nothing here can tell those from a lock nobody needs, and the cost of
     being wrong is a board interrupted mid-write, so the error says what to
     look for and a person decides.
@@ -485,7 +488,12 @@ def _take_over_stale(path: Path, root: Path, board: Board) -> str:
     """
     if not takeover_allowed(board, lease_liveness(read_holder(path))[0]):
         return ""  # the common case, before taking the takeover lock
-    guard = _try_lock(root / TAKEOVER_LOCK, fcntl.LOCK_EX)
+    try:
+        guard = _try_lock(root / TAKEOVER_LOCK, fcntl.LOCK_EX)
+    except OSError:
+        # Not worth failing a command for: the lease is left alone and the
+        # board is reported busy, as it was before this file existed.
+        return ""
     if guard is None:
         return ""  # another command is taking over a lease right now
     try:
@@ -689,7 +697,6 @@ def acquire(
     if host_lock:
         ordered.append((HOST_LOCK, root / f"{HOST_LOCK.key}.lock", False))
     ordered += [(board, root / f"{board.key}.lock", False) for board in by_serial]
-    taken_over: set[str] = set()
     while True:
         held: list[Lease] = []
         busy: tuple[Board, Path, bool] | None = None
@@ -770,12 +777,12 @@ def acquire(
                     files[key] = path
                     if not external:
                         _stamp(fd, dict(holder, resource=board.alias))
-                # One last check on every lease this attempt took: a takeover
-                # (below) removes the lock file it found stale, and in the moment
-                # between its last check and its unlink that file could have
-                # become this attempt's. A lock on a file that is no longer the
-                # board's lease file excludes nobody, so the attempt starts again
-                # rather than trusting it.
+                # One last check on every lease this attempt took: a lock on a
+                # file that is no longer the board's lease file excludes
+                # nobody. The takeover lock above keeps a takeover out of this
+                # window, so what is left is a file removed from outside the
+                # harness, which is how #215 was cleared by hand. The attempt
+                # starts again rather than trust such a lock.
                 for lease in held:
                     if lease.external:
                         continue
@@ -808,17 +815,16 @@ def acquire(
         # A lease of this host whose holder is gone holds nothing back; an
         # external lock belongs to the lab and is never touched. Once per
         # resource, so a file that keeps coming back cannot loop here.
-        if not external and board.key not in taken_over:
+        if not external:
             why = _take_over_stale(path, root, board)
             if why:
-                taken_over.add(board.key)
-                label = ("this host's power/firmware lock" if board == HOST_LOCK
-                         else board.alias)
+                # The next round takes the board; this one has released
+                # everything. Every round sleeps or reaches the deadline, so
+                # a lease file that keeps coming back cannot make this spin.
                 note(
-                    f"{label} was held by a lease that no longer holds it: {why}. "
-                    f"Taking it over ({path})."
+                    f"{board.alias} was held by a lease that no longer holds it: "
+                    f"{why}. Taking it over ({path})."
                 )
-                continue  # try again at once: that lock file is gone
         if clock() >= deadline:
             waited = f" after waiting {wait_s:g}s" if wait_s else ""
             if external:
@@ -841,8 +847,8 @@ def acquire(
                         f"this host's power/firmware lock is in use{waited}: held "
                         f"by {describe_holder(holder_now)} ({path});{left_over} it "
                         "is never taken over, because a firmware write or a power "
-                        "change of that session may still be running: look for "
-                        "one, and remove the lock file once you know there is none"
+                        "change it started may still be running: look for one, "
+                        "and remove the lock file once you know there is none"
                     )
                 raise LeaseError(
                     f"this host's power/firmware lock is in use{waited}: held by "

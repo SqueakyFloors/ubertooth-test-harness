@@ -19,6 +19,9 @@ from ubertooth_harness.cli import main
 from ubertooth_harness.resources import FileResourceRegistry
 from ubertooth_harness.topology import PowerIsolationAction
 
+# How long an attempt sleeps between rounds, for tests that count them.
+_POLL_S = leases._POLL_S
+
 A = leases.Board("UT_0", "aaaa0000aaaa0000aaaa0000aaaa0000")
 B = leases.Board("UT_1", "bbbb1111bbbb1111bbbb1111bbbb1111")
 PLATFORM = "macos" if sys.platform == "darwin" else "linux"
@@ -279,7 +282,7 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
         # note says which group to look at before trusting it.
         self.hold(A, dead_holder(pgid=os.getpgrp()))
         self.take().release()
-        self.assertIn(f"ps -g {os.getpgrp()}", self.notes[0])
+        self.assertIn(f"pgrep -g {os.getpgrp()}", self.notes[0])
         self.assertIn("may still be using the board", self.notes[0])
 
     def test_a_host_lock_whose_command_is_gone_is_never_taken_over(self):
@@ -288,12 +291,12 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
         It is all that keeps a power change or a firmware write from
         overlapping another, and what still holds its file could be a write
         in flight: a process that left the recorded session, or one of a
-        session the record does not name at all. So the error says what is
-        known and what to look for, whether or not the recorded session is
-        still running.
+        group the record does not name at all. So the error says what is
+        known and what to look for, whether or not the recorded group still
+        has processes.
         """
-        for record in (dead_holder(pgid=os.getpgrp()),  # its session lives
-                       dead_holder(),                   # its session is gone
+        for record in (dead_holder(pgid=os.getpgrp()),  # its group lives
+                       dead_holder(),                   # its group is gone
                        {k: v for k, v in dead_holder().items()
                         if k != "pgid"}):               # an older lease file
             with self.subTest(pgid=record.get("pgid")):
@@ -352,13 +355,14 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
     def test_a_stale_lease_is_taken_over_without_waiting(self):
         self.hold(A, dead_holder())
         slept = []
-        # No wait was asked for, so the takeover must happen inside the brief
-        # grace the first attempt has, not only after a --wait-for-boards.
+        # No wait was asked for, so the takeover and the round it costs must
+        # both fit in the brief grace every attempt has, rather than needing
+        # a --wait-for-boards.
         leases.acquire(
             [A], holder("agent-2"), directory=self.dir, note=self.notes.append,
             sleep=slept.append,
         ).release()
-        self.assertEqual([], slept)
+        self.assertEqual([_POLL_S], slept)
         self.assertEqual(1, len(self.notes))
 
 
@@ -372,16 +376,28 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
         self.assertIn("UT_1", self.notes[0])
 
     def test_a_takeover_leaves_the_other_boards_free(self):
-        # The attempt that found the stale lease released everything it had
-        # taken before taking over, as every other failed attempt does.
-        self.hold(A, dead_holder())
+        # The stale lease is on the second board in lock order, so the
+        # attempt that finds it is already holding the first one and has to
+        # give it back before taking over, as every failed attempt does.
+        self.hold(B, dead_holder())
+        taken = []
+
+        def note(message):
+            self.notes.append(message)
+            # Nothing of that attempt is still held at this point.
+            taken.append(leases.acquire([A], holder("passer-by"),
+                                        directory=self.dir))
+            taken[-1].release()
+
         leases.acquire([A, B], holder("agent-2"), directory=self.dir,
-                       note=self.notes.append).release()
+                       note=note).release()
+        self.assertEqual(1, len(taken))
         leases.acquire([A, B], holder("agent-3"), directory=self.dir).release()
 
-    def test_a_stale_lease_is_only_taken_over_once_per_command(self):
-        # A file that keeps coming back must not make acquire loop on it: the
-        # second attempt waits like any busy board and then gives up.
+    def test_a_lease_file_that_keeps_coming_back_cannot_make_a_loop(self):
+        # Every round sleeps or reaches the deadline, so a stale lease that
+        # is replaced as soon as it is taken over costs poll rounds and ends
+        # at the deadline, and each one is still taken over and reported.
         self.hold(A, dead_holder())
         now = [0.0]
 
@@ -399,7 +415,11 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
                 [A], holder("agent-2"), directory=self.dir, wait_s=10,
                 clock=lambda: now[0], sleep=sleep, note=note,
             )
-        self.assertEqual(1, len(self.notes))
+        # One takeover per round, and the rounds are the wait divided by
+        # the poll: bounded, not a spin.
+        self.assertGreater(len(self.notes), 1)
+        self.assertLessEqual(len(self.notes), 10 / 0.25 + 1)
+        self.assertGreaterEqual(now[0], 10)
 
     def test_a_lease_whose_file_was_removed_under_it_is_not_trusted(self):
         # The narrow race a takeover leaves: it decided to remove a file that
@@ -482,7 +502,7 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
 
     def test_boards_says_a_host_lock_of_a_gone_command_stays_held(self):
         for record in (dead_holder(pgid=os.getpgrp()), dead_holder()):
-            with self.subTest(pgid=record["pgid"]):
+            with self.subTest(pgid=record["pgid"]):  # group alive, then gone
                 path = self.hold(leases.HOST_LOCK, record)
                 state = leases.host_lock_state(directory=self.dir)
                 self.assertIn("is gone", state["stale"])
@@ -570,8 +590,15 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
         )
         self.assertEqual(0, started.returncode, started.stderr)
         orphan = int(started.stdout.strip())
-        self.addCleanup(lambda: os.kill(orphan, 9))
+        self.addCleanup(self._kill, orphan)
         return orphan
+
+    @staticmethod
+    def _kill(pid: int) -> None:
+        try:
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass  # it ended on its own
 
     def test_an_inherited_lock_outlives_its_lease_and_is_taken_over(self):
         # The orphan is in a session of its own, so nothing of the lease's
@@ -594,7 +621,7 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
         self.take().release()
         self.assertEqual(1, len(self.notes), self.notes)
         self.assertIn("may still be using the board", self.notes[0])
-        self.assertIn("ps -g", self.notes[0])
+        self.assertIn("pgrep -g", self.notes[0])
 
 
 class LeaseCliTests(RawHoldMixin, unittest.TestCase):
