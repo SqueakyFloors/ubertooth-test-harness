@@ -283,6 +283,16 @@ class CaptureTests(unittest.TestCase):
         self.assertIn("tshark exit: 0", out)
         self.assertIn("tshark checks passed", out)
 
+    def test_a_sigint_case_asking_for_a_packet_is_skipped_when_none_arrives(self):
+        # The bench cases ask for at least one packet, so the skip has to
+        # win over the count: a capture window with nothing in it says
+        # nothing about what a SIGINT does, and is not a shortfall.
+        code, out = self.capture(seconds=4.0, interrupt_after=1.0, min_packets=1,
+                                 environment={"FAKE_EXTCAP_SILENT": "1"})
+
+        self.assertEqual(pytools.SKIP_EXIT, code, out)
+        self.assertNotIn("fewer than", out)
+
     def test_a_sigint_with_nothing_decoded_to_stop_after_is_skipped(self):
         # The SIGINT goes in once a row has arrived, which is what makes the
         # check deterministic: tshark hands the capture to a dumpcap child,

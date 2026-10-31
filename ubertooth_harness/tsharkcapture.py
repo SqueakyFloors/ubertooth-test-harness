@@ -342,6 +342,12 @@ def _run_tshark(argv, env, seconds, interrupt_after, failures, out, directory):
                     process.wait(STOP_WAIT_S)
                 except subprocess.TimeoutExpired:
                     pass
+        if process.poll() is None:
+            # It is in a session of its own, so nothing outside this command
+            # will reap it: name it among what was left running, which fails
+            # the case. Nothing is ever stopped with SIGKILL
+            # (SqueakyFloors/ubertooth#239), here or in extcapcapture.py.
+            seen[process.pid] = " ".join(argv)
         stderr.seek(0)
         return (process.poll(), _read(stdout_path),
                 stderr.read().decode(errors="replace"), seen, quiet)
@@ -434,7 +440,11 @@ def _report(status, stdout, stderr, children, address, pdu_type, min_packets,
     out(f"tshark exit: {status}" + (" (after SIGINT)" if interrupted else ""))
     if status != 0:
         failures.append(f"tshark exited {status}, not 0")
-    if rows.advertiser < min_packets:
+    if quiet:
+        # Nothing was decoded at all, so there was nothing to stop the capture
+        # after and nothing to count: that is the skip below, not a shortfall.
+        pass
+    elif rows.advertiser < min_packets:
         name = PDU_NAMES.get(pdu_type, f"PDU type {pdu_type:#04x}")
         failures.append(
             f"Wireshark decoded {rows.advertiser} {name} packet(s) from "
