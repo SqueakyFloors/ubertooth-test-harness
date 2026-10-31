@@ -1,17 +1,98 @@
+import datetime
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
 
 from ubertooth_harness.events import open_run_publisher
-from ubertooth_harness.report import load_events, render_run, render_runs, write_report
+from ubertooth_harness.report import (
+    LEGACY_OUTPUT_HEAD_CHARS,
+    LEGACY_OUTPUT_HEAD_RECORDS,
+    LEGACY_OUTPUT_TAIL_CHARS,
+    LEGACY_OUTPUT_TAIL_RECORDS,
+    _take_chunks,
+    _tail_on_whole_lines,
+    elapsed,
+    load_events,
+    render_run,
+    render_runs,
+    write_report,
+)
 
 
 SERIAL = "aaaa0000"
+_START = datetime.datetime(2026, 1, 1)
 
 
-def write_run(directory: Path, *, finish=True, host="Host_Mac", source=None):
+def elapsed_stamp(ms: int) -> str:
+    """The transcript's stamp that many milliseconds into the run."""
+    return elapsed(_START)(_START + datetime.timedelta(milliseconds=ms))
+
+
+def gap_in(report: str) -> int:
+    """Characters the report says it left out of the transcript."""
+    return int(re.search(
+        r"\[M\] (\d+) more characters of output are in run\.jsonl", report,
+    ).group(1))
+
+
+def dump_events(texts: list[str]) -> list[dict]:
+    """One command that printed ``texts`` on stderr, recorded with no cap."""
+    records = [command_event(0, "command_started", "running",
+                             {"argv": ["ubertooth-dump"]})]
+    records += [
+        command_event(ms, "command_output", "running",
+                      {"stream": "stderr", "text": text})
+        for ms, text in enumerate(texts, start=1)
+    ]
+    records.append(command_event(len(texts) + 1, "command_finished", "passed",
+                                 {"returncode": 0, "duration_s": 9.0}))
+    return records
+
+
+def command_event(ms: int, event_type: str, status: str, details: dict) -> dict:
+    """One record of command `c`, that many milliseconds into the run.
+
+    Built here rather than through a publisher: a test of the output cap
+    needs thousands of records, and writing them through run.jsonl and the
+    console writer takes minutes.
+    """
+    moment = _START + datetime.timedelta(milliseconds=ms)
+    return {
+        "run_id": "run-a", "event_type": event_type, "status": status,
+        "timestamp": moment.isoformat(timespec="milliseconds"),
+        "details": {"command_id": "c", **details},
+    }
+
+
+def _serial_set(registered: str) -> set[str]:
+    """What `_Run.serials()` collects for one registered J-Link serial."""
+    from ubertooth_harness.report import _Run
+
+    return _Run([{
+        "run_id": "r", "event_type": "manifest", "status": "passed",
+        "timestamp": "2026-01-01T00:00:00",
+        "details": {"manifest": {"invocations": [
+            {"resource_identities": {"advertiser": {"jlink serial": registered}}},
+        ]}},
+    }]).serials()
+
+
+def write_run(
+    directory: Path, *, finish=True, host="Host_Mac", source=None,
+    dk_serial=None, peer_serial=None, dk_device=None,
+):
     publisher = open_run_publisher(directory, directory.name)
+    identities = {"Ubertooth": {"serial": SERIAL}}
+    if dk_serial:
+        identities["advertiser"] = {"jlink serial": dk_serial,
+                                    "BLE address": "C0:11:22:33:44:55"}
+        if dk_device:
+            identities["advertiser"]["serial device"] = dk_device
+    if peer_serial:
+        identities["peer"] = {"bridge serial": peer_serial,
+                              "BD_ADDR": "AA:BB:CC:11:22:33"}
     publisher.emit("run_started", "running", {"plan_name": "Plan", "suite": "fast", "host": host})
     publisher.emit("manifest", "passed", {"manifest": {
         "host": host,
@@ -21,7 +102,7 @@ def write_run(directory: Path, *, finish=True, host="Host_Mac", source=None):
                      "expected_revision": "git-aaaaaaa", "repository": "repo",
                      **(source or {})}],
         "artifacts": [],
-        "invocations": [{"resource_identities": {"Ubertooth": {"serial": SERIAL}}}],
+        "invocations": [{"resource_identities": identities}],
         "environment": {"os": {"system": "Darwin", "architecture": "arm64"}},
     }})
     publisher.emit("test_started", "running", {
@@ -118,6 +199,32 @@ class ReportTests(unittest.TestCase):
         self.assertIn(f"UT_Linux4 serial {SERIAL}", devices)
         self.assertIn("DK_Linux1 serial 001050210121", devices)
 
+    def test_a_short_serial_is_masked_only_where_it_stands_alone(self):
+        # A registry entry short enough to read as an ordinary number
+        # ("000123", which the registry takes and the tools write as 123):
+        # masking it inside every longer number would mangle the transcript.
+        from ubertooth_harness.report import _redact
+
+        self.assertEqual(
+            "--jlink <serial>; 1234 packets in 7123 us",
+            _redact("--jlink 123; 1234 packets in 7123 us",
+                    _serial_set("000123")),
+        )
+        # Its padded width is long enough to mask anywhere, so the path that
+        # carries it is masked whatever follows the serial.
+        self.assertEqual(
+            "port /dev/cu.usbmodem<serial>1",
+            _redact("port /dev/cu.usbmodem0000000001231",
+                    _serial_set("000123")),
+        )
+        # A real serial is masked wherever it appears, including inside the
+        # name of a device path.
+        self.assertEqual(
+            "port /dev/cu.usbmodem<serial>1",
+            _redact("port /dev/cu.usbmodem0010502101211",
+                    _serial_set("001050210121")),
+        )
+
     def test_redaction_masks_32_hex_tokens_but_not_longer_digests(self):
         from ubertooth_harness.report import _redact
 
@@ -148,6 +255,176 @@ class ReportTests(unittest.TestCase):
             self.assertNotIn("cccc2222", report)
             self.assertNotIn(SERIAL, report)
 
+    def test_redaction_masks_a_dk_jlink_serial_in_both_widths(self):
+        # The registry pads a J-Link serial to 12 digits and preflight puts it
+        # on nrfdk.py's command line as a number, so the report holds both.
+        registered, as_a_number = "001050210121", "1050210121"
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            write_run(run, finish=False, dk_serial=registered)
+            publisher = open_run_publisher(run, "run-a")
+            publisher.emit("command_started", "running", {
+                "command_id": "d",
+                "argv": ["python", "nrfdk.py", "identify", "--jlink", as_a_number],
+            })
+            publisher.emit("command_output", "running", {
+                "command_id": "d", "stream": "stdout",
+                "text": f"J-Link serial: {as_a_number}\n",
+            })
+            publisher.emit("command_finished", "passed", {
+                "command_id": "d", "returncode": 0, "duration_s": 0.1,
+            })
+
+            report = render_run(load_events(run / "run.jsonl"), redact_serials=True)
+
+            self.assertNotIn(as_a_number, report)
+            self.assertNotIn(registered, report)
+            self.assertIn("--jlink <serial>", report)
+
+    def test_redaction_masks_an_esp32_peer_bridge_serial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            write_run(run, finish=False, peer_serial="e9c5ba112233")
+            publisher = open_run_publisher(run, "run-a")
+            publisher.emit("command_started", "running", {
+                "command_id": "p", "argv": ["esp32-peer", "--serial", "e9c5ba112233"],
+            })
+            publisher.emit("command_finished", "passed", {
+                "command_id": "p", "returncode": 0, "duration_s": 0.1,
+            })
+
+            report = render_run(load_events(run / "run.jsonl"), redact_serials=True)
+
+            self.assertNotIn("e9c5ba112233", report)
+
+    def test_redaction_masks_the_serial_inside_a_device_path(self):
+        # The by-id name carries the probe's serial, so masking the serial is
+        # enough: replacing the whole path would leave the reader less.
+        path = "/dev/serial/by-id/usb-SEGGER_J-Link_001050210121-if00"
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            write_run(run, finish=False, dk_serial="001050210121",
+                      dk_device=path)
+            publisher = open_run_publisher(run, "run-a")
+            publisher.emit("command_started", "running", {
+                "command_id": "d", "argv": ["nrfdk.py", "identify", "--port", path],
+            })
+            publisher.emit("command_finished", "passed", {
+                "command_id": "d", "returncode": 0, "duration_s": 0.1,
+            })
+
+            report = render_run(load_events(run / "run.jsonl"), redact_serials=True)
+
+            self.assertIn(
+                "/dev/serial/by-id/usb-SEGGER_J-Link_<serial>-if00", report)
+            self.assertNotIn("001050210121", report)
+
+    def test_a_serial_followed_by_a_digit_in_a_path_is_masked(self):
+        # macOS names a probe /dev/cu.usbmodem<serial><interface>, so a digit
+        # follows the serial. The path is also discovered at run time off
+        # Linux, so masking cannot rely on the registry holding it.
+        path = "/dev/cu.usbmodem0010502101211"
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            write_run(run, finish=False, dk_serial="001050210121",
+                      dk_device=path)
+            publisher = open_run_publisher(run, "run-a")
+            publisher.emit("command_started", "running", {
+                "command_id": "d", "argv": ["nrfdk.py", "identify", "--port", path],
+            })
+            publisher.emit("command_output", "running", {
+                "command_id": "d", "stream": "stdout", "text": f"port: {path}\n",
+            })
+            publisher.emit("command_finished", "passed", {
+                "command_id": "d", "returncode": 0, "duration_s": 0.1,
+            })
+
+            report = render_run(load_events(run / "run.jsonl"), redact_serials=True)
+
+            self.assertNotIn("001050210121", report)
+            self.assertIn("--port /dev/cu.usbmodem<serial>1", report)
+
+    def test_a_short_serial_does_not_break_a_32_hex_token(self):
+        # The token rule masks an Ubertooth serial the run never named (an
+        # unregistered board in a failure reason); a short serial in the
+        # explicit list must not cut one in half first.
+        from ubertooth_harness.report import _redact
+
+        self.assertEqual(
+            "enumerated: <serial>",
+            _redact("enumerated: aaaaf123ffaaaaaaaaaaaaaaaaaaaaaa",
+                    _serial_set("000123")),
+        )
+
+    def test_the_padded_width_is_the_one_a_dk_port_name_carries(self):
+        # _SERIAL_PADDED_DIGITS restates the padding in targets.DK_BY_ID;
+        # this keeps the two in step.
+        from ubertooth_harness import targets
+        from ubertooth_harness.report import _SERIAL_PADDED_DIGITS
+
+        path = targets.device_path(
+            targets.KINDS[targets.NRF52840_DK], "123456", "linux")
+
+        self.assertIn("0" * (_SERIAL_PADDED_DIGITS - 6) + "123456", path)
+
+    def test_serial_widths_cover_padding_but_not_short_numbers(self):
+        from ubertooth_harness.report import _serial_widths
+
+        self.assertEqual({"1050210121", "001050210121"}, _serial_widths("001050210121"))
+        self.assertEqual({"1050210121", "001050210121"}, _serial_widths("1050210121"))
+        self.assertEqual({"12345", "000000012345"}, _serial_widths("12345"))
+        # A serial written in hex is masked as the registry holds it, and an
+        # Ubertooth's 32 digits are not a J-Link serial in another width.
+        self.assertEqual(set(), _serial_widths("aaaa0000"))
+        self.assertEqual(set(), _serial_widths("1" * 32))
+    def test_an_outcome_for_another_step_leaves_the_open_one_open(self):
+        # Records are read as they were written: an outcome naming a step
+        # other than the open one closes nothing, and the open step still
+        # gets the line its commands give it.
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            publisher = open_run_publisher(run, "run-a")
+            publisher.emit("build_started", "running", {})
+            publisher.emit("build_step_started", "running", {
+                "step_id": "host-build", "step_name": "Build Ubertooth host tools",
+            })
+            publisher.emit("build_step_finished", "passed", {
+                "step_id": "toolchain", "step_name": "Read toolchain versions",
+                "reason": "",
+            })
+            publisher.emit("build_finished", "passed", {"reason": ""})
+
+            report = render_run(load_events(run / "run.jsonl"))
+
+            self.assertIn("--- Read toolchain versions EXIT: passed ---", report)
+            self.assertIn("--- Build Ubertooth host tools EXIT: passed ---", report)
+
+    def test_a_build_step_with_no_outcome_record_falls_back_to_its_commands(self):
+        # A run recorded before the build said how each step ended has only
+        # its commands to go on, so the step's line is latched to the first
+        # command that did not pass.
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            publisher = open_run_publisher(run, "run-a")
+            publisher.emit("build_started", "running", {})
+            publisher.emit("build_step_started", "running", {
+                "step_id": "host-build", "step_name": "Build Ubertooth host tools",
+            })
+            publisher.emit("command_started", "running", {
+                "command_id": "b", "argv": ["cmake", "--build", "."],
+                "phase": "build", "step_id": "host-build",
+            })
+            publisher.emit("command_finished", "failed", {
+                "command_id": "b", "returncode": 2, "duration_s": 0.1,
+                "phase": "build", "step_id": "host-build",
+            })
+            publisher.emit("build_finished", "failed", {"reason": "it exited 2"})
+
+            report = render_run(load_events(run / "run.jsonl"))
+
+            self.assertIn("--- Build Ubertooth host tools EXIT: failed ---", report)
+            self.assertIn("=== BUILD EXIT: failed: it exited 2 ===", report)
+
     def test_report_shows_every_recorded_output_record(self):
         # run.jsonl output is capped when recorded (rawlog.RECORD_*), so the
         # report keeps every record, including how a long command ended.
@@ -166,6 +443,199 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(20, report.count(chunk.rstrip()))
             self.assertIn("[O] the end", report)
             self.assertNotIn("more characters of output", report)
+
+    def test_output_recorded_before_the_cap_is_capped_by_the_report(self):
+        # A run recorded before run.jsonl capped output at write time holds
+        # every line, and rendering it printed megabytes. The report keeps
+        # the start and the end, and says how much is only in run.jsonl.
+        line = "rx block timestamp 283640 * 100 nanoseconds\n"
+        records = 5000
+        report = render_run(dump_events([line] * records + ["the end\n"]))
+        printed = len(line) * records + len("the end\n")
+
+        # Many small records: the record limits bind, because each costs a
+        # timestamp and a tag of its own in the transcript.
+        lines = LEGACY_OUTPUT_HEAD_RECORDS + LEGACY_OUTPUT_TAIL_RECORDS - 1
+        self.assertEqual(lines, report.count(line.rstrip()))
+        self.assertIn("[E] the end", report)  # how the command ended
+        self.assertEqual(
+            printed - (lines * len(line) + len("the end\n")), gap_in(report),
+        )
+        # The gap note is stamped where the output left out ends, as the note
+        # a capped command leaves is: the last record before the tail, one
+        # record per millisecond here.
+        ends = records + 1 - LEGACY_OUTPUT_TAIL_RECORDS
+        self.assertIn(f"{elapsed_stamp(ends)} [M] {gap_in(report)} more", report)
+
+    def test_a_few_long_records_are_capped_by_size(self):
+        line = "x" * 63 + "\n"
+        record = line * 64  # 4 KiB, as a non-streaming command is recorded in
+        records = 40
+        report = render_run(dump_events([record] * records + ["the end\n"]))
+        printed = len(record) * records + len("the end\n")
+
+        self.assertLess(report.count(line.rstrip()) * len(line),
+                        LEGACY_OUTPUT_HEAD_CHARS + LEGACY_OUTPUT_TAIL_CHARS)
+        self.assertIn("[E] the end", report)
+        # Everything but the start and the end of the output, give or take
+        # the line the cap fell inside.
+        self.assertAlmostEqual(
+            printed - LEGACY_OUTPUT_HEAD_CHARS - LEGACY_OUTPUT_TAIL_CHARS,
+            gap_in(report), delta=len(line),
+        )
+        # The end starts on a whole line, as run.jsonl's own tail does. (The
+        # start may stop inside one, as run.jsonl's head does: it is bounded
+        # by size and records, not by lines.)
+        after = report.split("more characters of output are in run.jsonl\n", 1)[1]
+        for text in after.splitlines():
+            if "[E] x" in text:
+                self.assertTrue(text.endswith(line.rstrip()), text)
+
+    def test_the_cap_cuts_a_record_where_run_jsonl_would(self):
+        chunk = [(_START, "stderr", "aaa\nbbb\nccc\n")]
+
+        def took(**limits):
+            taken, left_out = _take_chunks(chunk, **limits)
+            kept = _tail_on_whole_lines(left_out, taken) if limits["from_end"] else taken
+            return [text for _moment, _stream, text in kept]
+
+        # From the end: a cut on a line boundary keeps that whole line, and
+        # one inside a line starts at the next.
+        self.assertEqual(["ccc\n"], took(chars=4, records=1, from_end=True))
+        self.assertEqual(["ccc\n"], took(chars=6, records=1, from_end=True))
+        # From the start: whole lines, or the fragment that fits when the
+        # record holds no line boundary at all.
+        self.assertEqual(["aaa\n"], took(chars=6, records=1, from_end=False))
+        self.assertEqual(["aa"], [
+            text for _moment, _stream, text in _take_chunks(
+                [(_START, "stderr", "a" * 100)], chars=2, records=1, from_end=False,
+            )[0]
+        ])
+
+    def test_a_left_out_line_running_through_several_records_is_dropped(self):
+        # The line left out can run through more than one of the tail's
+        # records; none of its pieces may render as a line of its own.
+        texts = (["x\n"] * LEGACY_OUTPUT_HEAD_RECORDS
+                 + ["this line was left out"]
+                 + ["part one ", "part two\n"]
+                 + ["y\n"] * (LEGACY_OUTPUT_TAIL_RECORDS - 2))
+
+        report = render_run(dump_events(texts))
+
+        printed = [text.split("[E] ", 1)[1] for text in report.splitlines()
+                   if "[E] " in text]
+        self.assertEqual([], [text for text in printed if "part" in text])
+        self.assertEqual(["y"] * (LEGACY_OUTPUT_TAIL_RECORDS - 2),
+                         printed[LEGACY_OUTPUT_HEAD_RECORDS:])
+        # The gap is stamped at the last record left out, which is the
+        # "part two" the line boundary dropped, not the record before it.
+        ends = LEGACY_OUTPUT_HEAD_RECORDS + 3  # one record per millisecond
+        self.assertIn(f"{elapsed_stamp(ends)} [M] {gap_in(report)} more", report)
+
+    def test_a_tail_that_is_all_one_line_shows_the_gap_and_no_more(self):
+        # Records holding the middle of one line leave nothing once the tail
+        # starts at a line boundary, as run.jsonl's tail does: a fragment
+        # rendered as a line would read as a line the command printed.
+        report = render_run(dump_events(["a" * 70000, "b" * 9000, "c" * 10999 + "\n"]))
+
+        printed = [text for text in report.splitlines() if "[E] " in text]
+        self.assertEqual(1, len(printed))  # the head's own cut line
+        self.assertEqual("a" * LEGACY_OUTPUT_HEAD_CHARS,
+                         printed[0].split("[E] ", 1)[1])
+        self.assertEqual(90000 - LEGACY_OUTPUT_HEAD_CHARS, gap_in(report))
+
+    def test_the_harness_own_last_word_survives_the_cap(self):
+        # A timeout, a cancellation or an output sink error begins on a line
+        # of its own (the executor prefixes it), so the tail keeps it.
+        report = render_run(dump_events(
+            ["noise\n" * 20000, "\nHARD TIMEOUT after 60s\n"]
+        ))
+
+        self.assertIn("more characters of output are in run.jsonl", report)
+        self.assertIn("[E] HARD TIMEOUT after 60s", report)
+
+    def test_one_empty_record_over_the_limit_leaves_the_output_whole(self):
+        # The record limits are reached but nothing is left out, so there is
+        # no gap to report.
+        texts = (["line\n"] * LEGACY_OUTPUT_HEAD_RECORDS + [""]
+                 + ["line\n"] * LEGACY_OUTPUT_TAIL_RECORDS)
+
+        report = render_run(dump_events(texts))
+
+        self.assertEqual(len(texts) - 1, report.count("[E] line"))
+        self.assertNotIn("more characters of output", report)
+
+    def test_the_tail_does_not_start_inside_a_left_out_line(self):
+        # A record boundary is not a line boundary: with the record limit
+        # reached, the first record of the tail can carry the end of a line
+        # whose start was left out.
+        texts = []
+        for index in range(125):
+            texts += [f"line {index} ", f"end {index}\n"]
+        texts.append("the end\n")  # 251 records, past the record limits
+
+        report = render_run(dump_events(texts))
+
+        after = report.split("more characters of output are in run.jsonl\n", 1)[1]
+        printed = [text.split(" ", 1)[1] for text in after.splitlines()
+                   if "[E] " in text]
+        self.assertEqual("[E] the end", printed[-1])
+        for text in printed[:-1]:
+            self.assertRegex(text, r"^\[E\] line \d+ end \d+$")
+
+    def test_the_cap_keeps_both_streams_in_arrival_order(self):
+        events = [command_event(0, "command_started", "running",
+                                {"argv": ["ubertooth-dump"]})]
+        for index in range(3000):
+            for stream in ("stdout", "stderr"):
+                events.append(command_event(
+                    len(events), "command_output", "running",
+                    {"stream": stream, "text": f"{stream} {index}\n"},
+                ))
+        events.append(command_event(len(events), "command_finished", "passed",
+                                    {"returncode": 0, "duration_s": 1.0}))
+
+        report = render_run(events)
+
+        transcript = [text for text in report.splitlines()
+                      if "[O] " in text or "[E] " in text]
+        self.assertEqual("[O] stdout 0", transcript[0].split(" ", 1)[1])
+        self.assertEqual("[E] stderr 0", transcript[1].split(" ", 1)[1])
+        self.assertEqual("[E] stderr 2999", transcript[-1].split(" ", 1)[1])
+
+    def test_output_capped_when_it_was_recorded_is_shown_as_recorded(self):
+        # The records a capped command leaves are already the start and the
+        # end of its output, with its own [M] note between them: capping
+        # them again would cut output the run deliberately kept.
+        for named in ({"output_file": "output/c.log"},
+                      {"output_files": [{"path": "output/c.stderr.log"}]}):
+            with tempfile.TemporaryDirectory() as directory, self.subTest(**named):
+                run = Path(directory) / "run-a"
+                publisher = open_run_publisher(run, "run-a")
+                publisher.emit("command_started", "running", {
+                    "command_id": "c", "argv": ["ubertooth-dump"],
+                })
+                chunk = "x" * 1000 + "\n"
+                for _ in range(100):
+                    publisher.emit("command_output", "running", {
+                        "command_id": "c", "stream": "stderr", "text": chunk,
+                    })
+                publisher.emit("command_output_omitted", "running", {
+                    "command_id": "c", **named,
+                    "output_omitted": {"lines": {"stderr": 7}, "chars": {"stderr": 70}},
+                })
+                publisher.emit("command_output", "running", {
+                    "command_id": "c", "stream": "stderr", "text": "the end\n",
+                })
+                publisher.emit("command_finished", "passed", {
+                    "command_id": "c", "returncode": 0, "duration_s": 9.0, **named,
+                })
+
+                report = render_run(load_events(run / "run.jsonl"))
+
+                self.assertEqual(100, report.count(chunk.rstrip()))
+                self.assertNotIn("more characters of output are in run.jsonl", report)
+                self.assertIn("7 stderr lines (70 characters)", report)
 
     def test_older_runs_with_offset_timestamps_render_elapsed_times(self):
         events = [

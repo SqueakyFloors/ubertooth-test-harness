@@ -110,9 +110,11 @@ class FlashReliabilityRunner:
         if len(set(request.guard_serials)) != len(request.guard_serials):
             raise HarnessError("guard serials must be unique")
         # libubertooth treats an all-digit -U value as a USB index (which can
-        # change when a board resets) and matches anything else as the END of
-        # a serial, first board wins. Each selector must name exactly one
-        # board, so refuse indexes and selectors that end another selector.
+        # change when a board resets) and matches anything else
+        # case-insensitively against the START of a serial. Two selectors here
+        # must name two boards, so refuse indexes and a selector that is a
+        # prefix of another: the board the longer one names answers both, and
+        # the run would write to it while believing it had two boards.
         selectors = (*targets, *request.guard_serials)
         for selector in selectors:
             if selector.isdigit():
@@ -120,10 +122,11 @@ class FlashReliabilityRunner:
                     f"device selector '{selector}' is a USB index; use the full serial"
                 )
             for other in selectors:
-                if selector != other and other.endswith(selector):
+                if selector != other and other.lower().startswith(selector.lower()):
                     raise HarnessError(
                         f"device selector '{selector}' also matches '{other}'; "
-                        "use full serials"
+                        "every selector must name a board of its own, as a "
+                        "full serial"
                     )
         if len(targets) > 1 and request.step.flashes % len(targets):
             raise HarnessError(
@@ -297,12 +300,20 @@ class FlashReliabilityRunner:
         cancellation: CancellationToken | None = None,
         owner: Mapping | None = None,
         output_dir: Path,
+        between_flashes: Callable[[], None] | None = None,
     ) -> FlashRunSummary:
         """Run the flash sequence, recording into the run's publisher.
 
         ``output_dir`` is the run directory: a command whose output passes
         the run.jsonl record limits keeps its full output in
         ``output/<command id>.log`` there, as test commands do.
+
+        ``between_flashes`` is called after each write and its read-backs,
+        before the next write, and must only read: this is where the run's
+        periodic checks (the firmware watchdog record) get their turn during a
+        soak that is one case from start to end. Whatever it spends is added
+        back to the whole-test deadline, so a check the harness asked for
+        cannot be what ends the test.
         """
         image_hashes = self._validate_request(request)
         self._owner = dict(owner or {})
@@ -418,6 +429,13 @@ class FlashReliabilityRunner:
                 )
 
         for index in range(request.step.flashes):
+            if index and between_flashes is not None and not token.is_cancelled():
+                # Between two writes, so no command of its own runs beside
+                # one of ours. A cancellation that arrives during it is seen
+                # by the check below, before the next write.
+                paused = self.clock()
+                between_flashes()
+                deadline += max(0.0, self.clock() - paused)
             if token.is_cancelled():
                 status = "canceled"
                 reason = self._cancel_reason(token)
