@@ -7,12 +7,36 @@ import unittest
 from pathlib import Path
 
 from ubertooth_harness.events import open_run_publisher
-from ubertooth_harness.report import load_events, render_run, render_runs, write_report
+from ubertooth_harness.report import (
+    LEGACY_OUTPUT_HEAD_CHARS,
+    LEGACY_OUTPUT_HEAD_RECORDS,
+    LEGACY_OUTPUT_TAIL_CHARS,
+    LEGACY_OUTPUT_TAIL_RECORDS,
+    load_events,
+    render_run,
+    render_runs,
+    write_report,
+)
 
 
 SERIAL = "aaaa0000"
 _START = datetime.datetime(2026, 1, 1)
 _moments = itertools.count()
+
+
+def elapsed_stamp(ms: int) -> str:
+    """The transcript's stamp that many milliseconds into the run."""
+    seconds, ms = divmod(ms, 1000)
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{ms:03d}"
+
+
+def gap_in(report: str) -> int:
+    """Characters the report says it left out of the transcript."""
+    return int(re.search(
+        r"\[M\] (\d+) more characters of output are in run\.jsonl", report,
+    ).group(1))
 
 
 def dump_events(texts: list[str]) -> list[dict]:
@@ -202,12 +226,6 @@ class ReportTests(unittest.TestCase):
         # A run recorded before run.jsonl capped output at write time holds
         # every line, and rendering it printed megabytes. The report keeps
         # the start and the end, and says how much is only in run.jsonl.
-        from ubertooth_harness.report import (
-            LEGACY_OUTPUT_HEAD_CHARS, LEGACY_OUTPUT_TAIL_CHARS,
-        )
-        from ubertooth_harness.report import (
-            LEGACY_OUTPUT_HEAD_RECORDS, LEGACY_OUTPUT_TAIL_RECORDS,
-        )
         line = "rx block timestamp 283640 * 100 nanoseconds\n"
         records = 5000
         report = render_run(dump_events([line] * records + ["the end\n"]))
@@ -219,14 +237,15 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(lines, report.count(line.rstrip()))
         self.assertIn("[E] the end", report)  # how the command ended
         self.assertEqual(
-            printed - (lines * len(line) + len("the end\n")),
-            self.gap_in(report),
+            printed - (lines * len(line) + len("the end\n")), gap_in(report),
         )
+        # The gap note is stamped where the output left out ends, as the note
+        # a capped command leaves is: the last record before the tail, one
+        # record per millisecond here.
+        ends = records + 1 - LEGACY_OUTPUT_TAIL_RECORDS
+        self.assertIn(f"{elapsed_stamp(ends)} [M] {gap_in(report)} more", report)
 
     def test_a_few_long_records_are_capped_by_size(self):
-        from ubertooth_harness.report import (
-            LEGACY_OUTPUT_HEAD_CHARS, LEGACY_OUTPUT_TAIL_CHARS,
-        )
         line = "x" * 63 + "\n"
         record = line * 64  # 4 KiB, as a non-streaming command is recorded in
         records = 40
@@ -240,7 +259,7 @@ class ReportTests(unittest.TestCase):
         # the line the cap fell inside.
         self.assertAlmostEqual(
             printed - LEGACY_OUTPUT_HEAD_CHARS - LEGACY_OUTPUT_TAIL_CHARS,
-            self.gap_in(report), delta=len(line),
+            gap_in(report), delta=len(line),
         )
         # The end starts on a whole line, as run.jsonl's own tail does. (The
         # start may stop inside one, as run.jsonl's head does: it is bounded
@@ -251,12 +270,14 @@ class ReportTests(unittest.TestCase):
                 self.assertTrue(text.endswith(line.rstrip()), text)
 
     def test_the_cap_cuts_a_record_where_run_jsonl_would(self):
-        from ubertooth_harness.report import _take_chunks
+        from ubertooth_harness.report import _take_chunks, _tail_on_whole_lines
 
         chunk = [(_START, "stderr", "aaa\nbbb\nccc\n")]
 
         def took(**limits):
-            return [text for _moment, _stream, text in _take_chunks(chunk, **limits)]
+            taken, left_out = _take_chunks(chunk, **limits)
+            kept = _tail_on_whole_lines(left_out, taken) if limits["from_end"] else taken
+            return [text for _moment, _stream, text in kept]
 
         # From the end: a cut on a line boundary keeps that whole line, and
         # one inside a line starts at the next.
@@ -268,8 +289,54 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(["aa"], [
             text for _moment, _stream, text in _take_chunks(
                 [(_START, "stderr", "a" * 100)], chars=2, records=1, from_end=False,
-            )
+            )[0]
         ])
+
+    def test_the_newest_output_is_kept_even_as_one_long_line(self):
+        # A record longer than the tail limit holding a single unfinished
+        # line leaves nothing once the tail starts at a line boundary. The
+        # newest output is where a timeout or cancellation marker lands, so
+        # the report keeps the end of that line.
+        report = render_run(dump_events(["a" * 70000, "b" * 19999 + "\n"]))
+
+        printed = [text for text in report.splitlines() if "[E] " in text]
+        newest = printed[-1].split("[E] ", 1)[1]
+        self.assertEqual("b" * len(newest), newest)
+        self.assertLessEqual(len(newest), LEGACY_OUTPUT_TAIL_CHARS)
+        # Both ends are filled to their limits, so the gap is the rest.
+        self.assertEqual(
+            70000 + 20000 - LEGACY_OUTPUT_HEAD_CHARS - LEGACY_OUTPUT_TAIL_CHARS,
+            gap_in(report),
+        )
+
+    def test_one_empty_record_over_the_limit_leaves_the_output_whole(self):
+        # The record limits are reached but nothing is left out, so there is
+        # no gap to report.
+        texts = (["line\n"] * LEGACY_OUTPUT_HEAD_RECORDS + [""]
+                 + ["line\n"] * LEGACY_OUTPUT_TAIL_RECORDS)
+
+        report = render_run(dump_events(texts))
+
+        self.assertEqual(len(texts) - 1, report.count("[E] line"))
+        self.assertNotIn("more characters of output", report)
+
+    def test_the_tail_does_not_start_inside_a_left_out_line(self):
+        # A record boundary is not a line boundary: with the record limit
+        # reached, the first record of the tail can carry the end of a line
+        # whose start was left out.
+        texts = []
+        for index in range(125):
+            texts += [f"line {index} ", f"end {index}\n"]
+        texts.append("the end\n")  # 251 records, past the record limits
+
+        report = render_run(dump_events(texts))
+
+        after = report.split("more characters of output are in run.jsonl\n", 1)[1]
+        printed = [text.split(" ", 1)[1] for text in after.splitlines()
+                   if "[E] " in text]
+        self.assertEqual("[E] the end", printed[-1])
+        for text in printed[:-1]:
+            self.assertRegex(text, r"^\[E\] line \d+ end \d+$")
 
     def test_the_cap_keeps_both_streams_in_arrival_order(self):
         events = [command_event("command_started", "running",
@@ -291,11 +358,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual("[E] stderr 0", transcript[1].split(" ", 1)[1])
         self.assertEqual("[E] stderr 2999", transcript[-1].split(" ", 1)[1])
 
-    def gap_in(self, report: str) -> int:
-        """Characters the report says it left out of the transcript."""
-        return int(re.search(
-            r"\[M\] (\d+) more characters of output are in run\.jsonl", report,
-        ).group(1))
+
 
     def test_output_capped_when_it_was_recorded_is_shown_as_recorded(self):
         # The records a capped command leaves are already the start and the

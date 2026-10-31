@@ -39,8 +39,9 @@ REDACTED = "<serial>"
 # the start and of the end of it is rendered. Both limits are rawlog's, and
 # both matter: the size bounds a few huge records, the count bounds many tiny
 # ones, which cost a timestamp and a tag each in the transcript. rawlog counts
-# bytes in run.jsonl and the report counts characters, which differ only for
-# output that is not ASCII.
+# the bytes a record takes in run.jsonl, JSON escapes included, and the report
+# counts the characters it renders, so the same limit is a little more
+# generous here.
 LEGACY_OUTPUT_HEAD_CHARS = RECORD_OUTPUT_BYTES
 LEGACY_OUTPUT_HEAD_RECORDS = RECORD_OUTPUT_EVENTS
 LEGACY_OUTPUT_TAIL_CHARS = RECORD_TAIL_BYTES
@@ -705,16 +706,17 @@ def _recorded_with_a_cap(outputs: Sequence[Mapping], finished: Mapping) -> bool:
 
 def _take_chunks(
     chunks: Sequence[Chunk], *, chars: int, records: int, from_end: bool
-) -> list[Chunk]:
+) -> tuple[list[Chunk], list[Chunk]]:
     """Chunks from one end of ``chunks``, within both limits.
 
-    The chunk that would cross the character limit is cut inside it. Taken
-    from the end, the cut moves on to the next line boundary, so the output
-    kept starts on a whole line as run.jsonl's own tail does. Taken from the
-    start, it keeps what fits: the start is bounded by size, and a line
-    longer than the limit would otherwise be dropped whole.
+    Returns what was taken and what the record the size limit fell inside
+    leaves behind, which is the output left out next to that end. Taken from
+    the start, the cut moves back to a line boundary where that record has
+    one, so the gap that follows begins on a fresh line; a single line longer
+    than the limit is cut inside instead of dropped whole.
     """
     taken: list[Chunk] = []
+    left_out: list[Chunk] = []
     room = chars
     for moment, stream, text in chunks:
         if len(taken) >= records:
@@ -723,20 +725,60 @@ def _take_chunks(
             taken.append((moment, stream, text))
             room -= len(text)
             continue
-        cut = len(text) - room
-        if from_end:
-            part = text[cut:]
-            if cut > 0 and text[cut - 1] != "\n" and "\n" in part:
-                # Starts inside a line that is left out: begin at the next.
-                part = part.split("\n", 1)[1]
-        else:
-            part = text[:room]
-            boundary = part.rfind("\n")
-            part = part[:boundary + 1] if boundary >= 0 else part
-        if part:
-            taken.append((moment, stream, part))
+        cut = len(text) - room if from_end else room
+        if not from_end:
+            boundary = text.rfind("\n", 0, cut)
+            if boundary >= 0:
+                cut = boundary + 1
+        kept, rest = (
+            (text[cut:], text[:cut]) if from_end else (text[:cut], text[cut:])
+        )
+        for part, where in ((kept, taken), (rest, left_out)):
+            if part:
+                where.append((moment, stream, part))
         break
-    return taken
+    return taken, left_out
+
+
+def _tail_on_whole_lines(left_out: Sequence[Chunk], tail: list[Chunk]) -> list[Chunk]:
+    """Begin each stream's part of the tail at a line boundary.
+
+    A record boundary is not a line boundary, so the first record of the tail
+    can carry the end of a line whose start was left out, which would render
+    as a whole line of its own. run.jsonl's tail starts at a line boundary
+    for the same reason (``rawlog.CappedOutput.finish``).
+    """
+    ends = {
+        stream: text[-1]
+        for _moment, stream, text in left_out if text
+    }
+    begun = set()
+    kept = []
+    for moment, stream, text in tail:
+        if stream not in begun:
+            begun.add(stream)
+            if ends.get(stream, "\n") != "\n":
+                _first, newline, rest = text.partition("\n")
+                text = rest if newline else ""
+                if not text:
+                    continue
+        kept.append((moment, stream, text))
+    return kept
+
+
+def _newest_line(chunks: Sequence[Chunk]) -> list[Chunk]:
+    """The last line of the newest record, when nothing else is left of the
+    tail: a record longer than the tail limit holding one unfinished line.
+
+    The newest output is where the harness puts its own last word (a timeout,
+    a cancellation, an output sink error), so run.jsonl always keeps the
+    newest record and the report says how the command ended.
+    """
+    for moment, stream, text in reversed(chunks):
+        lines = text.splitlines(keepends=True)
+        if lines:
+            return [(moment, stream, lines[-1][-LEGACY_OUTPUT_TAIL_CHARS:])]
+    return []
 
 
 def _capped_chunks(chunks: Sequence[Chunk]) -> list[Chunk]:
@@ -751,18 +793,30 @@ def _capped_chunks(chunks: Sequence[Chunk]) -> list[Chunk]:
     if (total <= LEGACY_OUTPUT_HEAD_CHARS + LEGACY_OUTPUT_TAIL_CHARS
             and len(chunks) <= LEGACY_OUTPUT_HEAD_RECORDS + LEGACY_OUTPUT_TAIL_RECORDS):
         return list(chunks)
-    head = _take_chunks(
+    head, after_head = _take_chunks(
         chunks, chars=LEGACY_OUTPUT_HEAD_CHARS,
         records=LEGACY_OUTPUT_HEAD_RECORDS, from_end=False,
     )
-    tail = _take_chunks(
+    tail, before_tail = _take_chunks(
         list(reversed(chunks)), chars=LEGACY_OUTPUT_TAIL_CHARS,
         records=LEGACY_OUTPUT_TAIL_RECORDS, from_end=True,
     )
     tail.reverse()
+    # What falls between them, in arrival order: the rest of the record the
+    # head stopped inside, the records neither end reached, and the start of
+    # the record the tail begins inside.
+    left_out = (
+        after_head
+        + list(chunks[len(head):len(chunks) - len(tail)])
+        + before_tail
+    )
+    tail = _tail_on_whole_lines(left_out, tail) or _newest_line(chunks)
     kept = sum(len(text) for _moment, _stream, text in head + tail)
-    # Stamped where the gap ends, as a recorded note is (its ``received``).
-    moment = tail[0][0] if tail else chunks[-1][0]
+    if kept >= total:  # one empty record over the record limit
+        return list(chunks)
+    # Stamped where the output left out ends, as a recorded note is (its
+    # ``received``, from ``rawlog.CappedOutput._dropped_at``).
+    moment = left_out[-1][0] if left_out else chunks[-1][0]
     note = (moment, NOTE, f"{total - kept} more characters of output are in run.jsonl\n")
     return head + [note] + tail
 
