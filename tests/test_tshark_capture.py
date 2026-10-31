@@ -145,11 +145,13 @@ class BudgetTests(unittest.TestCase):
         # The driver must get to its own stop before the step's timeout kills
         # it: tshark runs in a session of its own, so a command killed from
         # outside leaves it behind with nothing to reap it.
-        driver = (tsharkcapture.VERSION_TIMEOUT_S      # tshark --version
+        driver = (pytools.TOOL_TIMEOUT_S               # git show of the plugin
+                  + tsharkcapture.VERSION_TIMEOUT_S    # tshark --version
                   + tsharkcapture.VERSION_TIMEOUT_S    # tshark -G folders
                   + tsharkcapture.START_WAIT_S         # tshark -D
                   + tsharkcapture.EXIT_WAIT_S          # past the window
                   + tsharkcapture.STOP_WAIT_S          # past the SIGTERM
+                  + tsharkcapture.SCAN_BUDGET_S        # one scan past the deadline
                   + tsharkcapture.GONE_WAIT_S)         # the leftover scan
         self.assertLess(driver, tshark_cases.CAPTURE_SLACK_S)
 

@@ -18,7 +18,8 @@ suites:
         payload: c0ffee
 
     # The same advertiser, read by real tshark through the extcap plugin.
-    # Needs tshark on the host (no GUI); the cases are skipped without it.
+    # Needs tshark on the host (no GUI); without it the test is not
+    # applicable, and --dry-run says so.
     - BLE extcap in tshark:
         hosts: [Host_Linux]
         Ubertooth: default

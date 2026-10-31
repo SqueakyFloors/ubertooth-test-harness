@@ -574,9 +574,12 @@ are logged, so no captured traffic reaches the run record.
 `BLE extcap in tshark` adds the one thing those cannot show, that a real
 Wireshark agrees. `ubertooth_harness/tsharkcapture.py` installs the plugin in
 a Wireshark configuration of its own (a temporary `HOME`, so the user's own
-configuration is untouched and no other extcap program can answer), and real
+configuration is untouched), and real
 `tshark` then calls it as that Wireshark version does and decodes the records
-with its own dissector; the row it must print is known in advance, because an
+with its own dissector. The installed program records every call it is given,
+which is what shows that it, and not another extcap program the host has
+globally, is what tshark captured with. The row it must print is known in
+advance, because an
 nRF52840 DK advertises from its registered address. Its cases declare that
 they need `tshark` installed, so a host without it runs none of them (not
 applicable, and `--dry-run` says so) instead of flashing the DK to find out,

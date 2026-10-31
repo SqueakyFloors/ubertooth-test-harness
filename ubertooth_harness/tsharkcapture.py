@@ -3,8 +3,8 @@
 Run as a script by the BLE extcap in tshark cases::
 
     python tsharkcapture.py capture --interface ubertooth<serial> --seconds N
-        --address ADDR [--channel 37|38|39] [--min-packets N]
-        [--filter EXPR] [--interrupt-after S] [--program PATH]
+        --address ADDR [--min-packets N] [--filter EXPR]
+        [--interrupt-after S] [--program PATH]
     python tsharkcapture.py read FILE --address ADDR [--min-packets N]
 
 The other extcap cases (``extcapcapture.py``) play Wireshark's part
@@ -103,6 +103,11 @@ STOP_WAIT_S = 10.0
 # Reading a capture file opens no device and starts no capture.
 READ_TIMEOUT_S = 60.0
 GONE_WAIT_S = 5.0
+# One pass of the process-tree scan: pgrep per level, and the loop checks its
+# deadline between passes, so a pass can run past it by this much.
+SCAN_WAIT_S = 5.0
+SCAN_DEPTH = 4
+SCAN_BUDGET_S = SCAN_WAIT_S * SCAN_DEPTH
 POLL_S = 0.05
 VERSION_TIMEOUT_S = 20.0
 # The program is installed under this name, so tshark's interface listing and
@@ -245,7 +250,7 @@ def _children(pid: int) -> dict:
     """pid -> command line of the live children of pid."""
     try:
         result = subprocess.run(("pgrep", "-lf", "-P", str(pid)), capture_output=True,
-                                text=True, timeout=5)
+                                text=True, timeout=SCAN_WAIT_S)
     except (OSError, subprocess.SubprocessError):
         return {}
     found = {}
@@ -256,7 +261,7 @@ def _children(pid: int) -> dict:
     return found
 
 
-def _descendants(pid: int, depth: int = 4) -> dict:
+def _descendants(pid: int, depth: int = SCAN_DEPTH) -> dict:
     """pid -> command line of everything below pid: tshark starts dumpcap,
     which is what starts the extcap program, so children alone miss it."""
     found = {}
@@ -275,12 +280,16 @@ def _descendants(pid: int, depth: int = 4) -> dict:
 
 
 def _alive(pid: int) -> bool:
+    """True while that process id is one of ours and still there.
+
+    Every process id checked here was started by this command, so one that
+    now belongs to another user is a reused number, not a process left
+    behind.
+    """
     try:
         os.kill(pid, 0)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         return False
-    except PermissionError:
-        return True
     return True
 
 
@@ -466,8 +475,7 @@ def _report(status, stdout, stderr, children, address, pdu_type, min_packets,
             f"Wireshark decoded {rows.advertiser} {name} packet(s) from "
             f"{rows.address}, fewer than {min_packets}")
     if capture_filter is not None:
-        warning = f"applies no capture filter" in stderr
-        if not warning:
+        if "applies no capture filter" not in stderr:
             failures.append(
                 "the plugin's warning that it applies no capture filter did not "
                 "reach tshark")

@@ -12,8 +12,10 @@ registered address, so the row Wireshark must print is known before the
 capture starts.
 
 Each case sets the DK advertising on one channel, runs tshark through
-``tsharkcapture.py`` for the plan's duration, and stops both. The cases are
-skipped where tshark is not installed, which only running it can tell.
+``tsharkcapture.py`` for the plan's duration, and stops both. Every case
+declares that it needs tshark installed, so a host without it runs none of
+them (not applicable, which ``--dry-run`` names) and no DK is touched to find
+that out.
 """
 
 from __future__ import annotations
@@ -50,7 +52,7 @@ PAYLOAD_TAG = "c0ffee"
 # never kills it with a tshark of its own still running (it starts tshark in
 # a session of its own, which nothing outside would then reap);
 # tests/test_tshark_capture.py checks this against those limits.
-CAPTURE_SLACK_S = 90.0
+CAPTURE_SLACK_S = 150.0
 # The capture filter Wireshark would pass on; the plugin cannot apply it.
 CAPTURE_FILTER = "btle.length > 20"
 # How far into the capture the SIGINT case stops tshark.
