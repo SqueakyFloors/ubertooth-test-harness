@@ -1488,9 +1488,12 @@ python -m ubertooth_harness report runs/<mac-run-id> runs/<linux-run-id> \
 macOS and Linux runs for a release; each run's own report.md keeps its full
 transcript. Serial numbers are shown; `--redact-serials` replaces them with
 `<serial>`: an Ubertooth's serial, a DK's J-Link serial, and an ESP32 peer's
-bridge serial, each in every width the run writes it (the registry pads a
-J-Link serial to 12 digits, the tools take it as a number), plus any
-standalone 32-hex-digit token, which is the shape of an Ubertooth serial.
+bridge serial. A numeric serial is masked in each width the run writes it, as
+registered and as the number the tools take, so a DK's J-Link serial does not
+survive as the `--jlink 1050210121` the harness passes; a serial of fewer
+than six digits is left as the tools write it, because a number that short
+reads as any other number in a transcript. Any standalone 32-hex-digit token
+is masked too, since that is the shape of an Ubertooth serial.
 
 ## Flash reliability
 

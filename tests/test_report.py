@@ -130,6 +130,14 @@ class ReportTests(unittest.TestCase):
         self.assertIn(f"UT_Linux4 serial {SERIAL}", devices)
         self.assertIn("DK_Linux1 serial 001050210121", devices)
 
+    def test_a_numeric_serial_is_masked_between_digit_boundaries(self):
+        from ubertooth_harness.report import _redact
+
+        self.assertEqual(
+            "--jlink <serial>; count 91050210121437",
+            _redact("--jlink 1050210121; count 91050210121437", ["1050210121"]),
+        )
+
     def test_redaction_masks_32_hex_tokens_but_not_longer_digests(self):
         from ubertooth_harness.report import _redact
 
@@ -229,9 +237,10 @@ class ReportTests(unittest.TestCase):
 
         self.assertEqual({"1050210121", "001050210121"}, _serial_widths("001050210121"))
         self.assertEqual({"1050210121", "001050210121"}, _serial_widths("1050210121"))
-        # Too few digits to mask safely: it could be any number in the
-        # transcript. Hex serials are masked as they are written.
-        self.assertEqual(set(), _serial_widths("12345"))
+        # Fewer digits than that: the padded width is still unmistakable, but
+        # the number itself could be any number in the transcript.
+        self.assertEqual({"000000012345"}, _serial_widths("12345"))
+        # A serial written in hex is masked as the registry holds it.
         self.assertEqual(set(), _serial_widths("aaaa0000"))
 
     def test_report_shows_every_recorded_output_record(self):

@@ -58,36 +58,41 @@ def _time(event: Mapping) -> datetime.datetime:
     return moment
 
 
-# Shortest number masked on its own. A serial is masked wherever it appears,
-# so a short number would be masked inside longer text all over the
-# transcript, and six digits is where that stops being likely. The registry
-# accepts a J-Link serial of 6 to 12 digits, zeros included
-# (resources._JLINK_SERIAL), so one registered as `000123` keeps the width
-# the registry holds masked and leaves the number the tools take (`123`) in
-# the transcript; a SEGGER probe's serial is nine digits or more.
+# Shortest number masked on its own, once its leading zeros are gone. The
+# registry accepts a J-Link serial of 6 to 12 digits, zeros included
+# (resources._JLINK_SERIAL), so one registered as `000123` is masked as
+# registered and as the 12 digits udev's name uses, but the three digits the
+# tools put on the command line are left alone: a number that short would
+# read as any other number in the transcript. A SEGGER probe's serial is
+# nine digits or more.
 _SERIAL_MIN_DIGITS = 6
-# How wide udev's by-id name and the registry write a J-Link serial
-# (targets.DK_BY_ID).
+# How wide udev's by-id name writes a J-Link serial (targets.DK_BY_ID).
 _SERIAL_PADDED_DIGITS = 12
 
 
 def _serial_widths(value: str) -> set[str]:
     """The other widths one numeric serial is written in.
 
-    A J-Link serial reaches the run in two spellings of the same number: the
-    registry pads it to 12 digits (``001050210121``), as udev's by-id name
-    does, and nrfdk.py takes it as a number, so preflight.py puts it on the
-    command line with the leading zeros gone (``1050210121``).
-    ``--redact-serials`` has to mask each of them, or the serial survives in
-    the transcript. Any numeric serial is treated this way; a serial written
-    in hex is masked as the registry holds it.
+    A J-Link serial reaches the run in two spellings of the same number: as
+    the registry holds it, which is how `nrfutil device list` prints it
+    (``001050210121`` on this bench), and as a number, because nrfdk.py takes
+    it as one and preflight.py puts it on the command line with the leading
+    zeros gone (``1050210121``). udev's by-id name pads it to 12 digits
+    again. ``--redact-serials`` has to mask each of them, or the serial
+    survives in the transcript. Any numeric serial is treated this way; one
+    written in hex is masked as the registry holds it.
     """
     if not value.isdigit():
         return set()
     number = value.lstrip("0")
-    if len(number) < _SERIAL_MIN_DIGITS or len(number) > _SERIAL_PADDED_DIGITS:
+    if not number or len(number) > _SERIAL_PADDED_DIGITS:
         return set()
-    return {number, number.rjust(_SERIAL_PADDED_DIGITS, "0")}
+    # The padded width is unmistakable at any length; the number itself has
+    # to be long enough to stand on its own.
+    widths = {number.rjust(_SERIAL_PADDED_DIGITS, "0")}
+    if len(number) >= _SERIAL_MIN_DIGITS:
+        widths.add(number)
+    return widths
 
 
 class _Run:
@@ -149,9 +154,10 @@ class _Run:
         peer's bridge serial), preflight, flash guards, and boards seen by
         the isolation enumeration checks.
 
-        A device path that carries a serial (a DK's ``serial device``, the
-        ``/dev/serial/by-id`` name) is not one of them: the serial inside it
-        is masked by its own widths, and masking the whole path would turn
+        A device path that carries a serial is not one of them (the keys that
+        hold one are listed in ``_IDENTITY_SERIAL_KEYS`` below, which has the
+        same problem to solve): the serial inside it is masked by its own
+        widths, and masking the whole path would turn
         "port /dev/serial/by-id/usb-SEGGER_J-Link_<serial>-if00" into
         "port <serial>", which tells the reader less.
         """
@@ -928,7 +934,13 @@ _SERIAL_TOKEN = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{32}(?![0-9A-Fa-f])")
 
 def _redact(text: str, serials: Iterable[str]) -> str:
     for serial in sorted(serials, key=len, reverse=True):
-        text = text.replace(serial, REDACTED)
+        if serial.isdigit():
+            # Between digit boundaries, as the token rule below is, so a
+            # serial is not masked inside a longer number (a count, a
+            # timestamp) that happens to contain it.
+            text = re.sub(rf"(?<!\d){re.escape(serial)}(?!\d)", REDACTED, text)
+        else:
+            text = text.replace(serial, REDACTED)
     return _SERIAL_TOKEN.sub(REDACTED, text)
 
 
