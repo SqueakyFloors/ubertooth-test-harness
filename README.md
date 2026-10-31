@@ -1554,10 +1554,12 @@ serial port path keeps its shape with the serial inside it masked
 (`/dev/serial/by-id/usb-SEGGER_J-Link_<serial>-if00`), whether the registry
 held that path or the harness found it. Any standalone 32-hex-digit token is
 masked too, since that is the shape of an Ubertooth serial. Where a command's
-output was cut inside a serial, which the output caps can do, what the cut
-left at the end of that line is masked as well: 8 digits or more of a serial
-the run names, or 24 digits or more of any hex run, since that is wide enough
-to be a board's serial and nothing else.
+output was cut inside a serial, which either output cap can do, the piece the
+cut left behind is masked as well: a run of 8 hex digits or more that a serial
+the run names holds, or any hex run of 24 to 31 digits, which is wide enough
+to be a board's serial and little else. A run of one repeated digit
+(`00000000`) and a longer hex run, such as a git SHA or a digest, are left to
+read.
 
 ## Flash reliability
 

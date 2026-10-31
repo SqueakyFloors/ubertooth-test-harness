@@ -1115,61 +1115,66 @@ def _reason(details: Mapping, key: str = "reason") -> str:
 _SERIAL_TOKEN = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{32}(?![0-9A-Fa-f])")
 # Where a command's output was cut inside a serial, what is left of it is
 # neither the whole serial nor 32 digits wide, so neither rule above masks
-# it (#214). Output is cut in two places, both without regard to what the
-# text holds: run.jsonl caps each command as it is recorded, in pieces of a
-# fixed size (rawlog.RECORD_PIECE_CHARS), and the report's fallback cap for a
-# run recorded before that caps a single long line by character count.
+# it (#214). Output is cut in two places, both where the limit falls rather
+# than where the text allows: run.jsonl caps each command as it is recorded,
+# in pieces of a fixed size (rawlog.RECORD_PIECE_CHARS), and the report's
+# fallback cap for a run recorded before that caps a long line by character
+# count. Either side of the cut can survive, at the end of the output kept
+# before the gap or at the start of what follows it, so position says nothing
+# about which runs of hex to look at.
 #
-# Such a piece always ends a line of the transcript: the gap note that
-# follows it ends any partial line (rawlog._output_lines), and the tail after
-# the gap starts on a whole line. So only a hex run at the end of a line is
-# considered here, which leaves a value inside a line (an address, a hex dump)
-# alone.
-#
-# A piece this long is masked where it is the start or the end of a serial the
-# run names: 8 digits of a 32-digit serial still say which board it was, and
-# an unrelated value that ends a line and matches a known serial at either end
-# is improbable.
+# A run of hex digits this long is masked where a serial the run names holds
+# it: 8 digits of a 32-digit serial still say which board it was, and an
+# unrelated value of that width matching part of a known serial is
+# improbable. What this does not catch is a piece with no boundary of its own,
+# left glued to hex digits that came before or after it in the output, because
+# the whole run is then one longer value that no serial holds; a serial in
+# this output is written after a space, a colon, a slash, or an equals sign.
 _PARTIAL_HEX_DIGITS = 8
-# A cut serial the run never names (the case _SERIAL_TOKEN is there for) can
-# only be recognized by its shape, so a hex run of this many digits at the end
-# of a line is masked whatever it is. The token rule above already takes that
-# view of a standalone 32-hex value.
+# A cut serial of a board the run never names (the case _SERIAL_TOKEN is there
+# for while the serial is whole) can only be recognized by its shape, so a hex
+# run of this many digits is masked whatever it is. The token rule above
+# already takes that view of a standalone 32-hex value.
 _UNKNOWN_HEX_DIGITS = 24
-# Up to 31 digits: a 32-digit run is a serial the rule above masked, and a
+# Up to 31 digits: a 32-digit run is a serial the token rule masked, and a
 # longer one is a git SHA or a digest, which every rule here leaves alone.
-_HEX_LINE_END = re.compile(
-    rf"(?<![0-9A-Fa-f])[0-9A-Fa-f]{{{_PARTIAL_HEX_DIGITS},31}}(?=\n|$)"
+_UNKNOWN_HEX_LIMIT = 31
+_HEX_RUN = re.compile(
+    rf"(?<![0-9A-Fa-f])[0-9A-Fa-f]{{{_PARTIAL_HEX_DIGITS},}}(?![0-9A-Fa-f])"
 )
 
 
-def _mask_cut_serials(text: str, serials: Iterable[str]) -> str:
-    """Mask what a cut inside a serial left at the end of a line."""
-    known = {serial.lower() for serial in serials}
+def _mask_cut_serials(text: str, serials: Sequence[str]) -> str:
+    """Mask what a cut inside a serial left behind."""
+    # A serial no wider than one piece cannot leave one: it is masked whole.
+    known = [
+        serial.lower() for serial in serials
+        if len(serial) > _PARTIAL_HEX_DIGITS
+    ]
 
     def mask(match: re.Match) -> str:
         piece = match.group(0).lower()
-        # One digit repeated (00000000, ffffffff) names no board, and output
-        # carries such a value for its own reasons.
+        # One digit repeated (00000000, ffffffff) names no board, since every
+        # serial that starts or ends that way shares it, and output carries
+        # such a value for its own reasons.
         if len(set(piece)) == 1:
             return match.group(0)
-        if len(piece) >= _UNKNOWN_HEX_DIGITS:
+        if any(piece in serial for serial in known):
             return REDACTED
-        for serial in known:
-            if len(serial) > len(piece) and (
-                serial.startswith(piece) or serial.endswith(piece)
-            ):
-                return REDACTED
+        if _UNKNOWN_HEX_DIGITS <= len(piece) <= _UNKNOWN_HEX_LIMIT:
+            return REDACTED
         return match.group(0)
 
-    return _HEX_LINE_END.sub(mask, text)
+    return _HEX_RUN.sub(mask, text)
 
 
 def _redact(text: str, serials: Iterable[str]) -> str:
+    # Read once: the rules below each walk the serials.
+    serials = sorted(serials, key=len, reverse=True)
     # The token rule first: masking a short serial inside a 32-hex token
     # would leave the rest of that token, which this rule is there to catch.
     text = _SERIAL_TOKEN.sub(REDACTED, text)
-    for serial in sorted(serials, key=len, reverse=True):
+    for serial in serials:
         if serial.isdigit() and len(serial) < _SERIAL_MIN_DIGITS:
             # Short enough to read as an ordinary number, so it is masked
             # only where it stands alone and not inside a longer one.

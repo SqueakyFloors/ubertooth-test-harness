@@ -1,4 +1,5 @@
 import datetime
+import itertools
 import json
 import re
 import tempfile
@@ -6,6 +7,12 @@ import unittest
 from pathlib import Path
 
 from ubertooth_harness.events import open_run_publisher
+from ubertooth_harness.rawlog import (
+    RECORD_OUTPUT_BYTES,
+    RECORD_PIECE_CHARS,
+    CappedOutput,
+    record_bytes,
+)
 from ubertooth_harness.report import (
     LEGACY_OUTPUT_HEAD_CHARS,
     LEGACY_OUTPUT_HEAD_RECORDS,
@@ -24,6 +31,9 @@ from ubertooth_harness.report import (
 
 SERIAL = "aaaa0000"
 _START = datetime.datetime(2026, 1, 1)
+# Output records run.jsonl keeps before it starts leaving output out, for
+# output that arrives as one long line of plain characters.
+PIECES_KEPT = RECORD_OUTPUT_BYTES // record_bytes("x" * RECORD_PIECE_CHARS)
 
 
 def elapsed_stamp(ms: int) -> str:
@@ -65,6 +75,35 @@ def command_event(ms: int, event_type: str, status: str, details: dict) -> dict:
         "timestamp": moment.isoformat(timespec="milliseconds"),
         "details": {"command_id": "c", **details},
     }
+
+
+def capped_events(text: str, stream: str = "stderr") -> list[dict]:
+    """One command whose output run.jsonl capped as it was recorded.
+
+    The records come from rawlog.CappedOutput itself, so where the cut falls
+    is the real one, not one this test chose.
+    """
+    records = [command_event(0, "command_started", "running",
+                             {"argv": ["ubertooth-dump"]})]
+    moments = itertools.count(1)
+
+    def record(name: str, piece: str, received: str | None) -> None:
+        details = {"stream": name, "text": piece}
+        if received:
+            details["received"] = received
+        records.append(
+            command_event(next(moments), "command_output", "running", details))
+
+    with tempfile.TemporaryDirectory() as spill:
+        capped = CappedOutput(
+            record, lambda: (Path(spill) / "c.log", "output/c.log"))
+        capped.add(_START, stream, text)
+        details = capped.finish(lambda note: records.append(command_event(
+            next(moments), "command_output_omitted", "running", note)))
+        capped.close()
+    records.append(command_event(next(moments), "command_finished", "passed",
+                                 {"returncode": 0, "duration_s": 9.0, **details}))
+    return records
 
 
 def ubertooth_manifest(serial: str) -> dict:
@@ -368,44 +407,60 @@ class ReportTests(unittest.TestCase):
                     _serial_set("000123")),
         )
 
-    def test_a_serial_the_output_cap_cut_in_half_is_masked(self):
-        # #214: output is cut where the limit falls, not where the text
-        # allows, so the start of a serial can survive a cut inside one. A
-        # piece that wide still names the board.
+    def test_a_serial_the_recorded_cap_cut_in_half_is_masked(self):
+        # #214: run.jsonl caps output as it is recorded, in pieces of a fixed
+        # size, so a serial on a long line can be cut in two. Nothing is
+        # dropped from the tail here, so it is emitted as it arrived and the
+        # second piece of the serial opens a line.
+        serial = "cafebabedeadbeefcafeba9edead1ee0"
+        head = PIECES_KEPT * RECORD_PIECE_CHARS  # characters the head keeps
+        cut = 16  # digits of the serial the cut leaves in the head
+        text = ("x" * (head - cut) + serial
+                + " is idle\n" + "y" * 4 * RECORD_PIECE_CHARS + "\n")
+        events = [ubertooth_manifest(serial)] + capped_events(text)
+
+        plain = render_run(events)
+        report = render_run(events, redact_serials=True)
+
+        self.assertNotIn(serial, plain)  # the cut split it across two records
+        self.assertIn(f"x{serial[:cut]}", plain)
+        self.assertIn(f"[E] {serial[cut:]} is idle", plain)
+        self.assertNotIn(serial[:cut], report)
+        self.assertNotIn(serial[cut:], report)
+        self.assertIn(f"[E] {REDACTED} is idle", report)
+
+    def test_a_serial_the_report_cap_cut_in_half_is_masked(self):
+        # The report's own fallback cap, for a run recorded before run.jsonl
+        # capped output as it was written: it cuts a long line by character
+        # count, which lands inside a serial just as readily.
         serial = "0123456789abcdef0123456789abcdef"
-        kept = 16  # digits of it the head's cut leaves behind
-        line = ("x" * (LEGACY_OUTPUT_HEAD_CHARS - kept) + serial
+        cut = 16
+        line = ("x" * (LEGACY_OUTPUT_HEAD_CHARS - cut) + serial
                 + "y" * LEGACY_OUTPUT_TAIL_CHARS + "\n")
         events = [ubertooth_manifest(serial)] + dump_events([line])
 
         report = render_run(events, redact_serials=True)
 
-        self.assertIn(serial[:kept], render_run(events))  # shown unredacted
-        self.assertNotIn(serial[:kept], report)
+        self.assertIn(serial[:cut], render_run(events))  # shown unredacted
+        self.assertNotIn(serial[:cut], report)
         self.assertIn(f"x{REDACTED}", report)
         self.assertIn("more characters of output are in run.jsonl", report)
 
-    def test_a_piece_of_a_serial_is_masked_where_a_cut_leaves_one(self):
-        # Either end of a serial can be what survives, and only a piece that
-        # ends a line can have come from a cut: the gap note that follows a
-        # cut ends the line, and the output after the gap starts on a whole
-        # one.
+    def test_a_piece_of_a_serial_is_masked_wherever_a_cut_left_one(self):
+        # Either side of the cut can be what survives, and the gap note or
+        # the output around it can leave it at the start of a line, at the
+        # end of one, or inside one.
         from ubertooth_harness.report import _redact
 
         serial = "0123456789abcdef0123456789abcdef"
-        self.assertEqual(
-            "[O] boards: <serial>\n", _redact(f"[O] boards: {serial[:20]}\n", {serial}))
-        self.assertEqual(
-            "[O] boards: <serial>\n", _redact(f"[O] boards: {serial[12:]}\n", {serial}))
+        for piece in (serial[:20], serial[12:], serial[8:24]):
+            self.assertEqual(
+                "[O] boards: <serial> is idle\n",
+                _redact(f"[O] boards: {piece} is idle\n", {serial}), piece)
         # A J-Link serial in the width the tools write it (_serial_widths).
         self.assertEqual(
             "[O] --jlink <serial>\n",
             _redact("[O] --jlink 10502101\n", _serial_set("001050210121")))
-        # Inside a line it is some other value: no cut could have left it
-        # there.
-        self.assertEqual(
-            f"[O] boards: {serial[:20]} and more\n",
-            _redact(f"[O] boards: {serial[:20]} and more\n", {serial}))
 
     def test_a_cut_serial_no_board_registered_is_masked_by_its_width(self):
         # The serial of a board the run never named (what _SERIAL_TOKEN
@@ -420,15 +475,16 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(
             "[O] AA: 8e89bed6\n", _redact("[O] AA: 8e89bed6\n", ()))
 
-    def test_a_line_ending_in_hex_that_is_no_serial_is_left_alone(self):
+    def test_hex_that_is_no_piece_of_a_serial_is_left_alone(self):
         from ubertooth_harness.report import _redact
 
         serial = "0123456789abcdef0123456789abcdef"
         kept = (
-            f"[M] commit {'f' * 40}\n"       # a git SHA
-            f"[M] digest {'e' * 64}\n"       # a sha256 digest
-            "[O] transfer errors 00000000\n"  # one digit repeated
-            "[O] clkn 0012abcd\n"             # too narrow, and no serial's end
+            "[M] commit 7f3b91e04c6a28d5ff10b7e93c4a6d82be915074\n"    # a SHA
+            "[M] digest 3c9a1f7b60d4e825ab73cf0591d6e4820b7fa3c1"
+            "95e8d470a62bf1039c7d5e84\n"                              # sha256
+            "[O] transfer errors 00000000\n"   # one digit repeated
+            "[O] clkn 0012abcd\n"              # too narrow, and in no serial
         )
 
         self.assertEqual(kept, _redact(kept, {serial}))
