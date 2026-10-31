@@ -451,10 +451,16 @@ class Builder:
         self._finish_step(step_id, name, outcome["status"], outcome["reason"])
 
     def _finish_step(self, step_id: str, name: str, status: str, reason: str) -> None:
+        text = _one_line_reason(reason)
+        # A BuildError names the step it came from, because the BUILD marker
+        # needs it; inside the step's own marker that says the name twice.
+        for prefix in (f"{name}: ", f"{name} "):
+            if text.startswith(prefix):
+                text = text[len(prefix):]
+                break
         self.publisher.emit(
             "build_step_finished", status,
-            {"step_id": step_id, "step_name": name,
-             "reason": _one_line_reason(reason)},
+            {"step_id": step_id, "step_name": name, "reason": text},
         )
 
     def _run(self, argv: Sequence[str], timeout_s: float, label: str, cwd=None):
@@ -645,10 +651,11 @@ class Builder:
                     )
                     raise BuildError(f"{command.name} {reason}")
         if not _host_version_matches(plan, host_version):
+            # What was expected first: the version read can be long enough to
+            # be cut by the reason bound, and it is in the transcript anyway.
             raise BuildError(
-                f"built ubertooth-util reports {host_version!r}, expected "
-                f"{plan.ubertooth.expected_revision} and "
-                f"{plan.libbtbb.expected_revision}"
+                f"built ubertooth-util expected {plan.ubertooth.expected_revision} "
+                f"and {plan.libbtbb.expected_revision}, reports {host_version!r}"
             )
         expected_tools = required_tools(plan)
         missing = [tool for tool in expected_tools if not (plan.bin_dir / tool).is_file()]

@@ -436,6 +436,12 @@ class BuilderTests(unittest.TestCase):
                 report,
             )
             self.assertIn("=== BUILD EXIT: passed ===", report)
+            # One marker for the step, from its own record: the latch that
+            # reads the commands must not add a second.
+            self.assertNotIn(
+                "Built host tools report the resolved revision EXIT: failed",
+                report,
+            )
 
     def test_a_failed_step_says_so_with_its_reason(self):
         with tempfile.TemporaryDirectory() as work:
@@ -453,9 +459,11 @@ class BuilderTests(unittest.TestCase):
             self.assertEqual("toolchain", step["details"]["step_id"])
             self.assertEqual(("host-build", "failed"),
                              (last["details"]["step_id"], last["status"]))
+            # The step's marker does not repeat its own name, which the
+            # BuildError carries for the BUILD marker.
+            self.assertEqual("exited 2", last["details"]["reason"])
             self.assertIn(
-                "--- Build Ubertooth host tools EXIT: failed: "
-                "Build Ubertooth host tools exited 2 ---",
+                "--- Build Ubertooth host tools EXIT: failed: exited 2 ---",
                 render_run(events),
             )
 

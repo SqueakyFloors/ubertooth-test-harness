@@ -716,7 +716,7 @@ def _transcript(run: _Run) -> list[str]:
     def close_build_step(event):
         nonlocal build_step
         if build_step is not None:
-            line(event, f"--- {build_step[0]} EXIT: {build_step[1]} ---")
+            line(event, f"--- {build_step['name']} EXIT: {build_step['status']} ---")
             build_step = None
 
     for event in run.events:
@@ -738,7 +738,7 @@ def _transcript(run: _Run) -> list[str]:
             # A run recorded before the build said how each step ended
             # (build_step_finished) has only its commands to go on.
             if details.get("phase") == "build" and build_step is not None and status != "passed":
-                build_step[1] = status
+                build_step["status"] = status
             continue
         if kind == "run_started":
             run_title = (
@@ -760,13 +760,16 @@ def _transcript(run: _Run) -> list[str]:
             close_build_step(event)
             open_step = details.get("step_name") or details.get("step_id", "")
             line(event, f"+++ {open_step} +++")
-            build_step = [open_step, "passed", details.get("step_id")]
+            build_step = {
+                "name": open_step, "status": "passed",
+                "id": details.get("step_id"),
+            }
             continue
         elif kind == "build_step_finished":
             # The step's own outcome, which its commands do not give: a step
             # may accept a command that exited non-zero. A record for some
             # other step leaves the open one to be closed as it was before.
-            if build_step is not None and build_step[2] == details.get("step_id"):
+            if build_step is not None and build_step["id"] == details.get("step_id"):
                 build_step = None
             name = details.get("step_name") or details.get("step_id", "")
             line(event, f"--- {name} EXIT: {status}{_reason(details)} ---")
@@ -879,7 +882,7 @@ def _transcript(run: _Run) -> list[str]:
     for record in pending.values():
         out.append(_command_record(record["started"], record["outputs"], None, stamp).rstrip("\n"))
     if build_step is not None and run.events:
-        line(run.events[-1], f"--- {build_step[0]} EXIT: did not finish ---")
+        line(run.events[-1], f"--- {build_step['name']} EXIT: did not finish ---")
     return out
 
 
