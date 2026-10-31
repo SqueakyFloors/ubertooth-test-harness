@@ -933,7 +933,6 @@ def util_composition_cases(arguments, _resources, resource_identities):
     cases = [_version_case(case_id, options, serial)
              for case_id, options in VERSION_CASES.items()] + compositions
     if arguments["coverage"] == "comprehensive":
-        covered = {frozenset(case.argv[3:]) for case in compositions}
         cases.append(
             # Two -U name two boards for one command, so it is refused before
             # either is opened; the last one used to be selected.
@@ -946,9 +945,8 @@ def util_composition_cases(arguments, _resources, resource_identities):
             )
         )
         labels = {option: label for option, label, _pattern in _QUERY_OPTIONS}
+        # Every pair, since the only composition above asks for all nine.
         for first, second in compatible_pairs(every):
-            if frozenset((first, second)) in covered:
-                continue
             cases.append(
                 _query_case(
                     f"pair-{labels[first]}-{labels[second]}",
@@ -1638,8 +1636,9 @@ def btle_conflict_cases(_arguments, _resources, resource_identities):
 # Guard boards: every other registered Ubertooth on the host must be untouched
 #
 # Guards are read with queries only (no -S, no set option): firmware revision
-# and API, firmware compile info (its build timestamp also catches a
-# same-revision reflash), and every setting these tests change. The expected
+# and API, the version answer (-V, whose "Firmware build:" line carries a
+# build timestamp, so a same-revision reflash is caught too), and every
+# setting these tests change. The expected
 # value of each check is the guard's own baseline read before the test's
 # first case.
 #

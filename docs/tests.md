@@ -307,9 +307,11 @@ guarded (every command is read-only and selects by serial).
 **Expected outcome.** Six cases: firmware version, the whole `-V` answer (its
 four lines in the fork's order: host version, libbtbb path, firmware version,
 firmware build), device serial, part ID, board ID, and the four-query
-readback composition. A case failure does not stop the others. The `-V`
-case keeps its `firmware-compile-info` id, which a run's records and the
-learned durations are kept under, although it now covers more than that line.
+readback composition. A case failure does not stop the others. The `-V` case
+keeps its `firmware-compile-info` id and its `Firmware compile info` name,
+although it now covers more than that line: the id is what a run's records
+and the learned durations are kept under, and the name is the one preflight's
+per-board `-V` check already uses for the same read.
 
 **Known limits.** These are readbacks, so a pass says the board answers and
 identifies itself, not that any radio function works.

@@ -24,7 +24,10 @@ LIBBTBB_PATH_LINE = r"(?m)^libbtbb loaded from: \S"
 VERSION_ANSWER = (
     r"(?m)^Host tools version: libubertooth \S+[^\n]*\n"
     r"libbtbb loaded from: \S[^\n]*\n"
-    r"Firmware version: \S[^\n]*\n"
+    # Not "read failed" or "unavailable, <reason>", which is what the line
+    # carries when the board answered nothing; the build line below is not
+    # printed at all then, so this only says so in the pattern as well.
+    r"Firmware version: (?!read failed$|unavailable, )\S[^\n]*\n"
     rf"Firmware build: [^\n]*{COMPILE_INFO_PATTERN}"
 )
 
