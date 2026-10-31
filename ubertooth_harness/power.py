@@ -14,6 +14,10 @@ from ubertooth_harness.resources import (
 
 
 USBHUB3P_PORTS = tuple(range(8))
+# usb.getPortState bits (BrainStem aUSBHUB3P_USB_VBUS_ENABLED = 0,
+# aUSBHUB3P_USB2_DATA_ENABLED = 1, aUSBHUB3P_USB3_DATA_ENABLED = 3).
+USBHUB3P_STATE_VBUS = 1 << 0
+USBHUB3P_STATE_DATA = (1 << 1) | (1 << 3)
 ACRONAME_DRIVER = "acroname BrainStem USBHub3+"
 SIMULATED_DRIVER = "simulated USB power controller"
 
@@ -168,8 +172,27 @@ class SimulatedPowerController:
         return self._states[_validate_port(port)].power_enabled
 
 
+def _quiet_disconnect(hub) -> None:
+    """Disconnect after a failure without hiding the failure itself."""
+    try:
+        hub.disconnect()
+    except Exception:  # noqa: BLE001 - the original error is the one to report
+        pass
+
+
 class AcronameUSBHub3pController:
-    """Lazy BrainStem adapter; real state changes are unarmed by default."""
+    """BrainStem USBHub3+ adapter; real state changes are unarmed by default.
+
+    Uses the hub's `usb` entity, which addresses downstream ports 0-7 by
+    index (validated on a USBHub3+ with BrainStem 2.12.5). `getPortState`
+    returns a bit mask: bit 0 VBUS on, bit 1 USB 2.0 data on, bit 3 USB 3.0
+    data on. Data is reported and switched as the USB 2.0 and 3.0 pair
+    (`setDataEnable`/`setDataDisable` switch both): a port with only one of
+    them on is reported as data off. Power isolation switches only VBUS, which
+    leaves the data bits as they were (checked on the hub), so such a port is
+    left as it was found. The BrainStem library is imported lazily: see
+    requirements-acroname.txt.
+    """
 
     def __init__(
         self,
@@ -179,12 +202,15 @@ class AcronameUSBHub3pController:
         module_factory=None,
         no_error: int | None = None,
         usb_transport=None,
+        model: int | None = None,
     ):
         self.serial_number = _validate_serial(serial_number)
         self.allow_changes = bool(allow_changes)
+        self.firmware_version = None
         self._module_factory = module_factory
         self._no_error = no_error
         self._usb_transport = usb_transport
+        self._model = model
         self._hub = None
 
     def _load_api(self) -> None:
@@ -196,48 +222,80 @@ class AcronameUSBHub3pController:
             return
         try:
             import brainstem
+        except ImportError as error:
+            raise PowerControllerError(
+                "BrainStem Python API is not installed; run "
+                "python3 bootstrap.py --with-acroname"
+            ) from error
+        try:
+            from brainstem.defs import MODEL_USBHUB_3P
             from brainstem.link import Spec
             from brainstem.result import Result
         except ImportError as error:
+            version = getattr(brainstem, "__version__", "unknown")
             raise PowerControllerError(
-                "BrainStem Python API is not installed"
+                f"BrainStem Python API {version} lacks the USBHub3+ names this "
+                "driver uses; install the version requirements-acroname.txt pins"
             ) from error
         self._module_factory = brainstem.stem.USBHub3p
         self._no_error = Result.NO_ERROR
         self._usb_transport = Spec.USB
+        self._model = MODEL_USBHUB_3P
 
     def connect(self) -> None:
         if self._hub is not None:
             return
         self._load_api()
         hub = self._module_factory()
-        result = hub.discoverAndConnect(
-            self._usb_transport, self.serial_number
-        )
+        try:
+            result = hub.discoverAndConnect(
+                self._usb_transport, self.serial_number
+            )
+        except Exception as error:
+            _quiet_disconnect(hub)  # a failed connect may leave a partial link
+            raise PowerControllerError(
+                f"unable to connect to USBHub3+ serial "
+                f"0x{self.serial_number:08x}: {error}"
+            ) from error
+        except BaseException:
+            _quiet_disconnect(hub)
+            raise
         if result != self._no_error:
+            _quiet_disconnect(hub)
             raise PowerControllerError(
                 f"unable to connect to USBHub3+ serial "
                 f"0x{self.serial_number:08x}: error {result}"
             )
-        identity = hub.system.getSerialNumber()
         try:
-            observed = self._result_value(identity, "controller serial")
-        except PowerControllerError:
-            hub.disconnect()
-            raise
-        if observed != self.serial_number:
-            hub.disconnect()
-            raise PowerControllerError(
-                "USBHub3+ controller identity mismatch: "
-                f"expected 0x{self.serial_number:08x}, "
-                f"observed 0x{observed:08x}"
+            observed = self._result_int(
+                hub.system.getSerialNumber(), "controller serial"
             )
+            if observed != self.serial_number:
+                raise PowerControllerError(
+                    "USBHub3+ controller identity mismatch: "
+                    f"expected 0x{self.serial_number:08x}, "
+                    f"observed 0x{observed:08x}"
+                )
+            if self._model is not None:
+                model = self._result_value(hub.system.getModel(), "controller model")
+                if model != self._model:
+                    raise PowerControllerError(
+                        f"controller 0x{self.serial_number:08x} is model "
+                        f"{model}, not a USBHub3+ ({self._model})"
+                    )
+            version = self._result_int(
+                hub.system.getVersion(), "controller firmware version"
+            )
+        except BaseException:
+            _quiet_disconnect(hub)
+            raise
+        self.firmware_version = f"0x{version:08x}"
         self._hub = hub
 
-    def _require_hub(self):
+    def _usb(self):
         if self._hub is None:
             raise PowerControllerError("power controller is not connected")
-        return self._hub
+        return self._hub.usb
 
     def _result_value(self, result, operation: str):
         error = getattr(result, "error", None)
@@ -245,58 +303,70 @@ class AcronameUSBHub3pController:
             raise PowerControllerError(f"{operation} failed with error {error}")
         return result.value
 
+    def _result_int(self, result, operation: str) -> int:
+        """The read's value as a number; anything else is a controller error.
+
+        BrainStem hands back whatever the library decoded, so a value int()
+        cannot take must be reported like any other failed read, not escape
+        as a TypeError from somewhere deeper.
+        """
+        value = self._result_value(result, operation)
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise PowerControllerError(
+                f"{operation} returned {value!r}, which is not a number"
+            ) from error
+
+    def _port_state(self, port: int, operation: str) -> int:
+        return self._result_int(self._usb().getPortState(port), operation)
+
     def snapshot(self, port: int) -> PortState:
-        entity = self._require_hub().port[_validate_port(port)]
+        port = _validate_port(port)
+        usb = self._usb()
+        state = self._port_state(port, f"read port {port} state")
         return PortState(
             port,
-            bool(self._result_value(entity.getPowerEnabled(), "read power")),
-            bool(self._result_value(entity.getDataEnabled(), "read data")),
-            int(self._result_value(entity.getVbusVoltage(), "read VBUS voltage")),
-            int(self._result_value(entity.getVbusCurrent(), "read VBUS current")),
+            bool(state & USBHUB3P_STATE_VBUS),
+            state & USBHUB3P_STATE_DATA == USBHUB3P_STATE_DATA,
+            self._result_int(usb.getPortVoltage(port), "read VBUS voltage"),
+            self._result_int(usb.getPortCurrent(port), "read VBUS current"),
         )
 
     def _require_changes_armed(self) -> None:
         if not self.allow_changes:
             raise PowerControllerError("real power-controller changes are not armed")
 
-    def set_power_enabled(self, port: int, enabled: bool) -> None:
+    def _set(self, port: int, enabled: bool, what: str, bits: int) -> None:
         self._require_changes_armed()
-        entity = self._require_hub().port[_validate_port(port)]
+        port = _validate_port(port)
         requested = bool(enabled)
-        result = entity.setPowerEnabled(requested)
+        usb = self._usb()
+        if what == "power":
+            switch = usb.setPowerEnable if requested else usb.setPowerDisable
+        else:
+            switch = usb.setDataEnable if requested else usb.setDataDisable
+        result = switch(port)
         if result != self._no_error:
             raise PowerControllerError(
-                f"set power on port {port} failed with error {result}"
+                f"set {what} on port {port} failed with error {result}"
             )
-        observed = bool(
-            self._result_value(entity.getPowerEnabled(), "power readback")
-        )
-        if observed != requested:
-            raise PowerControllerError(
-                f"power readback mismatch on port {port}"
-            )
+        state = self._port_state(port, f"{what} readback")
+        observed = state & bits == bits if requested else not state & bits
+        if not observed:
+            raise PowerControllerError(f"{what} readback mismatch on port {port}")
+
+    def set_power_enabled(self, port: int, enabled: bool) -> None:
+        self._set(port, enabled, "power", USBHUB3P_STATE_VBUS)
 
     def set_data_enabled(self, port: int, enabled: bool) -> None:
-        self._require_changes_armed()
-        entity = self._require_hub().port[_validate_port(port)]
-        requested = bool(enabled)
-        result = entity.setDataEnabled(requested)
-        if result != self._no_error:
-            raise PowerControllerError(
-                f"set data on port {port} failed with error {result}"
-            )
-        observed = bool(
-            self._result_value(entity.getDataEnabled(), "data readback")
-        )
-        if observed != requested:
-            raise PowerControllerError(
-                f"data readback mismatch on port {port}"
-            )
+        self._set(port, enabled, "data", USBHUB3P_STATE_DATA)
 
     def close(self) -> None:
+        self.firmware_version = None
         if self._hub is not None:
-            self._hub.disconnect()
-            self._hub = None
+            hub, self._hub = self._hub, None
+            hub.disconnect()
 
 
 def _encode_startech_mask(mask: int) -> str:
@@ -574,6 +644,17 @@ def parse_controller_serial(value: str) -> int:
         raise PowerControllerError(
             "controller serial must be decimal or 0x-prefixed hexadecimal"
         ) from error
+
+
+def controller_ports(resource: Resource) -> tuple[int, ...]:
+    """Every switchable downstream port of a registered controller."""
+    if resource.driver == STARTECH_DRIVER:
+        return tuple(STARTECH_PORTS)
+    if resource.driver in (ACRONAME_DRIVER, SIMULATED_DRIVER):
+        return USBHUB3P_PORTS
+    raise PowerControllerError(
+        f"unsupported power-controller driver '{resource.driver}'"
+    )
 
 
 def controller_from_resource(

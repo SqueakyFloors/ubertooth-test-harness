@@ -23,7 +23,7 @@ from ubertooth_harness import leases
 from ubertooth_harness.cli import main
 from ubertooth_harness.report import _Run, _setup_rows
 from ubertooth_harness.runner_service import RunnerConfigError, RunnerService
-from tests.test_leases import A, B, HARDWARE, holder
+from tests.test_leases import A, B, HARDWARE, dead_holder, holder
 
 # Another tool on the host: holds a board's own lock file (writing what it
 # likes into it) until killed.
@@ -146,6 +146,27 @@ class TemplateTests(unittest.TestCase):
 
 class ExternalLockTests(_Fixture):
 
+    def test_a_lab_lock_is_never_taken_over(self):
+        """A lab's own lock file is the lab's, whatever it says inside.
+
+        A lease of a command that is gone is taken over (#215), which means
+        removing its file. An external file holds whatever the lab's own
+        tools put there, including a holder record that looks like a dead
+        harness command, and the harness never writes to or removes one.
+        """
+        # A record the harness would call stale in a lease of its own: the
+        # command it names is really gone, on this host.
+        gone = json.dumps(dict(dead_holder(), owner="lab-tool"))
+        self.assertEqual("stale", leases.lease_liveness(json.loads(gone))[0])
+        self.spawn(_LAB_HOLDER, self.ext(A), gone)
+        notes = []
+        with self.assertRaises(leases.LeaseError) as caught:
+            self.acquire([A], note=notes.append)
+        self.assertIn("held outside the harness", str(caught.exception))
+        self.assertEqual([], notes)
+        self.assertTrue(self.ext(A).exists())
+        self.assertEqual(gone, self.ext(A).read_text())
+
     def test_a_board_held_outside_the_harness_is_refused_and_named(self):
         self.spawn(_LAB_HOLDER, self.ext(A), "soak script pid 4242\nsecond line\n")
         started = time.monotonic()
@@ -255,12 +276,20 @@ class ExternalLockTests(_Fixture):
         real = leases._try_lock
 
         def recording(path, mode, **kwargs):
-            order.append(str(Path(path).relative_to(self.root)))
+            # A queue ticket is a place in a queue, not a resource lock
+            # (tests/test_lease_queue.py); the takeover lock stays, since
+            # where it sits is part of the order this checks.
+            if leases.TICKET_DIR not in Path(path).parts:
+                order.append(str(Path(path).relative_to(self.root)))
             return real(path, mode, **kwargs)
 
         with mock.patch.object(leases, "_try_lock", recording):
             self.acquire([B, A], host_lock=True).release()
+        # The takeover lock first (it orders this attempt against a takeover
+        # of a stale lease and is no resource of its own), then the lab's
+        # files, the host lock, and the leases.
         self.assertEqual([
+            f"leases/{leases.TAKEOVER_LOCK}",
             f"lab-locks/board-{A.key}.lock", f"lab-locks/board-{B.key}.lock",
             "leases/host-power.lock", f"leases/{A.key}.lock", f"leases/{B.key}.lock",
         ], order)

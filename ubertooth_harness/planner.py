@@ -16,6 +16,7 @@ from ubertooth_harness.hostneeds import (
 )
 from ubertooth_harness.plan import Plan
 from ubertooth_harness.resources import RegistryError, ResourceRegistry
+from ubertooth_harness.rf import describe as describe_placement
 from ubertooth_harness.topology import PowerIsolationAction, plan_exclusive_ubertooth
 
 
@@ -51,6 +52,19 @@ class TestInvocation:
     # board on the host) the run still checks, read-only, that the selected
     # board is the only Ubertooth enumerated.
     exclusive_ubertooth: bool = False
+    # The RF placement of every bound resource that has one (rf.py), by role,
+    # so the manifest, run.jsonl, and the report say what the run's numbers
+    # were taken at. A role whose resource has no `rf:` is absent.
+    resource_placements: Mapping[str, Mapping] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    # What each role's placement had to satisfy, by role, whether the plan
+    # asked for it or the test's own default did. Recorded because it is why
+    # a role got the resource it did: a host default passed over, or a board
+    # `each` left out, is otherwise invisible in the run record.
+    placement_requirements: Mapping[str, Mapping] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
 
 @dataclass(frozen=True)
@@ -136,6 +150,39 @@ class PlanCompiler:
             identities[role] = MappingProxyType(dict(self.registry.get(alias).identity))
         return MappingProxyType(resources), MappingProxyType(identities)
 
+    def _placements(self, resources: Mapping[str, str]) -> Mapping[str, Mapping]:
+        """The recorded RF placement of every bound resource that has one."""
+        return MappingProxyType({
+            role: MappingProxyType(self.registry.get(alias).rf.to_dict())
+            for role, alias in resources.items()
+            if self.registry.get(alias).rf is not None
+        })
+
+    def _placement_missing(self, definition, host, arguments, wanted) -> str:
+        """Why the host cannot place a role as the test needs, or ''.
+
+        Only for a role the plan left to the harness (``default`` or
+        ``each``): an explicit alias that cannot satisfy the requirement is a
+        mistake in the plan, and ``resolve_hardware`` refuses it.
+        """
+        for role, placement in wanted.items():
+            selector = arguments.get(role, "default")
+            if selector not in ("default", "each"):
+                continue
+            resource_type = definition.hardware_roles[role]
+            if self.registry.placed(host, resource_type, placement, role):
+                continue
+            registered = self.registry.hardware(host, resource_type)
+            have = "; ".join(
+                f"{alias} has {describe_placement(self.registry.get(alias).rf)}"
+                for alias in registered
+            ) or f"no {resource_type} is registered on it"
+            return (
+                f"no {resource_type} on this host has {placement.describe()} "
+                f"for the {role} ({have})"
+            )
+        return ""
+
     def compile_suite(self, plan: Plan, suite: str) -> "CompiledSuite":
         """Invocations, and the tests each host was left out of (not applicable)."""
         invocations = []
@@ -155,6 +202,7 @@ class PlanCompiler:
                 # run is a plan error.
                 eligible_hosts = []
                 left_out = []
+                wanted = definition.placement_requirements(arguments)
                 for alias in hosts:
                     capabilities = platform_capabilities(
                         alias, self.registry.get(alias).platform
@@ -166,6 +214,11 @@ class PlanCompiler:
                             if unmet(needs, capabilities)
                         ),
                         "",
+                    )
+                    # A host with no board placed as the test needs is left
+                    # out the same way, naming what was missing.
+                    reason = reason or self._placement_missing(
+                        definition, alias, arguments, wanted
                     )
                     if reason:
                         left_out.append(NotApplicable(alias, step.test_name, reason))
@@ -183,8 +236,9 @@ class PlanCompiler:
                         arguments.get(role) == "each" for role in role_names
                     ):
                         raise PlanningError(
-                            f"{step.test_name}: multi-role tests require explicit "
-                            "role aliases; all-pairs selection is not implemented"
+                            f"{step.test_name}: a multi-role test cannot select a "
+                            "role with 'each'; name each role by alias, or narrow "
+                            "it with rf:; all-pairs selection is not implemented"
                         )
                     choices = []
                     for role in role_names:
@@ -192,7 +246,8 @@ class PlanCompiler:
                         selector = arguments.get(role, "default")
                         choices.append(
                             self.registry.resolve_hardware(
-                                host, resource_type, selector, role
+                                host, resource_type, selector, role,
+                                wanted.get(role),
                             )
                         )
                     combinations = itertools.product(*choices) if choices else [()]
@@ -235,6 +290,11 @@ class PlanCompiler:
                                 arguments=arguments,
                                 resources=resources,
                                 resource_identities=identities,
+                                resource_placements=self._placements(resources),
+                                placement_requirements=MappingProxyType({
+                                    role: MappingProxyType(want.to_dict())
+                                    for role, want in wanted.items()
+                                }),
                                 power_isolation=power_isolation,
                                 exclusive_ubertooth=exclusive,
                             )

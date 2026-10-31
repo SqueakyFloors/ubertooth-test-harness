@@ -8,6 +8,8 @@ elapsed time since the run started) and a tag::
     [E] a line the command wrote to stderr
     [R] the result: command name, exit code, duration, and any timeout or
         cancellation
+    [<alias> >] a line sent to that known target's serial shell, and
+    [<alias> <] a line it answered (targets.shell_line)
 
 A command that printed one line is two lines; the response follows the result::
 
@@ -19,6 +21,7 @@ result line. Timestamps use the same clock and format as ``run.jsonl``.
 """
 
 import collections
+import dataclasses
 import datetime
 import json
 from pathlib import Path
@@ -27,6 +30,14 @@ import shlex
 from typing import Callable
 
 from ubertooth_harness.executor import CommandResult
+from ubertooth_harness.outputfiles import (
+    OUTPUT_DIR,
+    STREAMS,
+    CommandOutput,
+    OutputFile,
+    StreamFile,
+)
+from ubertooth_harness.targets import shell_tag
 
 
 def _stamp(moment: datetime.datetime) -> str:
@@ -88,12 +99,27 @@ def _output_lines(
 NOTE = "note"
 TAGS = {"stdout": "[O]", "stderr": "[E]", NOTE: "[M]"}
 
-OUTPUT_DIR = "output"
+
+def line_tag(stream: str, text: str) -> tuple[str, str]:
+    """The tag and text of one output line.
+
+    A driver talking to a known target writes each line of that conversation
+    on stderr already marked with the board's alias (targets.shell_line), so
+    it is tagged with that alias rather than as plain stderr. The saved output
+    files keep the line as the driver wrote it, marker included; this is for
+    the transcript and the live views.
+    """
+    if stream == "stderr":
+        tagged = shell_tag(text)
+        if tagged is not None:
+            return tagged
+    return TAGS[stream], text
+
 
 # Per-command limits on the output records kept in run.jsonl (#49): the first
 # RECORD_OUTPUT_EVENTS records or RECORD_OUTPUT_BYTES, and the last
-# RECORD_TAIL_EVENTS records or RECORD_TAIL_BYTES. Past the first limits the
-# command's full output goes to output/<command id>.log. Bytes are those the
+# RECORD_TAIL_EVENTS records or RECORD_TAIL_BYTES. Past the first limits each
+# of the command's streams goes to output/<command id>.<stream>.log. Bytes are those the
 # text takes in run.jsonl (UTF-8 of its JSON string, escapes included).
 RECORD_OUTPUT_BYTES = 64 * 1024
 RECORD_OUTPUT_EVENTS = 200
@@ -128,30 +154,45 @@ class _LineSplitter:
         self.pending = {"stdout": "", "stderr": ""}
 
 
-class CommandOutputLog:
-    """A command's full output, one '<UTC> [O]/[E] <line>' per line.
+class CommandOutputFiles:
+    """A command's full output: one file per stream, exactly as it arrived.
 
-    Written as it arrives (flushed per chunk), so an interrupted run keeps
-    everything received so far.
+    ``output/<command id>.stdout.log`` and ``.stderr.log`` hold what the
+    command wrote on that stream, with nothing of the harness's own added, so
+    a check reading one of them sees what the command printed. The text is as
+    the harness decoded it (UTF-8, any byte that is not valid UTF-8 replaced,
+    as the transcript has always shown it), and the SHA-256 is the hash of
+    the file. Each file is opened on its stream's first chunk, so a command
+    that writes nothing to stderr leaves no stderr file.
     """
 
-    def __init__(self, path: Path):
-        self.path = path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self._stream = path.open("x", encoding="utf-8")
-        self._lines = _LineSplitter()
-        self._last = None
+    def __init__(self, output_dir: Path, name: str):
+        self._output_dir = output_dir
+        self._base = _output_base(output_dir, name)
+        self._open: dict[str, StreamFile] = {}
+        self.files: tuple[OutputFile, ...] = ()
 
-    def write(self, moment: datetime.datetime, stream: str, text: str) -> None:
-        self._last = moment
-        for line in self._lines.feed(stream, text):
-            self._stream.write(f"{_stamp(moment)} {TAGS[stream]} {line}\n")
-        self._stream.flush()
+    @property
+    def names(self) -> tuple[str, ...]:
+        """The files opened so far, relative to the run directory."""
+        return tuple(self._open[stream].name for stream in STREAMS
+                     if stream in self._open)
 
-    def close(self) -> None:
-        for stream, line in self._lines.rest():
-            self._stream.write(f"{_stamp(self._last)} {TAGS[stream]} {line}\n")
-        self._stream.close()
+    def write(self, stream: str, text: str) -> None:
+        if stream not in self._open:
+            self._open[stream] = StreamFile(
+                self._base.with_name(f"{self._base.name}.{stream}.log"),
+                stream,
+                relative_to=self._output_dir,
+            )
+        self._open[stream].write(text)
+
+    def close(self) -> tuple[OutputFile, ...]:
+        self.files = tuple(
+            self._open[stream].close() for stream in STREAMS if stream in self._open
+        )
+        self._open.clear()
+        return self.files
 
 
 class OmittedOutput:
@@ -202,28 +243,34 @@ class CappedOutput:
 
     ``record(stream, text, received)`` emits one ``command_output`` record
     (``received`` is None while the command runs, else the chunk's arrival
-    time as a run.jsonl UTC timestamp); ``open_spill()`` returns ``(path, name)`` for the spill file.
+    time as a run.jsonl UTC timestamp); ``open_files()`` returns the
+    CommandOutputFiles to write the whole output to.
     The first records are emitted as output arrives. Past the head limits
     the newest output is held as a tail; ``finish(note)`` emits
     ``note(details)`` for the part left out, then the tail, so report.md and
     the GUI still see how the command ended. The newest chunk is always kept,
     so a harness marker the executor appends at the end (timeout,
     cancellation, OUTPUT SINK ERROR) reaches run.jsonl.
+
+    A command that stays inside the head limits writes no file, and its
+    complete output is in run.jsonl and in CommandResult. Once the files are
+    open every chunk goes to them, the held head first, so each stream's file
+    holds that stream in full from its first byte.
     """
 
     def __init__(
         self,
         record: Callable[[str, str, str | None], None],
-        open_spill: Callable[[], tuple[Path, str]],
+        open_files: Callable[[], CommandOutputFiles],
     ):
         self._record = record
-        self._open_spill = open_spill
+        self._open_files = open_files
         self._head_events = 0
         self._head_bytes = 0
-        self._head: list[Chunk] = []  # copied into the spill file when it opens
+        self._head: list[Chunk] = []  # copied into the files when they open
         self._spilling = False
-        self._log: CommandOutputLog | None = None
-        self.file = ""
+        self._log: CommandOutputFiles | None = None
+        self.files: tuple[OutputFile, ...] = ()
         self._tail: collections.deque = collections.deque()
         self._tail_bytes = 0
         self._omitted = OmittedOutput()
@@ -265,12 +312,11 @@ class CappedOutput:
             self._tail_bytes -= dropped_size
             self._drop(dropped_at, dropped_stream, dropped)
         if self._log is None:
-            path, self.file = self._open_spill()
-            self._log = CommandOutputLog(path)
-            for chunk in self._head:
-                self._log.write(*chunk)
+            self._log = self._open_files()
+            for _moment, held_stream, held_text in self._head:
+                self._log.write(held_stream, held_text)
             self._head.clear()
-        self._log.write(moment, stream, text)
+        self._log.write(stream, text)
 
     def _drop(self, moment: datetime.datetime, stream: str, text: str) -> None:
         self._dropped_at = moment
@@ -280,7 +326,7 @@ class CappedOutput:
 
     def close(self) -> None:
         if self._log is not None:
-            self._log.close()
+            self.files = self._log.close()
 
     def finish(self, note: Callable[[dict], None]) -> dict:
         """Emit the left-out note and the tail; details for command_finished."""
@@ -296,7 +342,10 @@ class CappedOutput:
                 if not text:
                     continue
             tail.append((moment, stream, text))
-        details = {"output_file": self.file, "output_omitted": self._omitted.summary()}
+        details = {
+            "output_files": [saved.to_dict() for saved in self.files],
+            "output_omitted": self._omitted.summary(),
+        }
         note_details = dict(details)
         if self._dropped_at is not None:
             note_details["received"] = _stamp(self._dropped_at)  # end of the gap
@@ -310,16 +359,24 @@ class CappedOutput:
 COLLECTED_CHUNK_CHARS = 4096
 
 
-def output_log_path(output_dir: Path, name: str) -> Path:
-    """A new output/<name>.log; a repeated name gets a numbered file."""
+def _output_base(output_dir: Path, name: str) -> Path:
+    """output/<name> for a command's stream files; a repeated name is numbered.
+
+    Names are command IDs the harness makes up, but they go into a path, so
+    anything that is not a plain name character becomes '-' and a run of dots
+    cannot climb out of the directory.
+    """
     safe = "".join(c if c.isalnum() or c in "._-" else "-" for c in name)
+    while ".." in safe:
+        safe = safe.replace("..", "-")
     base = output_dir / OUTPUT_DIR / safe
-    path = base.with_name(base.name + ".log")
     number = 2
-    while path.exists():
-        path = base.with_name(f"{base.name}-{number}.log")
+    while any(
+        base.with_name(f"{base.name}.{stream}.log").exists() for stream in STREAMS
+    ):
+        base = base.with_name(f"{safe}-{number}")
         number += 1
-    return path
+    return base
 
 
 def record_output(
@@ -331,13 +388,15 @@ def record_output(
     spill_name: str,
 ) -> tuple[CommandResult, dict]:
     """Run ``run(on_output)``, recording its output in run.jsonl within the
-    per-command limits (RECORD_*), and the full output in
-    ``output/<spill_name>.log`` once past them.
+    per-command limits (RECORD_*), and each stream in full in
+    ``output/<spill_name>.<stream>.log`` once past them.
 
     Each ``command_output`` and ``command_output_omitted`` record carries
     ``details`` (the owner and ``command_id``). Returns the result and the
-    details to add to ``command_finished`` (``output_file`` and
-    ``output_omitted`` when output was left out, else nothing).
+    details to add to ``command_finished`` (``output_files`` and
+    ``output_omitted`` when output was left out, else nothing). The result
+    carries its ``outputfiles.CommandOutput``, which is how a check reads the
+    whole stream rather than the bounded copy in ``result.stdout``.
     """
     streamed = []
 
@@ -348,14 +407,10 @@ def record_output(
             output_details["received"] = received
         publisher.emit("command_output", "running", output_details)
 
-    def open_spill():
-        path = output_log_path(output_dir, spill_name)
-        return path, path.relative_to(output_dir).as_posix()
-
     def note(omitted: dict) -> None:
         publisher.emit("command_output_omitted", "running", {**details, **omitted})
 
-    capped = CappedOutput(record, open_spill)
+    capped = CappedOutput(record, lambda: CommandOutputFiles(output_dir, spill_name))
 
     def output(stream: str, text: str) -> None:
         streamed.append(stream)
@@ -371,7 +426,14 @@ def record_output(
                     output(stream, text[start:start + COLLECTED_CHUNK_CHARS])
     finally:
         capped.close()
-    return result, capped.finish(note)
+    finished = capped.finish(note)
+    result = dataclasses.replace(result, output=CommandOutput(
+        run_dir=output_dir,
+        files=capped.files,
+        stdout=result.stdout,
+        stderr=result.stderr,
+    ))
+    return result, finished
 
 
 def result_text(result: CommandResult, *, stopped: bool = False) -> str:
@@ -409,9 +471,11 @@ def format_command_record(
         out.append(f"{fmt(finished)} {summary}; no output")
     elif len(lines) == 1:
         _moment, stream, text = lines[0]
-        out.append(f"{fmt(finished)} {summary}; {TAGS[stream]} {text}")
+        tag, text = line_tag(stream, text)
+        out.append(f"{fmt(finished)} {summary}; {tag} {text}")
     else:
         for moment, stream, text in lines:
-            out.append(f"{fmt(moment)} {TAGS[stream]} {text}")
+            tag, text = line_tag(stream, text)
+            out.append(f"{fmt(moment)} {tag} {text}")
         out.append(f"{fmt(finished)} {summary}")
     return "\n".join(out) + "\n"

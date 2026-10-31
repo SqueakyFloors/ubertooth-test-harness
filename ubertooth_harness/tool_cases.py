@@ -25,6 +25,7 @@ import sys
 
 from ubertooth_harness import specandump
 from ubertooth_harness.hostneeds import Needs
+from ubertooth_harness.outputfiles import text_lines
 from ubertooth_harness.stateful import (
     CAPTURE_DIR_KEY,
     Observation,
@@ -91,13 +92,13 @@ def sweep_check(fmt: str, low: int, high: int):
     every frequency of the range was reported, and RSSI is an int8."""
     pattern = _LINE_FORMATS[fmt]
 
-    def check(output: str) -> str:
+    def check(output) -> str:
         seen = set()
         outside = {}
         bad = 0
         samples = 0
         progress = 0
-        for line in output.splitlines():
+        for line in text_lines(output):
             line = line.strip()
             if not line or line.startswith("HARD TIMEOUT"):
                 continue
@@ -217,11 +218,16 @@ DASH_DUMP = "-x.bin"
 _IN_DIRECTORY = "import os, sys; os.chdir(sys.argv[1]); os.execvp(sys.argv[2], sys.argv[2:])"
 
 
-def _no_samples_on_stdout(output: str) -> str:
+def _no_samples_on_stdout(output) -> str:
     # The dump goes to the file, so stdout must stay empty: a binary sample
     # can decode to printable replacement characters, so any byte counts.
-    if output.strip():
-        return f"stdout is not empty ({len(output)} characters)"
+    characters = 0
+    printed = False
+    for line in text_lines(output):
+        characters += len(line) + 1
+        printed = printed or bool(line.strip())
+    if printed:
+        return f"stdout is not empty ({characters} characters)"
     return ""
 
 
@@ -418,13 +424,13 @@ _BUSY_FREQUENCIES_ALLOWED = 5
 _LIVE_VALUES = 3
 
 
-def rssi_sanity_check(output: str) -> str:
+def rssi_sanity_check(output) -> str:
     """A Step.output_check on default-format specan samples."""
     floor = {}
     total = 0
     count = 0
     values = set()
-    for line in output.splitlines():
+    for line in text_lines(output):
         match = _LINE_FORMATS["default"].match(line.strip())
         if match is None:
             continue  # sweep_check reports lines that are not samples
@@ -488,11 +494,14 @@ def rssi_sanity_cases(arguments, _resources, resource_identities):
 # field, and at -v2 the reserved fields too. Reads change nothing.
 
 _REG_LINE = r"(?m)^%(?:[A-Z0-9_]+|r[0-9A-Fa-f]{2}) = 0x[0-9A-Fa-f]{4}$"
+_REG_NAME = re.compile(r"^%([A-Z0-9_]+|r[0-9A-Fa-f]{2}) = 0x")
 
 
 def _register_order_check(expected):
     def check(output):
-        names = re.findall(r"(?m)^%([A-Z0-9_]+|r[0-9A-Fa-f]{2}) = 0x", output)
+        names = [
+            match[1] for match in map(_REG_NAME.match, text_lines(output)) if match
+        ]
         if names != list(expected):
             return f"registers {names}, expected {list(expected)}"
         return ""
@@ -500,7 +509,8 @@ def _register_order_check(expected):
 
 
 def _field_lines(output):
-    return [line for line in output.splitlines() if re.match(r"^[01.]{8} [01.]{8} ", line)]
+    return [line for line in text_lines(output)
+            if re.match(r"^[01.]{8} [01.]{8} ", line)]
 
 
 def _verbosity_check(level):

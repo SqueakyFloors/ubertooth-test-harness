@@ -1,0 +1,491 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>IOObjectClass</key>
+	<string>IORegistryEntry</string>
+	<key>IORegistryEntryChildren</key>
+	<array>
+		<dict>
+			<key>IOObjectClass</key>
+			<string>AppleT8122USBXHCI</string>
+			<key>IORegistryEntryID</key>
+			<integer>4294968001</integer>
+			<key>IORegistryEntryLocation</key>
+			<string>00000000</string>
+			<key>IORegistryEntryName</key>
+			<string>AppleT8122USBXHCI</string>
+			<key>IOServiceState</key>
+			<integer>30</integer>
+		</dict>
+		<dict>
+			<key>IOObjectClass</key>
+			<string>AppleT8122USBXHCI</string>
+			<key>IORegistryEntryChildren</key>
+			<array>
+				<dict>
+					<key>Device Speed</key>
+					<integer>1</integer>
+					<key>IOObjectClass</key>
+					<string>IOUSBHostDevice</string>
+					<key>IOObjectRetainCount</key>
+					<integer>43</integer>
+					<key>IORegistryEntryChildren</key>
+					<array>
+						<dict>
+							<key>IOObjectClass</key>
+							<string>IOUSBHostInterface</string>
+							<key>IORegistryEntryID</key>
+							<integer>4294970999</integer>
+							<key>IORegistryEntryLocation</key>
+							<string>0</string>
+							<key>IORegistryEntryName</key>
+							<string>Ubertooth One@02140000</string>
+							<key>bInterfaceClass</key>
+							<integer>255</integer>
+							<key>bInterfaceNumber</key>
+							<integer>0</integer>
+							<key>idProduct</key>
+							<integer>24578</integer>
+							<key>idVendor</key>
+							<integer>7504</integer>
+							<key>kUSBSerialNumberString</key>
+							<string>A1B2C3D4E5F600112233445566778899</string>
+						</dict>
+					</array>
+					<key>IORegistryEntryID</key>
+					<integer>4294971100</integer>
+					<key>IORegistryEntryLocation</key>
+					<string>02140000</string>
+					<key>IORegistryEntryName</key>
+					<string>Ubertooth One</string>
+					<key>IOServiceBusyState</key>
+					<integer>0</integer>
+					<key>IOServiceState</key>
+					<integer>30</integer>
+					<key>USB Address</key>
+					<integer>1</integer>
+					<key>USB Product Name</key>
+					<string>Ubertooth One</string>
+					<key>USB Serial Number</key>
+					<string>A1B2C3D4E5F600112233445566778899</string>
+					<key>USB Vendor Name</key>
+					<string>Great Scott Gadgets</string>
+					<key>USBPortType</key>
+					<integer>5</integer>
+					<key>USBSpeed</key>
+					<integer>1</integer>
+					<key>UsbDeviceFunction</key>
+					<integer>8</integer>
+					<key>UsbLinkSpeed</key>
+					<integer>12000000</integer>
+					<key>bDeviceClass</key>
+					<integer>0</integer>
+					<key>bDeviceProtocol</key>
+					<integer>0</integer>
+					<key>bDeviceSubClass</key>
+					<integer>0</integer>
+					<key>bMaxPacketSize0</key>
+					<integer>64</integer>
+					<key>bNumConfigurations</key>
+					<integer>1</integer>
+					<key>bcdDevice</key>
+					<integer>1347</integer>
+					<key>bcdUSB</key>
+					<integer>512</integer>
+					<key>iManufacturer</key>
+					<integer>1</integer>
+					<key>iProduct</key>
+					<integer>2</integer>
+					<key>iSerialNumber</key>
+					<integer>3</integer>
+					<key>idProduct</key>
+					<integer>24578</integer>
+					<key>idVendor</key>
+					<integer>7504</integer>
+					<key>kUSBAddress</key>
+					<integer>1</integer>
+					<key>kUSBCurrentConfiguration</key>
+					<integer>1</integer>
+					<key>kUSBProductString</key>
+					<string>Ubertooth One</string>
+					<key>kUSBSerialNumberString</key>
+					<string>A1B2C3D4E5F600112233445566778899</string>
+					<key>kUSBVendorString</key>
+					<string>Great Scott Gadgets</string>
+					<key>locationID</key>
+					<integer>34865152</integer>
+				</dict>
+				<dict>
+					<key>Device Speed</key>
+					<integer>1</integer>
+					<key>IOObjectClass</key>
+					<string>IOUSBHostDevice</string>
+					<key>IOObjectRetainCount</key>
+					<integer>43</integer>
+					<key>IORegistryEntryChildren</key>
+					<array>
+						<dict>
+							<key>Device Speed</key>
+							<integer>1</integer>
+							<key>IOObjectClass</key>
+							<string>IOUSBHostDevice</string>
+							<key>IOObjectRetainCount</key>
+							<integer>43</integer>
+							<key>IORegistryEntryID</key>
+							<integer>4294971201</integer>
+							<key>IORegistryEntryLocation</key>
+							<string>02210000</string>
+							<key>IORegistryEntryName</key>
+							<string>Ubertooth One</string>
+							<key>IOServiceBusyState</key>
+							<integer>0</integer>
+							<key>IOServiceState</key>
+							<integer>30</integer>
+							<key>USB Address</key>
+							<integer>1</integer>
+							<key>USB Product Name</key>
+							<string>Ubertooth One</string>
+							<key>USB Serial Number</key>
+							<string>99887766554433221100F6E5D4C3B2A1</string>
+							<key>USB Vendor Name</key>
+							<string>Great Scott Gadgets</string>
+							<key>USBPortType</key>
+							<integer>5</integer>
+							<key>USBSpeed</key>
+							<integer>1</integer>
+							<key>UsbDeviceFunction</key>
+							<integer>8</integer>
+							<key>UsbLinkSpeed</key>
+							<integer>12000000</integer>
+							<key>bDeviceClass</key>
+							<integer>0</integer>
+							<key>bDeviceProtocol</key>
+							<integer>0</integer>
+							<key>bDeviceSubClass</key>
+							<integer>0</integer>
+							<key>bMaxPacketSize0</key>
+							<integer>64</integer>
+							<key>bNumConfigurations</key>
+							<integer>1</integer>
+							<key>bcdDevice</key>
+							<integer>1347</integer>
+							<key>bcdUSB</key>
+							<integer>512</integer>
+							<key>iManufacturer</key>
+							<integer>1</integer>
+							<key>iProduct</key>
+							<integer>2</integer>
+							<key>iSerialNumber</key>
+							<integer>3</integer>
+							<key>idProduct</key>
+							<integer>24578</integer>
+							<key>idVendor</key>
+							<integer>7504</integer>
+							<key>kUSBAddress</key>
+							<integer>1</integer>
+							<key>kUSBCurrentConfiguration</key>
+							<integer>1</integer>
+							<key>kUSBProductString</key>
+							<string>Ubertooth One</string>
+							<key>kUSBSerialNumberString</key>
+							<string>99887766554433221100F6E5D4C3B2A1</string>
+							<key>kUSBVendorString</key>
+							<string>Great Scott Gadgets</string>
+							<key>locationID</key>
+							<integer>35717120</integer>
+						</dict>
+						<dict>
+							<key>Device Speed</key>
+							<integer>1</integer>
+							<key>IOObjectClass</key>
+							<string>IOUSBHostDevice</string>
+							<key>IOObjectRetainCount</key>
+							<integer>43</integer>
+							<key>IORegistryEntryID</key>
+							<integer>4294971202</integer>
+							<key>IORegistryEntryLocation</key>
+							<string>02220000</string>
+							<key>IORegistryEntryName</key>
+							<string>Ubertooth One DFU</string>
+							<key>IOServiceBusyState</key>
+							<integer>0</integer>
+							<key>IOServiceState</key>
+							<integer>30</integer>
+							<key>USB Address</key>
+							<integer>1</integer>
+							<key>USB Product Name</key>
+							<string>Ubertooth One DFU</string>
+							<key>USB Vendor Name</key>
+							<string>Great Scott Gadgets</string>
+							<key>USBPortType</key>
+							<integer>5</integer>
+							<key>USBSpeed</key>
+							<integer>1</integer>
+							<key>UsbDeviceFunction</key>
+							<integer>8</integer>
+							<key>UsbLinkSpeed</key>
+							<integer>12000000</integer>
+							<key>bDeviceClass</key>
+							<integer>0</integer>
+							<key>bDeviceProtocol</key>
+							<integer>0</integer>
+							<key>bDeviceSubClass</key>
+							<integer>0</integer>
+							<key>bMaxPacketSize0</key>
+							<integer>64</integer>
+							<key>bNumConfigurations</key>
+							<integer>1</integer>
+							<key>bcdDevice</key>
+							<integer>1347</integer>
+							<key>bcdUSB</key>
+							<integer>512</integer>
+							<key>iManufacturer</key>
+							<integer>1</integer>
+							<key>iProduct</key>
+							<integer>2</integer>
+							<key>iSerialNumber</key>
+							<integer>0</integer>
+							<key>idProduct</key>
+							<integer>24579</integer>
+							<key>idVendor</key>
+							<integer>7504</integer>
+							<key>kUSBAddress</key>
+							<integer>1</integer>
+							<key>kUSBCurrentConfiguration</key>
+							<integer>1</integer>
+							<key>kUSBProductString</key>
+							<string>Ubertooth One DFU</string>
+							<key>kUSBVendorString</key>
+							<string>Great Scott Gadgets</string>
+							<key>locationID</key>
+							<integer>35782656</integer>
+						</dict>
+						<dict>
+							<key>Device Speed</key>
+							<integer>1</integer>
+							<key>IOObjectClass</key>
+							<string>IOUSBHostDevice</string>
+							<key>IOObjectRetainCount</key>
+							<integer>43</integer>
+							<key>IORegistryEntryID</key>
+							<integer>4294971203</integer>
+							<key>IORegistryEntryLocation</key>
+							<string>02230000</string>
+							<key>IORegistryEntryName</key>
+							<string>USB Audio Device</string>
+							<key>IOServiceBusyState</key>
+							<integer>0</integer>
+							<key>IOServiceState</key>
+							<integer>30</integer>
+							<key>USB Address</key>
+							<integer>1</integer>
+							<key>USB Product Name</key>
+							<string>USB Audio Device</string>
+							<key>USB Serial Number</key>
+							<string>AUDIO0001</string>
+							<key>USB Vendor Name</key>
+							<string>Generic</string>
+							<key>USBPortType</key>
+							<integer>5</integer>
+							<key>USBSpeed</key>
+							<integer>1</integer>
+							<key>UsbDeviceFunction</key>
+							<integer>8</integer>
+							<key>UsbLinkSpeed</key>
+							<integer>12000000</integer>
+							<key>bDeviceClass</key>
+							<integer>0</integer>
+							<key>bDeviceProtocol</key>
+							<integer>0</integer>
+							<key>bDeviceSubClass</key>
+							<integer>0</integer>
+							<key>bMaxPacketSize0</key>
+							<integer>64</integer>
+							<key>bNumConfigurations</key>
+							<integer>1</integer>
+							<key>bcdDevice</key>
+							<integer>1347</integer>
+							<key>bcdUSB</key>
+							<integer>512</integer>
+							<key>iManufacturer</key>
+							<integer>1</integer>
+							<key>iProduct</key>
+							<integer>2</integer>
+							<key>iSerialNumber</key>
+							<integer>3</integer>
+							<key>idProduct</key>
+							<integer>20</integer>
+							<key>idVendor</key>
+							<integer>3468</integer>
+							<key>kUSBAddress</key>
+							<integer>1</integer>
+							<key>kUSBCurrentConfiguration</key>
+							<integer>1</integer>
+							<key>kUSBProductString</key>
+							<string>USB Audio Device</string>
+							<key>kUSBSerialNumberString</key>
+							<string>AUDIO0001</string>
+							<key>kUSBVendorString</key>
+							<string>Generic</string>
+							<key>locationID</key>
+							<integer>35848192</integer>
+						</dict>
+					</array>
+					<key>IORegistryEntryID</key>
+					<integer>4294971200</integer>
+					<key>IORegistryEntryLocation</key>
+					<string>02200000</string>
+					<key>IORegistryEntryName</key>
+					<string>USB2.0 Hub</string>
+					<key>IOServiceBusyState</key>
+					<integer>0</integer>
+					<key>IOServiceState</key>
+					<integer>30</integer>
+					<key>USB Address</key>
+					<integer>1</integer>
+					<key>USB Product Name</key>
+					<string>USB2.0 Hub</string>
+					<key>USB Vendor Name</key>
+					<string>Generic</string>
+					<key>USBPortType</key>
+					<integer>5</integer>
+					<key>USBSpeed</key>
+					<integer>1</integer>
+					<key>UsbDeviceFunction</key>
+					<integer>8</integer>
+					<key>UsbLinkSpeed</key>
+					<integer>12000000</integer>
+					<key>bDeviceClass</key>
+					<integer>9</integer>
+					<key>bDeviceProtocol</key>
+					<integer>0</integer>
+					<key>bDeviceSubClass</key>
+					<integer>0</integer>
+					<key>bMaxPacketSize0</key>
+					<integer>64</integer>
+					<key>bNumConfigurations</key>
+					<integer>1</integer>
+					<key>bcdDevice</key>
+					<integer>1347</integer>
+					<key>bcdUSB</key>
+					<integer>512</integer>
+					<key>iManufacturer</key>
+					<integer>1</integer>
+					<key>iProduct</key>
+					<integer>2</integer>
+					<key>iSerialNumber</key>
+					<integer>0</integer>
+					<key>idProduct</key>
+					<integer>1552</integer>
+					<key>idVendor</key>
+					<integer>1507</integer>
+					<key>kUSBAddress</key>
+					<integer>1</integer>
+					<key>kUSBCurrentConfiguration</key>
+					<integer>1</integer>
+					<key>kUSBProductString</key>
+					<string>USB2.0 Hub</string>
+					<key>kUSBVendorString</key>
+					<string>Generic</string>
+					<key>locationID</key>
+					<integer>35651584</integer>
+				</dict>
+			</array>
+			<key>IORegistryEntryID</key>
+			<integer>4294968002</integer>
+			<key>IORegistryEntryLocation</key>
+			<string>02000000</string>
+			<key>IORegistryEntryName</key>
+			<string>AppleT8122USBXHCI</string>
+			<key>IOServiceState</key>
+			<integer>30</integer>
+		</dict>
+		<dict>
+			<key>IOObjectClass</key>
+			<string>AppleT8122USBXHCI</string>
+			<key>IORegistryEntryChildren</key>
+			<array>
+				<dict>
+					<key>Device Speed</key>
+					<integer>1</integer>
+					<key>IOObjectClass</key>
+					<string>IOUSBHostDevice</string>
+					<key>IOObjectRetainCount</key>
+					<integer>43</integer>
+					<key>IORegistryEntryID</key>
+					<integer>4294971300</integer>
+					<key>IORegistryEntryLocation</key>
+					<string>01100000</string>
+					<key>IORegistryEntryName</key>
+					<string>Keyboard Hub</string>
+					<key>IOServiceBusyState</key>
+					<integer>0</integer>
+					<key>IOServiceState</key>
+					<integer>30</integer>
+					<key>USB Address</key>
+					<integer>1</integer>
+					<key>USB Product Name</key>
+					<string>Keyboard Hub</string>
+					<key>USB Vendor Name</key>
+					<string>Generic</string>
+					<key>USBPortType</key>
+					<integer>5</integer>
+					<key>USBSpeed</key>
+					<integer>1</integer>
+					<key>UsbDeviceFunction</key>
+					<integer>8</integer>
+					<key>UsbLinkSpeed</key>
+					<integer>12000000</integer>
+					<key>bDeviceClass</key>
+					<integer>9</integer>
+					<key>bDeviceProtocol</key>
+					<integer>0</integer>
+					<key>bDeviceSubClass</key>
+					<integer>0</integer>
+					<key>bMaxPacketSize0</key>
+					<integer>64</integer>
+					<key>bNumConfigurations</key>
+					<integer>1</integer>
+					<key>bcdDevice</key>
+					<integer>1347</integer>
+					<key>bcdUSB</key>
+					<integer>512</integer>
+					<key>iManufacturer</key>
+					<integer>1</integer>
+					<key>iProduct</key>
+					<integer>2</integer>
+					<key>iSerialNumber</key>
+					<integer>0</integer>
+					<key>idProduct</key>
+					<integer>4102</integer>
+					<key>idVendor</key>
+					<integer>1452</integer>
+					<key>kUSBAddress</key>
+					<integer>1</integer>
+					<key>kUSBCurrentConfiguration</key>
+					<integer>1</integer>
+					<key>kUSBProductString</key>
+					<string>Keyboard Hub</string>
+					<key>kUSBVendorString</key>
+					<string>Generic</string>
+					<key>locationID</key>
+					<integer>17825792</integer>
+				</dict>
+			</array>
+			<key>IORegistryEntryID</key>
+			<integer>4294968003</integer>
+			<key>IORegistryEntryLocation</key>
+			<string>01000000</string>
+			<key>IORegistryEntryName</key>
+			<string>AppleT8122USBXHCI</string>
+			<key>IOServiceState</key>
+			<integer>30</integer>
+		</dict>
+	</array>
+	<key>IORegistryEntryID</key>
+	<integer>4294967295</integer>
+	<key>IORegistryEntryName</key>
+	<string>Root</string>
+</dict>
+</plist>

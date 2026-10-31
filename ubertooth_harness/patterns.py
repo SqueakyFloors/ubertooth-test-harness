@@ -6,15 +6,44 @@ import re
 FIRMWARE_PATTERN = r"Firmware version:\s+\S+"
 COMPILE_INFO_PATTERN = r"\bubertooth\s+\S+\s+\("
 
+# The two other lines of the `-V` answer, which libubertooth prints for every
+# tool (host/libubertooth/src/ubertooth_version.c): the host tools' own
+# version, and the board's build string under its own label. Since fork
+# f898fe5 (SqueakyFloors/ubertooth#813) `-V` is the version command and ends
+# the command, so this answer is the whole of what a command line carrying it
+# prints; the build string used to come out bare, with no label.
+HOST_VERSION_LINE = r"(?m)^Host tools version: libubertooth \S+"
+# Which libbtbb was loaded, which the host version line cannot say; "unknown"
+# where the path could not be found, so the line is always there.
+LIBBTBB_PATH_LINE = r"(?m)^libbtbb loaded from: \S"
+# The whole `-V` answer for one board, as the four consecutive lines
+# libubertooth prints, in its order: a pattern per line would pass an answer
+# whose lines arrived in any order or with others between them. It is not
+# anchored to the end of the output, because a tool may put a warning or a
+# note on standard error beside it.
+VERSION_ANSWER = (
+    r"(?m)^Host tools version: libubertooth \S+[^\n]*\n"
+    r"libbtbb loaded from: \S[^\n]*\n"
+    # Not "read failed" or "unavailable, <reason>", which is what the line
+    # carries when the board answered nothing; the build line below is not
+    # printed at all then, so this only says so in the pattern as well.
+    r"Firmware version: (?!read failed$|unavailable, )\S[^\n]*\n"
+    rf"Firmware build: [^\n]*{COMPILE_INFO_PATTERN}"
+)
+
 # `ubertooth-util -v` names the image the build came from when the firmware
 # carries an info block ("Firmware version: bluetooth_rxtx git-1c7f06d6
 # (API:1.35)"), and leaves it out when it does not ("Firmware version:
-# 2020-12-R1 (API:1.07)"). Both forms are accepted everywhere the harness
-# reads a revision off a board.
+# 2020-12-R1 (API:1.07)"). Both forms are accepted, and any image name, where
+# the harness only reads the revision off a board.
 IMAGE_NAME_PATTERN = r"(?:\S+\s+)?"
 FIRMWARE_VERSION_RE = re.compile(
     rf"Firmware version:\s+{IMAGE_NAME_PATTERN}(?P<revision>\S+)\s+\(API:"
 )
+# The preflight identity check is stricter than the reads above: the run's
+# tests need the application image, so a board on another image (btbr, a
+# bench image) is a mismatch even when it was built from the same commit.
+APPLICATION_IMAGE_PATTERN = r"(?:bluetooth_rxtx\s+)?"
 PART_ID_PATTERN = r"Part ID:\s+[0-9A-Fa-f]+"
 BOARD_ID_PATTERN = r"Board ID Number:\s+\d+"
 
@@ -65,10 +94,23 @@ def revision_pattern(expected: str) -> str:
     return "git-(?:" + "|".join(alternatives) + ")"
 
 
+def same_revision(expected: str, reported: str) -> bool:
+    """Whether ``reported`` names the same commit as ``expected``.
+
+    The two can be abbreviations of different lengths of one commit, so this
+    is the comparison to use instead of ``==`` on revision strings.
+    """
+    return re.fullmatch(revision_pattern(expected), reported) is not None
+
+
 def firmware_version_pattern(expected: str) -> str:
-    """`ubertooth-util -v` output for firmware built from ``expected``."""
+    """`ubertooth-util -v` output for the application image built from ``expected``.
+
+    Only the application image the harness tests may be named, so a board on
+    another image does not match.
+    """
     return (
-        rf"Firmware version:\s+{IMAGE_NAME_PATTERN}"
+        rf"Firmware version:\s+{APPLICATION_IMAGE_PATTERN}"
         rf"{revision_pattern(expected)}(?:\s|\()"
     )
 

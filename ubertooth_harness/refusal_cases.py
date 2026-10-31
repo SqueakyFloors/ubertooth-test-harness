@@ -56,6 +56,7 @@ from pathlib import Path
 
 from ubertooth_harness import refusal
 from ubertooth_harness.hostneeds import tool_needs
+from ubertooth_harness.outputfiles import text_lines
 from ubertooth_harness.stateful import (
     StateCaseError,
     CAPTURE_DIR_KEY,
@@ -214,9 +215,10 @@ def _case(case_id, name, steps, expected_state) -> StateCase:
     )
 
 
-def _no_extra_on_stdout(stdout: str) -> str:
-    if "ignoring extra capture file" in stdout.lower():
-        return f"'{_EXTRA.strip()}' went to stdout, where a capture can be"
+def _no_extra_on_stdout(stdout) -> str:
+    for line in text_lines(stdout):
+        if "ignoring extra capture file" in line.lower():
+            return f"'{_EXTRA.strip()}' went to stdout, where a capture can be"
     return ""
 
 

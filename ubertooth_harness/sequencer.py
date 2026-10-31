@@ -2,14 +2,21 @@
 
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass, replace
+import datetime
 from pathlib import Path
 import time
 from typing import Mapping, Sequence
 
 from ubertooth_harness.cancellation import CancellationToken
-from ubertooth_harness.catalog import CatalogError, TestCatalog, builtin_catalog
+from ubertooth_harness.catalog import (
+    WATCHDOG_LIMIT_ARGUMENT,
+    CatalogError,
+    TestCatalog,
+    builtin_catalog,
+)
 from ubertooth_harness.events import (
     MANIFEST_MAX_BYTES,
+    OUTPUT_CHECKS_MAX_BYTES,
     open_run_publisher,
     EventPublisher,
     EventSink,
@@ -18,11 +25,19 @@ from ubertooth_harness.events import (
 from ubertooth_harness.enumeration import EnumerationError
 from ubertooth_harness.executor import CommandExecutor, CommandResult
 from ubertooth_harness.isolation import IsolationRuntime, IsolationSetupError
-from ubertooth_harness.manifest import ManifestError, RunManifest
+from ubertooth_harness.manifest import ManifestError, RunManifest, json_value
 from ubertooth_harness.planner import TestInvocation, alternated_roles
 from ubertooth_harness.power import PowerControllerError
 from ubertooth_harness.preflight import PreflightCheck
+from ubertooth_harness.outputfiles import (
+    TARGET_SERIAL_STREAM,
+    CommandOutput,
+    measure,
+    stream_for,
+)
 from ubertooth_harness.rawlog import record_output
+from ubertooth_harness.resources import RegistryError
+from ubertooth_harness import targets
 from ubertooth_harness.topology import IsolationCancelled, applied_power_isolation
 from ubertooth_harness.report import write_report
 from ubertooth_harness.cases import FlashCase
@@ -39,6 +54,7 @@ from ubertooth_harness.flash import (
     HarnessError,
 )
 from ubertooth_harness.plan import flash_step, image_label
+from ubertooth_harness.watchdog import MonitoredBoard, WatchdogMonitor
 from ubertooth_harness.stateful import (
     CAPTURE_DIR,
     CAPTURE_DIR_KEY,
@@ -50,6 +66,10 @@ from ubertooth_harness.stateful import (
     artifact_key,
 )
 from ubertooth_harness import transitions
+
+# File records per output_files event; each is about 180 bytes, so a batch
+# stays well inside the event limit (events.OUTPUT_CHECKS_MAX_BYTES).
+CASE_FILES_PER_RECORD = 100
 
 
 @dataclass(frozen=True)
@@ -68,6 +88,9 @@ class SequencerSummary:
     # neither skipped nor failed. Tests: every case, or the whole test.
     not_applicable_cases: int = 0
     not_applicable_tests: int = 0
+    # Times a board reset itself during the run, as the firmware counts them
+    # (watchdog.py). Reported, not failed.
+    watchdog_resets: int = 0
 
 
 _MAX_REASON_CHARS = 4096
@@ -117,6 +140,21 @@ def _path_safe(name: str) -> str:
     return "".join(c if c.isalnum() or c in "._-" else "-" for c in name)
 
 
+def _utc_text(moment: datetime.datetime) -> str:
+    """A clock reading as the records write it: naive UTC, to the second.
+
+    A naive reading is already UTC, as ``EventPublisher.emit`` takes it, so
+    the zone is attached before any conversion.
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=datetime.timezone.utc)
+    return (
+        moment.astimezone(datetime.timezone.utc)
+        .replace(tzinfo=None)
+        .isoformat(timespec="seconds")
+    )
+
+
 class NamedTestSequencer:
     def __init__(
         self,
@@ -127,6 +165,7 @@ class NamedTestSequencer:
         clock=time.monotonic,
         isolation: IsolationRuntime | None = None,
         registry=None,
+        watchdog_search=None,
     ):
         self.executor = executor
         self.catalog = catalog or builtin_catalog()
@@ -135,6 +174,10 @@ class NamedTestSequencer:
         self.isolation = isolation
         # Hosts' platforms and other Ubertooths (flash guards) come from here.
         self.registry = registry
+        # How the run looks for an open fork issue about a board's self-reset;
+        # `gh issue list` by default (watchdog.py). Injected by tests, which
+        # must not reach GitHub.
+        self.watchdog_search = watchdog_search
 
     PER_FLASH_TIMEOUT_S = 25.0
 
@@ -240,19 +283,34 @@ class NamedTestSequencer:
         case_id: str,
         manifest: RunManifest,
         output_dir: Path,
+        monitor: WatchdogMonitor | None,
     ) -> tuple[str, str]:
-        """Run flash reliability as one case; return (failure, status)."""
+        """Run flash reliability as one case; return (failure, status).
+
+        ``monitor`` is the run's watchdog monitor, or None when the run has
+        nothing to read. A soak is one case, so the reads the run makes
+        between cases never come round while it writes; the flash runner
+        gives the monitor a turn between its writes instead.
+        """
         owner = {
             "phase": "test",
             "invocation_id": invocation.invocation_id,
             "case_id": case_id,
         }
+
+        def read_watchdog() -> None:
+            # Between two writes, so this read runs beside no other command.
+            # What it finds reaches the test's record through the read after
+            # the test, as a read between cases does.
+            monitor.poll_if_due(invocation)
+
         publisher.emit("check_started", "running", {**owner, "case_name": case.name})
         try:
             request = self._flash_request(case, invocation, manifest)
             summary = FlashReliabilityRunner(self.executor, clock=self.clock).run(
                 request, publisher, cancellation=token, owner=owner,
                 output_dir=output_dir,
+                between_flashes=None if monitor is None else read_watchdog,
             )
             failure = "" if summary.passed else f"{case.name}: {summary.failure_reason}"
             status = summary.status
@@ -393,6 +451,38 @@ class NamedTestSequencer:
             raise
         publisher.emit("isolation_finished", "passed", dict(owner))
 
+    def _record_known_targets(
+        self,
+        publisher: EventPublisher,
+        invocation: TestInvocation,
+        definition,
+    ) -> None:
+        """Record which known device this test ran against, or that it had none.
+
+        A test driven against an nRF52840 DK or an ESP32 Classic peer knows
+        exactly what was on the air; the rest listen to whatever is there.
+        One record per test says which, so report.md and the GUI read the
+        same thing (targets.py). It holds what the registry and the test
+        definition say, which is what the run is about to drive; what the
+        board itself answered is in the test's own records.
+        """
+        platform = None
+        if self.registry is not None:
+            platform = self.registry.get(invocation.host).platform
+        found = targets.known_targets(
+            definition.hardware_roles or {},
+            invocation.resources,
+            invocation.resource_identities,
+            platform,
+        )
+        publisher.emit(
+            "known_target",
+            "recorded" if found else "none",
+            targets.target_details(
+                invocation.invocation_id, invocation.test_name, found
+            ),
+        )
+
     def _run_command(
         self,
         publisher: EventPublisher,
@@ -410,8 +500,9 @@ class NamedTestSequencer:
         A command whose output passes the per-command record limits
         (rawlog.RECORD_*) keeps its first and last output records in
         run.jsonl, with a ``command_output_omitted`` record between them, and
-        its full output in ``output/<command id>.log``; ``command_finished``
-        names the file and summarizes what was left out.
+        each of its streams in full in ``output/<command id>.<stream>.log``;
+        ``command_finished`` names the files and summarizes what was left
+        out.
         """
         details = dict(owner)
         details.update({"command_id": command_id, "argv": list(argv)})
@@ -445,7 +536,80 @@ class NamedTestSequencer:
         })
         finished.update(spilled)
         publisher.emit("command_finished", command_status, finished)
+        if isinstance(result.output, CommandOutput):
+            result.output.owner = {
+                **owner, "command_id": command_id, "argv": list(argv),
+            }
         return result
+
+    @staticmethod
+    def _record_case_files(
+        publisher: EventPublisher, owner: Mapping, output_dir: Path, directory
+    ) -> None:
+        """Record the files a case left in its own directory.
+
+        These are the captures its tools wrote (a PCAP, a PCAPNG, a ``-d``
+        dump) and any target device's shell traffic. Each one's size and
+        SHA-256 go in the run record, so the report lists it beside the
+        command output files and an audit can tell it is still the file the
+        run produced. Lines are counted only for a target's traffic; a
+        capture is binary.
+        """
+        if not directory:
+            return
+        path = Path(directory)
+        if not path.is_dir():
+            return
+        files = []
+        for found in sorted(path.rglob("*")):
+            if not found.is_file():
+                continue
+            stream = stream_for(found)
+            files.append(measure(
+                found, stream, relative_to=output_dir,
+                count_lines=stream == TARGET_SERIAL_STREAM,
+            ))
+        # A case that wrote many files would not fit in one record, and an
+        # event over the limit would abort the run after its cleanup had
+        # already finished, so they go in batches.
+        for start in range(0, len(files), CASE_FILES_PER_RECORD):
+            batch = files[start:start + CASE_FILES_PER_RECORD]
+            publisher.emit(
+                "output_files", "passed",
+                {**owner, "files": [saved.to_dict() for saved in batch]},
+                max_bytes=OUTPUT_CHECKS_MAX_BYTES,
+            )
+
+    @staticmethod
+    def _record_output_checks(publisher: EventPublisher, *results) -> None:
+        """Record what each check read from the command's output.
+
+        One ``output_checks`` record per command holds the files the checks
+        read and, for each check, its pattern and what it found.
+        ``ubertooth-harness validate <run dir>`` runs them again against the
+        same files, so a run can be audited or re-judged after a check is
+        fixed. The record is written after the checks have run, which is why
+        it is a record of its own rather than part of ``command_finished``.
+        """
+        for result in results:
+            output = result.output if result is not None else None
+            if not isinstance(output, CommandOutput) or not output.checks:
+                continue
+            # The command's own files are in its command_finished record,
+            # and each check names the files it read, so this record carries
+            # the checks only.
+            publisher.emit(
+                "output_checks",
+                "failed" if any(c.reason for c in output.checks) else "passed",
+                {
+                    **output.owner,
+                    "checks": [check.to_dict() for check in output.checks],
+                },
+                max_bytes=OUTPUT_CHECKS_MAX_BYTES,
+            )
+            # Emptied so a second call for the same command records nothing:
+            # the preflight asks twice when its fallback command runs.
+            output.checks.clear()
 
     def _run_state_step(
         self,
@@ -505,6 +669,7 @@ class NamedTestSequencer:
             output_dir=output_dir,
         )
         outcome = step.evaluate(result, context)
+        self._record_output_checks(publisher, result)
         if (
             step.observe is not None
             and outcome.observed is not None
@@ -670,6 +835,9 @@ class NamedTestSequencer:
                 # A value the case may have changed cannot be written back.
                 cleanup_failures.append(skipped)
 
+        self._record_case_files(
+            publisher, owner, output_dir, context.get(CAPTURE_DIR_KEY)
+        )
         reasons = []
         if step_failure:
             reasons.append(step_failure)
@@ -797,6 +965,63 @@ class NamedTestSequencer:
             },
         )
         return failure, status
+
+    def _watchdog_monitor(
+        self,
+        invocations,
+        manifest: RunManifest,
+        publisher: EventPublisher,
+        output_dir: Path,
+        cancelled=None,
+    ) -> WatchdogMonitor | None:
+        """The run's watchdog monitor, or None when there is nothing to read.
+
+        Every Ubertooth the run binds is read, guards included: the firmware
+        resets any of them that stops answering. None without a registry (the
+        resource types are what say which boards are Ubertooths) or with no
+        Ubertooth bound.
+        """
+        if self.registry is None:
+            return None
+        boards = {}
+        for invocation in invocations:
+            for role, alias in invocation.resources.items():
+                if alias in boards:
+                    continue
+                try:
+                    kind = self.registry.get(alias).type
+                except RegistryError:
+                    continue  # planning binds only registered resources
+                serial = str(
+                    invocation.resource_identities.get(role, {}).get("serial", "")
+                ).lower()
+                if kind == "Ubertooth" and serial:
+                    boards[alias] = MonitoredBoard(alias, serial)
+        if not boards:
+            return None
+        try:
+            source = manifest.source("Ubertooth")
+            build = f"{source.expected_revision} (commit {source.commit})"
+        except ManifestError:
+            build = ""
+        return WatchdogMonitor(
+            lambda **arguments: self._run_command(
+                publisher,
+                # Read-only, with hard command deadlines, so it still runs
+                # after cancellation: a board that reset itself is worth
+                # recording whether or not the run was stopped.
+                CancellationToken(),
+                output_dir=output_dir,
+                **arguments,
+            ),
+            publisher,
+            tuple(boards.values()),
+            build=build,
+            clock=self.clock,
+            cancelled=cancelled,
+            utc_now=lambda: _utc_text(publisher.utc_now()),
+            search=self.watchdog_search,
+        )
 
     def _emergency_cleanup(self, steps, context: Mapping) -> None:
         """Run cleanup commands without events after an internal error.
@@ -1050,6 +1275,7 @@ class NamedTestSequencer:
                 output_dir=output_dir,
             )
             failure = check.result_failure(result)
+            self._record_output_checks(publisher, result)
             if failure and check.needs_fallback(result):
                 # The command left the question unanswered, so this fork
                 # commit answers it on the older option: ask that one, and
@@ -1071,6 +1297,7 @@ class NamedTestSequencer:
                     failure = (
                         f"{asked}; then {' '.join(check.fallback_argv)}: {failure}"
                     )
+            self._record_output_checks(publisher, result)
             if failure:
                 status = "canceled" if result.cancelled else "failed"
                 publisher.emit(
@@ -1107,6 +1334,21 @@ class NamedTestSequencer:
             },
         )
 
+        monitor = (
+            self._watchdog_monitor(
+                invocations, manifest, publisher, output_dir, token.is_cancelled
+            )
+            if status == "running" else None
+        )
+        if monitor is not None:
+            # The baseline every later read is compared with: the firmware's
+            # counters are since power-on, so what they already hold is not
+            # this run's (watchdog.py). A board that does not answer now would
+            # not answer a test either, so no test runs.
+            opening = monitor.baseline()
+            if opening.failure:
+                status, failure = "failed", opening.failure
+
         if status == "running":
             for invocation in invocations:
                 if token.is_cancelled():
@@ -1114,6 +1356,7 @@ class NamedTestSequencer:
                     failure = f"canceled: {token.reason}"
                     break
                 definition = self.catalog.get(invocation.test_name)
+                watchdog_warnings: list[str] = []
                 publisher.emit(
                     "test_started",
                     "running",
@@ -1123,7 +1366,9 @@ class NamedTestSequencer:
                         "description": definition.description,
                         "host": invocation.host,
                         "resources": dict(invocation.resources),
-                        "arguments": dict(invocation.arguments),
+                        "rf": json_value(invocation.resource_placements),
+                        "rf_required": json_value(invocation.placement_requirements),
+                        "arguments": json_value(invocation.arguments),
                     },
                 )
                 cases = (
@@ -1159,6 +1404,9 @@ class NamedTestSequencer:
                         },
                     )
                     continue
+                # After the not-applicable exit: a test the host cannot run
+                # drove nothing, so it gets no known-target record at all.
+                self._record_known_targets(publisher, invocation, definition)
                 case_failures = []
                 case_statuses = []
                 skipped_cases = 0
@@ -1169,8 +1417,10 @@ class NamedTestSequencer:
                 guards = (planned_guards or {}).get(invocation.invocation_id) or ()
                 guard_context: dict[str, str] = {}
                 guard_pending = False
-                # Guard-check failures are counted apart from failed cases.
+                # Guard and watchdog check failures are counted apart from
+                # failed cases: neither is one of the test's own cases.
                 failed_guard_checks = 0
+                failed_watchdog_checks = 0
                 # A failed test ends the run only when the device state is not
                 # known: a guard changed or could not be read, a case was not
                 # verified restored, a flash failed, or isolation failed.
@@ -1204,12 +1454,18 @@ class NamedTestSequencer:
                                 case_failures.append(f"canceled: {token.reason}")
                                 case_statuses.append("canceled")
                                 break
+                            if monitor is not None:
+                                # Between cases, so a long test reports a
+                                # self-reset before it ends; never beside a
+                                # running command. What it finds reaches the
+                                # test's record through after_test below.
+                                monitor.poll_if_due(invocation)
                             guard_pending = bool(guards)
                             case_id = f"{invocation.invocation_id}-{case.case_id}"
                             if isinstance(case, FlashCase):
                                 failure_text, flash_status = self._run_flash_case(
                                     publisher, token, invocation, case, case_id, manifest,
-                                    output_dir,
+                                    output_dir, monitor,
                                 )
                                 if failure_text:
                                     unsafe = True
@@ -1283,6 +1539,7 @@ class NamedTestSequencer:
                             )
                             missing = case.missing_tool(result)
                             case_failure = "" if missing else case.result_failure(result)
+                            self._record_output_checks(publisher, result)
                             case_status = (
                                 "canceled" if result.cancelled
                                 else "skipped" if missing
@@ -1343,6 +1600,27 @@ class NamedTestSequencer:
                     unsafe = True
                     case_failures.append(f"unexpected {type(error).__name__}: {error}")
                     case_statuses.append("failed")
+                if monitor is not None:
+                    # After the power isolation has put every port back, so a
+                    # board switched off during the test is read powered. The
+                    # boards it switched count from their power-on, so their
+                    # baselines go and their next read becomes one.
+                    monitor.lost_power(
+                        action.resource_alias for action in invocation.power_isolation
+                    )
+                    watchdog = monitor.after_test(
+                        invocation, invocation.arguments.get(WATCHDOG_LIMIT_ARGUMENT)
+                    )
+                    watchdog_warnings.extend(watchdog.warnings)
+                    if watchdog.failure:
+                        # A board that did not come back cannot be used again;
+                        # a count over the test's limit leaves the device in a
+                        # known state, so later tests still run. Neither is a
+                        # failed case: every case of the test may have passed.
+                        unsafe = unsafe or watchdog.board_lost
+                        case_failures.append(watchdog.failure)
+                        case_statuses.append("failed")
+                        failed_watchdog_checks += 1
                 if case_failures:
                     status = (
                         "canceled"
@@ -1362,10 +1640,19 @@ class NamedTestSequencer:
                             "invocation_id": invocation.invocation_id,
                             "test_name": invocation.test_name,
                             "reason": test_failure,
-                            "failed_cases": len(case_failures) - failed_guard_checks,
+                            "failed_cases": (
+                                len(case_failures) - failed_guard_checks
+                                - failed_watchdog_checks
+                            ),
                             "failed_guard_checks": failed_guard_checks,
+                            "failed_watchdog_checks": failed_watchdog_checks,
                             "skipped_cases": skipped_cases,
                             "not_applicable_cases": len(omitted),
+                            # Reported, not failed: a board that reset
+                            # itself came back by itself. Each warning is in
+                            # its own watchdog record, so the test record
+                            # counts them (watchdog.py).
+                            "watchdog_warnings": len(watchdog_warnings),
                             # False: the device was verified back in its known
                             # state, so later tests still run.
                             "stops_run": stop_run,
@@ -1389,8 +1676,10 @@ class NamedTestSequencer:
                         "reason": "",
                         "failed_cases": 0,
                         "failed_guard_checks": 0,
+                        "failed_watchdog_checks": 0,
                         "skipped_cases": skipped_cases,
                         "not_applicable_cases": len(omitted),
+                        "watchdog_warnings": len(watchdog_warnings),
                     },
                 )
 
@@ -1408,6 +1697,19 @@ class NamedTestSequencer:
             if status == "canceled":
                 reason += f"; then {failure or 'canceled'}"
             status, failure = "failed", reason
+        if monitor is not None:
+            # The last read of every board, and the run's watchdog summary:
+            # the per-board reset count, and a fork issue to file for each
+            # board that reset itself.
+            ending = monitor.at_run_end()
+            if ending.failure:
+                # Not a failed test: no test is running. The run fails because
+                # a board it used cannot be used again -- unless it was
+                # canceled, where a board may have gone as part of stopping
+                # the run and the cancellation is the outcome.
+                if status != "canceled":
+                    status = "failed"
+                failure = f"{failure}; {ending.failure}" if failure else ending.failure
         summary = SequencerSummary(
             run_id=run_id,
             status=status,
@@ -1421,6 +1723,7 @@ class NamedTestSequencer:
             skipped_cases=run_skipped_cases,
             not_applicable_cases=sum(1 for item in not_applicable if item.case_id),
             not_applicable_tests=not_applicable_tests,
+            watchdog_resets=monitor.total_resets if monitor is not None else 0,
         )
         publisher.emit("run_finished", status, asdict(summary))
         return summary

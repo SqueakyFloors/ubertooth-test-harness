@@ -3,14 +3,18 @@
 Power controllers such as the StarTech managed hub cannot measure VBUS, so a
 port that reads "off" is not proof the board lost power. Isolation is instead
 confirmed by the board disappearing from (and reappearing in) USB enumeration.
-Discovery reads sysfs only; it never opens a device, so it cannot disturb a
+Discovery reads what the kernel already knows: sysfs on Linux, the IO registry
+through `ioreg` on macOS. It never opens a device, so it cannot disturb a
 running capture.
 """
 
+import plistlib
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Protocol
+from typing import Callable, Iterable, Protocol, Sequence
 
 UBERTOOTH_VENDOR = "1d50"
 # Every Ubertooth USB identity (firmware/bootloader/bootloader.cpp and
@@ -18,6 +22,13 @@ UBERTOOTH_VENDOR = "1d50"
 # DFU bootloader (6003). A board in a bootloader is still powered.
 UBERTOOTH_PRODUCTS = frozenset({"6000", "6001", "6002", "6003"})
 SYSFS_USB_DEVICES = "/sys/bus/usb/devices"
+# macOS has no sysfs. `ioreg` prints the kernel's IO registry, which holds the
+# descriptors macOS read when each device was enumerated; -p IOUSB selects the
+# USB plane, -l every property, -w0 unwrapped lines, -a an XML plist. The full
+# path, because PATH is the runner's environment: on an Intel Mac an earlier
+# /usr/local/bin is writable by any admin.
+IOREG_ARGV = ("/usr/sbin/ioreg", "-p", "IOUSB", "-l", "-w0", "-a")
+IOREG_TIMEOUT_S = 15.0
 # The DFU bootloader reports no serial number (iSerialNumber = 0), so such a
 # device cannot be identified. It is reported under this prefix, which can
 # never match a registered serial, so isolation checks fail closed on it.
@@ -25,7 +36,10 @@ UNIDENTIFIED_PREFIX = "unidentified:"
 
 # Measured on the lab host (StarTech hub): a board leaves USB about
 # 0.1-0.3 s after power-off and re-enumerates about 0.7-0.8 s after power-on
-# (about 1.2 s including restoration). Defaults leave generous headroom.
+# (about 1.2 s including restoration). On the Acroname USBHub3+ a board
+# leaves 0.06-0.22 s after power-off and re-enumerates 0.37-0.59 s after
+# power-on, answering ubertooth-util -v about 0.02 s later. Defaults leave
+# generous headroom for both.
 DEFAULT_REMOVAL_DEADLINE_S = 5.0
 DEFAULT_RETURN_DEADLINE_S = 10.0
 DEFAULT_POLL_INTERVAL_S = 0.1
@@ -85,6 +99,128 @@ class SysfsUbertoothEnumerator:
                 serial = ""
             found.add(serial or f"{UNIDENTIFIED_PREFIX}{device.name}:{product}")
         return frozenset(found)
+
+
+def _usb_id(value) -> str | None:
+    """A plist idVendor/idProduct as four lowercase hex digits."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if not 0 <= value <= 0xFFFF:
+        return None
+    return f"{value:04x}"
+
+
+def _ioreg_serial(node: dict) -> str:
+    """The device's serial, lowercase, or "" when it reports none.
+
+    A board in its DFU bootloader has iSerialNumber 0, so macOS records no
+    serial string for it, exactly as Linux records no sysfs `serial`.
+    """
+    for key in ("kUSBSerialNumberString", "USB Serial Number"):
+        value = node.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    return ""
+
+
+def _ioreg_name(node: dict) -> str:
+    """A stable name for a device with no serial: where it is on the bus."""
+    location = node.get("IORegistryEntryLocation")
+    if isinstance(location, str) and location.strip():
+        return location.strip()
+    location_id = node.get("locationID")
+    if isinstance(location_id, int) and not isinstance(location_id, bool):
+        return f"{location_id:08x}"
+    name = node.get("IORegistryEntryName")
+    return name.strip() if isinstance(name, str) and name.strip() else "unknown"
+
+
+def ubertooth_serials_from_ioreg(output: bytes) -> frozenset[str]:
+    """Parse `ioreg -p IOUSB -l -w0 -a` output into enumerated serials."""
+    try:
+        tree = plistlib.loads(output)
+    except Exception as error:
+        raise EnumerationError(f"cannot parse ioreg output: {error}") from error
+    found = set()
+    pending = [tree]
+    while pending:
+        node = pending.pop()
+        if not isinstance(node, dict):
+            continue
+        # An interface entry repeats its device's ids, so counting it would
+        # report the board twice (and a serial-less board, which is named by
+        # where it is, twice under two names). Nothing below an interface is a
+        # device either, so that whole subtree is left alone.
+        if "bInterfaceNumber" in node or "Interface" in str(
+            node.get("IOObjectClass", "")
+        ):
+            continue
+        children = node.get("IORegistryEntryChildren")
+        if isinstance(children, list):
+            pending.extend(children)
+        # A property of an unexpected type is treated as not an Ubertooth.
+        # This feeds the runner's board listing, which is read by people;
+        # power isolation, which must fail closed, reads sysfs on Linux.
+        vendor = _usb_id(node.get("idVendor"))
+        product = _usb_id(node.get("idProduct"))
+        if vendor != UBERTOOTH_VENDOR or product not in UBERTOOTH_PRODUCTS:
+            continue
+        serial = _ioreg_serial(node)
+        found.add(
+            serial or f"{UNIDENTIFIED_PREFIX}{_ioreg_name(node)}:{product}"
+        )
+    return frozenset(found)
+
+
+class IoregUbertoothEnumerator:
+    """macOS enumerator; the command and how to run it are injectable."""
+
+    def __init__(
+        self,
+        argv: Sequence[str] = IOREG_ARGV,
+        *,
+        timeout_s: float = IOREG_TIMEOUT_S,
+        run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    ):
+        self.argv = tuple(argv)
+        self.timeout_s = timeout_s
+        self.name = Path(self.argv[0]).name if self.argv else "ioreg"
+        self._run = run
+
+    def serials(self) -> frozenset[str]:
+        try:
+            finished = self._run(
+                list(self.argv),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=self.timeout_s,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise EnumerationError(
+                f"cannot read USB devices from {self.name}: {error}"
+            ) from error
+        if finished.returncode != 0:
+            detail = (finished.stderr or b"").decode(errors="replace").strip()
+            raise EnumerationError(
+                f"{self.name} exited {finished.returncode}"
+                + (f": {detail.splitlines()[0][:200]}" if detail else "")
+            )
+        return ubertooth_serials_from_ioreg(finished.stdout or b"")
+
+
+def local_enumerator(platform: str | None = None) -> UbertoothEnumerator:
+    """The read-only enumerator for the machine this runs on.
+
+    Raises EnumerationError on a platform with neither sysfs nor ioreg, so
+    callers report why the board listing is unavailable instead of guessing.
+    """
+    platform = sys.platform if platform is None else platform
+    if platform.startswith("linux"):
+        return SysfsUbertoothEnumerator()
+    if platform == "darwin":
+        return IoregUbertoothEnumerator()
+    raise EnumerationError(f"USB enumeration is not supported on {platform}")
 
 
 @dataclass(frozen=True)

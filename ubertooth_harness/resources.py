@@ -9,8 +9,19 @@ from typing import Mapping, Protocol, Sequence
 
 import yaml
 
+from ubertooth_harness.rf import (
+    Placement,
+    PlacementError,
+    PlacementRequirement,
+    describe as describe_placement,
+    placement as parse_placement,
+)
+
 
 _ALIAS_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
+
+# Resource types with no radio, which may not record an RF placement.
+PLACELESS_TYPES = ("Host", "USB power controller")
 
 
 class RegistryError(ValueError):
@@ -39,7 +50,65 @@ NRF52840_DK = "nRF52840 DK"
 DK_ROLES = ("advertiser", "central", "peripheral")
 _DK_IDENTITY_KEYS = ("jlink serial", "BLE address", "serial device")
 _JLINK_SERIAL = re.compile(r"^[0-9]{6,12}$")
-_BLE_ADDRESS = re.compile(r"^[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}$")
+# A 48-bit device address, colon separated: a DK's BLE address and an
+# ESP32 peer's BD_ADDR are written the same way.
+_ADDRESS_48 = re.compile(r"^[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}$")
+
+
+ESP32_CLASSIC_PEER = "ESP32 Classic peer"
+# Roles the peer firmware (firmware/esp32-classic-peer) can take. One image
+# holds both and `role <name>` switches between them, so a board may declare
+# both; the initiator pages, so it is the piconet master.
+PEER_ROLES = ("acceptor", "initiator")
+# LAP, UAP and name are notes: the lab registry records what the board's
+# status reports, for a person reading it. The code derives the LAP and UAP
+# from the address, and classic_cases.py refuses a note that disagrees.
+_PEER_IDENTITY_KEYS = ("bridge serial", "BD_ADDR", "LAP", "UAP", "name",
+                       "serial device")
+# The bridge's serial as its /dev/serial/by-id name carries it. udev takes
+# that from the USB iSerial string as the device reports it, and a CP210x
+# serial can be reprogrammed to any string, so the case and the length are
+# the board's to choose: only the characters a by-id name can hold are
+# required here. It is used verbatim, in the device path and in the lease
+# key, so what is registered is what is looked for.
+_BRIDGE_SERIAL = re.compile(r"^[0-9A-Za-z_.:+-]{1,64}$")
+
+
+def _validate_peer(resource) -> None:
+    """An ESP32 Classic peer: bridge serial, BD_ADDR, and its by-id path."""
+    alias = resource.alias
+    unknown = sorted(set(resource.identity) - set(_PEER_IDENTITY_KEYS))
+    if unknown:
+        raise RegistryError(
+            f"{ESP32_CLASSIC_PEER} {alias} identity has unknown key(s) "
+            f"{', '.join(unknown)}; use {', '.join(_PEER_IDENTITY_KEYS)}"
+        )
+    if not _BRIDGE_SERIAL.fullmatch(resource.identity.get("bridge serial", "")):
+        raise RegistryError(
+            f"{ESP32_CLASSIC_PEER} {alias} requires a 'bridge serial' identity: "
+            "the serial as its /dev/serial/by-id name holds it (letters, "
+            "digits, and _.:+- only)"
+        )
+    # Both boards' addresses are needed: the initiator calls the acceptor's,
+    # and every case checks the tool's output against the master's LAP and UAP.
+    if not _ADDRESS_48.fullmatch(resource.identity.get("BD_ADDR", "")):
+        raise RegistryError(
+            f"{ESP32_CLASSIC_PEER} {alias} requires a 'BD_ADDR' identity "
+            "(the address its status reports), like C8:85:41:2A:1B:2A"
+        )
+    device = resource.identity.get("serial device")
+    if device is not None and not is_stable_serial_device(device):
+        raise RegistryError(
+            f"{ESP32_CLASSIC_PEER} {alias} serial device must be a "
+            "/dev/serial/by-id/ path: /dev/ttyUSB<n> is assignment order and "
+            "the two boards swap"
+        )
+    roles = set(resource.roles)
+    if not roles or not roles <= set(PEER_ROLES):
+        raise RegistryError(
+            f"{ESP32_CLASSIC_PEER} {alias} roles must be one or more of "
+            f"{', '.join(PEER_ROLES)}"
+        )
 
 
 def _validate_dk(resource) -> None:
@@ -56,7 +125,7 @@ def _validate_dk(resource) -> None:
             f"nRF52840 DK {alias} requires a 'jlink serial' identity (6-12 digits)"
         )
     address = resource.identity.get("BLE address")
-    if address is not None and not _BLE_ADDRESS.fullmatch(address):
+    if address is not None and not _ADDRESS_48.fullmatch(address):
         raise RegistryError(
             f"nRF52840 DK {alias} BLE address must look like C0:11:22:33:44:55"
         )
@@ -88,6 +157,9 @@ class Resource:
     capabilities: tuple[str, ...]
     power: Mapping[str, object]
     driver: str | None
+    # The unit's RF placement from ``rf:``; None when the registry does not
+    # record one, which rf.py reads as an ordinary unit on the bench.
+    rf: Placement | None = None
 
 
 @dataclass(frozen=True)
@@ -104,10 +176,29 @@ class ResourceRegistry(Protocol):
     def get(self, alias: str) -> Resource:
         """Return one registered resource."""
 
-    def resolve_hardware(
-        self, host: str, resource_type: str, selector: str, role: str | None = None
+    def hardware(self, host: str, resource_type: str) -> tuple[str, ...]:
+        """Every resource of this type attached to the host, by alias."""
+
+    def placed(
+        self,
+        host: str,
+        resource_type: str,
+        placement: PlacementRequirement,
+        role: str | None = None,
     ) -> tuple[str, ...]:
-        """Resolve default, each, or explicit hardware deterministically."""
+        """Those of them whose RF placement satisfies the requirement, and
+        which may be bound to ``role`` when one is given."""
+
+    def resolve_hardware(
+        self,
+        host: str,
+        resource_type: str,
+        selector: str,
+        role: str | None = None,
+        placement: PlacementRequirement | None = None,
+    ) -> tuple[str, ...]:
+        """Resolve default, each, or explicit hardware deterministically,
+        restricted to resources whose RF placement satisfies ``placement``."""
 
 
 class FileResourceRegistry:
@@ -142,6 +233,12 @@ class FileResourceRegistry:
             ):
                 if not isinstance(field_value, dict):
                     raise RegistryError(f"resource {alias}.{field_name} must be a mapping")
+            placement = None
+            if value.get("rf") is not None:
+                try:
+                    placement = parse_placement(value["rf"])
+                except PlacementError as error:
+                    raise RegistryError(f"resource {alias}: {error}") from error
             resources[alias] = Resource(
                 alias=alias,
                 type=resource_type,
@@ -153,12 +250,20 @@ class FileResourceRegistry:
                 capabilities=tuple(value.get("capabilities", ())),
                 power=MappingProxyType(dict(power)),
                 driver=value.get("driver"),
+                rf=placement,
             )
         return cls(resources)
 
     def _validate(self) -> None:
         identities = {}
         for resource in self.resources.values():
+            if resource.rf is not None and resource.type in PLACELESS_TYPES:
+                # A placement describes a radio on the bench; a computer and
+                # a hub have none, and no test selects either by placement.
+                raise RegistryError(
+                    f"resource {resource.alias} is a {resource.type} and cannot "
+                    "have an rf placement"
+                )
             if resource.type == "Host":
                 if resource.platform not in ("linux", "macos"):
                     raise RegistryError(
@@ -202,6 +307,8 @@ class FileResourceRegistry:
         for resource in self.resources.values():
             if resource.type == NRF52840_DK:
                 _validate_dk(resource)
+            if resource.type == ESP32_CLASSIC_PEER:
+                _validate_peer(resource)
         used_power_ports = {}
         for resource in self.resources.values():
             if (
@@ -299,19 +406,69 @@ class FileResourceRegistry:
                 raise RegistryError(f"resource {alias} is not a Host")
         return aliases
 
-    def resolve_hardware(
-        self, host: str, resource_type: str, selector: str, role: str | None = None
-    ) -> tuple[str, ...]:
-        host_resource = self.get(host)
-        if host_resource.type != "Host":
-            raise RegistryError(f"resource {host} is not a Host")
-        eligible = tuple(
+    def hardware(self, host: str, resource_type: str) -> tuple[str, ...]:
+        """Every resource of this type attached to the host, by alias."""
+        return tuple(
             sorted(
                 resource.alias
                 for resource in self.resources.values()
                 if resource.type == resource_type and resource.attached_to == host
             )
         )
+
+    def placed(
+        self,
+        host: str,
+        resource_type: str,
+        placement: PlacementRequirement,
+        role: str | None = None,
+    ) -> tuple[str, ...]:
+        """Those of them whose RF placement satisfies the requirement.
+
+        With a role, only those that may also be bound to it, so a caller
+        asking whether the host can place a role gets the same answer
+        ``resolve_hardware`` will give.
+        """
+        return tuple(
+            alias
+            for alias in self.hardware(host, resource_type)
+            if placement.matches(self.get(alias).rf)
+            and self._takes_role(self.get(alias), role)
+        )
+
+    def _placements(self, aliases) -> str:
+        """What each of these resources is placed as, for a refusal message."""
+        return "; ".join(
+            f"{alias} has {describe_placement(self.get(alias).rf)}" for alias in aliases
+        ) or "none is registered"
+
+    def resolve_hardware(
+        self,
+        host: str,
+        resource_type: str,
+        selector: str,
+        role: str | None = None,
+        placement: PlacementRequirement | None = None,
+    ) -> tuple[str, ...]:
+        host_resource = self.get(host)
+        if host_resource.type != "Host":
+            raise RegistryError(f"resource {host} is not a Host")
+        eligible = self.hardware(host, resource_type)
+        # A requirement narrows the choice before the selector is read:
+        # 'default' takes the host's default only when it satisfies the
+        # requirement, and 'each' covers the matching resources alone.
+        # Role-filtered, so a resource that could never take the role is not
+        # offered as the one that satisfies the placement.
+        matching = (
+            self.placed(host, resource_type, placement, role) if placement else ()
+        )
+
+        def refuse_unplaced():
+            raise RegistryError(
+                f"host {host} has no {resource_type} with "
+                f"{placement.describe()} ({self._placements(eligible)})"
+            )
+
         if selector == "default":
             # A test that binds several resources of one type (the connection
             # pair's central and peripheral) needs a default per role, so the
@@ -328,12 +485,24 @@ class FileResourceRegistry:
                 raise RegistryError(
                     f"default {alias} is not a {resource_type} attached to {host}"
                 )
+            if placement and alias not in matching:
+                if not matching:
+                    refuse_unplaced()
+                # The host's default is not placed as this role needs, so the
+                # lowest-alias resource that is takes the role instead. The
+                # run record and the report name the resource used and the
+                # requirement it was chosen for.
+                alias = matching[0]
             self._declares_role(self.get(alias), role)
             return (alias,)
         if selector == "each":
             if not eligible:
                 raise RegistryError(f"host {host} has no {resource_type} resources")
-            return eligible
+            if not placement:
+                return eligible
+            if not matching:
+                refuse_unplaced()
+            return matching
         if selector in ("any", "random"):
             raise RegistryError(f"ambiguous selector '{selector}' is unsupported")
         resource = self.get(selector)
@@ -341,19 +510,33 @@ class FileResourceRegistry:
             raise RegistryError(
                 f"resource {selector} is not a {resource_type} attached to {host}"
             )
+        # The role first: a resource excluded from `matching` for its role
+        # would otherwise be refused for its placement, which is not why.
         self._declares_role(resource, role)
+        if placement and selector not in matching:
+            # An explicit alias the plan asked for: a placement it cannot
+            # satisfy is a mistake in the plan, not a resource to swap out.
+            raise RegistryError(
+                f"resource {selector} does not have {placement.describe()} "
+                f"(it has {describe_placement(resource.rf)})"
+            )
         return (selector,)
 
     @staticmethod
-    def _declares_role(resource, role: str | None) -> None:
-        """A resource that declares roles may only be bound to one of them.
+    def _takes_role(resource, role: str | None) -> bool:
+        """Whether this resource may be bound to the role.
 
         A resource with no roles (an Ubertooth) is bound by type alone, so
-        nothing is checked; a DK registered as the peripheral must not be
-        handed to a test that wants an advertiser, which would otherwise show
-        up only as a capture that holds nothing.
+        anything goes; a DK registered as the peripheral must not be handed
+        to a test that wants an advertiser, which would otherwise show up
+        only as a capture that holds nothing.
         """
-        if role is None or not resource.roles or role in resource.roles:
+        return role is None or not resource.roles or role in resource.roles
+
+    @classmethod
+    def _declares_role(cls, resource, role: str | None) -> None:
+        """Refuse a resource that declares roles and not this one."""
+        if cls._takes_role(resource, role):
             return
         raise RegistryError(
             f"resource {resource.alias} declares the role(s) "

@@ -506,14 +506,17 @@ class FailureSummaryTests(ControllerTestCase):
             await wait_until(lambda: self.controller.read_events(self.controller.runs["run-1"]))
         status, payload, _ = await self.http("GET", "/api/runs/run-1")
         self.assertEqual(200, status)
-        # One per board the planner selected, each with its estimate.
+        # One per board the planner selected, each with its estimate. No run
+        # has finished on this target, so the catalog estimate stands.
         self.assertEqual(
-            [{"invocation_id": "001-Exclusive Ubertooth topology",
-              "test_name": "Exclusive Ubertooth topology", "estimated_s": 13.0},
-             {"invocation_id": "002-Exclusive Ubertooth topology",
-              "test_name": "Exclusive Ubertooth topology", "estimated_s": 13.0}],
+            [{"invocation_id": f"00{n}-Exclusive Ubertooth topology",
+              "test_name": "Exclusive Ubertooth topology", "estimated_s": 15.0,
+              "catalog_estimated_s": 15.0, "estimate_source": "catalog",
+              "estimate_samples": 0, "estimate_scaled": False}
+             for n in (1, 2)],
             payload["invocations"],
         )
+        self.assertEqual([], payload["stages"])
 
     def test_skipped_tests_are_not_failures_and_split_lines_are_joined(self):
         def record(kind, status=None, **details):
@@ -569,6 +572,12 @@ class PageWiringTests(unittest.TestCase):
         for text in (self.html, self.js, self.css):
             self.assertNotRegex(text, r"(?i)(https?:)?//[a-z0-9.-]+\.[a-z]{2,}/")
             self.assertNotIn("@import", text)
+
+    def test_the_live_view_closes_a_build_step_with_its_outcome(self):
+        # The step's own status and reason, as report.md's transcript shows
+        # them (`--- <step> EXIT: <status>: <reason> ---`).
+        self.assertIn('kind === "build_step_finished"', self.js)
+        self.assertRegex(self.js, r'pushLog\(`--- \$\{details\.step_name.*EXIT: \$\{status\}')
 
     def test_script_sends_the_commit_it_listed(self):
         self.assertIn("commit: chosen ? chosen.commit : null", self.js)

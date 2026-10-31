@@ -33,6 +33,13 @@ Command contracts below come from the Ubertooth fork sources:
   ``-c2426 -c``, ``-c -c2426``, ``-a5 -a``, ``-l1 -l``, ``-d1 -d`` (fork
   5b45b3e, SqueakyFloors/ubertooth#228; before it the later option replaced
   the earlier one and the set was dropped). ``-z`` always kept both.
+- ``-V`` is the version command and ends the command: since fork f898fe5
+  (SqueakyFloors/ubertooth#813) ``ubertooth-util`` prints the host tools'
+  version and the board's firmware version and build, then returns, before
+  any identity query runs. So it does not compose with the other reads, and
+  ``-V -s`` prints no serial line. Its firmware lines carry labels of their
+  own (``Firmware build: ...``), where the old ``-V`` printed the bare build
+  string.
 - ``-z`` (set or read) with a mode option is refused (fork 4ed4a1d).
 - ``-S`` requests idle mode. From idle it changes nothing, so settings persist
   between idle commands. Leaving an active mode (xmas, range test, repeater,
@@ -69,10 +76,11 @@ from ubertooth_harness import capturefile
 from ubertooth_harness.cases import ALTERNATED_ROLE_PREFIX, CommandCase, guard_roles
 from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
-    COMPILE_INFO_PATTERN,
     FIRMWARE_PATTERN,
+    HOST_VERSION_TIMEOUT_S,
     IMAGE_NAME_PATTERN,
     PART_ID_PATTERN,
+    VERSION_ANSWER,
     serial_pattern,
 )
 from ubertooth_harness.stateful import (
@@ -841,9 +849,12 @@ def radio_setting_cases(arguments, _resources, resource_identities):
 # ---------------------------------------------------------------------------
 # Read-only same-command compositions
 
+# The reads that compose: each adds its own lines to one command's output.
+# -V is not one of them. Since fork f898fe5 (#813) it is the version command
+# and ends the command before any query runs, so it is covered on its own
+# below instead.
 _QUERY_OPTIONS = (
     ("-v", "firmware", FIRMWARE_PATTERN),
-    ("-V", "compile", COMPILE_INFO_PATTERN),
     ("-s", "serial", None),
     ("-p", "part", PART_ID_PATTERN),
     ("-b", "board", BOARD_ID_PATTERN),
@@ -854,6 +865,37 @@ _QUERY_OPTIONS = (
     ("-d", "all-leds", r"RX LED status : [01]\s+TX LED status : [01]"),
 )
 _USR_LED_LINE = r"USR LED status: [01]"
+# The case ids of the -V cases, which are not option compositions. The query
+# goes after -V in one and before it in the other: the fork sets the flags
+# while it reads the command line and acts only once the whole line has
+# parsed, so the order must make no difference.
+VERSION_CASES = {
+    "version-ends-the-command": ("-V", "-s"),
+    "version-ends-the-command-written-last": ("-s", "-V"),
+}
+
+
+def _version_case(case_id, options, serial):
+    """-V beside a query answers the version and nothing else.
+
+    Since fork f898fe5 (#813) -V is the version command: ubertooth-util
+    returns as soon as it has printed the answer, before the identity queries
+    run. So -V with -s prints the version answer and no serial line, whichever
+    order they were written in, and the answer carries labels of its own
+    ("Firmware build: ...") rather than the bare build string the old -V
+    printed.
+    """
+    return CommandCase(
+        case_id,
+        f"{' '.join(options)} answers the version alone",
+        _util(serial, *options),
+        (
+            VERSION_ANSWER,
+            # -V ended the command, so -s never ran.
+            rf"\A(?![\s\S]*{serial_pattern(serial)})",
+        ),
+        timeout_s=HOST_VERSION_TIMEOUT_S,
+    )
 
 
 def _query_patterns(options, serial):
@@ -880,13 +922,7 @@ def _query_case(case_id, name, options, serial):
 def util_composition_cases(arguments, _resources, resource_identities):
     serial = _serial(resource_identities, "Ubertooth util compositions")
     every = tuple(option for option, _label, _pattern in _QUERY_OPTIONS)
-    cases = [
-        _query_case(
-            "documented-version-composition",
-            "Documented -v -V composition",
-            ("-v", "-V"),
-            serial,
-        ),
+    compositions = [
         _query_case(
             "full-readback-composition",
             "Every read-only report in one command",
@@ -894,8 +930,9 @@ def util_composition_cases(arguments, _resources, resource_identities):
             serial,
         ),
     ]
+    cases = [_version_case(case_id, options, serial)
+             for case_id, options in VERSION_CASES.items()] + compositions
     if arguments["coverage"] == "comprehensive":
-        covered = {frozenset(case.argv[3:]) for case in cases}
         cases.append(
             # Two -U name two boards for one command, so it is refused before
             # either is opened; the last one used to be selected.
@@ -908,9 +945,8 @@ def util_composition_cases(arguments, _resources, resource_identities):
             )
         )
         labels = {option: label for option, label, _pattern in _QUERY_OPTIONS}
+        # Every pair, since the only composition above asks for all nine.
         for first, second in compatible_pairs(every):
-            if frozenset((first, second)) in covered:
-                continue
             cases.append(
                 _query_case(
                     f"pair-{labels[first]}-{labels[second]}",
@@ -1600,8 +1636,9 @@ def btle_conflict_cases(_arguments, _resources, resource_identities):
 # Guard boards: every other registered Ubertooth on the host must be untouched
 #
 # Guards are read with queries only (no -S, no set option): firmware revision
-# and API, firmware compile info (its build timestamp also catches a
-# same-revision reflash), and every setting these tests change. The expected
+# and API, the version answer (-V, whose "Firmware build:" line carries a
+# build timestamp, so a same-revision reflash is caught too), and every
+# setting these tests change. The expected
 # value of each check is the guard's own baseline read before the test's
 # first case.
 #
@@ -1652,7 +1689,8 @@ GUARD_FIRMWARE_PATTERN = (
     r"Firmware version:\s+(?P<value>"
     rf"{IMAGE_NAME_PATTERN}\S+\s+\(API:[0-9a-fA-F]+\.[0-9a-fA-F]+\))"
 )
-_GUARD_API_RE = re.compile(r"\(API:(?P<major>[0-9a-fA-F]+)\.(?P<minor>[0-9a-fA-F]+)\)")
+API_PATTERN = r"\(API:(?P<major>[0-9a-fA-F]+)\.(?P<minor>[0-9a-fA-F]+)\)"
+_GUARD_API_RE = re.compile(API_PATTERN)
 # Same shape the preflight compile-info check requires.
 GUARD_COMPILE_INFO_PATTERN = r"(?P<value>\bubertooth\s+\S+\s+\([^\n]*\S)"
 GUARD_READBACK = (

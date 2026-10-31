@@ -39,6 +39,7 @@ from ubertooth_harness.report import load_events, render_run
 from ubertooth_harness.resources import STARTECH_DRIVER, FileResourceRegistry
 from ubertooth_harness.sequencer import NamedTestSequencer
 
+from tests import watchdog_samples
 from tests.test_sequencer import CollectSink, run_contract
 
 SERIALS = {
@@ -145,8 +146,11 @@ class Lab:
 
 def multiple_devices(seen):
     """libubertooth's no-selector output with more than one board (stderr)."""
-    return "multiple Ubertooth devices found! Use '-U' to specify device number\n" + "".join(
-        f"  Device {i}: Serial No: {serial}\n" for i, serial in enumerate(seen)
+    # Fork 753269b: one "error: " line that says -U takes a serial too, then
+    # the boards indented under it, each as "  Device <index>: <serial>".
+    return ("error: multiple Ubertooth devices found; select one with "
+            "-U <index|serial>\n") + "".join(
+        f"  Device {i}: {serial}\n" for i, serial in enumerate(seen)
     )
 
 
@@ -167,6 +171,17 @@ class LabExecutor:
         stdout, stderr, code = "", "", 0
         if argv == ("ubertooth-util", "-V"):
             stdout = "Host tools version: libubertooth 1.1 (git-test)\n"
+        elif argv[0] == "ubertooth-util" and argv[-1] == "-w":
+            # The watchdog read selects its board, so several attached boards
+            # do not stop it; a board that is off answers nothing.
+            selected = argv[argv.index("-U") + 1] if "-U" in argv else (
+                seen[0] if len(seen) == 1 else ""
+            )
+            if selected and selected in seen:
+                stdout = watchdog_samples.report()
+            else:
+                stderr = watchdog_samples.BOARD_GONE.format(serial=selected)
+                code = 1
         elif len(seen) != 1 and argv[0] in ("ubertooth-util", "bash"):
             # ubertooth_start() opens no device, so the tool fails.
             stderr, code = multiple_devices(seen), 1
@@ -1231,11 +1246,18 @@ class RunSuiteCliIsolationTests(unittest.TestCase):
                     argv = argv[:1] + argv[3:]
                 # The compile identity of the board the check named. Bare -V
                 # is the host version check, which the base fake answers.
+                # -V is the version command and answers in full wherever it
+                # is asked (fork f898fe5): the host line, then this board's
+                # firmware version and build.
                 if selected and argv == ("ubertooth-util", "-V"):
                     self.commands.append(argv)
-                    return CommandResult(
-                        argv, 0, f"ubertooth {revision} (test@host)\n", "", 0.01, False, False
+                    answer = (
+                        f"Host tools version: libubertooth 1.1 ({revision})\n"
+                        "libbtbb loaded from: /p/lib/libbtbb.so.1\n"
+                        f"Firmware version: {revision} (API:1.07)\n"
+                        f"Firmware build: ubertooth {revision} (test@host)\n"
                     )
+                    return CommandResult(argv, 0, answer, "", 0.01, False, False)
                 result = super().run(argv, **kwargs)
                 return replace(result, stdout=result.stdout.replace("git-test", revision))
 

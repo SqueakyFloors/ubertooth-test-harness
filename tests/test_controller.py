@@ -1,6 +1,6 @@
 """Controller service on 127.0.0.1 with an ephemeral port and no hardware.
 
-Most tests drive the controller with a scripted protocol-v2 runner; one runs
+Most tests drive the controller with a scripted protocol-v3 runner; one runs
 the real target runner end to end with the Host-only plan the runner tests
 use.
 """
@@ -98,7 +98,7 @@ def event(run_id, sequence, event_type="test_started", status="running", **detai
 
 
 class FakeRunner:
-    """Scripted protocol-v2 runner over a real loopback WebSocket."""
+    """Scripted protocol-v3 runner over a real loopback WebSocket."""
 
     def __init__(self, port):
         self.url = f"ws://127.0.0.1:{port}/ws/runner"
@@ -201,7 +201,7 @@ class BindTests(ControllerTestCase):
         self.assertEqual({"127.0.0.1"}, addresses)
         status, payload, _ = await self.http("GET", "/")
         self.assertEqual(200, status)
-        self.assertEqual(2, payload["protocol_version"])
+        self.assertEqual(3, payload["protocol_version"])
         self.assertEqual("127.0.0.1", payload["bind"])
         self.assertIn("POST /api/targets/{host}/runs", payload["endpoints"])
         # No CDN-backed docs pages.
@@ -385,6 +385,40 @@ class RegistryTests(ControllerTestCase):
 
 class RunTests(ControllerTestCase):
 
+    async def test_flash_build_is_sent_and_recorded_only_with_build(self):
+        # (body, flash_build sent to the runner): flashing is the default
+        # when building and never applies to a run that does not build.
+        cases = (
+            ({"build": True}, True),
+            ({"build": True, "flash_build": False}, False),
+            ({"build": False, "flash_build": True}, False),
+            ({}, False),
+        )
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            for index, (body, expected) in enumerate(cases):
+                with self.subTest(body):
+                    post, message = await self.start_run(runner, **body)
+                    self.assertEqual(expected, message["flash_build"])
+                    run_id = f"flash-{index}"
+                    await runner.send(
+                        "run_accepted", request_id=message["request_id"], run_id=run_id
+                    )
+                    status, payload, _ = await post
+                    self.assertEqual(201, status, payload)
+                    self.assertEqual(expected, payload["run"]["flash_build"])
+                    record = json.loads(
+                        (self.results / run_id / "run.json").read_text()
+                    )
+                    self.assertEqual(expected, record["flash_build"])
+                    await runner.send(
+                        "run_error", request_id=message["request_id"], run_id=run_id,
+                        exit_code=2, reason="test",
+                    )
+                    await wait_until(
+                        lambda: self.controller.targets["Host_A"].active_run_id is None
+                    )
+
     async def test_run_is_dispatched_streamed_and_persisted(self):
         # Recorded only: the controller never reads the runner's directory.
         runner_dir = self.root / "runner-runs" / "run-1"
@@ -396,9 +430,9 @@ class RunTests(ControllerTestCase):
             )
             self.assertEqual("run", message["type"])
             self.assertEqual(
-                ("v1.2", COMMIT, "fast", "fast", ["Host version"], True),
+                ("v1.2", COMMIT, "fast", "fast", ["Host version"], True, True),
                 (message["ref"], message["commit"], message["plan"], message["suite"],
-                 message["tests"], message["build"]),
+                 message["tests"], message["build"], message["flash_build"]),
             )
             await runner.send("run_accepted", request_id=message["request_id"], run_id="run-1")
             status, payload, _ = await post
@@ -513,7 +547,11 @@ class RunTests(ControllerTestCase):
             await wait_until(
                 lambda: self.controller.targets["Host_A"].active_run_id is None
             )
-            # One outstanding start request per target.
+            # One outstanding start request per target. The reply timeout is
+            # read when the request arrives, so it is shortened before the
+            # one that has to expire, not after (issue #184); three seconds
+            # are still far longer than the loopback round trip below needs.
+            self.controller.reply_timeout_s = 3.0
             post, _ = await self.start_run(runner)
             status, payload, _ = await self.http(
                 "POST", "/api/targets/Host_A/runs",
@@ -521,7 +559,6 @@ class RunTests(ControllerTestCase):
             )
             self.assertEqual(409, status)
             self.assertIn("already pending", payload["detail"])
-            self.controller.reply_timeout_s = 0.1
             self.assertEqual(504, (await post)[0])
 
     async def test_invalid_run_requests(self):
@@ -533,6 +570,7 @@ class RunTests(ControllerTestCase):
                 {**base, "plan": "../etc/passwd"},
                 {**base, "extra": 1},
                 {**base, "build": "yes"},
+                {**base, "flash_build": "yes"},
                 {"ref": "main"},
             ):
                 with self.subTest(body):
@@ -1033,7 +1071,7 @@ class MalformedRunnerTests(ControllerTestCase):
             last_event_sequence=None, last_event_type=None,
         )
         for first in ("{bad json", heartbeat, b"\x00binary",
-                      json.dumps({"version": 2, "type": "register"})):
+                      json.dumps({"version": 3, "type": "register"})):
             with self.subTest(first=first):
                 self.assertEqual(1008, await self._closed_with(first))
         self.assertEqual({}, self.controller.targets)

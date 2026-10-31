@@ -36,6 +36,7 @@ import sys
 
 from ubertooth_harness import dfuimage
 from ubertooth_harness.cases import guard_roles
+from ubertooth_harness.outputfiles import search_lines, text_lines
 from ubertooth_harness.patterns import IMAGE_NAME_PATTERN
 from ubertooth_harness.stateful import (
     CAPTURE_DIR_KEY,
@@ -105,11 +106,11 @@ def _helper_step(step_id, name, *parts, pattern, timeout_s=10.0, mutates=False):
     """A dfuimage.py step. Its exit 1 is reported with the helper's own lines;
     ``pattern`` matches only the line it prints when the check holds."""
     def check(output):
-        if re.search(pattern, output):
+        if search_lines(output, pattern):
             return ""
         # Command records stay in the transcript; the reason keeps the
         # helper's own lines.
-        lines = [line.strip() for line in output.splitlines()
+        lines = [line.strip() for line in text_lines(output)
                  if line.strip() and not _RECORD_LINE.match(line)]
         if not lines:
             return "no output"

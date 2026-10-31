@@ -1,0 +1,69 @@
+name: Firmware
+
+# The nRF52840 DK role firmware, which the Test workflow does not compile: it
+# needs the nRF Connect SDK, so it is built in Nordic's toolchain image for
+# the version firmware/nrf52840dk/NCS_VERSION pins (#147). That image and the
+# SDK workspace are gigabytes, so this does not run on every push: it runs
+# when the firmware (or the script that builds it) changes, once a week in
+# case the pinned SDK or its image stops working, and by hand. It is
+# deliberately not a required check.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'firmware/nrf52840dk/**'
+      - 'scripts/ci.sh'
+      - '.github/workflows/firmware.yml'
+  pull_request:
+    paths:
+      - 'firmware/nrf52840dk/**'
+      - 'scripts/ci.sh'
+      - '.github/workflows/firmware.yml'
+  schedule:
+    # Mondays, 05:17 UTC.
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # The build itself is scripts/ci.sh firmware-dk, so it also runs off GitHub
+  # (scripts/local-ci.sh firmware-dk on any Linux host with docker); keep this
+  # file to runner setup only.
+  nrf52840dk:
+    runs-on: ubuntu-24.04
+    # Four builds at most: this tree, the base commit, and a repeat of each
+    # where the two images differ. The whole job, with the SDK workspace made
+    # from scratch and one build, took about 4 minutes when it was measured
+    # on 2026-10-31.
+    timeout-minutes: 60
+    steps:
+    # The whole history, so the commit a pull request is against is there to
+    # build and compare with (DK_BASE_REF below).
+    - uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+
+    - name: Build the DK role firmware
+      run: sh scripts/ci.sh firmware-dk
+      env:
+        # On a pull request, compare the image with the one the base commit
+        # builds and require a UTDK_FW_VERSION bump when it changed (#210).
+        # The base commit the event names, not the branch: the branch can
+        # advance while the job waits, and the comparison would then be
+        # against a tree this pull request was never written against. A job
+        # re-run can carry a base commit older than the merge commit it
+        # checks out; the version then differs and every board is reflashed
+        # anyway, so the step says that and compares nothing. Elsewhere (a
+        # push to main, the schedule, by hand) the expression is empty, there
+        # is nothing to compare against, and the step says so.
+        DK_BASE_REF: ${{ github.event.pull_request.base.sha }}
+
+    - name: The working tree is unchanged
+      run: test -z "$(git status --porcelain)" || { git status; exit 1; }

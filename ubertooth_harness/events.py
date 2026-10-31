@@ -10,6 +10,8 @@ import secrets
 import shlex
 from typing import Callable, Mapping, Protocol, Sequence, TextIO
 
+from ubertooth_harness.rawlog import line_tag
+
 
 EVENT_SCHEMA_VERSION = 1
 _MAX_DETAILS_BYTES = 16 * 1024
@@ -89,6 +91,10 @@ REPORT = "report.md"
 # The manifest record carries every invocation and identity, so it may exceed
 # the per-event limit; it is still bounded.
 MANIFEST_MAX_BYTES = 1024 * 1024
+# An output_checks record carries one entry per check a command's output was
+# read for, each with its pattern, so a step with many patterns may exceed
+# the per-event limit; it is still bounded.
+OUTPUT_CHECKS_MAX_BYTES = 64 * 1024
 
 
 class JsonlEventSink:
@@ -121,7 +127,7 @@ class TerminalEventSink:
     def _flush_partial(self) -> None:
         for name, text in self._partial.items():
             if text:
-                tag = "[E]" if name == "stderr" else "[O]"
+                tag, text = line_tag(name, text)
                 self.stream.write(f"{tag} {text}\n")
         self._partial = {"stdout": "", "stderr": ""}
 
@@ -137,8 +143,27 @@ class TerminalEventSink:
                 self.stream.write(f"[libbtbb pin] {message}\n")
             else:
                 self.stream.write(f"warning: {message}\n")
+        elif event.event_type == "watchdog":
+            for line in details.get("warnings", []):
+                self.stream.write(f"warning: {line}\n")
+            for line in details.get("notes", []):
+                self.stream.write(f"note: {line}\n")
+            if event.status == "failed" and details.get("reason"):
+                self.stream.write(f"error: {details['reason']}\n")
+        elif event.event_type == "watchdog_summary":
+            counts = ", ".join(
+                f"{board.get('resource')}: {board.get('resets')}"
+                for board in details.get("boards", [])
+                if board.get("resets")
+            )
+            if counts:
+                self.stream.write(
+                    f"\n[watchdog] boards that reset themselves: {counts}\n"
+                )
         elif event.event_type == "manifest":
             self.stream.write("\n[manifest recorded]\n")
+        elif event.event_type == "known_target":
+            self.stream.write(f"[M] {details.get('summary', '')}\n")
         elif event.event_type == "not_applicable":
             what = str(details.get("test_name", ""))
             if details.get("case_name"):
@@ -179,15 +204,18 @@ class TerminalEventSink:
             # Output arrives in chunks that need not end on a line boundary;
             # tag whole lines only.
             name = "stderr" if details.get("stream") == "stderr" else "stdout"
-            tag = "[E]" if name == "stderr" else "[O]"
             text = self._partial[name] + str(details.get("text", ""))
             *complete, self._partial[name] = text.split("\n")
             for part in complete:
-                self.stream.write(f"{tag} {part.rstrip(chr(13))}\n")
+                tag, part = line_tag(name, part.rstrip(chr(13)))
+                self.stream.write(f"{tag} {part}\n")
         elif event.event_type == "command_output_omitted":
+            from ubertooth_harness.outputfiles import output_file_list
+
             self._flush_partial()
             self.stream.write(
-                f"[M] output left out; full output in {details.get('output_file', '')}\n"
+                "[M] output left out; full output in "
+                f"{output_file_list(details)}\n"
             )
         elif event.event_type == "command_finished":
             from ubertooth_harness.executor import CommandResult

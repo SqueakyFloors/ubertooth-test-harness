@@ -31,6 +31,11 @@
     // ref option value ("<kind>:<name>") -> {name, kind, commit} as listed
     refOptions: new Map(),
     selected: null, // run_id shown in the live view
+    // run_id -> [{path, stream, bytes, lines, sha256, owner, checks}] as the
+    // run recorded them, and the page of the file open in the viewer.
+    files: new Map(),
+    openFile: null, // {run_id, path, page}
+    wantedFile: null, // a file named in the URL fragment, opened once loaded
     live: null, // {run_id, seen:Set, events:[], items:[], byInvocation:Map, log:[], partial, stage}
     socket: null,
     retry: 1000,
@@ -275,6 +280,8 @@
       suite: $("suite").value,
       tests: [],
       build: $("build").checked,
+      // Flashing applies only to a run that builds.
+      flash_build: $("build").checked && $("flash-build").checked,
     };
     if (!host || !body.ref || !body.plan || !body.suite) {
       status.textContent = "Choose a ref, plan, suite and target first.";
@@ -307,7 +314,7 @@
     return {
       run_id: runId, seen: new Set(), events: [], items: [],
       byInvocation: new Map(), log: [], partial: "", stage: "waiting",
-      invocations: null,
+      invocations: null, boards: new Map(),
     };
   }
 
@@ -316,8 +323,12 @@
   async function selectRun(runId, scroll = true) {
     if (!RUN_ID.test(String(runId))) return;
     state.selected = runId;
+    // The file open in the viewer belonged to the run being left.
+    state.openFile = null;
     // A link to this view: /ui/#run=<run_id>.
     window.history.replaceState(null, "", `#run=${runId}`);
+    const wanted = state.wantedFile;
+    state.wantedFile = null;
     state.live = newLive(runId);
     $("live-empty").hidden = true;
     $("live").hidden = false;
@@ -332,6 +343,8 @@
       for (const record of data.events) addEvent(runId, record, false);
       // Now that the run's plan is known, lay out its checklist and replay.
       rebuildChecklist();
+      await loadOutputFiles(runId);
+      if (wanted) await openOutputFile(runId, wanted, 0);
     } catch (error) {
       $("cancel-status").textContent = `Cannot load run: ${error.message}`;
     }
@@ -361,6 +374,7 @@
     }
     live.planned = Array.isArray(live.invocations) || Boolean(suite);
     live.byInvocation = new Map();
+    live.boards = new Map();
     // Records from the socket and from REST may interleave; replay in order.
     const events = [...live.events].sort((a, b) => a.sequence - b.sequence);
     live.events = [];
@@ -424,7 +438,14 @@
       if (counts && typeof counts === "object") {
         for (const value of Object.values(counts)) if (typeof value === "number") count += value;
       }
-      pushLog(`[... ${count} output lines left out; full output in ${String(details.output_file ?? "")} ...]`);
+      const saved = Array.isArray(details.output_files) ? details.output_files : [];
+      const names = saved.map((file) => String((file && file.path) ?? "")).join(", ");
+      pushLog(`[... ${count} output lines left out; full output in ${names} ...]`);
+    }
+    if (kind === "command_finished" || kind === "output_files") {
+      // A command just saved its output: refresh the list so the links
+      // appear during the run, not only when it is selected again.
+      if (details.output_files || kind === "output_files") loadOutputFiles(runId);
     }
     if (kind === "build_started") live.stage = "building";
     else if (kind === "preflight_started") live.stage = "preflight";
@@ -438,6 +459,23 @@
     if (kind === "libbtbb_pin" && status !== "passed") {
       // The libbtbb differs from the fork's install.sh pin, or was not compared.
       pushLog(`warning: ${String(details.message ?? "")}`);
+    }
+    if (kind === "watchdog") {
+      // The firmware reset a board, or did not: a count, never a failure.
+      const serial = String(details.serial ?? "");
+      const board = live.boards.get(serial) || {
+        resource: String(details.resource ?? ""), serial, resets: 0, state: "", warning: "",
+      };
+      board.resets += typeof details.new_resets === "number" ? details.new_resets : 0;
+      board.state = String(details.state ?? "");
+      const warnings = Array.isArray(details.warnings) ? details.warnings : [];
+      if (warnings.length) board.warning = String(warnings[warnings.length - 1]);
+      live.boards.set(serial, board);
+      for (const line of warnings) pushLog(`warning: ${String(line)}`);
+      for (const line of Array.isArray(details.notes) ? details.notes : []) {
+        pushLog(`note: ${String(line)}`);
+      }
+      if (status === "failed" && details.reason) pushLog(`error: ${String(details.reason)}`);
     }
     if (kind === "test_started") {
       const name = String(details.test_name ?? "");
@@ -453,6 +491,14 @@
       if (!live.testsStarted && record.timestamp) live.testsStarted = record.timestamp;
       live.byInvocation.set(String(details.invocation_id), item);
       pushLog(`=== TEST ${name} on ${details.host ?? ""} ===`);
+    } else if (kind === "known_target") {
+      // Which device the harness drove for this test, or that it had none;
+      // the controller sends the summary the report shows.
+      // The full line where there is a target; a short one otherwise, so a
+      // suite of plain tests does not repeat a sentence down the column.
+      const found = Array.isArray(details.targets) && details.targets.length > 0;
+      const item = live.byInvocation.get(String(details.invocation_id));
+      if (item) item.target = found ? String(details.summary ?? "") : "no known target";
     } else if (kind === "not_applicable") {
       // Left out before the run: the host cannot run it (not a skip or failure).
       const name = String(details.test_name ?? "");
@@ -478,7 +524,11 @@
       }
       pushLog(`=== TEST ${details.test_name ?? ""}: ${status}${details.reason ? ": " + details.reason : ""} ===`);
     } else if (kind === "build_step_started") {
-      pushLog(`+++ ${details.step_name ?? details.step_id ?? ""} +++`);
+      pushLog(`+++ ${details.step_name || details.step_id || ""} +++`);
+    } else if (kind === "build_step_finished") {
+      // The step's own outcome: it may have accepted a command that exited
+      // non-zero, so this is not the status of its last command.
+      pushLog(`--- ${details.step_name || details.step_id || ""} EXIT: ${status}${details.reason ? ": " + details.reason : ""} ---`);
     } else if (kind === "build_finished" || kind === "preflight_finished") {
       pushLog(`=== ${kind.replace("_finished", "").toUpperCase()}: ${status}${details.reason ? ": " + details.reason : ""} ===`);
     } else if (kind === "run_started") {
@@ -487,6 +537,145 @@
       pushLog(`=== RUN ${status}${details.failure_reason ? ": " + details.failure_reason : ""} ===`);
     }
     if (render) renderLive();
+  }
+
+  // ----- saved output files ----------------------------------------------
+  //
+  // The files the run saved are listed from its own records (so the list
+  // costs nothing to build) and read a page at a time, because one file can
+  // be a soak's whole output. The viewer is deliberately unlike the log
+  // tail: black on white in a fixed-width font, because it shows a saved
+  // file and not a live stream.
+
+  function fileSize(count) {
+    const units = [["GiB", 1 << 30], ["MiB", 1 << 20], ["KiB", 1 << 10]];
+    for (const [name, step] of units) {
+      if (count >= step) return `${(count / step).toFixed(1)} ${name}`;
+    }
+    return `${count} bytes`;
+  }
+
+  async function loadOutputFiles(runId) {
+    try {
+      const data = await api("GET", `${runPath(runId)}/files`);
+      if (!Array.isArray(data.files)) return;
+      state.files.set(runId, data.files);
+      renderLive();
+    } catch (error) {
+      // An older run, or a controller that has no files for it: the
+      // checklist simply shows no links.
+    }
+  }
+
+  function filesOf(runId, invocationId) {
+    const files = state.files.get(runId) || [];
+    return files.filter((file) => {
+      const owner = (file && file.owner) || {};
+      return String(owner.invocation_id ?? "") === String(invocationId ?? "");
+    });
+  }
+
+  // The files that belong to no test: the build's and the preflight's, which
+  // is where a failed build's compiler output is.
+  function runFiles(runId) {
+    const files = state.files.get(runId) || [];
+    return files.filter((file) => !((file && file.owner) || {}).invocation_id);
+  }
+
+  // One link per file this test saved. A file a check failed on is marked,
+  // so a reader looking at a failed test knows which one to open.
+  function fileList(item) {
+    const live = state.live;
+    if (!live) return null;
+    const files = item.invocation_id
+      ? filesOf(live.run_id, item.invocation_id) : [];
+    if (!files.length) return null;
+    return fileLinks(live.run_id, files);
+  }
+
+  function fileLinks(runId, files) {
+    return el("ul", { className: "check-files" }, ...files.map((file) => {
+      const checks = Array.isArray(file.checks) ? file.checks : [];
+      const failed = checks.filter((check) => check && check.reason).length;
+      const name = String(file.path).replace(/^output\//, "");
+      const about = `${file.stream} · ${fileSize(file.bytes)} · ${checks.length} check`
+        + `${checks.length === 1 ? "" : "s"}`
+        + (failed ? `, ${failed} failed` : "");
+      // A run the controller did not carry out itself keeps its output files
+      // on the target, so the list is complete but there is nothing to open.
+      if (file.readable === false) {
+        return el("li", {}, el("span", {
+          className: failed ? "hint file-failed" : "hint",
+          title: `${about} · saved on the target, not on the controller`,
+          text: `${name} (on the target)`,
+        }));
+      }
+      return el("li", {},
+        el("button", {
+          type: "button",
+          className: failed ? "link file-failed" : "link",
+          title: about,
+          onclick: () => openOutputFile(runId, String(file.path), 0),
+          text: name,
+        }));
+    }));
+  }
+
+  async function openOutputFile(runId, path, offset) {
+    $("live-file").hidden = false;
+    $("file-status").textContent = "Loading…";
+    const query = `path=${encodeURIComponent(path)}&offset=${Math.max(0, offset)}`;
+    try {
+      const page = await api("GET", `${runPath(runId)}/file?${query}`);
+      state.openFile = { run_id: runId, path, page };
+      renderOutputFile();
+    } catch (error) {
+      state.openFile = null;
+      $("file-view").textContent = "";
+      $("file-about").textContent = path;
+      $("file-status").textContent = `Cannot read this file: ${error.message}`;
+    }
+  }
+
+  function renderOutputFile() {
+    const open = state.openFile;
+    const live = $("live");
+    if (!open) {
+      $("live-file").hidden = true;
+      live.classList.remove("live-showing-file");
+      return;
+    }
+    live.classList.add("live-showing-file");
+    const page = open.page;
+    const first = page.offset + 1;
+    const last = page.offset + page.length;
+    const changed = page.file_bytes !== page.bytes;
+    $("file-about").textContent =
+      `${open.path} · ${page.stream} · ${fileSize(page.bytes)}`
+      + (page.lines ? ` · ${page.lines} lines` : "")
+      + ` · SHA-256 ${page.sha256}`
+      + (changed
+        ? ` · WARNING: ${fileSize(page.file_bytes)} on disk now, so this is `
+          + "not the file the run recorded"
+        : "");
+    $("file-status").textContent = page.length
+      ? `bytes ${first}–${last} of ${page.file_bytes}`
+      : "this file is empty";
+    $("file-previous").disabled = page.offset <= 0;
+    $("file-next").disabled = Boolean(page.eof);
+    const view = $("file-view");
+    view.textContent = String(page.text ?? "");
+    view.scrollTop = 0;
+  }
+
+  function pageOutputFile(direction) {
+    const open = state.openFile;
+    if (!open) return;
+    const step = open.page.page_bytes || 1;
+    const offset = direction < 0
+      ? Math.max(0, open.page.offset - step)
+      : open.page.offset + (open.page.length || step);
+    openOutputFile(open.run_id, open.path, offset);
   }
 
   function itemStatus(item, run) {
@@ -515,6 +704,25 @@
       [el("dt", { text: term }), el("dd", {}, value)]));
     $("cancel-button").hidden = run.status !== "running";
 
+    // Per board: how many times the firmware's watchdog reset it during this
+    // run, and the last warning if there was one. Hidden until a board is read.
+    const boards = [...live.boards.values()];
+    $("live-boards").hidden = boards.length === 0;
+    $("boards").replaceChildren(...boards.map((board) => el("li", {
+      className: board.resets ? "board board-reset" : "board",
+    },
+      el("span", { className: "board-name", text: board.resource || board.serial }),
+      el("span", {
+        className: "board-resets",
+        // The count always, since it matters most on a board whose last read
+        // failed; then what that read found, when it was not a record.
+        text: ` ${board.resets} self-reset${board.resets === 1 ? "" : "s"}`
+          + (board.state === "read" || !board.state ? ""
+            : board.state === "absent" ? "; did not answer"
+            : `; watchdog ${board.state}`),
+      }),
+      board.warning ? el("span", { className: "reason", text: ` — ${board.warning}` }) : null)));
+
     $("checklist").replaceChildren(...live.items.map((item) => {
       const shown = itemStatus(item, run);
       return el("li", {
@@ -524,8 +732,15 @@
         statusBadge(shown), " ", el("span", { className: "check-name", text: item.name }),
         item.estimated_s !== null && item.estimated_s !== undefined
           ? el("span", { className: "hint check-estimate", text: ` (about ${formatSeconds(item.estimated_s)})` }) : null,
-        item.reason ? el("span", { className: "reason", text: ` — ${item.reason}` }) : null);
+        item.target ? el("span", { className: "reason check-target", text: item.target }) : null,
+        item.reason ? el("span", { className: "reason", text: ` — ${item.reason}` }) : null,
+        fileList(item));
     }));
+    const runOwned = runFiles(live.run_id);
+    if (runOwned.length) {
+      $("checklist").append(el("li", { className: "check-note" },
+        "Build and preflight output: ", fileLinks(live.run_id, runOwned)));
+    }
     if (!live.items.length) {
       $("checklist").replaceChildren(el("li", {
         className: "check-note",
@@ -714,17 +929,37 @@
     });
   }
 
+  // Flash needs Build: disabled, with a note, while Build is unticked.
+  function syncFlashBuild() {
+    const build = $("build").checked;
+    $("flash-build").disabled = !build;
+    $("flash-build-note").hidden = build;
+  }
+
   function start() {
     $("run-form").addEventListener("submit", submitRun);
+    $("build").addEventListener("change", syncFlashBuild);
+    syncFlashBuild();
     $("refs-reload").addEventListener("click", loadRefs);
     $("plan").addEventListener("change", renderSuites);
     $("suite").addEventListener("change", renderSuiteTests);
     $("cancel-button").addEventListener("click", cancelRun);
+    $("file-previous").addEventListener("click", () => pageOutputFile(-1));
+    $("file-next").addEventListener("click", () => pageOutputFile(1));
+    $("file-close").addEventListener("click", () => {
+      state.openFile = null;
+      renderOutputFile();
+    });
     renderTargetSelect();
     loadRefs();
     loadPlans();
-    const linked = /^#run=(.+)$/.exec(window.location.hash);
-    if (linked && RUN_ID.test(linked[1])) state.selected = linked[1];
+    // /ui/#run=<run_id> shows that run; &file=<path> also opens that saved
+    // file in the viewer, so a file view can be linked to and reopened.
+    const linked = /^#run=([^&]+)(?:&file=(.+))?$/.exec(window.location.hash);
+    if (linked && RUN_ID.test(linked[1])) {
+      state.selected = linked[1];
+      if (linked[2]) state.wantedFile = decodeURIComponent(linked[2]);
+    }
     connect();
     window.setInterval(renderClock, 1000);
   }

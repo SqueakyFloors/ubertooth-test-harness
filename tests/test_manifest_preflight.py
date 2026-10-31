@@ -75,7 +75,15 @@ class FakeExecutor:
         elif command[-1] == "-v":
             output = f"Firmware version: {self.revision} (API:1.07)\n"
         elif command[-1] == "-V":
-            output = f"ubertooth {self.revision} (builder@host) timestamp\n"
+            # The whole answer, which is what -V prints for one board since
+            # fork f898fe5; the compile-info check reads its last line.
+            output = (
+                f"Host tools version: libubertooth 1.1 ({self.revision}), "
+                "libbtbb 1.0 (git-btbb)\n"
+                "libbtbb loaded from: /p/lib/libbtbb.so.1\n"
+                f"Firmware version: {self.revision} (API:1.07)\n"
+                f"Firmware build: ubertooth {self.revision} (builder@host) timestamp\n"
+            )
         elif command[-1] == "-s":
             serial = "wrong" if self.wrong_serial else "abcdef0123456789"
             output = f"Serial No: {serial}\n"
@@ -410,6 +418,31 @@ class PreflightTests(unittest.TestCase):
                 source.commit, persisted["details"]["manifest"]["sources"][0]["commit"]
             )
 
+    def test_firmware_check_accepts_the_application_image_name(self):
+        # Fork 730b4f5 (#523): -v names the image ahead of the revision.
+        with tempfile.TemporaryDirectory() as directory:
+            _root, source, _manifest, checks = prepare_preflight(directory)
+            check = next(c for c in checks if c.name == "Firmware version")
+            revision = source.expected_revision
+
+            def failure(text):
+                return check.result_failure(
+                    CommandResult(check.argv, 0, text, "", 0.01, False))
+
+            self.assertFalse(failure(f"Firmware version: {revision} (API:1.35)\n"))
+            self.assertFalse(
+                failure(f"Firmware version: bluetooth_rxtx {revision} (API:1.35)\n"))
+            # Another image at the run's own commit: the revisions name no
+            # difference, so the reason says what the output had to match.
+            for other in (f"btbr {revision}", f"bluetooth_rxtx git-other {revision}"):
+                self.assertIn("identity mismatch",
+                              failure(f"Firmware version: {other} (API:1.35)\n"))
+            # A different revision is named as one, with how to fix it.
+            other_revision = failure(
+                f"Firmware version: bluetooth_rxtx {revision}x (API:1.35)\n")
+            self.assertIn(f"runs {revision}x, the tools are {revision}",
+                          other_revision)
+
     def test_preflight_failure_prevents_test_start(self):
         with tempfile.TemporaryDirectory() as directory:
             root, source, manifest, checks = prepare_preflight(directory)
@@ -676,7 +709,7 @@ class RevisionAbbreviationTests(unittest.TestCase):
 
         self.assertEqual("", check.result_failure(result))
 
-    def test_a_mismatch_reason_names_the_pattern_that_failed(self):
+    def test_a_mismatch_reason_says_what_was_expected(self):
         check = PreflightCheck(
             check_id="preflight-002-firmware-version",
             name="Firmware version",
@@ -697,6 +730,22 @@ class RevisionAbbreviationTests(unittest.TestCase):
         )
 
         reason = check.result_failure(result)
+
+        # A readable revision is named along with the one the tools expect.
+        self.assertIn("UT_Linux0 runs git-1c7f06d6", reason)
+        self.assertIn("git-other", reason)
+
+        # Output with no revision in it falls back to naming the pattern.
+        unreadable = CommandResult(
+            argv=check.argv,
+            returncode=0,
+            stdout="Firmware version: unknown\n",
+            stderr="",
+            duration_s=0.05,
+            timed_out=False,
+        )
+
+        reason = check.result_failure(unreadable)
 
         self.assertIn("identity mismatch for UT_Linux0", reason)
         self.assertIn("git\\-other", reason)

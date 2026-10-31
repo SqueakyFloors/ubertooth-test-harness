@@ -270,14 +270,38 @@ def packet_record_indices(lap: int | None = None) -> list[int]:
 
 # --- output checks ------------------------------------------------------------
 
+# The noise figure and the signal-to-noise ratio beside it are either both
+# figures or both the word `none`: one comes from the other, so a line with one
+# of each is malformed and does not count as a packet. The fixture's records
+# set neither of the status bits that say the board measured this packet's
+# power or estimated its channel's background, so a current ubertooth-rx prints
+# `none` for both (fork 532adc19); a record from a board that does set them
+# prints figures.
+_NOISE_AND_SNR = r"(?:n=-?\d+ snr=-?\d+|n=none snr=none)"
+
 PACKET_LINE = re.compile(
-    r"^systime=(?P<systime>\d+) ch=\s*(?P<ch>\d+) LAP=(?P<lap>[0-9a-f]{6}) "
-    r"err=(?P<err>\d+) clkn=\d+ clk_offset=\d+ s=-?\d+ n=-?\d+ snr=-?\d+$"
+    rf"^systime=(?P<systime>\d+) ch=\s*(?P<ch>\d+) LAP=(?P<lap>[0-9a-f]{{6}}) "
+    rf"err=(?P<err>\d+) clkn=\d+ clk_offset=\d+ s=-?\d+ {_NOISE_AND_SNR}$"
 )
 UAP_LINE = re.compile(r"UAP = 0x(?P<uap>[0-9a-f]+) found after \d+ total packets")
 # libbtbb works the UAP out from the packets' CRCs and says so. Since libbtbb
 # bf878df2 it says it on standard error, like every note a library makes, so
 # the line cannot land in a capture written to standard output.
+def text_lines(source):
+    """``source``'s lines: a line source as given, or a string split the way
+    a saved output file is read (outputfiles.split_lines).
+
+    Spelled out here rather than imported, because this module also runs as a
+    script by path, where the package is not importable.
+    """
+    if not isinstance(source, str):
+        return source
+    lines = [line.rstrip("\r") for line in source.split("\n")]
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 ANY_UAP_NOTE = UAP_LINE.pattern
 
 
@@ -289,10 +313,10 @@ def uap_note(uap: int) -> str:
 def packets_check(expected: list[tuple[int, int, int]]):
     """A Step.output_check: exactly these packet lines, in this order."""
 
-    def check(output: str) -> str:
+    def check(output) -> str:
         seen = [
             (int(m["lap"], 16), int(m["err"]), int(m["ch"]))
-            for m in map(PACKET_LINE.match, output.splitlines()) if m
+            for m in map(PACKET_LINE.match, text_lines(output)) if m
         ]
         if seen == expected:
             return ""
@@ -321,11 +345,15 @@ def uap_check(expected: list[tuple[int, int, int]]):
     """
     packets = packets_check(expected)
 
-    def check(output: str) -> str:
+    def check(output) -> str:
         problem = packets(output)
         if problem:
             return problem
-        found = sorted({m["uap"] for m in UAP_LINE.finditer(output)})
+        found = sorted({
+            match["uap"]
+            for line in text_lines(output)
+            for match in UAP_LINE.finditer(line)
+        })
         if found:
             return "libbtbb's note about UAP " + ", ".join(found) + " is on stdout"
         return ""
@@ -334,11 +362,17 @@ def uap_check(expected: list[tuple[int, int, int]]):
 
 
 def survey_check(expected_lines: set[str]):
-    def check(output: str) -> str:
-        lines = output.splitlines()
-        if "Survey Results" not in lines:
+    def check(output) -> str:
+        results = None
+        for line in text_lines(output):
+            if results is None:
+                if line == "Survey Results":
+                    results = set()
+                continue
+            if line:
+                results.add(line)
+        if results is None:
             return "no 'Survey Results' line"
-        results = {line for line in lines[lines.index("Survey Results") + 1:] if line}
         if results != expected_lines:
             return ("survey listed " + ", ".join(sorted(results)) + "; expected "
                     + ", ".join(sorted(expected_lines)))
@@ -347,8 +381,10 @@ def survey_check(expected_lines: set[str]):
     return check
 
 
-def systime_check(output: str, recorded: list[int]) -> str:
-    times = [int(m["systime"]) for m in map(PACKET_LINE.match, output.splitlines()) if m]
+def systime_check(output, recorded: list[int]) -> str:
+    times = [
+        int(m["systime"]) for m in map(PACKET_LINE.match, text_lines(output)) if m
+    ]
     if times != recorded:
         first = times[0] if times else "none"
         return (f"packet lines report systime {first}, the records hold "

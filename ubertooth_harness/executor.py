@@ -1,6 +1,7 @@
 """Command execution boundary for harness operations."""
 
 import codecs
+import collections
 from dataclasses import dataclass
 import os
 import queue
@@ -15,6 +16,50 @@ from ubertooth_harness.cancellation import CancellationToken
 
 OutputCallback = Callable[[str, str], None]
 
+# Characters of each stream kept in memory for CommandResult: the first half
+# and the last half, with a line naming what is between them. A mode that
+# streams for hours would otherwise grow without bound. The full stream is
+# written to the run's output files as it arrives (rawlog.py), and checks
+# read it there (outputfiles.py), so this only has to carry the live view and
+# the short answers the harness reads directly.
+MEMORY_WINDOW_CHARS = 256 * 1024
+WINDOW_NOTE = (
+    "\n[... {left_out} characters left out of this copy; "
+    "the whole stream is in the run's output files ...]\n"
+)
+
+
+class _StreamWindow:
+    """A bounded in-memory copy of one stream: its start and its end."""
+
+    def __init__(self, limit: int = MEMORY_WINDOW_CHARS):
+        self._half = max(limit, 2) // 2
+        self._head: list[str] = []
+        self._head_chars = 0
+        self._tail: collections.deque = collections.deque()
+        self._tail_chars = 0
+        self._left_out = 0
+
+    def add(self, text: str) -> None:
+        if not text:
+            return
+        if self._head_chars + len(text) <= self._half and not self._tail:
+            self._head.append(text)
+            self._head_chars += len(text)
+            return
+        self._tail.append(text)
+        self._tail_chars += len(text)
+        # Always keep the newest chunk: the executor appends its timeout and
+        # cancellation markers last, and they must stay visible.
+        while len(self._tail) > 1 and self._tail_chars > self._half:
+            dropped = self._tail.popleft()
+            self._tail_chars -= len(dropped)
+            self._left_out += len(dropped)
+
+    def text(self) -> str:
+        note = WINDOW_NOTE.format(left_out=self._left_out) if self._left_out else ""
+        return "".join(self._head) + note + "".join(self._tail)
+
 
 @dataclass(frozen=True)
 class CommandResult:
@@ -25,6 +70,11 @@ class CommandResult:
     duration_s: float
     timed_out: bool
     cancelled: bool = False
+    # The files this command's output was saved to, read back on demand
+    # (outputfiles.CommandOutput). ``stdout`` and ``stderr`` above hold at
+    # most MEMORY_WINDOW_CHARS of each stream, so a check reads the stream
+    # through this instead.
+    output: object | None = None
 
 
 class CommandExecutor(Protocol):
@@ -80,10 +130,10 @@ class SubprocessCommandExecutor:
     def _deliver(
         stream_name: str,
         text: str,
-        output: dict[str, list[str]],
+        output: Mapping[str, "_StreamWindow"],
         on_output: OutputCallback | None,
     ) -> str:
-        output[stream_name].append(text)
+        output[stream_name].add(text)
         if on_output is None:
             return ""
         try:
@@ -124,7 +174,7 @@ class SubprocessCommandExecutor:
             self._deliver(
                 "stderr",
                 message,
-                {"stdout": [], "stderr": []},
+                {"stdout": _StreamWindow(), "stderr": _StreamWindow()},
                 on_output,
             )
             return CommandResult(
@@ -149,7 +199,7 @@ class SubprocessCommandExecutor:
         for reader in readers:
             reader.start()
 
-        output: dict[str, list[str]] = {"stdout": [], "stderr": []}
+        output = {"stdout": _StreamWindow(), "stderr": _StreamWindow()}
         completed_streams = 0
         deadline = started + timeout_s
         terminate_deadline = None
@@ -203,8 +253,8 @@ class SubprocessCommandExecutor:
         return CommandResult(
             command,
             returncode,
-            "".join(output["stdout"]),
-            "".join(output["stderr"]),
+            output["stdout"].text(),
+            output["stderr"].text(),
             time.monotonic() - started,
             timed_out,
             cancelled,

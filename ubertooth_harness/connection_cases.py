@@ -47,6 +47,7 @@ from ubertooth_harness.advertiser_cases import (
     _dk,
     _dk_idle,
 )
+from ubertooth_harness.outputfiles import search_lines
 from ubertooth_harness.receive_cases import seconds_arg
 from ubertooth_harness.stateful import (
     StateCase,
@@ -106,7 +107,7 @@ STATUS_TIMEOUT_S = 30.0
 _CONNCAPTURE = str(Path(conncapture.__file__).resolve())
 
 
-def _pair(resource_identities: Mapping) -> tuple[dict, dict]:
+def _pair(resources: Mapping, resource_identities: Mapping) -> tuple[dict, dict]:
     """The central and the peripheral, from the registry's identities."""
     pair = []
     for role in (CENTRAL_ROLE, PERIPHERAL_ROLE):
@@ -123,7 +124,8 @@ def _pair(resource_identities: Mapping) -> tuple[dict, dict]:
                 f"{TEST_NAME}: {role} BLE address {address} is not a static random "
                 "address (the two top bits must be set)")
         pair.append({"serial": str(serial), "address": address,
-                     "port": identity.get("serial device") or None})
+                     "port": identity.get("serial device") or None,
+                     "alias": resources.get(role, "")})
     central, peripheral = pair
     if central["serial"] == peripheral["serial"]:
         raise StateCaseError(
@@ -185,8 +187,8 @@ def _central_did_the_work(update_ms: int):
     different interval accepted: the capture checks the CONNECT_IND, which is
     written before any update.
     """
-    def check(stdout: str) -> str:
-        match = _TRAFFIC.search(stdout)
+    def check(stdout) -> str:
+        match = search_lines(stdout, _TRAFFIC)
         if match is None:
             return "the central reported no traffic line"
         counts = {name: int(value) for name, value in match.groupdict().items()}
@@ -197,7 +199,7 @@ def _central_did_the_work(update_ms: int):
         if counts["updates"] < 1:
             return (f"the central's {update_ms} ms connection parameter update "
                     "was never accepted")
-        asked = _UPDATE.search(stdout)
+        asked = search_lines(stdout, _UPDATE)
         if asked is None:
             return "the central reported no update line"
         if int(asked["ms"]) != update_ms:
@@ -276,9 +278,9 @@ def _capture_case(serial, central, peripheral, seconds, *, case_id, name,
     )
 
 
-def known_connection_cases(arguments, _resources, resource_identities):
+def known_connection_cases(arguments, resources, resource_identities):
     serial = _serial(resource_identities, TEST_NAME)
-    central, peripheral = _pair(resource_identities)
+    central, peripheral = _pair(resources, resource_identities)
     seconds = seconds_arg(arguments)
     interval = arguments["interval"]
     update = arguments["update"]
