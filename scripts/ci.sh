@@ -39,25 +39,41 @@ LIBBTBB_PIN=bf878df27e131dd8ab56bb3497918eb9a83f607b
 
 step() { printf '\n=== ci: %s ===\n' "$1"; }
 
-# Bluetooth piconet roles are central and peripheral, never master/slave
-# (AGENTS.md). Only names we do not own are allowed through: libbtbb's and
-# git's `master` branch, and ESP-IDF's ESP_SPP_ROLE_* constants. AGENTS.md and
-# this file are excluded by name, because the rule and the check have to name
-# the words they forbid. The search is plain grep rather than git grep so it
-# also works in the exported tree scripts/local-ci.sh runs in.
-ROLE_TERMS_ALLOW='libbtbb|upstream `master`|branch:master|"master",|ESP_SPP_ROLE_'
+# Bluetooth piconet roles are central and peripheral, never the older words
+# (AGENTS.md). Only the external names this project does not own are allowed:
+# libbtbb's and git's `master` branch and ESP-IDF's ESP_SPP_ROLE_* constants.
+# Each allowed form is deleted from the line before the line is judged, so
+# another occurrence on the same line still fails. The allowed forms are
+# matched exactly where the search is case-insensitive, so an odd spelling
+# fails rather than slips through. AGENTS.md and this file are skipped,
+# because the rule and the check have to name the words they forbid.
+ROLE_TERMS='master|slave'
+ROLE_TERMS_ALLOW='"master"|`master`|libbtbb-ref master|branch:master|ESP_SPP_ROLE_(MASTER|SLAVE)'
 
 check_role_terms() {
     step "Bluetooth role terms"
-    if grep -rIiE 'master|slave' . --exclude=ci.sh --exclude=AGENTS.md \
+    lines=$WORK/role-terms.txt
+    # Tracked files where git is here, so a scratch file in a working tree is
+    # nobody's failure; every file otherwise, which is what the tree
+    # scripts/local-ci.sh exports holds. Either way a search that errors ends
+    # the run instead of reading as a clean tree.
+    if git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+        git grep -nIiE "$ROLE_TERMS" -- ':!scripts/ci.sh' ':!AGENTS.md' \
+            > "$lines" || [ $? = 1 ]
+    else
+        grep -rIiE "$ROLE_TERMS" . --exclude=ci.sh --exclude=AGENTS.md \
             --exclude-dir=.git --exclude-dir=.venv --exclude-dir=__pycache__ \
-            --exclude-dir=runs | grep -vE "$ROLE_TERMS_ALLOW"; then
-        echo "error: the lines above say master/slave; write central/peripheral" \
-             "for Bluetooth piconet roles, or, if the line holds an external" \
-             "name we do not own, add it to ROLE_TERMS_ALLOW in scripts/ci.sh" >&2
+            > "$lines" || [ $? = 1 ]
+    fi
+    if sed -E "s@$ROLE_TERMS_ALLOW@@g" "$lines" | grep -iE "$ROLE_TERMS" >&2; then
+        echo "error: the lines above name a Bluetooth piconet role with an old" \
+             "word; write central or peripheral. If the line holds an external" \
+             "name this project does not own, or a pattern that has to match" \
+             "the fork's own output, add that form to ROLE_TERMS_ALLOW in" \
+             "scripts/ci.sh" >&2
         return 1
     fi
-    echo "no master/slave outside the allowed external names"
+    echo "every Bluetooth role word is central or peripheral"
 }
 
 run_test() {

@@ -39,8 +39,8 @@
   and third-party API identifiers such as ESP-IDF's `ESP_SPP_ROLE_MASTER`),
   and a pattern that has to match the Ubertooth fork's own output, which keeps
   matching what the fork prints today and accepts both wordings while the fork
-  changes over. `scripts/ci.sh test` checks this against an allowlist of those
-  external names.
+  changes over. `scripts/ci.sh test` checks this; both kinds of exception go
+  in its `ROLE_TERMS_ALLOW` allowlist, which it names in its failure message.
 - This repository is public: never name lab machines (host names, SSH aliases,
   IP addresses, `user@host` strings, lab home paths) or other systems running
   in the lab. See "Public text" in `.kiro/steering/branch-and-review.md`.
