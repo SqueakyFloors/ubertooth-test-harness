@@ -1553,13 +1553,15 @@ is masked only where it stands alone, so it cannot mask part of a count. A
 serial port path keeps its shape with the serial inside it masked
 (`/dev/serial/by-id/usb-SEGGER_J-Link_<serial>-if00`), whether the registry
 held that path or the harness found it. Any standalone 32-hex-digit token is
-masked too, since that is the shape of an Ubertooth serial. Where a command's
-output was cut inside a serial, which either output cap can do, the piece the
-cut left behind is masked as well: a run of 8 hex digits or more that a serial
-the run names holds, or any hex run of 24 to 31 digits, which is wide enough
-to be a board's serial and little else. A run of one repeated digit
-(`00000000`) and a longer hex run, such as a git SHA or a digest, are left to
-read.
+masked too, since that is the shape of an Ubertooth serial. Where output was
+cut inside a serial, which either output cap can do, the piece the cut left
+behind is masked as well: a run of 8 hex digits or more that a serial the run
+names holds, or, for a board the run never names, a run of 24 to 31 digits
+carrying both letters and digits, which is a serial and little else. Left to
+read are a wider run (a git SHA, a digest), a narrower piece, and a long run
+of digits or of letters alone (a counter, a bit string, a field of zeros).
+Redaction is this page only: a run's own `report.md`, which carries the
+transcript, is always written with its serials.
 
 ## Flash reliability
 

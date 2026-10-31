@@ -443,6 +443,7 @@ class ReportTests(unittest.TestCase):
 
         self.assertIn(serial[:cut], render_run(events))  # shown unredacted
         self.assertNotIn(serial[:cut], report)
+        self.assertNotIn(serial[cut:], report)
         self.assertIn(f"x{REDACTED}", report)
         self.assertIn("more characters of output are in run.jsonl", report)
 
@@ -485,9 +486,24 @@ class ReportTests(unittest.TestCase):
             "95e8d470a62bf1039c7d5e84\n"                              # sha256
             "[O] transfer errors 00000000\n"   # one digit repeated
             "[O] clkn 0012abcd\n"              # too narrow, and in no serial
+            # Wide enough to be masked by width, but all digits or all
+            # letters, which a serial that wide is not.
+            "[O] packets 123456789012345678901234\n"
+            "[O] bits 010101010101010101010101\n"
+            "[O] field ffffffffffffffffffffffff\n"
         )
 
         self.assertEqual(kept, _redact(kept, {serial}))
+
+    def test_a_piece_a_known_serial_holds_is_masked_whatever_it_looks_like(self):
+        # The shape test is for a board the run never named. A serial it does
+        # name settles the question by itself, so a piece of one is masked
+        # even where it reads as something else.
+        from ubertooth_harness.report import _redact
+
+        self.assertEqual(
+            "[O] boards: <serial>\n",
+            _redact("[O] boards: 00000000\n", {"0000000012ab34cd"}))
 
     def test_the_padded_width_is_the_one_a_dk_port_name_carries(self):
         # _SERIAL_PADDED_DIGITS restates the padding in targets.DK_BY_ID;

@@ -1123,18 +1123,28 @@ _SERIAL_TOKEN = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{32}(?![0-9A-Fa-f])")
 # before the gap or at the start of what follows it, so position says nothing
 # about which runs of hex to look at.
 #
-# A run of hex digits this long is masked where a serial the run names holds
+# A run of hex digits this wide is masked where a serial the run names holds
 # it: 8 digits of a 32-digit serial still say which board it was, and an
-# unrelated value of that width matching part of a known serial is
-# improbable. What this does not catch is a piece with no boundary of its own,
-# left glued to hex digits that came before or after it in the output, because
-# the whole run is then one longer value that no serial holds; a serial in
-# this output is written after a space, a colon, a slash, or an equals sign.
+# unrelated value that wide sitting inside a known serial is improbable. Two
+# pieces are left to read, deliberately: one narrower than this, which a cut
+# in the middle of a 10-digit J-Link serial can leave on both sides, because
+# masking every 4-digit hex value would mangle the transcript; and a piece
+# with no boundary of its own, left glued to hex digits that came before or
+# after it in the output, because the whole run is then one longer value no
+# serial holds. A serial in this output is written after a space, a colon, a
+# slash, or an equals sign.
+#
+# A serial is tested in lower case, which also masks a piece written in the
+# other case. A numeric serial is held in the registry's padded width too, so
+# a device registered as `000123` makes a run of eight zeros a piece of a
+# serial; no J-Link serial is that short.
 _PARTIAL_HEX_DIGITS = 8
 # A cut serial of a board the run never names (the case _SERIAL_TOKEN is there
-# for while the serial is whole) can only be recognized by its shape, so a hex
-# run of this many digits is masked whatever it is. The token rule above
-# already takes that view of a standalone 32-hex value.
+# for while the serial is whole) can only be recognized by its shape: this
+# many digits is as narrow as a run can be and still be a serial rather than
+# something a tool printed, the view the token rule above takes of a
+# standalone 32-hex value. A narrower piece of an unnamed board's serial is
+# left to read.
 _UNKNOWN_HEX_DIGITS = 24
 # Up to 31 digits: a 32-digit run is a serial the token rule masked, and a
 # longer one is a git SHA or a digest, which every rule here leaves alone.
@@ -1144,9 +1154,20 @@ _HEX_RUN = re.compile(
 )
 
 
+def _looks_like_a_serial(piece: str) -> bool:
+    """Whether a hex run could be part of a device serial.
+
+    A serial that wide carries both letters and digits (a piece of 24 hex
+    digits with no letter in it turns up about once in 100,000), while the
+    long runs a tool prints for its own reasons are usually one or the other:
+    a decimal counter, a bit string, a field of zeros or of ff.
+    """
+    return any(c.isdigit() for c in piece) and any(c.isalpha() for c in piece)
+
+
 def _mask_cut_serials(text: str, serials: Sequence[str]) -> str:
     """Mask what a cut inside a serial left behind."""
-    # A serial no wider than one piece cannot leave one: it is masked whole.
+    # A serial this narrow leaves no piece that wide: it is masked whole.
     known = [
         serial.lower() for serial in serials
         if len(serial) > _PARTIAL_HEX_DIGITS
@@ -1154,14 +1175,10 @@ def _mask_cut_serials(text: str, serials: Sequence[str]) -> str:
 
     def mask(match: re.Match) -> str:
         piece = match.group(0).lower()
-        # One digit repeated (00000000, ffffffff) names no board, since every
-        # serial that starts or ends that way shares it, and output carries
-        # such a value for its own reasons.
-        if len(set(piece)) == 1:
-            return match.group(0)
         if any(piece in serial for serial in known):
             return REDACTED
-        if _UNKNOWN_HEX_DIGITS <= len(piece) <= _UNKNOWN_HEX_LIMIT:
+        if (_UNKNOWN_HEX_DIGITS <= len(piece) <= _UNKNOWN_HEX_LIMIT
+                and _looks_like_a_serial(piece)):
             return REDACTED
         return match.group(0)
 
