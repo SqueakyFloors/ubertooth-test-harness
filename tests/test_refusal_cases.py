@@ -170,7 +170,7 @@ class FakeTools:
             else:
                 self._create(tool, option, value)
         return self._result(command, 1, "".join(out),
-                            "".join(err) + NOTE + "could not open Ubertooth device\n")
+                            "".join(err) + NOTE + "error: no Ubertooth devices found\n")
 
     @staticmethod
     def _create(tool, option, value):

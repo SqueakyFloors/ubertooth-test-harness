@@ -712,6 +712,24 @@ _UNAVAILABLE = "unavailable, "
 _READ_FAILED = "read failed"
 _SERIAL_RE = r"[0-9a-f]{32}"
 _SERIAL_LABEL = "Serial No"
+# libubertooth's refusal when several boards are attached and none was
+# selected: one line that says what to do, then the boards, indented. Since
+# fork 753269b (#655) the first line carries the "error: " prefix and says -U
+# takes a serial too, and a listed board is "  Device 0: <serial>"; it used to
+# be "multiple Ubertooth devices found! Use '-U' to specify device number"
+# with "  Device 0: Serial No: <serial>" under it.
+MULTIPLE_BOARDS = r"(?m)^" + re.escape(
+    "error: multiple Ubertooth devices found; select one with -U <index|serial>"
+) + r"$"
+# One board of that refusal's list, as a whole line, indented by the two
+# spaces libubertooth prints ("  Device %d: %s\n").
+LISTED_BOARD = r"(?m)^ {2}Device %s: %s$"
+
+
+def listed_board(index: str, serial: str) -> str:
+    return LISTED_BOARD % (index, re.escape(serial))
+
+
 # Report lines per board for -vVspb, in ubertooth-util's report order: the
 # query, its name here, the label it is listed under ("" where the report has
 # none), and the line it must match. This is the one place the harness states
@@ -929,8 +947,8 @@ def multi_board_cases(arguments, _resources, resource_identities):
                 (Step(
                     "refuse", "-C without -U", ("ubertooth-util", "-C"),
                     expected_returncodes=(1,),
-                    output_patterns=(r"multiple Ubertooth devices found",)
-                    + tuple(rf"Device \d+: Serial No: {s}" for s in registered),
+                    output_patterns=(MULTIPLE_BOARDS,)
+                    + tuple(listed_board(r"\d+", s) for s in registered),
                     forbidden_patterns=(r"Current frequency",),
                 ),),
                 "exit 1 listing every board; no channel read from any board",
