@@ -700,7 +700,7 @@ def _recorded_with_a_cap(outputs: Sequence[Mapping], finished: Mapping) -> bool:
     if any(o["event_type"] == "command_output_omitted" for o in outputs):
         return True
     # ``output_file`` is one combined file; ``output_files`` is the key the
-    # per-stream files take (#187), so a run recorded by either is read.
+    # per-stream files take (#194), so a run recorded by either is read.
     return bool(finished.get("output_file") or finished.get("output_files"))
 
 
@@ -797,25 +797,22 @@ def _capped_chunks(chunks: Sequence[Chunk]) -> list[Chunk]:
         records=LEGACY_OUTPUT_TAIL_RECORDS, from_end=True,
     )
     tail.reverse()
-    # What falls between them, in arrival order: the rest of the record the
-    # head stopped inside, the records neither end reached, and the start of
-    # the record the tail begins inside.
+    # Where the gap is, in arrival order: the rest of the record the head
+    # stopped inside, the records neither end reached, and the start of the
+    # record the tail begins inside. Only the last of these per stream is
+    # read (the character before the tail, and the gap's time); where one
+    # record holds both cuts, its middle is listed twice, so the size of
+    # this is not the size of the gap, which is total less what is kept.
     left_out = (
         after_head
         + list(chunks[len(head):len(chunks) - len(tail)])
         + before_tail
     )
-    dropped_so_far = len(left_out)
-    aligned = _tail_on_whole_lines(left_out, tail)
-    if aligned:
-        tail = aligned
-    else:
-        # The tail holds no line boundary at all: it is the end of one
-        # unfinished line, and showing it beats showing nothing, because the
-        # newest output is where the harness puts its own last word (a
-        # timeout, a cancellation, an output sink error). It is inside the
-        # limits already.
-        del left_out[dropped_so_far:]
+    # The tail can come back empty, when all of it belonged to a line whose
+    # start was left out. run.jsonl's tail does the same, and the harness's
+    # own last word (a timeout, a cancellation, an output sink error) is not
+    # lost by it: the executor begins each of those on a line of its own.
+    tail = _tail_on_whole_lines(left_out, tail)
     kept = sum(len(text) for _moment, _stream, text in head + tail)
     if kept >= total:  # one empty record over the record limit
         return list(chunks)

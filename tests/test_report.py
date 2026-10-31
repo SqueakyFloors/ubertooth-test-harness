@@ -1,5 +1,4 @@
 import datetime
-import itertools
 import json
 import re
 import tempfile
@@ -14,6 +13,7 @@ from ubertooth_harness.report import (
     LEGACY_OUTPUT_TAIL_RECORDS,
     _take_chunks,
     _tail_on_whole_lines,
+    elapsed,
     load_events,
     render_run,
     render_runs,
@@ -23,15 +23,11 @@ from ubertooth_harness.report import (
 
 SERIAL = "aaaa0000"
 _START = datetime.datetime(2026, 1, 1)
-_moments = itertools.count()
 
 
 def elapsed_stamp(ms: int) -> str:
     """The transcript's stamp that many milliseconds into the run."""
-    seconds, ms = divmod(ms, 1000)
-    minutes, seconds = divmod(seconds, 60)
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{ms:03d}"
+    return elapsed(_START)(_START + datetime.timedelta(milliseconds=ms))
 
 
 def gap_in(report: str) -> int:
@@ -43,23 +39,26 @@ def gap_in(report: str) -> int:
 
 def dump_events(texts: list[str]) -> list[dict]:
     """One command that printed ``texts`` on stderr, recorded with no cap."""
-    return [
-        command_event("command_started", "running", {"argv": ["ubertooth-dump"]}),
-        *(command_event("command_output", "running",
-                        {"stream": "stderr", "text": text}) for text in texts),
-        command_event("command_finished", "passed",
-                      {"returncode": 0, "duration_s": 9.0}),
+    records = [command_event(0, "command_started", "running",
+                             {"argv": ["ubertooth-dump"]})]
+    records += [
+        command_event(ms, "command_output", "running",
+                      {"stream": "stderr", "text": text})
+        for ms, text in enumerate(texts, start=1)
     ]
+    records.append(command_event(len(texts) + 1, "command_finished", "passed",
+                                 {"returncode": 0, "duration_s": 9.0}))
+    return records
 
 
-def command_event(event_type: str, status: str, details: dict) -> dict:
-    """One record of command `c`, timestamped a millisecond after the last.
+def command_event(ms: int, event_type: str, status: str, details: dict) -> dict:
+    """One record of command `c`, that many milliseconds into the run.
 
     Built here rather than through a publisher: a test of the output cap
     needs thousands of records, and writing them through run.jsonl and the
     console writer takes minutes.
     """
-    moment = _START + datetime.timedelta(milliseconds=next(_moments))
+    moment = _START + datetime.timedelta(milliseconds=ms)
     return {
         "run_id": "run-a", "event_type": event_type, "status": status,
         "timestamp": moment.isoformat(timespec="milliseconds"),
@@ -304,8 +303,7 @@ class ReportTests(unittest.TestCase):
 
         printed = [text.split("[E] ", 1)[1] for text in report.splitlines()
                    if "[E] " in text]
-        self.assertNotIn("part one ", printed)
-        self.assertNotIn("part two", printed)
+        self.assertEqual([], [text for text in printed if "part" in text])
         self.assertEqual(["y"] * (LEGACY_OUTPUT_TAIL_RECORDS - 2),
                          printed[LEGACY_OUTPUT_HEAD_RECORDS:])
         # The gap is stamped at the last record left out, which is the
@@ -313,24 +311,26 @@ class ReportTests(unittest.TestCase):
         ends = LEGACY_OUTPUT_HEAD_RECORDS + 3  # one record per millisecond
         self.assertIn(f"{elapsed_stamp(ends)} [M] {gap_in(report)} more", report)
 
-    def test_the_newest_output_is_kept_even_as_one_long_line(self):
-        # Records holding a single unfinished line leave nothing once the
-        # tail starts at a line boundary. The newest output is where a
-        # timeout or cancellation marker lands, so the report keeps the end
-        # of that line, as much of it as the limit allows.
+    def test_a_tail_that_is_all_one_line_shows_the_gap_and_no_more(self):
+        # Records holding the middle of one line leave nothing once the tail
+        # starts at a line boundary, as run.jsonl's tail does: a fragment
+        # rendered as a line would read as a line the command printed.
         report = render_run(dump_events(["a" * 70000, "b" * 9000, "c" * 10999 + "\n"]))
 
         printed = [text for text in report.splitlines() if "[E] " in text]
-        newest = printed[-1].split("[E] ", 1)[1]
-        # The end of that line, across the records it spans.
-        self.assertTrue(newest.endswith("c" * 10999), newest[-16:])
-        self.assertEqual(set("bc"), set(newest))
-        self.assertLessEqual(len(newest), LEGACY_OUTPUT_TAIL_CHARS)
-        # Both ends are filled to their limits, so the gap is the rest.
-        self.assertEqual(
-            70000 + 20000 - LEGACY_OUTPUT_HEAD_CHARS - LEGACY_OUTPUT_TAIL_CHARS,
-            gap_in(report),
-        )
+        self.assertEqual(1, len(printed))  # the head's own cut line
+        self.assertEqual("a" * LEGACY_OUTPUT_HEAD_CHARS,
+                         printed[0].split("[E] ", 1)[1])
+        self.assertEqual(90000 - LEGACY_OUTPUT_HEAD_CHARS, gap_in(report))
+
+    def test_the_harness_own_last_word_survives_the_cap(self):
+        # A timeout, a cancellation or an output sink error begins on a line
+        # of its own (the executor prefixes it), so the tail keeps it.
+        report = render_run(dump_events(
+            ["noise\n" * 9000, "\nHARD TIMEOUT after 60s\n"]
+        ))
+
+        self.assertIn("[E] HARD TIMEOUT after 60s", report)
 
     def test_one_empty_record_over_the_limit_leaves_the_output_whole(self):
         # The record limits are reached but nothing is left out, so there is
@@ -362,15 +362,15 @@ class ReportTests(unittest.TestCase):
             self.assertRegex(text, r"^\[E\] line \d+ end \d+$")
 
     def test_the_cap_keeps_both_streams_in_arrival_order(self):
-        events = [command_event("command_started", "running",
+        events = [command_event(0, "command_started", "running",
                                 {"argv": ["ubertooth-dump"]})]
         for index in range(3000):
             for stream in ("stdout", "stderr"):
                 events.append(command_event(
-                    "command_output", "running",
+                    len(events), "command_output", "running",
                     {"stream": stream, "text": f"{stream} {index}\n"},
                 ))
-        events.append(command_event("command_finished", "passed",
+        events.append(command_event(len(events), "command_finished", "passed",
                                     {"returncode": 0, "duration_s": 1.0}))
 
         report = render_run(events)
