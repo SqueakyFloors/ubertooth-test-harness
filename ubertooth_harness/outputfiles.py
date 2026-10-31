@@ -686,6 +686,7 @@ def text_lines(source) -> Iterable[str]:
     if isinstance(source, str):
         return split_lines(source)
     return source
+<<<<<<< HEAD
 
 
 @dataclass(frozen=True)
@@ -758,3 +759,5 @@ def saved_output(events) -> tuple[SavedOutput, ...]:
         SavedOutput(file, owner, tuple(by_path.get(file.path, ())))
         for file, owner in found
     )
+=======
+>>>>>>> origin/main

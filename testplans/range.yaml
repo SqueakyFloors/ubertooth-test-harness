@@ -14,3 +14,30 @@ suites:
         # The lab boards sit a few centimetres apart; a working link gets
         # through at the lowest levels.
         maximum PA level: 3
+
+  # The same test with the weak-link receiver answering: both roles are
+  # chosen by RF placement rather than by alias, which also keeps them apart
+  # on a bench whose default board is the attenuated one. The suite names one
+  # host, so a bench with no board placed for the responder fails planning,
+  # naming the requirement and what each board is placed as.
+  #
+  # The responder is pinned to exactly the 20 dB the bench measured, not a
+  # range: a weaker attenuator makes a link this suite has no figures for,
+  # and a bench with a different one should be told what is needed rather
+  # than run against numbers taken elsewhere.
+  #
+  # The level is the same 3 as above, and for the same reason: it is the
+  # bound this test already carries on this bench, not a figure derived from
+  # the weak-link runs, which reached 1 in this orientation. The suite does
+  # not narrow it; what it adds is which board answers. docs/tests.md has the
+  # numbers and what the suite is still waiting on.
+  range-weak-link:
+    - Two-device range test:
+        host: Host_Linux
+        sender: default
+        responder: default
+        rf:
+          sender: {max_attenuation_db: 0, antenna: true}
+          responder: {min_attenuation_db: 20, max_attenuation_db: 20, antenna: true}
+        allow RF transmission: true
+        maximum PA level: 3
