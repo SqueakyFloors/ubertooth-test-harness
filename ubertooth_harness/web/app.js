@@ -275,6 +275,8 @@
       suite: $("suite").value,
       tests: [],
       build: $("build").checked,
+      // Flashing applies only to a run that builds.
+      flash_build: $("build").checked && $("flash-build").checked,
     };
     if (!host || !body.ref || !body.plan || !body.suite) {
       status.textContent = "Choose a ref, plan, suite and target first.";
@@ -307,7 +309,7 @@
     return {
       run_id: runId, seen: new Set(), events: [], items: [],
       byInvocation: new Map(), log: [], partial: "", stage: "waiting",
-      invocations: null,
+      invocations: null, boards: new Map(),
     };
   }
 
@@ -361,6 +363,7 @@
     }
     live.planned = Array.isArray(live.invocations) || Boolean(suite);
     live.byInvocation = new Map();
+    live.boards = new Map();
     // Records from the socket and from REST may interleave; replay in order.
     const events = [...live.events].sort((a, b) => a.sequence - b.sequence);
     live.events = [];
@@ -439,6 +442,23 @@
       // The libbtbb differs from the fork's install.sh pin, or was not compared.
       pushLog(`warning: ${String(details.message ?? "")}`);
     }
+    if (kind === "watchdog") {
+      // The firmware reset a board, or did not: a count, never a failure.
+      const serial = String(details.serial ?? "");
+      const board = live.boards.get(serial) || {
+        resource: String(details.resource ?? ""), serial, resets: 0, state: "", warning: "",
+      };
+      board.resets += typeof details.new_resets === "number" ? details.new_resets : 0;
+      board.state = String(details.state ?? "");
+      const warnings = Array.isArray(details.warnings) ? details.warnings : [];
+      if (warnings.length) board.warning = String(warnings[warnings.length - 1]);
+      live.boards.set(serial, board);
+      for (const line of warnings) pushLog(`warning: ${String(line)}`);
+      for (const line of Array.isArray(details.notes) ? details.notes : []) {
+        pushLog(`note: ${String(line)}`);
+      }
+      if (status === "failed" && details.reason) pushLog(`error: ${String(details.reason)}`);
+    }
     if (kind === "test_started") {
       const name = String(details.test_name ?? "");
       const id = String(details.invocation_id ?? "");
@@ -453,6 +473,14 @@
       if (!live.testsStarted && record.timestamp) live.testsStarted = record.timestamp;
       live.byInvocation.set(String(details.invocation_id), item);
       pushLog(`=== TEST ${name} on ${details.host ?? ""} ===`);
+    } else if (kind === "known_target") {
+      // Which device the harness drove for this test, or that it had none;
+      // the controller sends the summary the report shows.
+      // The full line where there is a target; a short one otherwise, so a
+      // suite of plain tests does not repeat a sentence down the column.
+      const found = Array.isArray(details.targets) && details.targets.length > 0;
+      const item = live.byInvocation.get(String(details.invocation_id));
+      if (item) item.target = found ? String(details.summary ?? "") : "no known target";
     } else if (kind === "not_applicable") {
       // Left out before the run: the host cannot run it (not a skip or failure).
       const name = String(details.test_name ?? "");
@@ -478,7 +506,11 @@
       }
       pushLog(`=== TEST ${details.test_name ?? ""}: ${status}${details.reason ? ": " + details.reason : ""} ===`);
     } else if (kind === "build_step_started") {
-      pushLog(`+++ ${details.step_name ?? details.step_id ?? ""} +++`);
+      pushLog(`+++ ${details.step_name || details.step_id || ""} +++`);
+    } else if (kind === "build_step_finished") {
+      // The step's own outcome: it may have accepted a command that exited
+      // non-zero, so this is not the status of its last command.
+      pushLog(`--- ${details.step_name || details.step_id || ""} EXIT: ${status}${details.reason ? ": " + details.reason : ""} ---`);
     } else if (kind === "build_finished" || kind === "preflight_finished") {
       pushLog(`=== ${kind.replace("_finished", "").toUpperCase()}: ${status}${details.reason ? ": " + details.reason : ""} ===`);
     } else if (kind === "run_started") {
@@ -515,6 +547,25 @@
       [el("dt", { text: term }), el("dd", {}, value)]));
     $("cancel-button").hidden = run.status !== "running";
 
+    // Per board: how many times the firmware's watchdog reset it during this
+    // run, and the last warning if there was one. Hidden until a board is read.
+    const boards = [...live.boards.values()];
+    $("live-boards").hidden = boards.length === 0;
+    $("boards").replaceChildren(...boards.map((board) => el("li", {
+      className: board.resets ? "board board-reset" : "board",
+    },
+      el("span", { className: "board-name", text: board.resource || board.serial }),
+      el("span", {
+        className: "board-resets",
+        // The count always, since it matters most on a board whose last read
+        // failed; then what that read found, when it was not a record.
+        text: ` ${board.resets} self-reset${board.resets === 1 ? "" : "s"}`
+          + (board.state === "read" || !board.state ? ""
+            : board.state === "absent" ? "; did not answer"
+            : `; watchdog ${board.state}`),
+      }),
+      board.warning ? el("span", { className: "reason", text: ` — ${board.warning}` }) : null)));
+
     $("checklist").replaceChildren(...live.items.map((item) => {
       const shown = itemStatus(item, run);
       return el("li", {
@@ -524,6 +575,7 @@
         statusBadge(shown), " ", el("span", { className: "check-name", text: item.name }),
         item.estimated_s !== null && item.estimated_s !== undefined
           ? el("span", { className: "hint check-estimate", text: ` (about ${formatSeconds(item.estimated_s)})` }) : null,
+        item.target ? el("span", { className: "reason check-target", text: item.target }) : null,
         item.reason ? el("span", { className: "reason", text: ` — ${item.reason}` }) : null);
     }));
     if (!live.items.length) {
@@ -714,8 +766,17 @@
     });
   }
 
+  // Flash needs Build: disabled, with a note, while Build is unticked.
+  function syncFlashBuild() {
+    const build = $("build").checked;
+    $("flash-build").disabled = !build;
+    $("flash-build-note").hidden = build;
+  }
+
   function start() {
     $("run-form").addEventListener("submit", submitRun);
+    $("build").addEventListener("change", syncFlashBuild);
+    syncFlashBuild();
     $("refs-reload").addEventListener("click", loadRefs);
     $("plan").addEventListener("change", renderSuites);
     $("suite").addEventListener("change", renderSuiteTests);

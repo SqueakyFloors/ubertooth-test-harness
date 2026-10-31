@@ -104,6 +104,49 @@ class ShellTests(unittest.TestCase):
         shell = nrfdk.Shell(Port(FakeFirmware()), clock=FakeClock())
         self.assertEqual([], shell.command("adv start"))
 
+    def test_with_an_alias_every_line_of_the_conversation_is_written(self):
+        logged = []
+        shell = nrfdk.Shell(FakePort(FakeFirmware()), clock=FakeClock(),
+                            log=lambda direction, text: logged.append((direction, text)))
+
+        shell.command("adv start")
+
+        self.assertEqual([(">", "adv start"), ("<", "OK")], logged)
+
+    def test_the_logged_lines_carry_the_alias_and_the_direction(self):
+        stream = io.StringIO()
+        shell = nrfdk.Shell(FakePort(FakeFirmware()), clock=FakeClock(),
+                            log=nrfdk.shell_logger("DK_Linux1", stream))
+
+        status = shell.status()
+
+        lines = stream.getvalue().splitlines()
+        self.assertEqual("[DK_Linux1 >] status", lines[0])
+        self.assertTrue(lines[1].startswith('[DK_Linux1 <] {'))
+        self.assertIn(status["fw"], lines[1])
+        self.assertEqual("[DK_Linux1 <] OK", lines[-1])
+
+    def test_without_an_alias_nothing_is_written(self):
+        shell = nrfdk.Shell(FakePort(FakeFirmware()), clock=FakeClock())
+
+        self.assertEqual([], shell.command("adv start"))
+
+    def test_a_refused_command_is_written_before_it_raises(self):
+        firmware = FakeFirmware()
+        firmware.refuse["adv chmap 40"] = "channel map must be 37, 38, 39 or all"
+        stream = io.StringIO()
+        shell = nrfdk.Shell(FakePort(firmware), clock=FakeClock(),
+                            log=nrfdk.shell_logger("DK_Linux1", stream))
+
+        with self.assertRaises(nrfdk.NrfDkError):
+            shell.command("adv chmap 40")
+
+        self.assertEqual(
+            ["[DK_Linux1 >] adv chmap 40",
+             "[DK_Linux1 <] ERR channel map must be 37, 38, 39 or all"],
+            stream.getvalue().splitlines(),
+        )
+
     def test_status_must_have_every_field(self):
         with self.assertRaisesRegex(nrfdk.NrfDkError, "no valid 'counter'"):
             nrfdk.parse_status('{"role":"advertiser","fw":"x","bt":true,"address":"A",'
@@ -163,6 +206,30 @@ class ToolTests(unittest.TestCase):
             broken.write_text(":10000000FF\n")
             with self.assertRaisesRegex(nrfdk.NrfDkError, "bad Intel HEX record"):
                 nrfdk.check_image(broken)
+
+    def test_check_image_is_a_command_of_its_own_and_opens_no_board(self):
+        """`nrfdk.py check-image` is what scripts/ci.sh firmware-dk runs on a
+        fresh build, so it must need no J-Link and no serial port."""
+        def no_tools(argv, **_kwargs):  # pragma: no cover - must not run
+            raise AssertionError(f"check-image ran {argv}")
+
+        with tempfile.TemporaryDirectory() as directory:
+            good = hex_file(Path(directory) / "zephyr.hex",
+                            nrfdk.FIRMWARE_VERSION.encode())
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = nrfdk.main(["check-image", str(good)], run=no_tools)
+            self.assertEqual(0, code, err.getvalue())
+            self.assertIn(f"firmware version: {nrfdk.FIRMWARE_VERSION}", out.getvalue())
+            self.assertIn(f"image: {good}", out.getvalue())
+
+            old = hex_file(Path(directory) / "old.hex", b"utdk-0.0.1")
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(err):
+                code = nrfdk.main(["check-image", str(old)], run=no_tools)
+            self.assertEqual(1, code)
+            self.assertIn("does not contain firmware version", err.getvalue())
 
     def test_firmware_and_driver_versions_agree(self):
         header = (FIRMWARE / "src" / "roles.h").read_text()
@@ -362,6 +429,17 @@ class CommandLineTests(unittest.TestCase):
         code, out, err = self.main("stop", "--jlink", "1050000001", "--port", self.path)
         self.assertEqual(0, code, err)
         self.assertRegex(out, r"(?m)^counter: 11$")
+
+    def test_with_an_alias_the_whole_conversation_goes_to_stderr(self):
+        code, out, err = self.main("stop", "--jlink", "1050000001", "--port", self.path,
+                                   "--alias", "DK_Linux1")
+
+        self.assertEqual(0, code, err)
+        self.assertIn("[DK_Linux1 >] adv stop\n", err)
+        self.assertIn("[DK_Linux1 <] OK\n", err)
+        self.assertIn("[DK_Linux1 >] status\n", err)
+        # The results the cases read still go to stdout.
+        self.assertRegex(out, r"(?m)^advertising: off ")
 
     def test_identify_names_the_probe(self):
         code, out, err = self.main("identify", "--jlink", "001050000001", "--port", self.path)

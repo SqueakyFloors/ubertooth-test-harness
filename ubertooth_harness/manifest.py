@@ -19,7 +19,7 @@ from ubertooth_harness.events import validate_run_id
 from ubertooth_harness.planner import TestInvocation
 
 
-MANIFEST_SCHEMA_VERSION = 4
+MANIFEST_SCHEMA_VERSION = 5
 _COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
 # Hard limit on fetching a ref the source checkout does not have yet.
 FETCH_TIMEOUT_S = 60.0
@@ -332,6 +332,13 @@ class InvocationIdentity:
     # True for every exclusive-Ubertooth invocation, including one with no
     # power actions that only gets the read-only enumeration check.
     exclusive_ubertooth: bool = False
+    # The RF placement of every bound resource that has one (rf.py), by role,
+    # so a reader knows what attenuation and distance the run's numbers were
+    # taken at. Empty when no board the run used records a placement.
+    resource_placements: Mapping[str, Mapping] = MappingProxyType({})
+    # What each role's placement had to satisfy, so a report can say why a
+    # role got the resource it did (planner.TestInvocation).
+    placement_requirements: Mapping[str, Mapping] = MappingProxyType({})
 
     @classmethod
     def from_invocation(cls, invocation: TestInvocation) -> "InvocationIdentity":
@@ -351,6 +358,8 @@ class InvocationIdentity:
                 for action in invocation.power_isolation
             ),
             invocation.exclusive_ubertooth,
+            _frozen(dict(invocation.resource_placements)),
+            _frozen(dict(invocation.placement_requirements)),
         )
 
     def to_dict(self) -> dict:
@@ -358,7 +367,7 @@ class InvocationIdentity:
             "id": self.id,
             "test_name": self.test_name,
             "host": self.host,
-            "arguments": _json_value(self.arguments),
+            "arguments": json_value(self.arguments),
             "resources": dict(self.resources),
             "resource_identities": {
                 role: dict(identity)
@@ -366,14 +375,21 @@ class InvocationIdentity:
             },
             "power_isolation": [dict(action) for action in self.power_isolation],
             "exclusive_ubertooth": self.exclusive_ubertooth,
+            "resource_placements": json_value(self.resource_placements),
+            "placement_requirements": json_value(self.placement_requirements),
         }
 
 
-def _json_value(value):
+def json_value(value):
+    """The same value as plain JSON types, whatever wrappers it carries.
+
+    Normalized test arguments nest read-only mappings (an `rf:` requirement
+    per hardware role), and ``json.dump`` refuses a ``mappingproxy``.
+    """
     if isinstance(value, Mapping):
-        return {str(key): _json_value(item) for key, item in value.items()}
+        return {str(key): json_value(item) for key, item in value.items()}
     if isinstance(value, (tuple, list)):
-        return [_json_value(item) for item in value]
+        return [json_value(item) for item in value]
     return value
 
 

@@ -75,7 +75,7 @@ _ADVCAPTURE = str(Path(advcapture.__file__).resolve())
 _COUNTER = r"(?m)^counter: (?P<value>\d+)$"
 
 
-def _advertiser(resource_identities: Mapping) -> dict:
+def _advertiser(resources: Mapping, resource_identities: Mapping) -> dict:
     identity = resource_identities.get(ADVERTISER_ROLE)
     if not identity:
         raise StateCaseError(f"{TEST_NAME} requires an advertiser (nRF52840 DK)")
@@ -89,11 +89,16 @@ def _advertiser(resource_identities: Mapping) -> dict:
             f"{TEST_NAME}: advertiser BLE address {address} is not a static random "
             "address (the two top bits must be set)")
     port = identity.get("serial device") or None
-    return {"serial": str(serial), "address": address, "port": port}
+    return {"serial": str(serial), "address": address, "port": port,
+            "alias": resources.get(ADVERTISER_ROLE, "")}
 
 
 def _dk(dk: Mapping, command: str, *options: str) -> tuple[str, ...]:
     argv = (sys.executable, _NRFDK, command, "--jlink", dk["serial"])
+    # With the alias, nrfdk.py marks every line of its conversation with the
+    # board's shell, so the run's transcript holds it (targets.shell_line).
+    if dk.get("alias"):
+        argv += ("--alias", dk["alias"])
     if dk["port"]:
         argv += ("--port", dk["port"])
     return argv + options
@@ -205,9 +210,9 @@ def _capture_case(serial, dk, seconds, *, case_id, name, listen, chmap, interval
     )
 
 
-def known_advertiser_cases(arguments, _resources, resource_identities):
+def known_advertiser_cases(arguments, resources, resource_identities):
     serial = _serial(resource_identities, TEST_NAME)
-    dk = _advertiser(resource_identities)
+    dk = _advertiser(resources, resource_identities)
     seconds = seconds_arg(arguments)
     interval = arguments["interval"]
     payload = arguments["payload"]

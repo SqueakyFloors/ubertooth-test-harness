@@ -69,6 +69,26 @@ def registry_with(text):
         return FileResourceRegistry.load(path)
 
 
+class AliasTests(unittest.TestCase):
+    """Each DK's own alias marks its shell lines, so the pair is told apart."""
+
+    def test_each_dk_command_carries_that_board_s_alias(self):
+        driver = str(Path(nrfdk.__file__).resolve())
+        resources = {"Ubertooth": "UT_Linux0", "central": "DK_Linux1",
+                     "peripheral": "DK_Linux2"}
+        case = known_connection_cases(arguments(), resources, IDENTITIES)[0]
+
+        aliases = {}
+        for step in case.steps + case.cleanup:
+            argv = list(step.resolve_argv({}))
+            if argv[1:2] != [driver]:
+                continue
+            self.assertEqual("--alias", argv[5], argv)
+            aliases[argv[4]] = argv[6]
+        self.assertEqual({"1050000001": "DK_Linux1", "1050000002": "DK_Linux2"},
+                         aliases)
+
+
 class CaseTests(unittest.TestCase):
     def test_smoke_and_comprehensive_cases(self):
         self.assertEqual(
