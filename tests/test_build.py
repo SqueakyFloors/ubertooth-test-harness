@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest import mock
 
 from ubertooth_harness import cli
+from ubertooth_harness.cancellation import CancellationToken
 from ubertooth_harness.build import (
     BUILT_TOOLS,
     BuildError,
@@ -273,6 +274,15 @@ class BuilderTests(unittest.TestCase):
             steps = [item["step_id"] for item in result.commands]
             self.assertEqual(["verify-host-version", "verify-host-version-fallback"],
                              steps[-2:])
+            # The step's reason names the option that answered, so the
+            # fallback is not read as a busy board.
+            step = [e for e in load_events(Path(work) / "run.jsonl")
+                    if e["event_type"] == "build_step_finished"][-1]
+            self.assertEqual(
+                "the version line is the resolved revision, from -H; the exit "
+                "status is not what this step reads (-V exited 1)",
+                step["details"]["reason"],
+            )
 
     def test_a_reported_revision_is_not_asked_again_on_H(self):
         # The label is there, so -V answered: the wrong revision is the
@@ -370,6 +380,176 @@ class BuilderTests(unittest.TestCase):
             result = Builder(BusyBoard(plan), publisher_in(work), run_dir=work).run(plan)
 
             self.assertIn("libubertooth 1.1 (git-aaaaaaa)", result.host_version)
+
+    def test_every_step_says_how_it_ended(self):
+        with tempfile.TemporaryDirectory() as work:
+            plan = make_plan(work)
+
+            Builder(FakeBuildExecutor(plan), publisher_in(work), run_dir=work).run(plan)
+
+            events = load_events(Path(work) / "run.jsonl")
+            started = [e["details"]["step_id"] for e in events
+                       if e["event_type"] == "build_step_started"]
+            finished = [(e["details"]["step_id"], e["status"]) for e in events
+                        if e["event_type"] == "build_step_finished"]
+
+            self.assertEqual(["toolchain"] + [c.step_id for c in plan.commands],
+                             started)
+            self.assertEqual([(step, "passed") for step in started], finished)
+            self.assertIn(
+                "--- Built host tools report the resolved revision EXIT: passed ---",
+                render_run(events),
+            )
+
+    def test_an_accepted_exit_status_leaves_the_step_passed(self):
+        # -V prints the host version and then reads every attached board,
+        # exiting 1 if one cannot be read. The step accepts that, so it must
+        # not read as failed; its reason says which exit status it accepted.
+        with tempfile.TemporaryDirectory() as work:
+            plan = make_plan(work)
+
+            class BusyBoard(FakeBuildExecutor):
+                def run(self, argv, **kwargs):
+                    result = super().run(argv, **kwargs)
+                    if tuple(argv)[-1] == "-V":
+                        return replace(result, returncode=1)
+                    return result
+
+            Builder(BusyBoard(plan), publisher_in(work), run_dir=work).run(plan)
+
+            events = load_events(Path(work) / "run.jsonl")
+            step = next(e for e in events
+                        if e["event_type"] == "build_step_finished"
+                        and e["details"]["step_id"] == "verify-host-version")
+
+            self.assertEqual("passed", step["status"])
+            self.assertEqual(
+                "the version line is the resolved revision, from -V; the exit "
+                "status is not what this step reads (-V exited 1)",
+                step["details"]["reason"],
+            )
+            report = render_run(events)
+            self.assertIn(
+                "--- Built host tools report the resolved revision EXIT: passed: "
+                "the version line is the resolved revision, from -V; the exit "
+                "status is not what this step reads (-V exited 1) ---",
+                report,
+            )
+            self.assertIn("=== BUILD EXIT: passed ===", report)
+            # One marker for the step, from its own record: the latch that
+            # reads the commands must not add a second.
+            self.assertNotIn(
+                "Built host tools report the resolved revision EXIT: failed",
+                report,
+            )
+
+    def test_a_failed_step_says_so_with_its_reason(self):
+        with tempfile.TemporaryDirectory() as work:
+            plan = make_plan(work)
+
+            with self.assertRaises(BuildError):
+                Builder(FakeBuildExecutor(plan, fail_step="host-build"),
+                        publisher_in(work), run_dir=work).run(plan)
+
+            events = load_events(Path(work) / "run.jsonl")
+            step = next(e for e in events
+                        if e["event_type"] == "build_step_finished")
+            last = [e for e in events if e["event_type"] == "build_step_finished"][-1]
+
+            self.assertEqual("toolchain", step["details"]["step_id"])
+            self.assertEqual(("host-build", "failed"),
+                             (last["details"]["step_id"], last["status"]))
+            # The step's marker does not repeat its own name, which the
+            # BuildError carries for the BUILD marker.
+            self.assertEqual("exited 2", last["details"]["reason"])
+            self.assertIn(
+                "--- Build Ubertooth host tools EXIT: failed: exited 2 ---",
+                render_run(events),
+            )
+
+    def test_a_version_neither_option_answered_fails_its_own_step(self):
+        # Both commands exited 0 and the version is not the resolved one:
+        # the step decided that, so it says so rather than reading passed.
+        with tempfile.TemporaryDirectory() as work:
+            plan = make_plan(work)
+            executor = FakeBuildExecutor(
+                plan,
+                host_version=("Host tools version: libubertooth 1.1 "
+                              "(git-ccccccc), libbtbb 1.0 (git-bbbbbbb)\n"),
+            )
+
+            with self.assertRaisesRegex(BuildError, "expected"):
+                Builder(executor, publisher_in(work), run_dir=work).run(plan)
+
+            events = load_events(Path(work) / "run.jsonl")
+            step = [e for e in events if e["event_type"] == "build_step_finished"][-1]
+
+            self.assertEqual(("verify-host-version", "failed"),
+                             (step["details"]["step_id"], step["status"]))
+            self.assertIn("not the resolved revision", step["details"]["reason"])
+
+    def test_a_reason_is_one_bounded_line_whatever_it_came_from(self):
+        # Reasons are built from a tool's output and from cancellation
+        # messages someone else wrote; the marker they land in is one line,
+        # and the record has a size limit.
+        from ubertooth_harness.build import (
+            _MAX_MARKER_REASON_CHARS, _one_line_reason,
+        )
+
+        self.assertEqual("canceled: a; b", _one_line_reason("canceled: a\nb"))
+        bounded = _one_line_reason("x" * 9000)
+        self.assertEqual(_MAX_MARKER_REASON_CHARS, len(bounded))
+        self.assertTrue(bounded.endswith("... [truncated]"), bounded)
+
+    def test_a_canceled_build_leaves_its_step_failed(self):
+        with tempfile.TemporaryDirectory() as work:
+            plan = make_plan(work)
+            cancellation = CancellationToken()
+
+            class Cancels(FakeBuildExecutor):
+                def run(self, argv, **kwargs):
+                    cancellation.cancel("operator")
+                    return super().run(argv, **kwargs)
+
+            with self.assertRaises(BuildError):
+                Builder(Cancels(plan), publisher_in(work), run_dir=work,
+                        cancellation=cancellation).run(plan)
+
+            events = load_events(Path(work) / "run.jsonl")
+            step = [e for e in events if e["event_type"] == "build_step_finished"][-1]
+
+            self.assertEqual("failed", step["status"])
+            self.assertIn("canceled", step["details"]["reason"])
+
+    def test_a_mismatched_version_reason_is_one_line(self):
+        # -V prints the attached board's firmware lines under the version;
+        # the step's reason lands in a one-line marker in the transcript.
+        with tempfile.TemporaryDirectory() as work:
+            plan = make_plan(work)
+            executor = FakeBuildExecutor(
+                plan,
+                host_version=(
+                    "Host tools version: libubertooth 1.1 (git-ccccccc), "
+                    "libbtbb 1.0 (git-bbbbbbb)\n"
+                    "Firmware version: bluetooth_rxtx git-ccccccc (API:1.07)\n"
+                    "libusb_claim_interface error -6\n"
+                ),
+            )
+
+            with self.assertRaisesRegex(BuildError, "expected"):
+                Builder(executor, publisher_in(work), run_dir=work).run(plan)
+
+            events = load_events(Path(work) / "run.jsonl")
+            step = [e for e in events if e["event_type"] == "build_step_finished"][-1]
+
+            self.assertEqual(
+                "not the resolved revision: Host tools version: libubertooth "
+                "1.1 (git-ccccccc), libbtbb 1.0 (git-bbbbbbb)",
+                step["details"]["reason"],
+            )
+            marker = next(text for text in render_run(events).splitlines()
+                          if "EXIT: failed" in text)
+            self.assertTrue(marker.endswith("---"), marker)
 
     def test_every_catalog_tool_must_come_from_the_prefix(self):
         with tempfile.TemporaryDirectory() as work:
