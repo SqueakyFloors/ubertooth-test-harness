@@ -698,8 +698,9 @@ request fails with the byte and the field it belongs to named.
 
 **Weak-link responder.** `range.yaml`'s second suite, `range-weak-link`,
 chooses both boards by RF placement instead of by alias: the responder behind
-an attenuator (`min_attenuation_db: 10`, `max_attenuation_db: 20`) and the
-sender in the open (`max_attenuation_db: 0`), which also keeps the roles apart
+an attenuator (`min_attenuation_db: 20`, `max_attenuation_db: 20`,
+`antenna: true`) and the sender in the open (`max_attenuation_db: 0`,
+`antenna: true`), which also keeps the roles apart
 on a bench whose default board is the attenuated one. Because the step names
 one host, a bench with no such board fails planning, with the requirement and
 each board's placement in the message.

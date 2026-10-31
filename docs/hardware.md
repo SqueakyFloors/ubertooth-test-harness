@@ -251,10 +251,11 @@ are refused a placement.
 
 A worked weak-link receiver: one Ubertooth on a USB extension about a meter
 from the rest of the bench, with a 20 dB inline attenuator between the board
-and its antenna. A plan asks for it per hardware role, for example
-`rf: {Ubertooth: {min_attenuation_db: 10}}`, which is what a range, transmit
-power, margin, sensitivity, or RSSI test wants; no committed plan asks yet, so
-a recorded placement is latent until one does. The other way round is already
+and its antenna. A plan asks for it per hardware role, which is what a range, transmit power,
+margin, sensitivity, or RSSI test wants. `range.yaml`'s `range-weak-link`
+suite is the committed example: it asks for a responder at exactly this
+attenuation (`rf: {responder: {min_attenuation_db: 20, max_attenuation_db: 20,
+antenna: true}}`) and an unattenuated sender. The other way round is already
 live: captures, surveys, and follow tests require an ordinary link themselves,
 so they stay off an attenuated board with no plan saying so.
 
