@@ -21,7 +21,7 @@ reported as such and is not a failure.
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Iterator, Sequence, TextIO
+from typing import Iterator, TextIO
 
 from ubertooth_harness.events import RUN_LOG
 from ubertooth_harness.outputfiles import (
@@ -79,56 +79,53 @@ class Validation:
         return sum(1 for check in self.checks if check.skipped)
 
 
-def read_events(run_dir: Path) -> list[dict]:
-    """Every record in the run's ``run.jsonl``, in order."""
+def read_events(run_dir: Path) -> Iterator[dict]:
+    """Every record in the run's ``run.jsonl``, in order, one at a time.
+
+    A release run's log is tens of megabytes, and the point of this command
+    is that a finished run can be checked again without holding it in
+    memory, so the log is read line by line and only what a check needs is
+    kept.
+    """
     log = run_dir / RUN_LOG
     if not log.is_file():
         raise ValidateError(f"{log} is not a file; is this a run directory?")
-    events = []
-    for number, line in enumerate(log.read_text(encoding="utf-8").splitlines(), 1):
-        if not line.strip():
-            continue
-        try:
-            events.append(json.loads(line))
-        except json.JSONDecodeError as error:
-            raise ValidateError(f"{log} line {number}: {error}") from error
-    return events
+    with log.open(encoding="utf-8") as handle:
+        for number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValidateError(f"{log} line {number}: {error}") from error
 
 
 def _command_id(details) -> str:
     return str(details.get("command_id", ""))
 
 
-def recorded_output(events: Sequence[dict]) -> dict[str, dict[str, str]]:
-    """Each command's output as run.jsonl kept it, by command and stream.
+def recorded_output(run_dir: Path, wanted: set[str]) -> dict[str, dict[str, str]]:
+    """The output run.jsonl kept for the commands in ``wanted``.
 
     A command that stayed inside the record limits has its whole output in
     run.jsonl and no file of its own, so a check over it reads the same bytes
-    the live check read.
+    the live check read. Only those commands are kept, and each is bounded by
+    the record limits, so this stays small however long the run was.
     """
     text: dict[str, dict[str, str]] = {}
-    for event in events:
+    if not wanted:
+        return text
+    for event in read_events(run_dir):
         if event.get("event_type") != "command_output":
             continue
         details = event.get("details") or {}
         command = _command_id(details)
+        if command not in wanted:
+            continue
         stream = "stderr" if details.get("stream") == "stderr" else "stdout"
         streams = text.setdefault(command, {"stdout": "", "stderr": ""})
         streams[stream] += str(details.get("text", ""))
     return text
-
-
-def check_files(run_dir: Path, events: Sequence[dict]) -> Iterator[FileResult]:
-    """Every saved file the run recorded, measured again."""
-    seen = set()
-    for event in events:
-        if event.get("event_type") not in FILES_EVENTS:
-            continue
-        for saved in saved_files(event.get("details") or {}):
-            if saved.path in seen:
-                continue
-            seen.add(saved.path)
-            yield FileResult(saved, _file_problem(run_dir, saved))
 
 
 def _file_problem(run_dir: Path, saved: OutputFile) -> str:
@@ -181,14 +178,12 @@ def rerun_check(
                 "the file it read is missing: " + ", ".join(missing), "",
             )
     else:
+        # No file: the output was short enough to stay in run.jsonl in full.
+        # A stream the command never wrote to is an empty string, which is
+        # what the live check read, so the check still runs.
         streams = recorded.get(command_id) or {}
         parts = [streams.get(stream, "") for stream in check.streams]
         parts = [part for part in parts if part]
-        if not parts:
-            return CheckResult(
-                command_id, check, "",
-                "no saved file and no output in run.jsonl to read",
-            )
     match = search_parts(parts, check.pattern)
     found = match is not None
     if found != bool(check.found):
@@ -208,22 +203,34 @@ def rerun_check(
 
 def validate_run(run_dir: Path) -> Validation:
     """Re-run every recorded output check in ``run_dir``."""
-    events = read_events(run_dir)
-    files = tuple(check_files(run_dir, events))
-    kept = recorded_output(events)
-    checks = []
-    counted = 0
-    for event in events:
-        if event.get("event_type") != CHECKS_EVENT:
-            continue
+    # One pass for the files and the checks, keeping only those; then the
+    # recorded output of the commands whose checks have no file to read.
+    files = []
+    recorded: list[tuple[str, OutputCheck]] = []
+    seen = set()
+    for event in read_events(run_dir):
+        kind = event.get("event_type")
         details = event.get("details") or {}
-        command_id = _command_id(details)
-        for value in details.get("checks") or []:
-            counted += 1
-            checks.append(
-                rerun_check(run_dir, kept, command_id, OutputCheck.from_dict(value))
-            )
-    return Validation(files, tuple(checks), counted)
+        if kind in FILES_EVENTS:
+            for saved in saved_files(details):
+                if saved.path in seen:
+                    continue
+                seen.add(saved.path)
+                files.append(FileResult(saved, _file_problem(run_dir, saved)))
+        elif kind == CHECKS_EVENT:
+            command_id = _command_id(details)
+            for value in details.get("checks") or []:
+                recorded.append((command_id, OutputCheck.from_dict(value)))
+    wanted = {
+        command_id for command_id, check in recorded
+        if check.rerunnable and not check.files
+    }
+    kept = recorded_output(run_dir, wanted)
+    checks = tuple(
+        rerun_check(run_dir, kept, command_id, check)
+        for command_id, check in recorded
+    )
+    return Validation(tuple(files), checks, len(recorded))
 
 
 def report(validation: Validation, out: TextIO) -> None:
@@ -261,7 +268,7 @@ def validate_command(run_dir: Path, out: TextIO, errors: TextIO) -> int:
     """``ubertooth-harness validate <run dir>``: 0 when nothing differs."""
     try:
         validation = validate_run(Path(run_dir))
-    except ValidateError as error:
+    except (ValidateError, OSError) as error:
         errors.write(f"error: {error}\n")
         return 1
     report(validation, out)

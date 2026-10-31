@@ -3,6 +3,7 @@
 import hashlib
 import io
 import json
+import re
 from pathlib import Path
 import tempfile
 import unittest
@@ -17,6 +18,9 @@ from ubertooth_harness.executor import (
 from ubertooth_harness.outputfiles import (
     MAX_BLOCK_CHARS,
     OUTPUT_DIR,
+    READ_BLOCK_CHARS,
+    SEARCH_OVERLAP_CHARS,
+    SKIP_LINE,
     TARGET_SERIAL_STREAM,
     OutsideRun,
     confined,
@@ -28,6 +32,7 @@ from ubertooth_harness.outputfiles import (
     measure,
     search_parts,
     stream_for,
+    text_lines,
 )
 from ubertooth_harness.planner import TestInvocation
 from ubertooth_harness.sequencer import NamedTestSequencer
@@ -250,6 +255,49 @@ class ReadingFilesTests(unittest.TestCase):
         self.assertEqual(3, len(matches))
         self.assertEqual([("1", "0", "1")] * 3,
                          [m.group("usr", "rx", "tx") for m in matches])
+
+    def test_an_observed_setting_that_is_not_the_expected_one_is_recorded_failed(self):
+        step = Step("read", "Read the channel",
+                    ("ubertooth-util", "-c"),
+                    observe=Observation("channel", r"Channel: (?P<value>\d+)",
+                                        expected="2426"))
+        output = CommandOutput(stdout="Channel: 2402\n")
+        result = CommandResult(("ubertooth-util", "-c"), 0, "Channel: 2402\n",
+                               "", 0.1, False, output=output)
+        outcome = step.evaluate(result, {})
+        self.assertIn("expected channel=2426, observed 2402", outcome.failure)
+        # The record carries the reason, so the report and validate do not
+        # read a matched pattern as a check that came out for the run.
+        recorded = output.checks[-1]
+        self.assertEqual(("observed", True, "2402"),
+                         (recorded.kind, recorded.found, recorded.matched))
+        self.assertIn("expected channel=2426", recorded.reason)
+
+    def test_an_anchored_pattern_does_not_match_at_a_block_boundary(self):
+        # What is carried from one block to the next starts at a line start,
+        # so '^' cannot match in the middle of a line that a block split.
+        line = "x" * 99 + "\n"
+        head = line * ((READ_BLOCK_CHARS + SEARCH_OVERLAP_CHARS) // 100 + 100)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "x.log"
+            spliced = head + "pad SKIP: boom and more\n" + line * 2000
+            path.write_text(spliced, encoding="utf-8")
+            self.assertIsNone(re.search(SKIP_LINE, spliced))
+            self.assertIsNone(search_parts((path,), SKIP_LINE))
+            # A real line start far into the stream is still found.
+            real = head + "SKIP: no traffic\n" + line * 2000
+            path.write_text(real, encoding="utf-8")
+            match = search_parts((path,), SKIP_LINE)
+            self.assertIsNotNone(match)
+            self.assertEqual("no traffic", match[1])
+
+    def test_a_string_and_a_file_of_the_same_bytes_give_the_same_lines(self):
+        text = "a\rb\nc\x0cd\ne\r\n"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "x.log"
+            path.write_text(text, encoding="utf-8", newline="")
+            self.assertEqual(list(LineSource((path,))), list(text_lines(text)))
+            self.assertEqual(["a\rb", "c\x0cd", "e"], list(text_lines(text)))
 
     def test_a_check_reads_a_string_as_well_as_a_file(self):
         self.assertEqual("", nothing_on_stdout("\n  \n"))

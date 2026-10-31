@@ -69,9 +69,9 @@ from ubertooth_harness.power import (
 from ubertooth_harness.resources import FileResourceRegistry, RegistryError
 from ubertooth_harness.report import render_runs, write_report
 from ubertooth_harness.sequencer import NamedTestSequencer, run_started_details
-from ubertooth_harness.validate import validate_command
 from ubertooth_harness.stateful import StateCaseError
 from ubertooth_harness.transitions import guard_boards, ubertooth_roles
+from ubertooth_harness.validate import validate_command
 
 
 _DEFAULT_PLAN = Path(__file__).resolve().parents[1] / "testplans" / "slow.yaml"

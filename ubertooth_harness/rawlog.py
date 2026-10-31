@@ -118,8 +118,8 @@ def line_tag(stream: str, text: str) -> tuple[str, str]:
 
 # Per-command limits on the output records kept in run.jsonl (#49): the first
 # RECORD_OUTPUT_EVENTS records or RECORD_OUTPUT_BYTES, and the last
-# RECORD_TAIL_EVENTS records or RECORD_TAIL_BYTES. Past the first limits the
-# command's full output goes to output/<command id>.log. Bytes are those the
+# RECORD_TAIL_EVENTS records or RECORD_TAIL_BYTES. Past the first limits each
+# of the command's streams goes to output/<command id>.<stream>.log. Bytes are those the
 # text takes in run.jsonl (UTF-8 of its JSON string, escapes included).
 RECORD_OUTPUT_BYTES = 64 * 1024
 RECORD_OUTPUT_EVENTS = 200
@@ -360,8 +360,15 @@ COLLECTED_CHUNK_CHARS = 4096
 
 
 def _output_base(output_dir: Path, name: str) -> Path:
-    """output/<name> for a command's stream files; a repeated name is numbered."""
+    """output/<name> for a command's stream files; a repeated name is numbered.
+
+    Names are command IDs the harness makes up, but they go into a path, so
+    anything that is not a plain name character becomes '-' and a run of dots
+    cannot climb out of the directory.
+    """
     safe = "".join(c if c.isalnum() or c in "._-" else "-" for c in name)
+    while ".." in safe:
+        safe = safe.replace("..", "-")
     base = output_dir / OUTPUT_DIR / safe
     number = 2
     while any(

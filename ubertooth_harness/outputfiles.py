@@ -208,7 +208,7 @@ def _blocks(part) -> Iterator[str]:
             if not block:
                 return
             while not block.endswith("\n") and len(block) < MAX_BLOCK_CHARS:
-                more = handle.read(READ_BLOCK_CHARS)
+                more = handle.read(MAX_BLOCK_CHARS - len(block))
                 if not more:
                     break
                 cut = more.find("\n")
@@ -251,7 +251,7 @@ class LineSource:
             yield pending.rstrip("\r")
 
 
-def find_lines(source, pattern: str, *, span: int = LINE_SPAN) -> Iterator[re.Match]:
+def find_lines(source, pattern, *, span: int = LINE_SPAN) -> Iterator[re.Match]:
     """Every match of ``pattern`` in a line source, in order.
 
     For a check that is given lines but reads a pattern covering a few
@@ -282,21 +282,28 @@ def _matches_starting_in_first(expression, window) -> Iterator[re.Match]:
         yield match
 
 
-def search_lines(source, pattern: str, *, span: int = LINE_SPAN) -> re.Match | None:
-    """The first match of ``pattern`` in a line source, or None."""
+def search_lines(source, pattern, *, span: int = LINE_SPAN) -> re.Match | None:
+    """The first match of ``pattern`` in a line source, or None.
+
+    ``pattern`` may be a compiled pattern, so a caller keeps whichever flags
+    it was compiled with.
+    """
     return next(find_lines(source, pattern, span=span), None)
 
 
 def search_parts(parts: Sequence, pattern: str) -> re.Match | None:
     """Search the parts' concatenation for ``pattern``, a block at a time.
 
-    The search keeps the last SEARCH_OVERLAP_CHARS characters of each block,
-    so a match that reaches back no further than that across a block
-    boundary is still found. Blocks end at a line ending, so an anchored
-    pattern sees the same line endings it would see in the whole text.
+    What is carried from one block to the next starts at a line start, and a
+    block ends at a line ending where the stream has one, so a pattern
+    anchored with ``^`` or ``$`` sees the same line starts and ends it would
+    see in the whole text. A match reaching back no further than
+    SEARCH_OVERLAP_CHARS across a block boundary is still found; a longer one
+    is not.
     """
     expression = re.compile(pattern)
     buffer = ""
+    at_line_start = True
     for part in parts:
         for block in _blocks(part):
             buffer += block
@@ -305,8 +312,28 @@ def search_parts(parts: Sequence, pattern: str) -> re.Match | None:
             match = expression.search(buffer)
             if match is not None:
                 return match
-            buffer = buffer[-SEARCH_OVERLAP_CHARS:]
-    return expression.search(buffer)
+            buffer, at_line_start = _carry(buffer)
+            if not at_line_start:
+                # No line ending to cut at: searching on would offer a false
+                # line start to an anchored pattern, so give up the overlap
+                # rather than the meaning of the pattern.
+                buffer = ""
+                at_line_start = False
+    return expression.search(buffer) if buffer or at_line_start else None
+
+
+def _carry(buffer: str) -> tuple[str, bool]:
+    """The tail of ``buffer`` to search with the next block, from a line start.
+
+    Returns ("", False) when the last SEARCH_OVERLAP_CHARS hold no line
+    ending, which is a stream with no line structure for a pattern to anchor
+    to.
+    """
+    tail = buffer[-SEARCH_OVERLAP_CHARS:]
+    cut = tail.find("\n")
+    if cut < 0:
+        return "", False
+    return tail[cut + 1:], True
 
 
 @dataclass(frozen=True)
@@ -553,13 +580,27 @@ def output_file_list(details) -> str:
     return ", ".join(saved.path for saved in saved_files(details))
 
 
+def split_lines(text: str) -> list[str]:
+    """``text`` as lines, split the way a saved file is read.
+
+    Only on ``"\n"``, with a ``"\r"`` before it dropped. ``str.splitlines``
+    would also break on ``\r`` alone and on several other characters a tool's
+    progress output can carry, which would make a check see different lines
+    from a string than from the file the same bytes went to.
+    """
+    lines = [line.rstrip("\r") for line in text.split("\n")]
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 def text_lines(source) -> Iterable[str]:
     """``source``'s lines, for a check that reads output line by line.
 
     ``source`` is the LineSource a step's ``output_check`` is given, or a
     plain string in a caller or test that has the text already. Either can be
-    iterated more than once.
+    iterated more than once, and both split lines the same way.
     """
     if isinstance(source, str):
-        return source.splitlines()
+        return split_lines(source)
     return source
