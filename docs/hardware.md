@@ -274,6 +274,14 @@ Each firmware README holds the full build and flash procedure, the pinned
 toolchain versions, and the shell command reference. Images are built outside
 the repository and never committed; nothing under `firmware/` is generated.
 
+A device is reflashed when it reports a version other than the one in this
+table, so a change to the DK or peer sources that changes the image has to
+move that version, here and in the driver, or the boards keep the image they
+have. For the DK, CI builds the pull request's image and the image of the
+commit it is against, and fails when they differ with `UTDK_FW_VERSION`
+unchanged
+([#210](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/210)).
+
 ### Which Ubertooth firmware, and why
 
 The harness never tests host tools against firmware from another commit:

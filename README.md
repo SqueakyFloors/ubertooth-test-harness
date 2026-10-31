@@ -2434,12 +2434,22 @@ A second workflow (`.github/workflows/firmware.yml`) compiles the nRF52840 DK
 role firmware, which the test and build jobs do not: it needs the nRF Connect
 SDK, so it builds in Nordic's toolchain image for the version
 `firmware/nrf52840dk/NCS_VERSION` pins, and checks that the image carries the
-firmware version string the harness flashes by. That image and the SDK
-workspace are gigabytes, so it runs only on a change under
-`firmware/nrf52840dk` (or to `scripts/ci.sh`), weekly, and on request, and it
-is not a required check. `scripts/ci.sh firmware-dk` is the same build on any
-Linux host with docker, and `scripts/local-ci.sh firmware-dk` runs it against
-an exact commit.
+firmware version string the harness flashes by. On a pull request it also
+builds the sources of the commit the request is against and fails when the
+image changed while `UTDK_FW_VERSION` did not: `nrfdk.py ensure` flashes a DK
+only when the board reports another version, so that change would never reach
+a board that already runs this one. The images decide and not the files, so a
+comment or formatting change leaves the image identical and asks for no bump;
+a build that does not repeat itself is reported as that rather than as a
+missing bump; and a bump of `NCS_VERSION`, which both builds would use and
+the comparison could not see, asks for the version bump by itself.
+
+That image and the SDK workspace are gigabytes, so the workflow runs only on
+a change under `firmware/nrf52840dk` (or to `scripts/ci.sh` or the workflow
+itself), weekly, and on request, and it is not a required check.
+`scripts/ci.sh firmware-dk` is the same build on any Linux host with docker
+(`DK_BASE_REF=origin/main` to compare there too), and
+`scripts/local-ci.sh firmware-dk` runs it against an exact commit.
 
 The target-runner tests run against an in-process stub controller, and the
 controller tests against scripted runners and the real runner, all on
