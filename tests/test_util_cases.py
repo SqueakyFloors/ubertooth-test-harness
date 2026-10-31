@@ -28,6 +28,12 @@ def setUpModule():
     patch_host_api()
 
 
+# The second line of the bad-index refusal (INDEX_SHIFT_HINT in the fork's
+# libubertooth), which has been printed under it since 0c7e9c0.
+INDEX_SHIFT_HINT = ("indexes change when boards are added or removed; select a "
+                    "board by serial with -U<serial>\n")
+
+
 def failed_cases(events):
     """Failed test-phase case IDs (guard checks excluded)."""
     return sorted(
@@ -669,12 +675,15 @@ class MultiBench:
     - ``listing_drops_last``: the listing omits the last board.
     - ``unreadable``: indices the listing cannot open, which get
       ``unavailable, <reason>`` where each query's value would be.
+    - ``old_multi_wording``: the refusal for several boards with no -U as it
+      read before fork 753269b.
     """
 
     UNAVAILABLE = "unavailable, in use by another program"
 
     def __init__(self, serials, *, past_end=None, unregistered=(), index_map=None,
-                 listing_drops_last=False, unreadable=()):
+                 listing_drops_last=False, unreadable=(), old_multi_wording=False):
+        self.old_multi_wording = old_multi_wording
         self.order = list(serials) + list(unregistered)
         self.boards = {s: FakeUbertooth(serial=s, crc="1") for s in self.order}
         self.past_end = past_end
@@ -748,8 +757,8 @@ class MultiBench:
                 if self.past_end is None:
                     return self._result(
                         command, 1, "",
-                        f"error: no Ubertooth at index {index} ({len(self.order)} attached)\n"
-                        "could not open Ubertooth device\n")
+                        f"error: no Ubertooth at index {index} "
+                        f"({len(self.order)} attached)\n" + INDEX_SHIFT_HINT)
                 index = 0
             serial = self.order[index]
             rest = tuple(options[1:])
@@ -766,13 +775,23 @@ class MultiBench:
         queries = self._expand(options)
         if queries and not set(queries) - IDENTITY:
             return self._result(command, 0, self._listing(queries))
-        devices = "".join(
-            f"  Device {i}: Serial No: {s}\n" for i, s in enumerate(self.order)
-        )
+        # One line saying what to do, then the boards, as fork 753269b
+        # reworded it; it used to address the reader, list each board under a
+        # second label, and end with "could not open Ubertooth device", which
+        # named no cause of its own.
+        if self.old_multi_wording:
+            return self._result(
+                command, 1, "",
+                "multiple Ubertooth devices found! Use '-U' to specify device number\n"
+                + "".join(f"  Device {i}: Serial No: {s}\n"
+                          for i, s in enumerate(self.order))
+                + "could not open Ubertooth device\n",
+            )
+        devices = "".join(f"  Device {i}: {s}\n" for i, s in enumerate(self.order))
         return self._result(
             command, 1, "",
-            "multiple Ubertooth devices found! Use '-U' to specify device number\n"
-            + devices + "could not open Ubertooth device\n",
+            "error: multiple Ubertooth devices found; select one with "
+            "-U <index|serial>\n" + devices,
         )
 
 
@@ -874,6 +893,15 @@ class MultiBoardCaseTests(unittest.TestCase):
     def test_comprehensive_passes_on_fork_main(self):
         summary, _events, _report = multi_run(MultiBench((A, B)), "comprehensive")
         self.assertTrue(summary.passed, summary.failure_reason)
+
+    def test_the_refusal_wording_before_fork_753269b_fails_its_case(self):
+        summary, events, _report = multi_run(
+            MultiBench((A, B), old_multi_wording=True), "comprehensive")
+
+        self.assertFalse(summary.passed)
+        failed = failed_cases(events)
+        self.assertEqual(1, len(failed), failed)
+        self.assertTrue(failed[0].endswith("no-selector-other-option-refused"))
 
     def test_an_index_past_the_end_that_opens_a_board_fails(self):
         # SqueakyFloors/ubertooth#188 (fork builds before 0c7e9c0).

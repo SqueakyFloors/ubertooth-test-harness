@@ -23,7 +23,9 @@ Comprehensive coverage adds three modes, a repeated mode, -z with two modes
 (the mode refusal comes first), a stray word, -N with -i, and -U all with -i.
 Since db5649b -N prints the count and the command carries on (fork #332 was
 fixed by that design change), so -N -i prints 0, then runs -i, which finds no
-board: exit 1 with "could not open Ubertooth device". -U all -i gives the
+board: exit 1 with "error: no Ubertooth devices found", the line every tool
+gives for a selection that found nothing since fork 753269b (#655); it used
+to be an unprefixed "could not open Ubertooth device". -U all -i gives the
 -U all refusal alone (fork #333 went with -f).
 """
 
@@ -45,6 +47,9 @@ LABELS = {
 FIRMWARE_LEAVING = ("-i",)
 FORBIDDEN = (NO_BOARD_NOTE,)
 STRAY = "stray"
+# libubertooth's line for a selection that found no board at all, which every
+# tool gives since fork 753269b (#655).
+NO_DEVICES_FOUND = r"(?m)^error: no Ubertooth devices found$"
 
 
 def _ordered(modes) -> tuple[str, ...]:
@@ -161,7 +166,7 @@ def _comprehensive_cases():
         # Since fork db5649b -N prints the count and the command carries on:
         # -i then runs and finds no board. The switch's note is expected here.
         _case("count-with-mode", "util -N with -i prints the count, then runs -i", tuple(
-            _refuse(words, (r"(?m)^0$", r"could not open Ubertooth device"), forbidden=())
+            _refuse(words, (r"(?m)^0$", NO_DEVICES_FOUND), forbidden=())
             for words in (("-N", "-i"), ("-i", "-N"))
         ), "exit 1: the count 0, then -i finds no board"),
         _case("all-with-mode", "util -U all with -i: only the -U all refusal", (

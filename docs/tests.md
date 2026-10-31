@@ -580,17 +580,18 @@ the index case's step count grows with the number of boards. Smoke: `-U all
 same, and `-N` plus one `-U<index> -s` per board agree with the listing.
 Comprehensive adds the five identity queries listed per board in index order,
 both with `-U all` and with no selector, `-C` without `-U` refusing to pick a
-board (exit 1, listing every board, with no channel read), and an index past
-the last board refused with `error: no Ubertooth at index N (N attached)`.
+board (exit 1 with `error: multiple Ubertooth devices found; select one with
+-U <index|serial>` and one `Device <index>: <serial>` line per board, and no
+channel read), and an index past the last board refused with
+`error: no Ubertooth at index N (N attached)`.
 
 **Known limits.** Every command is read-only, so this says nothing about
 selection for a command that writes. The listing order is the USB index order,
 which the registry does not know, so the checks require the right set in index
 order rather than a particular board at a particular index. Harness issues
 [#162](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/162)
-(the identity listing expects output from before `-V` ended the command),
-[#174](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/174),
-and [#145](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/145)
+(the identity listing expects output from before `-V` ended the command) and
+[#145](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/145)
 are open against the expected wording.
 
 ## BLE mode conflicts
@@ -938,8 +939,9 @@ refused by the `-z` rule, and `-f`, which must be refused as an unrecognized
 option. Comprehensive runs 14, adding three modes at once, a repeated mode,
 `-z` with two modes (where the mode refusal comes first), a stray word, `-N`
 with `-i` (where `-N` prints the count and the command carries on to `-i`,
-which finds no board), and `-U all` with `-i`, which gives the `-U all`
-refusal alone.
+which finds no board and says `error: no Ubertooth devices found`, the line
+every tool gives for a selection that found nothing since fork `753269b`), and
+`-U all` with `-i`, which gives the `-U all` refusal alone.
 
 **Known limits.** As with `Refused command lines`, a fork from before the
 no-devices switch makes the case skip. Nothing here shows what `-i` does when
@@ -1014,10 +1016,11 @@ listing DLT 256, and `--extcap-config` offering channels 37-39 with 37 as the
 default. Comprehensive runs 20, adding an older `ubertooth<index>` interface
 name, the refusals when no interface is given or the interface is not an
 Ubertooth, `--capture` without `--fifo` refused before `ubertooth-btle` runs,
-an unknown option refused with no usage text after the message,
-`--extcap-version` accepted and ignored in all three forms Wireshark uses, and
-the options Wireshark sends only for features this plugin does not advertise,
-which must be refused like any unknown option.
+an unknown option refused with `error: unrecognized option '--extcap-bogus'`
+and no usage text after it (the wording every tool here shares since fork
+`5310a5d`), `--extcap-version` accepted and ignored in all three forms
+Wireshark uses, and the options Wireshark sends only for features this plugin
+does not advertise, which must be refused like any unknown option.
 
 **Known limits.** No display and no board, so the spectrum GUI itself is not
 exercised; its argument checks are still untested. Nothing here shows that
@@ -1129,8 +1132,10 @@ squelch, and LEDs.
 comfortably, not an expected capture rate, and it is bench-specific: a weaker
 link or a noisier room can fail it without anything being wrong with the code.
 The test needs two kinds of hardware and a flashable DK, so it cannot run
-anywhere the DK is absent. The DK firmware build is not yet produced by CI
-([#147](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/147)).
+anywhere the DK is absent. The DK firmware image itself comes from a local
+build: CI compiles it (the `Firmware` workflow, `scripts/ci.sh firmware-dk`)
+but publishes nothing, so a run still needs the image passed in as
+`--artifact "nRF52840 advertiser=PATH"`.
 
 ## Capture known BLE connection
 
@@ -1275,7 +1280,11 @@ verifies, so preflight checks only the board's serial and not its revision,
 and the test must be the last one on that board in the suite.
 
 **Expected outcome.** One case, run by the flash runner rather than as a
-command line. It passes when every requested write completed and verified. It
+command line. Because it is one case however many flashes it runs, the run's
+firmware watchdog reads happen between its writes rather than between cases,
+on the same three-minute interval, so a long soak reports a board that reset
+itself while it is still running; what a read takes is added back to the
+test's deadline. It passes when every requested write completed and verified. It
 fails and stops at the first mismatch: a write that did not take, a revision
 that does not match the image just written, a guard board whose revision
 changed or that disappeared, a per-flash write over 25 s, or the whole-test
@@ -1284,13 +1293,10 @@ and records the last revision read from each board.
 
 **Known limits.** It measures the write-and-verify path, not what the firmware
 then does. Selectors must be full serials: libubertooth reads an all-digit
-`-U` value as a USB index and otherwise matches the end of a serial, so the
-test refuses digit-only selectors and any serial that is the ending of
-another. Harness issue
-[#126](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/126) is
-open on that overlap check: it compares the end of a serial where libubertooth
-matches the start. A manual recovery or a power cycle never turns a failed run
-into a pass.
+`-U` value as a USB index and otherwise matches, case-insensitively, the start
+of a serial, so the test refuses digit-only selectors and any selector that is
+the beginning of another, which would name the same board twice. A manual
+recovery or a power cycle never turns a failed run into a pass.
 
 ## DFU images
 

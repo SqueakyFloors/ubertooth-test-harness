@@ -146,8 +146,11 @@ class Lab:
 
 def multiple_devices(seen):
     """libubertooth's no-selector output with more than one board (stderr)."""
-    return "multiple Ubertooth devices found! Use '-U' to specify device number\n" + "".join(
-        f"  Device {i}: Serial No: {serial}\n" for i, serial in enumerate(seen)
+    # Fork 753269b: one "error: " line that says -U takes a serial too, then
+    # the boards indented under it, each as "  Device <index>: <serial>".
+    return ("error: multiple Ubertooth devices found; select one with "
+            "-U <index|serial>\n") + "".join(
+        f"  Device {i}: {serial}\n" for i, serial in enumerate(seen)
     )
 
 

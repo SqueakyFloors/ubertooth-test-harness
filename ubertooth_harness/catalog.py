@@ -648,9 +648,10 @@ def _exclusive_topology_cases(arguments, _resources, resource_identities):
     """No-selector commands must see exactly the selected board.
 
     With more than one Ubertooth enumerated and no -U, libubertooth prints
-    "multiple Ubertooth devices found!" and indented "  Device N: Serial No:"
-    lines to stderr and opens no device, so ubertooth-util and ubertooth-btle
-    exit non-zero. These cases only pass when isolation left one board.
+    "error: multiple Ubertooth devices found; select one with -U
+    <index|serial>" and indented "  Device N: <serial>" lines to stderr and
+    opens no device, so ubertooth-util and ubertooth-btle exit non-zero.
+    These cases only pass when isolation left one board.
     """
     try:
         serial = resource_identities["Ubertooth"]["serial"].lower()

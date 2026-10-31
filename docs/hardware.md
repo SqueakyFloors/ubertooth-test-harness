@@ -489,7 +489,10 @@ a board; BlueZ, which `ubertooth-scan` and `ubertooth-follow` need and which
 exists on Linux only. Add `--with-acroname` to `bootstrap.py` on a host with
 an Acroname hub. Install the peer SDKs only on the host that builds the peer
 images: nRF Connect SDK v3.4.1 with `nrfutil sdk-manager` (about 6 GB), and
-ESP-IDF v5.5.6 (about 3 GB).
+ESP-IDF v5.5.6 (about 3 GB). A host with docker can build the DK image
+without that install, with `scripts/ci.sh firmware-dk` (see the
+[firmware README](../firmware/nrf52840dk/README.md)); flashing still needs
+`nrfutil`.
 
 ### macOS
 
