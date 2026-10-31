@@ -21,15 +21,11 @@ from ubertooth_harness.patterns import (
     same_revision,
 )
 from ubertooth_harness.outputfiles import output_of
-<<<<<<< HEAD
-from ubertooth_harness.resources import NRF52840_DK, ResourceRegistry
-=======
 from ubertooth_harness.resources import (
     ESP32_CLASSIC_PEER,
     NRF52840_DK,
     ResourceRegistry,
 )
->>>>>>> origin/main
 from ubertooth_harness.stateful import StateCaseError
 from ubertooth_harness.transitions import (
     API_PATTERN,
