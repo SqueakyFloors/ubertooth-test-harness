@@ -44,8 +44,13 @@ _TSHARK_CAPTURE = str(Path(tsharkcapture.__file__).resolve())
 CHANNEL = CHANNELS[0]
 ADVERTISING_INTERVAL_MS = 100
 PAYLOAD_TAG = "c0ffee"
-# Fetching the plugin, starting tshark, and stopping it, beyond the capture.
-CAPTURE_SLACK_S = 60.0
+# Fetching the plugin, asking tshark where its extcap directory is, listing
+# the interfaces, and stopping tshark, beyond the capture itself. It must
+# cover everything tsharkcapture.py allows itself, so that the step's timeout
+# never kills it with a tshark of its own still running (it starts tshark in
+# a session of its own, which nothing outside would then reap);
+# tests/test_tshark_capture.py checks this against those limits.
+CAPTURE_SLACK_S = 90.0
 # The capture filter Wireshark would pass on; the plugin cannot apply it.
 CAPTURE_FILTER = "btle.length > 20"
 # How far into the capture the SIGINT case stops tshark.

@@ -15,16 +15,19 @@ harness expects, which is what the harness's own parser cannot show.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import os
 from pathlib import Path
+import signal
 import sys
 import tempfile
 import unittest
+import warnings
 from unittest import mock
 
 from tests import fake_extcap
-from ubertooth_harness import advcapture, pytools, tsharkcapture
+from ubertooth_harness import advcapture, pytools, tshark_cases, tsharkcapture
 
 ADDRESS = "C3:11:22:33:44:55"
 OTHER = "D0:00:00:00:00:02"
@@ -135,6 +138,45 @@ class RefusalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as empty, \
                 mock.patch.dict(os.environ, {"PATH": empty}):
             self.usage_errors()
+
+
+class BudgetTests(unittest.TestCase):
+    def test_the_case_allows_more_time_than_the_driver_takes(self):
+        # The driver must get to its own stop before the step's timeout kills
+        # it: tshark runs in a session of its own, so a command killed from
+        # outside leaves it behind with nothing to reap it.
+        driver = (tsharkcapture.VERSION_TIMEOUT_S      # tshark --version
+                  + tsharkcapture.VERSION_TIMEOUT_S    # tshark -G folders
+                  + tsharkcapture.START_WAIT_S         # tshark -D
+                  + tsharkcapture.EXIT_WAIT_S          # past the window
+                  + tsharkcapture.STOP_WAIT_S          # past the SIGTERM
+                  + tsharkcapture.GONE_WAIT_S)         # the leftover scan
+        self.assertLess(driver, tshark_cases.CAPTURE_SLACK_S)
+
+    def test_a_tshark_that_ignores_the_stop_is_reported_not_left_quietly(self):
+        failures = []
+        lines = []
+        with mock.patch.multiple(tsharkcapture, EXIT_WAIT_S=0.5, STOP_WAIT_S=0.5), \
+                tempfile.TemporaryDirectory() as directory, \
+                warnings.catch_warnings():
+            # The one left running on purpose is killed below; its Popen is
+            # dropped first, which would warn about it.
+            warnings.simplefilter("ignore", ResourceWarning)
+            # Deaf to both signals, as a wedged tshark would be.
+            argv = ("sh", "-c", "trap '' TERM INT; sleep 30")
+            status, _out, _err, seen, _quiet = tsharkcapture._run_tshark(
+                argv, dict(os.environ), 0.2, None, failures, lines.append,
+                Path(directory))
+
+        self.assertIsNone(status)
+        self.assertTrue(any("was sent SIGTERM" in failure for failure in failures),
+                        failures)
+        # Its own process id is among what was left running, so the case fails
+        # instead of the command ending with a tshark still going.
+        self.assertTrue(any("sleep 30" in command for command in seen.values()), seen)
+        for pid in seen:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGKILL)
 
 
 class IsolationTests(unittest.TestCase):

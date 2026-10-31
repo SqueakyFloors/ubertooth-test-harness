@@ -90,10 +90,18 @@ ADDRESS_FIELD = "btle.advertising_address"
 PDU_TYPE_FIELD = "btle.advertising_header.pdu_type"
 PDU_TYPES = {"conn": 0x0, "nonconn": 0x2}
 PDU_NAMES = {0x0: "ADV_IND", 0x2: "ADV_NONCONN_IND"}
-# tshark's own limits: how long it may take to start, and to stop after the
-# capture window or a SIGINT.
+# tshark's own limits. The whole command must finish inside the step's
+# timeout (tshark_cases.CAPTURE_SLACK_S, which test_tshark_capture checks
+# against these): tshark runs in a session of its own, so a command killed
+# from outside would leave it behind untracked.
 START_WAIT_S = 20.0
-STOP_WAIT_S = 30.0
+# How long past the end of the capture window, or past a SIGINT, tshark may
+# take to exit before it is stopped.
+EXIT_WAIT_S = 10.0
+# How long after the SIGTERM before it counts as left running.
+STOP_WAIT_S = 10.0
+# Reading a capture file opens no device and starts no capture.
+READ_TIMEOUT_S = 60.0
 GONE_WAIT_S = 5.0
 POLL_S = 0.05
 VERSION_TIMEOUT_S = 20.0
@@ -311,7 +319,7 @@ def _run_tshark(argv, env, seconds, interrupt_after, failures, out, directory):
         process = subprocess.Popen(argv, stdout=stdout, stderr=stderr, env=env,
                                    start_new_session=True)
         seen = {}
-        deadline = time.monotonic() + seconds + STOP_WAIT_S
+        deadline = time.monotonic() + seconds + EXIT_WAIT_S
         not_before = (time.monotonic() + interrupt_after
                       if interrupt_after is not None else None)
         interrupted = quiet = False
@@ -324,24 +332,24 @@ def _run_tshark(argv, env, seconds, interrupt_after, failures, out, directory):
                     process.send_signal(signal.SIGINT)
                     not_before = None
                     interrupted = True
-                    deadline = time.monotonic() + STOP_WAIT_S
+                    deadline = time.monotonic() + EXIT_WAIT_S
             time.sleep(POLL_S)
         if interrupt_after is not None and not interrupted:
             # Nothing was decoded in time to interrupt after, so the capture
             # ran its window out and the SIGINT check was not made.
             quiet = True
         if process.poll() is None:
+            # The window and EXIT_WAIT_S are gone: stop it now rather than
+            # wait again, so the whole command stays inside the step's
+            # timeout and nothing is left for it to kill.
+            failures.append(
+                f"tshark did not exit within {EXIT_WAIT_S:g}s of the end of its "
+                "capture; it was sent SIGTERM")
+            process.terminate()
             try:
                 process.wait(STOP_WAIT_S)
             except subprocess.TimeoutExpired:
-                failures.append(
-                    f"tshark did not exit within {STOP_WAIT_S:g}s of the end of its "
-                    "capture; it was sent SIGTERM")
-                process.terminate()
-                try:
-                    process.wait(STOP_WAIT_S)
-                except subprocess.TimeoutExpired:
-                    pass
+                pass
         if process.poll() is None:
             # It is in a session of its own, so nothing outside this command
             # will reap it: name it among what was left running, which fails
@@ -422,8 +430,8 @@ def read_file(path, address, *, pdu_type=PDU_TYPES["nonconn"], min_packets=1,
     argv = tshark_argv("", 0, read=str(path))
     out("tshark command: " + " ".join(argv))
     env = dict(os.environ, LC_ALL="C")
-    result = subprocess.run(argv, capture_output=True, text=True, timeout=STOP_WAIT_S,
-                            env=env)
+    result = subprocess.run(argv, capture_output=True, text=True,
+                            timeout=READ_TIMEOUT_S, env=env)
     return _report(result.returncode, result.stdout, result.stderr, {}, address,
                    pdu_type, min_packets, None, failures, out)
 
