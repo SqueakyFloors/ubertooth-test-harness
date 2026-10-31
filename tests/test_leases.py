@@ -282,26 +282,34 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
         self.assertIn(f"ps -g {os.getpgrp()}", self.notes[0])
         self.assertIn("may still be using the board", self.notes[0])
 
-    def test_an_orphaned_host_lock_is_left_where_it_is(self):
-        # The host lock is the only thing keeping a power change or a
-        # firmware write from overlapping another, and one of that session's
-        # processes could be a write in flight.
-        path = self.hold(leases.HOST_LOCK, dead_holder(pgid=os.getpgrp()))
-        with self.assertRaises(leases.LeaseError) as caught:
-            leases.acquire([], holder("agent-2"), directory=self.dir,
-                           host_lock=True, note=self.notes.append)
-        message = str(caught.exception)
-        self.assertIn("this host's power/firmware lock is in use", message)
-        self.assertIn("The command that took it is gone", message)
-        self.assertIn(f"ps -g {os.getpgrp()}", message)
-        self.assertEqual([], self.notes)
-        self.assertEqual("gone-agent", leases.read_holder(path)["owner"])
-        # With that session gone too, the next command takes it over.
-        os.close(self.raw.pop())
-        self.hold(leases.HOST_LOCK, dead_holder())
-        leases.acquire([], holder("agent-2"), directory=self.dir,
-                       host_lock=True, note=self.notes.append).release()
-        self.assertEqual(1, len(self.notes))
+    def test_a_host_lock_whose_command_is_gone_is_never_taken_over(self):
+        """The one lock a person has to clear.
+
+        It is all that keeps a power change or a firmware write from
+        overlapping another, and what still holds its file could be a write
+        in flight: a process that left the recorded session, or one of a
+        session the record does not name at all. So the error says what is
+        known and what to look for, whether or not the recorded session is
+        still running.
+        """
+        for record in (dead_holder(pgid=os.getpgrp()),  # its session lives
+                       dead_holder(),                   # its session is gone
+                       {k: v for k, v in dead_holder().items()
+                        if k != "pgid"}):               # an older lease file
+            with self.subTest(pgid=record.get("pgid")):
+                path = self.hold(leases.HOST_LOCK, record)
+                with self.assertRaises(leases.LeaseError) as caught:
+                    leases.acquire([], holder("agent-2"), directory=self.dir,
+                                   host_lock=True, note=self.notes.append)
+                message = str(caught.exception)
+                self.assertIn("this host's power/firmware lock is in use", message)
+                self.assertIn("the command that took it is gone", message)
+                self.assertIn("it is never taken over", message)
+                self.assertIn("remove the lock file", message)
+                self.assertEqual([], self.notes)
+                self.assertEqual("gone-agent", leases.read_holder(path)["owner"])
+                os.close(self.raw.pop())
+                os.unlink(path)
 
     def test_a_busy_board_says_when_the_command_that_took_it_is_gone(self):
         # A board whose takeover did not happen (another command was in the
@@ -312,7 +320,12 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
         fcntl.flock(shared, fcntl.LOCK_SH | fcntl.LOCK_NB)
         with self.assertRaises(leases.LeaseError) as caught:
             self.take()
-        self.assertIn("The command that took it is gone", str(caught.exception))
+        message = str(caught.exception)
+        self.assertIn("the command that took it is gone", message)
+        # The tail other tools trim is still the last thing in the message.
+        self.assertTrue(
+            message.endswith("use --wait-for-boards MINUTES to wait for it"),
+            message)
 
     def test_a_lease_of_a_live_process_is_left_alone(self):
         self.hold(A, dict(holder("busy-agent"), pid=os.getpid(),
@@ -348,15 +361,6 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
         self.assertEqual([], slept)
         self.assertEqual(1, len(self.notes))
 
-    def test_a_stale_host_lock_is_taken_over(self):
-        self.hold(leases.HOST_LOCK, dead_holder())
-        held = leases.acquire(
-            [], holder("agent-2"), directory=self.dir, host_lock=True,
-            note=self.notes.append,
-        )
-        self.addCleanup(held.release)
-        self.assertTrue(held.holds_host_lock())
-        self.assertIn("this host's power/firmware lock", self.notes[0])
 
     def test_one_board_of_a_set_can_be_stale(self):
         self.hold(B, dead_holder())
@@ -476,11 +480,15 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
         self.assertTrue(path.exists())
         self.assertEqual("gone-agent", leases.read_holder(path)["owner"])
 
-    def test_boards_says_an_orphaned_host_lock_stays_held(self):
-        self.hold(leases.HOST_LOCK, dead_holder(pgid=os.getpgrp()))
-        state = leases.host_lock_state(directory=self.dir)
-        self.assertIn("still running", state["stale"])
-        self.assertFalse(state["takeover"])
+    def test_boards_says_a_host_lock_of_a_gone_command_stays_held(self):
+        for record in (dead_holder(pgid=os.getpgrp()), dead_holder()):
+            with self.subTest(pgid=record["pgid"]):
+                path = self.hold(leases.HOST_LOCK, record)
+                state = leases.host_lock_state(directory=self.dir)
+                self.assertIn("is gone", state["stale"])
+                self.assertFalse(state["takeover"])
+                os.close(self.raw.pop())
+                os.unlink(path)
 
     def test_boards_reports_a_live_lease_as_held_and_not_stale(self):
         with leases.acquire([A], holder("agent-1"), directory=self.dir):
@@ -520,10 +528,11 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
                 self.assertIn("cannot be checked", why)
         self.assertTrue(leases.takeover_allowed(A, "stale"))
         self.assertTrue(leases.takeover_allowed(A, "orphan"))
-        self.assertTrue(leases.takeover_allowed(leases.HOST_LOCK, "stale"))
-        self.assertFalse(leases.takeover_allowed(leases.HOST_LOCK, "orphan"))
         for kind in ("live", "foreign", "unknown"):
             self.assertFalse(leases.takeover_allowed(A, kind))
+        # The host lock is never taken over, whatever its record says.
+        for kind in ("stale", "orphan", "live", "foreign", "unknown"):
+            self.assertFalse(leases.takeover_allowed(leases.HOST_LOCK, kind))
 
     def _orphaned_lease(self, *, same_session: bool) -> int:
         """Leave A leased by a command that outlived the lease that took it.

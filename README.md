@@ -1402,20 +1402,24 @@ leftover command from that session may still be talking to the board:
 command ran in, so a leftover that left it (`setsid`, a daemon) is reported
 as gone.
 
-The host lock is the exception. It is the only thing that keeps USB power
-changes and firmware writes on a host from overlapping, so while any process
-of the dead command's session is still running — one of them could be a
-firmware write in flight — its host lock stays where it is, and the error
-says so:
+A board is taken over once per command: a second stale lease on the same
+board within one wait is left alone, so a lock file that keeps coming back
+cannot make a command loop. Such a board's error says the command that took
+it is gone, as the host lock's does below.
+
+The host lock is never taken over. It is the only thing that keeps USB power
+changes and firmware writes on a host from overlapping, and what still holds
+its file could be a firmware write in flight — a process that left the
+recorded session, or one of a session the record does not name at all. So its
+error says what is known and what to look for, and a person decides:
 
 ```
 error: this host's power/firmware lock is in use: held by agent, lease:
 ubertooth-dfu -U ... -d ..., pid 4471, since ... UTC (.../host-power.lock);
-another harness command is switching USB power or writing firmware here;
-retry when it ends, or use --wait-for-boards MINUTES. The command that took
-it is gone: its process (pid 4471) is gone, but other processes of the same
-session are still running (process group 4471); one of them may still be
-using the board, so check 'ps -g 4471'.
+the command that took it is gone: its process (pid 4471) is gone, and so is
+the process group it ran in (4471); it is never taken over, because a
+firmware write or a power change of that session may still be running: look
+for one, and remove the lock file once you know there is none
 ```
 
 `boards` marks such a lease and removes nothing itself:

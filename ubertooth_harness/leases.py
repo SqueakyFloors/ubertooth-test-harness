@@ -26,11 +26,15 @@ capture makes the next device command fail loudly instead of quietly sharing
 the board, while a leftover that is not using the board costs nothing. The
 board coming back is worth that, and the note says what to look for.
 
-The host lock is not like that: it is the only thing that keeps USB power
-changes and firmware writes on a host from overlapping. So while any process
-of the dead command's session is still running (one of them could be a
-firmware write in flight) its host lock stays where it is, and the error says
-what to look at instead.
+The host lock is never taken over. It is the only thing that keeps USB power
+changes and firmware writes on a host from overlapping, and what still holds
+its file could be a firmware write in flight. So its error says that the
+command which took it is gone and what to look for, and a person decides;
+a board interrupted mid-write is the one outcome worth waiting to avoid.
+
+A board's takeover happens once per command: a second stale lease on the
+same board within one wait is left alone, so a lock file that keeps coming
+back cannot make a command loop.
 
 What keeps a takeover narrow: a lease recorded on another host is left alone
 (a pid there means nothing here), and ``<lease dir>/takeover.lock`` orders a
@@ -444,18 +448,23 @@ def lease_liveness(holder: Mapping, *, hostname: str | None = None) -> tuple[str
 def takeover_allowed(board: Board, kind: str) -> bool:
     """Whether a lease in this state may be taken over.
 
-    A board's lease is taken over whether or not the dead command's session
-    is still running: the USB device is what really keeps two commands off
-    one board, so a leftover capture makes the next device command fail
-    loudly. The host lock is not like that. It exists so that USB power
-    changes and firmware writes on a host never overlap, and nothing else
-    stops them, so while any process of that session is still running — one
-    of them could be a firmware write in flight — the lock stays where it is
-    and the error says what to look at.
+    A board's lease is taken over once the command that took it is gone,
+    whether or not its session is still running: the USB device is what
+    really keeps two commands off one board, so a leftover capture makes the
+    next device command fail loudly rather than quietly share the board.
+
+    The host lock is never taken over. It is the only thing that keeps USB
+    power changes and firmware writes on a host from overlapping, and what
+    still holds its file could be a firmware write in flight: a process that
+    left the recorded session, or one of a session the record does not name
+    at all (a lease file from a harness that recorded no process group).
+    Nothing here can tell those from a lock nobody needs, and the cost of
+    being wrong is a board interrupted mid-write, so the error says what to
+    look for and a person decides.
     """
-    if kind == "stale":
-        return True
-    return kind == "orphan" and board != HOST_LOCK
+    if board == HOST_LOCK:
+        return False
+    return kind in ("stale", "orphan")
 
 
 def _note_to_stderr(message: str) -> None:
@@ -787,7 +796,8 @@ def acquire(
             if clock() >= deadline:
                 raise LeaseError(
                     f"cannot lease boards in {root}: another command is taking "
-                    f"over a stale lease ({root / TAKEOVER_LOCK}); retry"
+                    f"over a stale lease ({root / TAKEOVER_LOCK}); retry, or "
+                    "use --wait-for-boards MINUTES to wait for it"
                 )
             sleep(_POLL_S)
             continue
@@ -819,22 +829,31 @@ def acquire(
                 )
             holder_now = read_holder(path)
             kind, why = lease_liveness(holder_now)
-            # A lease this command would not take over (an orphaned host
-            # lock) must say why it is still there, or it reads as the stale
-            # lease nobody could explain before.
-            left_over = f" The command that took it is gone: {why}." if kind in (
-                "orphan", "stale") else ""
+            # A lease this command did not take over (the host lock, or a
+            # board whose one takeover this command has spent) must say the
+            # command that took it is gone, or it reads as the stale lease
+            # nobody could account for before.
+            left_over = (f" the command that took it is gone: {why};"
+                         if kind in ("orphan", "stale") else "")
             if board == HOST_LOCK:
+                if left_over:
+                    raise LeaseError(
+                        f"this host's power/firmware lock is in use{waited}: held "
+                        f"by {describe_holder(holder_now)} ({path});{left_over} it "
+                        "is never taken over, because a firmware write or a power "
+                        "change of that session may still be running: look for "
+                        "one, and remove the lock file once you know there is none"
+                    )
                 raise LeaseError(
                     f"this host's power/firmware lock is in use{waited}: held by "
                     f"{describe_holder(holder_now)} ({path}); another "
                     "harness command is switching USB power or writing firmware "
-                    f"here; retry when it ends, or use --wait-for-boards MINUTES.{left_over}"
+                    "here; retry when it ends, or use --wait-for-boards MINUTES"
                 )
             raise LeaseError(
                 f"{board.alias} is in use{waited}: held by "
-                f"{describe_holder(holder_now)} ({path}); "
-                f"use --wait-for-boards MINUTES to wait for it.{left_over}"
+                f"{describe_holder(holder_now)} ({path});{left_over} "
+                "use --wait-for-boards MINUTES to wait for it"
             )
         sleep(_POLL_S)
 
