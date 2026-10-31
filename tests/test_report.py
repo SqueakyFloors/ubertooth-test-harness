@@ -10,6 +10,13 @@ from ubertooth_harness.report import load_events, render_run, render_runs, write
 SERIAL = "aaaa0000"
 
 
+def _serial_set(registered: str) -> set:
+    """What `_Run.serials()` collects for one registered serial."""
+    from ubertooth_harness.report import _serial_widths
+
+    return {registered, registered.lower()} | _serial_widths(registered)
+
+
 def write_run(
     directory: Path, *, finish=True, host="Host_Mac", source=None,
     dk_serial=None, peer_serial=None, dk_device=None,
@@ -130,12 +137,23 @@ class ReportTests(unittest.TestCase):
         self.assertIn(f"UT_Linux4 serial {SERIAL}", devices)
         self.assertIn("DK_Linux1 serial 001050210121", devices)
 
-    def test_a_numeric_serial_is_masked_between_digit_boundaries(self):
+    def test_a_short_serial_is_masked_only_where_it_stands_alone(self):
+        # A registry entry short enough to read as an ordinary number
+        # ("000123", which the registry takes and the tools write as 123):
+        # masking it inside every longer number would mangle the transcript.
         from ubertooth_harness.report import _redact
 
         self.assertEqual(
-            "--jlink <serial>; count 91050210121437",
-            _redact("--jlink 1050210121; count 91050210121437", ["1050210121"]),
+            "--jlink <serial>; 1234 packets in 7123 us",
+            _redact("--jlink 123; 1234 packets in 7123 us",
+                    _serial_set("000123")),
+        )
+        # A real serial is masked wherever it appears, including inside the
+        # name of a device path.
+        self.assertEqual(
+            "port /dev/cu.usbmodem<serial>1",
+            _redact("port /dev/cu.usbmodem0010502101211",
+                    _serial_set("001050210121")),
         )
 
     def test_redaction_masks_32_hex_tokens_but_not_longer_digests(self):
@@ -232,9 +250,10 @@ class ReportTests(unittest.TestCase):
                 "/dev/serial/by-id/usb-SEGGER_J-Link_<serial>-if00", report)
             self.assertNotIn("001050210121", report)
 
-    def test_a_path_the_widths_cannot_reach_is_masked_whole(self):
+    def test_a_serial_followed_by_a_digit_in_a_path_is_masked(self):
         # macOS names a probe /dev/cu.usbmodem<serial><interface>, so a digit
-        # follows the serial and masking it on its own would not match.
+        # follows the serial. The path is also discovered at run time off
+        # Linux, so masking cannot rely on the registry holding it.
         path = "/dev/cu.usbmodem0010502101211"
         with tempfile.TemporaryDirectory() as directory:
             run = Path(directory) / "run-a"
@@ -254,18 +273,18 @@ class ReportTests(unittest.TestCase):
             report = render_run(load_events(run / "run.jsonl"), redact_serials=True)
 
             self.assertNotIn("001050210121", report)
-            self.assertIn("--port <serial>", report)
+            self.assertIn("--port /dev/cu.usbmodem<serial>1", report)
 
     def test_serial_widths_cover_padding_but_not_short_numbers(self):
         from ubertooth_harness.report import _serial_widths
 
         self.assertEqual({"1050210121", "001050210121"}, _serial_widths("001050210121"))
         self.assertEqual({"1050210121", "001050210121"}, _serial_widths("1050210121"))
-        # Fewer digits than that: the padded width is still unmistakable, but
-        # the number itself could be any number in the transcript.
-        self.assertEqual({"000000012345"}, _serial_widths("12345"))
-        # A serial written in hex is masked as the registry holds it.
+        self.assertEqual({"12345", "000000012345"}, _serial_widths("12345"))
+        # A serial written in hex is masked as the registry holds it, and an
+        # Ubertooth's 32 digits are not a J-Link serial in another width.
         self.assertEqual(set(), _serial_widths("aaaa0000"))
+        self.assertEqual(set(), _serial_widths("1" * 32))
 
     def test_report_shows_every_recorded_output_record(self):
         # run.jsonl output is capped when recorded (rawlog.RECORD_*), so the
