@@ -1490,10 +1490,11 @@ transcript. Serial numbers are shown; `--redact-serials` replaces them with
 `<serial>`: an Ubertooth's serial, a DK's J-Link serial, and an ESP32 peer's
 bridge serial. A numeric serial is masked in each width the run writes it, as
 registered and as the number the tools take, so a DK's J-Link serial does not
-survive as the `--jlink 1050210121` the harness passes; a serial of fewer
-than six digits is left as the tools write it, because a number that short
-reads as any other number in a transcript. Any standalone 32-hex-digit token
-is masked too, since that is the shape of an Ubertooth serial.
+survive as the `--jlink 1050210121` the harness passes. A serial port path is
+kept readable with the serial inside it masked
+(`/dev/serial/by-id/usb-SEGGER_J-Link_<serial>-if00`), or masked whole where
+that cannot reach the serial. Any standalone 32-hex-digit token is masked too,
+since that is the shape of an Ubertooth serial.
 
 ## Flash reliability
 

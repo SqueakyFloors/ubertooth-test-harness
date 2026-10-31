@@ -232,6 +232,30 @@ class ReportTests(unittest.TestCase):
                 "/dev/serial/by-id/usb-SEGGER_J-Link_<serial>-if00", report)
             self.assertNotIn("001050210121", report)
 
+    def test_a_path_the_widths_cannot_reach_is_masked_whole(self):
+        # macOS names a probe /dev/cu.usbmodem<serial><interface>, so a digit
+        # follows the serial and masking it on its own would not match.
+        path = "/dev/cu.usbmodem0010502101211"
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            write_run(run, finish=False, dk_serial="001050210121",
+                      dk_device=path)
+            publisher = open_run_publisher(run, "run-a")
+            publisher.emit("command_started", "running", {
+                "command_id": "d", "argv": ["nrfdk.py", "identify", "--port", path],
+            })
+            publisher.emit("command_output", "running", {
+                "command_id": "d", "stream": "stdout", "text": f"port: {path}\n",
+            })
+            publisher.emit("command_finished", "passed", {
+                "command_id": "d", "returncode": 0, "duration_s": 0.1,
+            })
+
+            report = render_run(load_events(run / "run.jsonl"), redact_serials=True)
+
+            self.assertNotIn("001050210121", report)
+            self.assertIn("--port <serial>", report)
+
     def test_serial_widths_cover_padding_but_not_short_numbers(self):
         from ubertooth_harness.report import _serial_widths
 

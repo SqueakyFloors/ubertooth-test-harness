@@ -58,15 +58,14 @@ def _time(event: Mapping) -> datetime.datetime:
     return moment
 
 
-# Shortest number masked on its own, once its leading zeros are gone. The
-# registry accepts a J-Link serial of 6 to 12 digits, zeros included
-# (resources._JLINK_SERIAL), so one registered as `000123` is masked as
-# registered and as the 12 digits udev's name uses, but the three digits the
-# tools put on the command line are left alone: a number that short would
-# read as any other number in the transcript. A SEGGER probe's serial is
-# nine digits or more.
+# Shortest number masked on its own, once its leading zeros are gone, which
+# is also the fewest significant digits nrfdk.jlink_serial accepts: the tools
+# never write a shorter number, so nothing is left unmasked by the floor. It
+# is there because a short number is masked wherever it stands in the
+# transcript, so a serial of exactly six digits does mask a count that reads
+# the same. A SEGGER probe's serial is nine digits or more.
 _SERIAL_MIN_DIGITS = 6
-# How wide udev's by-id name writes a J-Link serial (targets.DK_BY_ID).
+# How wide a DK's by-id name writes its J-Link serial (targets.DK_BY_ID).
 _SERIAL_PADDED_DIGITS = 12
 
 
@@ -77,10 +76,11 @@ def _serial_widths(value: str) -> set[str]:
     the registry holds it, which is how `nrfutil device list` prints it
     (``001050210121`` on this bench), and as a number, because nrfdk.py takes
     it as one and preflight.py puts it on the command line with the leading
-    zeros gone (``1050210121``). udev's by-id name pads it to 12 digits
+    zeros gone (``1050210121``). A DK's by-id name pads it to 12 digits
     again. ``--redact-serials`` has to mask each of them, or the serial
-    survives in the transcript. Any numeric serial is treated this way; one
-    written in hex is masked as the registry holds it.
+    survives in the transcript. Any numeric serial is treated this way, so a
+    numeric bridge serial gains a padded width nothing writes, which costs
+    nothing; one written in hex is masked as the registry holds it.
     """
     if not value.isdigit():
         return set()
@@ -187,10 +187,24 @@ class _Run:
             elif event["event_type"].startswith("isolation_"):
                 for serial in details.get("enumerated", []):
                     add(serial)
+        paths = set()
         for identity in identities:
             for key, value in identity.items():
-                if "serial" in key and not str(value).startswith("/"):
+                if "serial" not in key:
+                    continue
+                if str(value).startswith("/"):
+                    paths.add(str(value))
+                else:
                     add(value)
+        # A device path holds the serial inside it, so masking the widths
+        # leaves the rest of the path to read ("usb-SEGGER_J-Link_<serial>
+        # -if00"). Where that does not reach the serial, the whole path is
+        # masked instead: macOS names a probe /dev/cu.usbmodem<serial><port>,
+        # where a digit follows the serial and the digit-boundary rule in
+        # _redact does not match it.
+        for path in paths:
+            if any(serial in _redact(path, found) for serial in found):
+                found.add(path)
         return found
 
 
