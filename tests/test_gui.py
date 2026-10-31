@@ -573,6 +573,12 @@ class PageWiringTests(unittest.TestCase):
             self.assertNotRegex(text, r"(?i)(https?:)?//[a-z0-9.-]+\.[a-z]{2,}/")
             self.assertNotIn("@import", text)
 
+    def test_the_live_view_closes_a_build_step_with_its_outcome(self):
+        # The step's own status and reason, as report.md's transcript shows
+        # them (`--- <step> EXIT: <status>: <reason> ---`).
+        self.assertIn('kind === "build_step_finished"', self.js)
+        self.assertRegex(self.js, r'pushLog\(`--- \$\{details\.step_name.*EXIT: \$\{status\}')
+
     def test_script_sends_the_commit_it_listed(self):
         self.assertIn("commit: chosen ? chosen.commit : null", self.js)
 

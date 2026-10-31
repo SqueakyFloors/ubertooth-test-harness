@@ -66,8 +66,33 @@ def command_event(ms: int, event_type: str, status: str, details: dict) -> dict:
     }
 
 
-def write_run(directory: Path, *, finish=True, host="Host_Mac", source=None):
+def _serial_set(registered: str) -> set[str]:
+    """What `_Run.serials()` collects for one registered J-Link serial."""
+    from ubertooth_harness.report import _Run
+
+    return _Run([{
+        "run_id": "r", "event_type": "manifest", "status": "passed",
+        "timestamp": "2026-01-01T00:00:00",
+        "details": {"manifest": {"invocations": [
+            {"resource_identities": {"advertiser": {"jlink serial": registered}}},
+        ]}},
+    }]).serials()
+
+
+def write_run(
+    directory: Path, *, finish=True, host="Host_Mac", source=None,
+    dk_serial=None, peer_serial=None, dk_device=None,
+):
     publisher = open_run_publisher(directory, directory.name)
+    identities = {"Ubertooth": {"serial": SERIAL}}
+    if dk_serial:
+        identities["advertiser"] = {"jlink serial": dk_serial,
+                                    "BLE address": "C0:11:22:33:44:55"}
+        if dk_device:
+            identities["advertiser"]["serial device"] = dk_device
+    if peer_serial:
+        identities["peer"] = {"bridge serial": peer_serial,
+                              "BD_ADDR": "AA:BB:CC:11:22:33"}
     publisher.emit("run_started", "running", {"plan_name": "Plan", "suite": "fast", "host": host})
     publisher.emit("manifest", "passed", {"manifest": {
         "host": host,
@@ -77,7 +102,7 @@ def write_run(directory: Path, *, finish=True, host="Host_Mac", source=None):
                      "expected_revision": "git-aaaaaaa", "repository": "repo",
                      **(source or {})}],
         "artifacts": [],
-        "invocations": [{"resource_identities": {"Ubertooth": {"serial": SERIAL}}}],
+        "invocations": [{"resource_identities": identities}],
         "environment": {"os": {"system": "Darwin", "architecture": "arm64"}},
     }})
     publisher.emit("test_started", "running", {
@@ -174,6 +199,32 @@ class ReportTests(unittest.TestCase):
         self.assertIn(f"UT_Linux4 serial {SERIAL}", devices)
         self.assertIn("DK_Linux1 serial 001050210121", devices)
 
+    def test_a_short_serial_is_masked_only_where_it_stands_alone(self):
+        # A registry entry short enough to read as an ordinary number
+        # ("000123", which the registry takes and the tools write as 123):
+        # masking it inside every longer number would mangle the transcript.
+        from ubertooth_harness.report import _redact
+
+        self.assertEqual(
+            "--jlink <serial>; 1234 packets in 7123 us",
+            _redact("--jlink 123; 1234 packets in 7123 us",
+                    _serial_set("000123")),
+        )
+        # Its padded width is long enough to mask anywhere, so the path that
+        # carries it is masked whatever follows the serial.
+        self.assertEqual(
+            "port /dev/cu.usbmodem<serial>1",
+            _redact("port /dev/cu.usbmodem0000000001231",
+                    _serial_set("000123")),
+        )
+        # A real serial is masked wherever it appears, including inside the
+        # name of a device path.
+        self.assertEqual(
+            "port /dev/cu.usbmodem<serial>1",
+            _redact("port /dev/cu.usbmodem0010502101211",
+                    _serial_set("001050210121")),
+        )
+
     def test_redaction_masks_32_hex_tokens_but_not_longer_digests(self):
         from ubertooth_harness.report import _redact
 
@@ -203,6 +254,176 @@ class ReportTests(unittest.TestCase):
 
             self.assertNotIn("cccc2222", report)
             self.assertNotIn(SERIAL, report)
+
+    def test_redaction_masks_a_dk_jlink_serial_in_both_widths(self):
+        # The registry pads a J-Link serial to 12 digits and preflight puts it
+        # on nrfdk.py's command line as a number, so the report holds both.
+        registered, as_a_number = "001050210121", "1050210121"
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            write_run(run, finish=False, dk_serial=registered)
+            publisher = open_run_publisher(run, "run-a")
+            publisher.emit("command_started", "running", {
+                "command_id": "d",
+                "argv": ["python", "nrfdk.py", "identify", "--jlink", as_a_number],
+            })
+            publisher.emit("command_output", "running", {
+                "command_id": "d", "stream": "stdout",
+                "text": f"J-Link serial: {as_a_number}\n",
+            })
+            publisher.emit("command_finished", "passed", {
+                "command_id": "d", "returncode": 0, "duration_s": 0.1,
+            })
+
+            report = render_run(load_events(run / "run.jsonl"), redact_serials=True)
+
+            self.assertNotIn(as_a_number, report)
+            self.assertNotIn(registered, report)
+            self.assertIn("--jlink <serial>", report)
+
+    def test_redaction_masks_an_esp32_peer_bridge_serial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            write_run(run, finish=False, peer_serial="e9c5ba112233")
+            publisher = open_run_publisher(run, "run-a")
+            publisher.emit("command_started", "running", {
+                "command_id": "p", "argv": ["esp32-peer", "--serial", "e9c5ba112233"],
+            })
+            publisher.emit("command_finished", "passed", {
+                "command_id": "p", "returncode": 0, "duration_s": 0.1,
+            })
+
+            report = render_run(load_events(run / "run.jsonl"), redact_serials=True)
+
+            self.assertNotIn("e9c5ba112233", report)
+
+    def test_redaction_masks_the_serial_inside_a_device_path(self):
+        # The by-id name carries the probe's serial, so masking the serial is
+        # enough: replacing the whole path would leave the reader less.
+        path = "/dev/serial/by-id/usb-SEGGER_J-Link_001050210121-if00"
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            write_run(run, finish=False, dk_serial="001050210121",
+                      dk_device=path)
+            publisher = open_run_publisher(run, "run-a")
+            publisher.emit("command_started", "running", {
+                "command_id": "d", "argv": ["nrfdk.py", "identify", "--port", path],
+            })
+            publisher.emit("command_finished", "passed", {
+                "command_id": "d", "returncode": 0, "duration_s": 0.1,
+            })
+
+            report = render_run(load_events(run / "run.jsonl"), redact_serials=True)
+
+            self.assertIn(
+                "/dev/serial/by-id/usb-SEGGER_J-Link_<serial>-if00", report)
+            self.assertNotIn("001050210121", report)
+
+    def test_a_serial_followed_by_a_digit_in_a_path_is_masked(self):
+        # macOS names a probe /dev/cu.usbmodem<serial><interface>, so a digit
+        # follows the serial. The path is also discovered at run time off
+        # Linux, so masking cannot rely on the registry holding it.
+        path = "/dev/cu.usbmodem0010502101211"
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            write_run(run, finish=False, dk_serial="001050210121",
+                      dk_device=path)
+            publisher = open_run_publisher(run, "run-a")
+            publisher.emit("command_started", "running", {
+                "command_id": "d", "argv": ["nrfdk.py", "identify", "--port", path],
+            })
+            publisher.emit("command_output", "running", {
+                "command_id": "d", "stream": "stdout", "text": f"port: {path}\n",
+            })
+            publisher.emit("command_finished", "passed", {
+                "command_id": "d", "returncode": 0, "duration_s": 0.1,
+            })
+
+            report = render_run(load_events(run / "run.jsonl"), redact_serials=True)
+
+            self.assertNotIn("001050210121", report)
+            self.assertIn("--port /dev/cu.usbmodem<serial>1", report)
+
+    def test_a_short_serial_does_not_break_a_32_hex_token(self):
+        # The token rule masks an Ubertooth serial the run never named (an
+        # unregistered board in a failure reason); a short serial in the
+        # explicit list must not cut one in half first.
+        from ubertooth_harness.report import _redact
+
+        self.assertEqual(
+            "enumerated: <serial>",
+            _redact("enumerated: aaaaf123ffaaaaaaaaaaaaaaaaaaaaaa",
+                    _serial_set("000123")),
+        )
+
+    def test_the_padded_width_is_the_one_a_dk_port_name_carries(self):
+        # _SERIAL_PADDED_DIGITS restates the padding in targets.DK_BY_ID;
+        # this keeps the two in step.
+        from ubertooth_harness import targets
+        from ubertooth_harness.report import _SERIAL_PADDED_DIGITS
+
+        path = targets.device_path(
+            targets.KINDS[targets.NRF52840_DK], "123456", "linux")
+
+        self.assertIn("0" * (_SERIAL_PADDED_DIGITS - 6) + "123456", path)
+
+    def test_serial_widths_cover_padding_but_not_short_numbers(self):
+        from ubertooth_harness.report import _serial_widths
+
+        self.assertEqual({"1050210121", "001050210121"}, _serial_widths("001050210121"))
+        self.assertEqual({"1050210121", "001050210121"}, _serial_widths("1050210121"))
+        self.assertEqual({"12345", "000000012345"}, _serial_widths("12345"))
+        # A serial written in hex is masked as the registry holds it, and an
+        # Ubertooth's 32 digits are not a J-Link serial in another width.
+        self.assertEqual(set(), _serial_widths("aaaa0000"))
+        self.assertEqual(set(), _serial_widths("1" * 32))
+    def test_an_outcome_for_another_step_leaves_the_open_one_open(self):
+        # Records are read as they were written: an outcome naming a step
+        # other than the open one closes nothing, and the open step still
+        # gets the line its commands give it.
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            publisher = open_run_publisher(run, "run-a")
+            publisher.emit("build_started", "running", {})
+            publisher.emit("build_step_started", "running", {
+                "step_id": "host-build", "step_name": "Build Ubertooth host tools",
+            })
+            publisher.emit("build_step_finished", "passed", {
+                "step_id": "toolchain", "step_name": "Read toolchain versions",
+                "reason": "",
+            })
+            publisher.emit("build_finished", "passed", {"reason": ""})
+
+            report = render_run(load_events(run / "run.jsonl"))
+
+            self.assertIn("--- Read toolchain versions EXIT: passed ---", report)
+            self.assertIn("--- Build Ubertooth host tools EXIT: passed ---", report)
+
+    def test_a_build_step_with_no_outcome_record_falls_back_to_its_commands(self):
+        # A run recorded before the build said how each step ended has only
+        # its commands to go on, so the step's line is latched to the first
+        # command that did not pass.
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            publisher = open_run_publisher(run, "run-a")
+            publisher.emit("build_started", "running", {})
+            publisher.emit("build_step_started", "running", {
+                "step_id": "host-build", "step_name": "Build Ubertooth host tools",
+            })
+            publisher.emit("command_started", "running", {
+                "command_id": "b", "argv": ["cmake", "--build", "."],
+                "phase": "build", "step_id": "host-build",
+            })
+            publisher.emit("command_finished", "failed", {
+                "command_id": "b", "returncode": 2, "duration_s": 0.1,
+                "phase": "build", "step_id": "host-build",
+            })
+            publisher.emit("build_finished", "failed", {"reason": "it exited 2"})
+
+            report = render_run(load_events(run / "run.jsonl"))
+
+            self.assertIn("--- Build Ubertooth host tools EXIT: failed ---", report)
+            self.assertIn("=== BUILD EXIT: failed: it exited 2 ===", report)
 
     def test_report_shows_every_recorded_output_record(self):
         # run.jsonl output is capped when recorded (rawlog.RECORD_*), so the

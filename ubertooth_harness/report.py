@@ -80,6 +80,45 @@ def _time(event: Mapping) -> datetime.datetime:
     return moment
 
 
+# Fewest digits a number needs to be masked wherever it appears rather than
+# only where it stands alone (_redact). A SEGGER probe's serial is nine
+# digits or more, so this is about the short width of a registry entry like
+# `000123`, which the tools write as `123`: masking every "123" inside every
+# longer number would mangle the transcript, and a standalone one is masked
+# either way. The padded width of that same entry is 12 digits, so it is
+# masked everywhere, including inside a device path.
+_SERIAL_MIN_DIGITS = 6
+# How wide a DK's by-id name writes its J-Link serial (targets.DK_BY_ID).
+_SERIAL_PADDED_DIGITS = 12
+
+
+def _serial_widths(value: str) -> set[str]:
+    """The other widths one numeric serial is written in.
+
+    A J-Link serial reaches the run in two spellings of the same number: as
+    the registry holds it, which is how `nrfutil device list` prints it
+    (``001050210121`` on this bench), and as a number, because nrfdk.py takes
+    it as one and preflight.py puts it on the command line with the leading
+    zeros gone (``1050210121``). A DK's by-id name pads it to 12 digits
+    again. ``--redact-serials`` has to mask each of them, or the serial
+    survives in the transcript. Any numeric serial is treated this way, so a
+    numeric bridge serial gains a padded width nothing writes, which costs
+    nothing; one written in hex is masked as the registry holds it.
+    """
+    if not value.isdigit():
+        return set()
+    number = value.lstrip("0")
+    # Past 12 digits it is not a J-Link serial but an Ubertooth's, which is
+    # 32 hex digits and masked as it is written.
+    if len(number) > _SERIAL_PADDED_DIGITS:
+        return set()
+    if not number:
+        # All zeros, which the registry takes. The number the tools write is
+        # "0", and masking that would mask every 0 in the transcript.
+        return {value.rjust(_SERIAL_PADDED_DIGITS, "0")}
+    return {number, number.rjust(_SERIAL_PADDED_DIGITS, "0")}
+
+
 class _Run:
     """Facts about one run, gathered from its records."""
 
@@ -134,13 +173,24 @@ class _Run:
         return self.finished["status"]
 
     def serials(self) -> set[str]:
-        """Every device serial the run names: resources, preflight, flash
-        guards, and boards seen by the isolation enumeration checks."""
+        """Every device serial the run names, in every width it is written:
+        resources (an Ubertooth's serial, a DK's J-Link serial, an ESP32
+        peer's bridge serial), preflight, flash guards, and boards seen by
+        the isolation enumeration checks.
+
+        A device path that carries a serial is not one of them. ``_redact``
+        masks the serial inside the path, which leaves the rest of it to read
+        ("port /dev/serial/by-id/usb-SEGGER_J-Link_<serial>-if00" rather than
+        "port <serial>") and works for a path the registry never held: off
+        Linux the harness discovers the port at run time, and nrfdk.py prints
+        it.
+        """
         found = set()
 
         def add(value):
             if isinstance(value, str) and value:
                 found.update((value, value.lower()))
+                found.update(_serial_widths(value))
 
         identities = [
             identity
@@ -163,7 +213,9 @@ class _Run:
                     add(serial)
         for identity in identities:
             for key, value in identity.items():
-                if "serial" in key:
+                # A device path is not a serial: it holds one, and _redact
+                # masks it inside the path, wherever the path came from.
+                if "serial" in key and not str(value).startswith("/"):
                     add(value)
         return found
 
@@ -881,7 +933,7 @@ def _transcript(run: _Run) -> list[str]:
     def close_build_step(event):
         nonlocal build_step
         if build_step is not None:
-            line(event, f"--- {build_step[0]} EXIT: {build_step[1]} ---")
+            line(event, f"--- {build_step['name']} EXIT: {build_step['status']} ---")
             build_step = None
 
     for event in run.events:
@@ -900,8 +952,10 @@ def _transcript(run: _Run) -> list[str]:
             record = pending.pop(details.get("command_id", ""), None)
             if record is not None:
                 out.append(_command_record(record["started"], record["outputs"], event, stamp).rstrip("\n"))
+            # A run recorded before the build said how each step ended
+            # (build_step_finished) has only its commands to go on.
             if details.get("phase") == "build" and build_step is not None and status != "passed":
-                build_step[1] = status
+                build_step["status"] = status
             continue
         if kind == "run_started":
             run_title = (
@@ -921,9 +975,21 @@ def _transcript(run: _Run) -> list[str]:
             line(event, "=== BUILD ===")
         elif kind == "build_step_started":
             close_build_step(event)
-            open_step = details.get("step_name", details.get("step_id", ""))
+            open_step = details.get("step_name") or details.get("step_id", "")
             line(event, f"+++ {open_step} +++")
-            build_step = [open_step, "passed"]
+            build_step = {
+                "name": open_step, "status": "passed",
+                "id": details.get("step_id"),
+            }
+            continue
+        elif kind == "build_step_finished":
+            # The step's own outcome, which its commands do not give: a step
+            # may accept a command that exited non-zero. A record for some
+            # other step leaves the open one to be closed as it was before.
+            if build_step is not None and build_step["id"] == details.get("step_id"):
+                build_step = None
+            name = details.get("step_name") or details.get("step_id", "")
+            line(event, f"--- {name} EXIT: {status}{_reason(details)} ---")
             continue
         elif kind == "build_finished":
             close_build_step(event)
@@ -1033,7 +1099,7 @@ def _transcript(run: _Run) -> list[str]:
     for record in pending.values():
         out.append(_command_record(record["started"], record["outputs"], None, stamp).rstrip("\n"))
     if build_step is not None and run.events:
-        line(run.events[-1], f"--- {build_step[0]} EXIT: did not finish ---")
+        line(run.events[-1], f"--- {build_step['name']} EXIT: did not finish ---")
     return out
 
 
@@ -1050,9 +1116,22 @@ _SERIAL_TOKEN = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{32}(?![0-9A-Fa-f])")
 
 
 def _redact(text: str, serials: Iterable[str]) -> str:
+    # The token rule first: masking a short serial inside a 32-hex token
+    # would leave the rest of that token, which this rule is there to catch.
+    text = _SERIAL_TOKEN.sub(REDACTED, text)
     for serial in sorted(serials, key=len, reverse=True):
-        text = text.replace(serial, REDACTED)
-    return _SERIAL_TOKEN.sub(REDACTED, text)
+        if serial.isdigit() and len(serial) < _SERIAL_MIN_DIGITS:
+            # Short enough to read as an ordinary number, so it is masked
+            # only where it stands alone and not inside a longer one.
+            text = re.sub(rf"(?<!\d){re.escape(serial)}(?!\d)", REDACTED, text)
+        else:
+            # Anywhere it appears, which is how the serial inside a device
+            # path is masked: a probe's name on macOS
+            # (/dev/cu.usbmodem<serial><interface>) puts a digit right after
+            # it. A serial this long inside a longer number would be masked
+            # too, which costs a reader nothing.
+            text = text.replace(serial, REDACTED)
+    return text
 
 
 def render_run(events: Sequence[Mapping], *, redact_serials: bool = False, transcript: bool = True) -> str:
