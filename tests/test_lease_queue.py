@@ -75,29 +75,32 @@ class QueueFixture(unittest.TestCase):
 
 class QueueTests(QueueFixture):
 
-    def test_a_waiting_run_and_a_rush_of_leases_both_get_their_turn(self):
-        """#202's shape under real contention: nothing is left behind.
+    def test_a_waiting_run_is_served_and_the_rush_keeps_working(self):
+        """#202's shape under real contention, end to end.
 
-        A run that wants the host lock and a board, while board-only leases
-        take that board one after another with nothing in between. flock is
-        per open file, so threads here contend exactly as processes do. What
-        the queue does when both are ready at once is pinned by the
-        deterministic tests below; this one is about the whole thing
-        working under load, where the run would also often win on timing
-        alone.
+        A run that wants the host lock and a board waits while board-only
+        leases take that board one after another. The run is served, the rush
+        takes the board again afterwards, and nothing wedges. What the queue
+        does when both are ready at once is pinned by the deterministic tests
+        below, which fail with the queue taken out; with threads this shape
+        would often come out right on timing alone, so read this one as the
+        whole thing working under load.
         """
         held_first = leases.acquire([A], holder("holder"), directory=self.dir)
         stop = threading.Event()
         outcome = {}
-        counts = {"taken": 0, "refused": 0}
+        counts = {"took it first": 0, "tried while it waited": 0, "took it after": 0}
 
-        def starver():
+        def rush():
             while not stop.is_set():
+                waiting = not outcome
                 try:
                     with leases.acquire([A], holder("quick"), directory=self.dir):
-                        counts["taken"] += 1
+                        counts["took it after" if outcome else "took it first"] += 1
                 except leases.LeaseError:
-                    counts["refused"] += 1
+                    pass  # busy, or told to wait its turn
+                if waiting:
+                    counts["tried while it waited"] += 1
 
         def waiting_run():
             try:
@@ -112,21 +115,25 @@ class QueueTests(QueueFixture):
         run = threading.Thread(target=waiting_run)
         run.start()
         time.sleep(0.3)  # it is waiting, and its ticket is the older one
-        rush = threading.Thread(target=starver)
-        rush.start()
+        rushing = threading.Thread(target=rush)
+        rushing.start()
         try:
             time.sleep(0.2)
             held_first.release()  # the board every one of them wants
             run.join(timeout=30)
+            time.sleep(0.5)  # the rush gets its turn now
         finally:
             stop.set()
-            rush.join(timeout=30)
+            rushing.join(timeout=30)
         self.assertFalse(run.is_alive())
         self.assertEqual([leases.HOST_LOCK, A], outcome.get("boards"),
                          outcome.get("error"))
-        # The contention was real: board-only leases did take the board while
-        # the rush ran, which is what the waiting run had to get past.
-        self.assertGreater(counts["taken"], 0, "no board-only lease took the board")
+        self.assertEqual(0, counts["took it first"],
+                         "a board-only lease took the board the run was waiting for")
+        self.assertGreater(counts["tried while it waited"], 0,
+                           "the rush never ran while the run waited")
+        self.assertGreater(counts["took it after"], 0,
+                           "the rush never got the board at all")
 
     def test_the_queue_is_empty_again_when_a_command_stops_waiting(self):
         with leases.acquire([A], holder("agent-1"), directory=self.dir):
@@ -273,11 +280,12 @@ class QueueTests(QueueFixture):
         self.assertEqual([], rounds)
 
     def test_giving_way_at_a_free_board_is_bounded(self):
-        """A wrapper outside the harness must not be held back forever.
+        """A command ahead in the queue must not hold the others forever.
 
-        It can hold a board's own lock file and then wait for the lease, so a
-        command that gives way forever to a waiter stuck on that file would
-        deadlock. After a second of giving way to a board that is free, this
+        It can be stuck for reasons the queue can neither see nor help: a
+        wrapper outside the harness holding a board's own lock file while it
+        waits for the lease, or a run still blocked on the host lock. So
+        after half a second of giving way to a board that is free, this
         command takes it.
         """
         self.hold_ticket(A, self.older(), self.live_holder())
@@ -378,9 +386,16 @@ class QueueTests(QueueFixture):
         fcntl.flock(making, fcntl.LOCK_EX | fcntl.LOCK_NB)
         left, theirs = tempfile.mkstemp(dir=directory, prefix=".making-")
         os.close(left)
+        old = time.time() - leases._UNFINISHED_AGE_S - 1
+        os.utime(theirs, (old, old))
+        # And one that has only just appeared: another command may be making
+        # it this moment, between its file and its lock.
+        fresh, just_now = tempfile.mkstemp(dir=directory, prefix=".making-")
+        os.close(fresh)
         queue = leases.TicketQueue(self.dir, [A], holder("agent-2")).take()
         try:
             self.assertTrue(os.path.exists(mine), "took a ticket being made")
+            self.assertTrue(os.path.exists(just_now), "took a new file away")
             self.assertFalse(os.path.exists(theirs), "left a dead command's file")
             # Neither counts as a command waiting: a ticket is only a ticket
             # once it is under its queue name.

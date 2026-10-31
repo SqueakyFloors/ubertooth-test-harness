@@ -120,7 +120,8 @@ rounds, enough for a waiter that is really waiting to notice a resource was
 released) a command competes for it as it did before the queue. The bound
 is per stretch: it
 starts again whenever the resource is held, or the command ahead in the
-queue changes, so a long wait never turns into a licence to jump the queue.
+queue changes, so a long wait never turns into a licence to jump the queue
+(and a command behind several waiters gives way once for each of them).
 Giving way to a resource somebody is using is never bounded, since nothing
 here can be stuck on a lock that is held; the waiters simply take their
 turns.
@@ -190,8 +191,11 @@ TAKEOVER_LOCK = "takeover.lock"
 # One directory per resource, holding the tickets of the commands waiting for
 # it: <lease dir>/tickets/<key>/<number>-<pid>-<token>.
 TICKET_DIR = "tickets"
-# A ticket being made, under a name no queue scan reads.
+# A ticket being made, under a name no queue scan reads, and how long one
+# may be there before another command takes it for a leftover: longer than
+# the moment between its file appearing and its lock being taken.
 _UNFINISHED = ".making-"
+_UNFINISHED_AGE_S = 30.0
 
 
 class LeaseError(RuntimeError):
@@ -614,6 +618,9 @@ class TicketQueue:
 
     def __init__(self, root: Path | str, resources: Sequence[Board], holder: Mapping):
         self.root = Path(root) / TICKET_DIR
+        # 0755 from here down, whatever the umask says, like the lock files:
+        # a command that cannot read a queue would jump it in silence.
+        self.mode = 0o755
         # In lock order, so the resource reported is the first this command
         # would have taken.
         self.resources = list(resources)
@@ -628,13 +635,11 @@ class TicketQueue:
             directory = self.root / board.key
             try:
                 directory.mkdir(parents=True, exist_ok=True)
-                # Readable by whoever shares this lease directory, like the
-                # lock files, whatever the umask says: a command that cannot
-                # read a queue would jump it.
-                try:
-                    os.chmod(directory, 0o755)
-                except OSError:
-                    pass
+                for readable in (self.root, directory):
+                    try:
+                        os.chmod(readable, self.mode)
+                    except OSError:
+                        pass
                 self._drop_unfinished(directory)
                 if (directory / self.name).exists():
                     # The same resource twice in one attempt (a board has an
@@ -657,38 +662,53 @@ class TicketQueue:
         its command would wait with no place in the queue. So it is built
         under a name no scan reads and renamed into place, which is atomic.
         """
-        fd, temporary = tempfile.mkstemp(dir=directory, prefix=_UNFINISHED)
-        try:
-            os.fchmod(fd, 0o644)
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            _stamp(fd, dict(self.holder, resource=board.alias, ticket=self.name))
-            os.rename(temporary, directory / self.name)
-        except BaseException:
-            os.close(fd)
+        for attempt in range(3):
+            fd, temporary = tempfile.mkstemp(dir=directory, prefix=_UNFINISHED)
             try:
-                os.unlink(temporary)
-            except OSError:
-                pass
-            raise
-        return directory / self.name, fd
+                os.fchmod(fd, 0o644)
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _stamp(fd, dict(self.holder, resource=board.alias,
+                                ticket=self.name))
+                os.rename(temporary, directory / self.name)
+            except FileNotFoundError:
+                # Another command cleared this file as a leftover while it
+                # was being made. Nothing is wrong with the queue: make it
+                # again rather than refuse a command over it.
+                os.close(fd)
+                if attempt == 2:
+                    raise
+                continue
+            except BaseException:
+                os.close(fd)
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+                raise
+            return directory / self.name, fd
+        raise AssertionError("unreachable")  # the loop returns or raises
 
     def _drop_unfinished(self, directory: Path) -> None:
         """Clear tickets of commands that died while making one.
 
         A half-made ticket is locked by the command making it, so one that
-        nobody holds belongs to nobody.
+        nobody holds belongs to nobody — except in the moment between its
+        file being created and its lock being taken, which is why only a
+        file older than that moment is cleared.
         """
         try:
             entries = [
-                entry.path for entry in os.scandir(directory)
+                entry for entry in os.scandir(directory)
                 if entry.name.startswith(_UNFINISHED)
             ]
         except OSError:
             return
         for entry in entries:
             try:
-                if not _probe(Path(entry)):
-                    os.unlink(entry)
+                if entry.stat().st_mtime > time.time() - _UNFINISHED_AGE_S:
+                    continue  # it may be being made right now
+                if not _probe(Path(entry.path)):
+                    os.unlink(entry.path)
             except OSError:
                 pass
 
@@ -696,8 +716,8 @@ class TicketQueue:
         """The first resource a command asked for earlier: which resource,
         which ticket, and what that ticket says about its command.
 
-        The ticket's name identifies it even before its record is written,
-        which is what tells a caller that the command ahead has changed.
+        The name is what tells a caller that the command ahead has changed:
+        it is the ticket's own, where a record can be rewritten.
         None when nothing is ahead of this command anywhere, which is when
         it may try to take its locks.
         """

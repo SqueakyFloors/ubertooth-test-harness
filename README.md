@@ -1469,7 +1469,8 @@ UT_0         held  agent #14, run 2026-10-31-ble, pid 7781 (for 0h04m11s)
 Giving way is bounded in one case: a board that is *free*, and that the
 command could therefore have taken. After half a second of that — two poll
 rounds, enough for a waiter that is really waiting to notice the board was
-released — a command competes for the board as it did before the queue; a command with no
+released — a command competes for the board as it did before the queue,
+once for each command ahead of it; a command with no
 `--wait-for-boards` has a whole second before it gives up, so it too ends up
 competing rather than failing (and, if the board is taken again just before
 that second is up, failing with `is queued` where it used to say `is in
