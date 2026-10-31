@@ -69,7 +69,10 @@ from ubertooth_harness import targets  # noqa: E402
 # flashes a peer: a board carrying a later 1.x image, which has these
 # commands and more, must not fail a run. A different major version, or an
 # older one, does.
-MINIMUM_FIRMWARE = targets.PEER_FIRMWARE
+# The oldest image whose shell has every command this driver sends. It is
+# not targets.PEER_FIRMWARE, the version this tree builds: a firmware PR
+# bumps that, and boards on an older 1.x image must stay usable.
+MINIMUM_FIRMWARE = "utesp-1.0.0"
 BAUD = 115200
 ROLES = ("acceptor", "initiator")
 BOOT_ROLE = "acceptor"
