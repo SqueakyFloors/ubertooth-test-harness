@@ -10,8 +10,10 @@ appears (it is git-ignored; [`hardware.example.yaml`](../hardware.example.yaml)
 is the template).
 
 Companions: [`docs/tests.md`](tests.md) says what each test does with this
-hardware, [`README.md`](../README.md) how to register and run it, and
-[`DESIGN.md`](../DESIGN.md) how the harness itself is built.
+hardware, [`README.md`](../README.md) how to register and run it,
+[`scripts/lab/`](../scripts/lab/README.md) holds the by-hand helpers (holding
+a device, switching a hub port, the udev rule), and
+[`DESIGN.md`](../DESIGN.md) describes the harness itself.
 
 ## The devices
 
@@ -36,9 +38,10 @@ registered on the host, so all of them have to be attached and answering for
 those.
 
 Registered as type `Ubertooth` with its full 32-hex-digit serial. The serial
-has to be the whole thing: libubertooth matches `-U` against the *end* of a
-serial and takes the first board that matches, so a short serial can select
-a different board than the lease was taken on.
+has to be the whole thing: libubertooth treats an all-digit `-U` value as a USB
+index and matches anything else case-insensitively against the *start* of a
+serial, so a short serial is a prefix that another board may answer to, and a
+lease could be taken on one board while the tool opens another.
 
 ```yaml
   UT_Linux0:
@@ -212,8 +215,9 @@ Any ordinary powered hub carries devices fine and controls nothing. What a
 device behind one gives up:
 
 - **No power cycle.** A wedged board, DK, or bridge waits for someone at the
-  bench. A DK can still be rebooted over its J-Link (`nrfutil device reset`),
-  and an ESP32 over its shell (`reset`) while it still answers at all.
+  bench, because `scripts/lab/hub-port` has no port to switch. A DK can still
+  be rebooted over its J-Link (`nrfutil device reset`), and an ESP32 over its
+  shell (`reset`) while it still answers at all.
 - **No isolation.** A plan with `exclusive Ubertooth: true` compiles power-off
   actions for every other registered Ubertooth on the host, and compilation
   fails if one of them has no valid controller mapping or no per-port VBUS
@@ -302,22 +306,32 @@ again immediately before each write.
 
 ### Prebuilt images
 
-One image is pinned by the repository rather than built per run:
+An Ubertooth's firmware is built per run and hashed into that run's manifest,
+so it needs no record here: the run says what it flashed. The other three
+images are built or fetched once and flashed for as long as they are current,
+so each is recorded with the commit its sources come from and its SHA-256.
 
-| Image | What it is | Revision | SHA-256 |
-|---|---|---|---|
-| KGV | the known-good firmware that `Flash reliability` alternates against the run's own build | `2020-12-R1` (upstream Ubertooth release) | `e3fcb486c6e0ce7cc991bf6439f6dbc0156ed1229c2b95ebfd02198f9675bb11` |
+| Image | What it is | Version | Source | SHA-256 |
+|---|---|---|---|---|
+| `kgv.dfu` | the known-good Ubertooth firmware that `Flash reliability` alternates against the run's own build | `2020-12-R1` | upstream Ubertooth release `2020-12-R1` | `e3fcb486c6e0ce7cc991bf6439f6dbc0156ed1229c2b95ebfd02198f9675bb11` |
+| `zephyr.hex` | the nRF52840 DK role firmware | `utdk-1.2.1` | this repository at `94b2d85`, which is where `firmware/nrf52840dk` carries that version | `88c9479f792e3480c1362a74577fe387d89d342efde5b0a1e2d107098097c1ed` |
+| `esp32-classic-peer.bin` | the ESP32 Classic peer firmware | `utesp-1.0.0` | this repository at `1d3a049`, which is where `firmware/esp32-classic-peer` carries that version | `6ff85eb6d7069b8663ac78af7836b99af25f3a72b6b34f4f55881145c62266c0` |
 
-The plan carries both the revision and the hash
-([`testplans/slow.yaml`](../testplans/slow.yaml),
+The KGV is the one the repository pins: the plan carries its revision and its
+hash ([`testplans/slow.yaml`](../testplans/slow.yaml),
 [`testplans/mac.yaml`](../testplans/mac.yaml)), and the run supplies the file
 with `--artifact "KGV=<path>"`. The harness checks every image's SHA-256
 before the run starts and again before each write, so a bench whose copy
 differs fails before it writes anything.
 
-Every other image is built by the bench. Record each one you keep with the
-commit it was built from and its hash, beside the registry in your own private
-bench notes, and the run record will match it:
+The two peer images are not pinned, because the version string inside the
+image is what the harness checks: it refuses a DK image that does not contain
+the pinned version, and it flashes a board that reports another one. The
+hashes above let a bench confirm it holds the same image this repository's
+sources produce. Each was built as its firmware README says; a reproducible
+build is not claimed, so compare the version first and the hash second.
+
+Record any other image a bench keeps the same way, in its own private notes:
 
 ```sh
 git -C <checkout> rev-parse HEAD
@@ -325,9 +339,9 @@ sha256sum /tmp/utdk-build/zephyr/zephyr.hex          # shasum -a 256 on macOS
 sha256sum /tmp/utesp-build/esp32-classic-peer.bin
 ```
 
-A run's manifest already hashes every tool, library, and firmware image it
-built, so an Ubertooth firmware image needs no separate note: the run says
-what it flashed.
+An image built from a branch rather than from `main` belongs in that branch's
+pull request, not here, so this table never describes firmware the repository
+cannot build.
 
 ## The APIs and protocols the harness depends on
 
@@ -451,6 +465,10 @@ Where the bench's own scripts lock devices with their own per-device files, a
 lease takes those too (`--external-board-lock`). See
 [Sharing boards: leases](../README.md#sharing-boards-leases).
 
+For a command you run by hand, [`scripts/lab/hold`](../scripts/lab/README.md)
+takes the leases and names devices the way a bench note does, by serial or by
+an unambiguous prefix of one.
+
 ## Host setup
 
 ### Linux
@@ -572,6 +590,10 @@ Anything not on a switchable hub port cannot be power-cycled remotely. A DK
 answers `nrfutil device reset` over its J-Link and an ESP32 answers `reset`
 over its shell, but a device that has stopped answering altogether waits for
 someone at the bench. Keep that in mind when deciding what goes on which hub.
+
+For a device that does have a port,
+[`scripts/lab/hub-port`](../scripts/lab/README.md) is the recovery:
+`hub-port <controller> cycle <port>`, once, then look.
 
 ### Enumeration verification is Linux-only
 
