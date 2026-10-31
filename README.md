@@ -979,8 +979,8 @@ build](#flashing-the-boards-with-the-runs-build).
 The examples here and the default in `scripts/ci.sh` use one commit of the
 [`SqueakyFloors/libbtbb`](https://github.com/SqueakyFloors/libbtbb) fork: the
 commit the Ubertooth fork pins for its own builds, so a run builds the libbtbb
-that fork is built and tested against, not whatever the
-upstream `master` branch holds that day. The harness keeps its own copy of that pin (it never calls the
+that fork is built and tested against, not whatever upstream's `master` branch
+holds that day. The harness keeps its own copy of that pin (it never calls the
 fork's installer) and `tests/test_libbtbb_pin.py` keeps the copies in
 `scripts/ci.sh` and this file in step; bump both when the fork bumps its pin.
 To notice a bump, `run-suite` and `build` read `LIBBTBB_REF` from the fork's
@@ -1018,9 +1018,9 @@ is the point of its check.
 
 `--libbtbb-ref` can still name any ref, with one limit: the harness passes no
 `-DCMAKE_POLICY_VERSION_MINIMUM`, so a libbtbb declaring
-`cmake_minimum_required` below 3.5 — the upstream `master` branch declares 2.8
-at the time of writing — fails to configure under CMake 4 and needs CMake 3.x. The
-pinned commit declares a `3.5...3.31` range and configures under both.
+`cmake_minimum_required` below 3.5 — upstream's `master` branch declares 2.8
+at the time of writing — fails to configure under CMake 4 and needs CMake 3.x.
+The pinned commit declares a `3.5...3.31` range and configures under both.
 
 The resolved commits are cloned into `<run>/build/src` (the source checkouts
 are never modified), built out of tree, and installed into `<run>/build/prefix`.
