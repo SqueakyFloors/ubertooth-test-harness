@@ -169,18 +169,17 @@ def packet_check(*, channel=None, max_errors=None, survey=False):
         results_seen = False
         bad_results = 0
         for line in text_lines(output):
-            if line == "Survey Results":
-                results_seen = True
-                continue
-            if results_seen:
+            match = _PACKET.match(line)
+            if match is not None:
+                # Packet lines count wherever they are, as they did before
+                # the survey block was read in the same pass.
+                channels.add(int(match["ch"]))
+                worst = max(worst, int(match["err"]))
+            elif results_seen:
                 if not _SURVEY_LINE.match(line):
                     bad_results += 1
-                continue
-            match = _PACKET.match(line)
-            if match is None:
-                continue
-            channels.add(int(match["ch"]))
-            worst = max(worst, int(match["err"]))
+            elif line == "Survey Results":
+                results_seen = True
         if channel is not None:
             other = sorted(channels - {channel})
             if other:

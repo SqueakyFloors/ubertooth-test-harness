@@ -222,9 +222,11 @@ def _no_samples_on_stdout(output) -> str:
     # The dump goes to the file, so stdout must stay empty: a binary sample
     # can decode to printable replacement characters, so any byte counts.
     characters = 0
+    printed = False
     for line in text_lines(output):
-        characters += len(line)
-    if characters:
+        characters += len(line) + 1
+        printed = printed or bool(line.strip())
+    if printed:
         return f"stdout is not empty ({characters} characters)"
     return ""
 

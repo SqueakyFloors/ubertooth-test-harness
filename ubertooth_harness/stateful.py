@@ -262,19 +262,22 @@ class Step:
             return StepOutcome("")
         found = output.search(self.observe.pattern)
         observed = self.observe.value(found)
-        output.note_pattern("observed", f"{self.name}: {self.observe.key}",
-                            self.observe.pattern, found, value=observed or "")
+        name = f"{self.name}: {self.observe.key}"
+        mismatch = ""
         if observed is None:
-            return StepOutcome(
-                f"{self.name}: {self.observe.key} was not reported", expected
-            )
-        if expected is not None and observed != expected:
-            return StepOutcome(
-                f"{self.name}: expected {self.observe.key}={expected}, "
-                f"observed {observed}",
-                expected,
-                observed,
-            )
+            mismatch = f"{self.name}: {self.observe.key} was not reported"
+        elif expected is not None and observed != expected:
+            mismatch = (f"{self.name}: expected {self.observe.key}={expected}, "
+                        f"observed {observed}")
+        # Recorded after the comparison: a setting that was reported but is
+        # not the expected one is a failed check, and the record is what the
+        # report and `validate` read.
+        output.note_pattern("observed", name, self.observe.pattern, found,
+                            value=observed or "", reason=mismatch)
+        if observed is None:
+            return StepOutcome(mismatch, expected)
+        if mismatch:
+            return StepOutcome(mismatch, expected, observed)
         if self.observe.reject is not None:
             reason = self.observe.reject(observed)
             if reason:
