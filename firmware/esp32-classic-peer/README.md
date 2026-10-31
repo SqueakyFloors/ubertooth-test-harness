@@ -491,9 +491,12 @@ Either command answers once the controller has taken the map, rather than as
 soon as the command was sent. Taken is not yet on the air: the leader then
 announces the map to the other board and the hop sequence follows, so a test
 that has just set a map should give the link a moment and watch the air, not
-assume the next packet is on the new map. It works with a link up as well as
-before one: setting a map during a capture is how a test sees the piconet
-move from one map to another.
+assume the next packet is on the new map.
+
+Set it before the link comes up for a test that wants the whole link on one
+map; that is the way the bench has measured it. The command is accepted with
+a link up as well, and the controller reports the new map on the link, but
+how soon the air follows a mid-link change has not been measured here.
 
 Every answer `afh` can give:
 
