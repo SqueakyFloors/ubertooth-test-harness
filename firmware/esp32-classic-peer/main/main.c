@@ -111,6 +111,9 @@ static void cmd_help(void)
         "stream <on|off>               send payload bytes while connected",
         "stream period <ms>            time between writes, 5-10000",
         "stream payload <bytes>        bytes per write, 8-512",
+        "sco start                     open the synchronous audio link",
+        "sco stop                      drop it and stop the profile",
+        "sco stats                     the controller's packet counters",
         "defaults                      restore every boot setting",
         "reset                         restart the board",
     };
@@ -181,6 +184,24 @@ static void run(int argc, char **argv)
             answer(parse_uint(argv[2], &v) ? bt_stream_payload(v) : "payload must be a number");
         } else {
             answer("stream takes on, off, period <ms>, or payload <bytes>");
+        }
+        return;
+    }
+    if (strcmp(c, "sco") == 0) {
+        if (argc == 2 && strcmp(argv[1], "start") == 0) {
+            answer(bt_sco_start());
+        } else if (argc == 2 && strcmp(argv[1], "stop") == 0) {
+            answer(sco_stop());
+        } else if (argc == 2 && strcmp(argv[1], "stats") == 0) {
+            /* static for the same reason as the status line above. */
+            static char json[SHELL_OUT_MAX];
+            const char *err = sco_pkt_stats(json, sizeof(json));
+            if (!err) {
+                shell_line("%s", json);
+            }
+            answer(err);
+        } else {
+            answer("sco takes start, stop, or stats");
         }
         return;
     }

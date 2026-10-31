@@ -435,6 +435,14 @@ const char *bt_start(void)
     if (xTaskCreate(stream_task, "utesp_stream", 3072, NULL, 5, NULL) != pdPASS) {
         return "stream task failed";
     }
+    /* Only the machinery, not a profile: nothing of the audio link is on the
+     * air until "sco start". The audio link is the optional half of this
+     * firmware, so a board whose SPP side came up is reported as working
+     * even when this did not; "sco start" then says so. */
+    const char *sco_err = sco_init();
+    if (sco_err) {
+        shell_line("utesp: audio link unavailable: %s", sco_err);
+    }
     st.started = true;
     return NULL;
 }
@@ -443,9 +451,14 @@ const char *bt_start(void)
 
 const char *bt_set_role(enum peer_role role)
 {
-    const char *err = bt_spp_stop();
+    /* The audio link belongs to a role (gateway or hands-free unit), so it
+     * goes with the old one. */
+    const char *err = sco_stop();
 
     if (err) {
+        return err;
+    }
+    if ((err = bt_spp_stop()) != NULL) {
         return err;
     }
     LOCK();
@@ -648,9 +661,12 @@ const char *bt_stream_payload(unsigned bytes)
 const char *bt_defaults(void)
 {
     char name[NAME_LEN_MAX + 1];
-    const char *err = bt_spp_stop();
+    const char *err = sco_stop();
 
     if (err) {
+        return err;
+    }
+    if ((err = bt_spp_stop()) != NULL) {
         return err;
     }
     LOCK();
@@ -664,6 +680,7 @@ const char *bt_defaults(void)
     st.counter = 0;
     st.last_err = 0;
     UNLOCK();
+    sco_zero_counters();
 
     default_name(name, sizeof(name));
     if (esp_bt_gap_set_device_name(name) != ESP_OK) {
@@ -679,13 +696,33 @@ const char *bt_defaults(void)
     return bt_spp_start();
 }
 
+/* The audio link needs the role and the address "spp peer" set, and both
+ * live here under the lock, so the shell comes through this. */
+const char *bt_sco_start(void)
+{
+    enum peer_role role;
+    esp_bd_addr_t peer;
+    bool peer_set;
+
+    LOCK();
+    role = st.role;
+    peer_set = st.peer_set;
+    memcpy(peer, st.peer, ESP_BD_ADDR_LEN);
+    UNLOCK();
+
+    return sco_start(role, peer_set ? peer : NULL);
+}
+
 void bt_status_json(char *out, size_t len)
 {
     char self[18], peer[18], remote[18];
     const uint8_t *a = own_addr();
+    struct sco_view sco;
     int n;
 
     addr_text(a, self);
+    /* Read before taking this module's lock: sco_get() takes its own. */
+    sco_get(&sco);
     LOCK();
     addr_text(st.peer, peer);
     addr_text(st.remote, remote);
@@ -696,7 +733,11 @@ void bt_status_json(char *out, size_t len)
                  "\"connecting\":%s,\"connected\":%s,\"peer\":\"%s\",\"remote\":\"%s\","
                  "\"stream\":%s,\"period_ms\":%u,\"payload_len\":%u,\"counter\":%" PRIu32 ","
                  "\"writes\":%" PRIu32 ",\"write_errors\":%" PRIu32 ",\"rx_bytes\":%" PRIu32 ","
-                 "\"connects\":%" PRIu32 ",\"disconnects\":%" PRIu32 ",\"last_err\":%d}",
+                 "\"connects\":%" PRIu32 ",\"disconnects\":%" PRIu32 ",\"last_err\":%d,"
+                 "\"sco\":\"%s\",\"sco_profile\":\"%s\",\"sco_codec\":\"%s\","
+                 "\"sco_handle\":%u,\"sco_frame_len\":%u,\"sco_tx_frames\":%" PRIu32 ","
+                 "\"sco_tx_errors\":%" PRIu32 ",\"sco_rx_frames\":%" PRIu32 ","
+                 "\"sco_rx_bad\":%" PRIu32 "}",
                  st.role == PEER_ROLE_ACCEPTOR ? "acceptor" : "initiator", UTESP_FW_VERSION,
                  st.started ? "true" : "false", self, a[3], a[4], a[5], a[2], a[0], a[1],
                  st.name, st.discoverable ? "true" : "false", st.server_on ? "true" : "false",
@@ -704,7 +745,8 @@ void bt_status_json(char *out, size_t len)
                  st.peer_set ? peer : "", st.connected ? remote : "",
                  st.stream_on ? "true" : "false", st.period_ms, st.payload_len, st.counter,
                  st.writes, st.write_errors, st.rx_bytes, st.connects, st.disconnects,
-                 st.last_err);
+                 st.last_err, sco.state, sco.profile, sco.codec, sco.handle,
+                 sco.frame_len, sco.tx_frames, sco.tx_errors, sco.rx_frames, sco.rx_bad);
     UNLOCK();
 
     /* Truncated JSON would be a line a driver silently mis-parses. Say so
