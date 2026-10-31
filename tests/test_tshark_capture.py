@@ -114,17 +114,27 @@ class RefusalTests(unittest.TestCase):
         self.assertEqual(pytools.SKIP_EXIT, code)
         self.assertIn("SKIP: tshark is not installed", out)
 
-    def test_an_interrupt_after_the_capture_window_is_a_usage_error(self):
-        code, _out = self.main("capture", "--interface", INTERFACE, "--seconds", "5",
-                               "--address", ADDRESS, "--interrupt-after", "5")
+    def usage_errors(self):
+        for name, argv in (
+            ("--interrupt-after at the end of the window",
+             ("capture", "--interface", INTERFACE, "--seconds", "5", "--address",
+              ADDRESS, "--interrupt-after", "5")),
+            ("a negative packet count",
+             ("read", "x.pcap", "--address", ADDRESS, "--min-packets", "-1")),
+        ):
+            with self.subTest(name):
+                code, _out = self.main(*argv)
+                self.assertEqual(2, code)
 
-        self.assertEqual(2, code)
+    def test_a_wrong_command_line_is_a_usage_error(self):
+        self.usage_errors()
 
-    def test_a_negative_packet_count_is_a_usage_error(self):
-        code, _out = self.main("read", "x.pcap", "--address", ADDRESS,
-                               "--min-packets", "-1")
-
-        self.assertEqual(2, code)
+    def test_a_wrong_command_line_is_a_usage_error_without_tshark_too(self):
+        # The arguments are checked before the host is looked at: a host with
+        # no tshark must not turn a wrong command line into a skip.
+        with tempfile.TemporaryDirectory() as empty, \
+                mock.patch.dict(os.environ, {"PATH": empty}):
+            self.usage_errors()
 
 
 class IsolationTests(unittest.TestCase):

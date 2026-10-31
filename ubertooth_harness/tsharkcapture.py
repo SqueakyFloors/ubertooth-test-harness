@@ -502,8 +502,13 @@ def main(argv=None) -> int:
                                        "fork's btle-extcap.py)")
     sub.choices["read"].add_argument("file", help="capture file tshark reads")
     options = parser.parse_args(argv)
+    # Every argument is checked before the host is looked at, so a command
+    # line that is wrong is a usage error on any host, with or without tshark.
     if options.min_packets < 0:
         parser.error("--min-packets is a count of packets")
+    if options.command == "capture" and options.interrupt_after is not None and (
+            options.interrupt_after >= options.seconds):
+        parser.error("--interrupt-after must be inside the capture window")
     installed = version()
     if installed is None:
         print("SKIP: tshark is not installed")
@@ -513,8 +518,6 @@ def main(argv=None) -> int:
     if options.command == "read":
         return read_file(options.file, options.address, pdu_type=pdu_type,
                          min_packets=options.min_packets)
-    if options.interrupt_after is not None and options.interrupt_after >= options.seconds:
-        parser.error("--interrupt-after must be inside the capture window")
     program = _program(options.program)
     if isinstance(program, int):
         return program
