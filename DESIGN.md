@@ -512,7 +512,12 @@ each board's own lock file from other tools on the host is taken in the same
 attempt, before the host lock: external board locks (serial order), host
 lock, leases (serial order). A lab wrapper that takes a board's file and then
 a lease follows the same hierarchy, so neither can wait on the other in a
-cycle (README, "External board locks").
+cycle (README, "External board locks"). An attempt also holds
+`<lease dir>/takeover.lock` shared while it takes and checks its locks, and a
+takeover of a lease whose command is gone holds that file exclusively
+([#215](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/215),
+README "Stale leases"); it locks no resource and nothing ever blocks on it,
+so it is in no cycle.
 
 The exclusive-topology btle case runs `timeout --foreground -k 2 -s INT`, so
 [`timeout`](https://www.gnu.org/software/coreutils/manual/html_node/timeout-invocation.html) and btle stay in the command's own process group (the executor

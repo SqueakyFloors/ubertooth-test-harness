@@ -1339,8 +1339,9 @@ ends: the selected board, guard and alternated boards, power-isolated boards,
 and, for `Flash reliability` and exclusive tests, every Ubertooth on the host
 (they read or enumerate all of them). A lease is an exclusive `flock` on
 `~/.ubertooth-harness/leases/<serial>.lock` (override with
-`UBERTOOTH_HARNESS_LEASE_DIR`); the kernel drops it when the process exits, so
-leases never go stale. Boards are taken all or nothing, so two runs cannot
+`UBERTOOTH_HARNESS_LEASE_DIR`); the kernel drops it when every process holding
+that file exits, and a lease left behind by a session that is gone is taken
+over (below). Boards are taken all or nothing, so two runs cannot
 deadlock. A leased board needs its full 32-hex-digit serial in the hardware
 registry: libubertooth matches `-U` against the start of a serial, so a short
 serial would select the same board under a different lock.
@@ -1358,13 +1359,86 @@ ubertooth-harness lease --hardware hardware.yaml --owner "agent #14" UT_Mac0 -- 
 
 `lease` holds the named boards for exactly as long as the command runs; the
 command inherits the locks, so they stay held even if the harness process is
-killed first. Use it for every manual Ubertooth command on a shared host.
+killed first (and once that process is gone, the next command that wants the
+board may take it over: see "Stale leases" below). Use it for every manual
+Ubertooth command on a shared host.
+
+### Stale leases: a session that is gone
+
+Because the command inherits the lock files, a lock lives as long as any
+process holding one of them. A session killed part way through — a dropped
+network connection, a batch kill — can therefore leave a lease nothing is
+waiting on: the harness process is gone, and something it started, re-parented
+and forgotten, still holds the lock. A board locked like that used to stay
+locked (five hours of a release soak,
+[#215](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/215)).
+
+So a command that finds a busy lease recorded by a process of *this* host
+that no longer exists takes the board over: it removes that lock file, which
+is what later commands read, and says so in one line on standard error.
+
+```
+note: UT_Linux5 was held by a lease that no longer holds it: its process
+(pid 2380347) is gone, and so is the process group it ran in (2380347).
+Taking it over (/home/.../leases/05f0....lock).
+```
+
+A lease recorded on another host is left alone (a pid there means nothing
+here), as is a pid the system has since given to an unrelated process.
+`<lease dir>/takeover.lock` orders a takeover against everything else: a
+takeover holds it exclusively, and every command holds it shared while it
+takes its locks and checks them, so a lease file is never removed while a
+command is taking it and two commands can never end up holding one board
+through two lock files.
+
+What a takeover does not promise: something still holds the lock, or the
+kernel would have dropped it, and that something may still be using the
+board. The USB device is what really excludes two users — a second claim of
+an Ubertooth fails — so a leftover capture makes the next device command fail
+loudly rather than quietly sharing the board; a wrapper that only held the
+lock while doing something else costs nothing. That is the trade the bench
+wants: the board comes back, and the note says what to look for. When the
+record's process group is still running, the note names it, because a
+leftover command that session started may still be talking to the board:
+`pgrep -g <group>` shows what to stop. That signal only covers the process
+group the command ran in, so a leftover that left it (`setsid`, a daemon) is
+reported as gone.
+
+A takeover costs a poll round like any other busy lock, so a lease file that
+keeps coming back cannot make a command spin. A board whose lease could not
+be taken over (another command was taking one over at that moment) is
+reported with the same explanation the host lock gets below.
+
+The host lock is never taken over. It is the only thing that keeps USB power
+changes and firmware writes on a host from overlapping, and what still holds
+its file could be a firmware write in flight — a process that left the
+recorded session, or one of a session the record does not name at all. So its
+error says what is known and what to look for, and a person decides:
+
+```
+error: this host's power/firmware lock is in use: held by agent, lease:
+ubertooth-dfu -U ... -d ..., pid 4471, since ... UTC (.../host-power.lock);
+the command that took it is gone: its process (pid 4471) is gone, and so is
+the process group it ran in (4471); it is never taken over, because a
+firmware write or a power change it started may still be running: look for
+one, and remove the lock file once you know there is none
+```
+
+`boards` marks such a lease and removes nothing itself:
+
+```
+UT_Linux5    held  agent, lease: bash soak.sh, pid 2380347, since ... (for 5h12m)
+             stale: its process (pid 2380347) is gone, and so is the process
+             group it ran in (2380347); the next command that wants it takes
+             it over
+```
 
 ### The host lock
 
 Every harness command that switches USB power or writes firmware also holds
 the host lock, `<lease dir>/host-power.lock`, the same kind of `flock` lease
-(released by the kernel when the holder exits, so it never goes stale): a
+(released by the kernel when its holders exit, and taken over when they are
+gone, as above): a
 `run-suite` with power isolation (StarTech or Acroname) or an exclusive
 Ubertooth check, `Flash reliability`, or `DFU images` holds it for the whole
 run, a `--build` run that flashes its boards with its own build takes it with
@@ -1441,8 +1515,10 @@ is not free. `runner` passes the option to every run it starts
 the generated units carry no environment, so the variable alone does not
 reach it).
 
-Full lock order, one hierarchy for every command: the external board locks
-in serial order, then the host lock, then the board leases in serial order.
+Full lock order, one hierarchy for every command: `takeover.lock` shared for
+as long as the attempt lasts (above; it is no resource, and nothing ever
+blocks on it), then the external board locks in serial order, then the host
+lock, then the board leases in serial order.
 A lab wrapper that takes a board's own lock file and then runs
 `ubertooth-harness lease` (which may take the host lock, then the leases)
 follows the same order, so the two cannot deadlock; the harness also never

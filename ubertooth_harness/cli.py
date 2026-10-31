@@ -1057,6 +1057,13 @@ def _boards_command(args: argparse.Namespace) -> int:
             since = board_leases.held_for(holder)
             detail = board_leases.describe_holder(holder)
             print(f"{label:<12} held  {detail}" + (f" (for {since})" if since else ""))
+            if state.get("stale"):
+                # The command that took it is gone, so say what the next
+                # command that wants this board will do about it.
+                print(f"{'':<12} stale: {state['stale']}; "
+                      + ("the next command that wants it takes it over"
+                         if state.get("takeover")
+                         else "it stays held until somebody clears it"))
             if external.get("held") and not external.get("error"):
                 # Two parties hold the board; name the other one too.
                 print(f"{'':<12} and   " + board_leases.describe_external(

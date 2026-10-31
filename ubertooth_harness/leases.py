@@ -2,9 +2,55 @@
 (and the nRF52840 DKs used as BLE test devices, keyed by J-Link serial).
 
 A lease is an exclusive ``flock`` on ``<lease dir>/<serial>.lock``. The kernel
-drops it when the holding process exits, however it exits, so a lease can
-never go stale. The lock file also records who holds it, for the error a
-second run sees and for ``ubertooth-harness boards``.
+drops it when the holding process exits, however it exits. The lock file also
+records who holds it, for the error a second run sees and for
+``ubertooth-harness boards``.
+
+Stale leases: ``lease`` and ``hold`` hand their lock files to the command they
+run (the command inherits them, so the boards stay held even if the harness
+process is killed first), and one lock on a file lives as long as *any*
+process that holds that file open. A session killed part way through can
+leave a lease nothing is waiting on: its own process is gone, and some
+command it started, re-parented and forgotten, still holds the lock. A board
+locked like that would never come back (harness #215: five hours of a release
+soak). So when a busy lease records a process of *this* host that no longer
+exists, ``acquire()`` takes the board over: it removes that lock file, which
+is what later commands look at, and says so in one line on standard error.
+A lock the removed file's inode still carries is no longer in anyone's way.
+``boards`` marks such a lease stale and never removes anything.
+
+A takeover does not promise the board is idle: something holds that lock, or
+the kernel would have dropped it. What really keeps two commands off one
+board is the USB device, which only one of them can claim, so a leftover
+capture makes the next device command fail loudly instead of quietly sharing
+the board, while a leftover that is not using the board costs nothing. The
+board coming back is worth that, and the note says what to look for.
+
+The host lock is never taken over. It is the only thing that keeps USB power
+changes and firmware writes on a host from overlapping, and what still holds
+its file could be a firmware write in flight. So its error says that the
+command which took it is gone and what to look for, and a person decides;
+a board interrupted mid-write is the one outcome worth waiting to avoid.
+
+A takeover costs a poll round like any other busy lock, so a lease file that
+keeps coming back cannot make a command spin: every round either sleeps or
+reaches the deadline.
+
+What keeps a takeover narrow: a lease recorded on another host is left alone
+(a pid there means nothing here), and ``<lease dir>/takeover.lock`` orders a
+takeover against everything else. A takeover holds it exclusively; every
+attempt to take locks holds it shared for as long as it takes and checks its
+locks. So a lease file is never removed while a command is taking it, and two
+commands can never end up holding one board through two lock files. A pid
+that the system has given to an unrelated process in the meantime reads as
+alive, so the lease is left alone, as before. When the record's process group
+process group are still running, the note names it: a leftover command that
+session started may still be talking to the board, and ``pgrep -g <group>``
+is how to see it. That signal only covers the process group the command ran
+in, so a leftover that left it (``setsid``, a daemon) is reported as gone;
+and a host whose name changes
+under it (a Mac that renames itself on a new network) makes its own earlier
+leases read as another host's, which costs the report, never safety.
 
 A run takes every board it touches (selected, guard, alternated, and
 power-isolated boards) all or nothing, before preflight, and holds them until
@@ -29,6 +75,9 @@ only shows what the file holds.
 
 Lock order, one hierarchy for every acquirer:
 
+0. ``takeover.lock``, shared, for as long as the attempt below takes (it is
+   not a resource; it only orders an attempt against a takeover, and both
+   take it without ever blocking, so it is in no cycle);
 1. the external board locks, in serial order;
 2. the host lock;
 3. the board leases, in serial order.
@@ -55,6 +104,7 @@ import os
 import re
 import socket
 import stat
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -73,6 +123,9 @@ DEFAULT_LEASE_DIR = Path.home() / ".ubertooth-harness" / "leases"
 _BUSY_GRACE_S = 1.0
 _POLL_S = 0.25
 _FULL_SERIAL = re.compile(r"[0-9a-f]{32}")
+# Held for the moment one stale lease is taken over, so two commands that see
+# the same stale lease cannot both remove a lock file.
+TAKEOVER_LOCK = "takeover.lock"
 
 
 class LeaseError(RuntimeError):
@@ -88,7 +141,7 @@ class Board:
 
 
 # The per-host power/firmware lock. Its key cannot clash with a board's,
-# which is always 32 hex digits.
+# which is always 32 hex digits, nor with the takeover lock's file name.
 HOST_LOCK = Board("host lock", "host-power")
 
 
@@ -207,8 +260,9 @@ def board_key(alias: str, identity: Mapping) -> str:
 
 # nRF52840 DKs (BLE test devices) and ESP32 Classic peers are leased too, by
 # J-Link serial and by USB bridge serial. Both keys are prefixed, so neither
-# can clash with an Ubertooth's bare 32 hex digits or with the host lock; a
-# CP2102N bridge serial is 32 hex digits itself.
+# can clash with an Ubertooth's bare 32 hex digits, with the host lock, or
+# with `takeover`, which would name the takeover lock's own file; a CP2102N
+# bridge serial is 32 hex digits itself.
 # A key becomes a file name, so it may hold nothing that would reach
 # another directory or need quoting.
 _LOCK_NAME = re.compile(r"^[0-9A-Za-z_.:+-]{1,64}$")
@@ -290,6 +344,12 @@ def holder_info(*, run_id: str | None, owner: str | None, purpose: str) -> dict:
         "run_id": run_id,
         "purpose": purpose,
         "pid": os.getpid(),
+        # The process group this command leads or belongs to. The command
+        # that inherits the lock runs in it too, so it tells a later command
+        # whether anything that session started is still running. A group,
+        # not a session id: a group is what a command and its children
+        # share, and what `pgrep -g` reads (see the docstring).
+        "pgid": os.getpgrp(),
         "user": getpass.getuser(),
         "hostname": socket.gethostname(),
         "acquired_at": datetime.datetime.now(datetime.timezone.utc)
@@ -304,6 +364,160 @@ def read_holder(path: Path) -> dict:
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
+
+
+def _process_exists(pid) -> bool | None:
+    """True when a process with this pid exists, None when it cannot be told.
+
+    Signal 0 asks the kernel about a pid without disturbing it. Another
+    user's process answers "not allowed", which is still an answer: it
+    exists.
+    """
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None  # 0 and negatives mean "a group" to kill(), never a process
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    return True
+
+
+def _group_exists(pgid) -> bool | None:
+    """True when any process is still in this process group (as above)."""
+    if not isinstance(pgid, int) or isinstance(pgid, bool) or pgid <= 0:
+        return None  # 0 is the caller's own group: always alive, never asked
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    return True
+
+
+def lease_liveness(holder: Mapping, *, hostname: str | None = None) -> tuple[str, str]:
+    """Whether this lease's holder can still be holding it, and why in words.
+
+    The kinds are ``live`` (the recorded process is still there, or nothing
+    can be told about it), ``stale`` (it is gone, and so is the session it
+    ran in), ``orphan`` (it is gone but other processes of its process group
+    are still running), ``foreign`` (the record is from another host, where a
+    pid means nothing) and ``unknown`` (no record to go on, for example a
+    lease file a release has emptied).
+
+    The recorded group is the process group the command ran in, which is
+    where the command it started runs too. A process that left that group
+    (``setsid``, a daemon) is invisible here, so ``stale`` means nothing of
+    that group is left, not that nothing holds the lock. What holds the lock
+    is always some process; see the takeover in the module docstring.
+    """
+    if not holder:
+        return "unknown", "its lock file records no holder"
+    here = socket.gethostname() if hostname is None else hostname
+    recorded = str(holder.get("hostname") or "")
+    if not recorded:
+        return "unknown", "its lock file records no host"
+    if recorded != here:
+        return "foreign", f"it was taken on {recorded}, not on this host"
+    pid = holder.get("pid")
+    alive = _process_exists(pid)
+    if alive is True:
+        return "live", f"its process (pid {pid}) is still running"
+    if alive is None:
+        return "live", f"its process (pid {pid!r}) cannot be checked"
+    group = _group_exists(holder.get("pgid"))
+    if group is True:
+        return "orphan", (
+            f"its process (pid {pid}) is gone, but other processes of its "
+            f"process group ({holder['pgid']}) are still running; one of them may "
+            f"still be using the board, so check 'pgrep -g {holder['pgid']}'"
+        )
+    if group is None:
+        # A lease from a harness that did not record the group yet, or a
+        # record that does not say: the pid is all there is to go on.
+        return "stale", f"its process (pid {pid}) is gone"
+    return "stale", (
+        f"its process (pid {pid}) is gone, and so is the process group it ran "
+        f"in ({holder['pgid']})"
+    )
+
+
+def takeover_allowed(board: Board, kind: str) -> bool:
+    """Whether a lease in this state may be taken over.
+
+    A board's lease is taken over once the command that took it is gone,
+    whether or not its process group still runs: the USB device is what
+    really keeps two commands off one board, so a leftover capture makes the
+    next device command fail loudly rather than quietly share the board.
+
+    The host lock is never taken over. It is the only thing that keeps USB
+    power changes and firmware writes on a host from overlapping, and what
+    still holds its file could be a firmware write in flight: a process that
+    left the recorded group, or one of a group the record does not name at
+    all (a lease file from a harness that recorded no process group).
+    Nothing here can tell those from a lock nobody needs, and the cost of
+    being wrong is a board interrupted mid-write, so the error says what to
+    look for and a person decides.
+    """
+    if board == HOST_LOCK:
+        return False
+    return kind in ("stale", "orphan")
+
+
+def _note_to_stderr(message: str) -> None:
+    print(f"note: {message}", file=sys.stderr)
+
+
+def _take_over_stale(path: Path, root: Path, board: Board) -> str:
+    """Free a lease whose holder is gone: why it was taken over, or ''.
+
+    The lock itself cannot be taken away from whatever still holds the file
+    open, so the file is removed instead: the next attempt creates a new one
+    and locks that, and later commands read the new file. Every check is
+    repeated under the takeover lock, which is held exclusively here and
+    shared by every attempt in acquire(), so this cannot remove a file that
+    a command is in the middle of taking, and two commands cannot take over
+    one board at the same time. A lease that was released, taken by someone
+    else, or already taken over is left alone.
+    """
+    if not takeover_allowed(board, lease_liveness(read_holder(path))[0]):
+        return ""  # the common case, before taking the takeover lock
+    try:
+        guard = _try_lock(root / TAKEOVER_LOCK, fcntl.LOCK_EX)
+    except OSError:
+        # Not worth failing a command for: the lease is left alone and the
+        # board is reported busy, as it was before this file existed.
+        return ""
+    if guard is None:
+        return ""  # another command is taking over a lease right now
+    try:
+        before = _file_identity(path)
+        if before is None:
+            return ""  # already gone
+        if not _probe(path):
+            return ""  # free now: the next attempt simply takes it
+        # The holder record last, and after the probe: a command that has
+        # just taken this lease stamps its own record, so reading it here
+        # leaves the smallest window in which this could remove a lease
+        # somebody is holding. The acquirer's own check that its lock file is
+        # still the board's closes what is left of that window.
+        kind, why = lease_liveness(read_holder(path))
+        if not takeover_allowed(board, kind):
+            return ""
+        if _file_identity(path) != before:
+            return ""  # a different file by now
+        os.unlink(path)
+    except OSError:
+        return ""
+    finally:
+        os.close(guard)
+    return why
 
 
 def describe_holder(holder: Mapping) -> str:
@@ -435,12 +649,16 @@ def acquire(
     sleep: Callable[[float], None] = time.sleep,
     host_lock: bool = False,
     external_template: str | None = None,
+    note: Callable[[str], None] = _note_to_stderr,
 ) -> LeaseSet:
     """Lease every board, all or nothing, waiting up to wait_s for busy ones.
 
     With host_lock, the host lock is taken too; with external_template (an
     already validated external_lock_template()), each board's external lock
     too (see the module docstring for the order).
+
+    A busy lease whose holder is gone is taken over, once per resource, and
+    note() is told in one line (by default on standard error).
     """
     if not boards and not host_lock:
         return LeaseSet()
@@ -484,80 +702,129 @@ def acquire(
         busy: tuple[Board, Path, bool] | None = None
         where = root
         files: dict[tuple[int, int], Path] = {}
+        guard = None
         try:
-            for board, path, external in ordered:
-                where = path.parent if external else root
-                existing = _file_identity(path)
-                if existing is not None:
-                    if external and not stat.S_ISREG(existing[0]):
+            # Shared while this attempt takes its locks and checks them:
+            # a takeover (below) holds the same file exclusively, so no
+            # lease file can be removed while another command is taking
+            # it, and two commands can never end up holding one board
+            # through two lock files.
+            guard = _try_lock(root / TAKEOVER_LOCK, fcntl.LOCK_SH)
+            if guard is not None:
+                for board, path, external in ordered:
+                    where = path.parent if external else root
+                    existing = _file_identity(path)
+                    if existing is not None:
+                        if external and not stat.S_ISREG(existing[0]):
+                            raise _released(
+                                held,
+                                f"{board.alias}: its external board lock {path} is not "
+                                "a regular file; point the template at the lab's lock "
+                                "files",
+                            )
+                        # flock is per open file description, so two paths that
+                        # are one file (a symlink, a hard link, one path twice)
+                        # would make the process wait for its own lock.
+                        if existing[1:] in files:
+                            raise _released(
+                                held,
+                                f"{board.alias}: its lock file {path} is the same file "
+                                f"as {files[existing[1:]]}; every board needs its own "
+                                "lock file",
+                            )
+                    # An external file may belong to another user: read access
+                    # is enough for flock, and it is never written.
+                    try:
+                        fd = _try_lock(
+                            path, fcntl.LOCK_EX,
+                            # O_NONBLOCK: a lab path that is a FIFO must not make
+                            # the open itself wait forever. The check below then
+                            # refuses anything that is not a regular file.
+                            flags=(
+                                os.O_RDONLY | os.O_NONBLOCK if external else os.O_RDWR
+                            ),
+                        )
+                    except PermissionError as error:
+                        if not external:
+                            raise
+                        # Waiting cannot fix this, so say which board and file.
                         raise _released(
                             held,
-                            f"{board.alias}: its external board lock {path} is not "
-                            "a regular file; point the template at the lab's lock "
-                            "files",
-                        )
-                    # flock is per open file description, so two paths that
-                    # are one file (a symlink, a hard link, one path twice)
-                    # would make the process wait for its own lock.
-                    if existing[1:] in files:
+                            f"{board.alias}: its external board lock {path} cannot be "
+                            f"opened for reading ({error.strerror}); the harness needs "
+                            "read access to the lab's lock file",
+                        ) from error
+                    if fd is None:
+                        busy = (board, path, external)
+                        break
+                    held.append(Lease(board, path, fd, holder, external=external))
+                    # The same two checks on the file that was actually opened,
+                    # in case the path was replaced in between.
+                    info = os.fstat(fd)
+                    if external and not stat.S_ISREG(info.st_mode):
                         raise _released(
                             held,
-                            f"{board.alias}: its lock file {path} is the same file "
-                            f"as {files[existing[1:]]}; every board needs its own "
-                            "lock file",
+                            f"{board.alias}: its external board lock {path} is not a "
+                            "regular file; point the template at the lab's lock files",
                         )
-                # An external file may belong to another user: read access
-                # is enough for flock, and it is never written.
-                try:
-                    fd = _try_lock(
-                        path, fcntl.LOCK_EX,
-                        # O_NONBLOCK: a lab path that is a FIFO must not make
-                        # the open itself wait forever. The check below then
-                        # refuses anything that is not a regular file.
-                        flags=(
-                            os.O_RDONLY | os.O_NONBLOCK if external else os.O_RDWR
-                        ),
-                    )
-                except PermissionError as error:
+                    key = (info.st_dev, info.st_ino)
+                    if key in files:
+                        raise _released(
+                            held,
+                            f"{board.alias}: its lock file {path} is the same file as "
+                            f"{files[key]}; every board needs its own lock file",
+                        )
+                    files[key] = path
                     if not external:
-                        raise
-                    # Waiting cannot fix this, so say which board and file.
-                    raise _released(
-                        held,
-                        f"{board.alias}: its external board lock {path} cannot be "
-                        f"opened for reading ({error.strerror}); the harness needs "
-                        "read access to the lab's lock file",
-                    ) from error
-                if fd is None:
-                    busy = (board, path, external)
-                    break
-                held.append(Lease(board, path, fd, holder, external=external))
-                # The same two checks on the file that was actually opened,
-                # in case the path was replaced in between.
-                info = os.fstat(fd)
-                if external and not stat.S_ISREG(info.st_mode):
-                    raise _released(
-                        held,
-                        f"{board.alias}: its external board lock {path} is not a "
-                        "regular file; point the template at the lab's lock files",
-                    )
-                key = (info.st_dev, info.st_ino)
-                if key in files:
-                    raise _released(
-                        held,
-                        f"{board.alias}: its lock file {path} is the same file as "
-                        f"{files[key]}; every board needs its own lock file",
-                    )
-                files[key] = path
-                if not external:
-                    _stamp(fd, dict(holder, resource=board.alias))
+                        _stamp(fd, dict(holder, resource=board.alias))
+                # One last check on every lease this attempt took: a lock on a
+                # file that is no longer the board's lease file excludes
+                # nobody. The takeover lock above keeps a takeover out of this
+                # window, so what is left is a file removed from outside the
+                # harness, which is how #215 was cleared by hand. The attempt
+                # starts again rather than trust such a lock.
+                for lease in held:
+                    if lease.external:
+                        continue
+                    now = _file_identity(lease.path)
+                    info = os.fstat(lease.fd)
+                    if now is None or now[1:] != (info.st_dev, info.st_ino):
+                        busy = (lease.board, lease.path, False)
+                        break
         except OSError as error:
             LeaseSet(held).release()
             raise LeaseError(f"cannot lease boards in {where}: {error}") from error
+        finally:
+            if guard is not None:
+                os.close(guard)
+        if guard is None:
+            # Another command is taking over a stale lease. That is a
+            # moment, not a wait: look again on the next round.
+            if clock() >= deadline:
+                raise LeaseError(
+                    f"cannot lease boards in {root}: another command is taking "
+                    f"over a stale lease ({root / TAKEOVER_LOCK}); retry, or "
+                    "use --wait-for-boards MINUTES to wait for it"
+                )
+            sleep(_POLL_S)
+            continue
         if busy is None:
             return LeaseSet(held)
         LeaseSet(held).release()
         board, path, external = busy
+        # A lease of this host whose holder is gone holds nothing back; an
+        # external lock belongs to the lab and is never touched. Once per
+        # resource, so a file that keeps coming back cannot loop here.
+        if not external:
+            why = _take_over_stale(path, root, board)
+            if why:
+                # The next round takes the board; this one has released
+                # everything. Every round sleeps or reaches the deadline, so
+                # a lease file that keeps coming back cannot make this spin.
+                note(
+                    f"{board.alias} was held by a lease that no longer holds it: "
+                    f"{why}. Taking it over ({path})."
+                )
         if clock() >= deadline:
             waited = f" after waiting {wait_s:g}s" if wait_s else ""
             if external:
@@ -566,16 +833,32 @@ def acquire(
                     f"{describe_external(path, read_external_holder(path))}; "
                     "use --wait-for-boards MINUTES to wait for it"
                 )
+            holder_now = read_holder(path)
+            kind, why = lease_liveness(holder_now)
+            # A lease this command did not take over (the host lock, or a
+            # board whose one takeover this command has spent) must say the
+            # command that took it is gone, or it reads as the stale lease
+            # nobody could account for before.
+            left_over = (f" the command that took it is gone: {why};"
+                         if kind in ("orphan", "stale") else "")
             if board == HOST_LOCK:
+                if left_over:
+                    raise LeaseError(
+                        f"this host's power/firmware lock is in use{waited}: held "
+                        f"by {describe_holder(holder_now)} ({path});{left_over} it "
+                        "is never taken over, because a firmware write or a power "
+                        "change it started may still be running: look for one, "
+                        "and remove the lock file once you know there is none"
+                    )
                 raise LeaseError(
                     f"this host's power/firmware lock is in use{waited}: held by "
-                    f"{describe_holder(read_holder(path))} ({path}); another "
+                    f"{describe_holder(holder_now)} ({path}); another "
                     "harness command is switching USB power or writing firmware "
                     "here; retry when it ends, or use --wait-for-boards MINUTES"
                 )
             raise LeaseError(
                 f"{board.alias} is in use{waited}: held by "
-                f"{describe_holder(read_holder(path))} ({path}); "
+                f"{describe_holder(holder_now)} ({path});{left_over} "
                 "use --wait-for-boards MINUTES to wait for it"
             )
         sleep(_POLL_S)
@@ -592,6 +875,9 @@ def board_states(
     With external_template, a board whose external lock is held counts as
     held even without a lease; ``external`` then gives that lock's file,
     whether it is held, and what the file says about its holder.
+
+    A held lease whose holder is gone also carries ``stale``, saying why the
+    next command that wants the board takes it over.
     """
     root = lease_dir(directory)
     states = []
@@ -601,6 +887,11 @@ def board_states(
         if _probe(path):
             state["held"] = True
             state["holder"] = read_holder(path)
+            # Reported, never removed: a listing changes nothing on the bench.
+            kind, why = lease_liveness(state["holder"])
+            if kind in ("stale", "orphan"):
+                state["stale"] = why
+                state["takeover"] = takeover_allowed(board, kind)
         if external_template:
             external = external_lock_path(external_template, board)
             try:

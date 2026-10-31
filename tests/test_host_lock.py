@@ -117,7 +117,10 @@ class HostLockTests(unittest.TestCase):
         real = leases._try_lock
 
         def recording(path, mode, **kwargs):
-            order.append(Path(path).name)
+            # Resource locks only: the takeover lock orders a takeover
+            # against an attempt and is not one of the boards.
+            if Path(path).name != leases.TAKEOVER_LOCK:
+                order.append(Path(path).name)
             return real(path, mode, **kwargs)
 
         with mock.patch.object(leases, "_try_lock", recording):
