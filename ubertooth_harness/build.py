@@ -361,27 +361,30 @@ def _host_version_line(text: str) -> str:
     return text
 
 
-# A step's reason is a sentence, and it lands in a one-line marker in the
-# transcript. The bound is a backstop: a reason built from a tool's output or
-# from a cancellation message someone else wrote must still fit the record
-# (as sequencer bounds a case's reason for the same reason).
-_MAX_STEP_REASON_CHARS = 500
+# A step's or the build's reason is a sentence, and it lands in a one-line
+# marker in the transcript. The bound is a backstop: a reason built from a
+# tool's output or from a cancellation message someone else wrote must still
+# fit the record (as sequencer bounds a case's reason for the same reason).
+_MAX_MARKER_REASON_CHARS = 500
 
 
-def _step_reason(reason) -> str:
+def _one_line_reason(reason) -> str:
     """One bounded line, whatever the reason was built from.
 
     A line break becomes "; " rather than a space, so a reason built from
-    several lines still reads as several statements.
+    several lines still reads as several statements. There is nowhere else to
+    name for the rest of a reason this long: the step's and the build's
+    markers are both bounded, and the command's own output is in the
+    transcript above them.
     """
     text = "; ".join(
         " ".join(line.split())
         for line in str(reason).splitlines() if line.strip()
     )
-    if len(text) <= _MAX_STEP_REASON_CHARS:
+    if len(text) <= _MAX_MARKER_REASON_CHARS:
         return text
     marker = " ... [truncated]"
-    return text[:_MAX_STEP_REASON_CHARS - len(marker)] + marker
+    return text[:_MAX_MARKER_REASON_CHARS - len(marker)] + marker
 
 
 def _first_line(result: CommandResult) -> str:
@@ -450,7 +453,7 @@ class Builder:
         self.publisher.emit(
             "build_step_finished", status,
             {"step_id": step_id, "step_name": name,
-             "reason": _step_reason(reason)},
+             "reason": _one_line_reason(reason)},
         )
 
     def _run(self, argv: Sequence[str], timeout_s: float, label: str, cwd=None):
@@ -537,7 +540,12 @@ class Builder:
         try:
             result = self._run_plan(plan)
         except BuildError as error:
-            self.publisher.emit("build_finished", "failed", {"reason": str(error)})
+            self.publisher.emit(
+                "build_finished", "failed",
+                # The BUILD marker is one line too, and a cancellation reason
+                # comes from whoever asked for it.
+                {"reason": _one_line_reason(error)},
+            )
             raise
         self.publisher.emit(
             "build_finished", "passed",
@@ -603,10 +611,12 @@ class Builder:
                     if _host_version_matches(plan, host_version) and not result.timed_out:
                         host_version = _host_version_line(host_version)
                         if failures:
+                            # Which option answered, so a fallback that
+                            # answered is not read as a busy board.
                             step["reason"] = (
-                                "the version line is the resolved revision; "
-                                f"the exit status is not what this step reads "
-                                f"({failures})"
+                                "the version line is the resolved revision, "
+                                f"from {tried[-1][0][-1]}; the exit status is "
+                                f"not what this step reads ({failures})"
                             )
                         continue
                     # Either command may be the real problem, and the reason

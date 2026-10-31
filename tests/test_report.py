@@ -148,6 +148,28 @@ class ReportTests(unittest.TestCase):
             self.assertNotIn("cccc2222", report)
             self.assertNotIn(SERIAL, report)
 
+    def test_an_outcome_for_another_step_leaves_the_open_one_open(self):
+        # Records are read as they were written: an outcome naming a step
+        # other than the open one closes nothing, and the open step still
+        # gets the line its commands give it.
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            publisher = open_run_publisher(run, "run-a")
+            publisher.emit("build_started", "running", {})
+            publisher.emit("build_step_started", "running", {
+                "step_id": "host-build", "step_name": "Build Ubertooth host tools",
+            })
+            publisher.emit("build_step_finished", "passed", {
+                "step_id": "toolchain", "step_name": "Read toolchain versions",
+                "reason": "",
+            })
+            publisher.emit("build_finished", "passed", {"reason": ""})
+
+            report = render_run(load_events(run / "run.jsonl"))
+
+            self.assertIn("--- Read toolchain versions EXIT: passed ---", report)
+            self.assertIn("--- Build Ubertooth host tools EXIT: passed ---", report)
+
     def test_a_build_step_with_no_outcome_record_falls_back_to_its_commands(self):
         # A run recorded before the build said how each step ended has only
         # its commands to go on, so the step's line is latched to the first

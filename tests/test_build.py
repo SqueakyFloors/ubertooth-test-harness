@@ -274,6 +274,15 @@ class BuilderTests(unittest.TestCase):
             steps = [item["step_id"] for item in result.commands]
             self.assertEqual(["verify-host-version", "verify-host-version-fallback"],
                              steps[-2:])
+            # The step's reason names the option that answered, so the
+            # fallback is not read as a busy board.
+            step = [e for e in load_events(Path(work) / "run.jsonl")
+                    if e["event_type"] == "build_step_finished"][-1]
+            self.assertEqual(
+                "the version line is the resolved revision, from -H; the exit "
+                "status is not what this step reads (-V exited 1)",
+                step["details"]["reason"],
+            )
 
     def test_a_reported_revision_is_not_asked_again_on_H(self):
         # The label is there, so -V answered: the wrong revision is the
@@ -415,15 +424,15 @@ class BuilderTests(unittest.TestCase):
 
             self.assertEqual("passed", step["status"])
             self.assertEqual(
-                "the version line is the resolved revision; the exit status "
-                "is not what this step reads (-V exited 1)",
+                "the version line is the resolved revision, from -V; the exit "
+                "status is not what this step reads (-V exited 1)",
                 step["details"]["reason"],
             )
             report = render_run(events)
             self.assertIn(
                 "--- Built host tools report the resolved revision EXIT: passed: "
-                "the version line is the resolved revision; the exit status is "
-                "not what this step reads (-V exited 1) ---",
+                "the version line is the resolved revision, from -V; the exit "
+                "status is not what this step reads (-V exited 1) ---",
                 report,
             )
             self.assertIn("=== BUILD EXIT: passed ===", report)
@@ -475,11 +484,13 @@ class BuilderTests(unittest.TestCase):
         # Reasons are built from a tool's output and from cancellation
         # messages someone else wrote; the marker they land in is one line,
         # and the record has a size limit.
-        from ubertooth_harness.build import _MAX_STEP_REASON_CHARS, _step_reason
+        from ubertooth_harness.build import (
+            _MAX_MARKER_REASON_CHARS, _one_line_reason,
+        )
 
-        self.assertEqual("canceled: a; b", _step_reason("canceled: a\nb"))
-        bounded = _step_reason("x" * 9000)
-        self.assertEqual(_MAX_STEP_REASON_CHARS, len(bounded))
+        self.assertEqual("canceled: a; b", _one_line_reason("canceled: a\nb"))
+        bounded = _one_line_reason("x" * 9000)
+        self.assertEqual(_MAX_MARKER_REASON_CHARS, len(bounded))
         self.assertTrue(bounded.endswith("... [truncated]"), bounded)
 
     def test_a_canceled_build_leaves_its_step_failed(self):
