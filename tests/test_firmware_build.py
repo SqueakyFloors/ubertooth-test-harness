@@ -351,6 +351,25 @@ class FirmwareStepTests(unittest.TestCase):
         self.assertNotIn("gave different images", result.stderr)
         self.assertNotIn("bump it", result.stderr)
 
+    def test_a_base_that_does_not_build_fails_the_step(self):
+        base = self.base_sources()
+
+        result = self.run_step(DK_BASE_SRC=str(base), FAKE_DOCKER_EXIT_2="1")
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertEqual(2, len(self.builds()), self.builds())
+        self.assertNotIn("firmware-dk passed", result.stdout)
+        self.assertNotIn("gave different images", result.stderr)
+
+    def test_sources_with_no_sdk_version_are_refused(self):
+        base = self.base_sources()
+        (base / "NCS_VERSION").write_text("")
+
+        result = self.run_step(DK_BASE_SRC=str(base))
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("NCS_VERSION is empty", result.stderr)
+
     def test_sources_that_are_no_copy_of_the_firmware_are_refused(self):
         empty = self.directory / "nothing"
         empty.mkdir()

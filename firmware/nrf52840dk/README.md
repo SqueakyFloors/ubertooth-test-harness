@@ -67,6 +67,11 @@ NCS_WORKSPACE=~/ncs-ci scripts/ci.sh firmware-dk   # keep the SDK workspace
 DK_BASE_REF=origin/main scripts/ci.sh firmware-dk  # compare with main's image
 ```
 
+`DK_BASE_REF` needs this repository's history, so it works with
+`scripts/ci.sh` and not under `scripts/local-ci.sh`, which tests a tree
+exported with `git archive`; there, give `DK_BASE_SRC` a directory of the
+sources to compare against instead.
+
 It creates the SDK workspace (`west init --mr $NCS_VERSION`, `west update`),
 builds the image, and checks that it carries the firmware version string
 (`nrfdk.py check-image`), which is what `nrfdk.py ensure` looks for before it

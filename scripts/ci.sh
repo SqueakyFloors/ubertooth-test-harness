@@ -271,6 +271,15 @@ run_firmware_dk() {
         echo "$fw"
     }
 
+    dk_sdk_version() {
+        sdk=$(cat "$1/NCS_VERSION")
+        if [ -z "$sdk" ]; then
+            echo "error: $1/NCS_VERSION is empty" >&2
+            return 1
+        fi
+        echo "$sdk"
+    }
+
     # Whether these sources build the image they built before. Two builds of
     # one tree have to give one image, or a difference between two trees says
     # nothing about the change between them. Measured in CI on 2026-10-31:
@@ -327,7 +336,7 @@ run_firmware_dk() {
         # toolchain builds a new image, that needs the bump as any source
         # change does; building the base with its own SDK would mean a second
         # workspace of several gigabytes.
-        base_sdk=$(cat "$base/NCS_VERSION")
+        base_sdk=$(dk_sdk_version "$base")
         if [ "$base_sdk" != "$version" ]; then
             echo "error: the nRF Connect SDK moved from $base_sdk to $version" \
                  "while UTDK_FW_VERSION is still $here: a new toolchain builds" \
@@ -391,9 +400,10 @@ run_firmware_dk() {
     elif ! git -C "$repo" cat-file -e "$DK_BASE_REF:$DK_FIRMWARE/src/roles.h" 2>/dev/null; then
         step "the image against $DK_BASE_REF"
         echo "error: $DK_BASE_REF does not resolve to a tree holding" \
-             "$DK_FIRMWARE here, so the image cannot be compared; fetch that" \
-             "ref (the workflow checks out the whole history for it) or unset" \
-             "DK_BASE_REF" >&2
+             "$DK_FIRMWARE here, so the image cannot be compared: the ref is" \
+             "not in this history (the workflow checks the whole history out" \
+             "for it), or it is a commit from before that directory. Name a" \
+             "ref that has it, or unset DK_BASE_REF" >&2
         return 1
     else
         base_tree=$workspace/base-firmware
