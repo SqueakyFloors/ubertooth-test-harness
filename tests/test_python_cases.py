@@ -188,7 +188,10 @@ UTIL_FAILS_EXTCAP = {"extcap-interfaces-util-fails"}
 # The cases for an option the script does not have. At d04f79e each one got
 # getopt's own words ("error: option --extcap-bogus not recognized"), which
 # fork 5310a5d (#481) rewrote to the line every tool gives for that mistake,
-# and the usage text after it, which fork 12211ce (#406) dropped.
+# and the usage text after it, which fork 12211ce (#406) dropped. The real
+# report_bad_option() tells five mistakes apart; the fixture below stands in
+# for the one these cases make, a long option no LONG_OPTIONS entry begins
+# with, and would answer the other four in the same words.
 BAD_OPTION_EXTCAP = {
     "extcap-unknown-option", "extcap-refuses-extcap-reload-option",
     "extcap-refuses-extcap-control-in", "extcap-refuses-extcap-control-out",
@@ -211,6 +214,9 @@ EXTCAP = EXTCAP_D04F79E.replace(
         sys.exit(1)""")
 assert EXTCAP.count("sys.exit(1)") > EXTCAP_D04F79E.count("sys.exit(1)")
 assert "usage(sys.stderr)" not in EXTCAP
+# Each replacement found its text: a fixture whose derivation stopped matching
+# would be the d04f79e script under the current script's name.
+assert "unrecognized option '--%s'" in EXTCAP
 assert "unrecognized option" not in EXTCAP_D04F79E
 COMPREHENSIVE_INTERFACES = (
     "extcap-interfaces", "extcap-interfaces-serials", "extcap-interfaces-version",

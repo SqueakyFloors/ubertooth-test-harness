@@ -105,6 +105,7 @@ def _unknown_option(option: str) -> str:
     """
     return rf"(?m)^error: unrecognized option '--{re.escape(option)}'$"
 
+
 # --extcap-dlts and --extcap-config open no board, so any serial will do.
 _INTERFACE = "--extcap-interface=ubertooth" + "0123456789abcdef" * 2
 _DLT_LINE = _line(f"dlt {{number={EXTCAP_DLT}}}"

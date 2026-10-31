@@ -580,8 +580,10 @@ the index case's step count grows with the number of boards. Smoke: `-U all
 same, and `-N` plus one `-U<index> -s` per board agree with the listing.
 Comprehensive adds the five identity queries listed per board in index order,
 both with `-U all` and with no selector, `-C` without `-U` refusing to pick a
-board (exit 1, listing every board, with no channel read), and an index past
-the last board refused with `error: no Ubertooth at index N (N attached)`.
+board (exit 1 with `error: multiple Ubertooth devices found; select one with
+-U <index|serial>` and one `Device <index>: <serial>` line per board, and no
+channel read), and an index past the last board refused with
+`error: no Ubertooth at index N (N attached)`.
 
 **Known limits.** Every command is read-only, so this says nothing about
 selection for a command that writes. The listing order is the USB index order,
