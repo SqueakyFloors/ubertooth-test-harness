@@ -18,6 +18,7 @@ from ubertooth_harness.patterns import (
     compile_info_pattern,
     firmware_version_pattern,
     revision_pattern,
+    same_revision,
 )
 from ubertooth_harness.resources import (
     ESP32_CLASSIC_PEER,
@@ -93,8 +94,14 @@ class PreflightCheck:
                 target = self.resource_alias or self.host
                 found = _FIRMWARE_REVISION.get(self.name)
                 match = found.search(output) if found else None
-                if match:
-                    # Name both revisions and how to fix it (#135).
+                # Name both revisions and how to fix it (#135). Only when they
+                # really differ: a board on the right commit but another image
+                # (btbr, a bench image) also fails this check, and saying it
+                # runs the revision the tools are would name no difference at
+                # all. That case falls through to the identity mismatch below,
+                # which names what was expected.
+                if match and not same_revision(self.expected_revision,
+                                               match.group(1)):
                     return (
                         f"{self.name}: {target} runs {match.group(1)}, the tools "
                         f"are {self.expected_revision}: {self.fix or FLASH_FIX}"

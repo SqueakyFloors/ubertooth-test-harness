@@ -17,6 +17,16 @@ suites:
         interval: 100
         payload: c0ffee
 
+    # The same advertiser, read by real tshark through the extcap plugin.
+    # Needs tshark on the host (no GUI); without it the test is not
+    # applicable, and --dry-run says so.
+    - BLE extcap in tshark:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        advertiser: default
+        coverage: smoke
+        duration: 15s
+
   # Two more DKs, registered with the central and peripheral roles, connect
   # on the 1M PHY with Data Length Extension while the Ubertooth follows
   # them with `ubertooth-btle -f`.
@@ -42,6 +52,13 @@ suites:
         duration: 5s
         interval: 100
         payload: c0ffee
+
+    - BLE extcap in tshark:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        advertiser: default
+        coverage: comprehensive
+        duration: 15s
 
     - Capture known BLE connection:
         hosts: [Host_Linux]

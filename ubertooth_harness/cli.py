@@ -1,11 +1,13 @@
 """Command-line interface for the local harness slice."""
 
 import argparse
+from collections.abc import Sequence
 import contextlib
 from dataclasses import asdict
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import re
 import signal
 import subprocess
 import sys
@@ -59,6 +61,12 @@ from ubertooth_harness.preflight import (
     NO_FLASH_FIX,
     PreflightError,
     PreflightPolicy,
+)
+from ubertooth_harness.power import (
+    PowerControllerError,
+    controller_from_resource,
+    controller_ports,
+    snapshot_ports,
 )
 from ubertooth_harness.resources import FileResourceRegistry, RegistryError
 from ubertooth_harness.report import render_runs, write_report
@@ -378,6 +386,15 @@ def _parser() -> argparse.ArgumentParser:
     _add_external_lock_option(boards)
     boards.add_argument("--json", action="store_true", help="machine-readable output")
 
+    power = subparsers.add_parser(
+        "power",
+        help="read a USB power controller's ports (power, data, VBUS, current) "
+        "and the resources mapped to them; changes nothing",
+    )
+    power.add_argument("--hardware", type=Path, required=True)
+    power.add_argument("controller", metavar="ALIAS", help="registered USB power controller")
+    power.add_argument("--json", action="store_true", help="machine-readable output")
+
     lease = subparsers.add_parser(
         "lease",
         help="hold boards' leases while running one command, e.g. manual ubertooth-util use",
@@ -387,7 +404,8 @@ def _parser() -> argparse.ArgumentParser:
     lease.add_argument(
         "--host-lock", action="store_true",
         help="also hold this host's power/firmware lock, for a command that "
-        "switches USB power or writes firmware (automatic for ubertooth-dfu)",
+        "switches USB power or writes firmware (automatic for a command line "
+        "that names ubertooth-dfu)",
     )
     _add_lease_options(lease)
     lease.epilog = "usage: ubertooth-harness lease --hardware H ALIAS... -- COMMAND [ARG...]"
@@ -1028,13 +1046,17 @@ def _boards_command(args: argparse.Namespace) -> int:
         return 0
     for state in states:
         external = state.get("external") or {}
+        # The host lock is this machine's, whichever host --host named: a
+        # lock file read here says nothing about another machine's, so the
+        # line says which machine it is about.
+        label = state["resource"] + (" (this machine)" if state.get("host_lock") else "")
         if state.get("unleasable"):
-            print(f"{state['resource']:<12} not leasable: {state['unleasable']}")
+            print(f"{label:<12} not leasable: {state['unleasable']}")
         elif state["held"] and state["holder"]:
             holder = state["holder"]
             since = board_leases.held_for(holder)
             detail = board_leases.describe_holder(holder)
-            print(f"{state['resource']:<12} held  {detail}" + (f" (for {since})" if since else ""))
+            print(f"{label:<12} held  {detail}" + (f" (for {since})" if since else ""))
             if external.get("held") and not external.get("error"):
                 # Two parties hold the board; name the other one too.
                 print(f"{'':<12} and   " + board_leases.describe_external(
@@ -1042,20 +1064,102 @@ def _boards_command(args: argparse.Namespace) -> int:
                 ))
         elif external.get("held"):
             if external.get("error"):
-                print(f"{state['resource']:<12} held  outside the harness: "
+                print(f"{label:<12} held  outside the harness: "
                       f"{external['lock']} (cannot be read, so taken as held)")
             else:
                 detail = board_leases.describe_external(
                     Path(external["lock"]), external.get("holder", "")
                 )
-                print(f"{state['resource']:<12} held  {detail}")
+                print(f"{label:<12} held  {detail}")
         elif state["held"]:
-            print(f"{state['resource']:<12} held  {board_leases.describe_holder({})}")
+            print(f"{label:<12} held  {board_leases.describe_holder({})}")
         else:
-            print(f"{state['resource']:<12} free")
+            print(f"{label:<12} free")
         if external.get("error"):
             print(f"{'':<12} warning: cannot read external lock: {external['error']}")
     return 0
+
+
+def _power_command(args: argparse.Namespace) -> int:
+    registry = FileResourceRegistry.load(args.hardware)
+    resource = registry.get(args.controller)
+    try:
+        # Unarmed: this command can never switch a port.
+        controller = controller_from_resource(resource, allow_real_changes=False)
+        ports = controller_ports(resource)
+        mapped = {
+            board.power["port"]: board.alias
+            for board in registry.resources.values()
+            if board.power.get("controller") == resource.alias
+            and isinstance(board.power.get("port"), int)
+        }
+        controller.connect()
+        try:
+            states = snapshot_ports(controller, ports)
+            firmware = getattr(controller, "firmware_version", None)
+        finally:
+            try:
+                controller.close()
+            except Exception:  # noqa: BLE001 - a read error above is the one to report
+                pass
+    except PowerControllerError as error:
+        raise HarnessError(f"power controller {resource.alias}: {error}") from error
+    rows = [
+        {
+            "port": state.port,
+            "power_enabled": state.power_enabled,
+            "data_enabled": state.data_enabled,
+            "vbus_microvolts": state.vbus_microvolts,
+            "vbus_microamps": state.vbus_microamps,
+            "resource": mapped.get(state.port),
+        }
+        for state in states
+    ]
+    if args.json:
+        print(json.dumps({"controller": resource.alias, "driver": resource.driver,
+                          "firmware_version": firmware, "ports": rows},
+                         indent=2, sort_keys=True))
+        return 0
+    print(f"{resource.alias} ({resource.driver})"
+          + (f", firmware {firmware}" if firmware else ""))
+    for row in rows:
+        volts = "-" if row["vbus_microvolts"] is None else f"{row['vbus_microvolts'] / 1e6:.2f} V"
+        amps = "-" if row["vbus_microamps"] is None else f"{row['vbus_microamps'] / 1e3:.1f} mA"
+        print(f"port {row['port']}: power {'on ' if row['power_enabled'] else 'off'} "
+              f"data {'on ' if row['data_enabled'] else 'off'} "
+              f"VBUS {volts:>7} {amps:>9}  {row['resource'] or ''}".rstrip())
+    return 0
+
+
+_DFU_TOOL = "ubertooth-dfu"
+# A word of a command line, as a shell would split it: the quotes and
+# operators a wrapped command uses are separators, everything else is a word.
+_COMMAND_WORD = re.compile(r"""[^\s'"`|&;()<>]+""")
+
+
+def _writes_firmware(command: Sequence[str]) -> bool:
+    """True when the text of this command line names ubertooth-dfu.
+
+    The tool is not always the first word: `sudo ubertooth-dfu ...`,
+    `env VAR=1 ubertooth-dfu ...` and `sh -c "ubertooth-dfu ..."` all write
+    firmware, so every word of every argument is examined, including the words
+    inside a quoted argument a shell would run. A word is matched by its last
+    path component, so `/usr/local/bin/ubertooth-dfu` counts and
+    `ubertooth-dfu-wrapper` does not.
+
+    This reads the text and nothing else, which decides the two ways it is
+    wrong in the direction that costs least. A command line that only mentions
+    the name (`env PATH=/opt/ubertooth-dfu ls`) holds the lock while it runs,
+    which delays other commands and breaks nothing. A command line that
+    reaches the tool without naming it -- through a variable, a wrapper script
+    of its own, or a list of commands read from a file -- is not seen here,
+    and needs `--host-lock`; that is what the option is for.
+    """
+    return any(
+        PurePosixPath(word).name == _DFU_TOOL
+        for argument in command
+        for word in _COMMAND_WORD.findall(argument)
+    )
 
 
 def _lease_command(args: argparse.Namespace) -> int:
@@ -1075,7 +1179,19 @@ def _lease_command(args: argparse.Namespace) -> int:
         boards.append(board_leases.Board(alias, board_leases.resource_key(resource)))
     # A manual firmware write (or DFU read-back) must not overlap another
     # command's power changes or writes on this host.
-    host_lock = args.host_lock or Path(command[0]).name == "ubertooth-dfu"
+    host_lock = args.host_lock
+    if not host_lock and _writes_firmware(command):
+        host_lock = True
+        # Nobody asked for this lock, and holding it makes every other
+        # command that switches power or writes firmware wait until this one
+        # exits, so say what is being asked for and why. Before the attempt,
+        # which is also when a wait for it starts.
+        print(
+            "note: this command line names " + _DFU_TOOL + ", so it asks for "
+            "this host's power/firmware lock as well as its boards, and holds "
+            "it until the command exits",
+            file=sys.stderr,
+        )
     with board_leases.acquire(
         boards,
         board_leases.holder_info(run_id=None, owner=args.owner, purpose="lease: " + " ".join(command)),
@@ -1123,6 +1239,10 @@ def main(argv: list[str] | None = None) -> int:
             return _boards_command(args)
         if args.command == "lease":
             return _lease_command(args)
+        if args.command == "power":
+            # Opens a real controller: only from the harness environment.
+            require_harness_environment()
+            return _power_command(args)
         if args.command == "report":
             text = render_runs(args.runs, redact_serials=args.redact_serials, title=args.title)
             if args.output:

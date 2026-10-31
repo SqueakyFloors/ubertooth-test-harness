@@ -31,6 +31,8 @@ ACCEPTOR_ADDRESS = "C8:85:41:2A:1B:2A"
 INITIATOR_ADDRESS = "20:50:0D:E9:C5:BA"
 MASTER_LAP, MASTER_UAP = "e9c5ba", "0d"
 OTHER_LAP, OTHER_UAP = "2a1b2a", "41"
+RESOURCES = {"Ubertooth": "UT_Linux0", "acceptor": "ESP32_Linux0",
+             "initiator": "ESP32_Linux1"}
 IDENTITIES = {
     "Ubertooth": {"serial": SERIAL},
     "acceptor": {"bridge serial": ACCEPTOR_BRIDGE, "BD_ADDR": ACCEPTOR_ADDRESS},
@@ -165,6 +167,19 @@ class CaptureCaseTests(unittest.TestCase):
                           esp32peer.default_device(ACCEPTOR_BRIDGE),
                           "--address", ACCEPTOR_ADDRESS, "--role", "acceptor"],
                          list(argv[2:]))
+
+    def test_the_aliases_reach_the_driver_for_the_run_transcript(self):
+        # With them, esp32peer.py marks every line of its conversation with
+        # the two shells, so the run's transcript holds the pair's side.
+        case = known_classic_cases(arguments("Capture known Classic device"),
+                                   RESOURCES, IDENTITIES)[0]
+        steps = {s.step_id: s for s in case.steps}
+        argv = list(steps["stream-and-receive"].resolve_argv({}))
+        self.assertEqual("ESP32_Linux0", argv[argv.index("--acceptor-alias") + 1])
+        self.assertEqual("ESP32_Linux1", argv[argv.index("--initiator-alias") + 1])
+        reset = {s.step_id: s for s in case.cleanup}["reset-acceptor"]
+        reset_argv = list(reset.resolve_argv({}))
+        self.assertEqual("ESP32_Linux0", reset_argv[reset_argv.index("--alias") + 1])
 
     def test_the_capture_step_runs_the_tool_after_a_double_dash(self):
         cases = {case.case_id: case for case in known_classic_cases(

@@ -6,13 +6,20 @@ from types import MappingProxyType
 from typing import Callable, Mapping
 
 from ubertooth_harness.cases import CommandCase, FlashCase, guard_roles
-from ubertooth_harness.hostneeds import BLUEZ_TOOLS, NO_NEEDS, Needs, tool_needs
+from ubertooth_harness.hostneeds import (
+    BLUEZ_TOOLS, NO_NEEDS, PLATFORMS, Needs, tool_needs,
+)
+from ubertooth_harness.rf import (
+    NORMAL_LINK, PlacementError, PlacementRequirement,
+    requirement as rf_requirement,
+    requirements as rf_requirements,
+)
 from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
-    COMPILE_INFO_PATTERN,
     FIRMWARE_PATTERN,
     HOST_VERSION_TIMEOUT_S,
     PART_ID_PATTERN,
+    VERSION_ANSWER,
     serial_pattern,
 )
 from ubertooth_harness.resources import ESP32_CLASSIC_PEER
@@ -20,13 +27,17 @@ from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
     advertiser_cases, classic_cases, connection_cases, dfu_cases, dfu_host_cases,
     python_cases, receive_cases, refusal_cases, tool_cases, transitions,
-    util_cases, util_refusal_cases,
+    tshark_cases, util_cases, util_refusal_cases,
 )
 
 
 class CatalogError(ValueError):
     """A test name or argument does not match the catalog."""
 
+
+# The plan argument that turns the firmware's self-reset count into a
+# pass/fail measure for one test (watchdog.py).
+WATCHDOG_LIMIT_ARGUMENT = "max_watchdog_resets"
 
 _MISSING = object()
 _DURATION_RE = re.compile(r"^([1-9][0-9]*)(ms|s|m|h)$")
@@ -54,8 +65,8 @@ def _platforms(value):
     if not isinstance(value, (list, tuple)) or not value:
         raise CatalogError("platforms must be a non-empty list")
     normalized = tuple(value)
-    if any(item not in ("macos", "linux") for item in normalized):
-        raise CatalogError("platforms may contain only macos and linux")
+    if any(item not in PLATFORMS for item in normalized):
+        raise CatalogError("platforms may contain only " + " and ".join(PLATFORMS))
     if len(set(normalized)) != len(normalized):
         raise CatalogError("platforms must not contain duplicates")
     return normalized
@@ -182,6 +193,20 @@ def _coverage(value):
         raise CatalogError(str(error)) from error
 
 
+def _rf(value):
+    try:
+        asked = rf_requirements(value)
+    except PlacementError as error:
+        raise CatalogError(str(error)) from error
+    # Normalized arguments are written to the manifest and run.jsonl as JSON,
+    # and are read back from a manifest (the GUI), so a requirement is kept
+    # as the plain record it validated to; the planner reads it back with
+    # placement_requirements().
+    return MappingProxyType({
+        role: MappingProxyType(want.to_dict()) for role, want in asked.items()
+    })
+
+
 @dataclass(frozen=True)
 class ArgumentRule:
     validator: Callable
@@ -267,6 +292,32 @@ class TestDefinition:
     # Expected wall time by coverage profile (DEFAULT_PROFILE for a test
     # without a coverage argument); see ESTIMATES.
     estimates: Mapping[str, Estimate] | None = None
+    # The RF placement each hardware role needs when the plan does not say
+    # (rf.py): a capture or a survey asks for NORMAL_LINK, so the planner
+    # keeps it off an attenuated board. The plan's `rf:` overrides it per role.
+    rf_defaults: Mapping[str, PlacementRequirement] | None = None
+
+    def placement_requirements(
+        self, arguments: Mapping
+    ) -> Mapping[str, PlacementRequirement]:
+        """The placement every hardware role must satisfy for these arguments.
+
+        The plan's ``rf:`` for a role, else the test's own default for it;
+        roles with neither are absent, and any resource may take them.
+        """
+        requested = arguments.get("rf") or {}
+        defaults = self.rf_defaults or {}
+        wanted = {}
+        for role in self.hardware_roles or {}:
+            if role in requested:
+                # Normalizing the argument validated this record, so reading
+                # it back cannot fail.
+                placement = rf_requirement(requested[role])
+            else:
+                placement = defaults.get(role)
+            if placement:
+                wanted[role] = placement
+        return MappingProxyType(wanted)
 
     def estimated_seconds(self, arguments: Mapping) -> float | None:
         """Expected seconds of one invocation with these normalized arguments.
@@ -282,7 +333,11 @@ class TestDefinition:
         return _duration_argument_seconds(arguments)
 
     def test_needs(self, arguments: Mapping) -> tuple[Needs, ...]:
-        """The test-wide needs: the definition's and the plan's platforms."""
+        """The test-wide needs: the definition's and the plan's platforms.
+
+        A step without `platforms:` adds no platform need, so it runs on
+        every platform.
+        """
         needs = [self.needs] if self.needs else []
         if arguments.get("platforms"):
             needs.append(Needs(platforms=tuple(arguments["platforms"])))
@@ -306,6 +361,16 @@ class TestDefinition:
                 normalized[name] = rule.default
             elif rule.required:
                 raise CatalogError(f"{self.name}: missing required argument '{name}'")
+        if "rf" in normalized:
+            # An rf requirement selects the resource bound to one hardware
+            # role, so a role the test does not have could never be applied.
+            unknown = sorted(set(normalized["rf"]) - set(self.hardware_roles or {}))
+            if unknown:
+                raise CatalogError(
+                    f"{self.name}.rf: unknown hardware role(s) "
+                    f"{', '.join(unknown)}; this test binds "
+                    + (", ".join(self.hardware_roles or {}) or "no hardware")
+                )
         if self.check_arguments is not None:
             try:
                 self.check_arguments(normalized)
@@ -392,6 +457,19 @@ class TestCatalog:
 
 HOSTS = ArgumentRule(_hosts, default="each")
 UBERTOOTH = ArgumentRule(_selector, default="default")
+# Every test accepts `max_watchdog_resets:` (builtin_catalog adds it), so a
+# stability run can make the firmware's self-reset count a pass/fail measure.
+# It is optional: a step that leaves it out has no limit, and a self-reset is
+# only reported (watchdog.py), so the normalized arguments carry it only when
+# the plan sets it.
+MAX_WATCHDOG_RESETS = ArgumentRule(_nonnegative_integer)
+# Every test accepts `platforms:` (builtin_catalog adds it where the test does
+# not declare its own rule). It is optional: a step that leaves it out runs on
+# every platform, so the normalized arguments carry it only when the plan does.
+PLATFORMS_ARGUMENT = ArgumentRule(_platforms)
+# Every test that binds hardware accepts `rf:` (builtin_catalog adds it), one
+# placement requirement per hardware role. Optional, like `platforms:`.
+RF_ARGUMENT = ArgumentRule(_rf)
 DURATION = ArgumentRule(_duration, required=True)
 SAMPLE_EVERY = ArgumentRule(_duration, required=True)
 COVERAGE = ArgumentRule(_coverage, required=True)
@@ -523,7 +601,6 @@ def _ubertooth_identity_cases(_arguments, _resources, resource_identities):
         ) from error
     common = ("ubertooth-util", "-U", serial.lower())
     firmware = FIRMWARE_PATTERN
-    compile_info = COMPILE_INFO_PATTERN
     serial_output = serial_pattern(serial)
     part = PART_ID_PATTERN
     board = BOARD_ID_PATTERN
@@ -531,11 +608,17 @@ def _ubertooth_identity_cases(_arguments, _resources, resource_identities):
         CommandCase(
             "firmware-version", "Firmware version", common + ("-v",), (firmware,)
         ),
+        # -V is the version command, not an identity query: since fork
+        # f898fe5 (SqueakyFloors/ubertooth#813) it answers with the host
+        # tools' version and the board's firmware version and build, then
+        # ends the command. So it is read on its own, and the composition
+        # below asks for the four queries that do compose.
         CommandCase(
             "firmware-compile-info",
             "Firmware compile info",
             common + ("-V",),
-            (compile_info,),
+            (VERSION_ANSWER,),
+            timeout_s=HOST_VERSION_TIMEOUT_S,
         ),
         CommandCase(
             "device-serial", "Device serial", common + ("-s",), (serial_output,)
@@ -545,8 +628,8 @@ def _ubertooth_identity_cases(_arguments, _resources, resource_identities):
         CommandCase(
             "complete-readback-composition",
             "Complete readback composition",
-            common + ("-vVspb",),
-            (firmware, compile_info, serial_output, part, board),
+            common + ("-vspb",),
+            (firmware, serial_output, part, board),
         ),
     )
 
@@ -571,9 +654,10 @@ def _exclusive_topology_cases(arguments, _resources, resource_identities):
     """No-selector commands must see exactly the selected board.
 
     With more than one Ubertooth enumerated and no -U, libubertooth prints
-    "multiple Ubertooth devices found!" and indented "  Device N: Serial No:"
-    lines to stderr and opens no device, so ubertooth-util and ubertooth-btle
-    exit non-zero. These cases only pass when isolation left one board.
+    "error: multiple Ubertooth devices found; select one with -U
+    <index|serial>" and indented "  Device N: <serial>" lines to stderr and
+    opens no device, so ubertooth-util and ubertooth-btle exit non-zero.
+    These cases only pass when isolation left one board.
     """
     try:
         serial = resource_identities["Ubertooth"]["serial"].lower()
@@ -702,20 +786,24 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "BLE extcap capture": _profiles(
         Estimate(1.3, per_duration=1), Estimate(10.2, per_duration=6)
     ),
+    # ESTIMATE_PENDING_HW: the DK check and one capture, then three.
+    "BLE extcap in tshark": _profiles(
+        Estimate(25.0, per_duration=1), Estimate(35.0, per_duration=3)
+    ),
     # Three load runs of four flashes each took 10.4-10.7 s.
     "Flash reliability": _default(Estimate(0, per_count=("flashes", 2.65))),
     "DFU images": _profiles(Estimate(11.7), Estimate(69.0)),
-    # No run record (Linux only, needs power switching): two queries and the
-    # capture, plus up to 5 s removal and 10 s return deadlines with 1 s
-    # settles; about 8 s of power switching is assumed.
-    "Exclusive Ubertooth topology": _default(Estimate(8.0, per_duration=1)),
-    # No passing run yet: about 6 s from the test's start to -n on the Linux
-    # lab host (two resets), plus the result and about 40 reads and restores
-    # of both boards. On fork main 0684c11 a run fails in about 18 s: no
-    # result by the 10 s deadline (fork #26), then a clean cleanup. Before
-    # 0684c11 it took about 69 s: the wedged boards made every cleanup
-    # command time out.
-    "Two-device range test": _default(Estimate(10.0)),
+    # Three runs on the Linux lab host (Acroname USBHub3+, three other boards
+    # powered off, 5 s capture) took 12.5-16.7 s, median 15.2 s: about 1.3 s
+    # to a settled enumeration and switch-off, 1.5 s to confirm the board is
+    # alone, the queries and capture, and under 0.1 s to restore.
+    "Exclusive Ubertooth topology": _default(Estimate(10.0, per_duration=1)),
+    # Nine passing runs on the Linux lab host at fork 699960b (one guard
+    # board) took 11.5-14.9 s, median 13.3 s: about 6 s to -n (two resets),
+    # the result within about 1 s, then the reads and restores of both
+    # boards and the guard checks. Before fork #601 a run failed in about
+    # 18 s (no result by the 10 s deadline, fork #26).
+    "Two-device range test": _default(Estimate(13.5)),
     # ESTIMATE_PENDING_HW
     "Capture known BLE advertiser": _profiles(
         Estimate(25.0, per_duration=5), Estimate(70.0, per_duration=16)
@@ -733,6 +821,22 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "Follow Classic Bluetooth piconet": _profiles(
         Estimate(40.0, per_duration=2), Estimate(80.0, per_duration=4)
     ),
+})
+
+
+# Tests whose cases need an ordinary link: they listen for ambient traffic or
+# hold a live connection with a peer, so an attenuated board would cost them
+# the very packets they check for. A plan may still override this per role.
+RF_DEFAULTS: Mapping[str, Mapping[str, PlacementRequirement]] = MappingProxyType({
+    name: MappingProxyType({"Ubertooth": NORMAL_LINK})
+    for name in (
+        "Classic Bluetooth receive",
+        "Raw receive",
+        "BLE extcap capture",
+        "BLE extcap in tshark",
+        "Capture known BLE advertiser",
+        "Capture known BLE connection",
+    )
 })
 
 
@@ -1020,6 +1124,27 @@ def builtin_catalog() -> TestCatalog:
             guards_other_ubertooths=True,
         ),
         TestDefinition(
+            "BLE extcap in tshark",
+            "real tshark installs btle-extcap, captures through it from a "
+            "registered nRF52840 DK advertiser, and its own dissector decodes "
+            "the DK's address: with a capture filter it cannot apply, and "
+            "stopped with SIGINT partway",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH,
+                "advertiser": ArgumentRule(_selector, default="default"),
+                "coverage": COVERAGE, "duration": DURATION,
+            }),
+            MappingProxyType({"Ubertooth": "Ubertooth", "advertiser": "nRF52840 DK"}),
+            command_builder=tshark_cases.extcap_tshark_cases,
+            # A host without tshark runs none of it, and --dry-run says so.
+            needs=tshark_cases.NEEDS,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+            # Its first case flashes the DK when the board runs another
+            # firmware version, so the run holds the host lock.
+            writes_firmware=True,
+        ),
+        TestDefinition(
             "Capture known BLE advertiser",
             "ubertooth-btle -n and -f capture a registered nRF52840 DK advertiser "
             "on the channel it advertises on, with its payload, in PCAP and "
@@ -1245,6 +1370,45 @@ def builtin_catalog() -> TestCatalog:
         ]
     )
     return TestCatalog(
-        replace(definition, estimates=ESTIMATES.get(definition.name))
+        _accept_rf(_accept_watchdog_limit(_accept_platforms(
+            replace(
+                definition,
+                estimates=ESTIMATES.get(definition.name),
+                rf_defaults=RF_DEFAULTS.get(definition.name),
+            ))))
         for definition in definitions
     )
+
+
+def _accept_rf(definition: TestDefinition) -> TestDefinition:
+    """Accept `rf:` on every test that binds hardware, so a plan can ask for
+    a placement for any of its roles. A test that binds none cannot."""
+    if not definition.hardware_roles or "rf" in definition.arguments:
+        return definition
+    arguments = dict(definition.arguments)
+    arguments["rf"] = RF_ARGUMENT
+    return replace(definition, arguments=MappingProxyType(arguments))
+
+
+def _accept_watchdog_limit(definition: TestDefinition) -> TestDefinition:
+    """Accept `max_watchdog_resets:` on every test, so a plan can make the
+    firmware's self-reset count a pass/fail measure for any of them."""
+    if WATCHDOG_LIMIT_ARGUMENT in definition.arguments:
+        return definition
+    arguments = dict(definition.arguments)
+    arguments[WATCHDOG_LIMIT_ARGUMENT] = MAX_WATCHDOG_RESETS
+    return replace(definition, arguments=MappingProxyType(arguments))
+
+
+def _accept_platforms(definition: TestDefinition) -> TestDefinition:
+    """Accept `platforms:` on every test, so a plan can restrict any step.
+
+    Tests that must state their platforms (Flash reliability, Exclusive
+    Ubertooth topology, MAC polling soak) declare their own required rule and
+    keep it.
+    """
+    if "platforms" in definition.arguments:
+        return definition
+    arguments = dict(definition.arguments)
+    arguments["platforms"] = PLATFORMS_ARGUMENT
+    return replace(definition, arguments=MappingProxyType(arguments))

@@ -26,6 +26,7 @@ from ubertooth_harness.gui import failure_summary
 from ubertooth_harness.preflight import PreflightCheck
 from ubertooth_harness.report import load_events, render_run
 
+from tests import watchdog_samples
 from tests.test_cli import make_source
 
 
@@ -106,6 +107,10 @@ class FakeBoards:
                     _locked(self.lease_dir / f"{serial}.lock"),
                 ))
             output = "%MAIN = 0x1234\n"
+        elif command[-1] == "-w":
+            # The run reads each board's firmware watchdog record, before the
+            # flash stage and again at the end (watchdog.py).
+            output = watchdog_samples.report()
         elif command[-1] == "-v":
             serial = command[2]
             if self.silent_reads.get(serial):
@@ -114,7 +119,16 @@ class FakeBoards:
             else:
                 output = f"Firmware version: {self.revisions[serial]} (API:1.07)\n"
         elif command[-1] == "-V":
-            output = f"Compile info: ubertooth {self.revisions[command[2]]} (builder@host)\n"
+            # The whole answer one board gives since fork f898fe5; the
+            # compile-info check reads the build string off its last line.
+            revision = self.revisions[command[2]]
+            output = (
+                f"Host tools version: libubertooth 1.1 ({revision}), "
+                "libbtbb 1.0 (git-btbb)\n"
+                "libbtbb loaded from: /p/lib/libbtbb.so.1\n"
+                f"Firmware version: {revision} (API:1.07)\n"
+                f"Firmware build: ubertooth {revision} (builder@host) timestamp\n"
+            )
         elif command[-1] == "-s":
             output = f"Serial No: {command[2]}\n"
         else:

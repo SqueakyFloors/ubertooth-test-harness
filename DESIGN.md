@@ -17,7 +17,8 @@ checkoff, and a countdown/ETA in a web GUI.
 > implemented and tested against scripted runners and the real runner, and it
 > serves the web GUI (targets, run setup, live checklist, history). A
 > single-node deploy script installs the controller and a runner as systemd
-> user services on one Linux host (Ansible multi-node deploy remains). MAC
+> user services on one Linux host, or a runner and its SSH tunnel as launchd
+> LaunchAgents on a Mac test host (Ansible multi-node deploy remains). MAC
 > polling soak execution and radio fixtures remain design-only. Multi-node, firmware-flash, and radio behaviour require the lab
 > rack; see the
 > [core Ubertooth lab plan](https://github.com/SqueakyFloors/ubertooth/blob/main/TEST_LAB.md).
@@ -125,8 +126,10 @@ Target runner → controller:
 
 Semantics:
 - `register` is the first message on every connection. Ubertooth serials come
-  from the read-only sysfs enumeration used by power isolation (Linux); no
-  device is opened, so registration cannot stop a running board.
+  from a read-only enumeration: the sysfs scan power isolation uses on Linux,
+  and `ioreg -p IOUSB -l -w0 -a` on macOS. Neither opens a device, so
+  registration cannot stop a running board. Power isolation itself stays
+  Linux-only, since it is the switchable hubs that are validated there.
 - One run at a time. The runner executes `run-suite` as a child process in
   its harness environment, with a runner-assigned run ID and the runner's own
   hardware registry, host, source checkouts, output root, and
@@ -260,12 +263,12 @@ Therefore the target runner MUST identify devices by **serial number**, not inde
   and "sender" roles are deterministic regardless of enumeration order.
 
 The fork's `-U` also accepts a serial string, but libubertooth treats an
-all-digit value as an index and matches any other value as the *end* of a
-serial (first matching board wins). The flash runner therefore refuses
-digit-only selectors and any selector that is the ending of another, and the
-registry should hold full 32-hex-digit serials. With `alternate Ubertooths`,
-the planner binds every other registered board on the host as an
-`alternated Ubertooth N` resource of the flash invocation (requiring a
+all-digit value as an index and matches any other value case-insensitively
+against the *start* of a serial. The flash runner therefore refuses digit-only
+selectors and any selector that is the beginning of another, which would name
+one board twice, and the registry should hold full 32-hex-digit serials. With
+`alternate Ubertooths`, the planner binds every other registered board on the
+host as an `alternated Ubertooth N` resource of the flash invocation (requiring a
 `hosts: [...]` list, full serials, at least two boards, a single selected board rather than `each`, and
 a flash count that divides evenly), so preflight, the firmware-order check,
 the manifest, and the report treat each written board as a resource. After
@@ -309,6 +312,62 @@ valid host attachments, type-correct defaults, and valid power relationships.
 Actual identities live in ignored `hardware.yaml`; [`hardware.example.yaml`](hardware.example.yaml) is
 the committed template.
 
+### RF placement
+
+A bench may hold a board set up as a weak-link receiver: away from the others,
+with an inline attenuator between it and its antenna. An attached unit
+therefore MAY declare its RF placement, which
+[`ubertooth_harness/rf.py`](ubertooth_harness/rf.py) owns:
+
+```yaml
+  UT_Linux2:
+    type: Ubertooth
+    attached to: Host_Linux
+    rf: {antenna: true, attenuation_db: 20, distance_m: 1}
+```
+
+A placement is set by hand and describes the bench; nothing measures or
+infers it, and a unit with no `rf:` is read as an ordinary one (antenna
+attached, no attenuation, distance not recorded). That default is what makes
+`max_attenuation_db: 0` select the ordinary receivers without every registry
+having to spell `rf:` out on each of them. A `Host` and a `USB power
+controller` are refused a placement: neither has a radio, and no test selects
+either by placement.
+
+A test states what it needs of the unit bound to each hardware role as a
+`PlacementRequirement` (`antenna`, `min_attenuation_db`,
+`max_attenuation_db`), from the plan's `rf:` argument or, failing that, the
+test's own `rf_defaults`. Captures, surveys, and tests that hold a live
+connection default to an ordinary link, so the planner keeps them off an
+attenuated board; a plan's `rf:` overrides that per role. The requirement
+narrows `ResourceRegistry.resolve_hardware` before the selector is read, and
+is filtered by the role as well, so a unit that could never take the role is
+not offered as the one that satisfies the placement: `default` prefers the
+host's default and otherwise takes the lowest-alias unit that satisfies the
+requirement, `each` covers the matching units alone, and an explicit alias
+that cannot satisfy it is a planning error (its role is checked first, since
+that is a different mistake). A host with
+no matching unit is left out as not applicable (`hostneeds.NotApplicable`),
+with a reason naming the requirement and the placement of every unit of that
+type on the host, so a report says what was missing rather than silently
+selecting a board that cannot show what the test is for.
+
+Placement is recorded, never re-derived, and only where the registry states
+it: the planner puts the placement of every bound unit that has one on the
+invocation
+(`TestInvocation.resource_placements`), the manifest carries it per invocation
+(`resource_placements`, manifest schema 5), the sequencer repeats it in each
+`test_started` record, and the report shows it in a setup row and beside the
+resources of every result row. A run's range, transmit power, sensitivity, and
+RSSI figures can then be read against the attenuation they were taken at, and
+two runs at different attenuations cannot be confused for one another.
+
+What each role asked of its placement is recorded beside it
+(`TestInvocation.placement_requirements`, `rf_required` in `test_started`),
+whether the plan asked or the test's own default did. Without it a narrowed selection has no explanation in the run record: a
+host default passed over, or a unit `each` left out because its placement does
+not match, would read as an arbitrary choice.
+
 ### Power-controller boundary
 
 USB power controllers are typed resources with a stable controller serial,
@@ -320,11 +379,16 @@ and power readback.
 The controller protocol reads an immutable port snapshot containing power/data
 enable state and VBUS voltage/current. The simulated implementation supports
 planning and restoration tests. The optional [BrainStem](https://acroname.com/software/brainstem-development-kit) adapter uses the
-verified v2.12 Python boundary: deterministic
-`USBHub3p.discoverAndConnect(Spec.USB, serial)`, dependent `system.getSerialNumber()` identity readback, Result error/value
-checks for getters, and integer error/readback checks for setters. It imports
-BrainStem lazily and real writes are unarmed by default; no dependency is added
-until the physical hub and distributable are validated.
+BrainStem 2.12.5 Python API, validated on a USBHub3+: deterministic
+`USBHub3p.discoverAndConnect(Spec.USB, serial)`, `system.getSerialNumber()`
+and `system.getModel()` identity readback, and the hub's `usb` entity by port
+index (`getPortState` bits 0 VBUS, 1 USB 2.0 data, 3 USB 3.0 data;
+`getPortVoltage`, `getPortCurrent`; `setPowerEnable`/`setPowerDisable`,
+`setDataEnable`/`setDataDisable`). Getters are checked for their Result error,
+setters for their integer error, and every write is read back. It imports
+BrainStem lazily and real writes are unarmed by default. BrainStem is
+proprietary, so it is an opt-in, hash-checked install
+(`bootstrap.py --with-acroname`, `requirements-acroname.txt`).
 
 The StarTech managed hub adapter speaks the hub's management-controller serial
 protocol (CR-terminated ASCII at 9600 baud: `?Q` firmware version, `GP` port
@@ -487,7 +551,8 @@ Validation and preparation have distinct phases:
    writing, then released unless the run needs it later; the firmware build
    is implied.
 5. Mandatory preflight: verify installed host revision and every selected
-   Ubertooth firmware revision, compile identity, and registered serial before
+   Ubertooth firmware revision (the application image, or the bare revision
+   older firmware prints), compile identity, and registered serial before
    the first suite test starts.
 
 The `manifest` record is written to run.jsonl before preflight and snapshots requested
@@ -497,6 +562,21 @@ interpreter environment: Python version and executable, pip and dependency
 versions, OS, and architecture. Hardware commands run only in the
 bootstrapped harness virtual environment ([`bootstrap.py`](bootstrap.py)). Branch or tag movement
 after resolution cannot change an active run.
+
+Once preflight passes, the run reads each bound Ubertooth's firmware watchdog
+record (`ubertooth-util -w`) as its baseline, and again between cases of a
+long test, between the writes of a flash soak (which is one case however long
+it runs), after each test, and at the end of the run
+([`ubertooth_harness/watchdog.py`](ubertooth_harness/watchdog.py); README,
+"Firmware watchdog"). A board that reset itself is reported, never failed: the
+watchdog brought it back, and what it points to belongs on the fork, so the
+run offers a ready-to-file issue and searches the fork for an open one about
+the same mode and wait. The unrequested reset count is the signal, not the
+boot cause, because a reset the host asked for is a watchdog reset to the
+microcontroller and appears in the cause on a healthy board. Counters below
+the baseline's mean the board lost power, which re-baselines it. A board that
+does not come back fails its test and stops the run; a test may also set
+`max_watchdog_resets` to make the count a measure of its own.
 
 Core preflight is generated by the sequencer policy from compiled invocations;
 it is not optional YAML. Checks are reusable test-like modules and appear in
@@ -538,9 +618,34 @@ suites:
   slow:
     - Flash reliability:
         hosts: [Host_Linux, Host_Mac]
+        platforms: [linux, macos]
         Ubertooth: default
         flashes: 100
+
+    - MAC polling soak:
+        platforms: [linux]
+        duration: 1h
+        # ... its other arguments ...
+        max_watchdog_resets: 0
 ```
+
+Every test accepts `max_watchdog_resets: <n>`, which makes the firmware's
+self-reset count a pass/fail measure for that test: the test fails when its
+boards reset themselves more than `n` times. Leaving it out means no limit,
+and a self-reset is then only reported (README, "Firmware watchdog").
+
+Every test accepts `platforms:` (`linux`, `macos`, no duplicates), and a step
+that leaves it out runs on every platform. Every test that binds hardware also
+accepts `rf:`, one placement requirement per hardware role (see
+[RF placement](#rf-placement)); a role the test does not bind is refused at
+load. `hosts:` chooses the registered
+hosts a step may run on; `platforms:` narrows those to the ones that can run
+it, as a test-wide need (`hostneeds.Needs`), so the planner compiles the step
+only for hosts whose platform it lists and records the rest as not applicable.
+A step no named host can run fails planning. `Flash reliability`, `Exclusive
+Ubertooth topology`, and `MAC polling soak` must state their platforms and
+keep the argument required; the flash reliability compatibility view
+(`plan.flash_steps`) is built per listed platform.
 
 Host version, firmware version, compile identity, and serial identity are
 mandatory generated preflight checks rather than optional suite items. Their
@@ -781,7 +886,9 @@ by the REST API and `/ws/live`.
   unestimated test shows elapsed time and says so. Estimates are per
   invocation; once the run's manifest record arrives, the checklist is its
   planned invocations on the target (`invocations` in `GET /api/runs/{id}`),
-  so `Ubertooth: each` counts every selected board.
+  so `Ubertooth: each` counts every selected board, and each invocation's
+  estimate is the one learned on that target (4a) when its runs have measured
+  it.
 - **History:** every run with ref, plan/suite, target, status,
   started/finished, a `report.md` link, and the failure summary from
   `GET /api/runs/{id}` (per failed phase or test: reason and last output
@@ -794,6 +901,60 @@ response carries a strict CSP (`default-src 'self'`, no inline script,
 `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer`, controller and
 runner strings are rendered with `textContent` only, and static files are
 served from memory by exact name.
+
+### 4a. Learned durations
+
+Implemented: `ubertooth_harness/learned.py`, used by the controller.
+
+The catalog's estimates are hand-calibrated on one machine, so the countdown
+drifts everywhere else. The controller learns the real durations from the runs
+it already stores. When a run ends it reads that run's `run.jsonl` and keeps
+
+- the wall time between `test_started` and `test_finished` of every invocation
+  that **passed**,
+- the build and preflight stages (`build_started`/`build_finished`,
+  `preflight_started`/`preflight_finished`) when they passed, and
+- each flash run's own `duration_s` when it passed,
+
+in `<results dir>/estimates.json`, replaced atomically. Nothing comes from
+the runner beyond the events it already sends, and a failed, skipped,
+cancelled or not-applicable test is never a sample: it ends early or late for
+reasons that say nothing about the test's duration. A run that failed still
+teaches what its passing tests took.
+
+**Key:** stage, test name, target host (an invocation's own host wins over
+the run's target), coverage profile, and the value of the scaling argument —
+`duration`, `capture duration`, `flashes`, or preflight's number of checks —
+so a 5 s capture and a 30 s capture are separate. A build that includes the
+firmware would be a key of its own; a runner the controller dispatches builds
+host tools only.
+
+**Estimate:** the median of the key's last 10 samples once there are 3, so one
+run that queued behind a busy board does not move it. With fewer, the rate learned
+across every duration of the same test is scaled to this one (each sample less
+the catalog's fixed part, divided by its own units) and marked
+`estimate_scaled`, with `estimate_samples` counting every sample that rate
+rests on; failing that, the caller falls back to the catalog
+estimate. A sample more than ten times off the current median is dropped, but
+only once the median rests on 3 samples, so one odd early run cannot lock out
+the good ones; three dropped in a row that agree with each other mean the test
+itself now takes that long, and they become the window. A measured zero is never a sample, and the
+store keeps at most 1000 keys.
+
+`GET /api/plans?target=HOST` and a run's `invocations` return the value with
+`estimate_source` (`learned`, `catalog`, `none`), `estimate_samples` and
+`estimate_scaled` beside the unchanged `estimated_s`, plus
+`catalog_estimated_s`; learned build, preflight and flash durations come back
+as `stages`. A run is counted once (`learned_durations` in its `run.json`), so
+neither a re-sent `run_finished` nor two overlapping reports of one end can
+double its samples, and a run whose learning never finished is taken at the
+next startup. A run that ends as `lost` is mined for what its records hold;
+runs stored before this existed are left alone. Learning runs on a copy of the
+store in a worker thread, and the copy, the file and the run's record change
+together in the event loop afterwards, so an API lookup never reads a
+half-updated store and a cancelled learn leaves no samples behind; a learning
+failure costs the countdown accuracy and nothing else. Marking a learned
+estimate in the GUI ("4s, from 10 runs") is the remaining step of issue #137.
 
 ---
 
@@ -818,7 +979,35 @@ and `--no-libbtbb` opts out. `scripts/install-desktop-shortcut.sh` adds a GUI
 launcher for the desktop user, and `scripts/harness-open` opens a
 loopback-to-loopback SSH tunnel (`-J`, or `--two-hop` through an
 owner-only Unix socket on the jump host, never a TCP port there) and the
-browser from a laptop. See README "Deploy on the lab host". Linux only; launchd is not done.
+browser from a laptop. See README "Deploy on the lab host".
+
+The same script deploys a **Mac test host**, where there is no systemd and no
+controller of its own: it writes two launchd LaunchAgents to
+`~/Library/LaunchAgents`, `com.ubertooth-harness.runner` and
+`com.ubertooth-harness.tunnel`, and loads them with `launchctl bootstrap
+gui/$UID`. The tunnel is `ssh -N -o BatchMode=yes -o StrictHostKeyChecking=yes -L
+127.0.0.1:PORT:127.0.0.1:PORT [-J JUMP] HOST`, so the Mac runner dials a
+loopback controller as any other runner does; the key that forward uses is the
+access control, and the Mac is not reachable from the network (the forward
+binds its loopback, so local users there can reach the controller, the same
+trust boundary as `ssh -R` to a target). Both agents have `RunAtLoad` and
+`KeepAlive` and log under the harness data directory; the runner's
+`ExitTimeOut` leaves time to cancel a run and restore its boards. The tunnel's
+host, jump host and port come from the options, the environment, or the
+private config file `harness-open` reads, through the shared
+[`scripts/harness-config.sh`](scripts/harness-config.sh). Since the agent's
+`ssh` reads the user's SSH configuration, deploy resolves that configuration
+first with `ssh -G`, which connects to nothing, and refuses to install
+anything when a stanza matching the controller host adds a forward of its
+own: the agent would open that forward too, and it may bind beyond loopback.
+`ClearAllForwardings` is not an option, since it would drop the agent's own
+`-L` with it. Controller-only
+options are refused on macOS and the macOS-only options on Linux, a changed
+agent is replaced (`bootout` then `bootstrap`), and a deploy that would
+restart the runner while that Mac's own target has an active run is refused
+without `--force`. Since a LaunchAgent lives in the user's GUI login session,
+a Mac test host should log that user in automatically; deploy warns when it
+does not.
 
 Later (multi-node), Ansible:
 

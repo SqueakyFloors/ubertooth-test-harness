@@ -25,8 +25,10 @@ def _pair(**options):
 
 def _peers(acceptor, initiator):
     open_one = opener({ACCEPTOR: acceptor, INITIATOR: initiator})
-    return (esp32peer.Peer(ACCEPTOR, "acceptor", ACCEPTOR_ADDRESS, open_one),
-            esp32peer.Peer(INITIATOR, "initiator", INITIATOR_ADDRESS, open_one))
+    return (esp32peer.Peer(ACCEPTOR, "acceptor", ACCEPTOR_ADDRESS,
+                           opener=open_one),
+            esp32peer.Peer(INITIATOR, "initiator", INITIATOR_ADDRESS,
+                           opener=open_one))
 
 
 class AddressTests(unittest.TestCase):
@@ -140,6 +142,30 @@ class ShellTests(unittest.TestCase):
         # The firmware's "spp connected" notice comes before the OK.
         self.assertEqual([], peer_shell.command("spp start"))
         self.assertIn(f"utesp: spp connected {ACCEPTOR_ADDRESS}", peer_shell.notices)
+
+    def test_the_shell_writes_its_conversation_for_the_transcript(self):
+        from ubertooth_harness import targets
+        from tests.fake_esp32 import FakePeerPort, FakeClock
+
+        lines = []
+        firmware = FakePeerFirmware(ACCEPTOR_ADDRESS)
+        peer_shell = esp32peer.Shell(
+            FakePeerPort(firmware), "acceptor", FakeClock(),
+            log=lambda direction, text: lines.append((direction, text)))
+        peer_shell.wait_ready()
+        peer_shell.command("stream payload 200")
+        self.assertIn((targets.SENT, "stream payload 200"), lines)
+        self.assertIn((targets.RECEIVED, "OK"), lines)
+        # The boot notice is in there too, so the transcript shows the reset.
+        self.assertIn((targets.RECEIVED,
+                       f"utesp: {esp32peer.MINIMUM_FIRMWARE} ready"), lines)
+
+    def test_a_logger_marks_each_line_with_the_boards_alias(self):
+        from ubertooth_harness import targets
+
+        written = io.StringIO()
+        esp32peer.shell_logger("ESP32_Linux1", written)(targets.SENT, "spp start")
+        self.assertEqual("[ESP32_Linux1 >] spp start\n", written.getvalue())
 
     def test_a_status_line_that_is_not_json_is_reported(self):
         with self.assertRaisesRegex(esp32peer.PeerError, "status is not JSON"):
@@ -326,8 +352,8 @@ class StreamTests(unittest.TestCase):
     def test_two_bridges_that_lead_to_one_board_are_caught(self):
         firmware = FakePeerFirmware(ACCEPTOR_ADDRESS)
         open_one = opener({ACCEPTOR: firmware, INITIATOR: firmware})
-        acceptor = esp32peer.Peer(ACCEPTOR, "acceptor", None, open_one)
-        initiator = esp32peer.Peer(INITIATOR, "initiator", None, open_one)
+        acceptor = esp32peer.Peer(ACCEPTOR, "acceptor", None, opener=open_one)
+        initiator = esp32peer.Peer(INITIATOR, "initiator", None, opener=open_one)
         with self.assertRaisesRegex(esp32peer.PeerError,
                                     "both bridges lead to one board"):
             esp32peer.stream(acceptor, initiator, TRUE, out=io.StringIO())

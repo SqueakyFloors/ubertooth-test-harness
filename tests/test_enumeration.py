@@ -1,3 +1,5 @@
+import plistlib
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,7 +8,10 @@ from unittest import mock
 from ubertooth_harness.enumeration import (
     EnumerationError,
     EnumerationExpectation,
+    IOREG_TIMEOUT_S,
+    IoregUbertoothEnumerator,
     SysfsUbertoothEnumerator,
+    local_enumerator,
     wait_for_enumeration,
 )
 from ubertooth_harness.power import (
@@ -157,6 +162,188 @@ class SysfsEnumeratorTests(unittest.TestCase):
     def test_unreadable_root_fails_closed(self):
         with self.assertRaisesRegex(EnumerationError, "cannot read USB devices"):
             SysfsUbertoothEnumerator("/nonexistent/usb").serials()
+
+
+# tests/data/ioreg-iousb.plist was derived from a real
+# `ioreg -p IOUSB -l -w0 -a` run on a Mac: the tree shape, property names and
+# value types are that machine's, and the Ubertooth vendor and product ids are
+# the real ones, since that is what the enumerator matches. Everything that
+# identifies a machine or a device is made up: the device and vendor names,
+# the other devices' ids, the bus locations and the serials, because this
+# repository is public and no board was attached to record. These are the two
+# Ubertooths in it.
+IOREG_FIXTURE = Path(__file__).resolve().parent / "data" / "ioreg-iousb.plist"
+FIRST = "a1b2c3d4e5f600112233445566778899"
+SECOND = "99887766554433221100f6e5d4c3b2a1"
+
+
+def ioreg_runner(output=b"", returncode=0, stderr=b"", error=None, calls=None):
+    """Stand-in for subprocess.run that returns recorded ioreg output."""
+    def run(argv, **kwargs):
+        if calls is not None:
+            calls.append((tuple(argv), kwargs))
+        if error is not None:
+            raise error
+        return subprocess.CompletedProcess(argv, returncode, output, stderr)
+    return run
+
+
+class IoregEnumeratorTests(unittest.TestCase):
+
+    def enumerator(self, **kwargs):
+        return IoregUbertoothEnumerator(run=ioreg_runner(**kwargs))
+
+    def test_lists_ubertooths_from_recorded_ioreg_output(self):
+        serials = self.enumerator(output=IOREG_FIXTURE.read_bytes()).serials()
+        self.assertEqual(
+            frozenset({
+                FIRST,              # straight on a root controller
+                SECOND,             # behind a hub
+                # DFU bootloader: no serial string, named by its bus location.
+                "unidentified:02220000:6003",
+            }),
+            serials,
+        )
+
+    def test_reads_the_registry_without_opening_a_device(self):
+        calls = []
+        self.enumerator(output=IOREG_FIXTURE.read_bytes(), calls=calls).serials()
+        (argv, kwargs), = calls
+        # The full path: PATH is the runner's, and /usr/local/bin comes first.
+        self.assertEqual(("/usr/sbin/ioreg", "-p", "IOUSB", "-l", "-w0", "-a"), argv)
+        self.assertEqual(subprocess.DEVNULL, kwargs["stdin"])
+        self.assertEqual(IOREG_TIMEOUT_S, kwargs["timeout"])
+        self.assertFalse(kwargs["check"])
+
+    def plist(self, children):
+        return plistlib.dumps({"IORegistryEntryChildren": children})
+
+    def device(self, vendor, product, serial=None, location="02100000", **extra):
+        node = {
+            "IOObjectClass": "IOUSBHostDevice",
+            "IORegistryEntryName": "Device",
+            "IORegistryEntryLocation": location,
+            "idVendor": vendor,
+            "idProduct": product,
+            **extra,
+        }
+        if serial is not None:
+            node["USB Serial Number"] = serial
+            node["kUSBSerialNumberString"] = serial
+        return node
+
+    def test_other_vendors_and_products_are_ignored(self):
+        output = self.plist([
+            self.device(0x0403, 0x6001, "B001DBLH"),       # FTDI
+            self.device(0x1d50, 0x6018, "ignored"),        # another GSG board
+            self.device(0x1d50, 0x6002, FIRST.upper()),
+        ])
+        self.assertEqual(
+            frozenset({FIRST}), self.enumerator(output=output).serials()
+        )
+
+    def test_every_ubertooth_product_counts(self):
+        output = self.plist([
+            self.device(0x1d50, product, f"{product:04x}00000000000000000000000000", location=f"0{n}")
+            for n, product in enumerate((0x6000, 0x6001, 0x6002, 0x6003))
+        ])
+        self.assertEqual(4, len(self.enumerator(output=output).serials()))
+
+    def test_an_interface_entry_does_not_become_a_second_board(self):
+        # An IOUSBHostInterface repeats its device's ids and serial, so a
+        # parser that counted every node would see a board twice. A serial-less
+        # board would be counted twice under two names, which no amount of
+        # deduplicating by serial would catch, so both the interface number
+        # and the object class are checked.
+        for extra in ({"bInterfaceNumber": 0}, {}):
+            with self.subTest(extra=sorted(extra)):
+                board = self.device(0x1d50, 0x6003)
+                board["IORegistryEntryChildren"] = [{
+                    "IOObjectClass": "IOUSBHostInterface",
+                    "idVendor": 0x1d50,
+                    "idProduct": 0x6003,
+                    "IORegistryEntryLocation": "0",
+                    **extra,
+                }]
+                self.assertEqual(
+                    frozenset({"unidentified:02100000:6003"}),
+                    self.enumerator(output=self.plist([board])).serials(),
+                )
+
+    def test_a_serial_less_board_is_named_by_whatever_locates_it(self):
+        node = self.device(0x1d50, 0x6003)
+        del node["IORegistryEntryLocation"]
+        node["locationID"] = 0x02220000
+        self.assertEqual(
+            frozenset({"unidentified:02220000:6003"}),
+            self.enumerator(output=self.plist([node])).serials(),
+        )
+        bare = self.device(0x1d50, 0x6003)
+        del bare["IORegistryEntryLocation"]
+        bare["IORegistryEntryName"] = "Ubertooth One DFU"
+        self.assertEqual(
+            frozenset({"unidentified:Ubertooth One DFU:6003"}),
+            self.enumerator(output=self.plist([bare])).serials(),
+        )
+
+    def test_an_empty_or_odd_serial_is_unidentified(self):
+        for serial in ("", "   "):
+            output = self.plist([self.device(0x1d50, 0x6002, serial)])
+            self.assertEqual(
+                frozenset({"unidentified:02100000:6002"}),
+                self.enumerator(output=output).serials(),
+                serial,
+            )
+
+    def test_unexpected_property_types_are_skipped(self):
+        output = self.plist([
+            self.device("1d50", "6002", FIRST),            # ids as strings
+            self.device(0x1d50, 0x6002, 12345, location="02110000"),  # serial not text
+            {"IORegistryEntryChildren": "not a list"},
+            "not a node",
+        ])
+        self.assertEqual(
+            frozenset({"unidentified:02110000:6002"}),
+            self.enumerator(output=output).serials(),
+        )
+
+    def test_no_devices_is_an_empty_set_not_an_error(self):
+        self.assertEqual(
+            frozenset(), self.enumerator(output=plistlib.dumps({})).serials()
+        )
+
+    def test_unparsable_output_fails_closed(self):
+        with self.assertRaisesRegex(EnumerationError, "cannot parse ioreg output"):
+            self.enumerator(output=b"not a plist").serials()
+
+    def test_a_failed_command_fails_closed(self):
+        with self.assertRaisesRegex(EnumerationError, r"ioreg exited 1: ioreg: bad plane"):
+            self.enumerator(returncode=1, stderr=b"ioreg: bad plane\nmore\n").serials()
+        with self.assertRaisesRegex(EnumerationError, "ioreg exited 1$"):
+            self.enumerator(returncode=1).serials()
+
+    def test_a_missing_or_hung_command_fails_closed(self):
+        for error in (
+            FileNotFoundError(2, "No such file or directory"),
+            subprocess.TimeoutExpired(["ioreg"], 15.0),
+        ):
+            with self.subTest(error=type(error).__name__):
+                with self.assertRaisesRegex(
+                    EnumerationError, "cannot read USB devices from ioreg"
+                ):
+                    self.enumerator(error=error).serials()
+
+
+class LocalEnumeratorTests(unittest.TestCase):
+
+    def test_each_platform_gets_its_read_only_enumerator(self):
+        self.assertIsInstance(local_enumerator("linux"), SysfsUbertoothEnumerator)
+        self.assertIsInstance(local_enumerator("darwin"), IoregUbertoothEnumerator)
+        with self.assertRaisesRegex(EnumerationError, "not supported on win32"):
+            local_enumerator("win32")
+
+    def test_this_machine_has_one(self):
+        self.assertTrue(hasattr(local_enumerator(), "serials"))
 
 
 class WaitTests(unittest.TestCase):

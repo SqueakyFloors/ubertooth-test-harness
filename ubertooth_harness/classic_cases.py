@@ -41,6 +41,7 @@ from __future__ import annotations
 from pathlib import Path
 import re
 import sys
+from types import MappingProxyType
 from typing import Callable, Mapping
 
 from ubertooth_harness import capturefile, esp32peer
@@ -116,7 +117,8 @@ LINUX_ONLY = Needs(platforms=("linux",))
 # The pair, from the registry
 
 
-def _peer(resource_identities: Mapping, role: str, test_name: str) -> dict:
+def _peer(resource_identities: Mapping, role: str, test_name: str,
+          resources: Mapping = MappingProxyType({})) -> dict:
     identity = resource_identities.get(role)
     if not identity:
         raise StateCaseError(
@@ -138,12 +140,13 @@ def _peer(resource_identities: Mapping, role: str, test_name: str) -> dict:
                 f"{test_name}: the {role}'s registered {key} is {written}, but "
                 f"its BD_ADDR {address} gives {derived}")
     return {"serial": serial, "address": address, "device": device,
-            "lap": lap, "uap": uap}
+            "lap": lap, "uap": uap, "alias": resources.get(role, "")}
 
 
-def _pair(resource_identities: Mapping, test_name: str) -> tuple[dict, dict]:
-    acceptor = _peer(resource_identities, ACCEPTOR_ROLE, test_name)
-    initiator = _peer(resource_identities, INITIATOR_ROLE, test_name)
+def _pair(resource_identities: Mapping, test_name: str,
+          resources: Mapping = MappingProxyType({})) -> tuple[dict, dict]:
+    acceptor = _peer(resource_identities, ACCEPTOR_ROLE, test_name, resources)
+    initiator = _peer(resource_identities, INITIATOR_ROLE, test_name, resources)
     if acceptor["serial"] == initiator["serial"]:
         raise StateCaseError(
             f"{test_name} needs two ESP32 peers; the acceptor and the initiator "
@@ -245,8 +248,13 @@ def survey_omits(lap: str) -> Check:
 
 
 def _peer_command(command: str, peer: Mapping, role: str) -> tuple[str, ...]:
-    return (sys.executable, _ESP32PEER, command, "--device", peer["device"],
+    argv = (sys.executable, _ESP32PEER, command, "--device", peer["device"],
             "--address", peer["address"], "--role", role)
+    # With the alias, esp32peer.py marks every line of its conversation with
+    # the board's shell, so the run's transcript holds it (targets.shell_line).
+    if peer.get("alias"):
+        argv += ("--alias", peer["alias"])
+    return argv
 
 
 def _reset_step(step_id: str, peer: Mapping, role: str) -> Step:
@@ -302,8 +310,10 @@ def _stream_argv(acceptor, initiator, serial, seconds, options, files):
             sys.executable, _ESP32PEER, "stream",
             "--acceptor", acceptor["device"],
             "--acceptor-address", acceptor["address"],
+            "--acceptor-alias", acceptor["alias"],
             "--initiator", initiator["device"],
             "--initiator-address", initiator["address"],
+            "--initiator-alias", initiator["alias"],
             "--period", str(STREAM_PERIOD_MS),
             "--payload", str(STREAM_PAYLOAD),
             "--min-writes", str(MIN_WRITES),
@@ -362,10 +372,10 @@ def _capture_case(serial, acceptor, initiator, seconds, *, case_id, name,
 # The two tests
 
 
-def known_classic_cases(arguments, _resources, resource_identities):
+def known_classic_cases(arguments, resources, resource_identities):
     """Capture known Classic device: a survey and a sweep find the master."""
     serial = _serial(resource_identities, CAPTURE_TEST_NAME)
-    acceptor, initiator = _pair(resource_identities, CAPTURE_TEST_NAME)
+    acceptor, initiator = _pair(resource_identities, CAPTURE_TEST_NAME, resources)
     seconds = seconds_arg(arguments)
     master = initiator["lap"]
 
@@ -412,10 +422,10 @@ def known_classic_cases(arguments, _resources, resource_identities):
     return tuple(cases)
 
 
-def follow_classic_cases(arguments, _resources, resource_identities):
+def follow_classic_cases(arguments, resources, resource_identities):
     """Follow Classic Bluetooth piconet: -l and -u follow the master only."""
     serial = _serial(resource_identities, FOLLOW_TEST_NAME)
-    acceptor, initiator = _pair(resource_identities, FOLLOW_TEST_NAME)
+    acceptor, initiator = _pair(resource_identities, FOLLOW_TEST_NAME, resources)
     seconds = seconds_arg(arguments)
     master, master_uap = initiator["lap"], initiator["uap"]
 

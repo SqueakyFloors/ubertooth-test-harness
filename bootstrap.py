@@ -4,6 +4,7 @@
 Usage (any Python 3 can launch it; the environment itself is always 3.12):
 
     python3 bootstrap.py [--venv PATH] [--python PATH] [--recreate]
+                         [--with-acroname]
 
 Idempotent: an existing harness environment is reused and its pinned
 requirements are reinstalled only when they are not already satisfied. It
@@ -11,6 +12,10 @@ never installs into a system, user, or another application's interpreter:
 packages are installed only by the new environment's own
 interpreter, with pip's virtualenv guard on and the user site disabled, and an
 existing directory without the harness marker is refused rather than adopted.
+
+--with-acroname also installs the hash-checked requirements-acroname.txt
+(Acroname's proprietary BrainStem API, needed only to switch an Acroname
+USBHub3+); without it, an environment that already has it keeps it.
 
 Standard library only, so it runs before any dependency is installed, and
 compatible with Python 3.8+ launchers (such as macOS /usr/bin/python3).
@@ -31,6 +36,7 @@ REQUIRED_VERSION = (3, 12)
 MARKER = ".ubertooth-harness-venv"
 ROOT = Path(__file__).resolve().parent
 COMMAND_TIMEOUT_S = 600
+ACRONAME_REQUIREMENTS = "requirements-acroname.txt"
 
 
 class BootstrapError(RuntimeError):
@@ -155,7 +161,7 @@ def ensure_venv(venv: Path, base_python: str, *, recreate: bool) -> bool:
     return True
 
 
-def install_requirements(venv: Path, requirements: Path) -> None:
+def install_requirements(venv: Path, requirements: Path, *, require_hashes: bool = False) -> None:
     python = venv_python(venv)
     info = probe(python)
     if Path(info["prefix"]).resolve() != venv.resolve():
@@ -173,7 +179,8 @@ def install_requirements(venv: Path, requirements: Path) -> None:
     env.pop("PYTHONPATH", None)
     env.pop("PYTHONHOME", None)
     for argv in (
-        [python, "-m", "pip", "install", "-r", requirements],
+        [python, "-m", "pip", "install",
+         *(["--require-hashes"] if require_hashes else []), "-r", requirements],
         [python, "-m", "pip", "check"],
     ):
         result = _run(argv, env=env, capture=False)
@@ -196,12 +203,22 @@ def main(argv=None) -> int:
         action="store_true",
         help="delete and rebuild an existing harness environment",
     )
+    parser.add_argument(
+        "--with-acroname",
+        action="store_true",
+        help="also install the Acroname BrainStem API (requirements-acroname.txt; "
+        "proprietary, needed only for an Acroname USBHub3+)",
+    )
     args = parser.parse_args(argv)
     try:
         base = find_base_python(args.python)
         check_venv_support(base)
         created = ensure_venv(args.venv, base, recreate=args.recreate)
         install_requirements(args.venv, ROOT / "requirements.txt")
+        if args.with_acroname:
+            install_requirements(
+                args.venv, ROOT / ACRONAME_REQUIREMENTS, require_hashes=True
+            )
     except BootstrapError as error:
         print(f"bootstrap: error: {error}", file=sys.stderr)
         return 1

@@ -19,18 +19,23 @@ NOTE = "note: UBERTOOTH_TEST_NO_DEVICES is set, so no board is selected\n"
 MODES = "qnetxIi"  # util_modes.h order
 USAGE = "ubertooth-util - command line utility\nUsage: ...\n"
 DFU_NOTE = "ubertooth-util -f is no longer required - use ubertooth-dfu instead\n"
+# What libubertooth says when a selection found no board at all, since fork
+# 753269b (#655); it used to be an unprefixed "could not open Ubertooth device".
+NO_DEVICES_FOUND = "error: no Ubertooth devices found\n"
 COUNT_CASE = "count-with-mode"
 
 
 class FakeUtil:
     """ubertooth-util's argument checks as at fork main db5649b: unknown
-    options (-f was removed), stray word, -h/-V, util_check_modes(), -z with
-    a mode, -U all, then -N, which prints the count and carries on to the
-    board lookup. ``bugs``: pairs-accepted (no mode check), squelch-dropped
+    options (-f was removed), stray word, -V (which ends the command),
+    -h, util_check_modes(), -z with a mode, -U all, then -N, which prints
+    the count and carries on to the board lookup. ``bugs``: pairs-accepted (no mode check), squelch-dropped
     (no -z check), order-as-given (modes named in command order), dfu-mode
     (-f still a mode, as before db5649b), count-drops (-N prints the count
-    and exits 0, dropping the rest, as before db5649b). ``switch`` False is a
-    library from before b6d8ede."""
+    and exits 0, dropping the rest, as before db5649b), old-no-board-line
+    (a selection that found nothing says the unprefixed "could not open
+    Ubertooth device", as before 753269b). ``switch`` False is a library from
+    before b6d8ede."""
 
     def __init__(self, *, bugs=(), switch=True):
         self.bugs = set(bugs)
@@ -78,9 +83,11 @@ class FakeUtil:
         if operands:
             return self._result(command, 1, "",
                                 f"error: unexpected argument '{operands[0]}'\n")
-        if "V" in given and len(given) == 1:
-            # The whole -V answer with the no-device switch set: the host
-            # lines, then nothing attached, exit 0 and no switch note.
+        if "V" in given:
+            # -V is the version command and ends the command, before the mode
+            # checks and before the -U all check, whatever else was written
+            # (fork f898fe5). With the no-device switch set the answer is the
+            # host lines, then nothing attached, exit 0 and no switch note.
             return self._result(
                 command, 0,
                 "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0\n"
@@ -100,17 +107,21 @@ class FakeUtil:
             return self._result(command, 1, "",
                                 f"error: -z cannot be combined with -{modes[0]}\n")
         if device == "all":
+            # -V is not one of the queries the listing can show: it ended the
+            # command above.
             return self._result(command, 1, "",
                                 "error: -U all only supports the read-only queries -b, "
-                                "-v, -V, -p and -s; select one device with "
+                                "-v, -p and -s; select one device with "
                                 "-U<index|serial> for other options\n")
+        no_board = ("could not open Ubertooth device\n"
+                    if "old-no-board-line" in self.bugs else NO_DEVICES_FOUND)
         err = DFU_NOTE if "f" in given else ""
         if "N" in given:
             err += NOTE
             if "count-drops" in self.bugs or given == ["N"]:
                 return self._result(command, 0, "0\n", err)
-            return self._result(command, 1, "0\n", err + "could not open Ubertooth device\n")
-        return self._result(command, 1, "", err + NOTE + "could not open Ubertooth device\n")
+            return self._result(command, 1, "0\n", err + no_board)
+        return self._result(command, 1, "", err + NOTE + no_board)
 
 
 def cases(coverage):
@@ -232,6 +243,14 @@ class CaseTests(unittest.TestCase):
         summary, events = run(FakeUtil(bugs=("count-drops",)))
         self.assertEqual(["util -N with -i prints the count, then runs -i"],
                          failed_names(events))
+
+    def test_the_old_no_board_line_fails_the_count_case(self):
+        # The wording before fork 753269b: the case asked for it until #174.
+        summary, events = run(FakeUtil(bugs=("old-no-board-line",)))
+        self.assertEqual(["util -N with -i prints the count, then runs -i"],
+                         failed_names(events))
+        self.assertIn("error: no Ubertooth devices found",
+                      summary.failure_reason)
 
     def test_old_library_skips_and_runs_only_the_host_version(self):
         old = FakeUtil(switch=False)

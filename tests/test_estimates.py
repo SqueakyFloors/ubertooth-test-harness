@@ -88,9 +88,9 @@ class EstimateTests(unittest.TestCase):
 
     def test_capture_duration_and_per_flash(self):
         exclusive = self.catalog.get("Exclusive Ubertooth topology")
-        self.assertEqual(13.0, exclusive.estimated_seconds(arguments(
+        self.assertEqual(15.0, exclusive.estimated_seconds(arguments(
             exclusive, platforms=["linux"], **{"exclusive Ubertooth": True})))
-        self.assertEqual(68.0, exclusive.estimated_seconds(arguments(
+        self.assertEqual(70.0, exclusive.estimated_seconds(arguments(
             exclusive, platforms=["linux"],
             **{"exclusive Ubertooth": True, "capture duration": "1m"})))
         flash = self.catalog.get("Flash reliability")
@@ -185,17 +185,17 @@ class PlannedInvocationTests(unittest.TestCase):
         planned = planned_invocations([{"event_type": "run_started"},
                                        manifest_event(invocations)])
         self.assertEqual(
-            [(item.invocation_id, "Exclusive Ubertooth topology", 13.0)
+            [(item.invocation_id, "Exclusive Ubertooth topology", 15.0)
              for item in invocations],
             [(p["invocation_id"], p["test_name"], p["estimated_s"]) for p in planned],
         )
         # The plan listing gives one invocation and flags it as per board.
         plans = {plan["name"]: plan for plan in list_plans(REPOSITORY / "testplans")}
         (suite,) = plans["exclusive"]["suites"]
-        self.assertEqual(13.0, suite["estimated_s"])
+        self.assertEqual(15.0, suite["estimated_s"])
         self.assertEqual(1, suite["per_board_tests"])
         self.assertEqual([True], [test["per_board"] for test in suite["tests"]])
-        self.assertEqual(3 * 13.0, sum(p["estimated_s"] for p in planned))
+        self.assertEqual(3 * 15.0, sum(p["estimated_s"] for p in planned))
 
     def test_single_board_steps_match_the_plan_listing(self):
         invocations = self.compile("fast", "fast")

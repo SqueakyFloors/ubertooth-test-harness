@@ -53,15 +53,18 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
-# The oldest firmware whose shell has everything this driver uses
-# (firmware/esp32-classic-peer main/peer.h UTESP_FW_VERSION;
-# tests/test_esp32peer.py keeps them in step).
+from ubertooth_harness import targets
+
+# The oldest firmware whose shell has everything this driver uses, and the
+# stable path of its bridge: both from targets.py, which keeps every known
+# target's identity in one place (tests/test_targets.py keeps the version in
+# step with firmware/esp32-classic-peer/main/peer.h).
 #
 # A minimum rather than an exact version, because nothing in the harness
 # flashes a peer: a board carrying a later 1.x image, which has these
 # commands and more, must not fail a run. A different major version, or an
 # older one, does.
-MINIMUM_FIRMWARE = "utesp-1.0.0"
+MINIMUM_FIRMWARE = targets.PEER_FIRMWARE
 BAUD = 115200
 ROLES = ("acceptor", "initiator")
 BOOT_ROLE = "acceptor"
@@ -102,8 +105,6 @@ SETTLE_S = 1.0
 # Time an overrunning command gets to stop itself after SIGINT.
 INTERRUPT_TIMEOUT_S = 10.0
 
-_LINUX_BY_ID = ("/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_"
-                "Controller_{serial}-if00-port0")
 _ADDRESS = re.compile(r"^[0-9A-F]{2}(?::[0-9A-F]{2}){5}$")
 # What the board says by itself: its own notices, ESP-IDF's warnings and
 # errors, and the ROM's boot log, which appears after every reset.
@@ -170,10 +171,11 @@ def address_parts(address: str) -> tuple[str, str]:
 
     The LAP is the lowest three bytes and the UAP the one above them
     (ubertooth-rx(1), DISCOVERING UNDISCOVERABLE DEVICES), both lower case
-    hex with no separators.
+    hex with no separators. Unlike targets.lap_uap, which it uses, this
+    refuses an address it cannot read rather than returning empty strings:
+    a case that cannot name the piconet must not run.
     """
-    octets = normalize_address(address).split(":")
-    return "".join(octets[3:]).lower(), octets[2].lower()
+    return targets.lap_uap(normalize_address(address))
 
 
 def default_device(bridge_serial: str) -> str:
@@ -187,7 +189,7 @@ def default_device(bridge_serial: str) -> str:
     serial = str(bridge_serial).strip()
     if not serial:
         raise PeerError("a bridge serial is needed to find the board's port")
-    return _LINUX_BY_ID.format(serial=serial)
+    return targets.PEER_BY_ID.format(serial=serial)
 
 
 def period_ms(value) -> int:
@@ -216,15 +218,19 @@ class Shell:
     caller sees only the answer to what it asked.
     """
 
-    def __init__(self, port, label: str = "peer", clock=time.monotonic):
+    def __init__(self, port, label: str = "peer", clock=time.monotonic,
+                 log=None):
         self.port = port
         self.label = label
         self.clock = clock
+        # With a logger, every line to and from this shell is written for the
+        # run's transcript (targets.shell_line); None keeps it quiet.
+        self.log = log
         self.notices: list[str] = []
         self._buffer = b""
 
     @classmethod
-    def open(cls, path: str, label: str = "peer") -> "Shell":
+    def open(cls, path: str, label: str = "peer", log=None) -> "Shell":
         try:
             import serial  # pyserial, imported lazily
         except ImportError as error:
@@ -243,7 +249,7 @@ class Shell:
             port.open()
         except Exception as error:  # pyserial raises SerialException or OSError
             raise PeerError(f"cannot open {path}: {error}") from error
-        return cls(port, label)
+        return cls(port, label, log=log)
 
     def close(self) -> None:
         self.port.close()
@@ -268,8 +274,12 @@ class Shell:
         self._buffer = b""
         self.port.write(text.encode("ascii") + b"\n")
         self.port.flush()
+        if self.log is not None:
+            self.log(targets.SENT, text)
         data = []
         for line in self._lines(self.clock() + timeout):
+            if line and self.log is not None:
+                self.log(targets.RECEIVED, line)
             if _NOTICE.match(line):
                 self._note(line)
                 continue
@@ -294,6 +304,8 @@ class Shell:
     def wait_ready(self, timeout: float = BOOT_TIMEOUT_S) -> None:
         """Wait for the boot notice the firmware sends once Bluetooth is up."""
         for line in self._lines(self.clock() + timeout):
+            if line and self.log is not None:
+                self.log(targets.RECEIVED, line)
             if _BOOT_NOISE.match(line):
                 continue
             if _NOTICE.match(line):
@@ -377,11 +389,22 @@ def _report_traffic(out, label: str, status: dict) -> None:
 # Operations
 
 
+def shell_logger(alias: str, stream=None):
+    """Writes each shell line, marked with ``alias``, for the run's transcript."""
+    def log(direction: str, text: str) -> None:
+        print(targets.shell_line(alias, direction, text),
+              file=stream or sys.stderr, flush=True)
+    return log
+
+
 @dataclass
 class Peer:
     device: str
     label: str
     address: str | None = None
+    # The board's registry alias. With one, every line to and from its shell
+    # is written to stderr marked with that alias.
+    alias: str = ""
     # Opens the shell on ``device``; tests pass a fake.
     opener: Callable[[str, str], Shell] | None = None
 
@@ -391,7 +414,8 @@ class Peer:
         if not os.path.exists(self.device):
             raise PeerError(f"{self.device} does not exist: is the {self.label}'s "
                             "USB bridge attached?")
-        return Shell.open(self.device, self.label)
+        return Shell.open(self.device, self.label,
+                          shell_logger(self.alias) if self.alias else None)
 
 
 def identify(peer: Peer, out=None) -> dict:
@@ -588,6 +612,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         one.add_argument("--address", help="the registered BD_ADDR")
         one.add_argument("--role", default="peer", choices=ROLES + ("peer",),
                          help="what to call this board in the report")
+        one.add_argument("--alias", default="",
+                         help="the board's registry alias; with it, every line "
+                              "to and from its shell is written to stderr "
+                              "marked with that alias")
     pair = sub.add_parser("stream")
     pair.add_argument("--acceptor", required=True, help="the listening board's bridge")
     pair.add_argument("--initiator", required=True,
@@ -598,6 +626,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     pair.add_argument("--payload", type=int, default=DEFAULT_PAYLOAD, help="bytes")
     pair.add_argument("--min-writes", type=int, default=1,
                       help="writes the initiator must report afterwards")
+    pair.add_argument("--acceptor-alias", default="",
+                      help="the acceptor's registry alias, for the transcript")
+    pair.add_argument("--initiator-alias", default="",
+                      help="the initiator's registry alias, for the transcript")
     pair.add_argument("--min-seconds", type=float, default=0.0,
                       help="seconds the command must run for, so a capture "
                            "that stopped early is not taken for a pass")
@@ -618,12 +650,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "stream":
             return stream(
-                Peer(args.acceptor, "acceptor", args.acceptor_address),
-                Peer(args.initiator, "initiator", args.initiator_address),
+                Peer(args.acceptor, "acceptor", args.acceptor_address,
+                     args.acceptor_alias),
+                Peer(args.initiator, "initiator", args.initiator_address,
+                     args.initiator_alias),
                 command, period=args.period, payload=args.payload,
                 min_writes=args.min_writes, min_seconds=args.min_seconds,
                 timeout=args.timeout)
-        peer = Peer(args.device, args.role, args.address)
+        peer = Peer(args.device, args.role, args.address, args.alias)
         if args.command == "identify":
             identify(peer)
         elif args.command == "reset":
