@@ -1,0 +1,49 @@
+name: Firmware
+
+# The nRF52840 DK role firmware, which the Test workflow does not compile: it
+# needs the nRF Connect SDK, so it is built in Nordic's toolchain image for
+# the version firmware/nrf52840dk/NCS_VERSION pins (#147). That image and the
+# SDK workspace are gigabytes, so this does not run on every push: it runs
+# when the firmware (or the script that builds it) changes, once a week in
+# case the pinned SDK or its image stops working, and by hand. It is
+# deliberately not a required check.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'firmware/nrf52840dk/**'
+      - 'scripts/ci.sh'
+      - '.github/workflows/firmware.yml'
+  pull_request:
+    paths:
+      - 'firmware/nrf52840dk/**'
+      - 'scripts/ci.sh'
+      - '.github/workflows/firmware.yml'
+  schedule:
+    # Mondays, 05:17 UTC.
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # The build itself is scripts/ci.sh firmware-dk, so it also runs off GitHub
+  # (scripts/local-ci.sh firmware-dk on any Linux host with docker); keep this
+  # file to runner setup only.
+  nrf52840dk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Build the DK role firmware
+      run: sh scripts/ci.sh firmware-dk
+
+    - name: The working tree is unchanged
+      run: test -z "$(git status --porcelain)" || { git status; exit 1; }

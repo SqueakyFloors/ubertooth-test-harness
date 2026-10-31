@@ -2267,6 +2267,17 @@ scripts/local-ci.sh                       # HEAD, this host
 scripts/local-ci.sh -r <sha> -s "ssh lab-host.example"
 ```
 
+A second workflow (`.github/workflows/firmware.yml`) compiles the nRF52840 DK
+role firmware, which the test and build jobs do not: it needs the nRF Connect
+SDK, so it builds in Nordic's toolchain image for the version
+`firmware/nrf52840dk/NCS_VERSION` pins, and checks that the image carries the
+firmware version string the harness flashes by. That image and the SDK
+workspace are gigabytes, so it runs only on a change under
+`firmware/nrf52840dk` (or to `scripts/ci.sh`), weekly, and on request, and it
+is not a required check. `scripts/ci.sh firmware-dk` is the same build on any
+Linux host with docker, and `scripts/local-ci.sh firmware-dk` runs it against
+an exact commit.
+
 The target-runner tests run against an in-process stub controller, and the
 controller tests against scripted runners and the real runner, all on
 `127.0.0.1` ephemeral ports with no hardware. The GUI tests check the served
