@@ -197,15 +197,11 @@ BAD_OPTION_EXTCAP = {
     "extcap-refuses-extcap-control-in", "extcap-refuses-extcap-control-out",
     "extcap-refuses-extcap-config-option-name",
 }
-# The listing "ubertooth-util -U all -s" prints at d04f79e: the bare index,
-# then the serial. Fork 201c3c4 (SqueakyFloors/ubertooth#610, PR #674) gave
-# every listed line its report's own label, and btle-extcap.py's
-# INTERFACE_LINE followed, so a script and a stub ubertooth-util have to come
-# from the same era or the script finds nothing to list. The reason a board
-# gives for an unreadable serial changed with it.
-# What a board whose serial could not be read says where the serial would be;
-# before 201c3c4 the whole line was "<index>: <unavailable>".
+# What a board whose serial could not be read says where the serial would be,
+# since fork 201c3c4; before it the whole line was "<index>: <unavailable>".
+# ubertooth-util exits 1 for such a board, so UTIL_PARTIAL_STATUS goes with it.
 LABELLED_UNAVAILABLE = "unavailable, in use by another program"
+UTIL_PARTIAL_STATUS = 1
 
 
 def bare_listing(*serials):
@@ -220,38 +216,58 @@ def labelled_listing(*serials):
                    for index, serial in enumerate(serials))
 
 
-# btle-extcap.py as on fork main since 5310a5d, as four changes to the
-# d04f79e script, each one a fork change the cases check for:
-# ubertooth-util's failure is kept (779f4f7, #374), the listing reads the
-# labelled lines (201c3c4, #610), a described error prints no usage text
-# (12211ce, #406), and an option the script does not have is named in the C
-# tools' wording (5310a5d, #481).
+# btle-extcap.py as on fork main since 5310a5d, written as three changes to
+# the d04f79e script, each one a fork change these cases check for:
+#
+#   list_interfaces()  reads the labelled lines (201c3c4, #610), reports
+#                      ubertooth-util's failure instead of dropping it
+#                      (779f4f7, #362), and lists the boards it could name
+#                      before failing for the ones it could not (4633988,
+#                      #766);
+#   the usage text     no longer follows a described error (12211ce, #406);
+#   a bad option       is named in the C tools' wording (5310a5d, #481).
+#
+# It is trimmed to what the cases exercise, so it is not the whole of main:
+# the "no Ubertooth devices found" carve-out in list_interfaces(), the
+# -V option, and the stream and exit-status work of #806, #890, #919, #925,
+# #927, #937 and #980 are not modelled, and report_bad_option()'s other four
+# outcomes come out in the words of the one these cases make.
 BARE_INTERFACE_LINE = r"""r'(\d+): ([0-9a-fA-F]+)$'"""
 LABELLED_INTERFACE_LINE = r"""r'Serial No \((\d+)\): ([0-9a-fA-F]+)$'"""
-EXTCAP = EXTCAP_D04F79E.replace(
-    """    out = Popen(['ubertooth-util', '-U', 'all', '-s'], stdout=PIPE, stderr=PIPE,
+_D04F79E_LISTING = '''def list_interfaces():
+    out = Popen(['ubertooth-util', '-U', 'all', '-s'], stdout=PIPE, stderr=PIPE,
                 universal_newlines=True).communicate()[0]
-""", """    proc = Popen(['ubertooth-util', '-U', 'all', '-s'], stdout=PIPE,
+    for line in out.split('\\n'):
+        m = re.match(''' + BARE_INTERFACE_LINE + ''', line.strip())
+        if m:
+            print("interface {value=ubertooth%s}{display=Ubertooth One %s}"
+                  % (m.group(2), m.group(2)))
+'''
+_MAIN_LISTING = '''def list_interfaces():
+    proc = Popen(['ubertooth-util', '-U', 'all', '-s'], stdout=PIPE,
                  universal_newlines=True)
     out = proc.communicate()[0]
+    for line in out.split('\\n'):
+        m = re.match(''' + LABELLED_INTERFACE_LINE + ''', line.strip())
+        if m:
+            print("interface {value=ubertooth%s}{display=Ubertooth One %s}"
+                  % (m.group(2), m.group(2)))
     if proc.returncode != 0:
         sys.exit(1)
-""").replace(
-    BARE_INTERFACE_LINE, LABELLED_INTERFACE_LINE,
+'''
+EXTCAP = EXTCAP_D04F79E.replace(
+    _D04F79E_LISTING, _MAIN_LISTING,
 ).replace(
     """        print("error: %s" % err, file=sys.stderr); usage(sys.stderr); sys.exit(1)""",
     """        print("error: unrecognized option '--%s'" % err.opt, file=sys.stderr)
         sys.exit(1)""")
-assert EXTCAP.count("sys.exit(1)") > EXTCAP_D04F79E.count("sys.exit(1)")
+# Every replacement found its text: a derivation that silently stopped
+# matching would leave the d04f79e script under the current script's name.
+assert _D04F79E_LISTING in EXTCAP_D04F79E and _MAIN_LISTING in EXTCAP
+assert LABELLED_INTERFACE_LINE in EXTCAP and BARE_INTERFACE_LINE not in EXTCAP
 assert "usage(sys.stderr)" not in EXTCAP
-# Each replacement found its text: a fixture whose derivation stopped matching
-# would be the d04f79e script under the current script's name.
 assert "unrecognized option '--%s'" in EXTCAP
 assert "unrecognized option" not in EXTCAP_D04F79E
-# Each replacement found its text: a fixture that silently stopped changing
-# would be the d04f79e script under the current script's name.
-assert LABELLED_INTERFACE_LINE in EXTCAP and BARE_INTERFACE_LINE not in EXTCAP
-assert BARE_INTERFACE_LINE in EXTCAP_D04F79E
 COMPREHENSIVE_INTERFACES = (
     "extcap-interfaces", "extcap-interfaces-serials", "extcap-interfaces-version",
     "extcap-interfaces-version-word", "extcap-interfaces-stray-word",
@@ -267,33 +283,58 @@ def git(*args, cwd):
                           capture_output=True, text=True).stdout.strip()
 
 
-def _listing_era(text, labelled):
-    return "labelled" if labelled in text else "bare"
+_LABELLED_SERIAL_LINE = re.compile(r"\ASerial No \(\d+\): \S")
+
+
+def _script_listing_era(extcap):
+    """Which listing a fixture script reads, from the ``INTERFACE_LINE``
+    literal it carries. A script whose ``list_interfaces`` was replaced
+    wholesale has neither and is not classified."""
+    if LABELLED_INTERFACE_LINE in extcap:
+        return "labelled"
+    if BARE_INTERFACE_LINE in extcap:
+        return "bare"
+    return None
+
+
+def _output_listing_era(util_output):
+    """Which listing a stub ubertooth-util prints, from its first line, which
+    has to be a whole listing record either way. An empty listing is not
+    classified: it belongs to no era."""
+    for line in util_output.splitlines():
+        if not line.strip():
+            continue
+        return "labelled" if _LABELLED_SERIAL_LINE.match(line.strip()) else "bare"
+    return None
 
 
 class FakeFork:
     """A git repository holding btle-extcap.py and a fake ubertooth-util.
 
-    The script and the stub ubertooth-util must come from the same era: a
-    script that reads the labelled listing finds nothing in the bare one and
-    the other way round, which looks like a board that is simply not there.
-    Set ``mixed_eras`` for a case that pairs them on purpose.
+    The script and the stub ubertooth-util must read and print the same
+    listing: a script that reads the labelled listing finds nothing in the
+    bare one and the other way round, which looks like a board that is simply
+    not there. ``mixed_eras`` is for a case that pairs them on purpose; the
+    check compares the listing form only, which is what #610 changed, not
+    everything else the two eras differ in. ``util_status`` is the stub's exit
+    status: 1 is what ubertooth-util gives for a board it could not read.
     """
 
-    def __init__(self, directory, util_output, extcap=EXTCAP, *, mixed_eras=False):
+    def __init__(self, directory, util_output, extcap=EXTCAP, *,
+                 mixed_eras=False, util_status=0):
         if not mixed_eras:
-            script = _listing_era(extcap, LABELLED_INTERFACE_LINE)
-            listing = _listing_era(util_output, "Serial No (")
-            if util_output.strip() and script != listing:
+            reads = _script_listing_era(extcap)
+            prints = _output_listing_era(util_output)
+            if reads is not None and prints is not None and reads != prints:
                 raise AssertionError(
                     "btle-extcap.py and the stub ubertooth-util are from "
-                    f"different eras: the script reads the {script} listing, "
-                    f"the stub prints the {listing} one"
+                    f"different eras: the script reads the {reads} listing, "
+                    f"the stub prints the {prints} one"
                 )
         self.root = Path(directory)
-        script = self.root / "src" / pytools.EXTCAP_PATH
-        script.parent.mkdir(parents=True)
-        script.write_text(extcap)
+        source = self.root / "src" / pytools.EXTCAP_PATH
+        source.parent.mkdir(parents=True)
+        source.write_text(extcap)
         git("init", "-q", cwd=self.root / "src")
         git("add", ".", cwd=self.root / "src")
         git("commit", "-q", "-m", "fixture", cwd=self.root / "src")
@@ -301,7 +342,8 @@ class FakeFork:
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
         util = bin_dir / "ubertooth-util"
-        util.write_text("#!/bin/sh\nprintf '%s'\n" % util_output.replace("\n", "\\n"))
+        util.write_text("#!/bin/sh\nprintf '%s'\nexit %d\n"
+                        % (util_output.replace("\n", "\\n"), util_status))
         util.chmod(0o755)
         self.env = {
             "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
@@ -428,9 +470,10 @@ class ExtcapInterfaceCaseTests(unittest.TestCase):
             definition.normalize_arguments({"coverage": coverage}), {}, identities)}
 
     def run_all(self, util_output, serials, extcap=EXTCAP, coverage="comprehensive",
-                mixed_eras=False):
+                mixed_eras=False, util_status=0):
         with tempfile.TemporaryDirectory() as directory:
-            fork = FakeFork(directory, util_output, extcap, mixed_eras=mixed_eras)
+            fork = FakeFork(directory, util_output, extcap, mixed_eras=mixed_eras,
+                            util_status=util_status)
             return {case_id: run_case(case, fork.env)[1]
                     for case_id, case in self.cases(coverage, serials).items()}
 
@@ -448,29 +491,34 @@ class ExtcapInterfaceCaseTests(unittest.TestCase):
              "extcap-interfaces-stray-word"},
             {case_id for case_id, failure in failures.items() if failure})
 
-    def test_the_listing_cases_fail_before_fork_610(self):
+    def test_a_script_and_a_listing_from_different_eras_list_nothing(self):
         # Fork 201c3c4 (SqueakyFloors/ubertooth#610) labelled every listed
-        # line and btle-extcap.py's INTERFACE_LINE followed. A script from
-        # before it finds no serial in the listing a current ubertooth-util
-        # prints, so every case that expects an interface fails; the stray
-        # word is still refused, and nothing is listed either way.
-        failures = self.run_all(labelled_listing(SERIAL_A), [SERIAL_A],
-                                EXTCAP_D04F79E, mixed_eras=True)
-        self.assertEqual(
-            {"extcap-interfaces", "extcap-interfaces-serials",
-             "extcap-interfaces-version", "extcap-interfaces-version-word"},
-            {case_id for case_id, failure in failures.items() if failure})
-        # And the other way round: the current script finds nothing in the
-        # bare listing the older ubertooth-util printed.
-        before = self.run_all(bare_listing(SERIAL_A), [SERIAL_A], mixed_eras=True)
-        self.assertEqual(
-            {case_id for case_id, failure in failures.items() if failure},
-            {case_id for case_id, failure in before.items() if failure})
+        # line and btle-extcap.py's INTERFACE_LINE followed. Either half on
+        # its own finds no serial in the other's listing, so every case that
+        # expects an interface fails on its listing pattern; the stray word is
+        # still refused, and nothing is listed either way.
+        listing_cases = {"extcap-interfaces", "extcap-interfaces-serials",
+                         "extcap-interfaces-version", "extcap-interfaces-version-word"}
+        for util_output, extcap, era in (
+                (labelled_listing(SERIAL_A), EXTCAP_D04F79E, "a script from before it"),
+                (bare_listing(SERIAL_A), EXTCAP, "a listing from before it")):
+            with self.subTest(era):
+                failures = self.run_all(util_output, [SERIAL_A], extcap,
+                                        mixed_eras=True)
+                self.assertEqual(
+                    listing_cases,
+                    {case_id for case_id, failure in failures.items() if failure})
+                for case_id in listing_cases:
+                    self.assertIn("expected output pattern", failures[case_id])
 
     def test_mixing_the_eras_by_accident_is_refused(self):
         with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaisesRegex(AssertionError, "different eras"):
-                FakeFork(directory, bare_listing(SERIAL_A), EXTCAP)
+            for util_output, extcap in ((bare_listing(SERIAL_A), EXTCAP),
+                                        (labelled_listing(SERIAL_A), EXTCAP_D04F79E)):
+                with self.assertRaisesRegex(AssertionError, "different eras"):
+                    FakeFork(directory, util_output, extcap)
+            # An empty listing belongs to no era, so it is allowed with either.
+            FakeFork(directory, "", EXTCAP)
 
     def test_the_old_index_listing_fails(self):
         extcap = EXTCAP[:EXTCAP.index("def list_interfaces")] + OLD_LISTING.lstrip()
@@ -485,13 +533,24 @@ class ExtcapInterfaceCaseTests(unittest.TestCase):
         failures = self.run_all(labelled_listing(SERIAL_A, SERIAL_B), [SERIAL_A])
         self.assertIn("expected output pattern", failures["extcap-interfaces"])
 
-    def test_an_unreadable_serial_is_left_out(self):
+    def test_an_unreadable_serial_is_left_out_and_the_call_still_fails(self):
         # Since fork 201c3c4 a board whose serial could not be read says why
-        # where the serial would be; before it the line was "1: <unavailable>".
-        failures = self.run_all(
-            labelled_listing(SERIAL_A) + f"Serial No (1): {LABELLED_UNAVAILABLE}\n",
-            [SERIAL_A])
-        self.assertEqual("", failures["extcap-interfaces"])
+        # where the serial would be ("1: <unavailable>" before it), and
+        # ubertooth-util exits 1 for it. Since 4633988 (#766) the script lists
+        # the boards it could name and then fails too, so the readable board
+        # reaches standard output and the case fails on the exit status.
+        listing = labelled_listing(SERIAL_A, LABELLED_UNAVAILABLE)
+        with tempfile.TemporaryDirectory() as directory:
+            fork = FakeFork(directory, listing, util_status=UTIL_PARTIAL_STATUS)
+            case = self.cases("comprehensive", [SERIAL_A])["extcap-interfaces"]
+            result = subprocess.run(case.argv, env=fork.env, capture_output=True,
+                                    text=True, timeout=60)
+        self.assertEqual(
+            f"interface {{value=ubertooth{SERIAL_A}}}"
+            f"{{display=Ubertooth One {SERIAL_A}}}\n", result.stdout)
+        self.assertEqual(UTIL_PARTIAL_STATUS, result.returncode)
+        self.assertIn("exited 1", case.result_failure(CommandResult(
+            case.argv, result.returncode, result.stdout, result.stderr, 0.1, False)))
 
     def test_case_sets(self):
         self.assertEqual(list(COMPREHENSIVE_INTERFACES[:3]),
