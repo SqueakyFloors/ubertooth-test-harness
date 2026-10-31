@@ -55,10 +55,25 @@ static SemaphoreHandle_t request_lock;
 static SemaphoreHandle_t answer;
 static SemaphoreHandle_t slot_lock;
 static struct {
-    bool waiting; /* a reader still wants the answer */
-    bool pending; /* the controller has not replied to the command sent */
+    bool waiting;    /* a reader still wants the answer */
+    bool pending;    /* the controller has not replied to the command sent */
+    BT_HDR *free_me; /* a command buffer the reader must free; see below */
     struct utesp_afh_map got;
 } slot;
+
+/* Takes the command buffer a Command Status left behind, if there is one.
+ * Called from the reader, which is the only place it can be freed: the HCI
+ * layer is still reading it when afh_status() runs. */
+static BT_HDR *take_leftover(void)
+{
+    BT_HDR *buf;
+
+    xSemaphoreTake(slot_lock, portMAX_DELAY);
+    buf = slot.free_me;
+    slot.free_me = NULL;
+    xSemaphoreGive(slot_lock);
+    return buf;
+}
 
 int utesp_afh_init(void)
 {
@@ -114,9 +129,8 @@ static void afh_complete(BT_HDR *response, void *context)
         STREAM_TO_UINT8(got.status, stream);
     }
     if (response->len >= EVENT_EXPECTED_LEN) {
-        /* The connection handle comes next; it is the one this read sent,
-         * and the reader has it already. */
-        stream += 2;
+        STREAM_TO_UINT16(got.handle, stream);
+        got.handle &= 0x0fff; /* 12 bits meaningful, the rest reserved */
         STREAM_TO_UINT8(mode, stream);
         got.enabled = (mode != 0);
         STREAM_TO_ARRAY(got.map, stream, UTESP_AFH_MAP_LEN);
@@ -135,6 +149,33 @@ static void afh_complete(BT_HDR *response, void *context)
     osi_free(response);
 }
 
+/* Read AFH Channel Map is answered with a Command Complete (Core 6.0 Vol 4
+ * Part E 7.5.5), so this runs only if a controller answers out of spec.
+ * Without it the HCI layer would call nothing, and every later read would say
+ * the controller is silent.
+ *
+ * It must not free the command buffer: the layer reads the metadata in it
+ * after this returns, to decide what to free itself. So the buffer is handed
+ * to the reader, which frees it once it is awake. */
+static void afh_status(uint8_t status, BT_HDR *command, void *context)
+{
+    struct utesp_afh_map got;
+
+    (void)context;
+    memset(&got, 0, sizeof(got));
+    got.status = status;
+
+    xSemaphoreTake(slot_lock, portMAX_DELAY);
+    slot.pending = false;
+    slot.free_me = command;
+    if (slot.waiting) {
+        slot.got = got;
+        slot.waiting = false;
+        xSemaphoreGive(answer);
+    }
+    xSemaphoreGive(slot_lock);
+}
+
 /* Builds the command and waits for its answer. The caller holds
  * request_lock. */
 static int send_read(uint16_t handle, struct utesp_afh_map *out)
@@ -142,6 +183,7 @@ static int send_read(uint16_t handle, struct utesp_afh_map *out)
     BT_HDR *cmd;
     hci_cmd_metadata_t *metadata;
     uint8_t *pp;
+    BT_HDR *free_me;
     bool owed, answered;
 
     /* A command the controller never replied to still holds its place in the
@@ -156,6 +198,12 @@ static int send_read(uint16_t handle, struct utesp_afh_map *out)
         return UTESP_AFH_TIMED_OUT;
     }
 
+    /* One left by a read that had already given up waiting, so a second one
+     * cannot push the first out of the slot unfreed. */
+    if ((free_me = take_leftover()) != NULL) {
+        HCI_FREE_CMD_BUF(free_me);
+    }
+
     if ((cmd = HCI_GET_CMD_BUF(READ_AFH_PARAM_LEN)) == NULL) {
         return UTESP_AFH_NO_MEMORY;
     }
@@ -168,18 +216,11 @@ static int send_read(uint16_t handle, struct utesp_afh_map *out)
 
     /* The HCI layer reads the callbacks and the opcode out of the buffer's
      * metadata rather than out of the arguments to transmit_command(), so
-     * they are set here, as Bluedroid's own btu_hcif_send_cmd() sets them.
-     *
-     * No status callback, for the reason the clock read gives: Read AFH
-     * Channel Map is answered with a Command Complete (Core 6.0 Vol 4 Part E
-     * 7.5.5), and a callback here would have to free the command buffer the
-     * HCI layer still reads after the call. If a controller ever did answer
-     * with a Command Status, the layer would free the command and this read
-     * would time out. */
+     * they are set here, as Bluedroid's own btu_hcif_send_cmd() sets them. */
     metadata = HCI_GET_CMD_METAMSG(cmd);
     metadata->opcode = HCI_READ_AFH_CH_MAP;
     metadata->command_complete_cb = afh_complete;
-    metadata->command_status_cb = NULL;
+    metadata->command_status_cb = afh_status;
 
     /* Any leftover from a read that timed out, so the wait below is this
      * command's. */
@@ -189,7 +230,7 @@ static int send_read(uint16_t handle, struct utesp_afh_map *out)
     slot.waiting = true;
     xSemaphoreGive(slot_lock);
 
-    hci_layer_get_interface()->transmit_command(cmd, afh_complete, NULL, NULL);
+    hci_layer_get_interface()->transmit_command(cmd, afh_complete, afh_status, NULL);
 
     xSemaphoreTake(answer, pdMS_TO_TICKS(ANSWER_TIMEOUT_MS));
 
@@ -205,11 +246,21 @@ static int send_read(uint16_t handle, struct utesp_afh_map *out)
     slot.waiting = false;
     xSemaphoreGive(slot_lock);
 
+    if ((free_me = take_leftover()) != NULL) {
+        HCI_FREE_CMD_BUF(free_me);
+    }
+
     if (!answered) {
         return UTESP_AFH_TIMED_OUT;
     }
     if (out->status == HCI_SUCCESS && !out->complete) {
         return UTESP_AFH_BAD_ANSWER;
+    }
+    /* A map for a link other than the one asked about would be worse than no
+     * map at all. The handle is only meaningful in an answer that
+     * succeeded. */
+    if (out->status == HCI_SUCCESS && out->handle != handle) {
+        return UTESP_AFH_WRONG_LINK;
     }
     return UTESP_AFH_OK;
 }

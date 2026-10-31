@@ -20,10 +20,11 @@
 
 /* What the controller answered. */
 struct utesp_afh_map {
-    uint8_t status; /* the HCI status byte: 0 is success */
-    bool complete;  /* the answer carried all of the fields below */
-    bool enabled;   /* AFH_Mode: whether the link hops over a map at all.
-                     * The map below means nothing while this is false. */
+    uint8_t status;  /* the HCI status byte: 0 is success */
+    bool complete;   /* the answer carried all of the fields below */
+    uint16_t handle; /* the connection handle the controller echoed back */
+    bool enabled;    /* AFH_Mode: whether the link hops over a map at all.
+                      * The map below means nothing while this is false. */
     uint8_t map[UTESP_AFH_MAP_LEN];
 };
 
@@ -37,6 +38,7 @@ enum {
     UTESP_AFH_NO_MEMORY = -3,
     UTESP_AFH_TIMED_OUT = -4,  /* the controller did not answer */
     UTESP_AFH_BAD_ANSWER = -5, /* it answered success, but short */
+    UTESP_AFH_WRONG_LINK = -6, /* it answered about another link */
 };
 
 /* Makes the semaphores one read needs. Call once, while Bluedroid is

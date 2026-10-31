@@ -587,10 +587,9 @@ One read at a time, and a read that times out cannot leave its answer for the
 next one. A controller that answers the command and refuses it costs nothing
 but the `afh_link_error` line: the map that was asked for, and everything else
 `status` reports, is unaffected. A controller that stops answering altogether
-is the worse case the clock section describes: the command it never answered
-keeps its place in the host's pending list and one of the command credits, so
-`afh_link_error` says the controller did not answer and `reset` is the way
-out.
+is the case the clock section describes: the command it never answered keeps
+its place in the host's pending list, so later status lines say the controller
+did not answer without sending anything more, and `reset` is the way back.
 
 If a controller ever stops answering altogether, the `afh` that was waiting
 answers `ERR the controller did not answer the channel map` after three

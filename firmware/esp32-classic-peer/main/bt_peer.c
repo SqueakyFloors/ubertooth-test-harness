@@ -923,6 +923,8 @@ static const char *afh_read_failure(int result)
         return "the controller did not answer the channel map read";
     case UTESP_AFH_BAD_ANSWER:
         return "the controller's channel map answer was short";
+    case UTESP_AFH_WRONG_LINK:
+        return "the controller answered the channel map read for another link";
     default:
         return "the channel map read failed";
     }
@@ -957,11 +959,11 @@ static void afh_status_fields(char *out, size_t len)
 
     LOCK();
     memcpy(map, st.afh, AFH_MAP_LEN);
-    /* The same one-link test the clock read uses: a board with a second link
-     * open, or one that no longer knows which handle survived, is in no one
-     * piconet, and a map read for a guessed handle would be worse than
-     * none. See gap_cb(). */
-    in_piconet = st.acl_links == 1 && st.acl_known;
+    /* The same test the clock read uses: a board with a second link open, or
+     * one that no longer knows which handle survived, is in no one piconet,
+     * and a map read for a guessed handle would be worse than none. See
+     * gap_cb(). */
+    in_piconet = st.acl_known;
     handle = st.acl_handle;
     UNLOCK();
     afh_text(map, hex);
@@ -980,6 +982,14 @@ static void afh_status_fields(char *out, size_t len)
             in_piconet = false;
             error = afh_refused_read(link.status);
         }
+    }
+    if (in_piconet) {
+        /* A second link opening while the command was in flight would make
+         * the piconet a guess again, so the answer counts only if the link
+         * the board knew is still the one it knows. */
+        LOCK();
+        in_piconet = st.acl_known && st.acl_handle == handle;
+        UNLOCK();
     }
 
     if (in_piconet && link.enabled) {
