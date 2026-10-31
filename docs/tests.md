@@ -685,8 +685,8 @@ failure tells a wedged repeater from a wedged sender.
 named by an explicit alias or chosen by RF placement, and both needing a full
 32-hex-digit serial in the registry either way. `host:` must name one host
 rather than `each`. `allow RF transmission: true` is required: both boards
-transmit, the sender at every PA level up to 0 dBm. `maximum PA level:` (0-7, default 7) is the highest level
-the plan accepts for a pass. Guarded.
+transmit, the sender at every PA level up to 0 dBm. `maximum PA level:` (0-7,
+default 7) is the highest level the plan accepts for a pass. Guarded.
 
 **Expected outcome.** One case of 35 steps. It passes when the sender's `-m`
 reports four result lines with request and reply PA levels at or below
@@ -704,27 +704,26 @@ on a bench whose default board is the attenuated one. Because the step names
 one host, a bench with no such board fails planning, with the requirement and
 each board's placement in the message.
 
-It sets no `maximum PA level`, so the argument keeps its default of 7 and the
-suite asserts nothing about the level. What it asserts is the rest of the
-case, with an attenuated board answering: the round trip, the repeater
-answering USB with its RX LED on before and after, the idle reset, and
-restoration of both boards.
+Its `maximum PA level` is the same 3 the ordinary suite sets. That is the
+bound this test already carries on this bench rather than a figure taken from
+the weak-link runs: a responder a meter away behind 20 dB answered a sender in
+the open in five round trips whose ten PA levels, a request and a reply each,
+were all 0 or 1, and five with the roles swapped reported one level 2. The
+suite does not narrow the bound; what it adds is which board answers, and that
+the case runs at all with an attenuated responder.
 
-The bench measured one point of what the requirement accepts. A responder a
-meter away behind 20 dB answered a sender in the open in five round trips
-whose ten PA levels, a request and a reply each, were all 0 or 1; five round
-trips with the roles swapped reported one level 2. A bound taken from that one
-point would be a guess at every other attenuation and distance the
-requirement allows, and distance cannot be pinned at all, since an `rf`
-requirement has no distance key. The placement is still bounded above at 20
-dB, and its antenna pinned, so the suite selects boards near the configuration
-that was measured rather than any weak link at all.
+The responder is pinned to exactly 20 dB with its antenna attached, not a
+range, because that is the one configuration measured. A bench with a
+different attenuator fails planning with the requirement in the message, which
+is more use than a run judged against figures taken elsewhere. Distance cannot
+be pinned, since an `rf` requirement has no distance key, so a board at 20 dB
+much further away is still selected and may need a higher level.
 
 **Known limits.** On an ordinary bench the boards sit centimeters apart, so a
 working link gets through at a low PA level and a pass at level 0 says little
 about range. What `maximum PA level` buys is a tighter bound than "it worked at
-full power"; the weak-link suite keeps that same bound and changes which board
-answers, not the number. An occasional `mismatch on byte 0` is a known fork
+full power". The weak-link suite sets the same bound and changes which board
+answers. An occasional `mismatch on byte 0` is a known fork
 behavior
 ([ubertooth#677](https://github.com/SqueakyFloors/ubertooth/issues/677)). The
 test needs a second board, so it cannot run on a single-board host.

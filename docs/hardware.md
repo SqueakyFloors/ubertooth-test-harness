@@ -631,28 +631,6 @@ Two protocol facts that look like harness or tool faults and are not:
   heard. Take the UAP from the board's `status` or the registry and pass it
   with `-u`, rather than trusting a short survey.
 
-### A band sweep cannot measure an attenuator
-
-An attenuated board does not read about 20 dB lower across the band, so do not
-use a full-band `ubertooth-specan` mean to check that a board's `rf:`
-attenuation is what the registry says, or as a stand-in for a sensitivity
-measurement.
-
-Measured on one bench: three 10-second `ubertooth-specan -g` sweeps on a board
-a meter away behind a 20 dB attenuator gave a mean of -45.4 dBm every time,
-and three on a board with no attenuator gave -44.2 to -44.3. That is 1.1 dB
-apart with 0.1 dB of run-to-run spread: reproducible, but nothing like the 20
-dB in the path. Most of a sweep is the receiver's own floor, and the two
-boards' per-frequency minima overlap (-54 to -56 on both) while their maxima
-do not (0 to +9 against +7 to +20), so what the attenuator changes is the
-peaks, which depend on whatever ambient traffic was there.
-
-A sensitivity or RSSI measurement therefore needs a transmitter the harness
-drives at a known level, not ambient traffic. The same runs show
-`Spectrum RSSI sanity` passes on an attenuated board (a floor at every one of
-79 frequencies, a negative mean, 52 to 57 distinct readings), which is why
-that test carries no RF placement requirement.
-
 ## A worked bench layout
 
 One Linux host, two USB host controllers, and one Mac:

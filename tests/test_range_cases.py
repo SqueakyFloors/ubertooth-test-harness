@@ -582,7 +582,7 @@ suites:
                 dict(item.resource_placements["responder"]),
             )
             self.assertEqual(
-                {"antenna": True, "min_attenuation_db": 10.0,
+                {"antenna": True, "min_attenuation_db": 20.0,
                  "max_attenuation_db": 20.0},
                 dict(item.placement_requirements["responder"]),
             )
@@ -590,8 +590,7 @@ suites:
                 {"antenna": True, "max_attenuation_db": 0.0},
                 dict(item.placement_requirements["sender"]),
             )
-            # No ceiling in the plan, so the argument keeps its default.
-            self.assertEqual(7, item.arguments["maximum PA level"])
+            self.assertEqual(3, item.arguments["maximum PA level"])
 
     def test_the_weak_link_suite_needs_a_board_placed_for_it(self):
         # The suite names one host, so a bench with no attenuated board
@@ -601,9 +600,8 @@ suites:
 
             with self.assertRaisesRegex(
                 PlanningError,
-                "no Ubertooth on this host has attenuation of at least 10 dB "
-                "and attenuation of at most 20 dB and its antenna attached "
-                "for the responder",
+                "no Ubertooth on this host has attenuation of exactly 20 dB "
+                "and its antenna attached for the responder",
             ):
                 self.weak_link_suite(registry)
 
