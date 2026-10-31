@@ -35,10 +35,7 @@ from ubertooth_harness.outputfiles import (
     search_parts,
 )
 
-# Event types the re-run reads; outputfiles.py defines them, so a new one
-# is added in one place.
-CHECKS_EVENT = outputfiles.CHECKS_EVENT
-FILES_EVENTS = outputfiles.FILE_EVENTS
+
 
 
 class ValidateError(ValueError):
@@ -124,7 +121,7 @@ def check_files(run_dir: Path, events: Sequence[dict]) -> Iterator[FileResult]:
     """Every saved file the run recorded, measured again."""
     seen = set()
     for event in events:
-        if event.get("event_type") not in FILES_EVENTS:
+        if event.get("event_type") not in outputfiles.FILE_EVENTS:
             continue
         for saved in saved_files(event.get("details") or {}):
             if saved.path in seen:
@@ -216,7 +213,7 @@ def validate_run(run_dir: Path) -> Validation:
     checks = []
     counted = 0
     for event in events:
-        if event.get("event_type") != CHECKS_EVENT:
+        if event.get("event_type") != outputfiles.CHECKS_EVENT:
             continue
         details = event.get("details") or {}
         command_id = _command_id(details)

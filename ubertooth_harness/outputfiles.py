@@ -19,10 +19,9 @@ the same checks again against the saved files.
 import collections
 from dataclasses import dataclass, field
 import hashlib
-import json
 from pathlib import Path
 import re
-from typing import Iterable, Iterator, Mapping, Sequence
+from typing import Iterable, Iterator, Sequence
 
 OUTPUT_DIR = "output"
 STREAMS = ("stdout", "stderr")
@@ -588,13 +587,6 @@ class SavedOutput:
             self.owner.get("invocation_id") or self.owner.get("phase") or "run"
         )
 
-    def to_dict(self) -> dict:
-        return {
-            **self.file.to_dict(),
-            "owner": dict(self.owner),
-            "checks": [check.to_dict() for check in self.checks],
-        }
-
 
 # Event types that record a saved file: a command's own streams, and the
 # files a case's tools wrote.
@@ -606,28 +598,6 @@ _OWNER_KEYS = ("phase", "invocation_id", "case_id", "check_id", "step_id",
 
 def _owner(details) -> dict:
     return {key: details[key] for key in _OWNER_KEYS if key in details}
-
-
-def output_records(path: Path) -> Iterator[dict]:
-    """The file and check records in a run.jsonl, one line at a time.
-
-    Only these two kinds of record are kept, so listing a run's files costs
-    the size of that list rather than the size of the whole log: a soak's
-    run.jsonl is tens of megabytes and the list is a few kilobytes. A line
-    that is not JSON is skipped, as the report and the controller skip it.
-    """
-    with path.open(encoding="utf-8", errors="replace") as handle:
-        for line in handle:
-            if not line.strip():
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(event, dict) and event.get("event_type") in (
-                *FILE_EVENTS, CHECKS_EVENT
-            ):
-                yield event
 
 
 def saved_output(events) -> tuple[SavedOutput, ...]:
@@ -642,7 +612,7 @@ def saved_output(events) -> tuple[SavedOutput, ...]:
     # files.
     by_path: dict[str, list[OutputCheck]] = {}
     found: list[tuple[OutputFile, dict]] = []
-    seen = set()
+    seen: set[OutputFile] = set()
     for event in events:
         kind = event.get("event_type")
         details = event.get("details") or {}
@@ -653,9 +623,13 @@ def saved_output(events) -> tuple[SavedOutput, ...]:
                     by_path.setdefault(name, []).append(check)
         elif kind in FILE_EVENTS:
             for file in saved_files(details):
-                if file.path in seen:
+                # The same file is named by command_finished and by the
+                # note before it, so a repeat is normal; a repeat that
+                # describes the file differently is not, and listing both is
+                # the point of a table carrying hashes.
+                if file in seen:
                     continue
-                seen.add(file.path)
+                seen.add(file)
                 found.append((file, _owner(details)))
     return tuple(
         SavedOutput(file, owner, tuple(by_path.get(file.path, ())))

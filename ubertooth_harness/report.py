@@ -543,9 +543,10 @@ def _watchdog_section(run: _Run) -> list[str]:
     return lines
 
 
-# Sizes in the Output files table: a reader wants the order of magnitude,
-# and the exact byte count is in run.jsonl.
+# Sizes in the Output files table: the magnitude a reader wants at a glance,
+# and the exact count beside it.
 _UNITS = (("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10))
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 def _size(count: int) -> str:
@@ -567,7 +568,9 @@ def _check_failed(check) -> bool:
         return True
     if check.found is None:
         return False
-    return not check.found if check.kind != "forbidden" else check.found
+    if check.kind == "forbidden":
+        return check.found
+    return not check.found
 
 
 def _checks_cell(saved) -> str:
@@ -584,6 +587,8 @@ def _checks_cell(saved) -> str:
     named = "; ".join(
         f"{check.name}: {check.reason or _not_found(check)}" for check in failed[:3]
     )
+    if len(failed) > 3:
+        named += f"; and {len(failed) - 3} more"
     return f"{counts}: {len(failed)} against the run ({named})"
 
 
@@ -591,6 +596,15 @@ def _not_found(check) -> str:
     if check.kind == "forbidden":
         return f"{check.pattern!r} was found"
     return f"{check.pattern!r} was not found"
+
+
+def _hash_cell(value: str) -> str:
+    """A SHA-256 as a code span, or the value escaped when it is not one.
+
+    A run record is data, so a value that is not a digest must not be able to
+    add a column to the table.
+    """
+    return f"`{value}`" if _SHA256.fullmatch(value) else _cell(value)
 
 
 def _output_files_section(run: _Run) -> list[str]:
@@ -623,7 +637,7 @@ def _output_files_section(run: _Run) -> list[str]:
             lines.append(
                 f"| {_cell(item.file.path)} | {_cell(item.file.stream)} "
                 f"| {_size(item.file.bytes)} "
-                f"| {item.file.lines or ''} | `{item.file.sha256}` "
+                f"| {item.file.lines or ''} | {_hash_cell(item.file.sha256)} "
                 f"| {_cell(_checks_cell(item))} |"
             )
         lines.append("")
