@@ -148,6 +148,13 @@ class ReportTests(unittest.TestCase):
             _redact("--jlink 123; 1234 packets in 7123 us",
                     _serial_set("000123")),
         )
+        # Its padded width is long enough to mask anywhere, so the path that
+        # carries it is masked whatever follows the serial.
+        self.assertEqual(
+            "port /dev/cu.usbmodem<serial>1",
+            _redact("port /dev/cu.usbmodem0000000001231",
+                    _serial_set("000123")),
+        )
         # A real serial is masked wherever it appears, including inside the
         # name of a device path.
         self.assertEqual(

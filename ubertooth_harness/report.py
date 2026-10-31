@@ -58,11 +58,13 @@ def _time(event: Mapping) -> datetime.datetime:
     return moment
 
 
-# Fewest significant digits a number needs to be masked wherever it appears
-# rather than only where it stands alone (_redact). A SEGGER probe's serial
-# is nine digits or more, so this is about a registry entry short enough to
-# read as an ordinary number: masking every "123" inside every longer number
-# would mangle the transcript, and a standalone one is masked either way.
+# Fewest digits a number needs to be masked wherever it appears rather than
+# only where it stands alone (_redact). A SEGGER probe's serial is nine
+# digits or more, so this is about the short width of a registry entry like
+# `000123`, which the tools write as `123`: masking every "123" inside every
+# longer number would mangle the transcript, and a standalone one is masked
+# either way. The padded width of that same entry is 12 digits, so it is
+# masked everywhere, including inside a device path.
 _SERIAL_MIN_DIGITS = 6
 # How wide a DK's by-id name writes its J-Link serial (targets.DK_BY_ID).
 _SERIAL_PADDED_DIGITS = 12
@@ -932,7 +934,7 @@ _SERIAL_TOKEN = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{32}(?![0-9A-Fa-f])")
 
 def _redact(text: str, serials: Iterable[str]) -> str:
     for serial in sorted(serials, key=len, reverse=True):
-        if serial.isdigit() and len(serial.lstrip("0")) < _SERIAL_MIN_DIGITS:
+        if serial.isdigit() and len(serial) < _SERIAL_MIN_DIGITS:
             # Short enough to read as an ordinary number, so it is masked
             # only where it stands alone and not inside a longer one.
             text = re.sub(rf"(?<!\d){re.escape(serial)}(?!\d)", REDACTED, text)
