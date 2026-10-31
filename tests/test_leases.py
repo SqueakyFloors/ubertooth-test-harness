@@ -254,7 +254,8 @@ class LeaseCliTests(unittest.TestCase):
         lines = out.splitlines()
         self.assertRegex(lines[0], r"^UT_0 +free$")
         self.assertRegex(lines[1], r"^UT_1 +held  agent-7, run run-agent-7")
-        self.assertRegex(lines[2], r"^host lock +free$")
+        # The host lock is the one on the machine this command ran on.
+        self.assertRegex(lines[2], r"^host lock \(this machine\) +free$")
         states = json.loads(raw)
         self.assertEqual([False, True, False], [s["held"] for s in states])
         self.assertTrue(states[2]["host_lock"])
