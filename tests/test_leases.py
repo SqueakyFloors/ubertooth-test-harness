@@ -12,6 +12,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from ubertooth_harness import leases
 from ubertooth_harness.cli import main
@@ -363,6 +364,35 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
                 clock=lambda: now[0], sleep=sleep, note=note,
             )
         self.assertEqual(1, len(self.notes))
+
+    def test_a_lease_whose_file_was_removed_under_it_is_not_trusted(self):
+        # The narrow race a takeover leaves: it decided to remove a file that
+        # became somebody's live lease in between. The lock then excludes
+        # nobody, so the attempt that took it must start again instead of
+        # reporting a board it does not hold.
+        removed = []
+        stamp = leases._stamp
+
+        def stamping(fd, record):
+            # Right after the first lease is locked and recorded, as a
+            # takeover that had already decided to remove this file would.
+            stamp(fd, record)
+            if not removed:
+                removed.append(record)
+                os.unlink(self.dir / f"{A.key}.lock")
+
+        with mock.patch.object(leases, "_stamp", stamping):
+            held = leases.acquire(
+                [A], holder("agent-2"), directory=self.dir, wait_s=5,
+                sleep=lambda _s: None, note=self.notes.append,
+            )
+        self.addCleanup(held.release)
+        self.assertEqual(1, len(removed))
+        # The lease it returns is the file that is really the board's now.
+        path = self.dir / f"{A.key}.lock"
+        self.assertEqual("agent-2", leases.read_holder(path)["owner"])
+        self.assertEqual(
+            os.stat(path).st_ino, os.fstat(held.leases[0].fd).st_ino)
 
     def test_boards_reports_a_stale_lease_without_removing_it(self):
         path = self.hold(A, dead_holder())

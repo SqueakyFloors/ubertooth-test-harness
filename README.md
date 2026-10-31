@@ -1384,11 +1384,21 @@ Taking it over (/home/.../leases/05f0....lock).
 A lease recorded on another host is left alone (a pid there means nothing
 here), as is a pid the system has since given to an unrelated process, and
 two commands cannot take over the same board at once
-(`<lease dir>/takeover.lock`). When the record's process group is still
-running, the note names it, because a leftover command from that session may
-still be talking to the board: `ps -g <group>` shows what to stop. The host
-lock is taken over the same way. `boards` marks such a lease and removes
-nothing itself:
+(`<lease dir>/takeover.lock`). A command also checks, after locking, that its
+lock file is still the board's, so a takeover decided a moment earlier can
+never leave two commands each holding a file for one board.
+
+What a takeover does not promise: something still holds the lock, or the
+kernel would have dropped it, and that something may still be using the
+board. The USB device is what really excludes two users — a second claim of
+an Ubertooth fails — so a leftover capture makes the next device command fail
+loudly rather than quietly sharing the board; a wrapper that only held the
+lock while doing something else costs nothing. That is the trade the bench
+wants: the board comes back, and the note says what to look for. When the
+record's process group is still running, the note names it, because a
+leftover command from that session may still be talking to the board:
+`ps -g <group>` shows what to stop. The host lock is taken over the same way.
+`boards` marks such a lease and removes nothing itself:
 
 ```
 UT_Linux5    held  agent, lease: bash soak.sh, pid 2380347, since ... (for 5h12m)

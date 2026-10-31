@@ -18,6 +18,13 @@ exists, ``acquire()`` takes the board over: it removes that lock file, which
 is what later commands look at, and says so in one line on standard error.
 A lock the removed file's inode still carries is no longer in anyone's way.
 ``boards`` marks such a lease stale and never removes anything.
+
+A takeover does not promise the board is idle: something holds that lock, or
+the kernel would have dropped it. What really keeps two commands off one
+board is the USB device, which only one of them can claim, so a leftover
+capture makes the next device command fail loudly instead of quietly sharing
+the board, while a leftover that is not using the board costs nothing. The
+board coming back is worth that, and the note says what to look for.
 Two guards keep that narrow: a lease recorded on another host is left alone
 (a pid there means nothing here), and takeovers are serialized by
 ``<lease dir>/takeover.lock`` so two commands cannot each take over the same
@@ -427,11 +434,16 @@ def _take_over_stale(path: Path, root: Path) -> str:
         before = _file_identity(path)
         if before is None:
             return ""  # already gone
+        if not _probe(path):
+            return ""  # free now: the next attempt simply takes it
+        # The holder record last, and after the probe: a command that has
+        # just taken this lease stamps its own record, so reading it here
+        # leaves the smallest window in which this could remove a lease
+        # somebody is holding. The acquirer's own check that its lock file is
+        # still the board's closes what is left of that window.
         kind, why = lease_liveness(read_holder(path))
         if kind != "stale":
             return ""
-        if not _probe(path):
-            return ""  # free now: the next attempt simply takes it
         if _file_identity(path) != before:
             return ""  # a different file by now
         os.unlink(path)
@@ -692,6 +704,20 @@ def acquire(
                 files[key] = path
                 if not external:
                     _stamp(fd, dict(holder, resource=board.alias))
+            # One last check on every lease this attempt took: a takeover
+            # (below) removes the lock file it found stale, and in the moment
+            # between its last check and its unlink that file could have
+            # become this attempt's. A lock on a file that is no longer the
+            # board's lease file excludes nobody, so the attempt starts again
+            # rather than trusting it.
+            for lease in held:
+                if lease.external:
+                    continue
+                now = _file_identity(lease.path)
+                info = os.fstat(lease.fd)
+                if now is None or now[1:] != (info.st_dev, info.st_ino):
+                    busy = (lease.board, lease.path, False)
+                    break
         except OSError as error:
             LeaseSet(held).release()
             raise LeaseError(f"cannot lease boards in {where}: {error}") from error
