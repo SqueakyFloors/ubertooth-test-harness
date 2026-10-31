@@ -1115,13 +1115,14 @@ def _reason(details: Mapping, key: str = "reason") -> str:
 _SERIAL_TOKEN = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{32}(?![0-9A-Fa-f])")
 # Where a command's output was cut inside a serial, what is left of it is
 # neither the whole serial nor 32 digits wide, so neither rule above masks
-# it (#214). Output is cut in two places, both where the limit falls rather
-# than where the text allows: run.jsonl caps each command as it is recorded,
-# in pieces of a fixed size (rawlog.RECORD_PIECE_CHARS), and the report's
-# fallback cap for a run recorded before that caps a long line by character
-# count. Either side of the cut can survive, at the end of the output kept
-# before the gap or at the start of what follows it, so position says nothing
-# about which runs of hex to look at.
+# it (#214). The two output caps cut where the limit falls rather than where
+# the text allows: run.jsonl caps each command as it is recorded, in pieces of
+# a fixed size (rawlog.RECORD_PIECE_CHARS), and the report's fallback cap for
+# a run recorded before that caps a long line by character count. Other
+# records are cut to a character count too (a line shape, an enumeration, a
+# DFU message), and this rule covers them as well. Either side of a cut can
+# survive, at the end of the output kept before the gap or at the start of
+# what follows it, so position says nothing about which runs of hex to read.
 #
 # A run of hex digits this wide is masked where a serial the run names holds
 # it: 8 digits of a 32-digit serial still say which board it was, and an
@@ -1146,8 +1147,11 @@ _PARTIAL_HEX_DIGITS = 8
 # standalone 32-hex value. A narrower piece of an unnamed board's serial is
 # left to read.
 _UNKNOWN_HEX_DIGITS = 24
-# Up to 31 digits: a 32-digit run is a serial the token rule masked, and a
-# longer one is a git SHA or a digest, which every rule here leaves alone.
+# Up to 31 digits: a run of 32 is a serial the token rule masked, and a whole
+# git SHA (40) or digest (64) is left alone. A SHA or a digest that a cut left
+# this wide is masked as a serial, which is the price of a rule that has only
+# the shape of a run to go on: the report says <serial> where a reader could
+# have had a piece of a commit.
 _UNKNOWN_HEX_LIMIT = 31
 _HEX_RUN = re.compile(
     rf"(?<![0-9A-Fa-f])[0-9A-Fa-f]{{{_PARTIAL_HEX_DIGITS},}}(?![0-9A-Fa-f])"

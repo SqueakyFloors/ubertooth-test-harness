@@ -505,6 +505,20 @@ class ReportTests(unittest.TestCase):
             "[O] boards: <serial>\n",
             _redact("[O] boards: 00000000\n", {"0000000012ab34cd"}))
 
+    def test_the_widths_a_piece_is_masked_at_are_bounded_at_both_ends(self):
+        # What the rule leaves to read, so that widening it is a deliberate
+        # change and not a passing test.
+        from ubertooth_harness.report import _redact
+
+        serial = "0123456789abcdef0123456789abcdef"
+        # A piece of a known serial narrower than 8 digits.
+        self.assertEqual("[O] b 0123456\n", _redact("[O] b 0123456\n", {serial}))
+        # An unnamed board's serial cut to 23 digits, and a run of 36 that
+        # no cap produced.
+        for piece in ("1cc001038088cb956c43ad6", "1cc001038088cb956c43ad61c52000f512ab"):
+            self.assertEqual(f"[O] found {piece}\n",
+                             _redact(f"[O] found {piece}\n", ()), piece)
+
     def test_the_padded_width_is_the_one_a_dk_port_name_carries(self):
         # _SERIAL_PADDED_DIGITS restates the padding in targets.DK_BY_ID;
         # this keeps the two in step.

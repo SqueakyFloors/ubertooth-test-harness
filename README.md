@@ -1558,10 +1558,12 @@ cut inside a serial, which either output cap can do, the piece the cut left
 behind is masked as well: a run of 8 hex digits or more that a serial the run
 names holds, or, for a board the run never names, a run of 24 to 31 digits
 carrying both letters and digits, which is a serial and little else. Left to
-read are a wider run (a git SHA, a digest), a narrower piece, and a long run
-of digits or of letters alone (a counter, a bit string, a field of zeros).
-Redaction is this page only: a run's own `report.md`, which carries the
-transcript, is always written with its serials.
+read are a whole git SHA or digest, a narrower piece, and a long run of
+digits or of letters alone (a counter, a bit string, a field of zeros) that
+no serial the run names holds. The cost of the width rule is that a SHA an
+output cap cut that short reads as `<serial>` too. Redaction is this page
+only: a run's own `report.md`, which carries the transcript, is always
+written with its serials.
 
 ## Flash reliability
 
