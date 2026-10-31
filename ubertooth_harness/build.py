@@ -361,6 +361,29 @@ def _host_version_line(text: str) -> str:
     return text
 
 
+# A step's reason is a sentence, and it lands in a one-line marker in the
+# transcript. The bound is a backstop: a reason built from a tool's output or
+# from a cancellation message someone else wrote must still fit the record
+# (as sequencer bounds a case's reason for the same reason).
+_MAX_STEP_REASON_CHARS = 500
+
+
+def _step_reason(reason) -> str:
+    """One bounded line, whatever the reason was built from.
+
+    A line break becomes "; " rather than a space, so a reason built from
+    several lines still reads as several statements.
+    """
+    text = "; ".join(
+        " ".join(line.split())
+        for line in str(reason).splitlines() if line.strip()
+    )
+    if len(text) <= _MAX_STEP_REASON_CHARS:
+        return text
+    marker = " ... [truncated]"
+    return text[:_MAX_STEP_REASON_CHARS - len(marker)] + marker
+
+
 def _first_line(result: CommandResult) -> str:
     text = (result.stdout or result.stderr).strip()
     return text.splitlines()[0] if text else ""
@@ -407,7 +430,9 @@ class Builder:
         Anything that is not a BuildError (an executor OSError, Ctrl-C in a
         place nothing handles) leaves the step open with no record, as it
         leaves the build itself without a ``build_finished``; report.md then
-        says the step did not finish, which is what happened.
+        says the step did not finish, which is what happened. A canceled
+        build reaches here as a BuildError, so its step reads failed with the
+        cancellation as its reason, as ``build_finished`` does.
         """
         self.publisher.emit(
             "build_step_started", "running",
@@ -424,7 +449,8 @@ class Builder:
     def _finish_step(self, step_id: str, name: str, status: str, reason: str) -> None:
         self.publisher.emit(
             "build_step_finished", status,
-            {"step_id": step_id, "step_name": name, "reason": reason},
+            {"step_id": step_id, "step_name": name,
+             "reason": _step_reason(reason)},
         )
 
     def _run(self, argv: Sequence[str], timeout_s: float, label: str, cwd=None):
@@ -578,8 +604,9 @@ class Builder:
                         host_version = _host_version_line(host_version)
                         if failures:
                             step["reason"] = (
-                                f"the version line is the resolved revision; "
-                                f"{failures}, which this step does not check"
+                                "the version line is the resolved revision; "
+                                f"the exit status is not what this step reads "
+                                f"({failures})"
                             )
                         continue
                     # Either command may be the real problem, and the reason

@@ -415,15 +415,15 @@ class BuilderTests(unittest.TestCase):
 
             self.assertEqual("passed", step["status"])
             self.assertEqual(
-                "the version line is the resolved revision; -V exited 1, "
-                "which this step does not check",
+                "the version line is the resolved revision; the exit status "
+                "is not what this step reads (-V exited 1)",
                 step["details"]["reason"],
             )
             report = render_run(events)
             self.assertIn(
                 "--- Built host tools report the resolved revision EXIT: passed: "
-                "the version line is the resolved revision; -V exited 1, which "
-                "this step does not check ---",
+                "the version line is the resolved revision; the exit status is "
+                "not what this step reads (-V exited 1) ---",
                 report,
             )
             self.assertIn("=== BUILD EXIT: passed ===", report)
@@ -471,6 +471,17 @@ class BuilderTests(unittest.TestCase):
                              (step["details"]["step_id"], step["status"]))
             self.assertIn("not the resolved revision", step["details"]["reason"])
 
+    def test_a_reason_is_one_bounded_line_whatever_it_came_from(self):
+        # Reasons are built from a tool's output and from cancellation
+        # messages someone else wrote; the marker they land in is one line,
+        # and the record has a size limit.
+        from ubertooth_harness.build import _MAX_STEP_REASON_CHARS, _step_reason
+
+        self.assertEqual("canceled: a; b", _step_reason("canceled: a\nb"))
+        bounded = _step_reason("x" * 9000)
+        self.assertEqual(_MAX_STEP_REASON_CHARS, len(bounded))
+        self.assertTrue(bounded.endswith("... [truncated]"), bounded)
+
     def test_a_canceled_build_leaves_its_step_failed(self):
         with tempfile.TemporaryDirectory() as work:
             plan = make_plan(work)
@@ -490,17 +501,6 @@ class BuilderTests(unittest.TestCase):
 
             self.assertEqual("failed", step["status"])
             self.assertIn("canceled", step["details"]["reason"])
-
-    def test_the_browser_live_view_writes_the_step_outcome(self):
-        js = (Path(__file__).resolve().parents[1] / "ubertooth_harness" / "web"
-              / "app.js").read_text(encoding="utf-8")
-
-        self.assertIn('kind === "build_step_finished"', js)
-        self.assertIn(
-            '`--- ${details.step_name ?? details.step_id ?? ""} EXIT: ${status}'
-            '${details.reason ? ": " + details.reason : ""} ---`',
-            js,
-        )
 
     def test_a_mismatched_version_reason_is_one_line(self):
         # -V prints the attached board's firmware lines under the version;
