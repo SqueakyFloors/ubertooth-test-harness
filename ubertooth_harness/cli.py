@@ -1064,6 +1064,13 @@ def _boards_command(args: argparse.Namespace) -> int:
             since = board_leases.held_for(holder)
             detail = board_leases.describe_holder(holder)
             print(f"{label:<12} held  {detail}" + (f" (for {since})" if since else ""))
+            if state.get("stale"):
+                # The command that took it is gone, so say what the next
+                # command that wants this board will do about it.
+                print(f"{'':<12} stale: {state['stale']}; "
+                      + ("the next command that wants it takes it over"
+                         if state.get("takeover")
+                         else "it stays held until somebody clears it"))
             if external.get("held") and not external.get("error"):
                 # Two parties hold the board; name the other one too.
                 print(f"{'':<12} and   " + board_leases.describe_external(
@@ -1082,6 +1089,10 @@ def _boards_command(args: argparse.Namespace) -> int:
             print(f"{label:<12} held  {board_leases.describe_holder({})}")
         else:
             print(f"{label:<12} free")
+        if state.get("waiting"):
+            # Commands queued for it: a free board with a queue is somebody
+            # else's next, and a held one shows how deep the queue is.
+            print(f"{'':<12} queue: {board_leases.describe_waiting(state['waiting'])}")
         if external.get("error"):
             print(f"{'':<12} warning: cannot read external lock: {external['error']}")
     return 0
@@ -1179,7 +1190,10 @@ def _lease_command(args: argparse.Namespace) -> int:
     for alias in args.boards:
         resource = registry.get(alias)
         if resource.type not in board_leases.LEASED_TYPES:
-            raise HarnessError(f"resource {alias} is not an Ubertooth or an nRF52840 DK")
+            raise HarnessError(
+                f"resource {alias} is not leasable; leasable types are "
+                + ", ".join(board_leases.LEASED_TYPES)
+            )
         boards.append(board_leases.Board(alias, board_leases.resource_key(resource)))
     # A manual firmware write (or DFU read-back) must not overlap another
     # command's power changes or writes on this host.
