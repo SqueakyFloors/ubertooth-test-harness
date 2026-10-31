@@ -255,15 +255,16 @@ class ExternalLockTests(_Fixture):
         real = leases._try_lock
 
         def recording(path, mode, **kwargs):
-            # Resource locks only: the takeover lock orders a takeover
-            # against an attempt and is not one of the boards.
-            if Path(path).name != leases.TAKEOVER_LOCK:
-                order.append(str(Path(path).relative_to(self.root)))
+            order.append(str(Path(path).relative_to(self.root)))
             return real(path, mode, **kwargs)
 
         with mock.patch.object(leases, "_try_lock", recording):
             self.acquire([B, A], host_lock=True).release()
+        # The takeover lock first (it orders this attempt against a takeover
+        # of a stale lease and is no resource of its own), then the lab's
+        # files, the host lock, and the leases.
         self.assertEqual([
+            f"leases/{leases.TAKEOVER_LOCK}",
             f"lab-locks/board-{A.key}.lock", f"lab-locks/board-{B.key}.lock",
             "leases/host-power.lock", f"leases/{A.key}.lock", f"leases/{B.key}.lock",
         ], order)

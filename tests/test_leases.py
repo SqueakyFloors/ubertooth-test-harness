@@ -282,6 +282,38 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
         self.assertIn(f"ps -g {os.getpgrp()}", self.notes[0])
         self.assertIn("may still be using the board", self.notes[0])
 
+    def test_an_orphaned_host_lock_is_left_where_it_is(self):
+        # The host lock is the only thing keeping a power change or a
+        # firmware write from overlapping another, and one of that session's
+        # processes could be a write in flight.
+        path = self.hold(leases.HOST_LOCK, dead_holder(pgid=os.getpgrp()))
+        with self.assertRaises(leases.LeaseError) as caught:
+            leases.acquire([], holder("agent-2"), directory=self.dir,
+                           host_lock=True, note=self.notes.append)
+        message = str(caught.exception)
+        self.assertIn("this host's power/firmware lock is in use", message)
+        self.assertIn("The command that took it is gone", message)
+        self.assertIn(f"ps -g {os.getpgrp()}", message)
+        self.assertEqual([], self.notes)
+        self.assertEqual("gone-agent", leases.read_holder(path)["owner"])
+        # With that session gone too, the next command takes it over.
+        os.close(self.raw.pop())
+        self.hold(leases.HOST_LOCK, dead_holder())
+        leases.acquire([], holder("agent-2"), directory=self.dir,
+                       host_lock=True, note=self.notes.append).release()
+        self.assertEqual(1, len(self.notes))
+
+    def test_a_busy_board_says_when_the_command_that_took_it_is_gone(self):
+        # A board whose takeover did not happen (another command was in the
+        # middle of one) still explains itself.
+        self.hold(A, dead_holder())
+        shared = os.open(self.dir / leases.TAKEOVER_LOCK, os.O_RDWR | os.O_CREAT, 0o644)
+        self.raw.append(shared)
+        fcntl.flock(shared, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        with self.assertRaises(leases.LeaseError) as caught:
+            self.take()
+        self.assertIn("The command that took it is gone", str(caught.exception))
+
     def test_a_lease_of_a_live_process_is_left_alone(self):
         self.hold(A, dict(holder("busy-agent"), pid=os.getpid(),
                               pgid=os.getpgrp(), hostname=socket.gethostname()))
@@ -439,9 +471,16 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
         path = self.hold(A, dead_holder())
         state = leases.board_states([A], directory=self.dir)[0]
         self.assertTrue(state["held"])
-        self.assertIn("is gone", state["stale"])
+        self.assertIn("is gone, and so is the process group", state["stale"])
+        self.assertTrue(state["takeover"])
         self.assertTrue(path.exists())
         self.assertEqual("gone-agent", leases.read_holder(path)["owner"])
+
+    def test_boards_says_an_orphaned_host_lock_stays_held(self):
+        self.hold(leases.HOST_LOCK, dead_holder(pgid=os.getpgrp()))
+        state = leases.host_lock_state(directory=self.dir)
+        self.assertIn("still running", state["stale"])
+        self.assertFalse(state["takeover"])
 
     def test_boards_reports_a_live_lease_as_held_and_not_stale(self):
         with leases.acquire([A], holder("agent-1"), directory=self.dir):
@@ -455,6 +494,7 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
         cases = {
             "live": dict(pid=os.getpid(), pgid=os.getpgrp(), hostname=here),
             "stale": dict(pid=pid, pgid=pid, hostname=here),
+            "orphan": dict(pid=pid, pgid=os.getpgrp(), hostname=here),
             "foreign": dict(pid=pid, pgid=pid, hostname="elsewhere"),
             "unknown": dict(pid=pid, pgid=pid),
         }
@@ -462,25 +502,41 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
             with self.subTest(kind):
                 self.assertEqual(kind, leases.lease_liveness(record)[0])
         self.assertEqual("unknown", leases.lease_liveness({})[0])
-        # A record of a harness that did not keep the process group yet.
-        self.assertEqual(
-            "stale", leases.lease_liveness({"pid": pid, "hostname": here})[0])
-        # A pid value that kill() would read as a group, not a process.
+        # A record of a harness that did not keep the process group yet, or
+        # a group value kill() would not read as a group: the pid decides,
+        # and the reason claims nothing about a group it could not check.
+        for record in ({"pid": pid}, {"pid": pid, "pgid": 0},
+                       {"pid": pid, "pgid": "2380347"}):
+            with self.subTest(record=record):
+                kind, why = leases.lease_liveness(dict(record, hostname=here))
+                self.assertEqual("stale", kind)
+                self.assertEqual(f"its process (pid {pid}) is gone", why)
+        # A pid value that kill() would read as a group, not a process: it
+        # cannot be checked, so nothing is taken over.
         for bad in (0, -1, "2380347", None, True):
             with self.subTest(pid=bad):
-                self.assertEqual(
-                    "live", leases.lease_liveness({"pid": bad, "hostname": here})[0])
+                kind, why = leases.lease_liveness({"pid": bad, "hostname": here})
+                self.assertEqual("live", kind)
+                self.assertIn("cannot be checked", why)
+        self.assertTrue(leases.takeover_allowed(A, "stale"))
+        self.assertTrue(leases.takeover_allowed(A, "orphan"))
+        self.assertTrue(leases.takeover_allowed(leases.HOST_LOCK, "stale"))
+        self.assertFalse(leases.takeover_allowed(leases.HOST_LOCK, "orphan"))
+        for kind in ("live", "foreign", "unknown"):
+            self.assertFalse(leases.takeover_allowed(A, kind))
 
-    def test_an_inherited_lock_outlives_its_lease_and_is_taken_over(self):
-        """The real #215: the command outlives the lease that took the board.
+    def _orphaned_lease(self, *, same_session: bool) -> int:
+        """Leave A leased by a command that outlived the lease that took it.
 
         `lease` hands its lock files to the command it runs, so a session
-        killed part way through can leave a locked file behind with nothing
-        waiting on it. Here the lease process exits while a command it
-        started, in a session of its own, keeps the lock.
+        killed part way through leaves a locked file with nothing waiting on
+        it. The lease process here exits while a command it started keeps the
+        lock, either in the lease's own session (a plain child, which the
+        holder record's process group covers) or in a session of its own
+        (as `setsid` leaves one, which it cannot).
         """
         code = textwrap.dedent(f"""
-            import os, subprocess, sys, time
+            import os, subprocess, sys
             from ubertooth_harness import leases
             held = leases.acquire(
                 [leases.Board('UT_0', '{A.key}')],
@@ -491,7 +547,7 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
             os.set_inheritable(fd, True)
             child = subprocess.Popen(
                 [sys.executable, '-c', 'import time; time.sleep(120)'],
-                pass_fds=(fd,), start_new_session=True,
+                pass_fds=(fd,), start_new_session={not same_session},
                 # Not this process's output: a pipe the orphan holds open
                 # would keep the reader waiting for the orphan, not for the
                 # lease.
@@ -506,12 +562,30 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
         self.assertEqual(0, started.returncode, started.stderr)
         orphan = int(started.stdout.strip())
         self.addCleanup(lambda: os.kill(orphan, 9))
-        # The lease process is gone, the orphan still holds its lock file.
+        return orphan
+
+    def test_an_inherited_lock_outlives_its_lease_and_is_taken_over(self):
+        # The orphan is in a session of its own, so nothing of the lease's
+        # session is left to report.
+        self._orphaned_lease(same_session=False)
         state = leases.board_states([A], directory=self.dir)[0]
         self.assertTrue(state["held"])
-        self.assertIn("is gone", state["stale"])
+        self.assertIn("is gone, and so is the process group", state["stale"])
         self.take().release()
         self.assertEqual(1, len(self.notes), self.notes)
+        self.assertIn("and so is the process group", self.notes[0])
+
+    def test_an_orphan_in_the_lease_s_own_session_is_named_in_the_note(self):
+        # The common shape: a plain child of the command `lease` ran. The
+        # board is taken over, and the note says which group still holds
+        # processes that may be on it.
+        self._orphaned_lease(same_session=True)
+        state = leases.board_states([A], directory=self.dir)[0]
+        self.assertIn("still running", state["stale"])
+        self.take().release()
+        self.assertEqual(1, len(self.notes), self.notes)
+        self.assertIn("may still be using the board", self.notes[0])
+        self.assertIn("ps -g", self.notes[0])
 
 
 class LeaseCliTests(RawHoldMixin, unittest.TestCase):

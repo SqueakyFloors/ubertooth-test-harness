@@ -1398,7 +1398,26 @@ lock while doing something else costs nothing. That is the trade the bench
 wants: the board comes back, and the note says what to look for. When the
 record's process group is still running, the note names it, because a
 leftover command from that session may still be talking to the board:
-`ps -g <group>` shows what to stop. The host lock is taken over the same way.
+`ps -g <group>` shows what to stop. That signal only covers the session the
+command ran in, so a leftover that left it (`setsid`, a daemon) is reported
+as gone.
+
+The host lock is the exception. It is the only thing that keeps USB power
+changes and firmware writes on a host from overlapping, so while any process
+of the dead command's session is still running — one of them could be a
+firmware write in flight — its host lock stays where it is, and the error
+says so:
+
+```
+error: this host's power/firmware lock is in use: held by agent, lease:
+ubertooth-dfu -U ... -d ..., pid 4471, since ... UTC (.../host-power.lock);
+another harness command is switching USB power or writing firmware here;
+retry when it ends, or use --wait-for-boards MINUTES. The command that took
+it is gone: its process (pid 4471) is gone, but other processes of the same
+session are still running (process group 4471); one of them may still be
+using the board, so check 'ps -g 4471'.
+```
+
 `boards` marks such a lease and removes nothing itself:
 
 ```
@@ -1490,8 +1509,10 @@ is not free. `runner` passes the option to every run it starts
 the generated units carry no environment, so the variable alone does not
 reach it).
 
-Full lock order, one hierarchy for every command: the external board locks
-in serial order, then the host lock, then the board leases in serial order.
+Full lock order, one hierarchy for every command: `takeover.lock` shared for
+as long as the attempt lasts (above; it is no resource, and nothing ever
+blocks on it), then the external board locks in serial order, then the host
+lock, then the board leases in serial order.
 A lab wrapper that takes a board's own lock file and then runs
 `ubertooth-harness lease` (which may take the host lock, then the leases)
 follows the same order, so the two cannot deadlock; the harness also never
