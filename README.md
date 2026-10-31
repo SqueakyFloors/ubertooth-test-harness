@@ -443,6 +443,18 @@ python -m ubertooth_harness run-suite \
   --build --output runs
 ```
 
+The plan's second suite, `range-weak-link`, runs the same test with the
+weak-link receiver answering. It asks for the responder by RF placement
+(`rf: {responder: {min_attenuation_db: 10}}`) rather than by alias, so it runs
+wherever a board records at least 10 dB of attenuation and is reported not
+applicable, naming what was missing, where none does. Its `maximum PA level`
+is the same 3 as the main suite, which is what the bench measured: with a
+board a meter away behind a 20 dB attenuator, ten round trips, both orders
+alternated, all got through at PA level 0 to 2. At this distance 20 dB does
+not yet raise the level a link needs, so what the suite pins is that the link
+still closes with the attenuated board selected, and that the run records
+which board that was and at what placement.
+
 On current fork main the test passes: the sender gets a clean round trip and
 `-m` reports request and reply PA levels and copy numbers (fixed by
 [ubertooth#601](https://github.com/SqueakyFloors/ubertooth/pull/601); before

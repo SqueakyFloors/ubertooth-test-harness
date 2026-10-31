@@ -520,8 +520,32 @@ suites:
         plan = load_plan(project / "testplans" / "range.yaml")
         (item,) = PlanCompiler(builtin_catalog(), registry).compile(plan, "range")
         self.assertEqual("Host_Linux", item.host)
-        self.assertEqual({"sender": "UT_Linux0", "responder": "UT_Linux1"},
-                         dict(item.resources))
+        # The example bench's third board is the attenuated one, which this
+        # suite does not use, so it is bound as a guard and read only.
+        self.assertEqual(
+            {"sender": "UT_Linux0", "responder": "UT_Linux1",
+             "guard Ubertooth 1": "UT_Linux2"},
+            dict(item.resources),
+        )
+
+    def test_the_weak_link_range_plan_takes_the_attenuated_responder(self):
+        project = Path(__file__).resolve().parents[1]
+        registry = FileResourceRegistry.load(project / "hardware.example.yaml")
+        plan = load_plan(project / "testplans" / "range.yaml")
+
+        (item,) = PlanCompiler(builtin_catalog(), registry).compile(
+            plan, "range-weak-link"
+        )
+
+        self.assertEqual("UT_Linux2", item.resources["responder"])
+        self.assertEqual(
+            {"antenna": True, "attenuation_db": 20.0, "distance_m": 1.0},
+            dict(item.resource_placements["responder"]),
+        )
+        self.assertEqual(
+            {"min_attenuation_db": 10.0},
+            dict(item.placement_requirements["responder"]),
+        )
 
 
 if __name__ == "__main__":

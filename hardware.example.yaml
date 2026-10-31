@@ -40,19 +40,26 @@ resources:
       controller: Hub_Linux0
       port: 3
 
-    # Uncomment on a board set up as a weak-link receiver: one sitting away
-    # from the rest of the bench with an inline attenuator between it and its
-    # antenna. `rf:` describes the bench by hand; the harness never measures
-    # it, and a board with no `rf:` is taken to be an ordinary one (antenna
-    # attached, no attenuation). Keep the numbers current when the attenuator
-    # or the position changes, because reports quote them as what the run's
-    # figures were taken at. A plan then asks for this board with
-    # `rf: {Ubertooth: {min_attenuation_db: 10}}`, and captures, surveys and
-    # follow tests keep away from it on their own.
-    # rf:
-    #   antenna: true
-    #   attenuation_db: 20
-    #   distance_m: 1
+  # The weak-link receiver: a board sitting away from the rest of the bench
+  # with an inline attenuator between it and its antenna. `rf:` describes the
+  # bench by hand; the harness never measures it, and a board with no `rf:`
+  # is taken to be an ordinary one (antenna attached, no attenuation). Keep
+  # the numbers current when the attenuator or the position changes, because
+  # reports quote them as what the run's figures were taken at. Delete this
+  # entry on a bench that has no such board; a plan that asks for one then
+  # reports its step as not applicable, naming what was missing.
+  UT_Linux2:
+    type: Ubertooth
+    attached to: Host_Linux
+    identity:
+      serial: REPLACE_WITH_ATTENUATED_UBERTOOTH_SERIAL
+    rf:
+      antenna: true
+      attenuation_db: 20
+      distance_m: 1
+    power:
+      controller: Hub_Linux0
+      port: 2
 
   UT_Mac0:
     type: Ubertooth

@@ -541,13 +541,17 @@ suites:
         self.assertEqual("2s", invocation.arguments["bucket rotation"])
         self.assertEqual("1s", invocation.arguments["query every"])
         self.assertTrue(invocation.arguments["exclusive Ubertooth"])
-        self.assertEqual(1, len(invocation.power_isolation))
-        action = invocation.power_isolation[0]
-        expected_power = registry.get("UT_Linux1").power
-        self.assertEqual("UT_Linux1", action.resource_alias)
-        self.assertEqual(expected_power["controller"], action.controller_alias)
-        self.assertEqual(expected_power["port"], action.port)
-        self.assertFalse(action.power_enabled)
+        # Every other Ubertooth on the host is powered off, the attenuated
+        # one included: the soak needs its own board to be the only one.
+        self.assertEqual(
+            ["UT_Linux1", "UT_Linux2"],
+            [action.resource_alias for action in invocation.power_isolation],
+        )
+        for action in invocation.power_isolation:
+            expected_power = registry.get(action.resource_alias).power
+            self.assertEqual(expected_power["controller"], action.controller_alias)
+            self.assertEqual(expected_power["port"], action.port)
+            self.assertFalse(action.power_enabled)
 
     def test_exclusive_ubertooth_requires_power_mapping_for_every_extra(self):
         with tempfile.TemporaryDirectory() as directory:

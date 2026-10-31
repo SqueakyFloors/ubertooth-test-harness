@@ -14,3 +14,25 @@ suites:
         # The lab boards sit a few centimetres apart; a working link gets
         # through at the lowest levels.
         maximum PA level: 3
+
+  # The same test with the weak-link receiver answering: the responder is
+  # chosen by its RF placement rather than by alias, so this suite runs
+  # wherever a board records at least 10 dB of attenuation and is reported
+  # not applicable, naming what was missing, where none does.
+  #
+  # The level is the same 3 as above because that is what the bench
+  # measured: with a board 1 m away behind a 20 dB attenuator, ten round
+  # trips (both orders, alternated) all got through at PA level 0 to 2. So
+  # 20 dB at this distance does not yet make the PA level mean more than it
+  # does without it; what this suite pins is that the link still closes, and
+  # that the attenuated board is the one selected and recorded. Narrowing
+  # the level needs more attenuation than the bench has today.
+  range-weak-link:
+    - Two-device range test:
+        host: Host_Linux
+        sender: default
+        responder: default
+        rf:
+          responder: {min_attenuation_db: 10}
+        allow RF transmission: true
+        maximum PA level: 3
