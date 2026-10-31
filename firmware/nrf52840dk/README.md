@@ -64,7 +64,13 @@ image for the version `NCS_VERSION` pins, so nothing but docker is needed:
 ```sh
 scripts/ci.sh firmware-dk                 # or scripts/local-ci.sh firmware-dk
 NCS_WORKSPACE=~/ncs-ci scripts/ci.sh firmware-dk   # keep the SDK workspace
+DK_BASE_REF=origin/main scripts/ci.sh firmware-dk  # compare with main's image
 ```
+
+`DK_BASE_REF` needs this repository's history, so it works with
+`scripts/ci.sh` and not under `scripts/local-ci.sh`, which tests a tree
+exported with `git archive`; there, give `DK_BASE_SRC` a directory of the
+sources to compare against instead.
 
 It creates the SDK workspace (`west init --mr $NCS_VERSION`, `west update`),
 builds the image, and checks that it carries the firmware version string
@@ -77,6 +83,26 @@ under this directory, once a week, and on request
 ([#147](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/147));
 it is not a required check, because the image and the workspace are gigabytes.
 The image it builds is not published: a board is flashed from a local build.
+
+With `DK_BASE_REF` (a git ref, which the workflow sets to the commit a pull
+request is against) or `DK_BASE_SRC` (a directory of these sources) it builds
+those sources too and compares the two images, which is how the workflow
+holds a pull request to the rule that a change to the image bumps
+`UTDK_FW_VERSION`
+([#210](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/210)):
+without a bump, `nrfdk.py ensure` leaves the old image on every board that
+already reports this version. A change that leaves the image identical, such
+as a comment, needs no bump and the step passes. Both builds compile a copy
+of the sources at one path in the SDK workspace, so a difference in the image
+is a difference in the sources; two builds of one tree gave byte-identical
+images when this was measured in CI on 2026-10-31. When the images do differ,
+each side is built once more, and a difference there is reported as a build
+that does not repeat itself rather than as a missing bump.
+
+Both builds use the SDK and the toolchain image this directory pins, so a
+comparison cannot see what moving `NCS_VERSION` did to the image. A new
+toolchain builds a new image, so that needs the version bump as a source
+change does, and the step says so rather than comparing.
 
 ## Flash
 

@@ -38,12 +38,32 @@ jobs:
   # file to runner setup only.
   nrf52840dk:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Four builds at most: this tree, the base commit, and a repeat of each
+    # where the two images differ. The whole job, with the SDK workspace made
+    # from scratch and one build, took about 4 minutes when it was measured
+    # on 2026-10-31.
+    timeout-minutes: 60
     steps:
+    # The whole history, so the commit a pull request is against is there to
+    # build and compare with (DK_BASE_REF below).
     - uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
 
     - name: Build the DK role firmware
       run: sh scripts/ci.sh firmware-dk
+      env:
+        # On a pull request, compare the image with the one the base commit
+        # builds and require a UTDK_FW_VERSION bump when it changed (#210).
+        # The base commit the event names, not the branch: the branch can
+        # advance while the job waits, and the comparison would then be
+        # against a tree this pull request was never written against. A job
+        # re-run can carry a base commit older than the merge commit it
+        # checks out; the version then differs and every board is reflashed
+        # anyway, so the step says that and compares nothing. Elsewhere (a
+        # push to main, the schedule, by hand) the expression is empty, there
+        # is nothing to compare against, and the step says so.
+        DK_BASE_REF: ${{ github.event.pull_request.base.sha }}
 
     - name: The working tree is unchanged
       run: test -z "$(git status --porcelain)" || { git status; exit 1; }
