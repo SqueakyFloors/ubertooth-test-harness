@@ -170,9 +170,9 @@ preferred Ubertooth so repeated reliability tests stay on one device.
 Selection is deterministic: `default`, `each`, or an explicit resource alias.
 Ambiguous `any` and random selection are rejected. A test with several hardware
 roles may name each one by alias or narrow it by RF placement, but not with
-`each`; a future explicit `all pairs` policy will be separate. Target-runner discovery is
-reconciled as present/missing/unknown before execution and never silently
-reassigns an alias.
+`each`; a future explicit `all pairs` policy will be separate. Target-runner
+discovery is reconciled as present/missing/unknown before execution and never
+silently reassigns an alias.
 
 ### RF placement: where a board sits on the bench
 

@@ -523,7 +523,6 @@ suites:
         self.assertEqual({"sender": "UT_Linux0", "responder": "UT_Linux1"},
                          dict(item.resources))
 
-
     def weak_link_registry(self, directory, *, default="UT_0", attenuated=True):
         """Three boards as range-weak-link needs them, UT_2 behind 20 dB.
 
@@ -556,7 +555,7 @@ suites:
     identity: {{serial: {C}}}
 {placement}"""
         path = Path(directory) / "hardware.yaml"
-        path.write_text(text)
+        path.write_text(text, encoding="utf-8")
         return FileResourceRegistry.load(path)
 
     def weak_link_suite(self, registry):
@@ -591,7 +590,8 @@ suites:
                 {"antenna": True, "max_attenuation_db": 0.0},
                 dict(item.placement_requirements["sender"]),
             )
-            self.assertEqual(3, item.arguments["maximum PA level"])
+            # No ceiling in the plan, so the argument keeps its default.
+            self.assertEqual(7, item.arguments["maximum PA level"])
 
     def test_the_weak_link_suite_needs_a_board_placed_for_it(self):
         # The suite names one host, so a bench with no attenuated board

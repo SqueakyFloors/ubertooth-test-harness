@@ -684,9 +684,8 @@ failure tells a wedged repeater from a wedged sender.
 **Hardware and arguments.** Two Ubertooths as `sender` and `responder`, each
 named by an explicit alias or chosen by RF placement, and both needing a full
 32-hex-digit serial in the registry either way. `host:` must name one host
-rather than `each`. `allow RF
-transmission: true` is required: both boards transmit, the sender at every PA
-level up to 0 dBm. `maximum PA level:` (0-7, default 7) is the highest level
+rather than `each`. `allow RF transmission: true` is required: both boards
+transmit, the sender at every PA level up to 0 dBm. `maximum PA level:` (0-7, default 7) is the highest level
 the plan accepts for a pass. Guarded.
 
 **Expected outcome.** One case of 35 steps. It passes when the sender's `-m`
@@ -705,20 +704,21 @@ on a bench whose default board is the attenuated one. Because the step names
 one host, a bench with no such board fails planning, with the requirement and
 each board's placement in the message.
 
-Its `maximum PA level` is the same 3 as the ordinary suite. On the bench, a
-responder a meter away behind 20 dB answered a sender in the open in five
-round trips whose ten PA levels, a request and a reply each, were all 0 or 1,
-and five round trips with the roles swapped reported one level 2. So the
-attenuated link stayed within the existing bound rather than narrowing it. A
-tighter ceiling would rest on five hand-driven round trips in one
-orientation, and the harness has not judged this step yet, so the bound stays
-where the ordinary suite has it.
+It sets no `maximum PA level`, so the argument keeps its default of 7 and the
+suite asserts nothing about the level. What it asserts is the rest of the
+case, with an attenuated board answering: the round trip, the repeater
+answering USB with its RX LED on before and after, the idle reset, and
+restoration of both boards.
 
-The placement is bounded above because 20 dB is the only value measured, and
-the antenna is pinned because a board with none would be weaker still.
-Distance cannot be pinned, since an `rf` requirement has no distance key, so
-a board at this attenuation but much further away is still selected and may
-need a higher level.
+The bench measured one point of what the requirement accepts. A responder a
+meter away behind 20 dB answered a sender in the open in five round trips
+whose ten PA levels, a request and a reply each, were all 0 or 1; five round
+trips with the roles swapped reported one level 2. A bound taken from that one
+point would be a guess at every other attenuation and distance the
+requirement allows, and distance cannot be pinned at all, since an `rf`
+requirement has no distance key. The placement is still bounded above at 20
+dB, and its antenna pinned, so the suite selects boards near the configuration
+that was measured rather than any weak link at all.
 
 **Known limits.** On an ordinary bench the boards sit centimeters apart, so a
 working link gets through at a low PA level and a pass at level 0 says little
@@ -729,16 +729,17 @@ behavior
 ([ubertooth#677](https://github.com/SqueakyFloors/ubertooth/issues/677)). The
 test needs a second board, so it cannot run on a single-board host.
 
-**The `range-weak-link` suite fails on every run on fork main today**, at the
-step that asserts `-n` prints nothing on standard output: a repeater slow
-enough to miss the first progress interval makes `-n` print `waiting for the
-repeater...` there instead of on standard error
-([ubertooth#1026](https://github.com/SqueakyFloors/ubertooth/issues/1026)). A
-repeater at bench distance answers too quickly to reach that path, which is
-why only the weak-link run shows it. The run stops there, before `-m` is read,
-so this suite has never judged a PA level; the ten levels above come from
-driving `-e`, `-n`, and `-m` by hand. It is committed so that the fork fix is
-verified by a suite rather than by a one-off script.
+**The `range-weak-link` suite does not pass on fork main today.** Its one
+recorded run, at 20 dB and about a meter, failed at the step that asserts `-n`
+prints nothing on standard output: `-n` prints `waiting for the repeater...`
+there instead of on standard error
+([ubertooth#1026](https://github.com/SqueakyFloors/ubertooth/issues/1026)).
+That line appears only once the first progress interval has passed, so any
+repeater slower than it reaches the path and a repeater at bench distance does
+not, which is why the ordinary suite never showed it. The run stops there,
+before `-m` is read, so this suite has never judged a result; the PA levels
+above come from driving `-e`, `-n`, and `-m` by hand. It is committed so the
+fork fix is verified by a suite rather than by a one-off script.
 
 ## BLE monitor
 

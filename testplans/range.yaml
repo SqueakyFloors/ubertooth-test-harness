@@ -21,11 +21,14 @@ suites:
   # host, so a bench with no board placed for the responder fails planning,
   # naming the requirement and what each board is placed as.
   #
-  # The level is the same 3 as above: the bench measurement stayed within
-  # that bound rather than narrowing it. Less attenuation than the 20 dB
-  # measured only makes the link stronger, so the bound holds across the
-  # range the requirement accepts. docs/tests.md has the numbers, and what
-  # this suite is still waiting on before it can pass.
+  # No `maximum PA level`, so it keeps the default of 7 and asserts nothing
+  # about the level. The requirement accepts 10 to 20 dB at any distance (an
+  # rf requirement has no distance key), and the bench measured one point of
+  # that: 20 dB at a meter. A bound taken from one point would be a guess
+  # everywhere else, and this suite has never reached the step that judges it.
+  # What it does assert is the rest of the case -- the round trip, the
+  # repeater answering before and after, the idle reset, and restoration --
+  # with an attenuated board answering. docs/tests.md has the numbers.
   range-weak-link:
     - Two-device range test:
         host: Host_Linux
@@ -35,4 +38,3 @@ suites:
           sender: {max_attenuation_db: 0, antenna: true}
           responder: {min_attenuation_db: 10, max_attenuation_db: 20, antenna: true}
         allow RF transmission: true
-        maximum PA level: 3
