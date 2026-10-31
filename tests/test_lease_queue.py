@@ -144,16 +144,25 @@ class QueueTests(QueueFixture):
         leases.acquire([A], holder("agent-2"), directory=self.dir).release()
         self.assertFalse(path.exists())
 
-    def test_a_ticket_nobody_holds_is_ignored_but_left_alone(self):
-        # Being created right now, or left over from a pid the system has
-        # given to someone else: it holds nobody back, and it is not ours.
-        path = self.hold_ticket(A, self.older(), self.live_holder(), locked=False)
-        leases.acquire([A], holder("agent-2"), directory=self.dir).release()
-        self.assertTrue(path.exists())
+    def test_a_ticket_nobody_holds_is_dropped(self):
+        # A ticket is locked from the moment it is created, so an unlocked one
+        # is litter: a command whose pid the system has given to someone else
+        # (as here), one that wrote nothing, or one from another host. None of
+        # them holds anyone back, and a bench must not collect them forever.
+        kept = self.hold_ticket(A, self.older(), self.live_holder(), locked=False)
+        empty = self.hold_ticket(A, f"{3:020d}-{os.getpid()}-cccccc", {},
+                                 locked=False)
+        rounds = []
+        leases.acquire([A], holder("agent-2"), directory=self.dir,
+                       sleep=rounds.append).release()
+        self.assertEqual([], rounds)
+        self.assertFalse(kept.exists())
+        self.assertFalse(empty.exists())
 
     def test_a_ticket_of_another_host_holds_a_free_board_only_briefly(self):
         # Another host's record cannot be checked here, so it counts while
-        # its lock is held, like any other.
+        # its lock is held, like any other: this command gives way for its
+        # stretch and then takes the board.
         self.hold_ticket(A, self.older(), self.live_holder(hostname="another-host"))
         rounds = []
         leases.acquire(
@@ -161,6 +170,7 @@ class QueueTests(QueueFixture):
             clock=lambda: 0.0, sleep=rounds.append,
         ).release()
         self.assertGreaterEqual(len(rounds), 2)
+        self.assertLessEqual(len(rounds), 4)
 
     def test_a_newer_ticket_does_not_hold_anyone_back(self):
         self.hold_ticket(A, self.newer(), self.live_holder())
@@ -180,6 +190,30 @@ class QueueTests(QueueFixture):
         ).release()
         self.assertEqual([], rounds)
 
+    def test_the_queue_is_what_holds_a_newcomer_back_at_a_free_board(self):
+        """What the queue adds, and what the bench looked like without it.
+
+        An older command is waiting for UT_0 and the board is free. With the
+        queue, this command gives way for its stretch before competing; with
+        the queue taken out, it takes the board on its first round, which is
+        how a short lease could keep taking a board a run was waiting for.
+        """
+        self.hold_ticket(A, self.older(), self.live_holder())
+        with_queue = []
+        leases.acquire(
+            [A], holder("agent-2"), directory=self.dir, wait_s=60,
+            clock=lambda: 0.0, sleep=with_queue.append,
+        ).release()
+        self.assertGreaterEqual(len(with_queue), 2)
+
+        without_queue = []
+        with mock.patch.object(leases.TicketQueue, "ahead", lambda _self: None):
+            leases.acquire(
+                [A], holder("agent-3"), directory=self.dir, wait_s=60,
+                clock=lambda: 0.0, sleep=without_queue.append,
+            ).release()
+        self.assertEqual([], without_queue)
+
     def test_a_command_with_no_wait_competes_rather_than_failing(self):
         # Every manual board command goes through `lease`, which waits for
         # nothing by default: it gives way to the queue for a moment and then
@@ -196,6 +230,7 @@ class QueueTests(QueueFixture):
         it up must not stop honoring the queue for the rest of its wait, or
         it becomes the queue-jumper the queue was added to stop.
         """
+        # (Half a second of giving way, then it competes; see _FREE_YIELD_S.)
         self.hold_ticket(A, self.older(), self.live_holder())
         rounds = []
         raw = []

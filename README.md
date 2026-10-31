@@ -1443,9 +1443,10 @@ back the host lock, and tried again, and nothing held the newcomers back
 
 So every command first takes a numbered ticket for each board (and the host
 lock) it wants, under `<lease dir>/tickets/<key>/`, and gives way to any older
-ticket of a command that is still waiting. Waiters are served in the order
-they arrived, and a command that asks for a board somebody has waited longer
-for is told so instead of taking it:
+ticket of a command that is still waiting. What that promises, exactly: a
+command does not take a board out of turn in the moment it comes free, so the
+command that has waited longest gets a clear run at it, and one that asks for
+a board somebody has waited longer for is told so instead of taking it:
 
 ```
 error: UT_0 is queued: agent #14, run 2026-10-31-ble, lease: ubertooth-util
@@ -1469,18 +1470,23 @@ command could therefore have taken. After half a second of that — several
 poll rounds, so a waiter that is really waiting gets its turn — a command
 competes for the board as it did before the queue; a command with no
 `--wait-for-boards` has a whole second before it gives up, so it too ends up
-competing rather than failing. The bound is per stretch of giving way: it
-starts again whenever the board is held, or the command ahead in the queue
-changes, so a long wait never turns into a licence to jump the queue. Giving
-way to a board somebody is using is never bounded: nothing in the harness can
-be stuck on a lock that is held, so the waiters simply take their turns.
+competing rather than failing (and, if the board is taken again just before
+that second is up, failing with `is queued` where it used to say `is in
+use`). The bound is per stretch of giving way: it starts again whenever the
+board is held, or the command ahead in the queue changes, so a long wait
+never turns into a licence to jump the queue. Giving way to a board somebody
+is using is never bounded: nothing in the harness can be stuck on a lock that
+is held, so the waiters simply take their turns.
 
 That bound is what keeps the queue from becoming a new way to wait forever.
 A command can be ahead in the queue and unable to take the board for reasons
 the queue cannot see or help: a wrapper outside the harness holding a board's
 own lock file while it waits for the lease (the order below), or simply a run
 that is still blocked on the host lock. Its neighbors give it a clear run at
-the board and then carry on.
+the board and then carry on. So the queue is not a reservation: a command
+that needs several boards can still miss its turn when each comes free on
+its own and never all at once
+([#225](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/225)).
 
 ### The host lock
 

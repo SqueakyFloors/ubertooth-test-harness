@@ -75,14 +75,11 @@ only shows what the file holds.
 
 Lock order, one hierarchy for every acquirer:
 
-0. a ticket per resource (see "Waiting in turn" above) for as long as the
-   command waits, then ``takeover.lock``, shared, for as long as each
-   attempt below takes. Neither is a resource: a ticket is this command's
-   own file, nobody waits on it, and both are taken without ever blocking,
-   so neither is in a cycle;
-0b. ``takeover.lock``, shared (it is
-   not a resource; it only orders an attempt against a takeover, and both
-   take it without ever blocking, so it is in no cycle);
+0. a ticket per resource for as long as the command waits (see "Waiting in
+   turn" below), and ``takeover.lock``, shared, for as long as each attempt
+   takes. Neither is a resource and nobody ever blocks on either: a ticket
+   is the command's own file, and both are taken without waiting, so
+   neither can be part of a cycle;
 1. the external board locks, in serial order;
 2. the host lock;
 3. the board leases, in serial order.
@@ -97,16 +94,20 @@ Waiting in turn: retrying alone is not fair. A run that wants the host lock
 took that board one after another, since nothing held them back (harness
 #202). So every acquirer first takes a numbered ticket for each resource it
 wants, under ``<lease dir>/tickets/<key>/``, and gives way to any older
-ticket of a command that is still waiting. Waiters are served in the order
-they arrived, and a command that asks for a board somebody has waited longer
-for is told so instead of taking it.
+ticket of a command that is still waiting. What that promises, exactly: a
+command does not take a resource out of turn in the moment it comes free,
+so the command that has been waiting longest gets a clear run at it, and
+one that asks for a board somebody has waited longer for is told so instead
+of taking it. It is not a reservation: see the bound below, and #225 for
+the case it leaves open.
 
 A ticket is a file named after its number, locked with ``flock`` by the
 command waiting on it and removed when that command stops waiting, so a
 ticket counts only while its command is really there. A ticket whose process
 is gone expires, by the same test that frees a stale lease above, and is
-removed. Nothing is ever held while giving way: an acquirer holds no lock
-when it sleeps, so the lock order above still settles who waits on whom.
+removed. A command holds its tickets while it waits, and no lock of any
+resource, so the lock order above still settles who waits on whom; nothing
+ever blocks on a ticket, which is what keeps tickets out of every cycle.
 
 Ticket numbers come from the wall clock, so a clock set backwards can give a
 newcomer an older place; the order stays total either way, which is what the
@@ -127,7 +128,9 @@ A command can be ahead in the queue and unable to take a resource for
 reasons the queue can neither see nor help: a wrapper outside the harness
 holding a board's own lock file while it waits for the lease (the order
 below), or a run still blocked on the host lock. Its neighbors give it a
-clear run and then carry on.
+clear run and then carry on. The cost of that bound is that the queue is
+not a guarantee: a command that needs several resources can still miss its
+turn when each comes free on its own and never all at once (#225).
 
 A lab wrapper that takes its external board locks and then runs
 ``lease`` (which may take the host lock, then leases) follows the same
@@ -527,6 +530,7 @@ def takeover_allowed(board: Board, kind: str) -> bool:
         return False
     return kind in ("stale", "orphan")
 
+
 def _held(path: Path) -> bool:
     """Whether someone holds this lock file.
 
@@ -640,11 +644,14 @@ class TicketQueue:
                 ) from error
         return self
 
-    def ahead(self) -> tuple[Board, dict] | None:
-        """The first resource a command asked for earlier, and who that is.
+    def ahead(self) -> tuple[Board, str, dict] | None:
+        """The first resource a command asked for earlier: which resource,
+        which ticket, and what that ticket says about its command.
 
-        None when nothing is ahead of this command anywhere, which is when it
-        may try to take its locks.
+        The ticket's name identifies it even before its record is written,
+        which is what tells a caller that the command ahead has changed.
+        None when nothing is ahead of this command anywhere, which is when
+        it may try to take its locks.
         """
         for board in self.resources:
             for name in self._names(board):
@@ -655,7 +662,7 @@ class TicketQueue:
                 if expired:
                     self._remove(path)
                 elif waiting:
-                    return board, read_holder(path)
+                    return board, name, read_holder(path)
         return None
 
     def waiting_for(self, board: Board) -> int:
@@ -696,7 +703,8 @@ class TicketQueue:
 
     def _state(self, path: Path) -> tuple[bool, bool]:
         """(a command is waiting on this ticket, this ticket has expired)."""
-        if lease_liveness(read_holder(path))[0] == "stale":
+        kind = lease_liveness(read_holder(path))[0]
+        if kind == "stale":
             # Its process is gone, so nothing is waiting on it, by the same
             # test that frees a stale lease.
             return False, True
@@ -704,11 +712,16 @@ class TicketQueue:
             locked = _probe(path)
         except OSError:
             return True, False  # unknown is not free, as everywhere else
-        # A ticket whose lock is free but whose process is alive is either
-        # being created right now or left over from a pid the system has
-        # given to someone else: it holds nobody back, and removing it could
-        # take a ticket its owner is about to rely on, so it stays.
-        return locked, False
+        if locked:
+            return True, False
+        # Nobody holds it. A ticket is locked from the moment it is created,
+        # before anything is written to it, so an unlocked one is not a
+        # ticket being taken: it is left over from a command whose pid the
+        # system has since given to someone else (`live`), from one that
+        # wrote nothing (`unknown`), or from another host (`foreign`). None
+        # of those holds anyone back, and leaving them would let a bench
+        # collect ticket files forever.
+        return False, True
 
     def _remove(self, path: Path) -> None:
         try:
@@ -772,10 +785,19 @@ def _released(held: list, message: str) -> "LeaseError":
     return LeaseError(message)
 
 
-def _try_lock(path: Path, mode: int, *, flags: int = os.O_RDWR) -> int | None:
+def _try_lock(path: Path, mode: int, *, flags: int = os.O_RDWR,
+              create: bool = True) -> int | None:
     # A lock file is read by whoever waits for it, so it is 0644 whatever the
     # umask says; an existing file keeps the mode it has. Another process can
     # create or remove the file between the two opens, so try a few times.
+    if not create:
+        # A probe: the file is either there to be locked or it is gone, and
+        # gone means nobody holds it.
+        try:
+            fd = os.open(path, flags)
+        except FileNotFoundError:
+            return None
+        return _flock_or_close(fd, mode)
     for _attempt in range(5):
         try:
             fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o644)
@@ -792,6 +814,11 @@ def _try_lock(path: Path, mode: int, *, flags: int = os.O_RDWR) -> int | None:
         break
     else:
         fd = os.open(path, flags | os.O_CREAT, 0o644)
+    return _flock_or_close(fd, mode)
+
+
+def _flock_or_close(fd: int, mode: int) -> int | None:
+    """Take this lock, or close the descriptor and say it is busy."""
     try:
         fcntl.flock(fd, mode | fcntl.LOCK_NB)
     except OSError as error:
@@ -928,7 +955,7 @@ def acquire(
                 # wait for its lease, and the older waiter would be stuck on
                 # that file while this command gave way to the queue. So each
                 # stretch of giving way to a free resource is bounded.
-                marker = (queued[0].key, queued[1].get("ticket"))
+                marker = (queued[0].key, queued[1])
                 if marker != giving_way:
                     # A different resource, or the command ahead has changed:
                     # the queue is moving, so this starts again.
@@ -946,7 +973,7 @@ def acquire(
                 giving_way, yielded = None, 0.0
             if queued is not None:
                 if clock() >= deadline:
-                    board, other = queued
+                    board, _ticket, other = queued
                     label = ("this host's power/firmware lock"
                              if board == HOST_LOCK else board.alias)
                     busy_now = (
@@ -1202,7 +1229,10 @@ def _probe(path: Path, *, flags: int = os.O_RDWR, regular_only: bool = False) ->
         return False
     if regular_only and not stat.S_ISREG(identity[0]):
         raise OSError(errno.EINVAL, "not a regular file", str(path))
-    fd = _try_lock(path, fcntl.LOCK_SH, flags=flags)
+    # create=False: a file removed between the check above and the open is
+    # free, and a probe that created it again would leave litter behind
+    # (a ticket, read while its command was giving it back).
+    fd = _try_lock(path, fcntl.LOCK_SH, flags=flags, create=False)
     if fd is None:
         return True
     os.close(fd)
