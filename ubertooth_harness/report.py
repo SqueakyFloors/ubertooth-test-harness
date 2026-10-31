@@ -733,9 +733,12 @@ def _take_chunks(
         kept, rest = (
             (text[cut:], text[:cut]) if from_end else (text[:cut], text[cut:])
         )
-        for part, where in ((kept, taken), (rest, left_out)):
-            if part:
-                where.append((moment, stream, part))
+        if kept:
+            taken.append((moment, stream, kept))
+            if rest:
+                left_out.append((moment, stream, rest))
+        # With nothing kept from it, the record is wholly left out, and the
+        # caller already has it among the records neither end reached.
         break
     return taken, left_out
 
@@ -752,16 +755,18 @@ def _tail_on_whole_lines(left_out: Sequence[Chunk], tail: list[Chunk]) -> list[C
         stream: text[-1]
         for _moment, stream, text in left_out if text
     }
-    begun = set()
     kept = []
     for moment, stream, text in tail:
-        if stream not in begun:
-            begun.add(stream)
-            if ends.get(stream, "\n") != "\n":
-                _first, newline, rest = text.partition("\n")
-                text = rest if newline else ""
-                if not text:
-                    continue
+        # A line left out can run through several of the tail's records, so
+        # this holds until a newline actually arrives.
+        if ends.get(stream, "\n") != "\n":
+            _rest_of_it, newline, text = text.partition("\n")
+            if not newline:
+                ends[stream] = _rest_of_it[-1:] or ends[stream]
+                continue
+            ends[stream] = "\n"
+            if not text:
+                continue
         kept.append((moment, stream, text))
     return kept
 
@@ -771,8 +776,9 @@ def _newest_line(chunks: Sequence[Chunk]) -> list[Chunk]:
     tail: a record longer than the tail limit holding one unfinished line.
 
     The newest output is where the harness puts its own last word (a timeout,
-    a cancellation, an output sink error), so run.jsonl always keeps the
-    newest record and the report says how the command ended.
+    a cancellation, an output sink error), so the report keeps the end of
+    that line rather than nothing, which is more than run.jsonl's own tail
+    would hold.
     """
     for moment, stream, text in reversed(chunks):
         lines = text.splitlines(keepends=True)

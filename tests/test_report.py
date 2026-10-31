@@ -292,6 +292,23 @@ class ReportTests(unittest.TestCase):
             )[0]
         ])
 
+    def test_a_left_out_line_running_through_several_records_is_dropped(self):
+        # The line left out can run through more than one of the tail's
+        # records; none of its pieces may render as a line of its own.
+        texts = (["x\n"] * LEGACY_OUTPUT_HEAD_RECORDS
+                 + ["this line was left out"]
+                 + ["part one ", "part two\n"]
+                 + ["y\n"] * (LEGACY_OUTPUT_TAIL_RECORDS - 2))
+
+        report = render_run(dump_events(texts))
+
+        printed = [text.split("[E] ", 1)[1] for text in report.splitlines()
+                   if "[E] " in text]
+        self.assertNotIn("part one ", printed)
+        self.assertNotIn("part two", printed)
+        self.assertEqual(["y"] * (LEGACY_OUTPUT_TAIL_RECORDS - 2),
+                         printed[LEGACY_OUTPUT_HEAD_RECORDS:])
+
     def test_the_newest_output_is_kept_even_as_one_long_line(self):
         # A record longer than the tail limit holding a single unfinished
         # line leaves nothing once the tail starts at a line boundary. The
@@ -357,8 +374,6 @@ class ReportTests(unittest.TestCase):
         self.assertEqual("[O] stdout 0", transcript[0].split(" ", 1)[1])
         self.assertEqual("[E] stderr 0", transcript[1].split(" ", 1)[1])
         self.assertEqual("[E] stderr 2999", transcript[-1].split(" ", 1)[1])
-
-
 
     def test_output_capped_when_it_was_recorded_is_shown_as_recorded(self):
         # The records a capped command leaves are already the start and the
