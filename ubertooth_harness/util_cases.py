@@ -26,8 +26,12 @@ bluetooth_rxtx):
 - ``-U all -<queries>`` and read-only identity queries without ``-U`` (with
   more than one board) print ``<label> (<index>): <value>`` for every attached
   board in enumeration order, so every line says what it is and which board it
-  came from (SqueakyFloors/ubertooth#610). Compile info has no label of its
-  own and keeps the bare ``<index>: <value>`` form. A board that could not be
+  came from (SqueakyFloors/ubertooth#610). The queries the listing can show
+  are ``-b``, ``-v``, ``-p`` and ``-s``; ``-V`` is not one of them, because it
+  is the version command and ends the command before the listing is reached
+  (fork f898fe5, SqueakyFloors/ubertooth#813), and it then reports every
+  attached board itself, under labels of its own
+  (``Firmware build (0): ...``). A board that could not be
   opened gets ``unavailable, <reason>`` as the value of every query asked of
   it. A query that failed on a board that did open gets ``read failed``,
   unless that report has a diagnosis of its own (an unknown board ID, say),
@@ -714,6 +718,9 @@ _BARE_LINE = re.compile(r"^(?P<index>\d+): (?P<text>.*)$")
 # could not open at all, and a query whose read failed on a board it did open.
 _UNAVAILABLE = "unavailable, "
 _READ_FAILED = "read failed"
+# What `-V` prints where a reading would be: the read itself failed, or it
+# worked and the board had nothing to give (ubertooth_version.c).
+_NO_READING = (_READ_FAILED, "not reported")
 _SERIAL_RE = r"[0-9a-f]{32}"
 _SERIAL_LABEL = "Serial No"
 # libubertooth's refusal when several boards are attached and none was
@@ -830,8 +837,11 @@ def version_listing_check(count):
 
     `-V` is the version command, so it is not part of the identity listing:
     since fork f898fe5 it ends the command and reports every attached board
-    itself. The answer carries no serial, so which board is which cannot be
-    checked here; the identity listing does that.
+    itself. A board it could not open, and one whose version read failed, get
+    one line instead of two, so the lines are read board by board rather than
+    counted: that way such a board is named rather than reported as a wrong
+    line count. The answer carries no serial, so which board is which cannot
+    be checked here; the identity listing does that.
     """
     def check(stdout):
         lines = stdout.splitlines()
@@ -839,32 +849,34 @@ def version_listing_check(count):
         # once each (libubertooth's ubertooth_print_host_version()); the
         # boards follow. Fixed rather than filtered, so an answer that
         # repeats them or leaves one out is a failure.
-        head, reports = lines[:2], lines[2:]
+        head, rest = lines[:2], lines[2:]
         if (len(head) < 2
                 or not re.search(HOST_VERSION_LINE, head[0])
                 or not re.search(LIBBTBB_PATH_LINE, head[1])):
             return ("the answer does not open with the host tools' version "
                     f"and the libbtbb path: {head!r}")
-        expected = [(label, index, pattern) for index in range(count)
-                    for label, pattern in _VERSION_REPORTS]
-        if len(reports) != len(expected):
-            return (f"{len(reports)} report lines is not "
-                    f"{len(_VERSION_REPORTS)} per board for {count} boards")
-        for line, (label, index, pattern) in zip(reports, expected):
-            match = _VERSION_LINE.match(line)
-            if match is None:
-                return ("line is not '<label> (<index>): <value>': "
-                        f"{line!r}")
-            if (match["label"], int(match["index"])) != (label, index):
-                return (f"expected the {label} of board {index} here, "
-                        f"got {line!r}")
-            value = match["text"]
-            if value.startswith(_UNAVAILABLE):
-                return f"board {index} could not be opened: {line!r}"
-            if value.endswith(_READ_FAILED):
-                return f"board {index} read failed: {line!r}"
-            if not re.search(pattern, _single_board_line(label, value)):
-                return f"board {index} {label} line {line!r} does not match"
+        for index in range(count):
+            for label, pattern in _VERSION_REPORTS:
+                if not rest:
+                    return f"the answer ends before the {label} of board {index}"
+                line, rest = rest[0], rest[1:]
+                match = _VERSION_LINE.match(line)
+                if match is None:
+                    return ("line is not '<label> (<index>): <value>': "
+                            f"{line!r}")
+                if (match["label"], int(match["index"])) != (label, index):
+                    return (f"expected the {label} of board {index} here, "
+                            f"got {line!r}")
+                value = match["text"]
+                if value.startswith(_UNAVAILABLE):
+                    return f"board {index} could not be opened: {line!r}"
+                if value in _NO_READING:
+                    return f"board {index} {label} is not a reading: {line!r}"
+                if not re.search(pattern, _single_board_line(label, value)):
+                    return f"board {index} {label} line {line!r} does not match"
+        if rest:
+            return (f"the answer carries {len(rest)} line(s) after the last "
+                    f"board: {rest!r}")
         return ""
     return check
 
@@ -907,9 +919,11 @@ def _multi_case(serial, case_id, name, steps, expected_state):
 
 
 def _listing_step(step_id, name, argv, check):
-    # A listing reads every attached board, and -V costs a libusb control
-    # timeout or two for one that does not answer, so the usual 5 s is not
-    # enough on a host with several boards (patterns.py).
+    # Every listing opens each attached board in turn, and a board that does
+    # not answer costs a libusb control timeout or two before the command
+    # gives up on it, so the usual 5 s is not enough on a host with several
+    # boards. -V is the slowest of them, since it takes two reads per board,
+    # which is where the shared deadline comes from (patterns.py).
     return Step(step_id, name, argv, timeout_s=HOST_VERSION_TIMEOUT_S,
                 output_check=check)
 
@@ -1014,6 +1028,10 @@ def multi_board_cases(arguments, _resources, resource_identities):
             ),
             # -V is the version command: it answers for every board itself,
             # with -U all and with no selector alike, and ends the command.
+            # Exit 0 is required (Step's default) where the Host version
+            # check allows 1 as well: that one runs on any bench, while here
+            # every attached board is a registered board the run has leased,
+            # so one that cannot be read is a failure, not the bench's doing.
             _multi_case(
                 serial, "all-reports-every-board-version",
                 "-U all -V reports the version of every board",

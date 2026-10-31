@@ -1253,6 +1253,7 @@ class RunSuiteCliIsolationTests(unittest.TestCase):
                     self.commands.append(argv)
                     answer = (
                         f"Host tools version: libubertooth 1.1 ({revision})\n"
+                        "libbtbb loaded from: /p/lib/libbtbb.so.1\n"
                         f"Firmware version: {revision} (API:1.07)\n"
                         f"Firmware build: ubertooth {revision} (test@host)\n"
                     )

@@ -27,9 +27,9 @@ COUNT_CASE = "count-with-mode"
 
 class FakeUtil:
     """ubertooth-util's argument checks as at fork main db5649b: unknown
-    options (-f was removed), stray word, -h/-V, util_check_modes(), -z with
-    a mode, -U all, then -N, which prints the count and carries on to the
-    board lookup. ``bugs``: pairs-accepted (no mode check), squelch-dropped
+    options (-f was removed), stray word, -V (which ends the command),
+    -h, util_check_modes(), -z with a mode, -U all, then -N, which prints
+    the count and carries on to the board lookup. ``bugs``: pairs-accepted (no mode check), squelch-dropped
     (no -z check), order-as-given (modes named in command order), dfu-mode
     (-f still a mode, as before db5649b), count-drops (-N prints the count
     and exits 0, dropping the rest, as before db5649b), old-no-board-line
@@ -83,9 +83,11 @@ class FakeUtil:
         if operands:
             return self._result(command, 1, "",
                                 f"error: unexpected argument '{operands[0]}'\n")
-        if "V" in given and len(given) == 1:
-            # The whole -V answer with the no-device switch set: the host
-            # lines, then nothing attached, exit 0 and no switch note.
+        if "V" in given:
+            # -V is the version command and ends the command, before the mode
+            # checks and before the -U all check, whatever else was written
+            # (fork f898fe5). With the no-device switch set the answer is the
+            # host lines, then nothing attached, exit 0 and no switch note.
             return self._result(
                 command, 0,
                 "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0\n"
@@ -105,9 +107,11 @@ class FakeUtil:
             return self._result(command, 1, "",
                                 f"error: -z cannot be combined with -{modes[0]}\n")
         if device == "all":
+            # -V is not one of the queries the listing can show: it ended the
+            # command above.
             return self._result(command, 1, "",
                                 "error: -U all only supports the read-only queries -b, "
-                                "-v, -V, -p and -s; select one device with "
+                                "-v, -p and -s; select one device with "
                                 "-U<index|serial> for other options\n")
         no_board = ("could not open Ubertooth device\n"
                     if "old-no-board-line" in self.bugs else NO_DEVICES_FOUND)

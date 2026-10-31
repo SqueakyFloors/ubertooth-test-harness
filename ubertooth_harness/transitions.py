@@ -76,8 +76,7 @@ from ubertooth_harness import capturefile
 from ubertooth_harness.cases import ALTERNATED_ROLE_PREFIX, CommandCase, guard_roles
 from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
-    COMPILE_INFO_PATTERN,
-    FIRMWARE_BUILD_LINE,
+    FIRMWARE_BUILD_PATTERN,
     FIRMWARE_PATTERN,
     HOST_VERSION_LINE,
     HOST_VERSION_TIMEOUT_S,
@@ -889,8 +888,7 @@ def _version_case(serial):
             HOST_VERSION_LINE,
             LIBBTBB_PATH_LINE,
             FIRMWARE_PATTERN,
-            FIRMWARE_BUILD_LINE,
-            COMPILE_INFO_PATTERN,
+            FIRMWARE_BUILD_PATTERN,
             # -V ended the command, so -s never ran.
             rf"\A(?![\s\S]*{serial_pattern(serial)})",
         ),

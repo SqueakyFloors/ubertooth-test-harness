@@ -16,8 +16,7 @@ from ubertooth_harness.rf import (
 )
 from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
-    COMPILE_INFO_PATTERN,
-    FIRMWARE_BUILD_LINE,
+    FIRMWARE_BUILD_PATTERN,
     FIRMWARE_PATTERN,
     HOST_VERSION_LINE,
     HOST_VERSION_TIMEOUT_S,
@@ -603,7 +602,6 @@ def _ubertooth_identity_cases(_arguments, _resources, resource_identities):
         ) from error
     common = ("ubertooth-util", "-U", serial.lower())
     firmware = FIRMWARE_PATTERN
-    compile_info = COMPILE_INFO_PATTERN
     serial_output = serial_pattern(serial)
     part = PART_ID_PATTERN
     board = BOARD_ID_PATTERN
@@ -621,7 +619,7 @@ def _ubertooth_identity_cases(_arguments, _resources, resource_identities):
             "Firmware compile info",
             common + ("-V",),
             (HOST_VERSION_LINE, LIBBTBB_PATH_LINE, firmware,
-             FIRMWARE_BUILD_LINE, compile_info),
+             FIRMWARE_BUILD_PATTERN),
             timeout_s=HOST_VERSION_TIMEOUT_S,
         ),
         CommandCase(

@@ -936,16 +936,27 @@ class MultiBoardCaseTests(unittest.TestCase):
                           check(answer(*boards, head=head)), head)
         # A repeated head line is counted as a board's, so the answer has one
         # line too many.
-        self.assertIn("is not 2 per board",
-                      check(answer(*boards, head=HEAD + HEAD[1:])))
-        self.assertIn("is not 2 per board", check(answer(*boards[:2])))
+        # A repeated head line lands where board 0's version should be.
+        self.assertIn("line is not", check(answer(*boards, head=HEAD + HEAD[1:])))
+        self.assertIn("ends before the Firmware version of board 1",
+                      check(answer(*boards[:2])))
+        self.assertIn("ends before the Firmware build of board 1",
+                      check(answer(*boards[:3])))
+        self.assertIn("carries 1 line(s) after the last board",
+                      check(answer(*boards, boards[3])))
         self.assertIn("expected the Firmware version of board 1 here",
                       check(answer(*boards[:2], boards[3], boards[2])))
-        self.assertIn("could not be opened", check(answer(
-            *boards[:2], "Firmware version (1): unavailable, in use by another program",
-            "Firmware build (1): read failed")))
-        self.assertIn("read failed", check(answer(
-            *boards[:2], "Firmware version (1): read failed", boards[3])))
+        # A board that could not be opened, and a read that failed, get one
+        # line where two would be, which is what the fork prints.
+        self.assertIn("board 1 could not be opened", check(answer(
+            *boards[:2],
+            "Firmware version (1): unavailable, in use by another program")))
+        self.assertIn("board 1 Firmware version is not a reading", check(answer(
+            *boards[:2], "Firmware version (1): read failed")))
+        self.assertIn("board 1 Firmware build is not a reading", check(answer(
+            *boards[:3], "Firmware build (1): read failed")))
+        self.assertIn("board 1 Firmware build is not a reading", check(answer(
+            *boards[:3], "Firmware build (1): not reported")))
         # Lines with no index name no board, which is the single-board form
         # the fork prints only when one board is attached.
         self.assertIn("line is not", check(answer(
