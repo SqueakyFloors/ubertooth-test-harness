@@ -64,6 +64,7 @@ image for the version `NCS_VERSION` pins, so nothing but docker is needed:
 ```sh
 scripts/ci.sh firmware-dk                 # or scripts/local-ci.sh firmware-dk
 NCS_WORKSPACE=~/ncs-ci scripts/ci.sh firmware-dk   # keep the SDK workspace
+DK_BASE_REF=origin/main scripts/ci.sh firmware-dk  # compare with main's image
 ```
 
 It creates the SDK workspace (`west init --mr $NCS_VERSION`, `west update`),
@@ -77,6 +78,19 @@ under this directory, once a week, and on request
 ([#147](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/147));
 it is not a required check, because the image and the workspace are gigabytes.
 The image it builds is not published: a board is flashed from a local build.
+
+With `DK_BASE_REF` (a git ref) or `DK_BASE_SRC` (a directory of these
+sources) it builds those sources too and compares the two images, which is
+how the workflow holds a pull request to the rule that a change to the image
+bumps `UTDK_FW_VERSION`
+([#210](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/210)):
+without a bump, `nrfdk.py ensure` leaves the old image on every board that
+already reports this version. A change that leaves the image identical, such
+as a comment, needs no bump and the step passes. Both builds compile a copy
+of the sources at one path in the SDK workspace, so a difference in the image
+is a difference in the sources; when the images do differ, the base sources
+are built a second time, and a difference there is reported as a build that
+does not repeat itself rather than as a missing bump.
 
 ## Flash
 

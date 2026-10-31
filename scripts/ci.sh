@@ -7,6 +7,10 @@
 #   scripts/ci.sh libbtbb-pin   only the build's libbtbb pin check
 #   scripts/ci.sh firmware-dk   build the nRF52840 DK role firmware (needs docker)
 #
+# firmware-dk compares the image it builds with the one another commit's
+# sources build when DK_BASE_REF (a git ref, for example origin/main) or
+# DK_BASE_SRC (a directory holding the sources) says what to compare against.
+#
 # Run from the repository root. PYTHON selects the interpreter that runs
 # bootstrap.py (default python3). UBERTOOTH_SOURCE / LIBBTBB_SOURCE point the
 # build at existing clones instead of cloning from GitHub; the build always
@@ -185,7 +189,10 @@ EOF
 # (firmware/nrf52840dk/NCS_VERSION), in Nordic's own toolchain image for that
 # version, so neither CI nor a developer installs the 6 GB SDK toolchain to
 # compile it. Needs docker; NCS_WORKSPACE keeps the SDK workspace (several
-# gigabytes) across runs, and NCS_IMAGE replaces the image.
+# gigabytes) across runs, and NCS_IMAGE replaces the image. With DK_BASE_REF
+# (a git ref) or DK_BASE_SRC (a directory of DK firmware sources) it also
+# builds those sources and fails when the image changed with no version bump
+# (#210).
 #
 # This is not part of `all`: the image and the workspace are gigabytes and the
 # firmware changes rarely, so the workflow runs it on a change under
@@ -203,6 +210,10 @@ run_firmware_dk() {
     workspace=${NCS_WORKSPACE:-$WORK/ncs}
     build=$workspace/utdk-build
     hex=$build/zephyr/zephyr.hex
+    # The sources every build compiles, copied here from the tree or from
+    # another commit, so the comparison below builds the same paths twice and
+    # a difference in the image is a difference in the sources.
+    src=$workspace/utdk-src
     stamp=$workspace/.ncs-version
     mkdir -p "$workspace"
 
@@ -243,8 +254,69 @@ run_firmware_dk() {
     # and the whole history of forty repositories.
     ncs 'west update --narrow -o=--depth=1'
 
+    # The app sources, in the one place every build of them is compiled from.
+    dk_sources() {
+        rm -rf "$src"
+        mkdir -p "$src"
+        cp -R "$1/." "$src/"
+    }
+
+    dk_fw_version() {
+        fw=$(sed -n 's/^#define UTDK_FW_VERSION "\(.*\)".*/\1/p' "$1/src/roles.h")
+        if [ -z "$fw" ]; then
+            echo "error: no UTDK_FW_VERSION in $1/src/roles.h" >&2
+            return 1
+        fi
+        echo "$fw"
+    }
+
+    # What a source change leaves on the boards: `nrfdk.py ensure` flashes a
+    # DK only when it reports a firmware version other than the pinned one,
+    # so a change that leaves UTDK_FW_VERSION alone is never flashed, and a
+    # run then tests the old image and says nothing about the new one (#210).
+    # The images decide, not the files: a comment or formatting change leaves
+    # the image identical and asks for no bump.
+    compare_dk_image() {
+        base=$1
+        label=$2
+        here=$(dk_fw_version "$repo/$DK_FIRMWARE")
+        there=$(dk_fw_version "$base")
+        step "the image against $label"
+        if [ "$here" != "$there" ]; then
+            echo "UTDK_FW_VERSION moved from $there to $here, so every board is" \
+                 "reflashed; the images are not compared"
+            return 0
+        fi
+        cp "$hex" "$workspace/utdk-here.hex"
+        dk_sources "$base"
+        ncs "west build -p always --no-sysbuild -b $NCS_BOARD -d $build -s $src"
+        if cmp -s "$workspace/utdk-here.hex" "$hex"; then
+            echo "the image is the one $label builds, so $here still describes it"
+            # The build directory held the comparison build last; leave this
+            # tree's own image where a developer flashes it from.
+            cp "$workspace/utdk-here.hex" "$hex"
+            return 0
+        fi
+        # Before blaming the change: two builds of one tree must give one
+        # image, or a difference between two trees says nothing.
+        cp "$hex" "$workspace/utdk-there.hex"
+        ncs "west build -p always --no-sysbuild -b $NCS_BOARD -d $build -s $src"
+        if ! cmp -s "$workspace/utdk-there.hex" "$hex"; then
+            echo "error: two builds of the same sources gave different images, so" \
+                 "this comparison says nothing about the change; make the build" \
+                 "reproducible (fixed paths and timestamps) first" >&2
+            return 1
+        fi
+        echo "error: the image differs from the one $label builds while" \
+             "UTDK_FW_VERSION is still $here: bump it in" \
+             "$DK_FIRMWARE/src/roles.h and ubertooth_harness/nrfdk.py, or a" \
+             "board already running $here keeps the old image" >&2
+        return 1
+    }
+
     step "build $DK_FIRMWARE for $NCS_BOARD"
-    ncs "west build -p always --no-sysbuild -b $NCS_BOARD -d $build -s $repo/$DK_FIRMWARE"
+    dk_sources "$repo/$DK_FIRMWARE"
+    ncs "west build -p always --no-sysbuild -b $NCS_BOARD -d $build -s $src"
 
     # The same check the harness makes before it flashes a board: an image
     # that does not carry the pinned version string would be left in place by
@@ -255,6 +327,31 @@ run_firmware_dk() {
     # run_build does it.
     [ -x .venv/bin/python ] || "$PYTHON" bootstrap.py
     .venv/bin/python -m ubertooth_harness.nrfdk check-image "$hex"
+
+    # The sources to compare the image against: a directory of them
+    # (DK_BASE_SRC), or a git ref this repository holds (DK_BASE_REF, which
+    # the Firmware workflow sets to a pull request's base branch). With
+    # neither, or with a ref the tree cannot resolve, as in an exported tree
+    # with no git history (scripts/local-ci.sh), nothing is compared.
+    if [ -n "${DK_BASE_SRC:-}" ]; then
+        compare_dk_image "$DK_BASE_SRC" "$DK_BASE_SRC"
+    elif [ -z "${DK_BASE_REF:-}" ]; then
+        step "the image against another commit"
+        echo "no base sources given (DK_BASE_REF or DK_BASE_SRC), so the image" \
+             "is not compared and a missing version bump would not show up here"
+    elif ! git -C "$repo" cat-file -e "$DK_BASE_REF:$DK_FIRMWARE/src/roles.h" 2>/dev/null; then
+        step "the image against $DK_BASE_REF"
+        echo "$DK_BASE_REF does not resolve to a tree holding $DK_FIRMWARE here," \
+             "so the image is not compared"
+    else
+        base_tree=$workspace/base-firmware
+        rm -rf "$base_tree"
+        mkdir -p "$base_tree"
+        git -C "$repo" archive -o "$workspace/base-firmware.tar" \
+            "$DK_BASE_REF" "$DK_FIRMWARE"
+        tar -xf "$workspace/base-firmware.tar" -C "$base_tree"
+        compare_dk_image "$base_tree/$DK_FIRMWARE" "$DK_BASE_REF"
+    fi
 }
 
 case "${1:-}" in
