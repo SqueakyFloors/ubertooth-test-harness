@@ -17,10 +17,15 @@ makes, and that Wireshark's own dissector reads the records the plugin sends
 could share a misreading with the script; a dissector written by someone else
 cannot (harness issue #148).
 
-``capture`` installs the plugin in a Wireshark configuration of its own (a
-temporary HOME, and the extcap directory tshark itself reports for it), so
-nothing is written to the real user's configuration and no other extcap
-program on the host can answer. Then it runs::
+``capture`` installs the plugin in a Wireshark configuration of its own: a
+temporary HOME with every directory Wireshark takes from the environment
+pointed inside it, and the extcap directory tshark itself reports for that
+environment, which the versions differ on. Nothing is written to the host
+user's own configuration, and if tshark reports a directory outside it there
+is no way to install the plugin for this capture alone, so the command fails
+(exit 2) instead. The installed program records each call it is given, so the
+checks can tell that it, and not another extcap program on the host, is what
+tshark captured with. Then it runs::
 
     tshark -i ubertooth<serial> -a duration:N -l -T fields -E header=n
            -e btle.advertising_address -e btle.advertising_header.pdu_type
@@ -28,7 +33,10 @@ program on the host can answer. Then it runs::
 and checks the rows. tshark starts in a session of its own, so a signal this
 script sends reaches tshark alone: SIGINT to the whole process group would
 also hit the ``dumpcap`` that reads the plugin's FIFO, and tshark would then
-report a child that died rather than stopping its capture.
+report a child that died rather than stopping its capture. For the same
+reason the SIGINT goes in only once a row has been decoded, which is the proof
+that dumpcap is capturing; with nothing decoded in the window there is nothing
+to stop a capture after, and the run reports a skip rather than a guess.
 
 Checks (each failure is a ``FAIL:`` line and exit status 1):
 
@@ -40,15 +48,20 @@ Checks (each failure is a ``FAIL:`` line and exit status 1):
   ``--extcap-capture-filter``, which cannot apply it; the plugin's warning
   must reach tshark (it relays the plugin's stderr) and the capture must run
   anyway;
-- ``--interrupt-after S``: SIGINT after S seconds must end the capture
-  cleanly, exit 0, with the rows decoded so far kept;
-- no process the capture started is left behind.
+- ``--interrupt-after S``: SIGINT, no sooner than S seconds in and not before
+  a row has been decoded, must end the capture cleanly, exit 0, with the rows
+  decoded so far kept;
+- the program installed here is the one tshark captured with;
+- no process the capture started is left behind, the extcap program included:
+  it is dumpcap's child, not tshark's, and is checked by the process id it
+  recorded itself.
 
 Only counts and the advertiser's own address are printed, never another
 device's address or any packet data, so no nearby traffic reaches the run
 record. Exit status 2 is a usage or setup error; ``pytools.SKIP_EXIT`` with a
-``SKIP: <reason>`` line means tshark is not installed on this host, or the run
-has no extcap script to install.
+``SKIP: <reason>`` line means tshark is not installed on this host, the run
+has no extcap script to install, or (``--interrupt-after``) nothing was
+decoded to stop the capture after.
 """
 
 from __future__ import annotations
@@ -91,6 +104,7 @@ PROGRAM_NAME = "btle-extcap"
 # the layout Wireshark 4.x uses when `-G folders` cannot be read.
 EXTCAP_FOLDER_LINE = re.compile(r"(?mi)^Personal Extcap path:\s*(.+?)\s*$")
 FALLBACK_EXTCAP_DIR = Path(".local") / "lib" / "wireshark" / "extcap"
+NO_ROWS = "no packet reached tshark in the capture window"
 
 
 def version(run=subprocess.run) -> str | None:
@@ -107,21 +121,22 @@ def version(run=subprocess.run) -> str | None:
     return found[1] if found else None
 
 
-def _extcap_dir(home: Path, env) -> Path:
-    """The extcap directory tshark reports for this HOME."""
+def _extcap_dir(home: Path, env) -> Path | None:
+    """Where tshark looks for a personal extcap program with this
+    environment, or None when that is not inside home (so installing the
+    plugin would touch the host user's own configuration).
+
+    tshark is asked rather than told: which directory it is has changed
+    between Wireshark versions.
+    """
     try:
         result = subprocess.run((TSHARK, "-G", "folders"), capture_output=True,
                                 text=True, timeout=VERSION_TIMEOUT_S, env=env)
         found = EXTCAP_FOLDER_LINE.search(result.stdout or "")
     except (OSError, subprocess.SubprocessError):
         found = None
-    if found:
-        reported = Path(found[1])
-        # Only a path inside this run's HOME: a tshark that reports a shared
-        # directory must not have the plugin written into it.
-        if home in reported.parents:
-            return reported
-    return home / FALLBACK_EXTCAP_DIR
+    reported = Path(found[1]) if found else home / FALLBACK_EXTCAP_DIR
+    return reported if home in reported.parents else None
 
 
 @dataclass(frozen=True)
@@ -142,17 +157,33 @@ class Program:
         return (self.interpreter, str(target))
 
 
-def _install(directory: Path, program: Program) -> Path:
+def _install(directory: Path, program: Program, marker: Path) -> Path:
     """Put a program at directory/PROGRAM_NAME that runs it with tshark's
     arguments appended. Wireshark runs an extcap program directly, so this
-    wrapper is what carries the interpreter."""
+    wrapper is what carries the interpreter; it records its own process id and
+    arguments in marker first, so the checks can tell that the program this
+    installed is the one that answered, and that it is gone afterwards."""
     directory.mkdir(parents=True, exist_ok=True)
     argv = program.argv(directory)
     installed = directory / PROGRAM_NAME
     installed.write_text(
-        "#!/bin/sh\nexec " + " ".join(shlex.quote(str(word)) for word in argv) + ' "$@"\n')
+        "#!/bin/sh\n"
+        f"printf '%s %s\\n' \"$$\" \"$*\" >> {shlex.quote(str(marker))}\n"
+        "exec " + " ".join(shlex.quote(str(word)) for word in argv) + ' "$@"\n')
     installed.chmod(0o755)
     return installed
+
+
+def _marker_calls(marker: Path) -> list:
+    """(pid, arguments) of each run of the installed program."""
+    if not marker.exists():
+        return []
+    calls = []
+    for line in marker.read_text(errors="replace").splitlines():
+        pid, _, arguments = line.partition(" ")
+        if pid.isdigit():
+            calls.append((int(pid), arguments))
+    return calls
 
 
 class Rows:
@@ -217,6 +248,24 @@ def _children(pid: int) -> dict:
     return found
 
 
+def _descendants(pid: int, depth: int = 4) -> dict:
+    """pid -> command line of everything below pid: tshark starts dumpcap,
+    which is what starts the extcap program, so children alone miss it."""
+    found = {}
+    frontier = [pid]
+    for _level in range(depth):
+        next_frontier = []
+        for parent in frontier:
+            for child, command in _children(parent).items():
+                if child not in found:
+                    found[child] = command
+                    next_frontier.append(child)
+        if not next_frontier:
+            break
+        frontier = next_frontier
+    return found
+
+
 def _alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -241,43 +290,85 @@ def tshark_argv(interface: str, seconds: float, capture_filter: str | None = Non
                          "-e", ADDRESS_FIELD, "-e", PDU_TYPE_FIELD])
 
 
-def _run_tshark(argv, env, seconds, interrupt_after, failures, out):
-    """Run tshark to its end or to a SIGINT; (exit status, stdout, stderr)."""
+def _run_tshark(argv, env, seconds, interrupt_after, failures, out, directory):
+    """Run tshark to the end of its capture window, or to a SIGINT.
+
+    Returns (exit status, stdout, stderr, descendants seen, quiet): quiet when
+    a SIGINT was asked for and no packet ever reached tshark, so it was not
+    sent and the capture ran its window out.
+
+    The SIGINT goes to tshark once the capture is under way, which a decoded
+    row is the proof of: tshark hands its own capture over to a dumpcap child,
+    and a SIGINT that arrives before that child is capturing ends the run as a
+    child that died (exit 255) instead of a capture that was stopped.
+    """
     out("tshark command: " + " ".join(argv))
-    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
-        # A session of its own: a signal sent here reaches tshark alone, not
-        # the dumpcap that reads the plugin's FIFO.
+    stdout_path = directory / "tshark.out"
+    with open(stdout_path, "w+b") as stdout, tempfile.TemporaryFile() as stderr:
+        # A session of its own: the signal reaches tshark alone, never the
+        # dumpcap that reads the plugin's FIFO (which a signal to the process
+        # group would also hit).
         process = subprocess.Popen(argv, stdout=stdout, stderr=stderr, env=env,
                                    start_new_session=True)
-        children = {}
+        seen = {}
         deadline = time.monotonic() + seconds + STOP_WAIT_S
-        interrupt_at = (time.monotonic() + interrupt_after
-                        if interrupt_after is not None else None)
-        interrupted = False
+        not_before = (time.monotonic() + interrupt_after
+                      if interrupt_after is not None else None)
+        interrupted = quiet = False
         while process.poll() is None and time.monotonic() < deadline:
-            children.update(_children(process.pid))
-            if interrupt_at is not None and time.monotonic() >= interrupt_at:
-                out(f"stopping tshark with SIGINT after {interrupt_after:g}s")
-                process.send_signal(signal.SIGINT)
-                interrupt_at = None
-                interrupted = True
-                deadline = time.monotonic() + STOP_WAIT_S
+            seen.update(_descendants(process.pid))
+            if not_before is not None and time.monotonic() >= not_before:
+                rows = len(_read(stdout_path).splitlines())
+                if rows:
+                    out(f"stopping tshark with SIGINT, {rows} row(s) decoded")
+                    process.send_signal(signal.SIGINT)
+                    not_before = None
+                    interrupted = True
+                    deadline = time.monotonic() + STOP_WAIT_S
             time.sleep(POLL_S)
+        if interrupt_after is not None and not interrupted:
+            # Nothing was decoded in time to interrupt after, so the capture
+            # ran its window out and the SIGINT check was not made.
+            quiet = True
         if process.poll() is None:
-            failures.append(
-                f"tshark did not exit within {STOP_WAIT_S:g}s of the end of its "
-                "capture; it was sent SIGTERM")
-            process.terminate()
             try:
                 process.wait(STOP_WAIT_S)
             except subprocess.TimeoutExpired:
-                pass
-        if interrupt_after is not None and not interrupted:
-            failures.append("tshark exited before the SIGINT")
-        stdout.seek(0)
+                failures.append(
+                    f"tshark did not exit within {STOP_WAIT_S:g}s of the end of its "
+                    "capture; it was sent SIGTERM")
+                process.terminate()
+                try:
+                    process.wait(STOP_WAIT_S)
+                except subprocess.TimeoutExpired:
+                    pass
         stderr.seek(0)
-        return (process.poll(), stdout.read().decode(errors="replace"),
-                stderr.read().decode(errors="replace"), children)
+        return (process.poll(), _read(stdout_path),
+                stderr.read().decode(errors="replace"), seen, quiet)
+
+
+def _read(path: Path) -> str:
+    try:
+        return path.read_text(errors="replace")
+    except OSError:
+        return ""
+
+
+def _isolated_env(home: Path) -> dict:
+    """An environment whose Wireshark configuration is all inside home.
+
+    Every place Wireshark 3.x and 4.x take their personal directories from, so
+    the host user's own configuration is neither read nor written and an
+    extcap program installed here is the only personal one.
+    """
+    env = dict(os.environ, HOME=str(home))
+    env["XDG_DATA_HOME"] = str(home / "data")
+    env["XDG_CONFIG_HOME"] = str(home / "config")
+    env["XDG_CACHE_HOME"] = str(home / "cache")
+    env["WIRESHARK_CONFIG_DIR"] = str(home / "wireshark")
+    # No locale surprises in the field output.
+    env["LC_ALL"] = "C"
+    return env
 
 
 def capture(interface, seconds, address, *, program: Program,
@@ -287,21 +378,35 @@ def capture(interface, seconds, address, *, program: Program,
     failures = []
     with tempfile.TemporaryDirectory(prefix="tshark-home-") as directory:
         home = Path(directory)
-        env = dict(os.environ, HOME=str(home))
-        # No locale surprises in the field output.
-        env["LC_ALL"] = "C"
+        env = _isolated_env(home)
         extcap = _extcap_dir(home, env)
-        installed = _install(extcap, program)
+        if extcap is None:
+            print("error: this tshark does not take its personal extcap directory "
+                  "from the environment, so the plugin cannot be installed for it "
+                  "alone; its own configuration must not be used", file=sys.stderr)
+            return 2
+        marker = home / "extcap-calls"
+        installed = _install(extcap, program, marker)
         out(f"extcap program: {installed.name} in {extcap}")
         listing = subprocess.run((TSHARK, "-D"), capture_output=True, text=True,
                                  timeout=START_WAIT_S, env=env)
         if interface not in listing.stdout:
             failures.append(f"tshark -D does not list {interface}")
         argv = tshark_argv(interface, seconds, capture_filter)
-        status, stdout, stderr, children = _run_tshark(
-            argv, env, seconds, interrupt_after, failures, out)
-    return _report(status, stdout, stderr, children, address, pdu_type, min_packets,
-                   capture_filter, failures, out)
+        status, stdout, stderr, seen, quiet = _run_tshark(
+            argv, env, seconds, interrupt_after, failures, out, home)
+        calls = _marker_calls(marker)
+    for pid, arguments in calls:
+        out(f"the installed program ran: {arguments}")
+    if not any("--capture" in arguments for _pid, arguments in calls):
+        failures.append(
+            "the program installed here was not the one tshark captured with")
+    # The extcap program is dumpcap's child, not tshark's, and may outlive
+    # both: it is checked by the process id it recorded itself.
+    seen.update({pid: f"{PROGRAM_NAME} {arguments}" for pid, arguments in calls})
+    return _report(status, stdout, stderr, seen, address, pdu_type, min_packets,
+                   capture_filter, failures, out, quiet=quiet,
+                   interrupted=interrupt_after is not None and not quiet)
 
 
 def read_file(path, address, *, pdu_type=PDU_TYPES["nonconn"], min_packets=1,
@@ -318,7 +423,7 @@ def read_file(path, address, *, pdu_type=PDU_TYPES["nonconn"], min_packets=1,
 
 
 def _report(status, stdout, stderr, children, address, pdu_type, min_packets,
-            capture_filter, failures, out) -> int:
+            capture_filter, failures, out, *, quiet=False, interrupted=False) -> int:
     rows = Rows(address, pdu_type)
     rows.read(stdout)
     for line in stderr.splitlines():
@@ -326,7 +431,7 @@ def _report(status, stdout, stderr, children, address, pdu_type, min_packets,
         # part of the record; a row of fields never is.
         out("tshark: " + line.strip())
     out(rows.summary())
-    out(f"tshark exit: {status}")
+    out(f"tshark exit: {status}" + (" (after SIGINT)" if interrupted else ""))
     if status != 0:
         failures.append(f"tshark exited {status}, not 0")
     if rows.advertiser < min_packets:
@@ -357,6 +462,11 @@ def _report(status, stdout, stderr, children, address, pdu_type, min_packets,
         out(f"FAIL: {failure}")
     if failures:
         return 1
+    if quiet:
+        # There was nothing decoded to stop the capture after, so what a
+        # SIGINT does was not shown (the other checks still passed).
+        out(f"SKIP: {NO_ROWS}; the capture ran its window out instead")
+        return pytools.SKIP_EXIT
     out("tshark checks passed")
     return 0
 

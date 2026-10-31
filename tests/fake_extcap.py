@@ -27,6 +27,8 @@ Environment:
 - ``FAKE_EXTCAP_REFUSE``: refuse ``--capture`` with this message, exit 1
 - ``FAKE_EXTCAP_QUIET_FILTER``: take a capture filter without warning about
   it, which the real plugin never does and the checks must notice
+- ``FAKE_EXTCAP_SILENT``: open the FIFO and write the PCAP header, then no
+  records, as a capture with no advertising traffic in range looks
 """
 
 import getopt
@@ -96,12 +98,14 @@ def pcap_record(body: bytes, when: float) -> bytes:
 
 
 def _capture(fifo: str, address: str, period: float) -> int:
+    silent = bool(os.environ.get("FAKE_EXTCAP_SILENT"))
     with open(fifo, "wb", buffering=0) as out:
         out.write(pcap_header())
         counter = 0
         while True:
             counter += 1
-            out.write(pcap_record(record(address, counter), time.time()))
+            if not silent:
+                out.write(pcap_record(record(address, counter), time.time()))
             time.sleep(period)
 
 

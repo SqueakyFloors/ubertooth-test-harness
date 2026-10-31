@@ -18,6 +18,7 @@ skipped where tshark is not installed, which only running it can tell.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 import sys
 
@@ -25,6 +26,7 @@ from ubertooth_harness import nrfdk, pytools, tsharkcapture
 from ubertooth_harness.advertiser_cases import (
     CHANNELS, DK_TIMEOUT_S, _advertiser, _dk, _dk_idle, _ensure_case,
 )
+from ubertooth_harness.hostneeds import Needs
 from ubertooth_harness.receive_cases import seconds_arg
 from ubertooth_harness.stateful import StateCase, Step
 from ubertooth_harness.transitions import (
@@ -32,6 +34,10 @@ from ubertooth_harness.transitions import (
 )
 
 TEST_NAME = "BLE extcap in tshark"
+# Every case runs tshark, so a host without it runs none of them: the DK is
+# not flashed and no board is touched to find that out. tsharkcapture.py still
+# skips at run time, for a tshark that goes missing between the two.
+NEEDS = Needs(host_tools=("tshark",))
 _TSHARK_CAPTURE = str(Path(tsharkcapture.__file__).resolve())
 # The channel the DK advertises on, and tshark captures on, in every case:
 # which channel reaches the board is already covered by BLE extcap capture.
@@ -82,6 +88,7 @@ def _tshark_case(serial, dk, seconds, *, case_id, name, expected_state,
         case_id, name, steps, (_dk_idle(dk),) + _cleanup(serial, MODE_RESET_SETTINGS),
         expected_state=expected_state
         + "; advertiser idle; channel, squelch, and LEDs restored",
+        needs=NEEDS,
     )
 
 
@@ -94,7 +101,7 @@ def extcap_tshark_cases(arguments, resources, resource_identities):
     decoded = (f"Wireshark decodes the advertiser's {nrfdk.FIRMWARE_VERSION} packets "
                f"from {dk['address']}")
     cases = [
-        _ensure_case(dk),
+        replace(_ensure_case(dk), needs=NEEDS),
         _tshark_case(
             serial, dk, seconds, case_id="tshark-fields",
             name=f"tshark -i ubertooth{serial} decodes the advertiser's address",

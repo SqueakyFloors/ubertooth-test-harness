@@ -1121,21 +1121,27 @@ Wireshark version makes to an extcap program are the ones the plugin answers.
 The known advertiser is what makes the answer exact rather than "something was
 decoded": the DK advertises from its registered address, so the row tshark
 must print is known before the capture starts. The plugin is installed in a
-Wireshark configuration of its own (a temporary `HOME`, and the extcap
-directory that tshark itself reports for it), so the host user's configuration
-is untouched and no other extcap program can answer for the interface. tshark
-runs in a session of its own, so the SIGINT case reaches tshark alone: sent to
-the process group it would also hit the `dumpcap` that reads the FIFO, and
-tshark would report a child that died instead of stopping its capture.
+Wireshark configuration of its own (a temporary `HOME`, with every directory
+Wireshark takes from the environment pointed inside it, and the extcap
+directory that tshark itself reports for that environment), so the host user's
+configuration is untouched; the installed program records every call it gets,
+so what answered for the interface is known to be it and not another extcap
+program on the host. tshark runs in a session of its own, so the SIGINT case
+reaches tshark alone: sent to the process group it would also hit the
+`dumpcap` that reads the FIFO, and tshark would report a child that died
+instead of stopping its capture. The SIGINT goes in once a row has been
+decoded, for the same reason: that is the proof the capture is under way, and
+a signal that lands earlier ends the run as a child that died.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial, and one
 `advertiser` (nRF52840 DK) with a registered J-Link serial and BLE address.
 Guarded. `coverage:` and a required `duration:`. The Ubertooth defaults to
 needing an ordinary link. The test writes DK firmware: its first case flashes
 the DK when it runs anything but the version the harness pins, so the run
-holds the host lock. Every case is skipped where `tshark` is not installed,
-which only running it can tell; the version that read the records is recorded
-in the run manifest.
+holds the host lock. Every case declares that it needs `tshark` installed, so
+a host without it runs none of them (not applicable, named in `--dry-run`)
+rather than flashing the DK to find out; the version that read the records is
+recorded in the run manifest.
 
 **Expected outcome.** Smoke runs 2 cases: the DK is confirmed to run the
 pinned firmware at its registered address, then `tshark -i ubertooth<serial>`
@@ -1145,8 +1151,10 @@ Comprehensive runs 4, adding a capture filter, which Wireshark passes on as
 `--extcap-capture-filter` and the plugin cannot apply: its warning must reach
 tshark (which relays what the plugin wrote) and the capture must run anyway;
 and a capture stopped with SIGINT halfway, which must exit 0 with the rows
-decoded so far. Every case leaves the DK idle in the advertiser role with its
-boot settings and restores the Ubertooth's channel, squelch, and LEDs.
+decoded so far, and is skipped ("no packet reached tshark in the capture
+window") when there was nothing decoded to stop it after. Every case leaves
+the DK idle in the advertiser role with its boot settings and restores the
+Ubertooth's channel, squelch, and LEDs.
 
 **Known limits.** One Wireshark version answers for itself: what the version
 on the host does is what the case shows, and tshark hands packets on in

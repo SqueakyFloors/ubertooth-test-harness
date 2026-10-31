@@ -1126,6 +1126,8 @@ def builtin_catalog() -> TestCatalog:
             }),
             MappingProxyType({"Ubertooth": "Ubertooth", "advertiser": "nRF52840 DK"}),
             command_builder=tshark_cases.extcap_tshark_cases,
+            # A host without tshark runs none of it, and --dry-run says so.
+            needs=tshark_cases.NEEDS,
             continue_on_case_failure=True,
             guards_other_ubertooths=True,
             # Its first case flashes the DK when the board runs another

@@ -127,6 +127,38 @@ class RefusalTests(unittest.TestCase):
         self.assertEqual(2, code)
 
 
+class IsolationTests(unittest.TestCase):
+    def test_the_environment_moves_every_wireshark_directory_inside_the_home(self):
+        home = Path("/tmp/tshark-home-test")
+        env = tsharkcapture._isolated_env(home)
+
+        for name in ("HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME",
+                     "WIRESHARK_CONFIG_DIR"):
+            self.assertTrue(env[name].startswith(str(home)), f"{name}={env[name]}")
+
+    def test_a_directory_outside_the_home_is_refused_not_written_to(self):
+        # The host user's own extcap directory must never have the plugin
+        # written into it: when that is where tshark would look, there is no
+        # way to install it for this capture alone.
+        home = Path("/tmp/tshark-home-test")
+        folders = "Personal Extcap path:\t/home/someone/.local/lib/wireshark/extcap\n"
+        with mock.patch.object(tsharkcapture.subprocess, "run",
+                               return_value=mock.Mock(stdout=folders)):
+            self.assertIsNone(tsharkcapture._extcap_dir(home, {}))
+
+        inside = f"Personal Extcap path:\t{home}/data/lib/wireshark/extcap\n"
+        with mock.patch.object(tsharkcapture.subprocess, "run",
+                               return_value=mock.Mock(stdout=inside)):
+            self.assertEqual(Path(f"{home}/data/lib/wireshark/extcap"),
+                             tsharkcapture._extcap_dir(home, {}))
+
+    def test_a_tshark_that_cannot_be_asked_falls_back_inside_the_home(self):
+        home = Path("/tmp/tshark-home-test")
+        with mock.patch.object(tsharkcapture.subprocess, "run", side_effect=OSError):
+            self.assertEqual(home / tsharkcapture.FALLBACK_EXTCAP_DIR,
+                             tsharkcapture._extcap_dir(home, {}))
+
+
 class FixtureTests(unittest.TestCase):
     """The fake plugin's records are the ones the harness itself expects."""
 
@@ -161,12 +193,12 @@ class ReadTests(unittest.TestCase):
     """What Wireshark's own dissector reads from the records."""
 
     def check(self, records, **options):
-        out = io.StringIO()
+        lines = []
         with tempfile.TemporaryDirectory() as directory:
             code = tsharkcapture.read_file(
-                capture_file(directory, records), ADDRESS, out=out.write,
+                capture_file(directory, records), ADDRESS, out=lines.append,
                 **options)
-        return code, out.getvalue()
+        return code, "\n".join(lines)
 
     def test_wireshark_decodes_the_advertisers_address_and_pdu_type(self):
         records = [fake_extcap.record(ADDRESS, counter) for counter in (1, 2, 3)]
@@ -194,7 +226,7 @@ class CaptureTests(unittest.TestCase):
     """tshark drives the extcap program itself, as it drives the plugin."""
 
     def capture(self, **options):
-        out = io.StringIO()
+        lines = []
         environment = {
             "FAKE_EXTCAP_SERIAL": SERIAL,
             "FAKE_EXTCAP_ADDRESS": ADDRESS,
@@ -206,8 +238,8 @@ class CaptureTests(unittest.TestCase):
                 INTERFACE, options.pop("seconds", SECONDS), ADDRESS,
                 program=tsharkcapture.Program(interpreter=sys.executable,
                                               script=Path(FAKE).read_bytes()),
-                out=out.write, **options)
-        return code, out.getvalue()
+                out=lines.append, **options)
+        return code, "\n".join(lines)
 
     def test_tshark_captures_through_the_program_and_decodes_the_advertiser(self):
         code, out = self.capture()
@@ -241,6 +273,35 @@ class CaptureTests(unittest.TestCase):
         self.assertIn("tshark exit: 0", out)
         self.assertIn("tshark checks passed", out)
 
+    def test_a_sigint_with_nothing_decoded_to_stop_after_is_skipped(self):
+        # The SIGINT goes in once a row has arrived, which is what makes the
+        # check deterministic: tshark hands the capture to a dumpcap child,
+        # and a signal that lands before that child is capturing ends the run
+        # as a child that died. With no traffic there is nothing to stop
+        # after, so the check is not made rather than guessed at.
+        code, out = self.capture(seconds=4.0, interrupt_after=1.0,
+                                 min_packets=0,
+                                 environment={"FAKE_EXTCAP_SILENT": "1"})
+
+        self.assertEqual(pytools.SKIP_EXIT, code, out)
+        self.assertIn(f"SKIP: {tsharkcapture.NO_ROWS}", out)
+        self.assertNotIn("stopping tshark with SIGINT", out)
+
+    def test_the_program_this_installed_is_the_one_that_captured(self):
+        code, out = self.capture()
+
+        self.assertEqual(0, code, out)
+        # Recorded by the installed program itself, so another extcap program
+        # on the host answering for the interface could not pass this.
+        capture_calls = [line for line in out.splitlines()
+                         if line.startswith("the installed program ran: --capture")]
+        self.assertEqual(1, len(capture_calls), out)
+        # Which form the arguments take is Wireshark's business (4.6 sends
+        # --extcap-interface and its value as two words), so only the
+        # interface and the FIFO are checked.
+        self.assertIn(INTERFACE, capture_calls[0])
+        self.assertIn("--fifo", capture_calls[0])
+
     def test_a_plugin_that_refuses_the_capture_fails_the_check(self):
         code, out = self.capture(
             seconds=3.0,
@@ -251,13 +312,14 @@ class CaptureTests(unittest.TestCase):
         self.assertIn("FAIL:", out)
 
     def test_an_interface_the_program_does_not_offer_is_reported(self):
-        out = io.StringIO()
+        lines = []
         with mock.patch.dict(os.environ, {"FAKE_EXTCAP_SERIAL": "0badc0de"}):
             code = tsharkcapture.capture(
                 INTERFACE, 3.0, ADDRESS,
                 program=tsharkcapture.Program(interpreter=sys.executable,
                                               script=Path(FAKE).read_bytes()),
-                out=out.write)
+                out=lines.append)
 
-        self.assertEqual(1, code, out.getvalue())
-        self.assertIn(f"tshark -D does not list {INTERFACE}", out.getvalue())
+        out = "\n".join(lines)
+        self.assertEqual(1, code, out)
+        self.assertIn(f"tshark -D does not list {INTERFACE}", out)
