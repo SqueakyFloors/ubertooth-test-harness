@@ -321,6 +321,53 @@ class ReportTests(unittest.TestCase):
         # Ubertooth's 32 digits are not a J-Link serial in another width.
         self.assertEqual(set(), _serial_widths("aaaa0000"))
         self.assertEqual(set(), _serial_widths("1" * 32))
+    def test_an_outcome_for_another_step_leaves_the_open_one_open(self):
+        # Records are read as they were written: an outcome naming a step
+        # other than the open one closes nothing, and the open step still
+        # gets the line its commands give it.
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            publisher = open_run_publisher(run, "run-a")
+            publisher.emit("build_started", "running", {})
+            publisher.emit("build_step_started", "running", {
+                "step_id": "host-build", "step_name": "Build Ubertooth host tools",
+            })
+            publisher.emit("build_step_finished", "passed", {
+                "step_id": "toolchain", "step_name": "Read toolchain versions",
+                "reason": "",
+            })
+            publisher.emit("build_finished", "passed", {"reason": ""})
+
+            report = render_run(load_events(run / "run.jsonl"))
+
+            self.assertIn("--- Read toolchain versions EXIT: passed ---", report)
+            self.assertIn("--- Build Ubertooth host tools EXIT: passed ---", report)
+
+    def test_a_build_step_with_no_outcome_record_falls_back_to_its_commands(self):
+        # A run recorded before the build said how each step ended has only
+        # its commands to go on, so the step's line is latched to the first
+        # command that did not pass.
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run-a"
+            publisher = open_run_publisher(run, "run-a")
+            publisher.emit("build_started", "running", {})
+            publisher.emit("build_step_started", "running", {
+                "step_id": "host-build", "step_name": "Build Ubertooth host tools",
+            })
+            publisher.emit("command_started", "running", {
+                "command_id": "b", "argv": ["cmake", "--build", "."],
+                "phase": "build", "step_id": "host-build",
+            })
+            publisher.emit("command_finished", "failed", {
+                "command_id": "b", "returncode": 2, "duration_s": 0.1,
+                "phase": "build", "step_id": "host-build",
+            })
+            publisher.emit("build_finished", "failed", {"reason": "it exited 2"})
+
+            report = render_run(load_events(run / "run.jsonl"))
+
+            self.assertIn("--- Build Ubertooth host tools EXIT: failed ---", report)
+            self.assertIn("=== BUILD EXIT: failed: it exited 2 ===", report)
 
     def test_report_shows_every_recorded_output_record(self):
         # run.jsonl output is capped when recorded (rawlog.RECORD_*), so the
