@@ -10,11 +10,17 @@ from ubertooth_harness.report import load_events, render_run, render_runs, write
 SERIAL = "aaaa0000"
 
 
-def _serial_set(registered: str) -> set:
-    """What `_Run.serials()` collects for one registered serial."""
-    from ubertooth_harness.report import _serial_widths
+def _serial_set(registered: str) -> set[str]:
+    """What `_Run.serials()` collects for one registered J-Link serial."""
+    from ubertooth_harness.report import _Run
 
-    return {registered, registered.lower()} | _serial_widths(registered)
+    return _Run([{
+        "run_id": "r", "event_type": "manifest", "status": "passed",
+        "timestamp": "2026-01-01T00:00:00",
+        "details": {"manifest": {"invocations": [
+            {"resource_identities": {"advertiser": {"jlink serial": registered}}},
+        ]}},
+    }]).serials()
 
 
 def write_run(
@@ -281,6 +287,29 @@ class ReportTests(unittest.TestCase):
 
             self.assertNotIn("001050210121", report)
             self.assertIn("--port /dev/cu.usbmodem<serial>1", report)
+
+    def test_a_short_serial_does_not_break_a_32_hex_token(self):
+        # The token rule masks an Ubertooth serial the run never named (an
+        # unregistered board in a failure reason); a short serial in the
+        # explicit list must not cut one in half first.
+        from ubertooth_harness.report import _redact
+
+        self.assertEqual(
+            "enumerated: <serial>",
+            _redact("enumerated: aaaaf123ffaaaaaaaaaaaaaaaaaaaaaa",
+                    _serial_set("000123")),
+        )
+
+    def test_the_padded_width_is_the_one_a_dk_port_name_carries(self):
+        # _SERIAL_PADDED_DIGITS restates the padding in targets.DK_BY_ID;
+        # this keeps the two in step.
+        from ubertooth_harness import targets
+        from ubertooth_harness.report import _SERIAL_PADDED_DIGITS
+
+        path = targets.device_path(
+            targets.KINDS[targets.NRF52840_DK], "123456", "linux")
+
+        self.assertIn("0" * (_SERIAL_PADDED_DIGITS - 6) + "123456", path)
 
     def test_serial_widths_cover_padding_but_not_short_numbers(self):
         from ubertooth_harness.report import _serial_widths

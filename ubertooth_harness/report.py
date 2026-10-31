@@ -88,8 +88,12 @@ def _serial_widths(value: str) -> set[str]:
     number = value.lstrip("0")
     # Past 12 digits it is not a J-Link serial but an Ubertooth's, which is
     # 32 hex digits and masked as it is written.
-    if not number or len(number) > _SERIAL_PADDED_DIGITS:
+    if len(number) > _SERIAL_PADDED_DIGITS:
         return set()
+    if not number:
+        # All zeros, which the registry takes. The number the tools write is
+        # "0", and masking that would mask every 0 in the transcript.
+        return {value.rjust(_SERIAL_PADDED_DIGITS, "0")}
     return {number, number.rjust(_SERIAL_PADDED_DIGITS, "0")}
 
 
@@ -933,6 +937,9 @@ _SERIAL_TOKEN = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{32}(?![0-9A-Fa-f])")
 
 
 def _redact(text: str, serials: Iterable[str]) -> str:
+    # The token rule first: masking a short serial inside a 32-hex token
+    # would leave the rest of that token, which this rule is there to catch.
+    text = _SERIAL_TOKEN.sub(REDACTED, text)
     for serial in sorted(serials, key=len, reverse=True):
         if serial.isdigit() and len(serial) < _SERIAL_MIN_DIGITS:
             # Short enough to read as an ordinary number, so it is masked
@@ -945,7 +952,7 @@ def _redact(text: str, serials: Iterable[str]) -> str:
             # it. A serial this long inside a longer number would be masked
             # too, which costs a reader nothing.
             text = text.replace(serial, REDACTED)
-    return _SERIAL_TOKEN.sub(REDACTED, text)
+    return text
 
 
 def render_run(events: Sequence[Mapping], *, redact_serials: bool = False, transcript: bool = True) -> str:
