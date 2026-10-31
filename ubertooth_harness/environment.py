@@ -33,6 +33,19 @@ def _version(name: str) -> str | None:
         return None
 
 
+def _host_tools() -> dict:
+    """Versions of the host programs a case runs that are not the fork's.
+
+    Only tshark so far (BLE extcap in tshark, harness issue #148): its
+    dissector is what that test checks the plugin's records against, so which
+    one read them belongs in the run manifest. None where it is not
+    installed, which is where those cases are skipped.
+    """
+    from ubertooth_harness import tsharkcapture
+
+    return {"tshark": tsharkcapture.version()}
+
+
 def _os_identity() -> dict:
     identity = {
         "system": platform.system(),
@@ -64,6 +77,7 @@ def capture() -> dict:
         },
         "pip": _version("pip"),
         "dependencies": {name: _version(name) for name in requirement_names()},
+        "host_tools": _host_tools(),
         "os": _os_identity(),
     }
 

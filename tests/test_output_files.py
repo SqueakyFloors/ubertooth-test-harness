@@ -3,6 +3,8 @@
 import hashlib
 import io
 import json
+import random
+import re
 from pathlib import Path
 import tempfile
 import unittest
@@ -17,17 +19,24 @@ from ubertooth_harness.executor import (
 from ubertooth_harness.outputfiles import (
     MAX_BLOCK_CHARS,
     OUTPUT_DIR,
+    READ_BLOCK_CHARS,
+    SKIP_LINE,
+    WHOLE_STREAM_CHARS,
     TARGET_SERIAL_STREAM,
     OutsideRun,
+    TooLongToSearch,
     confined,
+    needs_whole_stream,
     CommandOutput,
     LineSource,
     OutputCheck,
     OutputFile,
     find_lines,
     measure,
+    saved_files,
     search_parts,
     stream_for,
+    text_lines,
 )
 from ubertooth_harness.planner import TestInvocation
 from ubertooth_harness.sequencer import NamedTestSequencer
@@ -250,6 +259,115 @@ class ReadingFilesTests(unittest.TestCase):
         self.assertEqual(3, len(matches))
         self.assertEqual([("1", "0", "1")] * 3,
                          [m.group("usr", "rx", "tx") for m in matches])
+
+    def test_an_observed_setting_that_is_not_the_expected_one_is_recorded_failed(self):
+        step = Step("read", "Read the channel",
+                    ("ubertooth-util", "-c"),
+                    observe=Observation("channel", r"Channel: (?P<value>\d+)",
+                                        expected="2426"))
+        output = CommandOutput(stdout="Channel: 2402\n")
+        result = CommandResult(("ubertooth-util", "-c"), 0, "Channel: 2402\n",
+                               "", 0.1, False, output=output)
+        outcome = step.evaluate(result, {})
+        self.assertIn("expected channel=2426, observed 2402", outcome.failure)
+        # The record carries the reason, so the report and validate do not
+        # read a matched pattern as a check that came out for the run.
+        recorded = output.checks[-1]
+        self.assertEqual(("observed", True, "2402"),
+                         (recorded.kind, recorded.found, recorded.matched))
+        self.assertIn("expected channel=2426", recorded.reason)
+
+    def test_a_streamed_search_agrees_with_one_over_the_whole_text(self):
+        # The patterns the harness searches for, over streams longer than a
+        # read block, against re.search over the same text.
+        patterns = (SKIP_LINE, r"Firmware version:\s+\S+", r"error: ",
+                    r"(?m)^\s+-s sweep all channels", r"rx block timestamp \d+")
+        choices = ("x" * 80, "pad SKIP: boom and more", "SKIP: no traffic",
+                   "Firmware version: git-1234abc (API:1.07)", "error: busy", "")
+        random.seed(3)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "x.log"
+            for lines in (1, 7, 9000):
+                text = "\n".join(random.choice(choices) for _ in range(lines)) + "\n"
+                path.write_text(text, encoding="utf-8")
+                for pattern in patterns:
+                    with self.subTest(lines=lines, pattern=pattern):
+                        wanted = re.search(pattern, text)
+                        found = search_parts((path,), pattern)
+                        self.assertEqual(bool(wanted), bool(found))
+                        if wanted:
+                            self.assertEqual(wanted[0], found[0])
+
+    def test_a_stream_with_no_line_endings_offers_no_false_line_start(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "x.log"
+            # One line far longer than a block: it starts once, so an
+            # anchored pattern inside it matches nowhere.
+            path.write_text("y" * (3 * MAX_BLOCK_CHARS) + "SKIP: inline",
+                            encoding="utf-8")
+            self.assertIsNone(re.search(SKIP_LINE, path.read_text()))
+            self.assertIsNone(search_parts((path,), SKIP_LINE))
+            # The same stream with a real line start before it is found.
+            path.write_text("y" * (3 * MAX_BLOCK_CHARS) + "\nSKIP: real\n",
+                            encoding="utf-8")
+            self.assertIsNotNone(search_parts((path,), SKIP_LINE))
+
+    def test_a_whole_stream_pattern_is_matched_against_the_whole_stream(self):
+        # The harness asserts things about an output as a whole: that a
+        # listing is exactly these lines, that no traceback appears anywhere.
+        no_traceback = r"\A(?![\s\S]*Traceback)"
+        self.assertTrue(needs_whole_stream(no_traceback))
+        self.assertFalse(needs_whole_stream(SKIP_LINE))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "x.log"
+            path.write_text("one\ntwo\n", encoding="utf-8")
+            self.assertIsNotNone(search_parts((path,), no_traceback))
+            path.write_text("one\nTraceback (most recent call last):\n",
+                            encoding="utf-8")
+            # A window search would answer this from the first line and pass
+            # a check that must fail.
+            self.assertIsNone(search_parts((path,), no_traceback))
+
+    def test_a_stream_too_long_for_a_whole_stream_pattern_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "x.log"
+            path.write_text("line\n" * ((WHOLE_STREAM_CHARS // 5) + 10),
+                            encoding="utf-8")
+            # A line pattern still reads it, a block at a time.
+            self.assertIsNotNone(search_parts((path,), r"(?m)^line$"))
+            with self.assertRaises(TooLongToSearch):
+                search_parts((path,), r"\A(?![\s\S]*Traceback)")
+
+    def test_a_malformed_record_is_left_out_rather_than_raising(self):
+        self.assertEqual((), saved_files({"output_files": ["not a record", 7]}))
+        self.assertEqual((), saved_files({"output_files": "not a list"}))
+        self.assertEqual("", OutputCheck.from_dict("not a record").kind)
+
+    def test_an_anchored_pattern_does_not_match_at_a_block_boundary(self):
+        # What is carried from one block to the next starts at a line start,
+        # so '^' cannot match in the middle of a line that a block split.
+        line = "x" * 99 + "\n"
+        head = line * (READ_BLOCK_CHARS // 100 + 200)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "x.log"
+            spliced = head + "pad SKIP: boom and more\n" + line * 2000
+            path.write_text(spliced, encoding="utf-8")
+            self.assertIsNone(re.search(SKIP_LINE, spliced))
+            self.assertIsNone(search_parts((path,), SKIP_LINE))
+            # A real line start far into the stream is still found.
+            real = head + "SKIP: no traffic\n" + line * 2000
+            path.write_text(real, encoding="utf-8")
+            match = search_parts((path,), SKIP_LINE)
+            self.assertIsNotNone(match)
+            self.assertEqual("no traffic", match[1])
+
+    def test_a_string_and_a_file_of_the_same_bytes_give_the_same_lines(self):
+        text = "a\rb\nc\x0cd\ne\r\n"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "x.log"
+            path.write_text(text, encoding="utf-8", newline="")
+            self.assertEqual(list(LineSource((path,))), list(text_lines(text)))
+            self.assertEqual(["a\rb", "c\x0cd", "e"], list(text_lines(text)))
 
     def test_a_check_reads_a_string_as_well_as_a_file(self):
         self.assertEqual("", nothing_on_stdout("\n  \n"))

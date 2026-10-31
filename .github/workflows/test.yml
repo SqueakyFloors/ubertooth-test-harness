@@ -30,6 +30,18 @@ jobs:
         cache: pip
         cache-dependency-path: requirements.txt
 
+    # tshark, so the checks that drive a real Wireshark dissector run here
+    # instead of being skipped (tests/test_tshark_capture.py, #148). It is
+    # about 60 MB from the distribution and the GUI is not installed; the
+    # macOS runner has no tshark, where those checks skip as they do on a
+    # host without it.
+    - name: Wireshark command-line tools (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tshark
+        tshark --version | head -1
+
     - name: Test
       run: sh scripts/ci.sh test
 

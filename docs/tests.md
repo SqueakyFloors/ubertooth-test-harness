@@ -84,8 +84,10 @@ access address (`-a`).
 
 **Guard Ubertooths.** A guarded test binds every other registered Ubertooth on
 the host as a `guard Ubertooth N` resource and reads each one before the test
-and after every case, with queries only: `ubertooth-util -v -V -C -a -z -d`,
-then `ubertooth-btle -k`. Every read must match the baseline taken before the
+and after every case, with queries only and one command per read:
+`ubertooth-util -v`, `-V`, `-C`, `-a`, `-z`, `-d`, then `ubertooth-btle -k`
+(`-V` ends the command, so it could not share one with the others anyway).
+Every read must match the baseline taken before the
 first case; one that differs fails the test. This is what catches a regression
 that reaches a board the command did not select. The `ubertooth-btle -k` read
 is left out unless that board's firmware API is at least the host tools' API,
@@ -224,10 +226,10 @@ name it.
 **What it does.** Nothing yet: a catalog entry for reading the firmware's
 compile identity from one board.
 
-**Theory of operation.** Not established. `Ubertooth identity` checks
-`ubertooth-util -V` against the compile-info pattern, and the guard readback
-uses the same line, whose build timestamp also catches a reflash of the same
-revision.
+**Theory of operation.** Not established. `Ubertooth identity` checks the
+whole `ubertooth-util -V` answer, the compile-info pattern among it, and the
+guard readback uses the same `Firmware build:` line, whose build timestamp
+also catches a reflash of the same revision.
 
 **Hardware and arguments.** One `Ubertooth`.
 
@@ -285,29 +287,34 @@ name it.
 
 ## Ubertooth identity
 
-**What it does.** Reads the five identity reports from one board, each on its
-own command line, and then all five in one command.
+**What it does.** Reads the identity reports from one board, each on its own
+command line, and then the four that compose in one command.
 
 **Theory of operation.** The registry already knows the board's serial, so the
 `-s` read has a known right answer and proves the command reached the board the
-plan selected rather than whichever board USB offered first. The other four
-reads are checked against the shape the tools print. The composed `-vVspb`
-case then requires all five reports from one command: a parser that drops a
-report when several are asked for passes the single-option cases and fails
-this one.
+plan selected rather than whichever board USB offered first. The other reads
+are checked against the shape the tools print. The composed `-vspb` case then
+requires all four reports from one command: a parser that drops a report when
+several are asked for passes the single-option cases and fails this one. `-V`
+is not in that composition. It is the version command: since fork `f898fe5`
+it prints the host tools' version and the board's firmware version and build,
+then ends the command, so its case asks for the whole of that answer on its
+own.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial. Not
 guarded (every command is read-only and selects by serial).
 
-**Expected outcome.** Six cases: firmware version, firmware compile info,
-device serial, part ID, board ID, and the complete readback composition. A
-case failure does not stop the others.
+**Expected outcome.** Six cases: firmware version, the whole `-V` answer (its
+four lines in the fork's order: host version, libbtbb path, firmware version,
+firmware build), device serial, part ID, board ID, and the four-query
+readback composition. A case failure does not stop the others. The `-V` case
+keeps its `firmware-compile-info` id and its `Firmware compile info` name,
+although it now covers more than that line: the id is what a run's records
+and the learned durations are kept under, and the name is the one preflight's
+per-board `-V` check already uses for the same read.
 
 **Known limits.** These are readbacks, so a pass says the board answers and
-identifies itself, not that any radio function works. Harness issue
-[#162](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/162) is
-open against the composition case: `-V` now ends the command, so the expected
-`-vVspb` output in the harness is wrong.
+identifies itself, not that any radio function works.
 
 ## Debug register read
 
@@ -338,24 +345,27 @@ command and requires every report asked for.
 that asks for two must print both. A parser bug that lets a later option
 replace an earlier one, or that returns after the first report, shows up as a
 missing line. `-l` and `-d` both print a USR LED line, so that pair requires
-two of them.
+two of them. `-V` is left out of the compositions and gets two cases of its
+own that go the other way: since fork `f898fe5` it is the version command and
+ends the command, so `-V -s` and `-s -V` must each print the whole version
+answer (its four lines, in order) and no serial line. The fork sets the flags
+while it reads the command line and acts only once the whole line has parsed,
+so both orders must behave alike. Asking for `-V` beside the others would
+hide every query behind it.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
 Guarded. `coverage:`.
 
-**Expected outcome.** Smoke runs 2 cases: the documented `-v -V` pair and all
-ten read-only queries in one command. Comprehensive runs 47: the same two,
-every other compatible pair of the ten queries, and a refusal case, since two
-`-U` options name two boards for one command and are refused
-(`error: option '-U' given more than once`, exit 1) rather than the last one
-winning. A case failure does not stop the others.
+**Expected outcome.** Smoke runs 3 cases: `-V -s` and `-s -V`, each
+answering the version alone, and all nine composable read-only queries in one
+command. Comprehensive runs 40: the same three, every compatible pair of the
+nine queries, and a refusal case, since two `-U` options name two boards for
+one command and are refused (`error: option '-U' given more than once`,
+exit 1) rather than the last one winning. A case failure does not stop the
+others.
 
 **Known limits.** Read-only only: nothing here writes a setting, so it says
 nothing about set-and-read ordering, which `Radio setting transitions` covers.
-Harness issue
-[#162](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/162)
-applies: `-V` now ends the command, so compositions that put other queries
-after it expect the wrong output.
 
 ## Argument validation
 
@@ -574,24 +584,28 @@ passing the pattern.
 Guarded. `coverage:`. On a host with one registered board the test skips
 itself at run time rather than failing planning.
 
-**Expected outcome.** With two boards, smoke runs 3 cases and comprehensive 7;
+**Expected outcome.** With two boards, smoke runs 3 cases and comprehensive 9;
 the index case's step count grows with the number of boards. Smoke: `-U all
 -s` lists every registered board and only those, `-s` without `-U` does the
 same, and `-N` plus one `-U<index> -s` per board agree with the listing.
-Comprehensive adds the five identity queries listed per board in index order,
-both with `-U all` and with no selector, `-C` without `-U` refusing to pick a
-board (exit 1, listing every board, with no channel read), and an index past
-the last board refused with `error: no Ubertooth at index N (N attached)`.
+Comprehensive adds the four identity queries listed per board in index
+order, both with `-U all` and with no selector; `-V` reporting every board
+itself, also both ways, as the host tools' two lines (the version and the
+libbtbb path) followed by each board's firmware version and build under its
+index; `-C` without `-U` refusing to
+pick a board (exit 1 with `error: multiple Ubertooth devices found; select
+one with -U <index|serial>` and one `Device <index>: <serial>` line per
+board, and no channel read); and an index past the last board refused with
+`error: no Ubertooth at index N (N attached)`.
 
 **Known limits.** Every command is read-only, so this says nothing about
 selection for a command that writes. The listing order is the USB index order,
 which the registry does not know, so the checks require the right set in index
-order rather than a particular board at a particular index. Harness issues
-[#162](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/162)
-(the identity listing expects output from before `-V` ended the command),
-[#174](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/174),
-and [#145](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/145)
-are open against the expected wording.
+order rather than a particular board at a particular index. The `-V` answer
+carries no serial, so which board each of its lines came from is not checked
+there; the identity listing does that. Harness issue
+[#145](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/145)
+is open against the extcap listing fixtures.
 
 ## BLE mode conflicts
 
@@ -938,8 +952,9 @@ refused by the `-z` rule, and `-f`, which must be refused as an unrecognized
 option. Comprehensive runs 14, adding three modes at once, a repeated mode,
 `-z` with two modes (where the mode refusal comes first), a stray word, `-N`
 with `-i` (where `-N` prints the count and the command carries on to `-i`,
-which finds no board), and `-U all` with `-i`, which gives the `-U all`
-refusal alone.
+which finds no board and says `error: no Ubertooth devices found`, the line
+every tool gives for a selection that found nothing since fork `753269b`), and
+`-U all` with `-i`, which gives the `-U all` refusal alone.
 
 **Known limits.** As with `Refused command lines`, a fork from before the
 no-devices switch makes the case skip. Nothing here shows what `-i` does when
@@ -1014,10 +1029,11 @@ listing DLT 256, and `--extcap-config` offering channels 37-39 with 37 as the
 default. Comprehensive runs 20, adding an older `ubertooth<index>` interface
 name, the refusals when no interface is given or the interface is not an
 Ubertooth, `--capture` without `--fifo` refused before `ubertooth-btle` runs,
-an unknown option refused with no usage text after the message,
-`--extcap-version` accepted and ignored in all three forms Wireshark uses, and
-the options Wireshark sends only for features this plugin does not advertise,
-which must be refused like any unknown option.
+an unknown option refused with `error: unrecognized option '--extcap-bogus'`
+and no usage text after it (the wording every tool here shares since fork
+`5310a5d`), `--extcap-version` accepted and ignored in all three forms
+Wireshark uses, and the options Wireshark sends only for features this plugin
+does not advertise, which must be refused like any unknown option.
 
 **Known limits.** No display and no board, so the spectrum GUI itself is not
 exercised; its argument checks are still untested. Nothing here shows that
@@ -1046,9 +1062,18 @@ Comprehensive runs 5, adding `--extcap-version` with the value as the next
 word and a stray word, which must be refused with nothing listed.
 
 **Known limits.** It checks the listing, not that a capture from any listed
-interface works; `BLE extcap capture` does that. Harness issue
-[#145](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/145) is
-open: the vendored unit-test fixtures predate the labeled listing.
+interface works; `BLE extcap capture` does that. An attached board whose
+serial cannot be read fails the test rather than being passed over, even when
+it is not a registered board: it is left out of the listing, and the call
+still exits 1 for it. Wireshark throws away everything a call that failed
+printed, so one board it cannot open costs the user the capture list
+entirely, which is why the behavior is worth pinning. A real run
+always uses the script out of the resolved fork commit, so what the unit
+tests pin is the pairing of that script with the `ubertooth-util` of the same
+era: a mismatch lists nothing, which is what a host with no board also looks
+like. Nothing compares the vendored copy against the fork's own script, so
+the fork moving to a third listing form would go unnoticed here until a run
+failed.
 
 ## BLE extcap capture
 
@@ -1078,9 +1103,65 @@ the reader closing the FIFO, which must exit 0 by itself.
 
 **Known limits.** No peer, so the stream may carry no packet records at all;
 the checks are about the header, the stream, and the exit. Nothing here runs
-real Wireshark or tshark; harness issue
-[#148](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/148)
-asks for one tshark case so a real dissector reads what the plugin sends.
+real Wireshark or tshark: `BLE extcap in tshark` does that, with a known
+advertiser.
+
+## BLE extcap in tshark
+
+**What it does.** Real `tshark` captures through the `btle-extcap` plugin from
+a registered nRF52840 DK advertiser, and its own dissector decodes the DK's
+address.
+
+**Theory of operation.** The cases above play Wireshark's part themselves and
+check the stream with the harness's own parser, which could share a misreading
+with the plugin. A dissector written by someone else cannot: if Wireshark
+prints the DK's address, then link type 256 and libbtbb's 10-byte LE
+pseudo-header are read the way the plugin writes them, and the calls that
+Wireshark version makes to an extcap program are the ones the plugin answers.
+The known advertiser is what makes the answer exact rather than "something was
+decoded": the DK advertises from its registered address, so the row tshark
+must print is known before the capture starts. The plugin is installed in a
+Wireshark configuration of its own (a temporary `HOME`, with every directory
+Wireshark takes from the environment pointed inside it, and the extcap
+directory that tshark itself reports for that environment), so the host user's
+configuration is untouched; the installed program records every call it gets,
+so what answered for the interface is known to be it and not another extcap
+program on the host. tshark runs in a session of its own, so the SIGINT case
+reaches tshark alone: sent to the process group it would also hit the
+`dumpcap` that reads the FIFO, and tshark would report a child that died
+instead of stopping its capture. The SIGINT goes in once a row has been
+decoded, for the same reason: that is the proof the capture is under way, and
+a signal that lands earlier ends the run as a child that died.
+
+**Hardware and arguments.** One `Ubertooth`, selected by full serial, and one
+`advertiser` (nRF52840 DK) with a registered J-Link serial and BLE address.
+Guarded. `coverage:` and a required `duration:`. The Ubertooth defaults to
+needing an ordinary link. The test writes DK firmware: its first case flashes
+the DK when it runs anything but the version the harness pins, so the run
+holds the host lock. Every case declares that it needs `tshark` installed, so
+a host without it runs none of them (not applicable, named in `--dry-run`)
+rather than flashing the DK to find out; the version that read the records is
+recorded in the run manifest.
+
+**Expected outcome.** Smoke runs 2 cases: the DK is confirmed to run the
+pinned firmware at its registered address, then `tshark -i ubertooth<serial>`
+captures for the duration and at least one row carries the DK's address as an
+ADV_NONCONN_IND, with tshark exiting 0 and no process left behind.
+Comprehensive runs 4, adding a capture filter, which Wireshark passes on as
+`--extcap-capture-filter` and the plugin cannot apply: its warning must reach
+tshark (which relays what the plugin wrote) and the capture must run anyway;
+and a capture stopped with SIGINT halfway, which must exit 0 with the rows
+decoded so far, and is skipped ("no packet reached tshark in the capture
+window") when there was nothing decoded to stop it after. Every case leaves
+the DK idle in the advertiser role with its boot settings and restores the
+Ubertooth's channel, squelch, and LEDs.
+
+**Known limits.** One Wireshark version answers for itself: what the version
+on the host does is what the case shows, and tshark hands packets on in
+batches, so the rows a case sees are not every packet the board caught. The
+checks are about the fields Wireshark decoded, not how many, so the counting
+checks stay in `Capture known BLE advertiser`. The GUI is not exercised, only
+tshark.
 
 ## Capture known BLE advertiser
 
@@ -1129,8 +1210,10 @@ squelch, and LEDs.
 comfortably, not an expected capture rate, and it is bench-specific: a weaker
 link or a noisier room can fail it without anything being wrong with the code.
 The test needs two kinds of hardware and a flashable DK, so it cannot run
-anywhere the DK is absent. The DK firmware build is not yet produced by CI
-([#147](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/147)).
+anywhere the DK is absent. The DK firmware image itself comes from a local
+build: CI compiles it (the `Firmware` workflow, `scripts/ci.sh firmware-dk`)
+but publishes nothing, so a run still needs the image passed in as
+`--artifact "nRF52840 advertiser=PATH"`.
 
 ## Capture known BLE connection
 
@@ -1275,7 +1358,11 @@ verifies, so preflight checks only the board's serial and not its revision,
 and the test must be the last one on that board in the suite.
 
 **Expected outcome.** One case, run by the flash runner rather than as a
-command line. It passes when every requested write completed and verified. It
+command line. Because it is one case however many flashes it runs, the run's
+firmware watchdog reads happen between its writes rather than between cases,
+on the same three-minute interval, so a long soak reports a board that reset
+itself while it is still running; what a read takes is added back to the
+test's deadline. It passes when every requested write completed and verified. It
 fails and stops at the first mismatch: a write that did not take, a revision
 that does not match the image just written, a guard board whose revision
 changed or that disappeared, a per-flash write over 25 s, or the whole-test
@@ -1284,13 +1371,10 @@ and records the last revision read from each board.
 
 **Known limits.** It measures the write-and-verify path, not what the firmware
 then does. Selectors must be full serials: libubertooth reads an all-digit
-`-U` value as a USB index and otherwise matches the end of a serial, so the
-test refuses digit-only selectors and any serial that is the ending of
-another. Harness issue
-[#126](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/126) is
-open on that overlap check: it compares the end of a serial where libubertooth
-matches the start. A manual recovery or a power cycle never turns a failed run
-into a pass.
+`-U` value as a USB index and otherwise matches, case-insensitively, the start
+of a serial, so the test refuses digit-only selectors and any selector that is
+the beginning of another, which would name the same board twice. A manual
+recovery or a power cycle never turns a failed run into a pass.
 
 ## DFU images
 

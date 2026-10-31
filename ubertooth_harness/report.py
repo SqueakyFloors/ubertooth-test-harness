@@ -20,12 +20,34 @@ from ubertooth_harness.events import REPORT, RUN_LOG
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness import outputfiles
 from ubertooth_harness.outputfiles import output_file_list
-from ubertooth_harness.rawlog import NOTE, TAGS, CommandCapture, format_command_record
+from ubertooth_harness.rawlog import (
+    NOTE,
+    RECORD_OUTPUT_BYTES,
+    RECORD_OUTPUT_EVENTS,
+    RECORD_TAIL_BYTES,
+    RECORD_TAIL_EVENTS,
+    TAGS,
+    Chunk,
+    CommandCapture,
+    format_command_record,
+)
 from ubertooth_harness.rf import describe as describe_placement
 from ubertooth_harness.watchdog import wait_counts
 
 
 REDACTED = "<serial>"
+# Fallback cap for a command whose output run.jsonl holds in full, because the
+# run was recorded before output was capped as it was written: this much of
+# the start and of the end of it is rendered. Both limits are rawlog's, and
+# both matter: the size bounds a few huge records, the count bounds many tiny
+# ones, which cost a timestamp and a tag each in the transcript. rawlog counts
+# the bytes a record takes in run.jsonl, JSON escapes included, and the report
+# counts the characters it renders, so the same limit is a little more
+# generous here.
+LEGACY_OUTPUT_HEAD_CHARS = RECORD_OUTPUT_BYTES
+LEGACY_OUTPUT_HEAD_RECORDS = RECORD_OUTPUT_EVENTS
+LEGACY_OUTPUT_TAIL_CHARS = RECORD_TAIL_BYTES
+LEGACY_OUTPUT_TAIL_RECORDS = RECORD_TAIL_EVENTS
 LEGEND = (
     "Times are elapsed since the run started (UTC start in Time above). "
     "Tags: `[C]` command sent, `[O]` stdout, `[E]` stderr, `[R]` command result, "
@@ -58,6 +80,45 @@ def _time(event: Mapping) -> datetime.datetime:
     if moment.tzinfo is not None:
         moment = moment.astimezone(datetime.timezone.utc).replace(tzinfo=None)
     return moment
+
+
+# Fewest digits a number needs to be masked wherever it appears rather than
+# only where it stands alone (_redact). A SEGGER probe's serial is nine
+# digits or more, so this is about the short width of a registry entry like
+# `000123`, which the tools write as `123`: masking every "123" inside every
+# longer number would mangle the transcript, and a standalone one is masked
+# either way. The padded width of that same entry is 12 digits, so it is
+# masked everywhere, including inside a device path.
+_SERIAL_MIN_DIGITS = 6
+# How wide a DK's by-id name writes its J-Link serial (targets.DK_BY_ID).
+_SERIAL_PADDED_DIGITS = 12
+
+
+def _serial_widths(value: str) -> set[str]:
+    """The other widths one numeric serial is written in.
+
+    A J-Link serial reaches the run in two spellings of the same number: as
+    the registry holds it, which is how `nrfutil device list` prints it
+    (``001050210121`` on this bench), and as a number, because nrfdk.py takes
+    it as one and preflight.py puts it on the command line with the leading
+    zeros gone (``1050210121``). A DK's by-id name pads it to 12 digits
+    again. ``--redact-serials`` has to mask each of them, or the serial
+    survives in the transcript. Any numeric serial is treated this way, so a
+    numeric bridge serial gains a padded width nothing writes, which costs
+    nothing; one written in hex is masked as the registry holds it.
+    """
+    if not value.isdigit():
+        return set()
+    number = value.lstrip("0")
+    # Past 12 digits it is not a J-Link serial but an Ubertooth's, which is
+    # 32 hex digits and masked as it is written.
+    if len(number) > _SERIAL_PADDED_DIGITS:
+        return set()
+    if not number:
+        # All zeros, which the registry takes. The number the tools write is
+        # "0", and masking that would mask every 0 in the transcript.
+        return {value.rjust(_SERIAL_PADDED_DIGITS, "0")}
+    return {number, number.rjust(_SERIAL_PADDED_DIGITS, "0")}
 
 
 class _Run:
@@ -114,13 +175,24 @@ class _Run:
         return self.finished["status"]
 
     def serials(self) -> set[str]:
-        """Every device serial the run names: resources, preflight, flash
-        guards, and boards seen by the isolation enumeration checks."""
+        """Every device serial the run names, in every width it is written:
+        resources (an Ubertooth's serial, a DK's J-Link serial, an ESP32
+        peer's bridge serial), preflight, flash guards, and boards seen by
+        the isolation enumeration checks.
+
+        A device path that carries a serial is not one of them. ``_redact``
+        masks the serial inside the path, which leaves the rest of it to read
+        ("port /dev/serial/by-id/usb-SEGGER_J-Link_<serial>-if00" rather than
+        "port <serial>") and works for a path the registry never held: off
+        Linux the harness discovers the port at run time, and nrfdk.py prints
+        it.
+        """
         found = set()
 
         def add(value):
             if isinstance(value, str) and value:
                 found.update((value, value.lower()))
+                found.update(_serial_widths(value))
 
         identities = [
             identity
@@ -143,7 +215,9 @@ class _Run:
                     add(serial)
         for identity in identities:
             for key, value in identity.items():
-                if "serial" in key:
+                # A device path is not a serial: it holds one, and _redact
+                # masks it inside the path, wherever the path came from.
+                if "serial" in key and not str(value).startswith("/"):
                     add(value)
         return found
 
@@ -543,9 +617,10 @@ def _watchdog_section(run: _Run) -> list[str]:
     return lines
 
 
-# Sizes in the Output files table: a reader wants the order of magnitude,
-# and the exact byte count is in run.jsonl.
+# Sizes in the Output files table: the magnitude a reader wants at a glance,
+# and the exact count beside it.
 _UNITS = (("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10))
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 def _size(count: int) -> str:
@@ -567,7 +642,9 @@ def _check_failed(check) -> bool:
         return True
     if check.found is None:
         return False
-    return not check.found if check.kind != "forbidden" else check.found
+    if check.kind == "forbidden":
+        return check.found
+    return not check.found
 
 
 def _checks_cell(saved) -> str:
@@ -584,6 +661,8 @@ def _checks_cell(saved) -> str:
     named = "; ".join(
         f"{check.name}: {check.reason or _not_found(check)}" for check in failed[:3]
     )
+    if len(failed) > 3:
+        named += f"; and {len(failed) - 3} more"
     return f"{counts}: {len(failed)} against the run ({named})"
 
 
@@ -591,6 +670,15 @@ def _not_found(check) -> str:
     if check.kind == "forbidden":
         return f"{check.pattern!r} was found"
     return f"{check.pattern!r} was not found"
+
+
+def _hash_cell(value: str) -> str:
+    """A SHA-256 as a code span, or the value escaped when it is not one.
+
+    A run record is data, so a value that is not a digest must not be able to
+    add a column to the table.
+    """
+    return f"`{value}`" if _SHA256.fullmatch(value) else _cell(value)
 
 
 def _output_files_section(run: _Run) -> list[str]:
@@ -623,7 +711,7 @@ def _output_files_section(run: _Run) -> list[str]:
             lines.append(
                 f"| {_cell(item.file.path)} | {_cell(item.file.stream)} "
                 f"| {_size(item.file.bytes)} "
-                f"| {item.file.lines or ''} | `{item.file.sha256}` "
+                f"| {item.file.lines or ''} | {_hash_cell(item.file.sha256)} "
                 f"| {_cell(_checks_cell(item))} |"
             )
         lines.append("")
@@ -756,15 +844,163 @@ def _output_time(output: Mapping) -> datetime.datetime:
     return _time({"timestamp": received}) if received else _time(output)
 
 
+def _recorded_with_a_cap(outputs: Sequence[Mapping], finished: Mapping) -> bool:
+    """Whether run.jsonl capped this command's output as it was recorded.
+
+    A command whose output passed the record limits leaves a
+    ``command_output_omitted`` record and names its output file in
+    ``command_finished``. Without either, the records hold everything the
+    command printed, which is how a run recorded before the cap was written.
+    """
+    if any(o["event_type"] == "command_output_omitted" for o in outputs):
+        return True
+    # ``output_file`` is one combined file; ``output_files`` is the key the
+    # per-stream files take (#194), so a run recorded by either is read.
+    return bool(finished.get("output_file") or finished.get("output_files"))
+
+
+def _take_chunks(
+    chunks: Sequence[Chunk], *, chars: int, records: int, from_end: bool
+) -> tuple[list[Chunk], list[Chunk]]:
+    """Chunks from one end of ``chunks``, within both limits.
+
+    Returns what was taken and what the record the size limit fell inside
+    leaves behind, which is the output left out next to that end. Taken from
+    the start, the cut moves back to a line boundary where that record has
+    one, so the gap that follows begins on a fresh line; a single line longer
+    than the limit is cut inside instead of dropped whole.
+    """
+    taken: list[Chunk] = []
+    left_out: list[Chunk] = []
+    room = chars
+    for moment, stream, text in chunks:
+        if len(taken) >= records:
+            break
+        if len(text) <= room:
+            taken.append((moment, stream, text))
+            room -= len(text)
+            continue
+        cut = len(text) - room if from_end else room
+        if not from_end:
+            boundary = text.rfind("\n", 0, cut)
+            if boundary >= 0:
+                cut = boundary + 1
+        kept, rest = (
+            (text[cut:], text[:cut]) if from_end else (text[:cut], text[cut:])
+        )
+        if kept:
+            taken.append((moment, stream, kept))
+            if rest:
+                left_out.append((moment, stream, rest))
+        # With nothing kept from it, the record is wholly left out, and the
+        # caller already has it among the records neither end reached.
+        break
+    return taken, left_out
+
+
+def _tail_on_whole_lines(left_out: list[Chunk], tail: list[Chunk]) -> list[Chunk]:
+    """Begin each stream's part of the tail at a line boundary.
+
+    A record boundary is not a line boundary, so the first record of the tail
+    can carry the end of a line whose start was left out, which would render
+    as a whole line of its own. run.jsonl's tail starts at a line boundary
+    for the same reason (``rawlog.CappedOutput.finish``).
+
+    What this drops is appended to ``left_out``, so the caller counts it and
+    stamps the gap where it really ends.
+    """
+    ends = {
+        stream: text[-1]
+        for _moment, stream, text in left_out if text
+    }
+    kept = []
+    for moment, stream, text in tail:
+        # A line left out can run through several of the tail's records, so
+        # this holds until a newline actually arrives.
+        if ends.get(stream, "\n") != "\n":
+            rest_of_it, newline, text = text.partition("\n")
+            if rest_of_it or newline:
+                left_out.append((moment, stream, rest_of_it + newline))
+            if not newline:
+                ends[stream] = rest_of_it[-1:] or ends[stream]
+                continue
+            ends[stream] = "\n"
+            if not text:
+                continue
+        kept.append((moment, stream, text))
+    return kept
+
+
+def _capped_chunks(chunks: Sequence[Chunk]) -> list[Chunk]:
+    """The start and the end of a command's output, with the gap counted.
+
+    The fallback cap of #125: run.jsonl caps each command's output as it is
+    recorded, but a run recorded before that holds all of it, and rendering
+    report.md for one printed megabytes. There is no output file to point at,
+    so the note points at run.jsonl.
+    """
+    total = sum(len(text) for _moment, _stream, text in chunks)
+    if (total <= LEGACY_OUTPUT_HEAD_CHARS + LEGACY_OUTPUT_TAIL_CHARS
+            and len(chunks) <= LEGACY_OUTPUT_HEAD_RECORDS + LEGACY_OUTPUT_TAIL_RECORDS):
+        return list(chunks)
+    head, after_head = _take_chunks(
+        chunks, chars=LEGACY_OUTPUT_HEAD_CHARS,
+        records=LEGACY_OUTPUT_HEAD_RECORDS, from_end=False,
+    )
+    tail, before_tail = _take_chunks(
+        list(reversed(chunks)), chars=LEGACY_OUTPUT_TAIL_CHARS,
+        records=LEGACY_OUTPUT_TAIL_RECORDS, from_end=True,
+    )
+    tail.reverse()
+    # Where the gap is, in arrival order: the rest of the record the head
+    # stopped inside, the records neither end reached, and the start of the
+    # record the tail begins inside. Only the last of these per stream is
+    # read (the character before the tail, and the gap's time); where one
+    # record holds both cuts, its middle is listed twice, so the size of
+    # this is not the size of the gap, which is total less what is kept.
+    left_out = (
+        after_head
+        + list(chunks[len(head):len(chunks) - len(tail)])
+        + before_tail
+    )
+    # The tail can come back empty, when all of it belonged to a line whose
+    # start was left out. run.jsonl's tail does the same, and the harness's
+    # own last word (a timeout, a cancellation, an output sink error) is not
+    # lost by it: the executor begins each of those on a line of its own.
+    tail = _tail_on_whole_lines(left_out, tail)
+    kept = sum(len(text) for _moment, _stream, text in head + tail)
+    if kept >= total:  # one empty record over the record limit
+        return list(chunks)
+    # Stamped where the output left out ends, as a recorded note is (its
+    # ``received``, from ``rawlog.CappedOutput._dropped_at``).
+    moment = left_out[-1][0] if left_out else chunks[-1][0]
+    note = (moment, NOTE, f"{total - kept} more characters of output are in run.jsonl\n")
+    return head + [note] + tail
+
+
+def _output_chunks(outputs: Sequence[Mapping], *, capped: bool) -> list[Chunk]:
+    """One command's output records as capture chunks, in arrival order."""
+    chunks = [
+        (_output_time(o), NOTE, _omitted_text(o["details"]))
+        if o["event_type"] == "command_output_omitted"
+        else (_output_time(o), o["details"].get("stream", "stdout"),
+              o["details"].get("text", ""))
+        for o in outputs
+    ]
+    return chunks if capped else _capped_chunks(chunks)
+
+
 def _command_record(
     started: Mapping, outputs: list[Mapping], finished: Mapping | None, stamp
 ) -> str:
     sd = started["details"]
     fd = finished["details"] if finished else {}
-    # Every command's output records are already capped in run.jsonl
-    # (rawlog.RECORD_*, the rest in output/), so the report shows them all.
-    stdout = "".join(o["details"]["text"] for o in outputs if o["details"].get("stream") == "stdout")
-    stderr = "".join(o["details"]["text"] for o in outputs if o["details"].get("stream") == "stderr")
+    # A command's output records are capped in run.jsonl as they are written
+    # (rawlog.RECORD_*, the rest in output/), so the report shows every record
+    # it kept; one recorded before that cap is capped here instead.
+    chunks = _output_chunks(outputs, capped=_recorded_with_a_cap(outputs, fd))
+    stdout = "".join(text for _moment, stream, text in chunks if stream == "stdout")
+    stderr = "".join(text for _moment, stream, text in chunks if stream == "stderr")
     result = CommandResult(
         tuple(sd.get("argv", [])),
         fd.get("returncode", -1),
@@ -775,12 +1011,7 @@ def _command_record(
         bool(fd.get("cancelled", False)),
     )
     capture = CommandCapture(lambda: _time(started))
-    capture.chunks = [
-        (_output_time(o), NOTE, _omitted_text(o["details"]))
-        if o["event_type"] == "command_output_omitted"
-        else (_output_time(o), o["details"].get("stream", "stdout"), o["details"].get("text", ""))
-        for o in outputs
-    ]
+    capture.chunks = chunks
     capture.finished = _time(finished) if finished else None
     stopped = bool(finished) and finished.get("status") == "stopped"
     record = format_command_record(result, capture, stopped=stopped, stamp=stamp)
@@ -805,7 +1036,7 @@ def _transcript(run: _Run) -> list[str]:
     def close_build_step(event):
         nonlocal build_step
         if build_step is not None:
-            line(event, f"--- {build_step[0]} EXIT: {build_step[1]} ---")
+            line(event, f"--- {build_step['name']} EXIT: {build_step['status']} ---")
             build_step = None
 
     for event in run.events:
@@ -824,8 +1055,10 @@ def _transcript(run: _Run) -> list[str]:
             record = pending.pop(details.get("command_id", ""), None)
             if record is not None:
                 out.append(_command_record(record["started"], record["outputs"], event, stamp).rstrip("\n"))
+            # A run recorded before the build said how each step ended
+            # (build_step_finished) has only its commands to go on.
             if details.get("phase") == "build" and build_step is not None and status != "passed":
-                build_step[1] = status
+                build_step["status"] = status
             continue
         if kind == "run_started":
             run_title = (
@@ -845,9 +1078,21 @@ def _transcript(run: _Run) -> list[str]:
             line(event, "=== BUILD ===")
         elif kind == "build_step_started":
             close_build_step(event)
-            open_step = details.get("step_name", details.get("step_id", ""))
+            open_step = details.get("step_name") or details.get("step_id", "")
             line(event, f"+++ {open_step} +++")
-            build_step = [open_step, "passed"]
+            build_step = {
+                "name": open_step, "status": "passed",
+                "id": details.get("step_id"),
+            }
+            continue
+        elif kind == "build_step_finished":
+            # The step's own outcome, which its commands do not give: a step
+            # may accept a command that exited non-zero. A record for some
+            # other step leaves the open one to be closed as it was before.
+            if build_step is not None and build_step["id"] == details.get("step_id"):
+                build_step = None
+            name = details.get("step_name") or details.get("step_id", "")
+            line(event, f"--- {name} EXIT: {status}{_reason(details)} ---")
             continue
         elif kind == "build_finished":
             close_build_step(event)
@@ -957,7 +1202,7 @@ def _transcript(run: _Run) -> list[str]:
     for record in pending.values():
         out.append(_command_record(record["started"], record["outputs"], None, stamp).rstrip("\n"))
     if build_step is not None and run.events:
-        line(run.events[-1], f"--- {build_step[0]} EXIT: did not finish ---")
+        line(run.events[-1], f"--- {build_step['name']} EXIT: did not finish ---")
     return out
 
 
@@ -974,9 +1219,22 @@ _SERIAL_TOKEN = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{32}(?![0-9A-Fa-f])")
 
 
 def _redact(text: str, serials: Iterable[str]) -> str:
+    # The token rule first: masking a short serial inside a 32-hex token
+    # would leave the rest of that token, which this rule is there to catch.
+    text = _SERIAL_TOKEN.sub(REDACTED, text)
     for serial in sorted(serials, key=len, reverse=True):
-        text = text.replace(serial, REDACTED)
-    return _SERIAL_TOKEN.sub(REDACTED, text)
+        if serial.isdigit() and len(serial) < _SERIAL_MIN_DIGITS:
+            # Short enough to read as an ordinary number, so it is masked
+            # only where it stands alone and not inside a longer one.
+            text = re.sub(rf"(?<!\d){re.escape(serial)}(?!\d)", REDACTED, text)
+        else:
+            # Anywhere it appears, which is how the serial inside a device
+            # path is masked: a probe's name on macOS
+            # (/dev/cu.usbmodem<serial><interface>) puts a digit right after
+            # it. A serial this long inside a longer number would be masked
+            # too, which costs a reader nothing.
+            text = text.replace(serial, REDACTED)
+    return text
 
 
 def render_run(events: Sequence[Mapping], *, redact_serials: bool = False, transcript: bool = True) -> str:

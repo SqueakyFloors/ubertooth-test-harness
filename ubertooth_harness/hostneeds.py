@@ -12,6 +12,8 @@ One declaration, ``Needs``, sits on a case (``CommandCase.needs``,
   build fails unless both are in the run prefix, so their cases are required;
   installed Linux tools have them when they are on the test PATH;
 - the Python tools build: ``run-suite --build --with-python``;
+- the host programs a case runs that nothing here installs (``HOST_TOOLS``,
+  tshark so far): present on the host's PATH or not;
 - a firmware build: the run's "test build" image (``--build --with-firmware``
   or ``--artifact "test build=PATH"``).
 
@@ -34,6 +36,9 @@ from typing import Iterable, Mapping, Sequence
 PLATFORMS = ("linux", "macos")
 # Built by the fork only when libbluetooth is found (BlueZ, Linux only).
 BLUEZ_TOOLS = ("ubertooth-scan", "ubertooth-follow")
+# Programs a case runs that are not the fork's and that the harness does not
+# install: present or not on the host (#148).
+HOST_TOOLS = ("tshark",)
 TEST_BUILD_LABEL = "test_build"
 _PLATFORM_NAMES = {"linux": "Linux", "macos": "macOS"}
 
@@ -50,6 +55,8 @@ class Needs:
     python_tools: bool = False
     # The run's firmware test build ("test build" image).
     firmware_build: bool = False
+    # Host programs it runs that nothing here installs (HOST_TOOLS).
+    host_tools: tuple[str, ...] = ()
 
     def __post_init__(self):
         unknown = [item for item in self.platforms if item not in PLATFORMS]
@@ -58,16 +65,20 @@ class Needs:
         other = [tool for tool in self.bluez_tools if tool not in BLUEZ_TOOLS]
         if other:
             raise ValueError(f"not a BlueZ-only tool: {', '.join(other)}")
+        unknown_tools = [tool for tool in self.host_tools if tool not in HOST_TOOLS]
+        if unknown_tools:
+            raise ValueError(f"not a known host tool: {', '.join(unknown_tools)}")
 
     def __bool__(self) -> bool:
         return bool(self.platforms or self.bluez_tools or self.python_tools
-                    or self.firmware_build)
+                    or self.firmware_build or self.host_tools)
 
     def describe(self) -> str:
         parts = []
         if self.platforms:
             parts.append("platform " + " or ".join(self.platforms))
         parts += [f"{tool} (BlueZ)" for tool in self.bluez_tools]
+        parts += [f"{tool} installed" for tool in self.host_tools]
         if self.python_tools:
             parts.append("Python tools build")
         if self.firmware_build:
@@ -96,6 +107,8 @@ class HostCapabilities:
     bluez_tools: frozenset | None = None
     python_tools: bool | None = None
     firmware_build: bool | None = None
+    # The HOST_TOOLS this host has; None: not known yet.
+    host_tools: frozenset | None = None
     # Where the tools come from: "build", "installed tools", or "not known".
     basis: str = "not known"
 
@@ -109,6 +122,7 @@ class HostCapabilities:
             "bluez_tools": known(self.bluez_tools),
             "python_tools": self.python_tools,
             "firmware_build": self.firmware_build,
+            "host_tools": known(self.host_tools),
         }
 
     def describe(self) -> str:
@@ -116,9 +130,12 @@ class HostCapabilities:
             return "not known" if value is None else "yes" if value else "no"
         tools = ("not known" if self.bluez_tools is None
                  else ", ".join(sorted(self.bluez_tools)) or "none")
+        host_tools = ("not known" if self.host_tools is None
+                      else ", ".join(sorted(self.host_tools)) or "none")
         return (f"{self.host} ({self.platform}, {self.basis}): BlueZ tools {tools}; "
                 f"Python tools build {flag(self.python_tools)}; "
-                f"firmware build {flag(self.firmware_build)}")
+                f"firmware build {flag(self.firmware_build)}; "
+                f"host tools {host_tools}")
 
 
 def _platform_name(platform: str) -> str:
@@ -148,6 +165,10 @@ def unmet(needs: Needs, capabilities: HostCapabilities | None) -> str:
     if needs.firmware_build and capabilities.firmware_build is False:
         return ("needs a firmware build (run-suite --build --with-firmware, or "
                 "--artifact \"test build=PATH\")")
+    if capabilities.host_tools is not None:
+        for tool in needs.host_tools:
+            if tool not in capabilities.host_tools:
+                return f"{tool} is not installed on {capabilities.host}"
     return ""
 
 
@@ -155,6 +176,12 @@ def platform_capabilities(host: str, platform: str) -> HostCapabilities:
     """What the platform alone decides: no BlueZ tools except on Linux."""
     return HostCapabilities(
         host, platform, None if platform == "linux" else frozenset(), basis="not known")
+
+
+def _installed_host_tools() -> frozenset:
+    """The HOST_TOOLS on this host, from the environment's own PATH: that is
+    what a case's command finds when it runs."""
+    return frozenset(tool for tool in HOST_TOOLS if shutil.which(tool))
 
 
 def _installed_bluez(platform: str, path: str | None) -> frozenset:
@@ -181,6 +208,7 @@ def planned_capabilities(
         host, platform, bluez,
         python_tools=bool(build and with_python),
         firmware_build=bool(build and with_firmware) or TEST_BUILD_LABEL in labels,
+        host_tools=_installed_host_tools(),
         basis="build" if build else "installed tools",
     )
 
@@ -205,6 +233,7 @@ def run_capabilities(
         host, platform, bluez,
         python_tools=bool(build and build.get("python")),
         firmware_build=TEST_BUILD_LABEL in labels,
+        host_tools=_installed_host_tools(),
         basis="build" if build else "installed tools",
     )
 

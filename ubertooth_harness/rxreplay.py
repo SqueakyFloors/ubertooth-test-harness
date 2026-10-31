@@ -42,12 +42,6 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-if __package__ in (None, ""):
-    # Run as a script: make the package importable for the check helpers.
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from ubertooth_harness.outputfiles import text_lines  # noqa: E402
-
 # --- Bluetooth baseband encoding ---------------------------------------------
 
 # The 64-bit PN sequence p0..p63 (bit i is p_i) that the sync word is
@@ -293,6 +287,21 @@ UAP_LINE = re.compile(r"UAP = 0x(?P<uap>[0-9a-f]+) found after \d+ total packets
 # libbtbb works the UAP out from the packets' CRCs and says so. Since libbtbb
 # bf878df2 it says it on standard error, like every note a library makes, so
 # the line cannot land in a capture written to standard output.
+def text_lines(source):
+    """``source``'s lines: a line source as given, or a string split the way
+    a saved output file is read (outputfiles.split_lines).
+
+    Spelled out here rather than imported, because this module also runs as a
+    script by path, where the package is not importable.
+    """
+    if not isinstance(source, str):
+        return source
+    lines = [line.rstrip("\r") for line in source.split("\n")]
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 ANY_UAP_NOTE = UAP_LINE.pattern
 
 

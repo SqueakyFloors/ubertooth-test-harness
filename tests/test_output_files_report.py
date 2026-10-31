@@ -1,10 +1,7 @@
 """The Output files table in report.md, and the records it is built from (#187)."""
 
-import json
-from pathlib import Path
 import unittest
 
-from ubertooth_harness.events import RUN_LOG
 from ubertooth_harness.outputfiles import OUTPUT_DIR, OutputFile, saved_output
 from ubertooth_harness.report import render_run
 STDOUT_FILE = f"{OUTPUT_DIR}/002-command-1.stdout.log"
@@ -144,6 +141,43 @@ class ReportTests(unittest.TestCase):
         report = render_run(events, transcript=False)
         self.assertIn("1 forbidden: 1 against the run", report)
         self.assertIn("was found", report)
+
+    def test_a_file_from_the_build_is_grouped_under_its_phase(self):
+        events = [
+            event(1, "run_started", {"plan_name": "fast"}, "running"),
+            event(2, "command_finished", {
+                "phase": "build", "step_id": "host-build",
+                "command_id": "build-host-build", "returncode": 2,
+                "output_files": [file_record(f"{OUTPUT_DIR}/build-host-build.stderr.log",
+                                             "stderr", "error: no\n")],
+            }, "failed"),
+            event(3, "run_finished", {"failure_reason": "build failed"}, "failed"),
+        ]
+        report = render_run(events, transcript=False)
+        self.assertIn("### build", report)
+        self.assertIn("build-host-build.stderr.log", report)
+
+    def test_a_record_whose_hash_is_not_one_cannot_break_the_table(self):
+        events = [e for e in run_events() if e["event_type"] != "output_checks"]
+        for e in events:
+            for file in (e["details"].get("output_files")
+                         or e["details"].get("files") or []):
+                file["sha256"] = "ab|cd"
+        report = render_run(events, transcript=False)
+        for line in report.splitlines():
+            if "stdout.log" in line and line.startswith("|"):
+                # The pipe is escaped, so the row still has six cells.
+                self.assertIn(r"ab\|cd", line)
+                self.assertEqual(7, line.replace(r"\|", "").count("|"), line)
+
+    def test_two_records_that_describe_one_path_differently_are_both_listed(self):
+        events = run_events()
+        events.insert(5, event(5, "output_files", {
+            "phase": "test", "invocation_id": "002",
+            "files": [file_record(CAPTURE_FILE, "capture", "\xd4\xc3", lines=0)],
+        }))
+        report = render_run(events, transcript=False)
+        self.assertEqual(2, report.count(f"| {CAPTURE_FILE} | capture |"))
 
     def test_a_run_with_no_saved_files_has_no_section(self):
         self.assertNotIn("## Output files",

@@ -207,6 +207,30 @@ class ToolTests(unittest.TestCase):
             with self.assertRaisesRegex(nrfdk.NrfDkError, "bad Intel HEX record"):
                 nrfdk.check_image(broken)
 
+    def test_check_image_is_a_command_of_its_own_and_opens_no_board(self):
+        """`nrfdk.py check-image` is what scripts/ci.sh firmware-dk runs on a
+        fresh build, so it must need no J-Link and no serial port."""
+        def no_tools(argv, **_kwargs):  # pragma: no cover - must not run
+            raise AssertionError(f"check-image ran {argv}")
+
+        with tempfile.TemporaryDirectory() as directory:
+            good = hex_file(Path(directory) / "zephyr.hex",
+                            nrfdk.FIRMWARE_VERSION.encode())
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = nrfdk.main(["check-image", str(good)], run=no_tools)
+            self.assertEqual(0, code, err.getvalue())
+            self.assertIn(f"firmware version: {nrfdk.FIRMWARE_VERSION}", out.getvalue())
+            self.assertIn(f"image: {good}", out.getvalue())
+
+            old = hex_file(Path(directory) / "old.hex", b"utdk-0.0.1")
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(err):
+                code = nrfdk.main(["check-image", str(old)], run=no_tools)
+            self.assertEqual(1, code)
+            self.assertIn("does not contain firmware version", err.getvalue())
+
     def test_firmware_and_driver_versions_agree(self):
         header = (FIRMWARE / "src" / "roles.h").read_text()
         match = re.search(r'#define UTDK_FW_VERSION "([^"]+)"', header)

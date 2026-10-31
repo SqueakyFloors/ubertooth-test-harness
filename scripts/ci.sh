@@ -5,6 +5,7 @@
 #   scripts/ci.sh build   build the fork's host tools into a temporary prefix
 #   scripts/ci.sh all     both
 #   scripts/ci.sh libbtbb-pin   only the build's libbtbb pin check
+#   scripts/ci.sh firmware-dk   build the nRF52840 DK role firmware (needs docker)
 #
 # Run from the repository root. PYTHON selects the interpreter that runs
 # bootstrap.py (default python3). UBERTOOTH_SOURCE / LIBBTBB_SOURCE point the
@@ -178,12 +179,91 @@ else:
 EOF
 }
 
+# The nRF52840 DK role firmware (firmware/nrf52840dk), which nothing else
+# compiles: a source change that does not build used to reach main unnoticed
+# (#147). It is built with the nRF Connect SDK version the firmware pins
+# (firmware/nrf52840dk/NCS_VERSION), in Nordic's own toolchain image for that
+# version, so neither CI nor a developer installs the 6 GB SDK toolchain to
+# compile it. Needs docker; NCS_WORKSPACE keeps the SDK workspace (several
+# gigabytes) across runs, and NCS_IMAGE replaces the image.
+#
+# This is not part of `all`: the image and the workspace are gigabytes and the
+# firmware changes rarely, so the workflow runs it on a change under
+# firmware/nrf52840dk, on a schedule, and by hand.
+NCS_URL=https://github.com/nrfconnect/sdk-nrf
+NCS_BOARD=nrf52840dk/nrf52840
+DK_FIRMWARE=firmware/nrf52840dk
+
+run_firmware_dk() {
+    # The physical path: docker mounts and `west build -s` must not depend on
+    # a symlinked parent (/tmp on macOS).
+    repo=$(pwd -P)
+    version=$(cat "$DK_FIRMWARE/NCS_VERSION")
+    image=${NCS_IMAGE:-ghcr.io/nrfconnect/sdk-nrf-toolchain:$version}
+    workspace=${NCS_WORKSPACE:-$WORK/ncs}
+    build=$workspace/utdk-build
+    hex=$build/zephyr/zephyr.hex
+    stamp=$workspace/.ncs-version
+    mkdir -p "$workspace"
+
+    # Every toolchain command runs in that image, which takes one shell
+    # string: bash is its entry point and loads the toolchain environment
+    # itself (BASH_ENV). The repository is mounted read-only, so a build
+    # cannot write into the working tree, and everything written goes to the
+    # workspace. git is told the mounted workspace is safe to use, since the
+    # container is root and the directory belongs to whoever ran this.
+    ncs() {
+        docker run --rm \
+            -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory \
+            -e GIT_CONFIG_VALUE_0='*' \
+            -v "$repo:$repo:ro" -v "$workspace:$workspace" -w "$workspace" \
+            "$image" "$1"
+    }
+
+    step "nRF Connect SDK $version toolchain ($image)"
+    ncs 'west --version; cmake --version | head -1; arm-zephyr-eabi-gcc --version | head -1'
+
+    step "nRF Connect SDK $version workspace in $workspace"
+    if [ -d "$workspace/.west" ]; then
+        # A workspace made for another version keeps that version's manifest
+        # revision, so reusing it would build sources the firmware does not
+        # pin. Say so instead of deleting someone's workspace.
+        kept=$([ -f "$stamp" ] && cat "$stamp" || echo unknown)
+        if [ "$kept" != "$version" ]; then
+            echo "error: the workspace in $workspace was made for nRF Connect SDK" \
+                 "$kept, not $version; remove it or set NCS_WORKSPACE elsewhere" >&2
+            return 1
+        fi
+        echo "reusing the $version workspace that is there"
+    else
+        ncs "west init -m $NCS_URL --mr $version ."
+        echo "$version" > "$stamp"
+    fi
+    # --narrow with a depth of one: the manifest's revisions, not every ref
+    # and the whole history of forty repositories.
+    ncs 'west update --narrow -o=--depth=1'
+
+    step "build $DK_FIRMWARE for $NCS_BOARD"
+    ncs "west build -p always --no-sysbuild -b $NCS_BOARD -d $build -s $repo/$DK_FIRMWARE"
+
+    # The same check the harness makes before it flashes a board: an image
+    # that does not carry the pinned version string would be left in place by
+    # `nrfdk.py ensure` on a board that already runs the old one.
+    step "the image carries the pinned firmware version"
+    ls -l "$hex"
+    # The harness package runs in its own Python 3.12 environment only, as
+    # run_build does it.
+    [ -x .venv/bin/python ] || "$PYTHON" bootstrap.py
+    .venv/bin/python -m ubertooth_harness.nrfdk check-image "$hex"
+}
+
 case "${1:-}" in
     test) run_test ;;
     build) run_build ;;
     # Only the pin check of the build, against UBERTOOTH_SOURCE (tests).
     libbtbb-pin) check_libbtbb_pin "${UBERTOOTH_SOURCE:?UBERTOOTH_SOURCE is required}" ;;
+    firmware-dk) run_firmware_dk ;;
     all) run_test; run_build ;;
-    *) echo "usage: scripts/ci.sh test|build|all|libbtbb-pin" >&2; exit 2 ;;
+    *) echo "usage: scripts/ci.sh test|build|all|libbtbb-pin|firmware-dk" >&2; exit 2 ;;
 esac
 step "${1} passed"

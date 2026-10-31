@@ -67,6 +67,10 @@ from ubertooth_harness.stateful import (
 )
 from ubertooth_harness import transitions
 
+# File records per output_files event; each is about 180 bytes, so a batch
+# stays well inside the event limit (events.OUTPUT_CHECKS_MAX_BYTES).
+CASE_FILES_PER_RECORD = 100
+
 
 @dataclass(frozen=True)
 class SequencerSummary:
@@ -279,19 +283,34 @@ class NamedTestSequencer:
         case_id: str,
         manifest: RunManifest,
         output_dir: Path,
+        monitor: WatchdogMonitor | None,
     ) -> tuple[str, str]:
-        """Run flash reliability as one case; return (failure, status)."""
+        """Run flash reliability as one case; return (failure, status).
+
+        ``monitor`` is the run's watchdog monitor, or None when the run has
+        nothing to read. A soak is one case, so the reads the run makes
+        between cases never come round while it writes; the flash runner
+        gives the monitor a turn between its writes instead.
+        """
         owner = {
             "phase": "test",
             "invocation_id": invocation.invocation_id,
             "case_id": case_id,
         }
+
+        def read_watchdog() -> None:
+            # Between two writes, so this read runs beside no other command.
+            # What it finds reaches the test's record through the read after
+            # the test, as a read between cases does.
+            monitor.poll_if_due(invocation)
+
         publisher.emit("check_started", "running", {**owner, "case_name": case.name})
         try:
             request = self._flash_request(case, invocation, manifest)
             summary = FlashReliabilityRunner(self.executor, clock=self.clock).run(
                 request, publisher, cancellation=token, owner=owner,
                 output_dir=output_dir,
+                between_flashes=None if monitor is None else read_watchdog,
             )
             failure = "" if summary.passed else f"{case.name}: {summary.failure_reason}"
             status = summary.status
@@ -481,8 +500,9 @@ class NamedTestSequencer:
         A command whose output passes the per-command record limits
         (rawlog.RECORD_*) keeps its first and last output records in
         run.jsonl, with a ``command_output_omitted`` record between them, and
-        its full output in ``output/<command id>.log``; ``command_finished``
-        names the file and summarizes what was left out.
+        each of its streams in full in ``output/<command id>.<stream>.log``;
+        ``command_finished`` names the files and summarizes what was left
+        out.
         """
         details = dict(owner)
         details.update({"command_id": command_id, "argv": list(argv)})
@@ -549,10 +569,14 @@ class NamedTestSequencer:
                 found, stream, relative_to=output_dir,
                 count_lines=stream == TARGET_SERIAL_STREAM,
             ))
-        if files:
+        # A case that wrote many files would not fit in one record, and an
+        # event over the limit would abort the run after its cleanup had
+        # already finished, so they go in batches.
+        for start in range(0, len(files), CASE_FILES_PER_RECORD):
+            batch = files[start:start + CASE_FILES_PER_RECORD]
             publisher.emit(
                 "output_files", "passed",
-                {**owner, "files": [saved.to_dict() for saved in files]},
+                {**owner, "files": [saved.to_dict() for saved in batch]},
                 max_bytes=OUTPUT_CHECKS_MAX_BYTES,
             )
 
@@ -571,16 +595,20 @@ class NamedTestSequencer:
             output = result.output if result is not None else None
             if not isinstance(output, CommandOutput) or not output.checks:
                 continue
+            # The command's own files are in its command_finished record,
+            # and each check names the files it read, so this record carries
+            # the checks only.
             publisher.emit(
                 "output_checks",
                 "failed" if any(c.reason for c in output.checks) else "passed",
                 {
                     **output.owner,
-                    "files": [saved.to_dict() for saved in output.files],
                     "checks": [check.to_dict() for check in output.checks],
                 },
                 max_bytes=OUTPUT_CHECKS_MAX_BYTES,
             )
+            # Emptied so a second call for the same command records nothing:
+            # the preflight asks twice when its fallback command runs.
             output.checks.clear()
 
     def _run_state_step(
@@ -1437,7 +1465,7 @@ class NamedTestSequencer:
                             if isinstance(case, FlashCase):
                                 failure_text, flash_status = self._run_flash_case(
                                     publisher, token, invocation, case, case_id, manifest,
-                                    output_dir,
+                                    output_dir, monitor,
                                 )
                                 if failure_text:
                                     unsafe = True
