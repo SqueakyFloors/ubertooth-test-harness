@@ -20,9 +20,10 @@ USBHub3+, 1 to 3 on a StarTech managed hub.
 
 It holds the harness's host power/firmware lock while it switches, so it can
 never overlap a run that is flashing or switching power, and it refuses a port
-whose registered device someone is holding, so it cannot cut power under
-another run or another person. `--force` switches anyway, for a device that is
-wedged and whose holder has given up on it; it names the holder either way.
+whose registered device someone is holding, naming the holder, so it cannot
+cut power under another run or another person. `--force` switches without
+holding the device, for one that is wedged and whose holder has given up on
+it; it cannot then say who holds it.
 
 Switch only the port of the device you are recovering. Taking a port down
 takes its device off the bus, and on a host near its USB endpoint limit a
@@ -60,7 +61,7 @@ try:
     )
     from ubertooth_harness.resources import FileResourceRegistry, RegistryError
 
-    from _bench import board as device_board
+    from _bench import bench_lock_board, board as device_board
 except ImportError:  # run from outside the harness environment
     sys.exit(
         "hub-port: run this from the harness environment "
@@ -148,33 +149,42 @@ def describe(state) -> str:
 
 
 def switch(controller, port: int, action: str, seconds: float, sleep=time.sleep) -> None:
-    """Switch the port, and never leave a cycle's port off because of an error.
+    """Switch the port, and never leave a cycle's port off.
 
-    A failed power-on in the middle of a cycle is the one failure that leaves
-    the bench worse than it found it, so it is retried once and both outcomes
-    are reported.
+    Once VBUS is off, every way out of this function goes through the restore:
+    a refused write, a failed read-back, or a Ctrl-C during the wait. A port
+    left off is the one failure that leaves the bench worse than it was found.
     """
-    if action == "cycle":
-        controller.set_power_enabled(port, False)
+    if action != "cycle":
+        controller.set_power_enabled(port, action == "on")
+        # The driver reads every write back, so this wait is only for the
+        # device: VBUS and current need a moment to mean anything.
+        sleep(SETTLE_S)
+        return
+
+    controller.set_power_enabled(port, False)
+    on = False
+    try:
         sleep(seconds)
-        try:
-            controller.set_power_enabled(port, True)
-        except PowerControllerError as error:
+        controller.set_power_enabled(port, True)
+        on = True
+    finally:
+        if not on:
             try:
                 controller.set_power_enabled(port, True)
-            except PowerControllerError as again:
-                raise PowerControllerError(
-                    f"port {port} is OFF and could not be switched back on: "
-                    f"{error}; the second attempt failed too: {again}"
-                ) from error
-            raise PowerControllerError(
-                f"port {port} took two attempts to switch back on and is now "
-                f"on; the first failed: {error}"
-            ) from error
-    else:
-        controller.set_power_enabled(port, action == "on")
-    # The driver reads every write back, so this wait is only for the device:
-    # VBUS and current need a moment to mean anything.
+                print(
+                    f"note: port {port} was switched back on after the cycle "
+                    "did not finish",
+                    file=sys.stderr,
+                )
+            except PowerControllerError as error:
+                # Reported, not raised: whatever stopped the cycle is the more
+                # useful thing to let through, and raising here would hide it.
+                print(
+                    f"error: port {port} is OFF and could not be switched "
+                    f"back on: {error}",
+                    file=sys.stderr,
+                )
     sleep(SETTLE_S)
 
 
@@ -198,7 +208,14 @@ def main(argv: list[str] | None = None, *, sleep=time.sleep) -> int:
         # later switch leave a window in which a run can take the device and
         # have its power cut. An empty port has nothing to hold.
         device = device_on_port(registry, resource.alias, args.port)
-        boards = [] if device is None or args.force else [device_board(device)]
+        boards = []
+        if device is not None and not args.force:
+            # Both of its lock names, exactly as `hold` takes them, so a bench
+            # script holding either one is met here too.
+            boards = [device_board(device)]
+            second = bench_lock_board(device)
+            if second is not None:
+                boards.append(second)
         if device is not None and args.force:
             print(
                 f"note: switching port {args.port} without holding "
@@ -241,6 +258,9 @@ def main(argv: list[str] | None = None, *, sleep=time.sleep) -> int:
         )
     except PowerControllerError as error:
         return _fail(f"{resource.alias}: {error}")
+    except KeyboardInterrupt:
+        # The port was restored on the way out; say so, not a traceback.
+        return _fail("canceled")
     return 0
 
 

@@ -64,6 +64,9 @@ REGISTRY = textwrap.dedent(
         identity:
           jlink serial: "{JLINK}"
           BLE address: "C0:00:00:00:00:01"
+        power:
+          controller: Hub0
+          port: 5
       ESP0:
         type: ESP32 Classic peer
         attached to: Host_Linux
@@ -595,7 +598,21 @@ class HubPortSwitches(Bench):
         self.assertEqual(0, status)
         self.assertTrue(seen["host_lock"].get("held"))
 
-    def test_a_cycle_whose_power_on_fails_tries_again_to_leave_the_port_on(self):
+    def test_an_interrupted_cycle_still_leaves_the_port_on(self):
+        """Ctrl-C in the wait must not leave a device without power."""
+        def interrupt(_seconds):
+            raise KeyboardInterrupt
+
+        self.controller.connect()
+        with self.assertRaises(KeyboardInterrupt), redirect_stderr(io.StringIO()):
+            hub_port.switch(self.controller, 4, "cycle", 5.0, sleep=interrupt)
+        self.assertTrue(self.controller.powered[4], "the port was left off")
+        self.assertEqual(
+            [("power", 4, False), ("power", 4, True)], self.controller.calls
+        )
+
+    def test_a_cycle_whose_power_on_fails_is_retried_and_reported(self):
+        """The port ends on, and the write's own error is what comes out."""
         from ubertooth_harness.power import PowerControllerError
 
         attempts = []
@@ -609,9 +626,11 @@ class HubPortSwitches(Bench):
 
         self.controller.connect()
         self.controller.set_power_enabled = flaky
-        with self.assertRaises(PowerControllerError) as caught:
+        err = io.StringIO()
+        with self.assertRaises(PowerControllerError) as caught, redirect_stderr(err):
             hub_port.switch(self.controller, 4, "cycle", 0.0, sleep=lambda _s: None)
-        self.assertIn("took two attempts", str(caught.exception))
+        self.assertIn("write refused", str(caught.exception))
+        self.assertIn("switched back on", err.getvalue())
         self.assertTrue(self.controller.powered[4], "the port was left off")
 
     def test_a_cycle_that_cannot_power_on_at_all_says_the_port_is_off(self):
@@ -624,11 +643,11 @@ class HubPortSwitches(Bench):
 
         self.controller.connect()
         self.controller.set_power_enabled = never_on
-        with self.assertRaises(PowerControllerError) as caught:
+        err = io.StringIO()
+        with self.assertRaises(PowerControllerError), redirect_stderr(err):
             hub_port.switch(self.controller, 4, "cycle", 0.0, sleep=lambda _s: None)
-        message = str(caught.exception)
-        self.assertIn("is OFF", message)
-        self.assertIn("second attempt failed", message)
+        self.assertIn("is OFF", err.getvalue())
+        self.assertFalse(self.controller.powered[4])
 
     def test_it_refuses_a_port_whose_device_someone_holds(self):
         """UT0 is mapped to port 3 in the test registry.
@@ -670,6 +689,21 @@ class HubPortSwitches(Bench):
         registry = self.load_registry()
         peer = registry.get("ESP0")
         self.assertEqual(f"esp32-{BRIDGE}", hub_port.device_board(peer).key)
+
+    def test_a_held_bench_lock_name_also_prevents_switching(self):
+        """A bench script holding only the older name must be met here too."""
+        holder = leases.acquire(
+            [leases.Board("DK0 (bench lock)", JLINK)],
+            leases.holder_info(run_id=None, owner="bob", purpose="a DK session"),
+            directory=self.leases,
+            external_template=self.template,
+        )
+        self.addCleanup(holder.release)
+        # DK0 is mapped to port 5 in the registry below.
+        status, _, err = self.run_hub_port(["Hub0", "cycle", "5"])
+        self.assertEqual(2, status)
+        self.assertEqual([], self.controller.calls)
+        self.assertIn("bob", err)
 
     def test_force_switches_a_held_port_and_says_so(self):
         holder = leases.acquire(
