@@ -716,6 +716,14 @@ full power", and the weak-link suite above tightens it further. An occasional
 ([ubertooth#677](https://github.com/SqueakyFloors/ubertooth/issues/677)). The
 test needs a second board, so it cannot run on a single-board host.
 
+The `range-weak-link` suite fails on fork main today, at the step that asserts
+`-n` prints nothing on standard output: a repeater slow enough to miss the
+first progress interval makes `-n` print `waiting for the repeater...` there
+instead of on standard error
+([ubertooth#1026](https://github.com/SqueakyFloors/ubertooth/issues/1026)). A
+repeater at bench distance answers too quickly to reach that path, which is
+why only the weak-link run shows it. The suite passes once that is fixed.
+
 ## BLE monitor
 
 **What it does.** Nothing yet: a catalog entry for a bounded BLE monitoring
