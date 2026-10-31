@@ -53,6 +53,13 @@ one, so a short name can never quietly select the wrong device.
 devices with per-device `flock` files keeps both sides honest: every hold
 takes that file too. Point it at the bench's existing lock files.
 
+An Ubertooth's lock file is named after its serial. A DK's and a peer's are
+named after the harness's lease key for them (`nrf52840dk-<serial without
+leading zeros>`, `esp32-<serial>`), because that is what a harness run takes.
+A bench script that still names such a lock after the plain serial would
+otherwise not exclude a harness run, so `hold` takes **both** names for those
+two types. Nothing has to be renamed on a bench for this to be safe.
+
 ## `hub-port`
 
 Switches one port of a registered USB power controller, which is the manual

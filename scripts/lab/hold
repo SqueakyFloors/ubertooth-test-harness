@@ -75,6 +75,22 @@ def lock_key(resource) -> str:
     )
 
 
+def plain_serial(resource) -> str:
+    """The serial a bench's own scripts name a device's lock file after.
+
+    An Ubertooth's lease key is its serial, so the two names are the same. A
+    DK's and a peer's are not: the harness names their locks after the lease
+    key (`nrf52840dk-<serial without leading zeros>`, `esp32-<serial>`) while
+    a bench's own scripts may still use the serial as registered. Both names
+    are taken below, so a holder of either kind still excludes the other.
+    """
+    for key in ("jlink serial", "bridge serial"):
+        value = str(resource.identity.get(key, "") or "").strip().lower()
+        if value:
+            return value
+    return ""
+
+
 def _identity_values(resource) -> list[str]:
     """The serials of a resource, as a bench note or a tool would print them."""
     values = []
@@ -227,14 +243,22 @@ def main(argv: list[str] | None = None) -> int:
     # Devices the harness cannot lease yet are held here instead, so a command
     # can hold a mixed set in one go.
     held_here = [r for r in resources if r.type not in leases.LEASED_TYPES]
+    boards = [leases.Board(r.alias, keys[r.alias]) for r in held_here]
+    # Plus the bench's older lock name for every device whose lease key is not
+    # its serial, which `ubertooth-harness lease` does not know about.
+    boards += [
+        leases.Board(f"{r.alias} (bench lock)", serial)
+        for r in resources
+        for serial in (plain_serial(r),)
+        if serial and serial != keys[r.alias]
+    ]
     inner = (
         harness_lease_argv(args, [r.alias for r in leasable], command)
         if leasable else list(command)
     )
-    if not held_here:
+    if not boards:
         return leases.exit_status(subprocess.call(inner))
 
-    boards = [leases.Board(r.alias, keys[r.alias]) for r in held_here]
     try:
         template = leases.external_lock_template(args.external_board_lock)
         with leases.acquire(

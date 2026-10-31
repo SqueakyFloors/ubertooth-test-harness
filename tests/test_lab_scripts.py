@@ -348,6 +348,41 @@ class HoldRuns(Bench):
         self.assertEqual(0, status)
         self.assertEqual("busy", marker.read_text())
 
+    def test_both_lock_names_are_taken_for_a_device_whose_key_is_not_its_serial(self):
+        """A bench script using the older plain-serial name must still be excluded."""
+        for device, paths in (
+            ("ESP0", (f"board-esp32-{BRIDGE}.lock", f"board-{BRIDGE}.lock")),
+            ("DK0", (f"board-nrf52840dk-{int(JLINK)}.lock", f"board-{JLINK}.lock")),
+        ):
+            with self.subTest(device=device):
+                checks = "\n".join(
+                    f"out.append(busy({str(self.locks / name)!r}))" for name in paths
+                )
+                script = (
+                    "import fcntl, pathlib\n"
+                    "def busy(path):\n"
+                    "    fd = open(path, 'a+')\n"
+                    "    try:\n"
+                    "        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+                    "    except OSError:\n"
+                    "        return 'busy'\n"
+                    "    return 'free'\n"
+                    "out = []\n"
+                    f"{checks}\n"
+                    f"pathlib.Path({str(self.root / (device + '.txt'))!r})"
+                    ".write_text(' '.join(out))\n"
+                )
+                status, _, err = self.run_hold(device, [sys.executable, "-c", script])
+                self.assertEqual(0, status, err)
+                self.assertEqual(
+                    "busy busy", (self.root / f"{device}.txt").read_text()
+                )
+
+    def test_an_ubertooth_needs_only_one_lock_name(self):
+        registry = self.load_registry()
+        board = registry.get("UT0")
+        self.assertEqual("", hold.plain_serial(board))  # no second name to take
+
     def test_a_peer_is_held_here_and_its_external_lock_is_taken(self):
         external = self.locks / f"board-esp32-{BRIDGE}.lock"
         script = (
