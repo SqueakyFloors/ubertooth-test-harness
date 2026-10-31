@@ -681,12 +681,12 @@ ran rather than just showing what `-r` left behind. The responder's LEDs are
 read while it repeats, before the sender starts and again after the test, so a
 failure tells a wedged repeater from a wedged sender.
 
-**Hardware and arguments.** Two Ubertooths as `sender` and `responder`, both
-required as explicit aliases with full 32-hex-digit serials, and `host:` must
-name one host rather than `each`. `allow RF transmission: true` is required:
-both boards transmit, the sender at every PA level up to 0 dBm. `maximum PA
-level:` (0-7, default 7) is the highest level the plan accepts for a pass.
-Guarded.
+**Hardware and arguments.** Two Ubertooths as `sender` and `responder`, each
+named by an explicit alias or chosen by RF placement, and both needing a full
+32-hex-digit serial in the registry either way. `host:` must name one host
+rather than `each`. `allow RF transmission: true` is required: both boards
+transmit, the sender at every PA level up to 0 dBm. `maximum PA level:` (0-7,
+default 7) is the highest level the plan accepts for a pass. Guarded.
 
 **Expected outcome.** One case of 35 steps. It passes when the sender's `-m`
 reports four result lines with request and reply PA levels at or below
@@ -696,12 +696,50 @@ at 2441 MHz once the test ends by itself; `-S` returns the repeater to idle;
 and every setting of both boards is restored. A reply that differs from the
 request fails with the byte and the field it belongs to named.
 
-**Known limits.** The boards sit centimeters apart on a bench, so a working
-link gets through at a low PA level and a pass at level 0 says little about
-range. What `maximum PA level` buys is a tighter bound than "it worked at full
-power". An occasional `mismatch on byte 0` is a known fork behavior
+**Weak-link responder.** `range.yaml`'s second suite, `range-weak-link`,
+chooses both boards by RF placement instead of by alias: the responder behind
+an attenuator (`min_attenuation_db: 20`, `max_attenuation_db: 20`,
+`antenna: true`) and the sender in the open (`max_attenuation_db: 0`,
+`antenna: true`), which also keeps the roles apart
+on a bench whose default board is the attenuated one. Because the step names
+one host, a bench with no such board fails planning, with the requirement and
+each board's placement in the message.
+
+Its `maximum PA level` is the same 3 the ordinary suite sets. That is the
+bound this test already carries on this bench rather than a figure taken from
+the weak-link runs: a responder a meter away behind 20 dB answered a sender in
+the open in five round trips whose ten PA levels, a request and a reply each,
+were all 0 or 1, and five with the roles swapped reported one level 2. The
+suite does not narrow the bound; what it adds is which board answers, and that
+the case runs at all with an attenuated responder.
+
+The responder is pinned to exactly 20 dB with its antenna attached, not a
+range, because that is the one configuration measured. A bench with a
+different attenuator fails planning with the requirement in the message, which
+is more use than a run judged against figures taken elsewhere. Distance cannot
+be pinned, since an `rf` requirement has no distance key, so a board at 20 dB
+much further away is still selected and may need a higher level.
+
+**Known limits.** On an ordinary bench the boards sit centimeters apart, so a
+working link gets through at a low PA level and a pass at level 0 says little
+about range. What `maximum PA level` buys is a tighter bound than "it worked at
+full power". The weak-link suite sets the same bound and changes which board
+answers. An occasional `mismatch on byte 0` is a known fork
+behavior
 ([ubertooth#677](https://github.com/SqueakyFloors/ubertooth/issues/677)). The
 test needs a second board, so it cannot run on a single-board host.
+
+**The `range-weak-link` suite does not pass on fork main today.** Its one
+recorded run, at 20 dB and about a meter, failed at the step that asserts `-n`
+prints nothing on standard output: `-n` prints `waiting for the repeater...`
+there instead of on standard error
+([ubertooth#1026](https://github.com/SqueakyFloors/ubertooth/issues/1026)).
+That line appears only once the first progress interval has passed. A
+repeater at bench distance answers before then, so the ordinary suite never
+reaches it; one a meter away behind 20 dB does not. The run stops there,
+before `-m` is read, so this suite has never judged a result; the PA levels
+above come from driving `-e`, `-n`, and `-m` by hand. It is committed so the
+fork fix is verified by a suite rather than by a one-off script.
 
 ## BLE monitor
 
@@ -1269,6 +1307,100 @@ option libbtbb writes for a CONNECT_IND is copied 6 bytes early
 comprehensive case pins that, so it fails when libbtbb is fixed and the case
 can become a real check.
 
+## Capture known Classic device
+
+**What it does.** Two ESP32 Classic peers hold a Serial Port Profile link and
+stream a payload across it; `ubertooth-rx` has to find that piconet, and the
+run says which address was on the air.
+
+**Theory of operation.** Classic Bluetooth gave the harness nothing to check
+against until the bench had a piconet of its own: ambient traffic has no known
+address, and `ubertooth-rx`'s own replay path only proves the decoder, not the
+radio. The peers fix that, and one protocol fact makes the check sharp. The
+initiator pages, so the piconet takes its clock and its address from the
+initiator, and every packet carries the initiator's LAP; the acceptor's LAP is
+on the air only during the page train, which is over before the capture
+starts. So the survey must list the initiator's LAP, an unfiltered sweep must
+report packets carrying it, and exchanging the two role bindings must move
+the LAP that appears to the other board. The pair is asked afterwards what it
+did, which closes the gap a capture alone leaves: a link that came up and then
+sent nothing would otherwise look the same as a quiet radio.
+
+Opening a peer's USB bridge resets the board, so the pair cannot be set up in
+one step and captured in the next. One command, `esp32peer.py stream`, holds
+both bridges for the whole session, brings the link up, runs `ubertooth-rx`
+as a child while the pair streams, and stops the pair afterwards. The tool
+keeps standard output to itself, so the case checks its real output; the
+pair's report goes to standard error and into the run record.
+
+**Hardware and arguments.** One `Ubertooth` and two ESP32 Classic peers as
+`acceptor` and `initiator`, each with a registered bridge serial and BD_ADDR,
+and both declaring both roles, because the comprehensive coverage exchanges
+them. `coverage:` and a required `duration:`; the pair streams 200 bytes every
+20 ms whatever the duration is. Linux only: a peer is reached through
+`/dev/serial/by-id`. Nothing flashes a peer, so each board must already run
+`utesp-1.0.0` or a later 1.x image, which mandatory preflight checks.
+
+**Expected outcome.** Smoke runs 2 cases: `ubertooth-rx -z` lists the
+central's LAP in its survey results, and a run with no target reports at least
+ten packet lines carrying it. Comprehensive runs 4, adding the survey into
+PCAPNG (where the file must hold packets, not just a header) and the same
+survey with the peers' roles exchanged, which must list the other board's LAP
+and not the first one's. Every case also requires that the link never went
+down, that the initiator reported at least fifty writes, and that the capture
+ran for its whole duration; it then resets both peers to the firmware's boot
+state and restores the Ubertooth's channel, squelch, and LEDs. About 40 s per
+case on the bench, most of it the two board resets and the page.
+
+**Known limits.** Ten packet lines is a floor, not an expected count: eight
+25 s captures on the bench gave 50 to 189 lines of the pair's piconet, and a
+quieter room or a weaker link gives fewer. A survey's UAP is inferred and
+comes out wrong when few packets have been heard, so only the LAP of a survey
+line is checked; take the UAP from the registry and pass it with `-u`. Other
+piconets in range are listed too, which is why an unfiltered run is not asked
+to report this one alone.
+
+## Follow Classic Bluetooth piconet
+
+**What it does.** The same two peers hold the same link, and
+`ubertooth-rx -l`/`-u` has to follow that piconet and report its packets, and
+nothing for the board that is not its central.
+
+**Theory of operation.** `-l` asks libbtbb for one access code, so a packet
+line this test sees should carry the LAP it asked for and no other: that makes
+the positive case a count and the negative case an absence. The negative case
+is the one that says the tool is really following a piconet rather than
+reporting whatever decodes, because the acceptor is in the same link, a foot
+away, transmitting throughout, and still must not appear: its LAP is not the
+piconet's. Running `-l` without `-u` is the same check with the UAP recovered
+from the air instead of given, which exercises the recovery the tool does for
+itself.
+
+The bring-up is the one in `Capture known Classic device`, for the same reason:
+opening a bridge resets the board, so one command holds both ports and runs
+the tool while the pair streams.
+
+**Hardware and arguments.** As `Capture known Classic device`: one `Ubertooth`
+and two ESP32 Classic peers as `acceptor` and `initiator`, `coverage:`, a
+required `duration:`, Linux only.
+
+**Expected outcome.** Smoke runs 2 cases: `-l <central LAP> -u <central UAP>`
+reports at least ten packet lines and none of another LAP, and `-l`/`-u` for
+the peer that is not the central reports no packet at all. Comprehensive runs
+4, adding `-l` without `-u` and `-l -u -q` into PCAP, where the file must hold
+packets as well as a header. The cleanup is the same: both peers reset, the
+Ubertooth restored.
+
+**Known limits.** Same floors and the same bench dependence as
+`Capture known Classic device`. The absence case asserts an exact zero over a
+live capture: an access code is 64 bits and `-e` allows two bit errors by
+default, so ambient traffic matching the acceptor's access code within two
+bits is not something a run will see, but it is an absence over the air rather
+than a proof. `ubertooth-follow` is a different tool and still untested: it
+reads the clock and the AFH map from a local BlueZ controller, which the bench
+has no adapter for
+([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)).
+
 ## CLI usage smoke
 
 **What it does.** Nothing yet: a catalog entry for exercising host tool usage
@@ -1503,23 +1635,8 @@ resource.
 **Expected outcome.** No implementation; only a `runnable: false` plan may
 name it.
 
-**Known limits.** Needs a Classic piconet as a fixture
-([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)).
-
-## Follow Classic Bluetooth piconet
-
-**What it does.** Nothing yet: a catalog entry for following a registered
-Classic Bluetooth piconet.
-
-**Theory of operation.** Not established in this revision of the catalog.
-
-**Hardware and arguments.** One `Ubertooth` and a required `piconet:`
-resource.
-
-**Expected outcome.** No implementation; only a `runnable: false` plan may
-name it.
-
-**Known limits.** Needs a Classic piconet as a fixture
+**Known limits.** The piconet it needs is on the bench now, as the two ESP32
+Classic peers; what is missing is the case
 ([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)).
 
 ## Bluetooth inquiry scan

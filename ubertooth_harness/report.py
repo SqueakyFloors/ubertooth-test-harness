@@ -18,6 +18,8 @@ from typing import Iterable, Mapping, Sequence
 from ubertooth_harness import targets
 from ubertooth_harness.events import REPORT, RUN_LOG
 from ubertooth_harness.executor import CommandResult
+from ubertooth_harness import outputfiles
+from ubertooth_harness.outputfiles import output_file_list
 from ubertooth_harness.rawlog import (
     NOTE,
     RECORD_OUTPUT_BYTES,
@@ -228,14 +230,22 @@ def _duration(first: Mapping | None, last: Mapping | None) -> str:
 
 
 def _cell(value) -> str:
-    return str(value).replace("|", "\\|").replace("\n", " ")
+    # A line ending of any kind would end the table row, and an unescaped
+    # pipe would add a column; values come from run records, which are data.
+    text = str(value).replace("|", "\\|")
+    for ending in ("\r\n", "\n", "\r"):
+        text = text.replace(ending, " ")
+    return text
 
 
 # The registry identity key that names a device differs by kind: an Ubertooth
 # has `serial`, an nRF52840 DK its J-Link probe's `jlink serial`. The keys are
 # listed rather than matched on the word "serial", which would also pick up a
 # DK's `serial device` and print a /dev/serial/by-id path.
-_IDENTITY_SERIAL_KEYS = ("serial", "jlink serial")
+# An Ubertooth is named by its own serial, a DK by its J-Link probe's, and
+# an ESP32 Classic peer by its USB bridge's: a peer has no serial of its
+# own, and the bridge serial is what the registry and the lab lease it by.
+_IDENTITY_SERIAL_KEYS = ("serial", "jlink serial", "bridge serial")
 
 
 def _identity_serial(identity: Mapping) -> str:
@@ -392,8 +402,9 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
         alias = start.get("resource")
         if not alias:
             continue
+        identity = start.get("resource_identity", {})
         device = devices.setdefault(alias, {
-            "serial": _identity_serial(start.get("resource_identity", {})),
+            "serial": _identity_serial(identity),
             "firmware": "",
         })
         if details.get("check_name") == "Firmware version":
@@ -644,6 +655,136 @@ def _target_cell(run: _Run, invocation: str) -> str:
     return targets.column(details.get("targets") or ())
 
 
+# Sizes in the Output files table: the magnitude a reader wants at a glance,
+# and the exact count beside it.
+_UNITS = (("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10))
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _size(count: int) -> str:
+    for name, step in _UNITS:
+        if count >= step:
+            return f"{count / step:.1f} {name} ({count} bytes)"
+    return f"{count} bytes"
+
+
+def _check_failed(check) -> bool:
+    """Did this recorded check come out against the run?
+
+    Not every kind records a reason when it fails: a step that failed on an
+    observed setting, or on a missing ``SKIP:`` line, says so in its own
+    step record and leaves the check's reason empty. So what the check
+    found decides as well.
+    """
+    if check.reason:
+        return True
+    if check.found is None:
+        return False
+    if check.kind == "forbidden":
+        return check.found
+    return not check.found
+
+
+def _checks_cell(saved) -> str:
+    """The checks that read one file, and how they came out."""
+    if not saved.checks:
+        return "none"
+    failed = [check for check in saved.checks if _check_failed(check)]
+    kinds = {}
+    for check in saved.checks:
+        kinds[check.kind] = kinds.get(check.kind, 0) + 1
+    counts = ", ".join(f"{count} {kind}" for kind, count in sorted(kinds.items()))
+    if not failed:
+        return f"{counts}: all passed"
+    named = "; ".join(
+        f"{check.name}: {check.reason or _not_found(check)}" for check in failed[:3]
+    )
+    if len(failed) > 3:
+        named += f"; and {len(failed) - 3} more"
+    return f"{counts}: {len(failed)} against the run ({named})"
+
+
+def _not_found(check) -> str:
+    if check.kind == "forbidden":
+        return f"{check.pattern!r} was found"
+    return f"{check.pattern!r} was not found"
+
+
+def _hash_cell(value: str) -> str:
+    """A SHA-256 as a code span, or the value escaped when it is not one.
+
+    A run record is data, so a value that is not a digest must not be able to
+    add a column to the table.
+    """
+    return f"`{value}`" if _SHA256.fullmatch(value) else _cell(value)
+
+
+def _output_files_section(run: _Run) -> list[str]:
+    """The files the run saved, by test, with the checks that read each one.
+
+    Together with the SHA-256 this is what lets a reader check a result
+    afterwards from the report alone, and `ubertooth-harness validate` run
+    the same checks again.
+    """
+    saved = outputfiles.saved_output(run.events)
+    if not saved:
+        return []
+    names = {
+        record["started"]["details"].get("invocation_id"):
+            record["started"]["details"].get("test_name", "")
+        for record in run.tests
+    }
+    lines = ["", "## Output files", ""]
+    groups: dict[str, list] = {}
+    for item in saved:
+        groups.setdefault(item.group, []).append(item)
+    for group, items in groups.items():
+        named = names.get(group)
+        lines += [
+            f"### {group}" + (f": {named}" if named else ""), "",
+            "| File | Stream | Size | Lines | SHA-256 | Checks |",
+            "|---|---|---|---|---|---|",
+        ]
+        for item in items:
+            lines.append(
+                f"| {_cell(item.file.path)} | {_cell(item.file.stream)} "
+                f"| {_size(item.file.bytes)} "
+                f"| {item.file.lines or ''} | {_hash_cell(item.file.sha256)} "
+                f"| {_cell(_checks_cell(item))} |"
+            )
+        lines.append("")
+    return lines
+
+
+def _known_target_section(run: _Run) -> list[str]:
+    """One line per test naming the known device it ran against, or none."""
+    if not run.tests or not run.known_targets:
+        return []
+    lines = ["", "## Known targets", "",
+             "Which device the harness drove for each test, so a capture "
+             "against a known device is told apart from one of whatever "
+             "traffic was there. The serial, port, and address are what the "
+             "registry records and the test's own ready case checks; the "
+             "firmware version is the one that device's driver requires, and "
+             "the board's own answer is in the transcript.", ""]
+    for record in run.tests:
+        invocation = record["started"]["details"].get("invocation_id", "")
+        details = run.known_targets.get(invocation)
+        if details is None:
+            # A test the host could not run drove nothing, and a run recorded
+            # before the harness kept this record says nothing either way.
+            continue
+        lines.append(f"- `{invocation}`: {details.get('summary', '')}")
+    return lines
+
+
+def _target_cell(run: _Run, invocation: str) -> str:
+    details = run.known_targets.get(invocation)
+    if details is None:
+        return ""
+    return targets.column(details.get("targets") or ())
+
+
 def _results_table(run: _Run) -> list[str]:
     lines = [
         "| Test | Host and resources | Known target | Result | Failed cases "
@@ -711,7 +852,7 @@ def elapsed(origin: datetime.datetime):
 
 
 def _omitted_text(note: Mapping) -> str:
-    """[M] note text for output kept in output/<command id>.log, not run.jsonl."""
+    """[M] note text for output kept in the output/ files, not run.jsonl."""
     summary = note.get("output_omitted") or {}
     lines = summary.get("lines") or {}
     chars = summary.get("chars") or {}
@@ -721,7 +862,7 @@ def _omitted_text(note: Mapping) -> str:
         if lines.get(stream) or chars.get(stream)
     )
     text = (
-        f"full output in {note.get('output_file', '')}; left out of run.jsonl here: "
+        f"full output in {output_file_list(note)}; left out of run.jsonl here: "
         f"{counts or 'nothing'}\n"
     )
     for shape in summary.get("common_shapes") or []:
@@ -1113,13 +1254,89 @@ def _reason(details: Mapping, key: str = "reason") -> str:
 # this may also mask an unrelated 32-hex value. Longer hex runs such as git
 # SHAs (40) and sha256 digests (64) are left alone.
 _SERIAL_TOKEN = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{32}(?![0-9A-Fa-f])")
+# Where a command's output was cut inside a serial, what is left of it is
+# neither the whole serial nor 32 digits wide, so neither rule above masks
+# it (#214). The two output caps cut where the limit falls rather than where
+# the text allows: run.jsonl caps each command as it is recorded, in pieces of
+# a fixed size (rawlog.RECORD_PIECE_CHARS), and the report's fallback cap for
+# a run recorded before that caps a long line by character count. Other
+# records are cut to a character count too (a line shape, an enumeration, a
+# DFU message), and this rule covers them as well. Either side of a cut can
+# survive, at the end of the output kept before the gap or at the start of
+# what follows it, so position says nothing about which runs of hex to read.
+#
+# A run of hex digits this wide is masked where a serial the run names holds
+# it: 8 digits of a 32-digit serial still say which board it was, and an
+# unrelated value that wide sitting inside a known serial is improbable. Two
+# pieces are left to read, deliberately: one narrower than this, which a cut
+# in the middle of a 10-digit J-Link serial can leave on both sides, because
+# masking every 4-digit hex value would mangle the transcript; and a piece
+# with no boundary of its own, left glued to hex digits that came before or
+# after it in the output, because the whole run is then one longer value no
+# serial holds. A serial in this output is written after a space, a colon, a
+# slash, or an equals sign.
+#
+# A serial is tested in lower case, which also masks a piece written in the
+# other case. A numeric serial is held in the registry's padded width too, so
+# a device registered as `000123` makes a run of eight zeros a piece of a
+# serial; no J-Link serial is that short.
+_PARTIAL_HEX_DIGITS = 8
+# A cut serial of a board the run never names (the case _SERIAL_TOKEN is there
+# for while the serial is whole) can only be recognized by its shape: this
+# many digits is as narrow as a run can be and still be a serial rather than
+# something a tool printed, the view the token rule above takes of a
+# standalone 32-hex value. A narrower piece of an unnamed board's serial is
+# left to read.
+_UNKNOWN_HEX_DIGITS = 24
+# Up to 31 digits: a run of 32 is a serial the token rule masked, and a whole
+# git SHA (40) or digest (64) is left alone. A SHA or a digest that a cut left
+# this wide is masked as a serial, which is the price of a rule that has only
+# the shape of a run to go on: the report says <serial> where a reader could
+# have had a piece of a commit.
+_UNKNOWN_HEX_LIMIT = 31
+_HEX_RUN = re.compile(
+    rf"(?<![0-9A-Fa-f])[0-9A-Fa-f]{{{_PARTIAL_HEX_DIGITS},}}(?![0-9A-Fa-f])"
+)
+
+
+def _looks_like_a_serial(piece: str) -> bool:
+    """Whether a hex run could be part of a device serial.
+
+    A serial that wide carries both letters and digits (a piece of 24 hex
+    digits with no letter in it turns up about once in 100,000), while the
+    long runs a tool prints for its own reasons are usually one or the other:
+    a decimal counter, a bit string, a field of zeros or of ff.
+    """
+    return any(c.isdigit() for c in piece) and any(c.isalpha() for c in piece)
+
+
+def _mask_cut_serials(text: str, serials: Sequence[str]) -> str:
+    """Mask what a cut inside a serial left behind."""
+    # A serial this narrow leaves no piece that wide: it is masked whole.
+    known = [
+        serial.lower() for serial in serials
+        if len(serial) > _PARTIAL_HEX_DIGITS
+    ]
+
+    def mask(match: re.Match) -> str:
+        piece = match.group(0).lower()
+        if any(piece in serial for serial in known):
+            return REDACTED
+        if (_UNKNOWN_HEX_DIGITS <= len(piece) <= _UNKNOWN_HEX_LIMIT
+                and _looks_like_a_serial(piece)):
+            return REDACTED
+        return match.group(0)
+
+    return _HEX_RUN.sub(mask, text)
 
 
 def _redact(text: str, serials: Iterable[str]) -> str:
+    # Read once: the rules below each walk the serials.
+    serials = sorted(serials, key=len, reverse=True)
     # The token rule first: masking a short serial inside a 32-hex token
     # would leave the rest of that token, which this rule is there to catch.
     text = _SERIAL_TOKEN.sub(REDACTED, text)
-    for serial in sorted(serials, key=len, reverse=True):
+    for serial in serials:
         if serial.isdigit() and len(serial) < _SERIAL_MIN_DIGITS:
             # Short enough to read as an ordinary number, so it is masked
             # only where it stands alone and not inside a longer one.
@@ -1131,7 +1348,9 @@ def _redact(text: str, serials: Iterable[str]) -> str:
             # it. A serial this long inside a longer number would be masked
             # too, which costs a reader nothing.
             text = text.replace(serial, REDACTED)
-    return text
+    # Last, so a whole serial is masked as one and only the pieces a cut left
+    # behind reach this rule.
+    return _mask_cut_serials(text, serials)
 
 
 def render_run(events: Sequence[Mapping], *, redact_serials: bool = False, transcript: bool = True) -> str:
@@ -1141,6 +1360,7 @@ def render_run(events: Sequence[Mapping], *, redact_serials: bool = False, trans
     lines += ["", "## Results", ""] + _results_table(run)
     lines += _known_target_section(run) + _not_applicable_section(run)
     lines += _watchdog_section(run)
+    lines += _output_files_section(run)
     if transcript:
         lines += ["", "## Transcript", "", LEGEND, "", "```text"] + _transcript(run) + ["```"]
     text = "\n".join(lines) + "\n"

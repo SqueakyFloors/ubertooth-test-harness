@@ -37,6 +37,9 @@ from ubertooth_harness.runner_service import (
 )
 
 TIMEOUT_S = 60
+# libbtbb's default branch: that repository's name for it, not ours to
+# rename, and what a ref that is a branch name looks like here.
+LIBBTBB_BRANCH = "master"
 
 
 class StubEnumerator:
@@ -135,7 +138,7 @@ def make_libbtbb(root: Path):
     commit, long and short, so a lookup that lands on HEAD cannot pass."""
     libbtbb = root / "libbtbb"
     libbtbb.mkdir()
-    _git(libbtbb, "init", "-q", "-b", "master")
+    _git(libbtbb, "init", "-q", "-b", LIBBTBB_BRANCH)
     commits = []
     for text in ("libbtbb\n", "libbtbb, later\n"):
         (libbtbb / "lell.c").write_text(text)

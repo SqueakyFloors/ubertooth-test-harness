@@ -236,8 +236,9 @@ class PlanCompiler:
                         arguments.get(role) == "each" for role in role_names
                     ):
                         raise PlanningError(
-                            f"{step.test_name}: multi-role tests require explicit "
-                            "role aliases; all-pairs selection is not implemented"
+                            f"{step.test_name}: a multi-role test cannot select a "
+                            "role with 'each'; name each role by alias, or narrow "
+                            "it with rf:; all-pairs selection is not implemented"
                         )
                     choices = []
                     for role in role_names:

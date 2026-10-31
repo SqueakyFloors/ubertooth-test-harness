@@ -2,9 +2,9 @@
 
 `scripts/ci.sh` holds the pin the harness builds by default; README.md repeats
 it in its examples. They must agree, and neither may fall back to a moving ref
-such as `master`, or a run would test a different libbtbb from the one the
-Ubertooth fork ships with. Mirrors the "Check the libbtbb pin" step in the
-fork's own CI.
+such as the `master` branch, or a run would test a different libbtbb from
+the one the Ubertooth fork ships with. Mirrors the "Check the libbtbb pin"
+step in the fork's own CI.
 """
 
 from __future__ import annotations

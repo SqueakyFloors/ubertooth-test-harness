@@ -11,7 +11,7 @@ from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.cases import GUARD_ROLE_PREFIX
 from ubertooth_harness.manifest import ManifestError, RunManifest
 from ubertooth_harness.planner import TestInvocation
-from ubertooth_harness import nrfdk
+from ubertooth_harness import esp32peer, nrfdk
 from ubertooth_harness.patterns import (
     FIRMWARE_VERSION_RE,
     HOST_VERSION_TIMEOUT_S,
@@ -20,9 +20,19 @@ from ubertooth_harness.patterns import (
     revision_pattern,
     same_revision,
 )
-from ubertooth_harness.resources import NRF52840_DK, ResourceRegistry
+from ubertooth_harness.outputfiles import output_of
+from ubertooth_harness.resources import (
+    ESP32_CLASSIC_PEER,
+    NRF52840_DK,
+    ResourceRegistry,
+)
 from ubertooth_harness.stateful import StateCaseError
-from ubertooth_harness.transitions import firmware_api, format_api, host_api_version
+from ubertooth_harness.transitions import (
+    API_PATTERN,
+    firmware_api,
+    format_api,
+    host_api_version,
+)
 
 
 class PreflightError(ValueError):
@@ -84,12 +94,14 @@ class PreflightCheck:
             return f"{self.name}: command canceled"
         if result.returncode not in self.accepted_returncodes:
             return f"{self.name}: command exited {result.returncode}"
-        output = result.stdout + result.stderr
+        output = output_of(result)
         for pattern in self.expected_patterns:
-            if not re.search(pattern, output):
+            present = output.search(pattern)
+            output.note_pattern("expected", self.name, pattern, present)
+            if present is None:
                 target = self.resource_alias or self.host
                 found = _FIRMWARE_REVISION.get(self.name)
-                match = found.search(output) if found else None
+                match = output.search(found.pattern) if found else None
                 # Name both revisions and how to fix it (#135). Only when they
                 # really differ: a board on the right commit but another image
                 # (btbr, a bench image) also fails this check, and saying it
@@ -109,7 +121,10 @@ class PreflightCheck:
                     f"output does not match {pattern}"
                 )
         if self.minimum_api is not None:
-            api = firmware_api(output)
+            reported = output.search(API_PATTERN)
+            output.note_pattern("observed", f"{self.name} API", API_PATTERN,
+                                reported)
+            api = firmware_api(reported[0]) if reported else None
             if api is None or api < self.minimum_api:
                 found = "unreadable" if api is None else format_api(api)
                 serial = self.resource_identity.get("serial", "")
@@ -131,8 +146,7 @@ class PreflightCheck:
         # first command hung.
         if result.cancelled or result.timed_out:
             return False
-        output = result.stdout + result.stderr
-        return re.search(self.fallback_when_missing, output) is None
+        return output_of(result).search(self.fallback_when_missing) is None
 
 
 # `-V` is the version command in every tool the fork builds from C, and its
@@ -201,6 +215,36 @@ def _dk_check(sequence: int, host: str, resource, expected_revision: str) -> Pre
         expected_patterns=(rf"(?m)^J-Link serial: {serial}$",),
         expected_revision=expected_revision,
         timeout_s=nrfdk.TOOL_TIMEOUT_S * 3,
+    )
+
+
+_ESP32PEER = str(Path(esp32peer.__file__).resolve())
+
+
+def _peer_check(sequence: int, host: str, resource, expected_revision: str) -> PreflightCheck:
+    """esp32peer.py identify: the bridge is there and the board answers.
+
+    Opening the bridge resets the board, so this also leaves it in the
+    firmware's boot state before the run.
+    """
+    serial = resource.identity["bridge serial"]
+    device = (resource.identity.get("serial device")
+              or esp32peer.default_device(serial))
+    argv = (sys.executable, _ESP32PEER, "identify", "--device", device,
+            "--address", resource.identity["BD_ADDR"])
+    return PreflightCheck(
+        check_id=f"preflight-{sequence:03d}-esp32-classic-peer",
+        name="ESP32 Classic peer",
+        host=host,
+        resource_alias=resource.alias,
+        resource_identity=MappingProxyType(dict(resource.identity)),
+        argv=argv,
+        expected_patterns=(
+            rf"(?m)^peer address: {re.escape(resource.identity['BD_ADDR'].upper())}$",
+            r"(?m)^peer firmware: utesp-\d+\.\d+\.\d+$",
+        ),
+        expected_revision=expected_revision,
+        timeout_s=esp32peer.BOOT_TIMEOUT_S + esp32peer.COMMAND_TIMEOUT_S * 2,
     )
 
 
@@ -301,7 +345,7 @@ class PreflightPolicy:
         checks = []
         sequence = 0
         seen_hosts = set()
-        seen_ubertooths = set()
+        seen_devices = set()
         for invocation in invocations:
             if invocation.host not in seen_hosts:
                 seen_hosts.add(invocation.host)
@@ -324,17 +368,26 @@ class PreflightPolicy:
                 )
             for alias in invocation.resources.values():
                 resource = self.registry.get(alias)
-                if resource.type == NRF52840_DK and alias not in seen_ubertooths:
+                if resource.type == NRF52840_DK and alias not in seen_devices:
                     # Its probe and VCOM0 port; the test itself flashes and
                     # verifies the role firmware (advertiser_cases.py).
-                    seen_ubertooths.add(alias)
+                    seen_devices.add(alias)
                     sequence += 1
                     checks.append(_dk_check(sequence, invocation.host, resource,
                                             ubertooth_source.expected_revision))
                     continue
-                if resource.type != "Ubertooth" or alias in seen_ubertooths:
+                if (resource.type == ESP32_CLASSIC_PEER
+                        and alias not in seen_devices):
+                    # Its bridge and the firmware behind it; the test itself
+                    # brings the pair up (classic_cases.py).
+                    seen_devices.add(alias)
+                    sequence += 1
+                    checks.append(_peer_check(sequence, invocation.host, resource,
+                                              ubertooth_source.expected_revision))
                     continue
-                seen_ubertooths.add(alias)
+                if resource.type != "Ubertooth" or alias in seen_devices:
+                    continue
+                seen_devices.add(alias)
                 serial = resource.identity.get("serial")
                 if not serial:
                     raise PreflightError(

@@ -40,6 +40,9 @@ from ubertooth_harness.report import write_report
 OLD = "84ab41fc99d172e812438bc9188f30a67216f748"
 NEW = "0123456789abcdef0123456789abcdef01234567"
 URL = "https://github.com/SqueakyFloors/libbtbb.git"
+# libbtbb's default branch: that repository's name for it, not ours to
+# rename, and what a ref that is a branch name looks like here.
+LIBBTBB_BRANCH = "master"
 
 # The shape of the fork's install.sh: the pin at top level, an override in
 # the option parser that must not be read as the pin.
@@ -100,7 +103,7 @@ class DriftWarningTests(unittest.TestCase):
         self.assertIsNone(drift_warning(pin, OLD[:7]))
         self.assertIsNone(drift_warning(ForkPin(URL, OLD[:7]), OLD.upper()))
         # A branch name that resolved to the pinned commit also matches.
-        self.assertIsNone(drift_warning(pin, "master", libbtbb_commit=OLD))
+        self.assertIsNone(drift_warning(pin, LIBBTBB_BRANCH, libbtbb_commit=OLD))
 
     def test_a_bump_names_both_commits(self):
         warning = drift_warning(ForkPin(URL, NEW), OLD, fork_label="Ubertooth main")
@@ -109,7 +112,7 @@ class DriftWarningTests(unittest.TestCase):
         self.assertIn("Ubertooth main", warning)
 
     def test_a_moving_ref_is_reported_by_its_commit(self):
-        warning = drift_warning(ForkPin(URL, NEW), "master", libbtbb_commit=OLD)
+        warning = drift_warning(ForkPin(URL, NEW), LIBBTBB_BRANCH, libbtbb_commit=OLD)
         self.assertIn(f"builds libbtbb {OLD}", warning)
 
     def test_another_repository_is_reported(self):
@@ -272,7 +275,7 @@ class ForkPinRefTests(unittest.TestCase):
         root = Path(self.tmp.name)
         self.libbtbb = root / "libbtbb"
         self.libbtbb.mkdir()
-        _git(self.libbtbb, "init", "-q", "-b", "master")
+        _git(self.libbtbb, "init", "-q", "-b", LIBBTBB_BRANCH)
         self.first, self.second = (
             self._commit(self.libbtbb, "lell.c", text) for text in ("one\n", "two\n")
         )
@@ -319,8 +322,8 @@ class ForkPinRefTests(unittest.TestCase):
                 self.assertEqual("passed", check_sources(sources).status)
 
     def test_a_named_ref_is_still_used_as_given(self):
-        sources, note = self._resolve(self.pins_second, libbtbb_ref="master")
-        self.assertEqual(("master", self.second, None),
+        sources, note = self._resolve(self.pins_second, libbtbb_ref=LIBBTBB_BRANCH)
+        self.assertEqual((LIBBTBB_BRANCH, self.second, None),
                          (sources[1].requested_ref, sources[1].commit, sources[1].ref_name))
         self.assertEqual("", note)
 
@@ -354,7 +357,7 @@ class ForkPinRefTests(unittest.TestCase):
     def test_a_pin_that_can_move_is_refused_not_resolved(self):
         # fork-pin is a promise of one exact commit, so a branch or tag name
         # is refused rather than built at whatever it points to today.
-        for name in ("master", "v1.0"):
+        for name in (LIBBTBB_BRANCH, "v1.0"):
             with self.subTest(pin=name):
                 moving = self._commit(self.fork, "install.sh", _install_sh(name))
                 self.assertIsNotNone(

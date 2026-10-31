@@ -155,7 +155,10 @@ and `MAC polling soak`.
 type and its role, the firmware each one runs and how it is built, flashed and
 checked, the APIs and protocols the harness depends on, host setup, the known
 limits of a crowded USB host, and a worked bench layout. Read it to set up a
-bench, or to judge what a result was measured on.
+bench, or to judge what a result was measured on. The by-hand helpers that go
+with it are in [`scripts/lab/`](scripts/lab/README.md): `hold` holds devices
+by serial for one command, and `hub-port` switches a hub port to recover one
+that has stopped answering.
 
 `hardware.yaml` is the ignored local resource registry; copy
 [`hardware.example.yaml`](hardware.example.yaml) to start. Register every macOS/Linux computer as a
@@ -165,11 +168,11 @@ stable serial/probe identity are authoritative. A host's `defaults` selects its
 preferred Ubertooth so repeated reliability tests stay on one device.
 
 Selection is deterministic: `default`, `each`, or an explicit resource alias.
-Ambiguous `any` and random selection are rejected. Tests with multiple hardware
-roles require explicit aliases; a future explicit `all pairs` policy will be
-separate. Target-runner discovery is
-reconciled as present/missing/unknown before execution and never silently
-reassigns an alias.
+Ambiguous `any` and random selection are rejected. A test with several hardware
+roles may name each one by alias or narrow it by RF placement, but not with
+`each`; a future explicit `all pairs` policy will be separate. Target-runner
+discovery is reconciled as present/missing/unknown before execution and never
+silently reassigns an alias.
 
 ### RF placement: where a board sits on the bench
 
@@ -440,7 +443,17 @@ python -m ubertooth_harness run-suite \
   --build --output runs
 ```
 
-On current fork main the test passes: the sender gets a clean round trip and
+The plan's second suite, `range-weak-link`, runs the same test with the
+weak-link receiver answering, choosing both boards by RF placement rather than
+by alias: a responder recorded at exactly the 20 dB the bench measured, with
+its antenna attached, and an unattenuated sender. It does not pass on current fork main:
+it stops at the step that asserts `-n` prints nothing on standard output,
+which a repeater slower than the first progress interval makes it do
+([ubertooth#1026](https://github.com/SqueakyFloors/ubertooth/issues/1026)).
+[docs/tests.md](docs/tests.md#two-device-range-test) has the measurement and
+the selection.
+
+On current fork main the `range` suite passes: the sender gets a clean round trip and
 `-m` reports request and reply PA levels and copy numbers (fixed by
 [ubertooth#601](https://github.com/SqueakyFloors/ubertooth/pull/601); before
 it the reply read back as zeros, [ubertooth#483](https://github.com/SqueakyFloors/ubertooth/issues/483),
@@ -659,9 +672,11 @@ python -m ubertooth_harness run-suite \
 | `Raw receive replay` | no Ubertooth; `host` and `fast` plans, and CI: `ubertooth-rx -i` on a synthetic fixture (`rxreplay.py`, built from the spec encoding, never a real capture) prints exactly the fixture's LAP/error/channel lines and skips the decoy records; `-l <LAP>` derives the UAP (CLK6 0); `-r` PCAPNG and `-q` PCAP with link type 255 and one packet per line; `-s` gives the same lines with no notice and `-h` lists it as the default sweep (fork #361); `-d` into a missing directory exits 1 with one `error: <file>: No such file or directory` line, no usage and no packet line, and the directory holds only the unchanged fixture (fork 5ac22a8) | adds `-z` (both piconets, one with its UAP); `-l` of an ID-only LAP (no UAP); `-l -u` with the right UAP (confirmed, hop reversal) and a wrong one (nothing confirmed); `-e 0` drops the one-error access code; `-d` writes the packet records back byte for byte (and passes `rxdump.py`); `-l -q` captures one LAP; empty file exit 0; missing file exit 1 (`error: <file>: No such file or directory`); lines carry the recorded systime (fork #202); `-i <directory>` and a cut last record are reported, exit 1 (fork #203; both fixed in a55ac89); `-i -u` without `-l` refused before the input is used (fork #236, fixed in 57469f2; the bare `-u` is in Argument validation, under a lease) |
 | `Ubertooth util modes` | `-I` blinks every LED (sampled at jittered intervals until both phases appear, at most 60 samples or 10 s including a read in flight), `-q120` (-120 dBm) lights every LED; each returns at once, its start line on stderr (`-I`: one `note: the board is blinking; stop it with ubertooth-util -U <serial> -S ...` line; fork #326), keeps channel and PA, and `-S` ends it with the idle reset (LEDs off, 2441 MHz, squelch -120, PA kept); originals are restored; `-m` after `-r` says `no range test result yet` (fork #190) | adds `-q20` and bare `-q` (-85 dBm) running until `-S`, `-I` ending `-q` and `-q` ending `-I` (the new mode starts at 2441 MHz), `-s -I`. A failed LED read (fork #213) is retried once and the retry recorded; two in a row fail the case |
 | `Multi-board selection` | needs two or more registered boards on the host (a one-board host skips it): `-U all -s` and `-s` without `-U` list every registered board and only those, each line labelled with the board's index in it (`Serial No (0): <serial>`, fork #610); `-N` counts them; each `-U<index>` opens the board the listing names at that index | adds `-U all -bvps` and `-bvps` without `-U` (four lines per board), `-U all -V` and `-V` without `-U` (the host tools' two lines, the version and the libbtbb path, then each board's `Firmware version (<index>)` and `Firmware build (<index>)`, since `-V` ends the command and reports every board itself, fork f898fe5), `-C` without `-U` refused; `-U<n>` past the last board is refused with `no Ubertooth at index` (fork #188, fixed in 0c7e9c0) |
-| `Two-device range test` | no `coverage` argument; `range` plan; two registered boards on one host (`sender`, `responder`; the same board in both roles is refused), `allow RF transmission: true`: both boards reset (so neither has an old result) and set to 2410 MHz, `-e` on the responder, which must then answer USB with its RX LED on and still be at 2410 MHz before `-n` on the sender (so a failure tells a wedged repeater from a wedged sender), then the sender's `-m` is read until a result appears (10 s deadline) and must give request and reply PA levels at most `maximum PA level` (0-7, default 7; the plan sets 3) and copy numbers 0-15; a mismatch fails, naming the field that differs; the sender is idle afterwards (LEDs off, back to 2441 MHz: the idle reset ran); the responder still answers USB with its RX LED on, keeps no result, and `-S` stops it (LEDs off, back to 2441 MHz); channel, PA, squelch, LEDs and CRC of both boards restored, other registered boards guarded. Passes on fork main since fork #601 (fork #26, #483), about 9 runs in 10 on a bench pair; the rest fail with `mismatch on byte 0` (fork #677) | no comprehensive profile |
+| `Two-device range test` | no `coverage` argument; `range` plan; two registered boards on one host (`sender`, `responder`; the same board in both roles is refused), `allow RF transmission: true`: both boards reset (so neither has an old result) and set to 2410 MHz, `-e` on the responder, which must then answer USB with its RX LED on and still be at 2410 MHz before `-n` on the sender (so a failure tells a wedged repeater from a wedged sender), then the sender's `-m` is read until a result appears (10 s deadline) and must give request and reply PA levels at most `maximum PA level` (0-7, default 7; both suites of the `range` plan set 3) and copy numbers 0-15; a mismatch fails, naming the field that differs; the sender is idle afterwards (LEDs off, back to 2441 MHz: the idle reset ran); the responder still answers USB with its RX LED on, keeps no result, and `-S` stops it (LEDs off, back to 2441 MHz); channel, PA, squelch, LEDs and CRC of both boards restored, other registered boards guarded. Passes on fork main since fork #601 (fork #26, #483), about 9 runs in 10 on a bench pair; the rest fail with `mismatch on byte 0` (fork #677) | no comprehensive profile |
 | `Capture known BLE advertiser` | `ble` plan; an Ubertooth and an nRF52840 DK with the `advertiser` role on one host (see [BLE test devices](#ble-test-devices-nrf52840-dk)): the DK is flashed with `firmware/nrf52840dk` when it reports another version, and must report its registered address; for each of channels 37, 38 and 39 the DK advertises (`ADV_NONCONN_IND`, `interval`, `payload` tag) on that channel only and `ubertooth-btle -n -A<channel> -q` captures for `duration`: at least a fifth of its advertising events and no more than its interval allows, every one on that channel's RF channel, CRC right, from its address, with the harness payload (magic, channel map, tag) and a counter between the DK's counters before and after; `-n -A37` while it advertises on 38 holds none of its packets; `-f -A37 -r` (PCAPNG) holds them too; the DK is stopped and returned to its boot settings, the Ubertooth's channel, squelch and LEDs restored, other registered boards guarded | adds every listen/advertise channel pair that must hold nothing, `-f -A38`/`-A39`, `ADV_IND` (which is scannable, so the advertiser's own scan responses to scanners nearby are counted and only their channel is checked), advertising on all three channels, a 1000 ms interval (packet bound), and no tag |
 | `Capture known BLE connection` | `ble` plan, `connection` suite; an Ubertooth and two nRF52840 DKs, one with the `central` role and one with the `peripheral` role, on one host (see [BLE test devices](#ble-test-devices-nrf52840-dk)): both DKs are flashed with `firmware/nrf52840dk` when they report another version and must report their registered addresses; the peripheral advertises connectable, the central connects at `interval` with a 251-byte data length, writes 244 bytes every 100 ms, asks for `update` once connected, and remakes the link every 4 s; `ubertooth-btle -f -r` captures for `duration` and the capture must hold one CONNECT_IND between the two addresses with exactly that interval, latency 0 and a 4 s supervision timeout, a hop increment of 5-16, every data channel in the channel map, at least five packets on the connection's access address with correct CRCs, and at least one longer than the 27 bytes a link without Data Length Extension allows; both DKs are left idle in the advertiser role, the Ubertooth's channel, squelch and LEDs restored, other registered boards guarded | adds the same with `-q` (PCAP) and a case pinning the wrong connection information libbtbb records in a PCAPNG ([libbtbb#21](https://github.com/SqueakyFloors/libbtbb/issues/21)), which fails when that is fixed |
+| `Capture known Classic device` | `classic` plan; an Ubertooth and two ESP32 Classic peers with the `acceptor` and `initiator` roles on one host (see [Classic test devices](#classic-test-devices-esp32-classic-peers)): both peers must already run `firmware/esp32-classic-peer`, which mandatory preflight checks by asking each one to identify itself; `esp32peer.py stream` then brings a Serial Port Profile link up between them, streams 200 bytes every 20 ms, and runs `ubertooth-rx` for `duration` while it holds. `ubertooth-rx -z` must list the piconet central's LAP in its survey results, and a run with no target must report at least ten packet lines carrying that LAP; the central is whichever peer pages, so its LAP is the initiator's. Afterwards the pair must report a link that never went down and at least fifty writes, both peers are reset to the firmware's boot state, the Ubertooth's channel, squelch and LEDs are restored, and other registered boards are guarded | adds `-z -r` (PCAPNG with link type 255) and the same survey with the peers' roles swapped, which must list the other board's LAP and not the first one's |
+| `Follow Classic Bluetooth piconet` | `classic` plan; the same two peers and the same bring-up: `ubertooth-rx -l <central LAP> -u <central UAP>` must report at least ten packet lines and none of another LAP (libbtbb is asked for one access code), and `-l`/`-u` for the peer that is *not* the central must report no packet at all | adds `-l` without `-u` (the UAP is recovered from the air) and `-l -u -q` (PCAP with link type 255) |
 | `DFU images` | writes the selected board's firmware; slow plan (not fast): `-d <test image> -r`, then `-u -r` reads back the image padded with 0xff; `-s` on the image without its suffix gives the build's `.dfu` | `firmware` plan (not release): adds `-s` refusing a `.dfu`; seven bad images (wrong CRC, truncated, no suffix, text, no `UFD`, wrong vendor, wrong product) refused before a device is opened (fork #198, #199, fixed in e8edd15), the board still in its application with the same flash (read back); `-s` refuses a suffixed `.bin` and accepts a read-only one (fork #200, fixed in 9d710fe). At 6fee30c `-d <image> -r` exits 1 after a good flash (fork #267, fixed in 89d9197), so the write cases fail there |
 | `BLE mode conflicts` | no `coverage` argument; release plan | every combination of `ubertooth-btle -f -n -p` must be rejected before sniffing |
 | `Ubertooth util conflicts` | no `coverage` argument; requires `allow RF transmission: true`; release plan | every pair of `-q -n -e -t -x -I` must be rejected with the fork's `error: options ... cannot be combined` before a mode starts |
@@ -964,8 +979,8 @@ build](#flashing-the-boards-with-the-runs-build).
 The examples here and the default in `scripts/ci.sh` use one commit of the
 [`SqueakyFloors/libbtbb`](https://github.com/SqueakyFloors/libbtbb) fork: the
 commit the Ubertooth fork pins for its own builds, so a run builds the libbtbb
-that fork is built and tested against, not whatever upstream `master` holds
-that day. The harness keeps its own copy of that pin (it never calls the
+that fork is built and tested against, not whatever upstream's `master` branch
+holds that day. The harness keeps its own copy of that pin (it never calls the
 fork's installer) and `tests/test_libbtbb_pin.py` keeps the copies in
 `scripts/ci.sh` and this file in step; bump both when the fork bumps its pin.
 To notice a bump, `run-suite` and `build` read `LIBBTBB_REF` from the fork's
@@ -1003,9 +1018,9 @@ is the point of its check.
 
 `--libbtbb-ref` can still name any ref, with one limit: the harness passes no
 `-DCMAKE_POLICY_VERSION_MINIMUM`, so a libbtbb declaring
-`cmake_minimum_required` below 3.5 — upstream `master` at the time of writing
-declares 2.8 — fails to configure under CMake 4 and needs CMake 3.x. The
-pinned commit declares a `3.5...3.31` range and configures under both.
+`cmake_minimum_required` below 3.5 — upstream's `master` branch declares 2.8
+at the time of writing — fails to configure under CMake 4 and needs CMake 3.x.
+The pinned commit declares a `3.5...3.31` range and configures under both.
 
 The resolved commits are cloned into `<run>/build/src` (the source checkouts
 are never modified), built out of tree, and installed into `<run>/build/prefix`.
@@ -1217,6 +1232,113 @@ key, `board-nrf52840dk-<J-Link serial without leading zeros>.lock` for the
 template `<lab lock dir>/board-{serial}.lock`. Hold such a lock only for the
 run, so other users of the DK get their turn.
 
+## Classic test devices (ESP32 Classic peers)
+
+Tests that need real Classic Bluetooth (BR/EDR) traffic use two
+ESP32-WROOM-32E boards running the harness's own peer firmware,
+[`firmware/esp32-classic-peer`](firmware/esp32-classic-peer/README.md)
+(build, flash, shell protocol, versions). They are the Classic counterpart of
+the DKs: the two boards hold a Serial Port Profile link to each other and
+stream a payload across it, so a test has BR/EDR traffic from an address it
+knows, on demand, with no third-party device involved. The Ubertooth only
+receives.
+
+Register each board as an `ESP32 Classic peer` with the serial of its CP2102N
+USB to UART bridge and the BD_ADDR its `status` reports
+([`hardware.example.yaml`](hardware.example.yaml)):
+
+```yaml
+ESP32_Linux0:
+  type: ESP32 Classic peer
+  attached to: Host_Linux
+  roles: [acceptor, initiator]
+  identity:
+    bridge serial: "0123456789abcdef0123456789abcdef"
+    BD_ADDR: "C8:00:00:00:00:01"
+```
+
+A registry may also write down the `LAP`, `UAP` and `name` the board's
+`status` reports, for a person reading it; the code derives them from the
+address, and a copy that disagrees is refused as a typo.
+
+One image holds both roles, `acceptor` (the boot role, which listens) and
+`initiator` (which pages, connects, and streams), and one shell command
+switches between them, so no test reflashes a peer. Both boards may declare
+both roles; a host picks which one listens and which one pages:
+
+```yaml
+Host_Linux:
+  type: Host
+  defaults:
+    ESP32 Classic peer: ESP32_Linux0
+    acceptor: ESP32_Linux0
+    initiator: ESP32_Linux1
+```
+
+**The LAP on the air is the central's, and the central is whichever board
+pages.** The initiator pages, so every packet in the piconet carries the
+initiator's LAP; the acceptor's LAP is on the air only during the page train,
+which is over before a capture starts. That is why these cases take the LAP
+and UAP from the initiator's registered BD_ADDR, and why exchanging the two
+bindings moves the piconet to the other address.
+
+`ubertooth_harness/esp32peer.py` drives a peer. It opens the bridge by its
+stable path (`/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_<serial>-if00-port0`,
+derived from the bridge serial unless the identity names a `serial device`),
+waits for the firmware's boot notice, and speaks its line shell: `status`
+(one JSON line with the BD_ADDR, LAP and UAP), `role`, `spp peer`,
+`spp start`, `stream`, `spp stop`. `reset` restarts the board with the
+bridge's own RTS line, which is how a case releases one. Every command fails
+closed with an `error:` line.
+
+**Opening the bridge resets the board.** DTR and RTS are wired to the chip's
+EN and IO0 pins, and the kernel asserts both when the port is first opened,
+so the pair cannot be set up in one command and captured in the next, the way
+a DK's can. `esp32peer.py stream` is the answer: it holds both ports for one
+whole session, brings the link up, runs the tool under test while the pair
+streams, stops the pair, and reports what both boards did. The tool's own
+output is passed straight through on standard output, and the pair's report
+(both BD_ADDRs, the central's LAP and UAP, writes, bytes received) is on
+standard error, so a case checks the tool's output exactly as it would
+without the peers:
+
+```sh
+python -m ubertooth_harness run-suite \
+  --plan testplans/classic.yaml --suite classic \
+  --hardware hardware.yaml --host Host_Linux \
+  --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
+  --output runs
+```
+
+Nothing in the harness flashes a peer, so the driver asks for a minimum
+version (`utesp-1.0.0`) rather than an exact one: a later image of the same
+major has these commands and more, and the run record keeps whichever
+version each board reported. An older image, or another major version,
+fails mandatory preflight naming what it found; build and flash it from
+`firmware/esp32-classic-peer` at this harness commit.
+
+The `classic` suite of [`testplans/classic.yaml`](testplans/classic.yaml) is
+the smoke run above, `classic-comprehensive` adds the capture files and the
+role exchange, and `classic-long` is the bounded long variant: the same two
+follow cases over a five-minute capture each, which is what shows that a
+receive run and the pair's link hold up for minutes rather than seconds. The
+sampling soak, `Classic Bluetooth receive soak`, is still a backlog entry;
+sampling is what it waits for, not traffic.
+
+Because the comprehensive coverage exchanges the two roles, both peers a plan
+binds must declare both: the registry's role list is what a plan picks a board
+by, and one image holds both roles anyway.
+
+A peer is leased like an Ubertooth (`ubertooth-harness boards` and `lease`
+list it), keyed by its bridge serial (`esp32-<serial>.lock` in the lease
+directory). As with the DKs, a lab that guards boards with its own per-board
+lock files must hold both bridges' lock files around the run until the
+harness takes external board locks
+([#123](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/123)).
+
+The peers have no switchable power on this bench, so nothing power-cycles
+one: a board that stops answering needs someone at it.
+
 ## Sharing boards: leases
 
 Several agents can share one host's Ubertooths when they run as the same user
@@ -1227,8 +1349,9 @@ ends: the selected board, guard and alternated boards, power-isolated boards,
 and, for `Flash reliability` and exclusive tests, every Ubertooth on the host
 (they read or enumerate all of them). A lease is an exclusive `flock` on
 `~/.ubertooth-harness/leases/<serial>.lock` (override with
-`UBERTOOTH_HARNESS_LEASE_DIR`); the kernel drops it when the process exits, so
-leases never go stale. Boards are taken all or nothing, so two runs cannot
+`UBERTOOTH_HARNESS_LEASE_DIR`); the kernel drops it when every process holding
+that file exits, and a lease left behind by a session that is gone is taken
+over (below). Boards are taken all or nothing, so two runs cannot
 deadlock. A leased board needs its full 32-hex-digit serial in the hardware
 registry: libubertooth matches `-U` against the start of a serial, so a short
 serial would select the same board under a different lock.
@@ -1246,13 +1369,143 @@ ubertooth-harness lease --hardware hardware.yaml --owner "agent #14" UT_Mac0 -- 
 
 `lease` holds the named boards for exactly as long as the command runs; the
 command inherits the locks, so they stay held even if the harness process is
-killed first. Use it for every manual Ubertooth command on a shared host.
+killed first (and once that process is gone, the next command that wants the
+board may take it over: see "Stale leases" below). Use it for every manual
+Ubertooth command on a shared host.
+
+### Stale leases: a session that is gone
+
+Because the command inherits the lock files, a lock lives as long as any
+process holding one of them. A session killed part way through — a dropped
+network connection, a batch kill — can therefore leave a lease nothing is
+waiting on: the harness process is gone, and something it started, re-parented
+and forgotten, still holds the lock. A board locked like that used to stay
+locked (five hours of a release soak,
+[#215](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/215)).
+
+So a command that finds a busy lease recorded by a process of *this* host
+that no longer exists takes the board over: it removes that lock file, which
+is what later commands read, and says so in one line on standard error.
+
+```
+note: UT_Linux5 was held by a lease that no longer holds it: its process
+(pid 2380347) is gone, and so is the process group it ran in (2380347).
+Taking it over (/home/.../leases/05f0....lock).
+```
+
+A lease recorded on another host is left alone (a pid there means nothing
+here), as is a pid the system has since given to an unrelated process.
+`<lease dir>/takeover.lock` orders a takeover against everything else: a
+takeover holds it exclusively, and every command holds it shared while it
+takes its locks and checks them, so a lease file is never removed while a
+command is taking it and two commands can never end up holding one board
+through two lock files.
+
+What a takeover does not promise: something still holds the lock, or the
+kernel would have dropped it, and that something may still be using the
+board. The USB device is what really excludes two users — a second claim of
+an Ubertooth fails — so a leftover capture makes the next device command fail
+loudly rather than quietly sharing the board; a wrapper that only held the
+lock while doing something else costs nothing. That is the trade the bench
+wants: the board comes back, and the note says what to look for. When the
+record's process group is still running, the note names it, because a
+leftover command that session started may still be talking to the board:
+`pgrep -g <group>` shows what to stop. That signal only covers the process
+group the command ran in, so a leftover that left it (`setsid`, a daemon) is
+reported as gone.
+
+A takeover costs a poll round like any other busy lock, so a lease file that
+keeps coming back cannot make a command spin. A board whose lease could not
+be taken over (another command was taking one over at that moment) is
+reported with the same explanation the host lock gets below.
+
+The host lock is never taken over. It is the only thing that keeps USB power
+changes and firmware writes on a host from overlapping, and what still holds
+its file could be a firmware write in flight — a process that left the
+recorded session, or one of a session the record does not name at all. So its
+error says what is known and what to look for, and a person decides:
+
+```
+error: this host's power/firmware lock is in use: held by agent, lease:
+ubertooth-dfu -U ... -d ..., pid 4471, since ... UTC (.../host-power.lock);
+the command that took it is gone: its process (pid 4471) is gone, and so is
+the process group it ran in (4471); it is never taken over, because a
+firmware write or a power change it started may still be running: look for
+one, and remove the lock file once you know there is none
+```
+
+`boards` marks such a lease and removes nothing itself:
+
+```
+UT_Linux5    held  agent, lease: bash soak.sh, pid 2380347, since ... (for 5h12m)
+             stale: its process (pid 2380347) is gone, and so is the process
+             group it ran in (2380347); the next command that wants it takes
+             it over
+```
+
+### Waiting in turn
+
+Retrying alone is not fair. A run that wants the host lock *and* a board
+could wait out its whole `--wait-for-boards` while short board-only leases
+took that board one after another: each attempt found the board busy, gave
+back the host lock, and tried again, and nothing held the newcomers back
+([#202](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/202)).
+
+So every command first takes a numbered ticket for each board (and the host
+lock) it wants, under `<lease dir>/tickets/<key>/`, and gives way to any older
+ticket of a command that is still waiting. What that promises, exactly: a
+command does not take a board out of turn in the moment it comes free, so the
+command that has waited longest gets a clear run at it, and one that asks for
+a board somebody has waited longer for is told so instead of taking it:
+
+```
+error: UT_0 is queued: agent #14, run 2026-10-31-ble, lease: ubertooth-util
+-U ... -v, pid 7781, since 2026-10-31T06:12:03.114 UTC asked for it first and
+is still waiting for it; use --wait-for-boards MINUTES to wait for your turn
+```
+
+A ticket is a file named after its number, locked while its command waits and
+removed when it stops waiting. It is locked and written before it appears
+under its queue name, so a ticket counts only while its command is really
+there: one nobody holds is nobody's and is removed, as is one whose process
+is gone, and those are the only things `boards` takes away. It shows how
+deep a queue is (in `--json`, as `waiting`):
+
+```
+UT_0         held  agent #14, run 2026-10-31-ble, pid 7781 (for 0h04m11s)
+             queue: 2 commands are waiting for it
+```
+
+Giving way is bounded in one case: a board that is *free*, and that the
+command could therefore have taken. After half a second of that — two poll
+rounds, enough for a waiter that is really waiting to notice the board was
+released — a command competes for the board as it did before the queue,
+once for each command ahead of it; a command with no
+`--wait-for-boards` has a whole second before it gives up, so it too ends up
+competing rather than failing (and, if the board is taken again just before
+that second is up, failing with `is queued` where it used to say `is in
+use`). The bound is per stretch of giving way: it starts again whenever the
+board is held, or the command ahead in the queue changes, so a long wait
+never turns into a licence to jump the queue. Giving way to a board somebody
+is using is never bounded: nothing in the harness can be stuck on a lock that
+is held, so the waiters simply take their turns.
+
+That bound is what keeps the queue from becoming a new way to wait forever.
+A command can be ahead in the queue and unable to take the board for reasons
+the queue cannot see or help: a wrapper outside the harness holding a board's
+own lock file while it waits for the lease (the order below), or simply a run
+that is still blocked on the host lock. Its neighbors give it a clear run at
+the board and then carry on. So the queue is not a reservation: a command
+that needs several boards can still miss its turn when each comes free on
+its own and never all at once
+([#225](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/225)).
 
 ### The host lock
 
 Every harness command that switches USB power or writes firmware also holds
 the host lock, `<lease dir>/host-power.lock`, the same kind of `flock` lease
-(released by the kernel when the holder exits, so it never goes stale): a
+(released by the kernel when its holders exit, and taken over when they are
+gone, as above): a
 `run-suite` with power isolation (StarTech or Acroname) or an exclusive
 Ubertooth check, `Flash reliability`, or `DFU images` holds it for the whole
 run, a `--build` run that flashes its boards with its own build takes it with
@@ -1285,8 +1538,9 @@ machine's host and its boards are listed from this machine's lease directory,
 where nothing holds them.
 
 Lock order: the host lock first, then the boards in serial order, taken in one
-all-or-nothing attempt. Nothing blocks while holding a lock (a busy lock
-releases everything and the attempt is retried until the deadline), and no
+all-or-nothing attempt, and behind the queue above. Nothing blocks while
+holding a lock (a busy lock releases everything and the attempt is retried
+until the deadline), and no
 command takes the host lock after it already holds a board, so runs and
 manual leases cannot deadlock. With external board locks (below) the full
 order is: external board locks, host lock, leases.
@@ -1329,8 +1583,11 @@ is not free. `runner` passes the option to every run it starts
 the generated units carry no environment, so the variable alone does not
 reach it).
 
-Full lock order, one hierarchy for every command: the external board locks
-in serial order, then the host lock, then the board leases in serial order.
+Full lock order, one hierarchy for every command: a ticket per resource for
+as long as the command waits and `takeover.lock` shared for as long as each
+attempt lasts (both above; neither is a resource, and nothing ever blocks on
+either), then the external board locks in serial order, then the host lock,
+then the board leases in serial order.
 A lab wrapper that takes a board's own lock file and then runs
 `ubertooth-harness lease` (which may take the host lock, then the leases)
 follows the same order, so the two cannot deadlock; the harness also never
@@ -1388,7 +1645,7 @@ later cancellation does not hide an earlier failure: the run still fails.
 
 A test run is one `run-suite` run of a plan suite. It writes exactly two files
 into `<output>/<run-id>/` (plus `build/` with `--build`, `captures/` when
-a BLE capture case ran, and `output/` when a command printed a lot):
+a capture case ran, and `output/` when a command printed a lot):
 
 - `run.jsonl`: every record, appended and fsynced as it happens. The first
   records are `run_started` and `manifest` (sources, plan and registry hashes,
@@ -1402,9 +1659,11 @@ a BLE capture case ran, and `output/` when a command printed a lot):
 - `report.md`: compiled from `run.jsonl` when the run ends, including failed or
   canceled runs. It lists the setup (commits, host and platform, toolchain,
   Python, device serials and firmware, RF placement, artifact hashes) and a
-  results table, then a Watchdog section when any board was read, then the
-  full transcript. A board that reset itself puts its warning in the test's
-  Reason column too, since the test itself passed.
+  results table, then a Watchdog section when any board was read, an Output
+  files section when the run saved any (see [Checks read the output
+  files](#checks-read-the-output-files)), then the full transcript. A board
+  that reset itself puts its warning in the test's Reason column too, since
+  the test itself passed.
 
 Where a board the run used records an RF placement
 ([RF placement](#rf-placement-where-a-board-sits-on-the-bench)), the manifest
@@ -1445,15 +1704,22 @@ order, before the `[R]` line. The live terminal stream on stderr uses the same
 Every response is kept, but run.jsonl holds at most the first 200 output
 records or 64 KiB, and the last 50 records or 16 KiB, of each build,
 preflight, test or flash command's output (bytes as written to run.jsonl, JSON
-escapes included, so a 4-byte character counts 12). Past the first limits, the
-command's full output, from its first line, goes to `output/<command id>.log`
-in the run directory as it arrives, one `<UTC time> [O]` or `[E]` line per
-output line in arrival order (or `[<alias> >]` and `[<alias> <]` for a known
-target's shell lines). A flash command's file also names its test, for
-example `output/003-Flash-reliability-flash-0001.log`, because flash command
+escapes included, so a 4-byte character counts 12). Past the first limits,
+each of the command's streams goes to a file of its own in the run
+directory as it arrives, from its first byte:
+`output/<command id>.stdout.log` and `output/<command id>.stderr.log`. A file
+holds what the command wrote on that stream, with nothing of the harness's
+own added, so a reader sees what the tool printed, including a known target's
+shell lines as the driver marked them (`[<alias> >]` and `[<alias> <]`). The
+text is as the harness decoded it (UTF-8, any byte that is not valid UTF-8
+replaced, as the transcript has always shown it), and the SHA-256 is the hash
+of the file. A stream a command never wrote to leaves no file.
+A flash command's files also name its test, for example
+`output/003-Flash-reliability-flash-0001.stdout.log`, because flash command
 IDs repeat in every flash test. The live stream then gets no more output records until the
-command ends; then a `command_output_omitted` record names the file
-(`output_file`), summarizes what run.jsonl left out (`output_omitted`:
+command ends; then a `command_output_omitted` record names the files
+(`output_files`, each with its path, stream, size, line count, and SHA-256),
+summarizes what run.jsonl left out (`output_omitted`:
 stdout and stderr line and character counts and the ten most common line
 shapes, digit runs replaced by `N`, with their counts) and gives in `received`
 when the left-out output ended; it is followed by the last
@@ -1466,14 +1732,14 @@ rendering report.md for such a run caps it the same way instead, to the first
 200 records or 64 KiB and the last 50 records or 16 KiB, counted in characters
 rendered rather than the bytes a record takes in run.jsonl, with one `[M]`
 line for the gap (`<n> more characters of output are in run.jsonl`).
-`command_finished` repeats `output_file` and `output_omitted`. The newest
+`command_finished` repeats `output_files` and `output_omitted`. The newest
 output, such as the harness's own timeout, cancellation or `OUTPUT SINK ERROR`
 line, is always among the last records. report.md shows the gap as `[M]`
 lines between the first and last lines:
 
 ```text
 00:07:00.120 [E] rx block timestamp 283640 * 100 nanoseconds
-00:07:02.940 [M] full output in output/016-Raw-receive-dump-full-receive.log; left out of run.jsonl here: 6893 stderr lines (309933 characters)
+00:07:02.940 [M] full output in output/016-Raw-receive-dump-full-receive.stderr.log; left out of run.jsonl here: 6893 stderr lines (309933 characters)
 00:07:02.940 [M]   6893 x [E] rx block timestamp N * N nanoseconds
 00:07:02.944 [E] rx block timestamp 290481 * 100 nanoseconds
 00:07:02.951 [R] ubertooth-dump exit 124 in 3.012s, stopped at its planned deadline
@@ -1483,9 +1749,58 @@ This keeps the per-block progress lines `ubertooth-dump` prints on stderr
 (about 2500 a second), the per-block progress of each `ubertooth-dfu` in a
 flash reliability run, compiler output, and long packet listings out of
 run.jsonl: on a release run that cut run.jsonl from 48 MB to about 20 MB, and the dump stderr records
-from 15 MB to 1 MB. Checks still see each command's complete output. Through
+from 15 MB to 1 MB. Through
 the runner service the `output/` files stay in the runner's run directory;
 only run.jsonl records reach the controller.
+
+### Checks read the output files
+
+A check sees each command's complete output however long the command ran. It
+reads the stream from the file a block at a time, so the harness's memory
+does not grow with the stream: an hours-long capture and a two-line answer
+cost the same. `CommandResult.stdout` and `.stderr` keep only the first and
+last 128 KiB of each stream for the live view, with a line between them
+saying how much is missing, so a check must not read them directly. A command
+whose output stayed inside the run.jsonl limits has no file, and the same
+checks read its complete in-memory copy.
+
+Every check that reads output is recorded in an `output_checks` record: its
+kind (an expected pattern, a forbidden one, an observed setting, the
+command's own `SKIP:` line, or a check written as code), the pattern, the
+files it read, whether it matched, and what it matched. The files a case's
+tools wrote (captures, `-d` dumps, and any target device's shell traffic in
+`<name>.serial.log`) are recorded the same way, in an `output_files` record
+with each file's size and SHA-256.
+
+Each file the run saved is listed in report.md's **Output files** section,
+grouped by test (and under `build` or `preflight` for a file those phases
+saved): its path, stream, size, line count, SHA-256, and the checks that read
+it with their results. A check counts against the run when it recorded a
+reason, when an expected pattern or an observed setting was not found, or
+when a forbidden pattern was.
+
+
+### Re-running a finished run's output checks
+
+```sh
+python -m ubertooth_harness validate runs/<run-id>
+```
+
+`validate` reads the run directory and nothing else: no hardware, no
+network, and it writes nothing. It measures every recorded file again and
+runs every recorded pattern check again over the same bytes, then reports
+
+- a file that is missing, a different size, or a different SHA-256, so the
+  run directory is no longer the one the run produced;
+- a check that now reaches a different verdict, which is what to look at
+  after a check has been fixed, or when auditing a result;
+- the checks it cannot run again. A check written as code
+  (`Step.output_check`, for example the spectrum sweep's sample checks) is
+  one of those: the record holds its verdict, not its logic.
+
+It exits 0 when nothing differs and 1 when something does. A run recorded
+before output checks existed has nothing to re-run, which it says and which
+is not a failure.
 
 Run IDs look like `20261022T203045Z-a1b2c3d4e5f6`; `--run-id` supplies a
 path-safe ID. Records use event schema version 1 (pre-release; no stable
@@ -1550,7 +1865,17 @@ is masked only where it stands alone, so it cannot mask part of a count. A
 serial port path keeps its shape with the serial inside it masked
 (`/dev/serial/by-id/usb-SEGGER_J-Link_<serial>-if00`), whether the registry
 held that path or the harness found it. Any standalone 32-hex-digit token is
-masked too, since that is the shape of an Ubertooth serial.
+masked too, since that is the shape of an Ubertooth serial. Where output was
+cut inside a serial, which either output cap can do, the piece the cut left
+behind is masked as well: a run of 8 hex digits or more that a serial the run
+names holds, or, for a board the run never names, a run of 24 to 31 digits
+carrying both letters and digits, which is a serial and little else. Left to
+read are a whole git SHA or digest, a narrower piece, and a long run of
+digits or of letters alone (a counter, a bit string, a field of zeros) that
+no serial the run names holds. The cost of the width rule is that a SHA an
+output cap cut that short reads as `<serial>` too. Redaction is this page
+only: a run's own `report.md`, which carries the transcript, is always
+written with its serials.
 
 ## Flash reliability
 
@@ -2299,8 +2624,17 @@ skipped at run time and that the not-applicable cases match `--dry-run`: the
 follow and scan cases on macOS, none of them on Linux; `sign-test-build` and
 specan-ui on both (no firmware build, installed tools). On Linux it also
 checks that the build installed `ubertooth-scan` and `ubertooth-follow` and
-that their `-h` cases passed. The
-checks themselves are in `scripts/ci.sh`. To run them on an exact commit
+that their `-h` cases passed.
+
+The test job also checks that the tree writes Bluetooth piconet roles as
+central and peripheral (`AGENTS.md`), with an allowlist for the external
+names this project does not own: libbtbb's and git's `master` branch and
+ESP-IDF's `ESP_SPP_ROLE_*` constants. A line that needs another such name adds
+it to `ROLE_TERMS_ALLOW` in `scripts/ci.sh`, as would a pattern that has to
+match the fork's own output while the fork changes its wording; the harness
+has no such pattern today.
+
+The checks themselves are in `scripts/ci.sh`. To run them on an exact commit
 without GitHub Actions, locally or on another host over SSH:
 
 ```sh
@@ -2312,12 +2646,22 @@ A second workflow (`.github/workflows/firmware.yml`) compiles the nRF52840 DK
 role firmware, which the test and build jobs do not: it needs the nRF Connect
 SDK, so it builds in Nordic's toolchain image for the version
 `firmware/nrf52840dk/NCS_VERSION` pins, and checks that the image carries the
-firmware version string the harness flashes by. That image and the SDK
-workspace are gigabytes, so it runs only on a change under
-`firmware/nrf52840dk` (or to `scripts/ci.sh`), weekly, and on request, and it
-is not a required check. `scripts/ci.sh firmware-dk` is the same build on any
-Linux host with docker, and `scripts/local-ci.sh firmware-dk` runs it against
-an exact commit.
+firmware version string the harness flashes by. On a pull request it also
+builds the sources of the commit the request is against and fails when the
+image changed while `UTDK_FW_VERSION` did not: `nrfdk.py ensure` flashes a DK
+only when the board reports another version, so that change would never reach
+a board that already runs this one. The images decide and not the files, so a
+comment or formatting change leaves the image identical and asks for no bump;
+a build that does not repeat itself is reported as that rather than as a
+missing bump; and a bump of `NCS_VERSION`, which both builds would use and
+the comparison could not see, asks for the version bump by itself.
+
+That image and the SDK workspace are gigabytes, so the workflow runs only on
+a change under `firmware/nrf52840dk` (or to `scripts/ci.sh` or the workflow
+itself), weekly, and on request, and it is not a required check.
+`scripts/ci.sh firmware-dk` is the same build on any Linux host with docker
+(`DK_BASE_REF=origin/main` to compare there too), and
+`scripts/local-ci.sh firmware-dk` runs it against an exact commit.
 
 The target-runner tests run against an in-process stub controller, and the
 controller tests against scripted runners and the real runner, all on

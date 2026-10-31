@@ -58,6 +58,7 @@ import sys
 
 from ubertooth_harness import dfuimage
 from ubertooth_harness.hostneeds import Needs
+from ubertooth_harness.outputfiles import text_lines
 from ubertooth_harness.refusal_cases import NO_BOARD_NOTE, probe_step, tool_step
 from ubertooth_harness.stateful import (
     CAPTURE_DIR_KEY,
@@ -138,8 +139,8 @@ def _state_before(sub="") -> Step:
                    observe=Observation("directory before", _ENTRIES))
 
 
-def _changes(stdout: str) -> str:
-    for line in stdout.splitlines():
+def _changes(stdout) -> str:
+    for line in text_lines(stdout):
         if line.startswith("Directory changed: "):
             return line
     return ""
