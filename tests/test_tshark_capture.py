@@ -373,6 +373,27 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(1, code, out)
         self.assertIn("FAIL:", out)
 
+    def test_a_tshark_that_does_not_answer_the_listing_is_reported(self):
+        lines = []
+        real = tsharkcapture.subprocess.run
+
+        def slow(argv, **options):
+            if tuple(argv[:2]) == (tsharkcapture.TSHARK, "-D"):
+                raise tsharkcapture.subprocess.TimeoutExpired(argv, 1)
+            return real(argv, **options)
+
+        with mock.patch.object(tsharkcapture.subprocess, "run", side_effect=slow), \
+                mock.patch.object(tsharkcapture, "START_WAIT_S", 1.0):
+            code = tsharkcapture.capture(
+                INTERFACE, 1.0, ADDRESS,
+                program=tsharkcapture.Program(interpreter=sys.executable,
+                                              script=Path(FAKE).read_bytes()),
+                out=lines.append)
+
+        out = "\n".join(lines)
+        self.assertEqual(1, code, out)
+        self.assertIn("tshark -D did not answer within 1s", out)
+
     def test_an_interface_the_program_does_not_offer_is_reported(self):
         lines = []
         with mock.patch.dict(os.environ, {"FAKE_EXTCAP_SERIAL": "0badc0de"}):

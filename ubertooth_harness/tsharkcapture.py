@@ -402,9 +402,17 @@ def capture(interface, seconds, address, *, program: Program,
         marker = home / "extcap-calls"
         installed = _install(extcap, program, marker)
         out(f"extcap program: {installed.name} in {extcap}")
-        listing = subprocess.run((TSHARK, "-D"), capture_output=True, text=True,
-                                 timeout=START_WAIT_S, env=env)
-        if interface not in listing.stdout:
+        # Listing the interfaces runs the program too, so a tshark that does
+        # not answer is reported like any other failure rather than ending
+        # the command with a traceback; what the program started is caught by
+        # the process ids it recorded, below.
+        try:
+            listing = subprocess.run((TSHARK, "-D"), capture_output=True, text=True,
+                                     timeout=START_WAIT_S, env=env).stdout
+        except subprocess.TimeoutExpired:
+            listing = ""
+            failures.append(f"tshark -D did not answer within {START_WAIT_S:g}s")
+        if interface not in listing:
             failures.append(f"tshark -D does not list {interface}")
         argv = tshark_argv(interface, seconds, capture_filter)
         status, stdout, stderr, seen, quiet = _run_tshark(
