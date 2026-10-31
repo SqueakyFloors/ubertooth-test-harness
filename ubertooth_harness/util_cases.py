@@ -919,11 +919,13 @@ def _multi_case(serial, case_id, name, steps, expected_state):
 
 
 def _listing_step(step_id, name, argv, check):
-    # Every listing opens each attached board in turn, and a board that does
-    # not answer costs a libusb control timeout or two before the command
-    # gives up on it, so the usual 5 s is not enough on a host with several
-    # boards. -V is the slowest of them, since it takes two reads per board,
-    # which is where the shared deadline comes from (patterns.py).
+    # Every listing opens each attached board in turn and reads it, so it
+    # needs more than the usual 5 s on a host with several boards; -V reads
+    # each board twice. This is the deadline every -V in the harness uses
+    # (patterns.py). It is not enough to ride out a board that has stopped
+    # answering, whose read costs libubertooth's own 20 s control timeout:
+    # such a board ends the step at this deadline rather than reaching the
+    # tool's own "read failed" line.
     return Step(step_id, name, argv, timeout_s=HOST_VERSION_TIMEOUT_S,
                 output_check=check)
 

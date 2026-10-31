@@ -582,10 +582,11 @@ def run_test(test_name, executor, *, coverage="smoke", cancellation=None):
 class HostVersionPassthrough:
     """Answer the mandatory host-version preflight, forward everything else.
 
-    The preflight asks ``ubertooth-util -V`` before any test runs, and a case
-    that reads the version asks the same command later, so only the first
-    call is answered here; the rest reach the device, which answers -V
-    itself. One instance per run.
+    The preflight asks ``ubertooth-util -V`` before any test runs, and
+    Multi-board selection's ``-V`` with no selector asks the same command
+    later (tests/test_util_cases.py, through test_guards.run_guarded), so
+    only the first call is answered here; the rest reach the device, which
+    answers -V itself. One instance per run.
     """
 
     def __init__(self, device):
@@ -663,10 +664,11 @@ class CoverageGenerationTests(unittest.TestCase):
         options = tuple(option for option, _label, _pattern in transitions._QUERY_OPTIONS)
         _args, cases = cases_for("Ubertooth util compositions", "comprehensive")
 
-        # -V does not compose: its case is a pair of options but not a
-        # composition, so it is left out of the pair set.
+        # -V does not compose: its cases are a pair of options but not a
+        # composition, so they are left out of the pair set.
         composed = {frozenset(case.argv[3:]) for case in cases
-                    if len(case.argv) == 5 and case.case_id != transitions.VERSION_CASE}
+                    if len(case.argv) == 5
+                    and case.case_id not in transitions.VERSION_CASES}
 
         self.assertEqual(
             {frozenset(pair) for pair in compatible_pairs(options)}, composed
@@ -674,9 +676,13 @@ class CoverageGenerationTests(unittest.TestCase):
         self.assertNotIn("-V", options)
         full = next(case for case in cases if case.case_id == "full-readback-composition")
         self.assertEqual(options, full.argv[3:])
-        version = next(case for case in cases
-                       if case.case_id == transitions.VERSION_CASE)
-        self.assertEqual(("-V", "-s"), version.argv[3:])
+        # -V with the query after it and before it, so an order the fork
+        # treats alike is checked both ways.
+        self.assertEqual(
+            transitions.VERSION_CASES,
+            {case.case_id: case.argv[3:] for case in cases
+             if case.case_id in transitions.VERSION_CASES},
+        )
 
     def test_plans_select_valid_profiles_for_every_transition_test(self):
         expected = {"fast.yaml": ("fast", "smoke"), "release.yaml": ("release", "comprehensive")}
@@ -1057,15 +1063,21 @@ class TransitionExecutionTests(unittest.TestCase):
             event.details["case_id"].rsplit("compositions-", 1)[1]
             for event in case_results(events) if event.status == "failed"
         )
-        self.assertEqual([transitions.VERSION_CASE], failed)
-        self.assertIn("-V beside a query", summary.failure_reason)
+        self.assertEqual(sorted(transitions.VERSION_CASES), failed)
+        self.assertIn("answers the version alone", summary.failure_reason)
 
     def test_compositions_do_not_repeat_identical_commands(self):
         _args, cases = cases_for("Ubertooth util compositions", "comprehensive")
 
         commands = [case.argv for case in cases]
 
-        self.assertEqual(len(commands), len({frozenset(c) for c in commands}))
+        self.assertEqual(len(commands), len({tuple(c) for c in commands}))
+        # No two compositions ask for the same set of reports. The two -V
+        # cases are the one place where one pair appears twice, written in
+        # both orders on purpose, so they are compared as written above.
+        composed = [c for c in commands
+                    if c[3:] not in transitions.VERSION_CASES.values()]
+        self.assertEqual(len(composed), len({frozenset(c) for c in composed}))
 
     def test_a_board_at_pa_zero_runs_every_case_and_gets_pa_zero_back(self):
         # Harness #5: -a0 sets PA 0 (fork 4ed4a1d), so nothing skips and the

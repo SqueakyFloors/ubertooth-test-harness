@@ -934,8 +934,6 @@ class MultiBoardCaseTests(unittest.TestCase):
                      ("Host tools version: 1.1", HEAD[1])):
             self.assertIn("does not open with the host tools' version",
                           check(answer(*boards, head=head)), head)
-        # A repeated head line is counted as a board's, so the answer has one
-        # line too many.
         # A repeated head line lands where board 0's version should be.
         self.assertIn("line is not", check(answer(*boards, head=HEAD + HEAD[1:])))
         self.assertIn("ends before the Firmware version of board 1",

@@ -16,12 +16,10 @@ from ubertooth_harness.rf import (
 )
 from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
-    FIRMWARE_BUILD_PATTERN,
     FIRMWARE_PATTERN,
-    HOST_VERSION_LINE,
     HOST_VERSION_TIMEOUT_S,
-    LIBBTBB_PATH_LINE,
     PART_ID_PATTERN,
+    VERSION_ANSWER,
     serial_pattern,
 )
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
@@ -618,8 +616,7 @@ def _ubertooth_identity_cases(_arguments, _resources, resource_identities):
             "firmware-compile-info",
             "Firmware compile info",
             common + ("-V",),
-            (HOST_VERSION_LINE, LIBBTBB_PATH_LINE, firmware,
-             FIRMWARE_BUILD_PATTERN),
+            (VERSION_ANSWER,),
             timeout_s=HOST_VERSION_TIMEOUT_S,
         ),
         CommandCase(

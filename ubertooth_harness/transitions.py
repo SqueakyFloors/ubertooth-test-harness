@@ -76,13 +76,11 @@ from ubertooth_harness import capturefile
 from ubertooth_harness.cases import ALTERNATED_ROLE_PREFIX, CommandCase, guard_roles
 from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
-    FIRMWARE_BUILD_PATTERN,
     FIRMWARE_PATTERN,
-    HOST_VERSION_LINE,
     HOST_VERSION_TIMEOUT_S,
     IMAGE_NAME_PATTERN,
-    LIBBTBB_PATH_LINE,
     PART_ID_PATTERN,
+    VERSION_ANSWER,
     serial_pattern,
 )
 from ubertooth_harness.stateful import (
@@ -867,28 +865,32 @@ _QUERY_OPTIONS = (
     ("-d", "all-leds", r"RX LED status : [01]\s+TX LED status : [01]"),
 )
 _USR_LED_LINE = r"USR LED status: [01]"
-# The case id of the -V case, which is not an option composition.
-VERSION_CASE = "version-ends-the-command"
+# The case ids of the -V cases, which are not option compositions. The query
+# goes after -V in one and before it in the other: the fork sets the flags
+# while it reads the command line and acts only once the whole line has
+# parsed, so the order must make no difference.
+VERSION_CASES = {
+    "version-ends-the-command": ("-V", "-s"),
+    "version-ends-the-command-written-last": ("-s", "-V"),
+}
 
 
-def _version_case(serial):
+def _version_case(case_id, options, serial):
     """-V beside a query answers the version and nothing else.
 
     Since fork f898fe5 (#813) -V is the version command: ubertooth-util
     returns as soon as it has printed the answer, before the identity queries
-    run. So -V -s prints the version answer and no serial line, and the
-    answer carries labels of its own ("Firmware build: ...") rather than the
-    bare build string the old -V printed.
+    run. So -V with -s prints the version answer and no serial line, whichever
+    order they were written in, and the answer carries labels of its own
+    ("Firmware build: ...") rather than the bare build string the old -V
+    printed.
     """
     return CommandCase(
-        VERSION_CASE,
-        "-V beside a query answers the version alone",
-        _util(serial, "-V", "-s"),
+        case_id,
+        f"{' '.join(options)} answers the version alone",
+        _util(serial, *options),
         (
-            HOST_VERSION_LINE,
-            LIBBTBB_PATH_LINE,
-            FIRMWARE_PATTERN,
-            FIRMWARE_BUILD_PATTERN,
+            VERSION_ANSWER,
             # -V ended the command, so -s never ran.
             rf"\A(?![\s\S]*{serial_pattern(serial)})",
         ),
@@ -928,7 +930,8 @@ def util_composition_cases(arguments, _resources, resource_identities):
             serial,
         ),
     ]
-    cases = [_version_case(serial), *compositions]
+    cases = [_version_case(case_id, options, serial)
+             for case_id, options in VERSION_CASES.items()] + compositions
     if arguments["coverage"] == "comprehensive":
         covered = {frozenset(case.argv[3:]) for case in compositions}
         cases.append(

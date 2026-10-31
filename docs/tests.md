@@ -304,10 +304,12 @@ own.
 **Hardware and arguments.** One `Ubertooth`, selected by full serial. Not
 guarded (every command is read-only and selects by serial).
 
-**Expected outcome.** Six cases: firmware version, the `-V` answer (host
-version line, firmware version, firmware build), device serial, part ID,
-board ID, and the four-query readback composition. A case failure does not
-stop the others.
+**Expected outcome.** Six cases: firmware version, the whole `-V` answer (its
+four lines in the fork's order: host version, libbtbb path, firmware version,
+firmware build), device serial, part ID, board ID, and the four-query
+readback composition. A case failure does not stop the others. The `-V`
+case keeps its `firmware-compile-info` id, which a run's records and the
+learned durations are kept under, although it now covers more than that line.
 
 **Known limits.** These are readbacks, so a pass says the board answers and
 identifies itself, not that any radio function works.
@@ -341,21 +343,24 @@ command and requires every report asked for.
 that asks for two must print both. A parser bug that lets a later option
 replace an earlier one, or that returns after the first report, shows up as a
 missing line. `-l` and `-d` both print a USR LED line, so that pair requires
-two of them. `-V` is left out of the compositions and gets a case of its own
-that goes the other way: since fork `f898fe5` it is the version command and
-ends the command, so `-V -s` must print the whole version answer and no
-serial line. Asking for it beside the others would hide every query behind
-it.
+two of them. `-V` is left out of the compositions and gets two cases of its
+own that go the other way: since fork `f898fe5` it is the version command and
+ends the command, so `-V -s` and `-s -V` must each print the whole version
+answer (its four lines, in order) and no serial line. The fork sets the flags
+while it reads the command line and acts only once the whole line has parsed,
+so both orders must behave alike. Asking for `-V` beside the others would
+hide every query behind it.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
 Guarded. `coverage:`.
 
-**Expected outcome.** Smoke runs 2 cases: `-V -s` answering the version
-alone, and all nine composable read-only queries in one command.
-Comprehensive runs 39: the same two, every compatible pair of the nine
-queries, and a refusal case, since two `-U` options name two boards for one
-command and are refused (`error: option '-U' given more than once`, exit 1)
-rather than the last one winning. A case failure does not stop the others.
+**Expected outcome.** Smoke runs 3 cases: `-V -s` and `-s -V`, each
+answering the version alone, and all nine composable read-only queries in one
+command. Comprehensive runs 40: the same three, every compatible pair of the
+nine queries, and a refusal case, since two `-U` options name two boards for
+one command and are refused (`error: option '-U' given more than once`,
+exit 1) rather than the last one winning. A case failure does not stop the
+others.
 
 **Known limits.** Read-only only: nothing here writes a setting, so it says
 nothing about set-and-read ordering, which `Radio setting transitions` covers.
@@ -583,8 +588,9 @@ the index case's step count grows with the number of boards. Smoke: `-U all
 same, and `-N` plus one `-U<index> -s` per board agree with the listing.
 Comprehensive adds the four identity queries listed per board in index
 order, both with `-U all` and with no selector; `-V` reporting every board
-itself, also both ways, as the host version line followed by each board's
-firmware version and build under its index; `-C` without `-U` refusing to
+itself, also both ways, as the host tools' two lines (the version and the
+libbtbb path) followed by each board's firmware version and build under its
+index; `-C` without `-U` refusing to
 pick a board (exit 1 with `error: multiple Ubertooth devices found; select
 one with -U <index|serial>` and one `Device <index>: <serial>` line per
 board, and no channel read); and an index past the last board refused with
