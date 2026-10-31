@@ -51,9 +51,14 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Sequence
 
-from ubertooth_harness import targets
+if __package__ in (None, ""):
+    # Run as a script: make the package importable for the shell-line format.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from ubertooth_harness import targets  # noqa: E402
 
 # The oldest firmware whose shell has everything this driver uses, and the
 # stable path of its bridge: both from targets.py, which keeps every known

@@ -392,6 +392,21 @@ class MainTests(unittest.TestCase):
         self.assertEqual(1, code)
         self.assertIn("error: /dev/absent-a does not exist", captured())
 
+    def test_the_driver_runs_as_a_script_by_path(self):
+        # The cases run it by path, from whatever directory the runner is in,
+        # so the package has to be importable from there. Without that every
+        # peer command dies in the import before it reaches a board.
+        import subprocess
+        import tempfile
+
+        result = subprocess.run(
+            [sys.executable, esp32peer.__file__, "identify",
+             "--device", "/dev/absent-peer"],
+            capture_output=True, text=True, cwd=tempfile.gettempdir())
+        self.assertEqual(1, result.returncode)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("error: /dev/absent-peer does not exist", result.stderr)
+
     def test_a_command_after_an_identify_is_refused(self):
         with _captured_stderr():
             with self.assertRaises(SystemExit) as raised:
