@@ -11,6 +11,10 @@ no third-party device involved. That is what `ubertooth-rx`,
 `ubertooth-rx -l`/`-u`, `ubertooth-follow`, and `ubertooth-btbr` need to be
 tested against something known.
 
+They also open a synchronous (SCO or eSCO) audio link to each other, which
+puts reserved-slot voice packets on the air next to the data packets. See
+[The audio link](#the-audio-link).
+
 One image holds both roles, and one command switches between them:
 
 | Role | What it does |
@@ -27,7 +31,7 @@ The channel is opened with no security (`ESP_SPP_SEC_NONE`), so a link needs
 no pairing and a capture holds only the SDP lookup, the connection, and the
 data.
 
-Firmware version: `utesp-1.0.0` (`UTESP_FW_VERSION` in `main/peer.h`).
+Firmware version: `utesp-1.1.0` (`UTESP_FW_VERSION` in `main/peer.h`).
 
 ## Versions
 
@@ -89,10 +93,15 @@ not part of any answer, so a driver skips them:
 
 | Notice | When |
 |---|---|
-| `utesp: utesp-1.0.0 ready` | after boot, once Bluetooth is up |
-| `utesp: utesp-1.0.0 start failed: <reason>` | after boot, if it is not |
+| `utesp: utesp-1.1.0 ready` | after boot, once Bluetooth is up |
+| `utesp: utesp-1.1.0 start failed: <reason>` | after boot, if it is not |
 | `utesp: spp connected <address>` | a link came up, either role |
 | `utesp: spp disconnected` | the link went down |
+| `utesp: sco connected` | the synchronous audio link came up |
+| `utesp: sco disconnected` | it went down |
+| `utesp: audio link unavailable: <reason>` | after boot, if only the audio half failed to set up; SPP still works and `sco start` answers `ERR` |
+| `utesp: sco frame size <n> unusable, sending no audio` | a link came up asking for a frame size this firmware cannot fill |
+| `utesp: sco the profile is still running: <reason>` | a start failed and could not put the profile away either |
 
 ESP-IDF's own log lines start with `W (` or `E (` and are warnings or errors;
 `sdkconfig.defaults` keeps the log at that level so nothing else appears.
@@ -110,6 +119,9 @@ ESP-IDF's own log lines start with `W (` or `E (` and are warnings or errors;
 | `stream <on\|off>` | send the payload while the link is up |
 | `stream period <ms>` | time between writes, 5 to 10000 (default 100) |
 | `stream payload <bytes>` | bytes per write, 8 to 512 (default 100) |
+| `sco start` | acceptor: be ready; initiator: open the audio link |
+| `sco stop` | drop the audio link and stop the profile |
+| `sco stats` | one JSON line of the controller's packet counters, then `OK` |
 | `defaults` | restore every boot setting and zero the counters |
 | `reset` | answer `OK`, then restart the board |
 
@@ -182,6 +194,212 @@ silent board.
 
 `bt` is false only if Bluetooth failed to come up; the shell still answers
 then, with a zero address, and the boot notice says why.
+
+## The audio link
+
+A synchronous link (SCO or eSCO) carries voice in reserved slots rather than
+in the polled slots ACL data uses, so it looks different on the air and a
+decoder has to handle it separately. `sco start` puts one on the air between
+the two boards.
+
+ESP-IDF gives an application synchronous links only through the Hands-Free
+Profile, so that is how the link is opened: the initiator runs the audio
+gateway and the acceptor runs the hands-free unit. The gateway pages, which
+keeps the initiator the piconet's leader, the same way round as for SPP, so
+the LAP on the air is still the initiator's.
+
+ESP-IDF's own
+[configuration help](https://docs.espressif.com/projects/esp-idf/en/v5.5.6/esp32/api-reference/bluetooth/esp_hf_ag.html)
+says the two roles "can be included simultaneously but they cannot run
+simultaneously", so the image holds both and only the one the role needs is
+started. Nothing starts until `sco start`, so a board that has not run it is on the
+air exactly as it was before this was added. After a `sco start` and
+`sco stop` the SPP side works as before, but whether the Hands-Free SDP
+record and any Class of Device the profile set are fully undone is ESP-IDF's
+business and is not checked here: a test that compares two SPP captures byte
+for byte should run them on a board that has had no audio link, or reset it
+in between.
+
+| Step | Acceptor (hands-free unit) | Initiator (audio gateway) |
+|---|---|---|
+| `sco start` | start the profile and wait | start the profile, page the acceptor, open the audio link |
+| while up | send and count frames | send and count frames |
+| `sco stop` | drop the link and the service level connection, stop the profile | the same |
+
+So a test runs `sco start` on the acceptor first, then `spp peer <acceptor
+address>` and `sco start` on the initiator. `sco start` on the initiator
+answers only once the controller has opened the link, and says what went
+wrong otherwise: `ERR service level connect timed out`, `ERR the peer refused
+the service level connection`, `ERR audio connect timed out`, or `ERR the
+controller did not open a synchronous link`. `role` and `defaults` take the
+audio link down, because it belongs to a role; `spp stop` does not, as the
+two links are separate. Those two answer `ERR` and change nothing else if the
+audio link will not stop, rather than half applying themselves.
+
+A second `sco start` for the role a board is already in keeps the profile and
+the service level connection it has, and opens only what is missing, so a
+retry cannot pull down the link it is asking for. A frame size this firmware
+cannot fill is a failed start: the link carries no pattern, so `sco start`
+answers `ERR the link asked for a frame size this firmware cannot fill` and
+puts the profile away.
+
+A start that fails tries to put the profile away, and if that does not work
+either it says so with a `utesp: sco the profile is still running` notice:
+the answer to the command is why the start failed, and the notice is the
+reason `role` and `defaults` will refuse next.
+
+These commands block the shell while the controller works, so a driver's read
+timeout has to allow for the worst case. Counting the tidying up a failure
+does: about 32 seconds for `sco start` on the initiator (3 s to start the
+profile, 15 s to page and bring the service level connection up, 10 s for the
+audio link, then up to 3.5 s to put the profile back), about 10 seconds for
+`sco stop` (3 s each for the link and the service level connection, 3.5 s for
+the profile), and about 18 seconds for `role` and `defaults`, which stop the
+audio link, then the SPP side, and then start the SPP server again. Allow 40 seconds and nothing will time out.
+A link to a board that is awake takes four or five seconds in practice.
+
+If `sco stop` keeps answering `ERR`, the profile is still the firmware's to
+stop and `role` and `defaults` will keep refusing with it. `reset` is the way
+out; the SPP side goes on working in the meantime.
+
+### The audio pattern
+
+There is no microphone on these boards, so the firmware makes the audio. Each
+frame is a little-endian 32-bit frame counter followed by a ramp
+(`frame[i] = i`), so no two frames of a link are alike and the content is
+fixed rather than whatever the buffer happened to hold. The counter restarts
+at zero each time the link comes up.
+
+The counter is **not** readable from an Ubertooth capture: the controller
+codes these samples to CVSD, so the bytes on the air are not these bytes. It
+is readable by whatever sees the frames before that coding, which is the far
+end over HCI, and it would reach the air unchanged in a build whose codec is
+transparent. What a capture gets from this link is its timing and its packet
+count, not its payload.
+
+The link clocks the sending. A synchronous link is symmetric and the
+controller hands up one frame per interval, so each side answers each frame
+it receives with one frame of its own: that matches the link's rate with no
+timer here to drift against it. If no frame arrives for 50 ms the firmware
+sends one anyway, which both starts the exchange when the link comes up and
+keeps a live link from going silent if a frame is ever missed.
+
+The far end counts frames rather than comparing bytes, and `sco_rx_bad`
+counts the frames the controller marked as damaged. Nothing in the harness
+decodes CVSD, so no test compares payloads today.
+
+### What `status` reports
+
+| Field | Meaning |
+|---|---|
+| `sco` | `off` (no profile), `ready` (profile started, no link), `slc` (service level connection up), `on` (audio link up) |
+| `sco_profile` | `none`, `ag` (audio gateway), `hf` (hands-free unit) |
+| `sco_codec` | `none`, `cvsd`, or `msbc`, as the two ends negotiated it |
+| `sco_handle` | the controller's (e)SCO connection handle |
+| `sco_frame_len` | the frame size the controller asked for, in bytes |
+| `sco_tx_frames`, `sco_tx_errors` | frames the stack took, and frames it refused |
+| `sco_rx_frames`, `sco_rx_bad` | frames received, and how many of those the controller marked damaged |
+
+`sco stats` asks the controller for its own packet counters, which is the
+number a capture can be checked against:
+
+```json
+{"rx_total":4057,"rx_correct":4037,"rx_err":0,"rx_none":20,"rx_lost":0,"tx_total":4059,"tx_discarded":0}
+```
+
+That is a measured 30-second link: 4059 packets each way, one every 7.4 ms,
+which is the rate a 7.5 ms interval gives. The interval itself is not
+reported, so that is an inference from the packet rate, not a reading (see
+below). The frames are 120 bytes of 16-bit samples at that rate, which is
+128 kbit/s handed to the controller; the controller codes it down to the
+64 kbit/s a CVSD link carries on the air.
+
+### The packet type is not selectable, and is not reported
+
+A test would like to ask for a particular synchronous packet type (EV3, HV3,
+2-EV3) and to read back the link type, packet type, interval, and
+retransmission window the controller settled on. ESP-IDF offers neither, and
+this firmware does not pretend otherwise. In ESP-IDF v5.5.6:
+
+- **Choosing the parameters.** The eSCO parameters are a compile-time table
+  inside the stack, `bta_ag_esco_params[]` in
+  `components/bt/host/bluedroid/bta/hf_ag/bta_ag_sco.c`. Which row is used
+  follows from the negotiated codec and from whether both ends set the eSCO
+  S4 feature bit, and both ESP32s do. The one function that would override
+  the row, `bta_ag_set_esco_param()` (declared in
+  `bta/hf_ag/include/bta_ag_int.h`), has no caller anywhere in the tree, and
+  no `esp_hf_*` or `esp_bt_gap_*` function takes synchronous link
+  parameters. So with this image the stack asks for the CVSD S4 row: 2-EV3,
+  12 ms maximum latency, retransmission effort "quality". What the controller
+  actually opens is whatever is left after that row is masked against the
+  packet types the controller supports.
+- **Reading them back.** The stack does read them: `bta_ag_sco_conn_cback()`
+  in the same file calls `BTM_ReadEScoLinkParms()` and stores the link type,
+  transmit interval, retransmission window, and air mode in its own control
+  block. Nothing carries them further; the only synchronous-link facts that
+  reach an application are the audio state (which distinguishes a CVSD link
+  from an mSBC one), the connection handle, the frame size, and the packet
+  counters above, and `status` reports all four.
+
+An Ubertooth capture is the way to see the packet type on the air, which is
+the direction the fork's tests want anyway. The link is easy to find there:
+`ubertooth-rx -l e9c5ba -u 0d -t 30` read 168 packets of the piconet while
+an audio link was up, and 0 in the same 30 seconds with the boards idle.
+
+The codec is a build-time choice for the same reason:
+`CONFIG_BT_HFP_WBS_ENABLE` decides whether mSBC is offered at all, and this
+image sets it to `n`, so the link is always CVSD and `sco_codec` always reads
+`cvsd` while one is up. With wide-band speech the two boards would settle on
+mSBC, whose air mode is transparent, and then the firmware would have to
+produce real mSBC frames rather than samples. `sco_codec` still reports what
+the audio state says rather than a constant, so a build that turns wide-band
+speech on does not start lying.
+
+## The piconet clock is not readable from this firmware
+
+A test that checks the clock an Ubertooth recovers wants the piconet clock
+from the board that leads the piconet, which here is the initiator. That
+board's own native clock (CLKN) **is** the piconet clock, and the ESP32's controller will report it:
+`HCI_Read_Clock` (opcode `0x1407`) with `Which_Clock` = 0 answers with a
+status of success and a rising clock value. Measured on one of these boards
+on 2026-10-30 with a throwaway firmware that runs the controller with no host
+stack, so the application owns the HCI transport:
+
+```
+PROBE read_clock       opcode=0x1407: 04 0e 0c 05 07 14 00 00 00 3e 00 00 00 00 00
+PROBE read_clock_again opcode=0x1407: 04 0e 0c 05 07 14 00 00 00 54 00 00 00 00 00
+```
+
+That is a Command Complete with status `00`, connection handle `0000`, and a
+clock of `0x3e` then `0x54` in units of 312.5 microseconds.
+
+A board doing SPP and HFP cannot send that command, so there is no `clock`
+command here. Everything the application could use to send it is closed:
+
+- Bluedroid never sends `HCI_Read_Clock`. The opcode is defined in
+  `components/bt/host/bluedroid/stack/include/stack/hcidefs.h` and referenced
+  nowhere else in the component, and no `esp_*` function returns a clock.
+- `esp_vhci_host_register_callback()` takes one callback, and Bluedroid holds
+  it while it is enabled. Sending a command behind its back would hand the
+  answer to Bluedroid, which drops an event it has no pending command for.
+- `esp_ble_gap_vendor_command_send()` is the one public way to send a chosen
+  HCI opcode, and it cannot reach this one: it ends in
+  `BTM_VendorSpecificCommand()`, which documents that the "opcode will be
+  OR'd with HCI_GRP_VENDOR_SPECIFIC", and `btsnd_hcic_vendor_spec_cmd()` in
+  `stack/hcic/hcicmds.c` does exactly that. `0x1407 | 0xFC00` is `0xFC07`, a
+  vendor command, not Read Clock.
+- `esp_bluedroid_attach_hci_driver()` looks like the seam for this: it lets
+  an application supply Bluedroid's HCI transport. It is compiled out when
+  the controller is in the same build, which on the ESP32 it always is:
+  `hci_host_send_packet()` and `hci_host_register_callback()` in
+  `host/bluedroid/api/esp_bluedroid_hci.c` call the VHCI functions directly
+  under `#if (BT_CONTROLLER_INCLUDED == TRUE)` and ignore the registered
+  operations.
+
+A board that gave up Bluedroid could report the clock: driven over HCI, it
+could join a piconet as the other side of a link and read the piconet clock
+with `Which_Clock` = 1, or lead one and read its own. That is a
+different role from this firmware and is not built here.
 
 ## Extending
 
