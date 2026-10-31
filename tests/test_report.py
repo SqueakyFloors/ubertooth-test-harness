@@ -327,9 +327,10 @@ class ReportTests(unittest.TestCase):
         # A timeout, a cancellation or an output sink error begins on a line
         # of its own (the executor prefixes it), so the tail keeps it.
         report = render_run(dump_events(
-            ["noise\n" * 9000, "\nHARD TIMEOUT after 60s\n"]
+            ["noise\n" * 20000, "\nHARD TIMEOUT after 60s\n"]
         ))
 
+        self.assertIn("more characters of output are in run.jsonl", report)
         self.assertIn("[E] HARD TIMEOUT after 60s", report)
 
     def test_one_empty_record_over_the_limit_leaves_the_output_whole(self):
