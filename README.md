@@ -1433,6 +1433,55 @@ UT_Linux5    held  agent, lease: bash soak.sh, pid 2380347, since ... (for 5h12m
              it over
 ```
 
+### Waiting in turn
+
+Retrying alone is not fair. A run that wants the host lock *and* a board
+could wait out its whole `--wait-for-boards` while short board-only leases
+took that board one after another: each attempt found the board busy, gave
+back the host lock, and tried again, and nothing held the newcomers back
+([#202](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/202)).
+
+So every command first takes a numbered ticket for each board (and the host
+lock) it wants, under `<lease dir>/tickets/<key>/`, and gives way to any older
+ticket of a command that is still waiting. Waiters are served in the order
+they arrived, and a command that asks for a board somebody has waited longer
+for is told so instead of taking it:
+
+```
+error: UT_0 is queued: agent #14, run 2026-10-31-ble, lease: ubertooth-util
+-U ... -v, pid 7781, since 2026-10-31T06:12:03.114 UTC asked for it first and
+is still waiting for it; use --wait-for-boards MINUTES to wait for your turn
+```
+
+A ticket is a file named after its number, locked while its command waits and
+removed when it stops waiting, so a ticket counts only while its command is
+really there; a ticket whose process is gone expires and is removed, like a
+stale lease, which is the one thing `boards` does take away. It shows how
+deep a queue is (in `--json`, as `waiting`):
+
+```
+UT_0         held  agent #14, run 2026-10-31-ble, pid 7781 (for 0h04m11s)
+             queue: 2 commands are waiting for it
+```
+
+Giving way is bounded in one case: a board that is *free*, and that the
+command could therefore have taken. After half a second of that — several
+poll rounds, so a waiter that is really waiting gets its turn — a command
+competes for the board as it did before the queue; a command with no
+`--wait-for-boards` has a whole second before it gives up, so it too ends up
+competing rather than failing. The bound is per stretch of giving way: it
+starts again whenever the board is held, or the command ahead in the queue
+changes, so a long wait never turns into a licence to jump the queue. Giving
+way to a board somebody is using is never bounded: nothing in the harness can
+be stuck on a lock that is held, so the waiters simply take their turns.
+
+That bound is what keeps the queue from becoming a new way to wait forever.
+A command can be ahead in the queue and unable to take the board for reasons
+the queue cannot see or help: a wrapper outside the harness holding a board's
+own lock file while it waits for the lease (the order below), or simply a run
+that is still blocked on the host lock. Its neighbors give it a clear run at
+the board and then carry on.
+
 ### The host lock
 
 Every harness command that switches USB power or writes firmware also holds
@@ -1471,8 +1520,9 @@ machine's host and its boards are listed from this machine's lease directory,
 where nothing holds them.
 
 Lock order: the host lock first, then the boards in serial order, taken in one
-all-or-nothing attempt. Nothing blocks while holding a lock (a busy lock
-releases everything and the attempt is retried until the deadline), and no
+all-or-nothing attempt, and behind the queue above. Nothing blocks while
+holding a lock (a busy lock releases everything and the attempt is retried
+until the deadline), and no
 command takes the host lock after it already holds a board, so runs and
 manual leases cannot deadlock. With external board locks (below) the full
 order is: external board locks, host lock, leases.
@@ -1515,10 +1565,11 @@ is not free. `runner` passes the option to every run it starts
 the generated units carry no environment, so the variable alone does not
 reach it).
 
-Full lock order, one hierarchy for every command: `takeover.lock` shared for
-as long as the attempt lasts (above; it is no resource, and nothing ever
-blocks on it), then the external board locks in serial order, then the host
-lock, then the board leases in serial order.
+Full lock order, one hierarchy for every command: a ticket per resource for
+as long as the command waits and `takeover.lock` shared for as long as each
+attempt lasts (both above; neither is a resource, and nothing ever blocks on
+either), then the external board locks in serial order, then the host lock,
+then the board leases in serial order.
 A lab wrapper that takes a board's own lock file and then runs
 `ubertooth-harness lease` (which may take the host lock, then the leases)
 follows the same order, so the two cannot deadlock; the harness also never

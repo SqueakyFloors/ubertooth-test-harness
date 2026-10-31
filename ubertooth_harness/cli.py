@@ -1082,6 +1082,10 @@ def _boards_command(args: argparse.Namespace) -> int:
             print(f"{label:<12} held  {board_leases.describe_holder({})}")
         else:
             print(f"{label:<12} free")
+        if state.get("waiting"):
+            # Commands queued for it: a free board with a queue is somebody
+            # else's next, and a held one shows how deep the queue is.
+            print(f"{'':<12} queue: {board_leases.describe_waiting(state['waiting'])}")
         if external.get("error"):
             print(f"{'':<12} warning: cannot read external lock: {external['error']}")
     return 0

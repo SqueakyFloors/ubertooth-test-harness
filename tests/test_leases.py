@@ -433,7 +433,7 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
             # Right after the first lease is locked and recorded, as a
             # takeover that had already decided to remove this file would.
             stamp(fd, record)
-            if not removed:
+            if not removed and "ticket" not in record:  # the lease, not a ticket
                 removed.append(record)
                 os.unlink(self.dir / f"{A.key}.lock")
 
@@ -460,7 +460,10 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
 
         with mock.patch.object(leases, "_try_lock", recording):
             leases.acquire([A], holder("agent-1"), directory=self.dir).release()
-        self.assertEqual([leases.TAKEOVER_LOCK, f"{A.key}.lock"], order)
+        # Its place in the queue first (tests/test_lease_queue.py), then the
+        # takeover lock, then the board.
+        self.assertRegex(order[0], r"^\d{20}-\d+-[0-9a-f]+$")
+        self.assertEqual([leases.TAKEOVER_LOCK, f"{A.key}.lock"], order[1:])
 
     def test_no_lease_is_taken_while_a_takeover_is_in_progress(self):
         # The takeover lock, held exclusively: an attempt must not take a

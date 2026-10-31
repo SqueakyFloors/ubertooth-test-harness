@@ -75,7 +75,12 @@ only shows what the file holds.
 
 Lock order, one hierarchy for every acquirer:
 
-0. ``takeover.lock``, shared, for as long as the attempt below takes (it is
+0. a ticket per resource (see "Waiting in turn" above) for as long as the
+   command waits, then ``takeover.lock``, shared, for as long as each
+   attempt below takes. Neither is a resource: a ticket is this command's
+   own file, nobody waits on it, and both are taken without ever blocking,
+   so neither is in a cycle;
+0b. ``takeover.lock``, shared (it is
    not a resource; it only orders an attempt against a takeover, and both
    take it without ever blocking, so it is in no cycle);
 1. the external board locks, in serial order;
@@ -85,7 +90,46 @@ Lock order, one hierarchy for every acquirer:
 All are taken in one all-or-nothing attempt and nothing ever blocks while
 holding a lock (a busy lock releases everything and the attempt is retried
 until the deadline). Without a template this is the old order (host lock,
-then boards). A lab wrapper that takes its external board locks and then runs
+then boards).
+
+Waiting in turn: retrying alone is not fair. A run that wants the host lock
+*and* a board could retry past its deadline while short board-only leases
+took that board one after another, since nothing held them back (harness
+#202). So every acquirer first takes a numbered ticket for each resource it
+wants, under ``<lease dir>/tickets/<key>/``, and gives way to any older
+ticket of a command that is still waiting. Waiters are served in the order
+they arrived, and a command that asks for a board somebody has waited longer
+for is told so instead of taking it.
+
+A ticket is a file named after its number, locked with ``flock`` by the
+command waiting on it and removed when that command stops waiting, so a
+ticket counts only while its command is really there. A ticket whose process
+is gone expires, by the same test that frees a stale lease above, and is
+removed. Nothing is ever held while giving way: an acquirer holds no lock
+when it sleeps, so the lock order above still settles who waits on whom.
+
+Ticket numbers come from the wall clock, so a clock set backwards can give a
+newcomer an older place; the order stays total either way, which is what the
+lock order needs.
+
+Giving way is bounded in one case: a resource that is *free*, and that this
+command could therefore have taken. After half a second of that (several
+poll rounds, so a waiter that is really waiting gets its turn) a command
+competes for it as it did before the queue. The bound is per stretch: it
+starts again whenever the resource is held, or the command ahead in the
+queue changes, so a long wait never turns into a licence to jump the queue.
+Giving way to a resource somebody is using is never bounded, since nothing
+here can be stuck on a lock that is held; the waiters simply take their
+turns.
+
+That bound is what keeps the queue from becoming a new way to wait forever.
+A command can be ahead in the queue and unable to take a resource for
+reasons the queue can neither see nor help: a wrapper outside the harness
+holding a board's own lock file while it waits for the lease (the order
+below), or a run still blocked on the host lock. Its neighbors give it a
+clear run and then carry on.
+
+A lab wrapper that takes its external board locks and then runs
 ``lease`` (which may take the host lock, then leases) follows the same
 hierarchy, so neither it nor the harness can wait on the other in a cycle,
 and a process never takes a lock earlier in the order after a later one.
@@ -123,9 +167,23 @@ DEFAULT_LEASE_DIR = Path.home() / ".ubertooth-harness" / "leases"
 _BUSY_GRACE_S = 1.0
 _POLL_S = 0.25
 _FULL_SERIAL = re.compile(r"[0-9a-f]{32}")
+# A ticket file name, <number>-<pid>-<token>. Anything else in a queue
+# directory is not a ticket and is left alone.
+_TICKET_NAME = re.compile(r"\d{20}-\d+-[0-9a-f]+")
+# How long one stretch of giving way lets the commands ahead in the queue
+# take a resource that is free: two poll rounds, enough for a waiter that is
+# really waiting to notice a board was released, shorter than the grace a
+# command with no wait has (_BUSY_GRACE_S), so even that command ends up
+# competing for the resource rather than failing, and short enough that a
+# holder outside the harness waiting for a lease is never held back for long
+# (see acquire()).
+_FREE_YIELD_S = 0.5
 # Held for the moment one stale lease is taken over, so two commands that see
 # the same stale lease cannot both remove a lock file.
 TAKEOVER_LOCK = "takeover.lock"
+# One directory per resource, holding the tickets of the commands waiting for
+# it: <lease dir>/tickets/<key>/<number>-<pid>-<token>.
+TICKET_DIR = "tickets"
 
 
 class LeaseError(RuntimeError):
@@ -469,6 +527,20 @@ def takeover_allowed(board: Board, kind: str) -> bool:
         return False
     return kind in ("stale", "orphan")
 
+def _held(path: Path) -> bool:
+    """Whether someone holds this lock file.
+
+    Unknown counts as free, so the bound on giving way in acquire() holds
+    whatever the answer. The caller passes a board's lease file, which is
+    the harness's own and always readable; a board whose *external* lock is
+    held by the lab reads as free here, which only means that giving way to
+    it is bounded, the safe side of the question.
+    """
+    try:
+        return _probe(path)
+    except OSError:
+        return False
+
 
 def _note_to_stderr(message: str) -> None:
     print(f"note: {message}", file=sys.stderr)
@@ -518,6 +590,143 @@ def _take_over_stale(path: Path, root: Path, board: Board) -> str:
     finally:
         os.close(guard)
     return why
+
+
+class TicketQueue:
+    """One command's place in the queue for each resource it is waiting for.
+
+    Ticket names order the waiters: the number is the wall clock in
+    nanoseconds when the command started waiting, zero-padded so plain name
+    order is queue order, and the pid and a random token make the name the
+    command's own. A ticket counts only while its command holds its ``flock``
+    and its process is still there, so a waiter that is killed stops holding
+    anyone back.
+    """
+
+    def __init__(self, root: Path | str, resources: Sequence[Board], holder: Mapping):
+        self.root = Path(root) / TICKET_DIR
+        # In lock order, so the resource reported is the first this command
+        # would have taken.
+        self.resources = list(resources)
+        self.holder = holder
+        self.number = time.time_ns()
+        self.name = f"{self.number:020d}-{os.getpid()}-{os.urandom(3).hex()}"
+        self.tickets: list[tuple[Path, int]] = []
+
+    def take(self) -> "TicketQueue":
+        """Queue for every resource. Before any lock is taken, and quick."""
+        for board in self.resources:
+            directory = self.root / board.key
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+                path = directory / self.name
+                fd = _try_lock(path, fcntl.LOCK_EX)
+                if fd is None:
+                    # Either the same resource twice in one attempt (a board
+                    # has an external lock as well as a lease), where the
+                    # ticket already held is enough, or a file this user
+                    # cannot lock. The command then waits without a place in
+                    # this resource's queue: it still gives way to others,
+                    # which is the safe side of the question.
+                    continue
+                # Kept before anything that can fail, so a ticket is never
+                # left locked with nobody to give it back.
+                self.tickets.append((path, fd))
+                _stamp(fd, dict(self.holder, resource=board.alias, ticket=self.name))
+            except OSError as error:
+                self.release()
+                raise LeaseError(
+                    f"cannot queue for {board.alias} in {directory}: {error}"
+                ) from error
+        return self
+
+    def ahead(self) -> tuple[Board, dict] | None:
+        """The first resource a command asked for earlier, and who that is.
+
+        None when nothing is ahead of this command anywhere, which is when it
+        may try to take its locks.
+        """
+        for board in self.resources:
+            for name in self._names(board):
+                if name >= self.name:
+                    break  # this command's own ticket, and the later ones
+                path = self.root / board.key / name
+                waiting, expired = self._state(path)
+                if expired:
+                    self._remove(path)
+                elif waiting:
+                    return board, read_holder(path)
+        return None
+
+    def waiting_for(self, board: Board) -> int:
+        """How many commands are waiting for this resource right now.
+
+        Expired tickets are removed on the way, so a listing (which scans
+        every ticket, where ahead() stops at the first command that is
+        waiting) does not report a command that is gone as waiting.
+        """
+        count = 0
+        for name in self._names(board):
+            path = self.root / board.key / name
+            waiting, expired = self._state(path)
+            if expired:
+                self._remove(path)
+            elif waiting:
+                count += 1
+        return count
+
+    def release(self) -> None:
+        """Leave the queue; a ticket must not outlive its command's wait."""
+        while self.tickets:
+            path, fd = self.tickets.pop()
+            self._remove(path)
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def _names(self, board: Board) -> list[str]:
+        try:
+            return sorted(
+                entry.name for entry in os.scandir(self.root / board.key)
+                if _TICKET_NAME.fullmatch(entry.name)
+            )
+        except OSError:
+            return []  # no queue for this resource yet
+
+    def _state(self, path: Path) -> tuple[bool, bool]:
+        """(a command is waiting on this ticket, this ticket has expired)."""
+        if lease_liveness(read_holder(path))[0] == "stale":
+            # Its process is gone, so nothing is waiting on it, by the same
+            # test that frees a stale lease.
+            return False, True
+        try:
+            locked = _probe(path)
+        except OSError:
+            return True, False  # unknown is not free, as everywhere else
+        # A ticket whose lock is free but whose process is alive is either
+        # being created right now or left over from a pid the system has
+        # given to someone else: it holds nobody back, and removing it could
+        # take a ticket its owner is about to rely on, so it stays.
+        return locked, False
+
+    def _remove(self, path: Path) -> None:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+    def __enter__(self) -> "TicketQueue":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.release()
+
+
+def describe_waiting(count: int) -> str:
+    """'1 command is waiting for it' / 'N commands are waiting for it'."""
+    return (f"{count} command{'' if count == 1 else 's'} "
+            f"{'is' if count == 1 else 'are'} waiting for it")
 
 
 def describe_holder(holder: Mapping) -> str:
@@ -657,8 +866,9 @@ def acquire(
     already validated external_lock_template()), each board's external lock
     too (see the module docstring for the order).
 
-    A busy lease whose holder is gone is taken over, once per resource, and
-    note() is told in one line (by default on standard error).
+    A busy board lease whose holder is gone is taken over and note() is told
+    in one line (by default on standard error). Commands are served in the
+    order they arrived, through the ticket queue (see the module docstring).
     """
     if not boards and not host_lock:
         return LeaseSet()
@@ -697,171 +907,229 @@ def acquire(
     if host_lock:
         ordered.append((HOST_LOCK, root / f"{HOST_LOCK.key}.lock", False))
     ordered += [(board, root / f"{board.key}.lock", False) for board in by_serial]
-    while True:
-        held: list[Lease] = []
-        busy: tuple[Board, Path, bool] | None = None
-        where = root
-        files: dict[tuple[int, int], Path] = {}
-        guard = None
-        try:
-            # Shared while this attempt takes its locks and checks them:
-            # a takeover (below) holds the same file exclusively, so no
-            # lease file can be removed while another command is taking
-            # it, and two commands can never end up holding one board
-            # through two lock files.
-            guard = _try_lock(root / TAKEOVER_LOCK, fcntl.LOCK_SH)
-            if guard is not None:
-                for board, path, external in ordered:
-                    where = path.parent if external else root
-                    existing = _file_identity(path)
-                    if existing is not None:
-                        if external and not stat.S_ISREG(existing[0]):
+    # The command this attempt is giving way to at the moment, and how many
+    # poll rounds it has given way to it at a resource that was free (see the
+    # loop; rounds, not wall-clock time, so a loaded host stretches it).
+    giving_way: tuple[str, str | None] | None = None
+    yielded = 0.0
+    # A place in the queue for every resource, before any lock is taken, so
+    # waiters are served in the order they arrived (#202).
+    queue = TicketQueue(root, [board for board, _p, _e in ordered], holder).take()
+    try:
+        while True:
+            # Another command asked for one of these resources earlier and
+            # is still waiting for it: taking locks now would jump the queue.
+            queued = queue.ahead()
+            if queued is not None:
+                # Giving way to a resource that is free, and that this
+                # command could therefore have taken, is the one case where
+                # the queue could deadlock: a party the queue cannot see may
+                # hold a board's own lock file outside the harness and then
+                # wait for its lease, and the older waiter would be stuck on
+                # that file while this command gave way to the queue. So each
+                # stretch of giving way to a free resource is bounded.
+                marker = (queued[0].key, queued[1].get("ticket"))
+                if marker != giving_way:
+                    # A different resource, or the command ahead has changed:
+                    # the queue is moving, so this starts again.
+                    giving_way, yielded = marker, 0.0
+                if _held(root / f"{queued[0].key}.lock"):
+                    # Nothing here can be stuck on a lock somebody holds, so
+                    # giving way to one is never bounded: the waiters take
+                    # their turns.
+                    yielded = 0.0
+                else:
+                    yielded += _POLL_S
+                    if yielded > _FREE_YIELD_S:
+                        queued = None  # compete for it, as before the queue
+            else:
+                giving_way, yielded = None, 0.0
+            if queued is not None:
+                if clock() >= deadline:
+                    board, other = queued
+                    label = ("this host's power/firmware lock"
+                             if board == HOST_LOCK else board.alias)
+                    busy_now = (
+                        f"; it is held by {describe_holder(read_holder(root / f'{board.key}.lock'))}"
+                        if _held(root / f"{board.key}.lock") else ""
+                    )
+                    raise LeaseError(
+                        f"{label} is queued"
+                        + (f" after waiting {wait_s:g}s" if wait_s else "")
+                        + f": {describe_holder(other)} asked for it first and is "
+                        f"still waiting for it{busy_now}; use --wait-for-boards "
+                        "MINUTES to wait for your turn"
+                    )
+                sleep(_POLL_S)
+                continue
+            held: list[Lease] = []
+            busy: tuple[Board, Path, bool] | None = None
+            where = root
+            files: dict[tuple[int, int], Path] = {}
+            guard = None
+            try:
+                # Shared while this attempt takes its locks and checks them:
+                # a takeover (below) holds the same file exclusively, so no
+                # lease file can be removed while another command is taking
+                # it, and two commands can never end up holding one board
+                # through two lock files.
+                guard = _try_lock(root / TAKEOVER_LOCK, fcntl.LOCK_SH)
+                if guard is not None:
+                    for board, path, external in ordered:
+                        where = path.parent if external else root
+                        existing = _file_identity(path)
+                        if existing is not None:
+                            if external and not stat.S_ISREG(existing[0]):
+                                raise _released(
+                                    held,
+                                    f"{board.alias}: its external board lock {path} is not "
+                                    "a regular file; point the template at the lab's lock "
+                                    "files",
+                                )
+                            # flock is per open file description, so two paths that
+                            # are one file (a symlink, a hard link, one path twice)
+                            # would make the process wait for its own lock.
+                            if existing[1:] in files:
+                                raise _released(
+                                    held,
+                                    f"{board.alias}: its lock file {path} is the same file "
+                                    f"as {files[existing[1:]]}; every board needs its own "
+                                    "lock file",
+                                )
+                        # An external file may belong to another user: read access
+                        # is enough for flock, and it is never written.
+                        try:
+                            fd = _try_lock(
+                                path, fcntl.LOCK_EX,
+                                # O_NONBLOCK: a lab path that is a FIFO must not make
+                                # the open itself wait forever. The check below then
+                                # refuses anything that is not a regular file.
+                                flags=(
+                                    os.O_RDONLY | os.O_NONBLOCK if external else os.O_RDWR
+                                ),
+                            )
+                        except PermissionError as error:
+                            if not external:
+                                raise
+                            # Waiting cannot fix this, so say which board and file.
                             raise _released(
                                 held,
-                                f"{board.alias}: its external board lock {path} is not "
-                                "a regular file; point the template at the lab's lock "
-                                "files",
-                            )
-                        # flock is per open file description, so two paths that
-                        # are one file (a symlink, a hard link, one path twice)
-                        # would make the process wait for its own lock.
-                        if existing[1:] in files:
+                                f"{board.alias}: its external board lock {path} cannot be "
+                                f"opened for reading ({error.strerror}); the harness needs "
+                                "read access to the lab's lock file",
+                            ) from error
+                        if fd is None:
+                            busy = (board, path, external)
+                            break
+                        held.append(Lease(board, path, fd, holder, external=external))
+                        # The same two checks on the file that was actually opened,
+                        # in case the path was replaced in between.
+                        info = os.fstat(fd)
+                        if external and not stat.S_ISREG(info.st_mode):
                             raise _released(
                                 held,
-                                f"{board.alias}: its lock file {path} is the same file "
-                                f"as {files[existing[1:]]}; every board needs its own "
-                                "lock file",
+                                f"{board.alias}: its external board lock {path} is not a "
+                                "regular file; point the template at the lab's lock files",
                             )
-                    # An external file may belong to another user: read access
-                    # is enough for flock, and it is never written.
-                    try:
-                        fd = _try_lock(
-                            path, fcntl.LOCK_EX,
-                            # O_NONBLOCK: a lab path that is a FIFO must not make
-                            # the open itself wait forever. The check below then
-                            # refuses anything that is not a regular file.
-                            flags=(
-                                os.O_RDONLY | os.O_NONBLOCK if external else os.O_RDWR
-                            ),
-                        )
-                    except PermissionError as error:
+                        key = (info.st_dev, info.st_ino)
+                        if key in files:
+                            raise _released(
+                                held,
+                                f"{board.alias}: its lock file {path} is the same file as "
+                                f"{files[key]}; every board needs its own lock file",
+                            )
+                        files[key] = path
                         if not external:
-                            raise
-                        # Waiting cannot fix this, so say which board and file.
-                        raise _released(
-                            held,
-                            f"{board.alias}: its external board lock {path} cannot be "
-                            f"opened for reading ({error.strerror}); the harness needs "
-                            "read access to the lab's lock file",
-                        ) from error
-                    if fd is None:
-                        busy = (board, path, external)
-                        break
-                    held.append(Lease(board, path, fd, holder, external=external))
-                    # The same two checks on the file that was actually opened,
-                    # in case the path was replaced in between.
-                    info = os.fstat(fd)
-                    if external and not stat.S_ISREG(info.st_mode):
-                        raise _released(
-                            held,
-                            f"{board.alias}: its external board lock {path} is not a "
-                            "regular file; point the template at the lab's lock files",
-                        )
-                    key = (info.st_dev, info.st_ino)
-                    if key in files:
-                        raise _released(
-                            held,
-                            f"{board.alias}: its lock file {path} is the same file as "
-                            f"{files[key]}; every board needs its own lock file",
-                        )
-                    files[key] = path
-                    if not external:
-                        _stamp(fd, dict(holder, resource=board.alias))
-                # One last check on every lease this attempt took: a lock on a
-                # file that is no longer the board's lease file excludes
-                # nobody. The takeover lock above keeps a takeover out of this
-                # window, so what is left is a file removed from outside the
-                # harness, which is how #215 was cleared by hand. The attempt
-                # starts again rather than trust such a lock.
-                for lease in held:
-                    if lease.external:
-                        continue
-                    now = _file_identity(lease.path)
-                    info = os.fstat(lease.fd)
-                    if now is None or now[1:] != (info.st_dev, info.st_ino):
-                        busy = (lease.board, lease.path, False)
-                        break
-        except OSError as error:
+                            _stamp(fd, dict(holder, resource=board.alias))
+                    # One last check on every lease this attempt took: a lock on a
+                    # file that is no longer the board's lease file excludes
+                    # nobody. The takeover lock above keeps a takeover out of this
+                    # window, so what is left is a file removed from outside the
+                    # harness, which is how #215 was cleared by hand. The attempt
+                    # starts again rather than trust such a lock.
+                    for lease in held:
+                        if lease.external:
+                            continue
+                        now = _file_identity(lease.path)
+                        info = os.fstat(lease.fd)
+                        if now is None or now[1:] != (info.st_dev, info.st_ino):
+                            busy = (lease.board, lease.path, False)
+                            break
+            except OSError as error:
+                LeaseSet(held).release()
+                raise LeaseError(f"cannot lease boards in {where}: {error}") from error
+            finally:
+                if guard is not None:
+                    os.close(guard)
+            if guard is None:
+                # Another command is taking over a stale lease. That is a
+                # moment, not a wait: look again on the next round.
+                if clock() >= deadline:
+                    raise LeaseError(
+                        f"cannot lease boards in {root}: another command is taking "
+                        f"over a stale lease ({root / TAKEOVER_LOCK}); retry, or "
+                        "use --wait-for-boards MINUTES to wait for it"
+                    )
+                sleep(_POLL_S)
+                continue
+            if busy is None:
+                return LeaseSet(held)
             LeaseSet(held).release()
-            raise LeaseError(f"cannot lease boards in {where}: {error}") from error
-        finally:
-            if guard is not None:
-                os.close(guard)
-        if guard is None:
-            # Another command is taking over a stale lease. That is a
-            # moment, not a wait: look again on the next round.
+            board, path, external = busy
+            # A lease of this host whose holder is gone holds nothing back; an
+            # external lock belongs to the lab and is never touched. Once per
+            # resource, so a file that keeps coming back cannot loop here.
+            if not external:
+                why = _take_over_stale(path, root, board)
+                if why:
+                    # The next round takes the board; this one has released
+                    # everything. Every round sleeps or reaches the deadline, so
+                    # a lease file that keeps coming back cannot make this spin.
+                    note(
+                        f"{board.alias} was held by a lease that no longer holds it: "
+                        f"{why}. Taking it over ({path})."
+                    )
             if clock() >= deadline:
+                waited = f" after waiting {wait_s:g}s" if wait_s else ""
+                if external:
+                    raise LeaseError(
+                        f"{board.alias} is in use{waited}: held "
+                        f"{describe_external(path, read_external_holder(path))}; "
+                        "use --wait-for-boards MINUTES to wait for it"
+                    )
+                holder_now = read_holder(path)
+                kind, why = lease_liveness(holder_now)
+                # A lease this command did not take over (the host lock, or a
+                # board whose one takeover this command has spent) must say the
+                # command that took it is gone, or it reads as the stale lease
+                # nobody could account for before.
+                left_over = (f" the command that took it is gone: {why};"
+                             if kind in ("orphan", "stale") else "")
+                if board == HOST_LOCK:
+                    if left_over:
+                        raise LeaseError(
+                            f"this host's power/firmware lock is in use{waited}: held "
+                            f"by {describe_holder(holder_now)} ({path});{left_over} it "
+                            "is never taken over, because a firmware write or a power "
+                            "change it started may still be running: look for one, "
+                            "and remove the lock file once you know there is none"
+                        )
+                    raise LeaseError(
+                        f"this host's power/firmware lock is in use{waited}: held by "
+                        f"{describe_holder(holder_now)} ({path}); another "
+                        "harness command is switching USB power or writing firmware "
+                        "here; retry when it ends, or use --wait-for-boards MINUTES"
+                    )
                 raise LeaseError(
-                    f"cannot lease boards in {root}: another command is taking "
-                    f"over a stale lease ({root / TAKEOVER_LOCK}); retry, or "
+                    f"{board.alias} is in use{waited}: held by "
+                    f"{describe_holder(holder_now)} ({path});{left_over} "
                     "use --wait-for-boards MINUTES to wait for it"
                 )
             sleep(_POLL_S)
-            continue
-        if busy is None:
-            return LeaseSet(held)
-        LeaseSet(held).release()
-        board, path, external = busy
-        # A lease of this host whose holder is gone holds nothing back; an
-        # external lock belongs to the lab and is never touched. Once per
-        # resource, so a file that keeps coming back cannot loop here.
-        if not external:
-            why = _take_over_stale(path, root, board)
-            if why:
-                # The next round takes the board; this one has released
-                # everything. Every round sleeps or reaches the deadline, so
-                # a lease file that keeps coming back cannot make this spin.
-                note(
-                    f"{board.alias} was held by a lease that no longer holds it: "
-                    f"{why}. Taking it over ({path})."
-                )
-        if clock() >= deadline:
-            waited = f" after waiting {wait_s:g}s" if wait_s else ""
-            if external:
-                raise LeaseError(
-                    f"{board.alias} is in use{waited}: held "
-                    f"{describe_external(path, read_external_holder(path))}; "
-                    "use --wait-for-boards MINUTES to wait for it"
-                )
-            holder_now = read_holder(path)
-            kind, why = lease_liveness(holder_now)
-            # A lease this command did not take over (the host lock, or a
-            # board whose one takeover this command has spent) must say the
-            # command that took it is gone, or it reads as the stale lease
-            # nobody could account for before.
-            left_over = (f" the command that took it is gone: {why};"
-                         if kind in ("orphan", "stale") else "")
-            if board == HOST_LOCK:
-                if left_over:
-                    raise LeaseError(
-                        f"this host's power/firmware lock is in use{waited}: held "
-                        f"by {describe_holder(holder_now)} ({path});{left_over} it "
-                        "is never taken over, because a firmware write or a power "
-                        "change it started may still be running: look for one, "
-                        "and remove the lock file once you know there is none"
-                    )
-                raise LeaseError(
-                    f"this host's power/firmware lock is in use{waited}: held by "
-                    f"{describe_holder(holder_now)} ({path}); another "
-                    "harness command is switching USB power or writing firmware "
-                    "here; retry when it ends, or use --wait-for-boards MINUTES"
-                )
-            raise LeaseError(
-                f"{board.alias} is in use{waited}: held by "
-                f"{describe_holder(holder_now)} ({path});{left_over} "
-                "use --wait-for-boards MINUTES to wait for it"
-            )
-        sleep(_POLL_S)
+    finally:
+        # The wait is over, however it ended: this command's tickets must
+        # not hold anyone back now.
+        queue.release()
 
 
 def board_states(
@@ -877,17 +1145,26 @@ def board_states(
     whether it is held, and what the file says about its holder.
 
     A held lease whose holder is gone also carries ``stale``, saying why the
-    next command that wants the board takes it over.
+    next command that wants the board takes it over. ``waiting`` is how many
+    commands are queued for the board (see the module docstring).
     """
     root = lease_dir(directory)
+    # A listing takes no ticket of its own; it reads the queue, and drops
+    # the tickets of commands that are gone (see waiting_for), so it never
+    # reports one of those as waiting.
+    queue = TicketQueue(root, boards, {})
     states = []
     for board in boards:
         path = root / f"{board.key}.lock"
-        state = {"resource": board.alias, "key": board.key, "held": False, "holder": {}}
+        state = {
+            "resource": board.alias, "key": board.key, "held": False, "holder": {},
+            "waiting": queue.waiting_for(board),
+        }
         if _probe(path):
             state["held"] = True
             state["holder"] = read_holder(path)
-            # Reported, never removed: a listing changes nothing on the bench.
+            # Reported, never removed: a listing takes nothing away from a
+            # board, whatever its lease says.
             kind, why = lease_liveness(state["holder"])
             if kind in ("stale", "orphan"):
                 state["stale"] = why
