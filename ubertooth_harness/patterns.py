@@ -6,6 +6,31 @@ import re
 FIRMWARE_PATTERN = r"Firmware version:\s+\S+"
 COMPILE_INFO_PATTERN = r"\bubertooth\s+\S+\s+\("
 
+# The two other lines of the `-V` answer, which libubertooth prints for every
+# tool (host/libubertooth/src/ubertooth_version.c): the host tools' own
+# version, and the board's build string under its own label. Since fork
+# f898fe5 (SqueakyFloors/ubertooth#813) `-V` is the version command and ends
+# the command, so this answer is the whole of what a command line carrying it
+# prints; the build string used to come out bare, with no label.
+HOST_VERSION_LINE = r"(?m)^Host tools version: libubertooth \S+"
+# Which libbtbb was loaded, which the host version line cannot say; "unknown"
+# where the path could not be found, so the line is always there.
+LIBBTBB_PATH_LINE = r"(?m)^libbtbb loaded from: \S"
+# The whole `-V` answer for one board, as the four consecutive lines
+# libubertooth prints, in its order: a pattern per line would pass an answer
+# whose lines arrived in any order or with others between them. It is not
+# anchored to the end of the output, because a tool may put a warning or a
+# note on standard error beside it.
+VERSION_ANSWER = (
+    r"(?m)^Host tools version: libubertooth \S+[^\n]*\n"
+    r"libbtbb loaded from: \S[^\n]*\n"
+    # Not "read failed" or "unavailable, <reason>", which is what the line
+    # carries when the board answered nothing; the build line below is not
+    # printed at all then, so this only says so in the pattern as well.
+    r"Firmware version: (?!read failed$|unavailable, )\S[^\n]*\n"
+    rf"Firmware build: [^\n]*{COMPILE_INFO_PATTERN}"
+)
+
 # `ubertooth-util -v` names the image the build came from when the firmware
 # carries an info block ("Firmware version: bluetooth_rxtx git-1c7f06d6
 # (API:1.35)"), and leaves it out when it does not ("Firmware version:

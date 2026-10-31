@@ -508,7 +508,11 @@
       }
       pushLog(`=== TEST ${details.test_name ?? ""}: ${status}${details.reason ? ": " + details.reason : ""} ===`);
     } else if (kind === "build_step_started") {
-      pushLog(`+++ ${details.step_name ?? details.step_id ?? ""} +++`);
+      pushLog(`+++ ${details.step_name || details.step_id || ""} +++`);
+    } else if (kind === "build_step_finished") {
+      // The step's own outcome: it may have accepted a command that exited
+      // non-zero, so this is not the status of its last command.
+      pushLog(`--- ${details.step_name || details.step_id || ""} EXIT: ${status}${details.reason ? ": " + details.reason : ""} ---`);
     } else if (kind === "build_finished" || kind === "preflight_finished") {
       pushLog(`=== ${kind.replace("_finished", "").toUpperCase()}: ${status}${details.reason ? ": " + details.reason : ""} ===`);
     } else if (kind === "run_started") {

@@ -75,7 +75,15 @@ class FakeExecutor:
         elif command[-1] == "-v":
             output = f"Firmware version: {self.revision} (API:1.07)\n"
         elif command[-1] == "-V":
-            output = f"ubertooth {self.revision} (builder@host) timestamp\n"
+            # The whole answer, which is what -V prints for one board since
+            # fork f898fe5; the compile-info check reads its last line.
+            output = (
+                f"Host tools version: libubertooth 1.1 ({self.revision}), "
+                "libbtbb 1.0 (git-btbb)\n"
+                "libbtbb loaded from: /p/lib/libbtbb.so.1\n"
+                f"Firmware version: {self.revision} (API:1.07)\n"
+                f"Firmware build: ubertooth {self.revision} (builder@host) timestamp\n"
+            )
         elif command[-1] == "-s":
             serial = "wrong" if self.wrong_serial else "abcdef0123456789"
             output = f"Serial No: {serial}\n"

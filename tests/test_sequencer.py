@@ -49,13 +49,19 @@ class IdentityExecutor(FakeExecutor):
         option = command[-1]
         outputs = {
             "-v": "Firmware version: git-test (API:1.07)\n",
-            "-V": "ubertooth git-test (builder@host) timestamp\n",
+            # The whole -V answer, which is what -V prints wherever it
+            # appears: it ends the command (fork f898fe5).
+            "-V": (
+                "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
+                "libbtbb loaded from: /p/lib/libbtbb.so.1\n"
+                "Firmware version: git-test (API:1.07)\n"
+                "Firmware build: ubertooth git-test (builder@host) timestamp\n"
+            ),
             "-s": "Serial No: abc123\n",
             "-p": "missing expected part output\n",
             "-b": "Board ID Number: 1 (Ubertooth One)\n",
-            "-vVspb": (
+            "-vspb": (
                 "Firmware version: git-test (API:1.07)\n"
-                "ubertooth git-test (builder@host) timestamp\n"
                 "Serial No: abc123\n"
                 "Part ID: 1234ABCD\n"
                 "Board ID Number: 1 (Ubertooth One)\n"
@@ -225,7 +231,7 @@ class SequencerTests(unittest.TestCase):
             self.assertEqual(6, len(test_checks))
             self.assertEqual("failed", test_checks[3].status)
             self.assertEqual("passed", test_checks[-1].status)
-            self.assertEqual("-vVspb", executor.commands[-1][-1])
+            self.assertEqual("-vspb", executor.commands[-1][-1])
 
     def test_an_unanswered_preflight_check_asks_its_fallback(self):
         """A fork commit that answers the host version on the older option."""

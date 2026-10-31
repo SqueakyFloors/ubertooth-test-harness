@@ -283,19 +283,34 @@ class NamedTestSequencer:
         case_id: str,
         manifest: RunManifest,
         output_dir: Path,
+        monitor: WatchdogMonitor | None,
     ) -> tuple[str, str]:
-        """Run flash reliability as one case; return (failure, status)."""
+        """Run flash reliability as one case; return (failure, status).
+
+        ``monitor`` is the run's watchdog monitor, or None when the run has
+        nothing to read. A soak is one case, so the reads the run makes
+        between cases never come round while it writes; the flash runner
+        gives the monitor a turn between its writes instead.
+        """
         owner = {
             "phase": "test",
             "invocation_id": invocation.invocation_id,
             "case_id": case_id,
         }
+
+        def read_watchdog() -> None:
+            # Between two writes, so this read runs beside no other command.
+            # What it finds reaches the test's record through the read after
+            # the test, as a read between cases does.
+            monitor.poll_if_due(invocation)
+
         publisher.emit("check_started", "running", {**owner, "case_name": case.name})
         try:
             request = self._flash_request(case, invocation, manifest)
             summary = FlashReliabilityRunner(self.executor, clock=self.clock).run(
                 request, publisher, cancellation=token, owner=owner,
                 output_dir=output_dir,
+                between_flashes=None if monitor is None else read_watchdog,
             )
             failure = "" if summary.passed else f"{case.name}: {summary.failure_reason}"
             status = summary.status
@@ -1450,7 +1465,7 @@ class NamedTestSequencer:
                             if isinstance(case, FlashCase):
                                 failure_text, flash_status = self._run_flash_case(
                                     publisher, token, invocation, case, case_id, manifest,
-                                    output_dir,
+                                    output_dir, monitor,
                                 )
                                 if failure_text:
                                     unsafe = True

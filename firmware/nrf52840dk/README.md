@@ -56,6 +56,28 @@ The image is `/tmp/utdk-build/zephyr/zephyr.hex` (about 130 KB of flash,
 27 KB of RAM). Builds go outside the repository; nothing under `firmware/`
 is generated.
 
+### Without installing the SDK
+
+`scripts/ci.sh firmware-dk` builds the same image in Nordic's toolchain
+image for the version `NCS_VERSION` pins, so nothing but docker is needed:
+
+```sh
+scripts/ci.sh firmware-dk                 # or scripts/local-ci.sh firmware-dk
+NCS_WORKSPACE=~/ncs-ci scripts/ci.sh firmware-dk   # keep the SDK workspace
+```
+
+It creates the SDK workspace (`west init --mr $NCS_VERSION`, `west update`),
+builds the image, and checks that it carries the firmware version string
+(`nrfdk.py check-image`), which is what `nrfdk.py ensure` looks for before it
+flashes a board. A kept workspace records the version it was made for and is
+refused when `NCS_VERSION` moves on, since `west init` is what pins the
+manifest: remove it, or point `NCS_WORKSPACE` somewhere else. The repository is mounted read-only, so a build writes
+nothing into the working tree. The `Firmware` workflow runs it on a change
+under this directory, once a week, and on request
+([#147](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/147));
+it is not a required check, because the image and the workspace are gigabytes.
+The image it builds is not published: a board is flashed from a local build.
+
 ## Flash
 
 ```sh

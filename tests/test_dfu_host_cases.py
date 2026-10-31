@@ -120,7 +120,7 @@ class FakeDfu:
                      f"DFU expected revision: {info.revision}\n")
         return self._result(command, 1, out, named
                             + "DFU +0.000s: operation started\n" + NOTE
-                            + "could not open Ubertooth device\n")
+                            + "error: no Ubertooth devices found\n")
 
     def _sign(self, source: Path) -> str:
         target = source.with_suffix(".dfu")
