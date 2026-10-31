@@ -17,4 +17,9 @@
 #
 # 0x24ff is Acroname's USB vendor ID; mode 0664 is read and write for the
 # owner and the group, read for everyone else.
-SUBSYSTEM=="usb", ATTRS{idVendor}=="24ff", GROUP="plugdev", MODE="0664"
+#
+# ATTR, not ATTRS: ATTRS matches the attribute on the device or on any of its
+# ancestors, so with ATTRS this rule would also match every device plugged
+# into an Acroname hub, and hand the group read and write on all of them. ATTR
+# matches the hub's own USB node, which is the one the harness opens.
+SUBSYSTEM=="usb", ATTR{idVendor}=="24ff", GROUP="plugdev", MODE="0664"

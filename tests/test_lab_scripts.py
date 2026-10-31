@@ -890,9 +890,20 @@ class LabFiles(unittest.TestCase):
 
     def test_the_udev_rule_names_the_acroname_vendor_and_a_group(self):
         text = RULES.read_text(encoding="utf-8")
-        self.assertIn('ATTRS{idVendor}=="24ff"', text)
+        rule = [line for line in text.splitlines() if not line.startswith("#")]
+        self.assertEqual(1, len([line for line in rule if line.strip()]))
+        self.assertIn('ATTR{idVendor}=="24ff"', text)
         self.assertRegex(text, r'GROUP="[a-z]+"')
         self.assertRegex(text, r'MODE="0[0-7]{3}"')
+
+    def test_the_udev_rule_matches_only_the_hub_not_what_is_behind_it(self):
+        """ATTRS would match the attribute on any ancestor, so every device
+        plugged into the hub would get the group's read and write."""
+        rule = "\n".join(
+            line for line in RULES.read_text(encoding="utf-8").splitlines()
+            if not line.startswith("#")
+        )
+        self.assertNotIn("ATTRS{", rule)
 
     def test_no_script_names_a_host_serial_or_home_path(self):
         """These are public: a bench's own identities stay in its registry."""
