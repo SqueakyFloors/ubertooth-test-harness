@@ -124,10 +124,9 @@ class QueueTests(QueueFixture):
         self.assertFalse(run.is_alive())
         self.assertEqual([leases.HOST_LOCK, A], outcome.get("boards"),
                          outcome.get("error"))
-        # The contention was real: the board-only leases did run, and each
-        # either took the board or was told it was busy.
-        self.assertGreater(counts["taken"] + counts["refused"], 0,
-                           "no board-only lease ever ran")
+        # The contention was real: board-only leases did take the board while
+        # the rush ran, which is what the waiting run had to get past.
+        self.assertGreater(counts["taken"], 0, "no board-only lease took the board")
 
     def test_the_queue_is_empty_again_when_a_command_stops_waiting(self):
         with leases.acquire([A], holder("agent-1"), directory=self.dir):
@@ -334,6 +333,61 @@ class QueueTests(QueueFixture):
             queue.release()
         for board in (A, B, leases.HOST_LOCK):
             self.assertEqual([], self.tickets(board))
+
+    def test_a_ticket_is_in_place_before_any_lock_is_taken(self):
+        # And it is locked and written when it appears, never half made: a
+        # ticket nobody holds is read as litter and removed.
+        seen = []
+        real = leases._try_lock
+
+        def recording(path, mode, **kwargs):
+            seen.append((Path(path).name, self.tickets(A)))
+            return real(path, mode, **kwargs)
+
+        with mock.patch.object(leases, "_try_lock", recording):
+            leases.acquire([A], holder("agent-1"), directory=self.dir).release()
+        self.assertEqual(leases.TAKEOVER_LOCK, seen[0][0])
+        self.assertEqual(1, len(seen[0][1]), seen[0])
+        ticket = self.ticket_dir(A) / seen[0][1][0]
+        self.assertEqual([], self.tickets(A))  # given back at the end
+        self.assertFalse(ticket.exists())
+
+    def test_a_ticket_is_locked_and_written_when_it_appears(self):
+        """Nothing may ever see a ticket that is not yet its command's.
+
+        An unlocked ticket is read as litter and removed, so a file created
+        under its queue name and locked a moment later could lose its place
+        to any command polling at that moment. It is made under a name no
+        scan reads and renamed into place instead.
+        """
+        queue = leases.TicketQueue(self.dir, [A], holder("agent-1")).take()
+        try:
+            path = self.ticket_dir(A) / queue.name
+            self.assertTrue(leases._probe(path), "its lock is not held")
+            self.assertEqual("agent-1", leases.read_holder(path)["owner"])
+        finally:
+            queue.release()
+        self.assertEqual([], self.tickets(A))
+
+    def test_a_ticket_half_made_by_a_command_that_died_is_cleared(self):
+        directory = self.ticket_dir(A)
+        directory.mkdir(parents=True)
+        # One command is making its ticket right now; another died making one.
+        making, mine = tempfile.mkstemp(dir=directory, prefix=".making-")
+        self.raw.append(making)
+        fcntl.flock(making, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        left, theirs = tempfile.mkstemp(dir=directory, prefix=".making-")
+        os.close(left)
+        queue = leases.TicketQueue(self.dir, [A], holder("agent-2")).take()
+        try:
+            self.assertTrue(os.path.exists(mine), "took a ticket being made")
+            self.assertFalse(os.path.exists(theirs), "left a dead command's file")
+            # Neither counts as a command waiting: a ticket is only a ticket
+            # once it is under its queue name.
+            self.assertEqual(1, queue.waiting_for(A))
+            self.assertIsNone(queue.ahead())
+        finally:
+            queue.release()
 
     def test_ticket_names_put_the_oldest_first(self):
         one = leases.TicketQueue(self.dir, [A], holder("first"))

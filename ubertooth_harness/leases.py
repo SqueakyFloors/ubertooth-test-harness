@@ -103,9 +103,10 @@ the case it leaves open.
 
 A ticket is a file named after its number, locked with ``flock`` by the
 command waiting on it and removed when that command stops waiting, so a
-ticket counts only while its command is really there. A ticket whose process
-is gone expires, by the same test that frees a stale lease above, and is
-removed. A command holds its tickets while it waits, and no lock of any
+ticket counts only while its command is really there: it is locked and
+written before it appears under its queue name, so a ticket nobody holds is
+nobody's and is removed, as is one whose process is gone (the same test that
+frees a stale lease above). A command holds its tickets while it waits, and no lock of any
 resource, so the lock order above still settles who waits on whom; nothing
 ever blocks on a ticket, which is what keeps tickets out of every cycle.
 
@@ -114,9 +115,10 @@ newcomer an older place; the order stays total either way, which is what the
 lock order needs.
 
 Giving way is bounded in one case: a resource that is *free*, and that this
-command could therefore have taken. After half a second of that (several
-poll rounds, so a waiter that is really waiting gets its turn) a command
-competes for it as it did before the queue. The bound is per stretch: it
+command could therefore have taken. After half a second of that (two poll
+rounds, enough for a waiter that is really waiting to notice a resource was
+released) a command competes for it as it did before the queue. The bound
+is per stretch: it
 starts again whenever the resource is held, or the command ahead in the
 queue changes, so a long wait never turns into a licence to jump the queue.
 Giving way to a resource somebody is using is never bounded, since nothing
@@ -152,6 +154,7 @@ import re
 import socket
 import stat
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -187,6 +190,8 @@ TAKEOVER_LOCK = "takeover.lock"
 # One directory per resource, holding the tickets of the commands waiting for
 # it: <lease dir>/tickets/<key>/<number>-<pid>-<token>.
 TICKET_DIR = "tickets"
+# A ticket being made, under a name no queue scan reads.
+_UNFINISHED = ".making-"
 
 
 class LeaseError(RuntimeError):
@@ -623,26 +628,69 @@ class TicketQueue:
             directory = self.root / board.key
             try:
                 directory.mkdir(parents=True, exist_ok=True)
-                path = directory / self.name
-                fd = _try_lock(path, fcntl.LOCK_EX)
-                if fd is None:
-                    # Either the same resource twice in one attempt (a board
-                    # has an external lock as well as a lease), where the
-                    # ticket already held is enough, or a file this user
-                    # cannot lock. The command then waits without a place in
-                    # this resource's queue: it still gives way to others,
-                    # which is the safe side of the question.
+                # Readable by whoever shares this lease directory, like the
+                # lock files, whatever the umask says: a command that cannot
+                # read a queue would jump it.
+                try:
+                    os.chmod(directory, 0o755)
+                except OSError:
+                    pass
+                self._drop_unfinished(directory)
+                if (directory / self.name).exists():
+                    # The same resource twice in one attempt (a board has an
+                    # external lock as well as a lease): one ticket is enough.
                     continue
-                # Kept before anything that can fail, so a ticket is never
-                # left locked with nobody to give it back.
-                self.tickets.append((path, fd))
-                _stamp(fd, dict(self.holder, resource=board.alias, ticket=self.name))
+                self.tickets.append(self._publish(directory, board))
             except OSError as error:
                 self.release()
                 raise LeaseError(
                     f"cannot queue for {board.alias} in {directory}: {error}"
                 ) from error
         return self
+
+    def _publish(self, directory: Path, board: Board) -> tuple[Path, int]:
+        """Make this command's ticket, locked and written before it is seen.
+
+        A ticket under its queue name must already hold its lock, because an
+        unlocked one is read as litter and removed; a file created under its
+        own name and locked a moment later could be removed in between, and
+        its command would wait with no place in the queue. So it is built
+        under a name no scan reads and renamed into place, which is atomic.
+        """
+        fd, temporary = tempfile.mkstemp(dir=directory, prefix=_UNFINISHED)
+        try:
+            os.fchmod(fd, 0o644)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _stamp(fd, dict(self.holder, resource=board.alias, ticket=self.name))
+            os.rename(temporary, directory / self.name)
+        except BaseException:
+            os.close(fd)
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise
+        return directory / self.name, fd
+
+    def _drop_unfinished(self, directory: Path) -> None:
+        """Clear tickets of commands that died while making one.
+
+        A half-made ticket is locked by the command making it, so one that
+        nobody holds belongs to nobody.
+        """
+        try:
+            entries = [
+                entry.path for entry in os.scandir(directory)
+                if entry.name.startswith(_UNFINISHED)
+            ]
+        except OSError:
+            return
+        for entry in entries:
+            try:
+                if not _probe(Path(entry)):
+                    os.unlink(entry)
+            except OSError:
+                pass
 
     def ahead(self) -> tuple[Board, str, dict] | None:
         """The first resource a command asked for earlier: which resource,
@@ -976,10 +1024,18 @@ def acquire(
                     board, _ticket, other = queued
                     label = ("this host's power/firmware lock"
                              if board == HOST_LOCK else board.alias)
-                    busy_now = (
-                        f"; it is held by {describe_holder(read_holder(root / f'{board.key}.lock'))}"
-                        if _held(root / f"{board.key}.lock") else ""
-                    )
+                    busy_now = ""
+                    if _held(root / f"{board.key}.lock"):
+                        busy_now = ("; it is held by " + describe_holder(
+                            read_holder(root / f"{board.key}.lock")))
+                    elif external_template:
+                        # The command ahead may be stuck on the lab's own
+                        # lock file rather than on anything the harness
+                        # holds, which is the file to go and look at.
+                        lab = external_lock_path(external_template, board)
+                        if _held(lab):
+                            busy_now = "; it is held " + describe_external(
+                                lab, read_external_holder(lab))
                     raise LeaseError(
                         f"{label} is queued"
                         + (f" after waiting {wait_s:g}s" if wait_s else "")

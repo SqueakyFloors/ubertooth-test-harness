@@ -460,10 +460,10 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
 
         with mock.patch.object(leases, "_try_lock", recording):
             leases.acquire([A], holder("agent-1"), directory=self.dir).release()
-        # Its place in the queue first (tests/test_lease_queue.py), then the
-        # takeover lock, then the board.
-        self.assertRegex(order[0], r"^\d{20}-\d+-[0-9a-f]+$")
-        self.assertEqual([leases.TAKEOVER_LOCK, f"{A.key}.lock"], order[1:])
+        # The takeover lock, then the board. Its place in the queue is taken
+        # before both, with a lock of its own that is not taken through
+        # _try_lock (tests/test_lease_queue.py).
+        self.assertEqual([leases.TAKEOVER_LOCK, f"{A.key}.lock"], order)
 
     def test_no_lease_is_taken_while_a_takeover_is_in_progress(self):
         # The takeover lock, held exclusively: an attempt must not take a

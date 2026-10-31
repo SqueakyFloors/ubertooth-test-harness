@@ -1455,9 +1455,10 @@ is still waiting for it; use --wait-for-boards MINUTES to wait for your turn
 ```
 
 A ticket is a file named after its number, locked while its command waits and
-removed when it stops waiting, so a ticket counts only while its command is
-really there; a ticket whose process is gone expires and is removed, like a
-stale lease, which is the one thing `boards` does take away. It shows how
+removed when it stops waiting. It is locked and written before it appears
+under its queue name, so a ticket counts only while its command is really
+there: one nobody holds is nobody's and is removed, as is one whose process
+is gone, and those are the only things `boards` takes away. It shows how
 deep a queue is (in `--json`, as `waiting`):
 
 ```
@@ -1466,9 +1467,9 @@ UT_0         held  agent #14, run 2026-10-31-ble, pid 7781 (for 0h04m11s)
 ```
 
 Giving way is bounded in one case: a board that is *free*, and that the
-command could therefore have taken. After half a second of that — several
-poll rounds, so a waiter that is really waiting gets its turn — a command
-competes for the board as it did before the queue; a command with no
+command could therefore have taken. After half a second of that — two poll
+rounds, enough for a waiter that is really waiting to notice the board was
+released — a command competes for the board as it did before the queue; a command with no
 `--wait-for-boards` has a whole second before it gives up, so it too ends up
 competing rather than failing (and, if the board is taken again just before
 that second is up, failing with `is queued` where it used to say `is in
