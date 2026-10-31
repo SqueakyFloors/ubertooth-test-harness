@@ -12,6 +12,8 @@ from ubertooth_harness.report import (
     LEGACY_OUTPUT_HEAD_RECORDS,
     LEGACY_OUTPUT_TAIL_CHARS,
     LEGACY_OUTPUT_TAIL_RECORDS,
+    _take_chunks,
+    _tail_on_whole_lines,
     load_events,
     render_run,
     render_runs,
@@ -270,8 +272,6 @@ class ReportTests(unittest.TestCase):
                 self.assertTrue(text.endswith(line.rstrip()), text)
 
     def test_the_cap_cuts_a_record_where_run_jsonl_would(self):
-        from ubertooth_harness.report import _take_chunks, _tail_on_whole_lines
-
         chunk = [(_START, "stderr", "aaa\nbbb\nccc\n")]
 
         def took(**limits):
@@ -308,17 +308,23 @@ class ReportTests(unittest.TestCase):
         self.assertNotIn("part two", printed)
         self.assertEqual(["y"] * (LEGACY_OUTPUT_TAIL_RECORDS - 2),
                          printed[LEGACY_OUTPUT_HEAD_RECORDS:])
+        # The gap is stamped at the last record left out, which is the
+        # "part two" the line boundary dropped, not the record before it.
+        ends = LEGACY_OUTPUT_HEAD_RECORDS + 3  # one record per millisecond
+        self.assertIn(f"{elapsed_stamp(ends)} [M] {gap_in(report)} more", report)
 
     def test_the_newest_output_is_kept_even_as_one_long_line(self):
-        # A record longer than the tail limit holding a single unfinished
-        # line leaves nothing once the tail starts at a line boundary. The
-        # newest output is where a timeout or cancellation marker lands, so
-        # the report keeps the end of that line.
-        report = render_run(dump_events(["a" * 70000, "b" * 19999 + "\n"]))
+        # Records holding a single unfinished line leave nothing once the
+        # tail starts at a line boundary. The newest output is where a
+        # timeout or cancellation marker lands, so the report keeps the end
+        # of that line, as much of it as the limit allows.
+        report = render_run(dump_events(["a" * 70000, "b" * 9000, "c" * 10999 + "\n"]))
 
         printed = [text for text in report.splitlines() if "[E] " in text]
         newest = printed[-1].split("[E] ", 1)[1]
-        self.assertEqual("b" * len(newest), newest)
+        # The end of that line, across the records it spans.
+        self.assertTrue(newest.endswith("c" * 10999), newest[-16:])
+        self.assertEqual(set("bc"), set(newest))
         self.assertLessEqual(len(newest), LEGACY_OUTPUT_TAIL_CHARS)
         # Both ends are filled to their limits, so the gap is the rest.
         self.assertEqual(

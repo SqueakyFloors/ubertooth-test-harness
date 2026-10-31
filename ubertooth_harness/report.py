@@ -699,8 +699,8 @@ def _recorded_with_a_cap(outputs: Sequence[Mapping], finished: Mapping) -> bool:
     """
     if any(o["event_type"] == "command_output_omitted" for o in outputs):
         return True
-    # ``output_file`` is one combined file, ``output_files`` the per-stream
-    # files that replaced it.
+    # ``output_file`` is one combined file; ``output_files`` is the key the
+    # per-stream files take (#187), so a run recorded by either is read.
     return bool(finished.get("output_file") or finished.get("output_files"))
 
 
@@ -743,13 +743,16 @@ def _take_chunks(
     return taken, left_out
 
 
-def _tail_on_whole_lines(left_out: Sequence[Chunk], tail: list[Chunk]) -> list[Chunk]:
+def _tail_on_whole_lines(left_out: list[Chunk], tail: list[Chunk]) -> list[Chunk]:
     """Begin each stream's part of the tail at a line boundary.
 
     A record boundary is not a line boundary, so the first record of the tail
     can carry the end of a line whose start was left out, which would render
     as a whole line of its own. run.jsonl's tail starts at a line boundary
     for the same reason (``rawlog.CappedOutput.finish``).
+
+    What this drops is appended to ``left_out``, so the caller counts it and
+    stamps the gap where it really ends.
     """
     ends = {
         stream: text[-1]
@@ -760,31 +763,17 @@ def _tail_on_whole_lines(left_out: Sequence[Chunk], tail: list[Chunk]) -> list[C
         # A line left out can run through several of the tail's records, so
         # this holds until a newline actually arrives.
         if ends.get(stream, "\n") != "\n":
-            _rest_of_it, newline, text = text.partition("\n")
+            rest_of_it, newline, text = text.partition("\n")
+            if rest_of_it or newline:
+                left_out.append((moment, stream, rest_of_it + newline))
             if not newline:
-                ends[stream] = _rest_of_it[-1:] or ends[stream]
+                ends[stream] = rest_of_it[-1:] or ends[stream]
                 continue
             ends[stream] = "\n"
             if not text:
                 continue
         kept.append((moment, stream, text))
     return kept
-
-
-def _newest_line(chunks: Sequence[Chunk]) -> list[Chunk]:
-    """The last line of the newest record, when nothing else is left of the
-    tail: a record longer than the tail limit holding one unfinished line.
-
-    The newest output is where the harness puts its own last word (a timeout,
-    a cancellation, an output sink error), so the report keeps the end of
-    that line rather than nothing, which is more than run.jsonl's own tail
-    would hold.
-    """
-    for moment, stream, text in reversed(chunks):
-        lines = text.splitlines(keepends=True)
-        if lines:
-            return [(moment, stream, lines[-1][-LEGACY_OUTPUT_TAIL_CHARS:])]
-    return []
 
 
 def _capped_chunks(chunks: Sequence[Chunk]) -> list[Chunk]:
@@ -816,7 +805,17 @@ def _capped_chunks(chunks: Sequence[Chunk]) -> list[Chunk]:
         + list(chunks[len(head):len(chunks) - len(tail)])
         + before_tail
     )
-    tail = _tail_on_whole_lines(left_out, tail) or _newest_line(chunks)
+    dropped_so_far = len(left_out)
+    aligned = _tail_on_whole_lines(left_out, tail)
+    if aligned:
+        tail = aligned
+    else:
+        # The tail holds no line boundary at all: it is the end of one
+        # unfinished line, and showing it beats showing nothing, because the
+        # newest output is where the harness puts its own last word (a
+        # timeout, a cancellation, an output sink error). It is inside the
+        # limits already.
+        del left_out[dropped_so_far:]
     kept = sum(len(text) for _moment, _stream, text in head + tail)
     if kept >= total:  # one empty record over the record limit
         return list(chunks)

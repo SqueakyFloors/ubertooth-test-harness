@@ -1415,8 +1415,9 @@ the command ended; report.md shows every output record run.jsonl holds. A
 command recorded before these limits existed left no file and no
 `command_output_omitted` record, so run.jsonl holds all of its output;
 rendering report.md for such a run caps it the same way instead, to the first
-200 records or 64 KiB and the last 50 records or 16 KiB, with one `[M]` line
-for the gap (`<n> more characters of output are in run.jsonl`).
+200 records or 64 KiB and the last 50 records or 16 KiB, counted in characters
+rendered rather than the bytes a record takes in run.jsonl, with one `[M]`
+line for the gap (`<n> more characters of output are in run.jsonl`).
 `command_finished` repeats `output_file` and `output_omitted`. The newest
 output, such as the harness's own timeout, cancellation or `OUTPUT SINK ERROR`
 line, is always among the last records. report.md shows the gap as `[M]`
