@@ -58,7 +58,7 @@ _ADDRESS_48 = re.compile(r"^[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}$")
 ESP32_CLASSIC_PEER = "ESP32 Classic peer"
 # Roles the peer firmware (firmware/esp32-classic-peer) can take. One image
 # holds both and `role <name>` switches between them, so a board may declare
-# both; the initiator pages, so it is the piconet master.
+# both; the initiator pages, so it is the piconet central.
 PEER_ROLES = ("acceptor", "initiator")
 # LAP, UAP and name are notes: the lab registry records what the board's
 # status reports, for a person reading it. The code derives the LAP and UAP
@@ -90,7 +90,7 @@ def _validate_peer(resource) -> None:
             "digits, and _.:+- only)"
         )
     # Both boards' addresses are needed: the initiator calls the acceptor's,
-    # and every case checks the tool's output against the master's LAP and UAP.
+    # and every case checks the tool's output against the central's LAP and UAP.
     if not _ADDRESS_48.fullmatch(resource.identity.get("BD_ADDR", "")):
         raise RegistryError(
             f"{ESP32_CLASSIC_PEER} {alias} requires a 'BD_ADDR' identity "

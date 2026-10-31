@@ -281,9 +281,9 @@ class StreamTests(unittest.TestCase):
     def test_the_pair_links_up_streams_and_the_command_runs(self):
         status, report, acceptor, initiator = self._stream(min_writes=10)
         self.assertEqual(0, status)
-        self.assertIn(f"master LAP: {esp32peer.address_parts(INITIATOR_ADDRESS)[0]}",
+        self.assertIn(f"central LAP: {esp32peer.address_parts(INITIATOR_ADDRESS)[0]}",
                       report)
-        self.assertIn("master UAP: 0d", report)
+        self.assertIn("central UAP: 0d", report)
         self.assertIn(f"link: up to {ACCEPTOR_ADDRESS}", report)
         self.assertIn("command exit: 0", report)
         self.assertIn("pair streamed: yes", report)
@@ -322,8 +322,8 @@ class StreamTests(unittest.TestCase):
             written = captured()
         self.assertEqual("systime=1 ch= 1\n", written)
         # ... and none of the pair's report went to that stream.
-        self.assertNotIn("master LAP", written)
-        self.assertIn("master LAP: e9c5ba", report.getvalue())
+        self.assertNotIn("central LAP", written)
+        self.assertIn("central LAP: e9c5ba", report.getvalue())
 
     def test_a_pair_that_sent_too_little_fails_the_run(self):
         with self.assertRaisesRegex(esp32peer.PeerError,

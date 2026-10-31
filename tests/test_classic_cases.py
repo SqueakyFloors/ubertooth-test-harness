@@ -29,7 +29,7 @@ ACCEPTOR_BRIDGE = "aaaa0000aaaa0000aaaa0000aaaa0000"
 INITIATOR_BRIDGE = "bbbb1111bbbb1111bbbb1111bbbb1111"
 ACCEPTOR_ADDRESS = "C8:85:41:2A:1B:2A"
 INITIATOR_ADDRESS = "20:50:0D:E9:C5:BA"
-MASTER_LAP, MASTER_UAP = "e9c5ba", "0d"
+CENTRAL_LAP, CENTRAL_UAP = "e9c5ba", "0d"
 OTHER_LAP, OTHER_UAP = "2a1b2a", "41"
 RESOURCES = {"Ubertooth": "UT_Linux0", "acceptor": "ESP32_Linux0",
              "initiator": "ESP32_Linux1"}
@@ -93,43 +93,43 @@ class CheckTests(unittest.TestCase):
     """What each case accepts and what it reports as a failure."""
 
     def test_enough_packets_of_the_piconet_pass(self):
-        check = piconet_packets(MASTER_LAP, 3, only=True)
-        self.assertEqual("", check(packets(MASTER_LAP, 3)))
+        check = piconet_packets(CENTRAL_LAP, 3, only=True)
+        self.assertEqual("", check(packets(CENTRAL_LAP, 3)))
 
     def test_too_few_packets_are_counted_in_the_failure(self):
-        check = piconet_packets(MASTER_LAP, 3, only=True)
+        check = piconet_packets(CENTRAL_LAP, 3, only=True)
         self.assertEqual("2 packet lines with LAP e9c5ba, expected at least 3",
-                         check(packets(MASTER_LAP, 2)))
+                         check(packets(CENTRAL_LAP, 2)))
 
     def test_a_filtered_run_must_report_no_other_piconet(self):
-        check = piconet_packets(MASTER_LAP, 1, only=True)
+        check = piconet_packets(CENTRAL_LAP, 1, only=True)
         self.assertEqual("packet lines with LAP 2a1b2a, not e9c5ba",
-                         check(packets(MASTER_LAP, 2) + packets(OTHER_LAP, 1)))
+                         check(packets(CENTRAL_LAP, 2) + packets(OTHER_LAP, 1)))
 
     def test_an_unfiltered_run_may_report_other_piconets(self):
-        check = piconet_packets(MASTER_LAP, 1, only=False)
-        self.assertEqual("", check(packets(MASTER_LAP, 1) + packets(OTHER_LAP, 4)))
+        check = piconet_packets(CENTRAL_LAP, 1, only=False)
+        self.assertEqual("", check(packets(CENTRAL_LAP, 1) + packets(OTHER_LAP, 4)))
 
-    def test_a_lap_that_is_not_the_masters_must_report_nothing(self):
+    def test_a_lap_that_is_not_the_centrals_must_report_nothing(self):
         check = no_piconet_packets(OTHER_LAP)
         self.assertEqual("", check("note: nothing decoded\n"))
         self.assertIn("1 packet lines (LAP 2a1b2a), expected none",
                       check(packets(OTHER_LAP, 1)))
 
-    def test_the_survey_must_list_the_masters_lap(self):
-        self.assertEqual("", survey_lists(MASTER_LAP)(packets(MASTER_LAP, 2) + SURVEY))
+    def test_the_survey_must_list_the_centrals_lap(self):
+        self.assertEqual("", survey_lists(CENTRAL_LAP)(packets(CENTRAL_LAP, 2) + SURVEY))
         self.assertEqual("the survey listed e9c5ba, not LAP 2a1b2a",
                          survey_lists(OTHER_LAP)(SURVEY))
         self.assertEqual("the survey listed nothing, not LAP e9c5ba",
-                         survey_lists(MASTER_LAP)("systime=1 nonsense\n"))
+                         survey_lists(CENTRAL_LAP)("systime=1 nonsense\n"))
 
     def test_a_survey_line_with_no_uap_still_names_its_lap(self):
-        self.assertEqual("", survey_lists(MASTER_LAP)(
+        self.assertEqual("", survey_lists(CENTRAL_LAP)(
             "Survey Results\n??:??:??:E9:C5:BA\n"))
 
-    def test_the_swapped_case_requires_the_other_lap_and_not_the_masters(self):
-        self.assertEqual("the survey listed LAP e9c5ba, which is not the master's",
-                         survey_omits(MASTER_LAP)(SURVEY))
+    def test_the_swapped_case_requires_the_other_lap_and_not_the_centrals(self):
+        self.assertEqual("the survey listed LAP e9c5ba, which is not the central's",
+                         survey_omits(CENTRAL_LAP)(SURVEY))
         self.assertEqual("", survey_omits(OTHER_LAP)(SURVEY))
 
 
@@ -155,7 +155,8 @@ class CaptureCaseTests(unittest.TestCase):
         # The peers are bound the other way round, so the other board pages.
         self.assertEqual(INITIATOR_ADDRESS, argv[argv.index("--acceptor-address") + 1])
         self.assertEqual(ACCEPTOR_ADDRESS, argv[argv.index("--initiator-address") + 1])
-        self.assertIn(rf"(?m)^master LAP: {OTHER_LAP}$", stream.output_patterns)
+        self.assertIn(rf"(?m)^central LAP: {OTHER_LAP}$",
+                      stream.output_patterns)
 
     def test_the_cleanup_resets_each_peer_through_the_driver(self):
         case = known_classic_cases(arguments("Capture known Classic device"), {},
@@ -224,14 +225,14 @@ class CaptureCaseTests(unittest.TestCase):
 
 class FollowCaseTests(unittest.TestCase):
 
-    def test_smoke_follows_the_master_and_nothing_else(self):
+    def test_smoke_follows_the_central_and_nothing_else(self):
         cases = follow_classic_cases(arguments("Follow Classic Bluetooth piconet"),
                                      {}, IDENTITIES)
         self.assertEqual(["follow-lap-uap", "follow-other-lap"],
                          [case.case_id for case in cases])
         steps = {case.case_id: {s.step_id: s for s in case.steps} for case in cases}
         follow = steps["follow-lap-uap"]["stream-and-receive"].resolve_argv({})
-        self.assertEqual(["-l", MASTER_LAP, "-u", MASTER_UAP], list(follow[-4:]))
+        self.assertEqual(["-l", CENTRAL_LAP, "-u", CENTRAL_UAP], list(follow[-4:]))
         other = steps["follow-other-lap"]["stream-and-receive"].resolve_argv({})
         self.assertEqual(["-l", OTHER_LAP, "-u", OTHER_UAP], list(other[-4:]))
 
@@ -247,8 +248,8 @@ class FollowCaseTests(unittest.TestCase):
         case = follow_classic_cases(arguments("Follow Classic Bluetooth piconet"),
                                     {}, IDENTITIES)[0]
         check = {s.step_id: s for s in case.steps}["stream-and-receive"].output_check
-        self.assertEqual("", check(packets(MASTER_LAP, MIN_PACKETS)))
-        self.assertIn("expected at least", check(packets(MASTER_LAP, 1)))
+        self.assertEqual("", check(packets(CENTRAL_LAP, MIN_PACKETS)))
+        self.assertIn("expected at least", check(packets(CENTRAL_LAP, 1)))
         # A line that is not a packet line is not one of this piconet's: a
         # truncated one does not count towards the floor.
         self.assertIn("expected at least",
@@ -345,7 +346,7 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(RegistryError, "roles must be one or more of "
                                     "acceptor, initiator"):
             registry_with(text.replace("roles: [acceptor, initiator]",
-                                       "roles: [master]", 1))
+                                       "roles: [primary]", 1))
 
     def test_the_example_registry_and_the_classic_plan_compile(self):
         registry = FileResourceRegistry.load(ROOT / "hardware.example.yaml")

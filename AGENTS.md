@@ -32,6 +32,16 @@
   and implemented fail-closed.
 - Never commit credentials, authentication tokens, employee data, or captured
   device traffic.
+- Bluetooth piconet roles are **central** and **peripheral**, for BR/EDR and
+  LE alike, in code, messages, report and GUI text, registry roles, docs, and
+  tests. Never master/slave. Two things stay as they are: names we do not own
+  (another repository's `master` branch, quoted upstream output, spec titles,
+  and third-party API identifiers such as ESP-IDF's `ESP_SPP_ROLE_MASTER`),
+  and, should one ever be needed, a pattern that has to match the Ubertooth
+  fork's own output: it keeps matching what the fork prints and accepts both
+  wordings while the fork changes over. The harness has no such pattern today.
+  `scripts/ci.sh test` checks the rule; an exception of either kind goes in its
+  `ROLE_TERMS_ALLOW` allowlist, which it names in its failure message.
 - This repository is public: never name lab machines (host names, SSH aliases,
   IP addresses, `user@host` strings, lab home paths) or other systems running
   in the lab. See "Public text" in `.kiro/steering/branch-and-review.md`.

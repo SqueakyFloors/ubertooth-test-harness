@@ -25,7 +25,7 @@ WORK=${CI_TEMP:-${RUNNER_TEMP:-$(mktemp -d)}}
 # libbtbb comes from this project's fork at a pinned commit, so a push to
 # libbtbb cannot change a harness build. It is the commit the Ubertooth fork
 # pins for its own builds (fork issue #320), so a harness run builds the
-# libbtbb the fork is built and tested against, not upstream master.
+# libbtbb the fork is built and tested against, not upstream's `master` branch.
 # This pin is the harness's own copy, deliberately: the harness never calls
 # the fork's installer. It must match the fork's (LIBBTBB_REF in the fork's
 # install.sh, also in its .github/workflows/build.yml); the build step warns
@@ -39,7 +39,58 @@ LIBBTBB_PIN=bf878df27e131dd8ab56bb3497918eb9a83f607b
 
 step() { printf '\n=== ci: %s ===\n' "$1"; }
 
+# Bluetooth piconet roles are central and peripheral, never the older words
+# (AGENTS.md). Only the external names this project does not own are allowed,
+# each written here as it appears in the tree: libbtbb's and git's `master`
+# branch, and ESP-IDF's two SPP role constants. A line is judged on its text
+# with every allowed form deleted, so the path is never read as content and a
+# second occurrence on the same line still fails. AGENTS.md and this file are
+# skipped, because the rule and the check have to name the words they forbid.
+ROLE_TERMS='master|slave'
+ROLE_TERMS_ALLOW='`master` branch|"branch:master"|libbtbb-ref master|LIBBTBB_BRANCH = "master"|ESP_SPP_ROLE_MASTER,|ESP_SPP_ROLE_SLAVE,'
+
+check_role_terms() {
+    step "Bluetooth role terms"
+    if [ ! -f AGENTS.md ] || [ ! -f scripts/ci.sh ]; then
+        echo "error: run scripts/ci.sh from the repository root" >&2
+        return 1
+    fi
+    out=$WORK/role-terms
+    if [ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)" ]; then
+        # Tracked files, so a scratch file in a working tree is nobody's
+        # failure. Only at the top level, where the pathspecs mean what
+        # they say.
+        git grep -nIiE "$ROLE_TERMS" -- ':!scripts/ci.sh' ':!AGENTS.md' \
+            > "$out.lines" || [ $? = 1 ]
+    else
+        # Every file, which is what the tree scripts/local-ci.sh exports holds.
+        grep -rnIiE "$ROLE_TERMS" . --exclude=ci.sh --exclude=AGENTS.md \
+            --exclude-dir=.git --exclude-dir=.venv --exclude-dir=__pycache__ \
+            > "$out.lines" || [ $? = 1 ]
+    fi
+    # One command each, so a step that errors ends the run instead of leaving
+    # an empty file that reads as a clean tree.
+    sed -E 's/^[^:]*:[0-9]+://' "$out.lines" > "$out.text"
+    sed -E "s@$ROLE_TERMS_ALLOW@@g" "$out.text" > "$out.judged"
+    grep -niE "$ROLE_TERMS" "$out.judged" > "$out.hits" || [ $? = 1 ]
+    if [ -s "$out.hits" ]; then
+        # The file's own lines, found by their position in the search output,
+        # so a reader can search for what they see.
+        awk -F: 'NR == FNR { bad[$1]; next } FNR in bad' \
+            "$out.hits" "$out.lines" >&2
+        echo "error: the lines above name a Bluetooth piconet role with an" \
+             "old word; write central or peripheral. If the line holds an" \
+             "external name this project does not own, or a pattern that has" \
+             "to match the fork's own output, add that form to" \
+             "ROLE_TERMS_ALLOW in scripts/ci.sh" >&2
+        return 1
+    fi
+    echo "every Bluetooth role word is central or peripheral"
+}
+
 run_test() {
+    check_role_terms
+
     step "bootstrap"
     "$PYTHON" bootstrap.py | tee "$WORK/first.log"
     grep -q "bootstrap: created" "$WORK/first.log"
