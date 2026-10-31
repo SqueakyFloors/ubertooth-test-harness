@@ -56,9 +56,16 @@ takes that file too. Point it at the bench's existing lock files.
 An Ubertooth's lock file is named after its serial. A DK's and a peer's are
 named after the harness's lease key for them (`nrf52840dk-<serial without
 leading zeros>`, `esp32-<serial>`), because that is what a harness run takes.
-A bench script that still names such a lock after the plain serial would
-otherwise not exclude a harness run, so `hold` takes **both** names for those
-two types. Nothing has to be renamed on a bench for this to be safe.
+A bench script that names such a lock after the plain serial instead would not
+meet a harness run on the same file, so `hold` takes **both** names for those
+two types.
+
+That makes every `hold` exclude every other `hold`, whichever name a bench
+script was written against. It does not reach further than that: a
+`run-suite` or an `ubertooth-harness lease` takes only the harness's own key,
+so a bench script holding the plain name alone can still overlap a run on a DK
+or a peer. The way to be sure is for the bench's scripts to take their devices
+through `hold`, which is what this script is for.
 
 ## `hub-port`
 
@@ -75,12 +82,16 @@ It holds the harness's host power/firmware lock while it switches, so it
 cannot overlap a run that is flashing or switching power, and it prints the
 port's state afterwards so you can see the result.
 
-It does not take the device's lease. Switch a port only when you know nobody
-is using what is on it: `ubertooth-harness boards` says who holds what, and
-`hold` is how to hold it while you work. Switch only the port of the device
-you are recovering, and cycle once before looking rather than looping, because
-on a host near its USB endpoint limit a device that leaves the bus may not
-come back ([`docs/hardware.md`](../../docs/hardware.md), "Known limits").
+It also refuses a port whose registered device someone is holding, naming the
+holder, so it cannot cut power under another run or another person. `--force`
+switches anyway, which is what a wedged device whose holder has given up on it
+needs. A cycle whose power-on fails tries once more rather than leaving the
+port off.
+
+Switch only the port of the device you are recovering, and cycle once before
+looking rather than looping, because on a host near its USB endpoint limit a
+device that leaves the bus may not come back
+([`docs/hardware.md`](../../docs/hardware.md), "Known limits").
 
 Reading the ports changes nothing and belongs to the harness:
 

@@ -26,7 +26,8 @@ is as short as the bench's own wrapper was:
     export UBERTOOTH_HARNESS_EXTERNAL_BOARD_LOCK=~/bench/board-{serial}.lock
     scripts/lab/hold UT_Linux0 -- ubertooth-util -U <serial> -v
 
-Exit status is the command's, or 1 if a device could not be held.
+Exit status is the command's, or 2 if a device could not be held, which is
+what the harness CLI exits on an error of its own.
 """
 
 from __future__ import annotations
@@ -39,6 +40,10 @@ from pathlib import Path
 
 try:
     from ubertooth_harness import leases
+    # The rule for "this command line writes firmware", so the host lock is
+    # asked for on exactly the command lines `ubertooth-harness lease` asks
+    # for it on, rather than by a second copy of the rule here.
+    from ubertooth_harness.cli import _writes_firmware as writes_firmware
     from ubertooth_harness.resources import FileResourceRegistry, RegistryError
 except ImportError:  # run from outside the harness environment
     sys.exit(
@@ -230,35 +235,61 @@ def harness_lease_argv(args, aliases, command) -> list[str]:
     return argv + list(aliases) + ["--"] + list(command)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args, command = parse_args(list(sys.argv[1:] if argv is None else argv))
-    try:
-        registry = FileResourceRegistry.load(args.hardware)
-        resources = [resolve(registry, name) for name in args.devices.split(",")]
-        keys = {resource.alias: lock_key(resource) for resource in resources}
-    except RegistryError as error:
-        return _fail(error)
+def extra_boards(resources, keys) -> list[leases.Board]:
+    """Locks `ubertooth-harness lease` does not take for these devices.
 
-    leasable = [r for r in resources if r.type in leases.LEASED_TYPES]
-    # Devices the harness cannot lease yet are held here instead, so a command
-    # can hold a mixed set in one go.
-    held_here = [r for r in resources if r.type not in leases.LEASED_TYPES]
-    boards = [leases.Board(r.alias, keys[r.alias]) for r in held_here]
-    # Plus the bench's older lock name for every device whose lease key is not
-    # its serial, which `ubertooth-harness lease` does not know about.
-    boards += [
+    A type it does not lease yet, and the bench's older lock name for a device
+    whose lease key is not its serial.
+    """
+    extra = [
+        leases.Board(r.alias, keys[r.alias])
+        for r in resources if r.type not in leases.LEASED_TYPES
+    ]
+    extra += [
         leases.Board(f"{r.alias} (bench lock)", serial)
         for r in resources
         for serial in (plain_serial(r),)
         if serial and serial != keys[r.alias]
     ]
-    inner = (
-        harness_lease_argv(args, [r.alias for r in leasable], command)
-        if leasable else list(command)
-    )
-    if not boards:
-        return leases.exit_status(subprocess.call(inner))
+    return extra
 
+
+def main(argv: list[str] | None = None) -> int:
+    args, command = parse_args(list(sys.argv[1:] if argv is None else argv))
+    try:
+        registry = FileResourceRegistry.load(args.hardware)
+        resources = [resolve(registry, name) for name in args.devices.split(",")]
+        # LeaseError too: a registry can load and still hold a serial no lock
+        # file can be named after.
+        keys = {resource.alias: lock_key(resource) for resource in resources}
+        extra = extra_boards(resources, keys)
+    except (RegistryError, leases.LeaseError) as error:
+        return _fail(error)
+
+    # With nothing extra to take, this is purely a wrapper: the harness holds
+    # every lock, decides the host lock, and runs the command.
+    if not extra:
+        return leases.exit_status(
+            subprocess.call(
+                harness_lease_argv(args, [r.alias for r in resources], command)
+            )
+        )
+
+    # Otherwise every lock is taken here, in one all-or-nothing attempt in the
+    # harness's own order, rather than nesting a second attempt inside this
+    # one: a wait must never happen while some of the locks are already held.
+    boards = extra + [
+        leases.Board(r.alias, keys[r.alias])
+        for r in resources if r.type in leases.LEASED_TYPES
+    ]
+    host_lock = args.host_lock or writes_firmware(command)
+    if host_lock and not args.host_lock:
+        print(
+            "note: this command line names ubertooth-dfu, so it asks for this "
+            "host's power/firmware lock as well as its devices, and holds it "
+            "until the command exits",
+            file=sys.stderr,
+        )
     try:
         template = leases.external_lock_template(args.external_board_lock)
         with leases.acquire(
@@ -269,6 +300,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
             directory=args.lease_dir,
             wait_s=args.wait_for_boards * 60,
+            host_lock=host_lock,
             external_template=template,
         ) as held:
             # The command inherits the locks, so they are held for as long as
@@ -276,7 +308,7 @@ def main(argv: list[str] | None = None) -> int:
             fds = [lease.fd for lease in held.leases]
             for fd in fds:
                 os.set_inheritable(fd, True)
-            return leases.exit_status(subprocess.call(inner, pass_fds=fds))
+            return leases.exit_status(subprocess.call(command, pass_fds=fds))
     except leases.LeaseError as error:
         return _fail(error)
 

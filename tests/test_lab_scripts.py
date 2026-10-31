@@ -414,6 +414,75 @@ class HoldRuns(Bench):
         self.assertEqual(2, status)
         self.assertIn("bob", err)
 
+    def busy_script(self, paths, out_name):
+        """A command that records which of these lock files it cannot take."""
+        checks = "\n".join(f"out.append(busy({str(p)!r}))" for p in paths)
+        return (
+            "import fcntl, pathlib\n"
+            "def busy(path):\n"
+            "    fd = open(path, 'a+')\n"
+            "    try:\n"
+            "        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+            "    except OSError:\n"
+            "        return 'busy'\n"
+            "    return 'free'\n"
+            "out = []\n"
+            f"{checks}\n"
+            f"pathlib.Path({str(self.root / out_name)!r}).write_text(' '.join(out))\n"
+        )
+
+    def test_a_mixed_hold_holds_every_device_in_one_attempt(self):
+        paths = (
+            self.leases / f"{UT_SERIAL}.lock",
+            self.leases / f"esp32-{BRIDGE}.lock",
+            self.locks / f"board-{UT_SERIAL}.lock",
+            self.locks / f"board-esp32-{BRIDGE}.lock",
+        )
+        status, _, err = self.run_hold(
+            "UT0,ESP0",
+            [sys.executable, "-c", self.busy_script(paths, "mixed.txt")],
+        )
+        self.assertEqual(0, status, err)
+        self.assertEqual("busy busy busy busy", (self.root / "mixed.txt").read_text())
+
+    def test_the_host_lock_is_taken_when_asked_for_on_a_peer_only_hold(self):
+        host = self.leases / "host-power.lock"
+        status, _, err = self.run_hold(
+            "ESP0",
+            [sys.executable, "-c", self.busy_script((host,), "host.txt")],
+            extra=("--host-lock",),
+        )
+        self.assertEqual(0, status, err)
+        self.assertEqual("busy", (self.root / "host.txt").read_text())
+
+    def test_a_firmware_write_asks_for_the_host_lock_by_itself(self):
+        """The harness's own rule, so `hold` and `lease` agree on which lines."""
+        host = self.leases / "host-power.lock"
+        script = self.busy_script((host,), "dfu.txt")
+        status, _, err = self.run_hold(
+            "ESP0", [sys.executable, "-c", script, "ubertooth-dfu"]
+        )
+        self.assertEqual(0, status, err)
+        self.assertEqual("busy", (self.root / "dfu.txt").read_text())
+        self.assertIn("ubertooth-dfu", err)
+
+    def test_a_hold_without_a_firmware_write_leaves_the_host_lock_alone(self):
+        host = self.leases / "host-power.lock"
+        status, _, err = self.run_hold(
+            "ESP0", [sys.executable, "-c", self.busy_script((host,), "nohost.txt")]
+        )
+        self.assertEqual(0, status, err)
+        self.assertEqual("free", (self.root / "nohost.txt").read_text())
+
+    def test_a_serial_no_lock_can_be_named_after_is_reported_not_raised(self):
+        self.registry.write_text(
+            REGISTRY.replace(f"serial: {UT_SERIAL}", "serial: nothex"), encoding="utf-8"
+        )
+        status, _, err = self.run_hold("UT0", [sys.executable, "-c", "pass"])
+        self.assertEqual(2, status)
+        self.assertIn("hold: error:", err)
+        self.assertNotIn("Traceback", err)
+
     def test_an_unknown_device_fails_before_the_command_runs(self):
         marker = self.root / "ran"
         status, _, err = self.run_hold(
@@ -449,6 +518,18 @@ class HubPortArguments(Bench):
     def test_an_out_of_range_cycle_time_is_refused(self):
         with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
             hub_port.parse_args(["--hardware", str(self.registry), "Hub0", "cycle", "1", "600"])
+
+    def test_seconds_is_refused_for_an_action_that_does_not_wait(self):
+        for action in ("on", "off"):
+            with self.subTest(action=action):
+                with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                    hub_port.parse_args(
+                        ["--hardware", str(self.registry), "Hub0", action, "1", "5"]
+                    )
+
+    def test_cycle_gets_the_default_wait(self):
+        args = hub_port.parse_args(["--hardware", str(self.registry), "Hub0", "cycle", "1"])
+        self.assertEqual(hub_port.DEFAULT_CYCLE_S, args.seconds)
 
     def test_an_unknown_controller_fails(self):
         out, err = io.StringIO(), io.StringIO()
@@ -503,6 +584,73 @@ class HubPortSwitches(Bench):
         status, _, _ = self.run_hub_port(["Hub0", "off", "1"])
         self.assertEqual(0, status)
         self.assertTrue(seen["host_lock"].get("held"))
+
+    def test_a_cycle_whose_power_on_fails_tries_again_to_leave_the_port_on(self):
+        from ubertooth_harness.power import PowerControllerError
+
+        attempts = []
+        real = self.controller.set_power_enabled
+
+        def flaky(port, enabled):
+            attempts.append(enabled)
+            if enabled and attempts.count(True) == 1:
+                raise PowerControllerError("write refused")
+            real(port, enabled)
+
+        self.controller.connect()
+        self.controller.set_power_enabled = flaky
+        with self.assertRaises(PowerControllerError) as caught:
+            hub_port.switch(self.controller, 4, "cycle", 0.0, sleep=lambda _s: None)
+        self.assertIn("took two attempts", str(caught.exception))
+        self.assertTrue(self.controller.powered[4], "the port was left off")
+
+    def test_a_cycle_that_cannot_power_on_at_all_says_the_port_is_off(self):
+        from ubertooth_harness.power import PowerControllerError
+
+        def never_on(port, enabled):
+            if enabled:
+                raise PowerControllerError("write refused")
+            self.controller.powered[port] = False
+
+        self.controller.connect()
+        self.controller.set_power_enabled = never_on
+        with self.assertRaises(PowerControllerError) as caught:
+            hub_port.switch(self.controller, 4, "cycle", 0.0, sleep=lambda _s: None)
+        message = str(caught.exception)
+        self.assertIn("is OFF", message)
+        self.assertIn("second attempt failed", message)
+
+    def test_it_refuses_a_port_whose_device_someone_holds(self):
+        """UT0 is mapped to port 3 in the test registry."""
+        holder = leases.acquire(
+            [leases.Board("UT0", UT_SERIAL)],
+            leases.holder_info(run_id=None, owner="bob", purpose="a capture"),
+            directory=self.leases,
+        )
+        self.addCleanup(holder.release)
+        status, _, err = self.run_hub_port(["Hub0", "cycle", "3"])
+        self.assertEqual(2, status)
+        self.assertEqual([], self.controller.calls)
+        self.assertIn("UT0", err)
+        self.assertIn("bob", err)
+        self.assertIn("--force", err)
+
+    def test_force_switches_a_held_port_and_says_so(self):
+        holder = leases.acquire(
+            [leases.Board("UT0", UT_SERIAL)],
+            leases.holder_info(run_id=None, owner="bob", purpose="a capture"),
+            directory=self.leases,
+        )
+        self.addCleanup(holder.release)
+        status, _, err = self.run_hub_port(["Hub0", "off", "3", "--force"])
+        self.assertEqual(0, status)
+        self.assertEqual([("power", 3, False)], self.controller.calls)
+        self.assertIn("--force", err)
+
+    def test_an_empty_port_is_switched_with_no_holder_check(self):
+        status, _, err = self.run_hub_port(["Hub0", "off", "7"])
+        self.assertEqual(0, status, err)
+        self.assertEqual([("power", 7, False)], self.controller.calls)
 
     def test_it_waits_for_a_held_host_lock_rather_than_switching(self):
         holder = leases.acquire(
