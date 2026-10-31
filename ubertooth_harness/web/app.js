@@ -34,7 +34,8 @@
     // run_id -> [{path, stream, bytes, lines, sha256, owner, checks}] as the
     // run recorded them, and the page of the file open in the viewer.
     files: new Map(),
-    openFile: null, // {run_id, path, offset}
+    openFile: null, // {run_id, path, page}
+    wantedFile: null, // a file named in the URL fragment, opened once loaded
     live: null, // {run_id, seen:Set, events:[], items:[], byInvocation:Map, log:[], partial, stage}
     socket: null,
     retry: 1000,
@@ -326,6 +327,8 @@
     state.openFile = null;
     // A link to this view: /ui/#run=<run_id>.
     window.history.replaceState(null, "", `#run=${runId}`);
+    const wanted = state.wantedFile;
+    state.wantedFile = null;
     state.live = newLive(runId);
     $("live-empty").hidden = true;
     $("live").hidden = false;
@@ -341,6 +344,7 @@
       // Now that the run's plan is known, lay out its checklist and replay.
       rebuildChecklist();
       await loadOutputFiles(runId);
+      if (wanted) await openOutputFile(runId, wanted, 0);
     } catch (error) {
       $("cancel-status").textContent = `Cannot load run: ${error.message}`;
     }
@@ -949,8 +953,13 @@
     renderTargetSelect();
     loadRefs();
     loadPlans();
-    const linked = /^#run=(.+)$/.exec(window.location.hash);
-    if (linked && RUN_ID.test(linked[1])) state.selected = linked[1];
+    // /ui/#run=<run_id> shows that run; &file=<path> also opens that saved
+    // file in the viewer, so a file view can be linked to and reopened.
+    const linked = /^#run=([^&]+)(?:&file=(.+))?$/.exec(window.location.hash);
+    if (linked && RUN_ID.test(linked[1])) {
+      state.selected = linked[1];
+      if (linked[2]) state.wantedFile = decodeURIComponent(linked[2]);
+    }
     connect();
     window.setInterval(renderClock, 1000);
   }
