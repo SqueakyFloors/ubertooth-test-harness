@@ -471,6 +471,9 @@ the bridge's reset wiring above.
 Several agents or people share one host's devices through leases. An
 Ubertooth or a DK is leased by its serial before anything touches it, and
 anything that switches USB power or writes firmware also takes the host lock.
+A lease left behind by a session that is gone (a dropped connection, a batch
+kill) is taken over by the next command that wants the device, which says so
+and names the process group to check for a leftover command on it.
 Where the bench's own scripts lock devices with their own per-device files, a
 lease takes those too (`--external-board-lock`). See
 [Sharing boards: leases](../README.md#sharing-boards-leases).

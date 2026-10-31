@@ -1339,8 +1339,9 @@ ends: the selected board, guard and alternated boards, power-isolated boards,
 and, for `Flash reliability` and exclusive tests, every Ubertooth on the host
 (they read or enumerate all of them). A lease is an exclusive `flock` on
 `~/.ubertooth-harness/leases/<serial>.lock` (override with
-`UBERTOOTH_HARNESS_LEASE_DIR`); the kernel drops it when the process exits, so
-leases never go stale. Boards are taken all or nothing, so two runs cannot
+`UBERTOOTH_HARNESS_LEASE_DIR`); the kernel drops it when every process holding
+that file exits, and a lease left behind by a session that is gone is taken
+over (below). Boards are taken all or nothing, so two runs cannot
 deadlock. A leased board needs its full 32-hex-digit serial in the hardware
 registry: libubertooth matches `-U` against the start of a serial, so a short
 serial would select the same board under a different lock.
@@ -1360,11 +1361,48 @@ ubertooth-harness lease --hardware hardware.yaml --owner "agent #14" UT_Mac0 -- 
 command inherits the locks, so they stay held even if the harness process is
 killed first. Use it for every manual Ubertooth command on a shared host.
 
+### Stale leases: a session that is gone
+
+Because the command inherits the lock files, a lock lives as long as any
+process holding one of them. A session killed part way through — a dropped
+network connection, a batch kill — can therefore leave a lease nothing is
+waiting on: the harness process is gone, and something it started, re-parented
+and forgotten, still holds the lock. A board locked like that used to stay
+locked (five hours of a release soak,
+[#215](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/215)).
+
+So a command that finds a busy lease recorded by a process of *this* host
+that no longer exists takes the board over: it removes that lock file, which
+is what later commands read, and says so in one line on standard error.
+
+```
+note: UT_Linux5 was held by a lease that no longer holds it: its process
+(pid 2380347) is gone, and so is the process group it ran in (2380347).
+Taking it over (/home/.../leases/05f0....lock).
+```
+
+A lease recorded on another host is left alone (a pid there means nothing
+here), as is a pid the system has since given to an unrelated process, and
+two commands cannot take over the same board at once
+(`<lease dir>/takeover.lock`). When the record's process group is still
+running, the note names it, because a leftover command from that session may
+still be talking to the board: `ps -g <group>` shows what to stop. The host
+lock is taken over the same way. `boards` marks such a lease and removes
+nothing itself:
+
+```
+UT_Linux5    held  agent, lease: bash soak.sh, pid 2380347, since ... (for 5h12m)
+             stale: its process (pid 2380347) is gone, and so is the process
+             group it ran in (2380347); the next command that wants it takes
+             it over
+```
+
 ### The host lock
 
 Every harness command that switches USB power or writes firmware also holds
 the host lock, `<lease dir>/host-power.lock`, the same kind of `flock` lease
-(released by the kernel when the holder exits, so it never goes stale): a
+(released by the kernel when its holders exit, and taken over when they are
+gone, as above): a
 `run-suite` with power isolation (StarTech or Acroname) or an exclusive
 Ubertooth check, `Flash reliability`, or `DFU images` holds it for the whole
 run, a `--build` run that flashes its boards with its own build takes it with

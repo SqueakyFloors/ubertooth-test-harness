@@ -1,6 +1,9 @@
+import fcntl
 import hashlib
 import io
 import json
+import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -186,17 +189,270 @@ class LeaseTests(unittest.TestCase):
         return path
 
 
-class LeaseCliTests(unittest.TestCase):
+def reaped_pid() -> int:
+    """A pid of a process that has ended and been waited for: nothing holds it."""
+    child = subprocess.Popen([sys.executable, "-c", ""])
+    child.wait()
+    return child.pid
+
+
+def dead_holder(**fields) -> dict:
+    """A holder record of a session that is gone, as #215's lease file was."""
+    pid = reaped_pid()
+    record = dict(
+        holder("gone-agent"), pid=pid, pgid=pid,
+        purpose="lease: bash soak.sh", hostname=socket.gethostname(),
+    )
+    record.update(fields)
+    return record
+
+
+class RawHoldMixin:
+    """Holding a lease file with a holder record the test chooses."""
 
     def setUp(self):
+        super().setUp()
+        self.raw = []
+        self.addCleanup(self._close_raw)
+
+    def _close_raw(self):
+        for fd in self.raw:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def hold_raw(self, directory, board, record):
+        """Hold a board's lease file, with a record of our choosing.
+
+        flock belongs to an open file, not to a process, so a second
+        descriptor on the same file conflicts with the first even in one
+        process: this is a lease that is really locked, saying whatever the
+        test needs about who took it.
+        """
+        directory.mkdir(parents=True, exist_ok=True)
+        path = Path(directory) / f"{board.key}.lock"
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        self.raw.append(fd)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.ftruncate(fd, 0)
+        os.pwrite(fd, (json.dumps(record) + "\n").encode(), 0)
+        return path
+
+
+class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
+    """A lease whose holder is gone must not hold a board forever (#215)."""
+
+    def setUp(self):
+        super().setUp()
         self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.dir = Path(self._dir.name)
+        self.notes = []
+
+    def hold(self, board, record):
+        return self.hold_raw(self.dir, board, record)
+
+    def take(self, board=A, **kwargs):
+        return leases.acquire(
+            [board], holder("agent-2"), directory=self.dir,
+            note=self.notes.append, **kwargs,
+        )
+
+    def test_a_lease_whose_process_is_gone_is_taken_over(self):
+        record = dead_holder()
+        path = self.hold(A, record)
+        held = self.take()
+        self.addCleanup(held.release)
+        self.assertEqual([A], [lease.board for lease in held.leases])
+        # The board's lock file is a new one, recording the new holder.
+        self.assertEqual("agent-2", leases.read_holder(path)["owner"])
+        self.assertEqual(1, len(self.notes), self.notes)
+        self.assertIn("UT_0 was held by a lease that no longer holds it", self.notes[0])
+        self.assertIn(f"pid {record['pid']}", self.notes[0])
+        self.assertIn("process group", self.notes[0])
+
+    def test_a_takeover_says_when_the_session_is_still_running(self):
+        # The lease process is gone but its process group is not, which is
+        # what an orphaned capture looks like: the board is freed, and the
+        # note says which group to look at before trusting it.
+        self.hold(A, dead_holder(pgid=os.getpgrp()))
+        self.take().release()
+        self.assertIn(f"ps -g {os.getpgrp()}", self.notes[0])
+        self.assertIn("may still be using the board", self.notes[0])
+
+    def test_a_lease_of_a_live_process_is_left_alone(self):
+        self.hold(A, dict(holder("busy-agent"), pid=os.getpid(),
+                              pgid=os.getpgrp(), hostname=socket.gethostname()))
+        with self.assertRaises(leases.LeaseError) as caught:
+            self.take()
+        self.assertIn("UT_0 is in use", str(caught.exception))
+        self.assertEqual([], self.notes)
+
+    def test_a_lease_from_another_host_is_left_alone(self):
+        # A pid of another machine says nothing here, so its lease stands
+        # however dead that pid is locally.
+        self.hold(A, dead_holder(hostname="another-host"))
+        with self.assertRaises(leases.LeaseError):
+            self.take()
+        self.assertEqual([], self.notes)
+
+    def test_a_lease_file_with_no_record_is_left_alone(self):
+        self.hold(A, {})
+        with self.assertRaises(leases.LeaseError):
+            self.take()
+        self.assertEqual([], self.notes)
+
+    def test_a_stale_lease_is_taken_over_without_waiting(self):
+        self.hold(A, dead_holder())
+        slept = []
+        # No wait was asked for, so the takeover must happen inside the brief
+        # grace the first attempt has, not only after a --wait-for-boards.
+        leases.acquire(
+            [A], holder("agent-2"), directory=self.dir, note=self.notes.append,
+            sleep=slept.append,
+        ).release()
+        self.assertEqual([], slept)
+        self.assertEqual(1, len(self.notes))
+
+    def test_a_stale_host_lock_is_taken_over(self):
+        self.hold(leases.HOST_LOCK, dead_holder())
+        held = leases.acquire(
+            [], holder("agent-2"), directory=self.dir, host_lock=True,
+            note=self.notes.append,
+        )
+        self.addCleanup(held.release)
+        self.assertTrue(held.holds_host_lock())
+        self.assertIn("this host's power/firmware lock", self.notes[0])
+
+    def test_one_board_of_a_set_can_be_stale(self):
+        self.hold(B, dead_holder())
+        held = leases.acquire(
+            [A, B], holder("agent-2"), directory=self.dir, note=self.notes.append,
+        )
+        self.addCleanup(held.release)
+        self.assertEqual([A, B], [lease.board for lease in held.leases])
+        self.assertIn("UT_1", self.notes[0])
+
+    def test_a_takeover_leaves_the_other_boards_free(self):
+        # The attempt that found the stale lease released everything it had
+        # taken before taking over, as every other failed attempt does.
+        self.hold(A, dead_holder())
+        leases.acquire([A, B], holder("agent-2"), directory=self.dir,
+                       note=self.notes.append).release()
+        leases.acquire([A, B], holder("agent-3"), directory=self.dir).release()
+
+    def test_a_stale_lease_is_only_taken_over_once_per_command(self):
+        # A file that keeps coming back must not make acquire loop on it: the
+        # second attempt waits like any busy board and then gives up.
+        self.hold(A, dead_holder())
+        now = [0.0]
+
+        def note(message):
+            # Called when the lease has just been taken over: another equally
+            # stale lease appears before the retry can lock the board.
+            self.notes.append(message)
+            self.hold(A, dead_holder())
+
+        def sleep(seconds):
+            now[0] += seconds
+
+        with self.assertRaises(leases.LeaseError):
+            leases.acquire(
+                [A], holder("agent-2"), directory=self.dir, wait_s=10,
+                clock=lambda: now[0], sleep=sleep, note=note,
+            )
+        self.assertEqual(1, len(self.notes))
+
+    def test_boards_reports_a_stale_lease_without_removing_it(self):
+        path = self.hold(A, dead_holder())
+        state = leases.board_states([A], directory=self.dir)[0]
+        self.assertTrue(state["held"])
+        self.assertIn("is gone", state["stale"])
+        self.assertTrue(path.exists())
+        self.assertEqual("gone-agent", leases.read_holder(path)["owner"])
+
+    def test_boards_reports_a_live_lease_as_held_and_not_stale(self):
+        with leases.acquire([A], holder("agent-1"), directory=self.dir):
+            state = leases.board_states([A], directory=self.dir)[0]
+        self.assertTrue(state["held"])
+        self.assertNotIn("stale", state)
+
+    def test_liveness_of_a_holder(self):
+        here = socket.gethostname()
+        pid = reaped_pid()
+        cases = {
+            "live": dict(pid=os.getpid(), pgid=os.getpgrp(), hostname=here),
+            "stale": dict(pid=pid, pgid=pid, hostname=here),
+            "foreign": dict(pid=pid, pgid=pid, hostname="elsewhere"),
+            "unknown": dict(pid=pid, pgid=pid),
+        }
+        for kind, record in cases.items():
+            with self.subTest(kind):
+                self.assertEqual(kind, leases.lease_liveness(record)[0])
+        self.assertEqual("unknown", leases.lease_liveness({})[0])
+        # A record of a harness that did not keep the process group yet.
+        self.assertEqual(
+            "stale", leases.lease_liveness({"pid": pid, "hostname": here})[0])
+        # A pid value that kill() would read as a group, not a process.
+        for bad in (0, -1, "2380347", None, True):
+            with self.subTest(pid=bad):
+                self.assertEqual(
+                    "live", leases.lease_liveness({"pid": bad, "hostname": here})[0])
+
+    def test_an_inherited_lock_outlives_its_lease_and_is_taken_over(self):
+        """The real #215: the command outlives the lease that took the board.
+
+        `lease` hands its lock files to the command it runs, so a session
+        killed part way through can leave a locked file behind with nothing
+        waiting on it. Here the lease process exits while a command it
+        started, in a session of its own, keeps the lock.
+        """
+        code = textwrap.dedent(f"""
+            import os, subprocess, sys, time
+            from ubertooth_harness import leases
+            held = leases.acquire(
+                [leases.Board('UT_0', '{A.key}')],
+                leases.holder_info(run_id=None, owner='gone-agent',
+                                   purpose='lease: bash soak.sh'),
+                directory=sys.argv[1])
+            fd = held.leases[0].fd
+            os.set_inheritable(fd, True)
+            child = subprocess.Popen(
+                [sys.executable, '-c', 'import time; time.sleep(120)'],
+                pass_fds=(fd,), start_new_session=True,
+                # Not this process's output: a pipe the orphan holds open
+                # would keep the reader waiting for the orphan, not for the
+                # lease.
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL)
+            print(child.pid, flush=True)
+            """)
+        started = subprocess.run(
+            [sys.executable, "-c", code, str(self.dir)],
+            capture_output=True, text=True, timeout=60, start_new_session=True,
+        )
+        self.assertEqual(0, started.returncode, started.stderr)
+        orphan = int(started.stdout.strip())
+        self.addCleanup(lambda: os.kill(orphan, 9))
+        # The lease process is gone, the orphan still holds its lock file.
+        state = leases.board_states([A], directory=self.dir)[0]
+        self.assertTrue(state["held"])
+        self.assertIn("is gone", state["stale"])
+        self.take().release()
+        self.assertEqual(1, len(self.notes), self.notes)
+
+
+class LeaseCliTests(RawHoldMixin, unittest.TestCase):
+
+    def setUp(self):
+        super().setUp()
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
         self.root = Path(self._dir.name)
         self.lease_dir = self.root / "leases"
         self.hardware = self.root / "hardware.yaml"
         self.hardware.write_text(HARDWARE)
-
-    def tearDown(self):
-        self._dir.cleanup()
 
     def _main(self, *argv):
         out, err = io.StringIO(), io.StringIO()
@@ -311,6 +567,29 @@ class LeaseCliTests(unittest.TestCase):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             main(["lease", "--hardware", str(self.hardware), "--wait-for-boards", "-5",
                   "UT_0", "--", "true"])
+
+    def test_boards_says_a_lease_is_stale_and_lease_takes_it_over(self):
+        self.hold_raw(self.lease_dir, A, dead_holder())
+        code, out, _err = self._main(
+            "boards", "--hardware", str(self.hardware), "--lease-dir", str(self.lease_dir),
+        )
+        self.assertEqual(0, code)
+        lines = out.splitlines()
+        self.assertRegex(lines[0], r"^UT_0 +held  gone-agent")
+        self.assertRegex(lines[1], r"^ +stale: its process \(pid \d+\) is gone")
+        self.assertIn("takes it over", lines[1])
+        _code, raw, _err = self._main(
+            "boards", "--hardware", str(self.hardware), "--lease-dir", str(self.lease_dir),
+            "--json",
+        )
+        self.assertIn("is gone", json.loads(raw)[0]["stale"])
+        # The next command that wants the board takes it over, and says so.
+        code, _out, err = self._main(
+            "lease", "--hardware", str(self.hardware), "--lease-dir", str(self.lease_dir),
+            "UT_0", "--", sys.executable, "-c", "pass",
+        )
+        self.assertEqual(0, code)
+        self.assertIn("note: UT_0 was held by a lease that no longer holds it", err)
 
     def test_lease_returns_the_command_exit_code(self):
         code, _out, _err = self._main(

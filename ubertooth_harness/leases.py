@@ -2,9 +2,30 @@
 (and the nRF52840 DKs used as BLE test devices, keyed by J-Link serial).
 
 A lease is an exclusive ``flock`` on ``<lease dir>/<serial>.lock``. The kernel
-drops it when the holding process exits, however it exits, so a lease can
-never go stale. The lock file also records who holds it, for the error a
-second run sees and for ``ubertooth-harness boards``.
+drops it when the holding process exits, however it exits. The lock file also
+records who holds it, for the error a second run sees and for
+``ubertooth-harness boards``.
+
+Stale leases: ``lease`` and ``hold`` hand their lock files to the command they
+run (the command inherits them, so the boards stay held even if the harness
+process is killed first), and one lock on a file lives as long as *any*
+process that holds that file open. A session killed part way through can
+leave a lease nothing is waiting on: its own process is gone, and some
+command it started, re-parented and forgotten, still holds the lock. A board
+locked like that would never come back (harness #215: five hours of a release
+soak). So when a busy lease records a process of *this* host that no longer
+exists, ``acquire()`` takes the board over: it removes that lock file, which
+is what later commands look at, and says so in one line on standard error.
+A lock the removed file's inode still carries is no longer in anyone's way.
+``boards`` marks such a lease stale and never removes anything.
+Two guards keep that narrow: a lease recorded on another host is left alone
+(a pid there means nothing here), and takeovers are serialized by
+``<lease dir>/takeover.lock`` so two commands cannot each take over the same
+board. A pid that the system has given to an unrelated process in the
+meantime reads as alive, so the lease is left alone, as before.
+When the record's process group is still running, the note names it: a
+leftover command from that session may still be talking to the board, and
+``ps -g <group>`` is how to see it.
 
 A run takes every board it touches (selected, guard, alternated, and
 power-isolated boards) all or nothing, before preflight, and holds them until
@@ -55,6 +76,7 @@ import os
 import re
 import socket
 import stat
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -73,6 +95,9 @@ DEFAULT_LEASE_DIR = Path.home() / ".ubertooth-harness" / "leases"
 _BUSY_GRACE_S = 1.0
 _POLL_S = 0.25
 _FULL_SERIAL = re.compile(r"[0-9a-f]{32}")
+# Held for the moment one stale lease is taken over, so two commands that see
+# the same stale lease cannot both remove a lock file.
+TAKEOVER_LOCK = "takeover.lock"
 
 
 class LeaseError(RuntimeError):
@@ -290,6 +315,10 @@ def holder_info(*, run_id: str | None, owner: str | None, purpose: str) -> dict:
         "run_id": run_id,
         "purpose": purpose,
         "pid": os.getpid(),
+        # The process group this command leads or belongs to. A command that
+        # inherits the lock runs in it, so it tells a later command whether
+        # anything from this session is still running (see the docstring).
+        "pgid": os.getpgrp(),
         "user": getpass.getuser(),
         "hostname": socket.gethostname(),
         "acquired_at": datetime.datetime.now(datetime.timezone.utc)
@@ -304,6 +333,113 @@ def read_holder(path: Path) -> dict:
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
+
+
+def _process_exists(pid) -> bool | None:
+    """True when a process with this pid exists, None when it cannot be told.
+
+    Signal 0 asks the kernel about a pid without disturbing it. Another
+    user's process answers "not allowed", which is still an answer: it
+    exists.
+    """
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None  # 0 and negatives mean "a group" to kill(), never a process
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    return True
+
+
+def _group_exists(pgid) -> bool | None:
+    """True when any process is still in this process group (as above)."""
+    if not isinstance(pgid, int) or isinstance(pgid, bool) or pgid <= 0:
+        return None  # 0 is the caller's own group: always alive, never asked
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    return True
+
+
+def lease_liveness(holder: Mapping, *, hostname: str | None = None) -> tuple[str, str]:
+    """Whether this lease's holder can still be holding it, and why in words.
+
+    The kinds are ``live`` (the recorded process is still there, or nothing
+    can be told about it), ``stale`` (it is gone, so the lock belongs to
+    nobody and the board can be taken over), ``foreign`` (the record is from
+    another host, where a pid means nothing) and ``unknown`` (no record to go
+    on, for example a lease file a release has emptied).
+    """
+    if not holder:
+        return "unknown", "its lock file records no holder"
+    here = socket.gethostname() if hostname is None else hostname
+    recorded = str(holder.get("hostname") or "")
+    if not recorded:
+        return "unknown", "its lock file records no host"
+    if recorded != here:
+        return "foreign", f"it was taken on {recorded}, not on this host"
+    pid = holder.get("pid")
+    if _process_exists(pid) is not False:
+        return "live", f"its process (pid {pid}) is still running"
+    if _group_exists(holder.get("pgid")) is True:
+        return "stale", (
+            f"its process (pid {pid}) is gone, but other processes of the same "
+            f"session are still running (process group {holder['pgid']}); one of "
+            f"them may still be using the board, so check 'ps -g {holder['pgid']}'"
+        )
+    if holder.get("pgid") is None:
+        # A lease taken by a harness that did not record the group yet.
+        return "stale", f"its process (pid {pid}) is gone"
+    return "stale", (
+        f"its process (pid {pid}) is gone, and so is the process group it ran "
+        f"in ({holder['pgid']})"
+    )
+
+
+def _note_to_stderr(message: str) -> None:
+    print(f"note: {message}", file=sys.stderr)
+
+
+def _take_over_stale(path: Path, root: Path) -> str:
+    """Free a lease whose holder is gone: why it was taken over, or ''.
+
+    The lock itself cannot be taken away from whatever still holds the file
+    open, so the file is removed instead: the next attempt creates a new one
+    and locks that, and later commands read the new file. Every check is
+    repeated under the takeover lock, so a lease that was released, taken by
+    someone else, or already taken over in the meantime is left alone.
+    """
+    if lease_liveness(read_holder(path))[0] != "stale":
+        return ""  # the common case, before taking the takeover lock
+    guard = _try_lock(root / TAKEOVER_LOCK, fcntl.LOCK_EX)
+    if guard is None:
+        return ""  # another command is taking over a lease right now
+    try:
+        before = _file_identity(path)
+        if before is None:
+            return ""  # already gone
+        kind, why = lease_liveness(read_holder(path))
+        if kind != "stale":
+            return ""
+        if not _probe(path):
+            return ""  # free now: the next attempt simply takes it
+        if _file_identity(path) != before:
+            return ""  # a different file by now
+        os.unlink(path)
+    except OSError:
+        return ""
+    finally:
+        os.close(guard)
+    return why
 
 
 def describe_holder(holder: Mapping) -> str:
@@ -435,12 +571,16 @@ def acquire(
     sleep: Callable[[float], None] = time.sleep,
     host_lock: bool = False,
     external_template: str | None = None,
+    note: Callable[[str], None] = _note_to_stderr,
 ) -> LeaseSet:
     """Lease every board, all or nothing, waiting up to wait_s for busy ones.
 
     With host_lock, the host lock is taken too; with external_template (an
     already validated external_lock_template()), each board's external lock
     too (see the module docstring for the order).
+
+    A busy lease whose holder is gone is taken over, once per resource, and
+    note() is told in one line (by default on standard error).
     """
     if not boards and not host_lock:
         return LeaseSet()
@@ -479,6 +619,7 @@ def acquire(
     if host_lock:
         ordered.append((HOST_LOCK, root / f"{HOST_LOCK.key}.lock", False))
     ordered += [(board, root / f"{board.key}.lock", False) for board in by_serial]
+    taken_over: set[str] = set()
     while True:
         held: list[Lease] = []
         busy: tuple[Board, Path, bool] | None = None
@@ -558,6 +699,20 @@ def acquire(
             return LeaseSet(held)
         LeaseSet(held).release()
         board, path, external = busy
+        # A lease of this host whose holder is gone holds nothing back; an
+        # external lock belongs to the lab and is never touched. Once per
+        # resource, so a file that keeps coming back cannot loop here.
+        if not external and board.key not in taken_over:
+            why = _take_over_stale(path, root)
+            if why:
+                taken_over.add(board.key)
+                label = ("this host's power/firmware lock" if board == HOST_LOCK
+                         else board.alias)
+                note(
+                    f"{label} was held by a lease that no longer holds it: {why}. "
+                    f"Taking it over ({path})."
+                )
+                continue  # try again at once: that lock file is gone
         if clock() >= deadline:
             waited = f" after waiting {wait_s:g}s" if wait_s else ""
             if external:
@@ -592,6 +747,9 @@ def board_states(
     With external_template, a board whose external lock is held counts as
     held even without a lease; ``external`` then gives that lock's file,
     whether it is held, and what the file says about its holder.
+
+    A held lease whose holder is gone also carries ``stale``, saying why the
+    next command that wants the board takes it over.
     """
     root = lease_dir(directory)
     states = []
@@ -601,6 +759,10 @@ def board_states(
         if _probe(path):
             state["held"] = True
             state["holder"] = read_holder(path)
+            # Reported, never removed: a listing changes nothing on the bench.
+            kind, why = lease_liveness(state["holder"])
+            if kind == "stale":
+                state["stale"] = why
         if external_template:
             external = external_lock_path(external_template, board)
             try:
