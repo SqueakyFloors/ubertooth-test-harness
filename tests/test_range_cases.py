@@ -521,87 +521,103 @@ suites:
         plan = load_plan(project / "testplans" / "range.yaml")
         (item,) = PlanCompiler(builtin_catalog(), registry).compile(plan, "range")
         self.assertEqual("Host_Linux", item.host)
-        # The example bench's third board is the attenuated one, which this
-        # suite does not use, so it is bound as a guard and read only.
-        self.assertEqual(
-            {"sender": "UT_Linux0", "responder": "UT_Linux1",
-             "guard Ubertooth 1": "UT_Linux2"},
-            dict(item.resources),
+        self.assertEqual({"sender": "UT_Linux0", "responder": "UT_Linux1"},
+                         dict(item.resources))
+
+
+    def weak_link_registry(self, directory, *, default="UT_0", attenuated=True):
+        """Three boards as range-weak-link needs them, UT_2 behind 20 dB.
+
+        An inline registry, not the committed example: the example is the
+        template a bench copies, and a board most benches do not have would
+        make every guarded test on such a copy ask for a board that is not
+        attached.
+        """
+        placement = (
+            "    rf: {antenna: true, attenuation_db: 20, distance_m: 1}\n"
+            if attenuated else ""
         )
+        text = f"""resources:
+  Host_Linux:
+    type: Host
+    platform: linux
+    roles: [test target]
+    defaults: {{Ubertooth: {default}}}
+  UT_0:
+    type: Ubertooth
+    attached to: Host_Linux
+    identity: {{serial: {A}}}
+  UT_1:
+    type: Ubertooth
+    attached to: Host_Linux
+    identity: {{serial: {B}}}
+  UT_2:
+    type: Ubertooth
+    attached to: Host_Linux
+    identity: {{serial: {C}}}
+{placement}"""
+        path = Path(directory) / "hardware.yaml"
+        path.write_text(text)
+        return FileResourceRegistry.load(path)
 
-    def test_the_weak_link_range_plan_takes_the_attenuated_responder(self):
-        project = Path(__file__).resolve().parents[1]
-        registry = FileResourceRegistry.load(project / "hardware.example.yaml")
-        plan = load_plan(project / "testplans" / "range.yaml")
-
-        (item,) = PlanCompiler(builtin_catalog(), registry).compile(
+    def weak_link_suite(self, registry):
+        plan = load_plan(
+            Path(__file__).resolve().parents[1] / "testplans" / "range.yaml"
+        )
+        return PlanCompiler(builtin_catalog(), registry).compile(
             plan, "range-weak-link"
         )
 
-        # The attenuated board answers, an unattenuated one sends, and the
-        # third is read as a guard: the two roles must not collide.
-        self.assertEqual(
-            {"sender": "UT_Linux0", "responder": "UT_Linux2",
-             "guard Ubertooth 1": "UT_Linux1"},
-            dict(item.resources),
-        )
-        self.assertEqual(
-            {"antenna": True, "attenuation_db": 20.0, "distance_m": 1.0},
-            dict(item.resource_placements["responder"]),
-        )
-        self.assertEqual(
-            {"min_attenuation_db": 10.0, "max_attenuation_db": 20.0},
-            dict(item.placement_requirements["responder"]),
-        )
-        self.assertEqual(
-            {"antenna": True, "max_attenuation_db": 0.0},
-            dict(item.placement_requirements["sender"]),
-        )
-        self.assertEqual(2, item.arguments["maximum PA level"])
+    def test_the_weak_link_range_plan_takes_the_attenuated_responder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (item,) = self.weak_link_suite(self.weak_link_registry(directory))
+
+            # The attenuated board answers, an unattenuated one sends, and
+            # the third is read as a guard: the roles must not collide.
+            self.assertEqual(
+                {"sender": "UT_0", "responder": "UT_2",
+                 "guard Ubertooth 1": "UT_1"},
+                dict(item.resources),
+            )
+            self.assertEqual(
+                {"antenna": True, "attenuation_db": 20.0, "distance_m": 1.0},
+                dict(item.resource_placements["responder"]),
+            )
+            self.assertEqual(
+                {"antenna": True, "min_attenuation_db": 10.0,
+                 "max_attenuation_db": 20.0},
+                dict(item.placement_requirements["responder"]),
+            )
+            self.assertEqual(
+                {"antenna": True, "max_attenuation_db": 0.0},
+                dict(item.placement_requirements["sender"]),
+            )
+            self.assertEqual(2, item.arguments["maximum PA level"])
 
     def test_the_weak_link_suite_needs_a_board_placed_for_it(self):
         # The suite names one host, so a bench with no attenuated board
         # fails planning rather than being recorded not applicable.
-        project = Path(__file__).resolve().parents[1]
-        text = (project / "hardware.example.yaml").read_text()
-        plain = re.sub(
-            r"\n    rf:\n      antenna: true\n      attenuation_db: 20\n"
-            r"      distance_m: 1",
-            "",
-            text,
-        )
-        self.assertNotIn("attenuation_db", plain)
-        plan = load_plan(project / "testplans" / "range.yaml")
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "hardware.yaml"
-            path.write_text(plain)
-            compiler = PlanCompiler(
-                builtin_catalog(), FileResourceRegistry.load(path)
-            )
+            registry = self.weak_link_registry(directory, attenuated=False)
 
             with self.assertRaisesRegex(
                 PlanningError,
                 "no Ubertooth on this host has attenuation of at least 10 dB "
-                "and attenuation of at most 20 dB for the responder",
+                "and attenuation of at most 20 dB and its antenna attached "
+                "for the responder",
             ):
-                compiler.compile(plan, "range-weak-link")
+                self.weak_link_suite(registry)
 
     def test_the_weak_link_suite_keeps_the_roles_apart_on_an_attenuated_default(self):
         # Two `default` selectors would both resolve to the attenuated board
         # and planning would fail; the sender's own requirement prevents it.
-        project = Path(__file__).resolve().parents[1]
-        text = (project / "hardware.example.yaml").read_text()
-        shifted = text.replace("Ubertooth: UT_Linux0", "Ubertooth: UT_Linux2")
-        plan = load_plan(project / "testplans" / "range.yaml")
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "hardware.yaml"
-            path.write_text(shifted)
-            (item,) = PlanCompiler(
-                builtin_catalog(), FileResourceRegistry.load(path)
-            ).compile(plan, "range-weak-link")
+            registry = self.weak_link_registry(directory, default="UT_2")
 
-            self.assertEqual("UT_Linux2", item.resources["responder"])
-            self.assertEqual("UT_Linux0", item.resources["sender"])
+            (item,) = self.weak_link_suite(registry)
+
+            self.assertEqual("UT_2", item.resources["responder"])
+            self.assertEqual("UT_0", item.resources["sender"])
 
 
 if __name__ == "__main__":

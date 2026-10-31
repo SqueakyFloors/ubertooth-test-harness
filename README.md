@@ -453,12 +453,14 @@ suite needs such a board; because it names one host, a bench with none fails
 planning, with the requirement and each board's placement in the message.
 
 Its `maximum PA level` of 2 is measured in that orientation: with the
-responder a meter away behind 20 dB and the sender in the open, ten round
-trips got through at PA level 0 or 1 every time, so 2 is the observed maximum
-plus one level of headroom, tighter than the 3 the main suite allows. The
-placement is bounded above as well, because 20 dB is the only value measured:
-more attenuation needs a higher level, which would make this ceiling wrong
-rather than strict.
+responder a meter away behind 20 dB and the sender in the open, five round
+trips reported ten PA levels, a request and a reply each, and every one was 0
+or 1, so 2 is the observed maximum plus one level of headroom, tighter than
+the 3 the main suite allows. The placement is bounded above because 20 dB is
+the only value measured, and the antenna is pinned because a board with none
+would be weaker still. Distance cannot be pinned, since an `rf` requirement
+has no distance key, so a board at this attenuation but much further away may
+need a higher level than the meter this was measured at.
 
 On current fork main the test passes: the sender gets a clean round trip and
 `-m` reports request and reply PA levels and copy numbers (fixed by

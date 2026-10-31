@@ -704,9 +704,12 @@ on a bench whose default board is the attenuated one. Because the step names
 one host, a bench with no such board fails planning, with the requirement and
 each board's placement in the message. Its `maximum PA level` of 2 was
 measured in that orientation: a responder a meter away behind 20 dB answered a
-sender in the open at PA level 0 or 1 in ten round trips, so 2 is the observed
-maximum plus one level. The upper bound on the placement is there because 20
-dB is the only value measured; more attenuation needs a higher level.
+sender in the open in five round trips, whose ten PA levels (a request and a
+reply each) were all 0 or 1, so 2 is the observed maximum plus one level. The
+upper bound on the placement is there because 20 dB is the only value
+measured, and the antenna is pinned because a board with none would be weaker
+still; distance cannot be pinned, since an `rf` requirement has no distance
+key.
 
 **Known limits.** On an ordinary bench the boards sit centimeters apart, so a
 working link gets through at a low PA level and a pass at level 0 says little
@@ -722,7 +725,9 @@ first progress interval makes `-n` print `waiting for the repeater...` there
 instead of on standard error
 ([ubertooth#1026](https://github.com/SqueakyFloors/ubertooth/issues/1026)). A
 repeater at bench distance answers too quickly to reach that path, which is
-why only the weak-link run shows it. The suite passes once that is fixed.
+why only the weak-link run shows it. The run stops there, before `-m` is read,
+so `maximum PA level: 2` has not yet been judged by the check itself: the ten
+PA levels behind it come from driving `-e`, `-n`, and `-m` by hand.
 
 ## BLE monitor
 

@@ -25,13 +25,19 @@ suites:
   # fails planning, naming the requirement and what each board is placed as.
   # Delete the suite, or the whole plan, on a bench without one.
   #
-  # The level is measured, in this orientation: with the responder a meter
-  # away behind 20 dB, ten round trips with the sender in the open got
-  # through at PA level 0 or 1 every time, so 2 is the observed maximum plus
-  # one level of headroom. That is tighter than the 3 the main suite allows.
-  # The placement is bounded above as well, because 20 dB is the only value
-  # measured: more attenuation needs a higher level, and would make this
-  # ceiling wrong rather than strict.
+  # The level is measured in this orientation: with the responder a meter
+  # away behind 20 dB and the sender in the open, five round trips reported
+  # ten PA levels (a request and a reply each) and every one was 0 or 1, so 2
+  # is the observed maximum plus one level of headroom. That is tighter than
+  # the 3 the main suite allows. The reverse orientation, which this suite
+  # never plans, reported one level 2.
+  #
+  # The placement is bounded above because 20 dB is the only value measured,
+  # and the antenna is pinned because a board with none would be weaker
+  # still: more loss needs a higher level, which would make this ceiling
+  # wrong rather than strict. Distance cannot be pinned (an rf requirement
+  # has no distance key), so a board at this attenuation but much further
+  # away may need a higher level than the meter this was measured at.
   range-weak-link:
     - Two-device range test:
         host: Host_Linux
@@ -39,6 +45,6 @@ suites:
         responder: default
         rf:
           sender: {max_attenuation_db: 0, antenna: true}
-          responder: {min_attenuation_db: 10, max_attenuation_db: 20}
+          responder: {min_attenuation_db: 10, max_attenuation_db: 20, antenna: true}
         allow RF transmission: true
         maximum PA level: 2
