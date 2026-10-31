@@ -849,12 +849,12 @@ static const char *afh_apply(const uint8_t *map)
         return "bluetooth is not up";
     }
     /* The completion event says nothing about which map it answers, so one
-     * map at a time, and none at all while the controller still owes an
-     * answer: otherwise a late answer to a map that timed out would be read
-     * as this map's, and the shell would report a map the controller never
-     * took. A board left in that state is recovered by "reset". */
+     * map at a time, and none at all while an answer is still owed:
+     * otherwise a late answer to a map that timed out would be read as this
+     * map's, and the shell would report a map the controller never took. A
+     * board left in that state is recovered by "reset". */
     if (owed) {
-        return "the controller has not answered the last channel map";
+        return "the last channel map has not been answered";
     }
 
     memcpy(channels, map, AFH_MAP_LEN);
@@ -880,9 +880,12 @@ static const char *afh_apply(const uint8_t *map)
     status = st.afh_status;
     UNLOCK();
     if (!answered) {
-        /* The answer may still arrive, so the board goes on owing one, and
-         * the map is still this board's to report if it is taken. */
-        return "the controller did not answer the channel map";
+        /* Not necessarily the controller's doing: the stack drops
+         * BTM_SetAfhChannels()'s own refusal, so a map it never sent reaches
+         * here the same way. Either way an answer may still arrive, so the
+         * board goes on owing one, and the map is still this board's to
+         * report if it turns out to have been taken. */
+        return "the channel map was not answered";
     }
     return status == ESP_BT_STATUS_SUCCESS ? NULL : afh_refused_reason(status);
 }
@@ -1084,7 +1087,8 @@ void bt_status_json(char *out, size_t len)
     char self[18], peer[18], remote[18];
     /* static, like the shell's own answer buffers: only the shell task gets
      * here and its stack is small. 224 bytes holds the longest the six
-     * fields can be, which is 171; a seventh has to be counted in here. */
+     * fields can be, which is 176 with the longest reason in
+     * afh_link_error; a seventh field has to be counted in here. */
     static char afh_fields[224];
     const uint8_t *a = own_addr();
     struct sco_view sco;

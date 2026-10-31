@@ -169,7 +169,7 @@ mistaken for its own.
 `status` reports every field on one line, whichever role is running:
 
 ```json
-{"role":"initiator","fw":"utesp-1.3.0","bt":true,"address":"20:50:0D:E9:C5:BA","lap":"e9c5ba","uap":"0d","nap":"2050","name":"UT-ESP32-E9C5BA","discoverable":true,"spp_server":false,"connecting":false,"connected":true,"peer":"C8:85:41:2A:1B:2A","remote":"C8:85:41:2A:1B:2A","stream":true,"period_ms":20,"payload_len":200,"counter":1483,"writes":1483,"write_errors":0,"rx_bytes":0,"connects":1,"disconnects":0,"last_err":0,"sco":"off","sco_profile":"none","sco_codec":"none","sco_handle":0,"sco_frame_len":0,"sco_tx_frames":0,"sco_tx_errors":0,"sco_rx_frames":0,"sco_rx_bad":0,"afh":"ffffffffff0000000000","afh_used":40,"afh_link":"ffffffffff0000000000","afh_link_used":40,"afh_mode":"on","afh_link_error":""}
+{"role":"initiator","fw":"utesp-1.3.0","bt":true,"address":"20:50:0D:E9:C5:BA","lap":"e9c5ba","uap":"0d","nap":"2050","name":"UT-ESP32-E9C5BA","discoverable":true,"spp_server":false,"connecting":false,"connected":true,"peer":"C8:85:41:2A:1B:2A","remote":"C8:85:41:2A:1B:2A","stream":true,"period_ms":20,"payload_len":200,"counter":1483,"writes":1483,"write_errors":0,"rx_bytes":0,"connects":1,"disconnects":0,"last_err":0,"sco":"off","sco_profile":"none","sco_codec":"none","sco_handle":0,"sco_frame_len":0,"sco_tx_frames":0,"sco_tx_errors":0,"sco_rx_frames":0,"sco_rx_bad":0,"afh":"ffffffffff0000000000","afh_used":40,"afh_link":"fefffffeff0000000000","afh_link_used":38,"afh_mode":"on","afh_link_error":""}
 ```
 
 - `address`: the BD_ADDR, split out as `lap`, `uap` and `nap` as well,
@@ -507,8 +507,8 @@ Every answer `afh` can give:
 | `ERR the top bit of the last byte is reserved and must be zero` | bit 79 is reserved |
 | `ERR a piconet needs at least 20 channels` | fewer than 20 channels marked used |
 | `ERR the controller refused the channel map, status <n>` | the controller said no, with its own status |
-| `ERR the controller did not answer the channel map` | it said nothing for three seconds |
-| `ERR the controller has not answered the last channel map` | an earlier `afh` timed out and is still unanswered; `reset` is the way out |
+| `ERR the channel map was not answered` | nothing came back within three seconds |
+| `ERR the last channel map has not been answered` | an earlier `afh` timed out and is still unanswered; `reset` is the way out |
 | `ERR the stack would not take the channel map` | ESP-IDF refused the call |
 | `ERR bluetooth is not up` | the board's Bluetooth failed to start, which the boot notice says |
 | `ERR afh takes twenty hex digits or off` | the wrong number of words |
@@ -599,11 +599,13 @@ is the case the clock section describes: the command it never answered keeps
 its place in the host's pending list, so later status lines say the controller
 did not answer without sending anything more, and `reset` is the way back.
 
-If a controller ever stops answering altogether, the `afh` that was waiting
-answers `ERR the controller did not answer the channel map` after three
-seconds, and every `afh` after it answers `ERR the controller has not
-answered the last channel map` at once, because a late answer must not be
-read as the new map's. `reset` is the way out, as it is for the clock.
+If an answer never comes, the `afh` that was waiting says so after three
+seconds, and every `afh` after it answers `ERR the last channel map has not
+been answered` at once, because a late answer must not be read as the new
+map's. `reset` is the way out, as it is for the clock. Neither message blames
+the controller, because the answer can also go missing inside the stack:
+`bta_dm_set_afh_channels()` drops `BTM_SetAfhChannels()`'s own refusal, so a
+map ESP-IDF never sent looks the same from here.
 
 ## Extending
 
