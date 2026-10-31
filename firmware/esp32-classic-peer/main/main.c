@@ -114,6 +114,7 @@ static void cmd_help(void)
         "sco start                     open the synchronous audio link",
         "sco stop                      drop it and stop the profile",
         "sco stats                     the controller's packet counters",
+        "clock                         the native and piconet clocks",
         "defaults                      restore every boot setting",
         "reset                         restart the board",
     };
@@ -203,6 +204,16 @@ static void run(int argc, char **argv)
         } else {
             answer("sco takes start, stop, or stats");
         }
+        return;
+    }
+    if (argc == 1 && strcmp(c, "clock") == 0) {
+        /* static for the same reason as the status line above. */
+        static char json[SHELL_OUT_MAX];
+        const char *err = bt_clock_json(json, sizeof(json));
+        if (!err) {
+            shell_line("%s", json);
+        }
+        answer(err);
         return;
     }
     if (argc == 1 && strcmp(c, "defaults") == 0) {

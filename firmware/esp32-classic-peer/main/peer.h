@@ -8,7 +8,7 @@
 
 /* The harness pins this string and reflashes a board that reports anything
  * else, so it changes whenever the shell protocol or the air behavior does. */
-#define UTESP_FW_VERSION "utesp-1.1.0"
+#define UTESP_FW_VERSION "utesp-1.2.0"
 
 enum peer_role {
     PEER_ROLE_ACCEPTOR = 0, /* the boot role: wait for the other board */
@@ -37,6 +37,10 @@ const char *bt_sco_start(void);
 
 /* One JSON object, no newline, truncated to fit. */
 void bt_status_json(char *out, size_t len);
+
+/* The board's clocks as one JSON object, or a reason the read failed. The
+ * piconet fields are null when the board is in no piconet. */
+const char *bt_clock_json(char *out, size_t len);
 
 /* ---------------------------------------------- the synchronous audio link */
 

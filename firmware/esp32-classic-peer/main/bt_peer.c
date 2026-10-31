@@ -28,6 +28,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
+#include "utesp_clock.h"
 
 #define STREAM_PERIOD_MS_DEFAULT 100
 #define STREAM_PAYLOAD_DEFAULT   100
@@ -52,6 +53,9 @@ static struct {
     bool connecting; /* an outgoing connection is on its way */
     bool connected;
     uint32_t handle;
+    unsigned acl_links;   /* live baseband links; the clock read needs one */
+    bool acl_known;       /* and needs to know which, see gap_cb() */
+    uint16_t acl_handle;
     esp_bd_addr_t peer;   /* what "spp peer" set: who the initiator calls */
     esp_bd_addr_t remote; /* the far end of the live link */
     bool peer_set;
@@ -223,6 +227,44 @@ static void connect_failed(int status)
     st.last_err = status;
     UNLOCK();
     xSemaphoreGive(link_ev);
+}
+
+/* The baseband link under the profiles. Its connection handle is what
+ * HCI_Read_Clock needs to name a piconet, and this event is the only place
+ * an application is told it; the SPP and audio handles are the profiles'
+ * own, not this one. */
+/* These two events are also the only honest way to count the links, which
+ * matters because the board is connectable: something else in the room can
+ * open a second one. "The piconet" then means nothing, and a board that has
+ * been down to two links and back to one no longer knows which handle the
+ * survivor is. Both cases read as no piconet rather than as a guess; one
+ * link, opened while there were none, is the bench's case and the only one
+ * the clock is read for. */
+static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
+{
+    switch (event) {
+    case ESP_BT_GAP_ACL_CONN_CMPL_STAT_EVT:
+        if (param->acl_conn_cmpl_stat.stat == ESP_BT_STATUS_SUCCESS) {
+            LOCK();
+            st.acl_links++;
+            st.acl_known = st.acl_links == 1;
+            st.acl_handle = param->acl_conn_cmpl_stat.handle;
+            UNLOCK();
+        }
+        break;
+
+    case ESP_BT_GAP_ACL_DISCONN_CMPL_STAT_EVT:
+        LOCK();
+        if (st.acl_links) {
+            st.acl_links--;
+        }
+        st.acl_known = false;
+        UNLOCK();
+        break;
+
+    default:
+        break;
+    }
 }
 
 static void spp_cb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
@@ -400,6 +442,9 @@ const char *bt_start(void)
     if (esp_spp_register_callback(spp_cb) != ESP_OK) {
         return "callback registration failed";
     }
+    if (esp_bt_gap_register_callback(gap_cb) != ESP_OK) {
+        return "gap callback registration failed";
+    }
 
     default_name(st.name, sizeof(st.name));
     if (esp_bt_gap_set_device_name(st.name) != ESP_OK) {
@@ -442,6 +487,11 @@ const char *bt_start(void)
     const char *sco_err = sco_init();
     if (sco_err) {
         shell_line("utesp: audio link unavailable: %s", sco_err);
+    }
+    /* Same again for the clock read: a board whose SPP side works is worth
+     * having even if this did not come up, and "clock" says so itself. */
+    if (utesp_clock_init() != UTESP_CLOCK_OK) {
+        shell_line("utesp: clock read unavailable");
     }
     st.started = true;
     return NULL;
@@ -755,4 +805,104 @@ void bt_status_json(char *out, size_t len)
         snprintf(out, len, "{\"fw\":\"%s\",\"error\":\"status line too long\"}",
                  UTESP_FW_VERSION);
     }
+}
+
+/* ------------------------------------------------------------- the clocks */
+
+static const char *read_failure(int result)
+{
+    switch (result) {
+    case UTESP_CLOCK_NOT_READY:
+        return "the clock read is not available";
+    case UTESP_CLOCK_NO_MEMORY:
+        return "out of memory";
+    case UTESP_CLOCK_TIMED_OUT:
+        return "the controller did not answer the clock read";
+    case UTESP_CLOCK_BAD_ANSWER:
+        return "the controller's clock answer was short";
+    case UTESP_CLOCK_WRONG_LINK:
+        return "the controller answered the clock read for another link";
+    default:
+        return "the clock read failed";
+    }
+}
+
+/* A controller that refuses the read is reported with the status it gave,
+ * rather than as an empty answer. Only the shell task gets here, so the one
+ * buffer is enough. */
+static const char *refused(uint8_t status)
+{
+    static char reason[64];
+
+    snprintf(reason, sizeof(reason), "the controller refused the clock read, status 0x%02x",
+             status);
+    return reason;
+}
+
+const char *bt_clock_json(char *out, size_t len)
+{
+    struct utesp_clock native, piconet;
+    const struct utesp_clock *reported;
+    char piconet_fields[80];
+    bool started, in_piconet;
+    uint16_t acl_handle;
+    int result;
+    int n;
+
+    LOCK();
+    started = st.started;
+    in_piconet = st.acl_known;
+    acl_handle = st.acl_handle;
+    UNLOCK();
+    if (!started) {
+        return "bluetooth is not up";
+    }
+
+    if ((result = utesp_clock_read(0, false, &native)) != UTESP_CLOCK_OK) {
+        return read_failure(result);
+    }
+    if (native.status != 0) {
+        return refused(native.status);
+    }
+
+    if (in_piconet) {
+        result = utesp_clock_read(acl_handle, true, &piconet);
+        if (result == UTESP_CLOCK_NO_LINK) {
+            /* The link went down between the two reads. */
+            in_piconet = false;
+        } else if (result != UTESP_CLOCK_OK) {
+            return read_failure(result);
+        } else if (piconet.status != 0) {
+            return refused(piconet.status);
+        }
+    }
+    if (in_piconet) {
+        /* A second link opening while the command was in flight would make
+         * the piconet a guess again, so the answer counts only if the link
+         * the board knew is still the only one. */
+        LOCK();
+        in_piconet = st.acl_known && st.acl_handle == acl_handle;
+        UNLOCK();
+    }
+
+    if (in_piconet) {
+        snprintf(piconet_fields, sizeof(piconet_fields),
+                 "\"piconet\":%" PRIu32 ",\"accuracy\":%u,\"handle\":%u", piconet.clock,
+                 piconet.accuracy, piconet.handle);
+    } else {
+        snprintf(piconet_fields, sizeof(piconet_fields),
+                 "\"piconet\":null,\"accuracy\":null,\"handle\":null");
+    }
+
+    /* The two reads are separate commands, so the timestamp and the latency
+     * are those of the piconet read, the one a test lines up against a
+     * capture; with no piconet they are the native read's. */
+    reported = in_piconet ? &piconet : &native;
+    n = snprintf(out, len,
+                 "{\"native\":%" PRIu32 ",%s,\"t_us\":%" PRId64 ",\"read_us\":%" PRId64 "}",
+                 native.clock, piconet_fields, reported->answered_us, reported->read_us);
+    if (n < 0 || (size_t)n >= len) {
+        return "the clock line does not fit";
+    }
+    return NULL;
 }

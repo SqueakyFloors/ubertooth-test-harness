@@ -15,6 +15,11 @@ They also open a synchronous (SCO or eSCO) audio link to each other, which
 puts reserved-slot voice packets on the air next to the data packets. See
 [The audio link](#the-audio-link).
 
+And each board reports its clocks. `clock` gives the board's own native
+clock and the clock of the piconet it is in, which is the number an
+Ubertooth's recovered clock can be checked against. See
+[The clocks](#the-clocks).
+
 One image holds both roles, and one command switches between them:
 
 | Role | What it does |
@@ -31,7 +36,7 @@ The channel is opened with no security (`ESP_SPP_SEC_NONE`), so a link needs
 no pairing and a capture holds only the SDP lookup, the connection, and the
 data.
 
-Firmware version: `utesp-1.1.0` (`UTESP_FW_VERSION` in `main/peer.h`).
+Firmware version: `utesp-1.2.0` (`UTESP_FW_VERSION` in `main/peer.h`).
 
 ## Versions
 
@@ -93,8 +98,8 @@ not part of any answer, so a driver skips them:
 
 | Notice | When |
 |---|---|
-| `utesp: utesp-1.1.0 ready` | after boot, once Bluetooth is up |
-| `utesp: utesp-1.1.0 start failed: <reason>` | after boot, if it is not |
+| `utesp: utesp-1.2.0 ready` | after boot, once Bluetooth is up |
+| `utesp: utesp-1.2.0 start failed: <reason>` | after boot, if it is not |
 | `utesp: spp connected <address>` | a link came up, either role |
 | `utesp: spp disconnected` | the link went down |
 | `utesp: sco connected` | the synchronous audio link came up |
@@ -102,6 +107,7 @@ not part of any answer, so a driver skips them:
 | `utesp: audio link unavailable: <reason>` | after boot, if only the audio half failed to set up; SPP still works and `sco start` answers `ERR` |
 | `utesp: sco frame size <n> unusable, sending no audio` | a link came up asking for a frame size this firmware cannot fill |
 | `utesp: sco the profile is still running: <reason>` | a start failed and could not put the profile away either |
+| `utesp: clock read unavailable` | after boot, if only the clock read failed to set up; everything else works and `clock` answers `ERR` |
 
 ESP-IDF's own log lines start with `W (` or `E (` and are warnings or errors;
 `sdkconfig.defaults` keeps the log at that level so nothing else appears.
@@ -122,6 +128,7 @@ ESP-IDF's own log lines start with `W (` or `E (` and are warnings or errors;
 | `sco start` | acceptor: be ready; initiator: open the audio link |
 | `sco stop` | drop the audio link and stop the profile |
 | `sco stats` | one JSON line of the controller's packet counters, then `OK` |
+| `clock` | one JSON line of the native and piconet clocks, then `OK` |
 | `defaults` | restore every boot setting and zero the counters |
 | `reset` | answer `OK`, then restart the board |
 
@@ -154,7 +161,7 @@ mistaken for its own.
 `status` reports every field on one line, whichever role is running:
 
 ```json
-{"role":"initiator","fw":"utesp-1.0.0","bt":true,"address":"20:50:0D:E9:C5:BA","lap":"e9c5ba","uap":"0d","nap":"2050","name":"UT-ESP32-E9C5BA","discoverable":true,"spp_server":false,"connecting":false,"connected":true,"peer":"C8:85:41:2A:1B:2A","remote":"C8:85:41:2A:1B:2A","stream":true,"period_ms":20,"payload_len":200,"counter":1483,"writes":1483,"write_errors":0,"rx_bytes":0,"connects":1,"disconnects":0,"last_err":0}
+{"role":"initiator","fw":"utesp-1.2.0","bt":true,"address":"20:50:0D:E9:C5:BA","lap":"e9c5ba","uap":"0d","nap":"2050","name":"UT-ESP32-E9C5BA","discoverable":true,"spp_server":false,"connecting":false,"connected":true,"peer":"C8:85:41:2A:1B:2A","remote":"C8:85:41:2A:1B:2A","stream":true,"period_ms":20,"payload_len":200,"counter":1483,"writes":1483,"write_errors":0,"rx_bytes":0,"connects":1,"disconnects":0,"last_err":0}
 ```
 
 - `address`: the BD_ADDR, split out as `lap`, `uap` and `nap` as well,
@@ -355,51 +362,93 @@ produce real mSBC frames rather than samples. `sco_codec` still reports what
 the audio state says rather than a constant, so a build that turns wide-band
 speech on does not start lying.
 
-## The piconet clock is not readable from this firmware
+## The clocks
 
-A test that checks the clock an Ubertooth recovers wants the piconet clock
-from the board that leads the piconet, which here is the initiator. That
-board's own native clock (CLKN) **is** the piconet clock, and the ESP32's controller will report it:
-`HCI_Read_Clock` (opcode `0x1407`) with `Which_Clock` = 0 answers with a
-status of success and a rising clock value. Measured on one of these boards
-on 2026-10-30 with a throwaway firmware that runs the controller with no host
-stack, so the application owns the HCI transport:
+`clock` answers with one JSON line:
 
-```
-PROBE read_clock       opcode=0x1407: 04 0e 0c 05 07 14 00 00 00 3e 00 00 00 00 00
-PROBE read_clock_again opcode=0x1407: 04 0e 0c 05 07 14 00 00 00 54 00 00 00 00 00
+```json
+{"native":4942,"piconet":4946,"accuracy":65535,"handle":129,"t_us":2119521,"read_us":750}
 ```
 
-That is a Command Complete with status `00`, connection handle `0000`, and a
-clock of `0x3e` then `0x54` in units of 312.5 microseconds.
+- `native`: this board's own clock (CLKN). It is 28 bits in units of 312.5
+  microseconds, so it advances 3200 times a second and wraps about every
+  23.3 hours.
+- `piconet`: the clock of the piconet the board's link belongs to, which is
+  the piconet leader's native clock. Both boards of a pair report the same
+  piconet clock, whichever of them is the leader. The initiator pages, so it
+  starts as the leader, and while it is, its two numbers are the same
+  counter read twice; the link policy allows a role switch, so do not rely
+  on that half.
+- `accuracy`: the largest error the piconet clock may have, in the same
+  units as the clock itself, so one tick is 312.5 microseconds. 65535 means
+  the controller does not know, which is what these boards' controllers say.
+  The spec sets it to zero for a native read, which is why the one reported
+  is the piconet read's.
+- `handle`: the connection handle of the baseband link, as the controller
+  echoed it back.
+- `t_us`: microseconds since this board booted, monotonic, taken when the
+  answer reached the host. The controller sampled the clock some time before
+  that, so it is an upper bound on that instant, and `read_us` bounds how
+  far off it can be.
+- `read_us`: how long the read took, from the command joining the queue to
+  the answer reaching the host.
 
-A board doing SPP and HFP cannot send that command, so there is no `clock`
-command here. Everything the application could use to send it is closed:
+The two clocks are two separate commands, a fraction of a millisecond apart,
+so on the leader the two numbers differ by a tick or two: in the line above,
+one read took 750 microseconds and the two values are 4 ticks, 1.25
+milliseconds, apart. On a follower the native clock is the board's own and
+has nothing to do with the piconet's.
 
-- Bluedroid never sends `HCI_Read_Clock`. The opcode is defined in
-  `components/bt/host/bluedroid/stack/include/stack/hcidefs.h` and referenced
-  nowhere else in the component, and no `esp_*` function returns a clock.
-- `esp_vhci_host_register_callback()` takes one callback, and Bluedroid holds
-  it while it is enabled. Sending a command behind its back would hand the
-  answer to Bluedroid, which drops an event it has no pending command for.
+With no link there is no piconet: `piconet`, `accuracy` and `handle` read
+`null`, `native` still reads, and `t_us` and `read_us` are the native read's.
+A link that goes down while the command is in flight reads the same way, as
+no piconet rather than as a failure. So does a board with more than one
+baseband link, where "the piconet" would be a guess: these boards are
+connectable, so something else in the room can open one.
+A controller that refuses a read answers `ERR the controller refused the
+clock read, status 0x<hh>` and prints no line, rather than an answer with a
+hole in it. A controller that stops answering altogether is a different
+case: the command it never answered keeps its place in the host's pending
+list, so later reads answer `ERR the controller did not answer the clock
+read` without sending anything more, and `reset` is the way back.
+
+### How the command is sent
+
+The ESP32's controller answers `HCI_Read_Clock` (opcode `0x1407`), but
+ESP-IDF's Bluetooth host, Bluedroid, never sends it and gives an application
+no way to send a chosen opcode:
+
+- Bluedroid defines the opcode in
+  `components/bt/host/bluedroid/stack/include/stack/hcidefs.h` and references
+  it nowhere else, and no `esp_*` function returns a clock.
 - `esp_ble_gap_vendor_command_send()` is the one public way to send a chosen
-  HCI opcode, and it cannot reach this one: it ends in
-  `BTM_VendorSpecificCommand()`, which documents that the "opcode will be
-  OR'd with HCI_GRP_VENDOR_SPECIFIC", and `btsnd_hcic_vendor_spec_cmd()` in
-  `stack/hcic/hcicmds.c` does exactly that. `0x1407 | 0xFC00` is `0xFC07`, a
-  vendor command, not Read Clock.
-- `esp_bluedroid_attach_hci_driver()` looks like the seam for this: it lets
-  an application supply Bluedroid's HCI transport. It is compiled out when
-  the controller is in the same build, which on the ESP32 it always is:
-  `hci_host_send_packet()` and `hci_host_register_callback()` in
-  `host/bluedroid/api/esp_bluedroid_hci.c` call the VHCI functions directly
-  under `#if (BT_CONTROLLER_INCLUDED == TRUE)` and ignore the registered
-  operations.
+  opcode, and it cannot reach this one: it ends in
+  `BTM_VendorSpecificCommand()`, and `btsnd_hcic_vendor_spec_cmd()` in
+  `stack/hcic/hcicmds.c` ORs `HCI_GRP_VENDOR_SPECIFIC` into the opcode it is
+  given. `0x1407 | 0xFC00` is `0xFC07`, a vendor command.
+- `esp_vhci_host_register_callback()` takes one callback, and Bluedroid holds
+  it while it is enabled, so a command sent that way would hand its answer to
+  Bluedroid, which drops an event it has no pending command for.
+- `esp_bluedroid_attach_hci_driver()`, which lets an application supply
+  Bluedroid's transport, is compiled out when the controller is in the same
+  build, which on the ESP32 it always is: `hci_host_send_packet()` and
+  `hci_host_register_callback()` in `host/bluedroid/api/esp_bluedroid_hci.c`
+  call the VHCI functions directly under
+  `#if (BT_CONTROLLER_INCLUDED == TRUE)`.
 
-A board that gave up Bluedroid could report the clock: driven over HCI, it
-could join a piconet as the other side of a link and read the piconet clock
-with `Which_Clock` = 1, or lead one and read its own. That is a
-different role from this firmware and is not built here.
+What is reachable is Bluedroid's own command queue, from inside Bluedroid.
+So `bluedroid/utesp_clock.c` here is compiled as part of ESP-IDF's `bt`
+component rather than as part of this firmware's component: the top-level
+`CMakeLists.txt` adds it to that component's library and include path. It
+builds the command with Bluedroid's own `HCI_GET_CMD_BUF()`, sets the
+completion callback in the buffer's metadata as `btu_hcif_send_cmd()` does,
+and hands it to `hci_layer_get_interface()->transmit_command()`.
+
+The command then joins the queue every other HCI command goes on, under the
+same command credits, and the HCI layer matches the Command Complete to it by
+opcode and calls the callback. Host and controller stay in step, and nothing
+in ESP-IDF's own tree is modified: a different ESP-IDF checkout needs no
+patching, only the same version.
 
 ## Extending
 
