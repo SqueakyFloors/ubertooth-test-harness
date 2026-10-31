@@ -49,17 +49,19 @@ HAS_HISTORY = subprocess.run(
 # Writes the image west build would produce when the command is a build, and
 # records every command. $FAKE_HEX_PAYLOAD is the image every build leaves;
 # $FAKE_HEX_PAYLOAD_<n> replaces it for the nth build, which is how a test
-# gives the comparison build an image of its own. With $FAKE_DOCKER_EXIT it
-# fails like a build that does not compile.
+# gives the comparison build an image of its own. With $FAKE_DOCKER_EXIT, or
+# $FAKE_DOCKER_EXIT_<n> for one build, it fails like a build that does not
+# compile.
 FAKE_DOCKER = textwrap.dedent("""\
     #!/bin/sh
     printf '%s\\n' "$*" >> "$FAKE_LOG"
     case "$*" in
         *"west build"*)
-            [ "${FAKE_DOCKER_EXIT:-0}" = 0 ] || exit "$FAKE_DOCKER_EXIT"
             builds=$(cat "$FAKE_BUILDS" 2>/dev/null || echo 0)
             builds=$((builds + 1))
             printf '%s\\n' "$builds" > "$FAKE_BUILDS"
+            eval "code=\\${FAKE_DOCKER_EXIT_$builds:-\\${FAKE_DOCKER_EXIT:-0}}"
+            [ "$code" = 0 ] || exit "$code"
             eval "payload=\\${FAKE_HEX_PAYLOAD_$builds:-\\$FAKE_HEX_PAYLOAD}"
             # The sources this build compiled, for a test to look at: the
             # command ends with the directory west build is given.
@@ -335,6 +337,29 @@ class FirmwareStepTests(unittest.TestCase):
         self.assertNotIn("bump it", result.stderr)
         self.assertEqual(4, len(self.builds()), self.builds())
 
+    def test_a_build_that_fails_during_a_repeat_is_reported_as_that(self):
+        # The repeats run where set -e does not end the script, so a build
+        # that failed must not be read as an image that came out different.
+        base = self.base_sources()
+
+        result = self.run_step(DK_BASE_SRC=str(base),
+                               FAKE_HEX_PAYLOAD_2=self.image("two", filler=b"\x11"),
+                               FAKE_DOCKER_EXIT_3="1")
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("this tree did not build a second time", result.stderr)
+        self.assertNotIn("gave different images", result.stderr)
+        self.assertNotIn("bump it", result.stderr)
+
+    def test_sources_that_are_no_copy_of_the_firmware_are_refused(self):
+        empty = self.directory / "nothing"
+        empty.mkdir()
+
+        result = self.run_step(DK_BASE_SRC=str(empty))
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("holds no src/roles.h", result.stderr)
+
     def test_an_sdk_bump_without_a_version_bump_fails(self):
         # Both builds use the SDK this tree pins, so the comparison cannot
         # see what a new toolchain did to the image; it builds a new image,
@@ -372,6 +397,10 @@ class FirmwareStepTests(unittest.TestCase):
             (self.workspace / "base-firmware" / "firmware" / "nrf52840dk"
              / "src" / "roles.h").exists(), result.stdout)
         self.assertEqual(2, len(self.builds()), self.builds())
+        # Everything the comparison writes goes to the workspace.
+        self.assertEqual("", subprocess.run(
+            ("git", "-C", str(ROOT), "status", "--porcelain"),
+            capture_output=True, text=True).stdout)
 
     def test_a_ref_that_does_not_resolve_fails_the_step(self):
         # The ref was asked for, so a missing one means the history the

@@ -44,8 +44,8 @@ jobs:
     # on 2026-10-31.
     timeout-minutes: 60
     steps:
-    # The whole history, so the base branch is there to build and compare
-    # against (DK_BASE_REF below).
+    # The whole history, so the commit a pull request is against is there to
+    # build and compare with (DK_BASE_REF below).
     - uses: actions/checkout@v5
       with:
         fetch-depth: 0
@@ -56,10 +56,13 @@ jobs:
         # On a pull request, compare the image with the one the base commit
         # builds and require a UTDK_FW_VERSION bump when it changed (#210).
         # The base commit the event names, not the branch: the branch can
-        # advance while the job waits, and this is the commit the checked-out
-        # merge commit was made against. Elsewhere (a push to main, the
-        # schedule, by hand) the expression is empty, there is nothing to
-        # compare against, and the step says so.
+        # advance while the job waits, and the comparison would then be
+        # against a tree this pull request was never written against. A job
+        # re-run can carry a base commit older than the merge commit it
+        # checks out; the version then differs and every board is reflashed
+        # anyway, so the step says that and compares nothing. Elsewhere (a
+        # push to main, the schedule, by hand) the expression is empty, there
+        # is nothing to compare against, and the step says so.
         DK_BASE_REF: ${{ github.event.pull_request.base.sha }}
 
     - name: The working tree is unchanged

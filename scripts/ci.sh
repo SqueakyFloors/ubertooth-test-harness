@@ -277,8 +277,16 @@ run_firmware_dk() {
     # two builds of one tree gave byte-identical images.
     dk_image_repeats() {
         step "the image $2 builds a second time"
-        dk_sources "$1"
-        ncs "west build -p always --no-sysbuild -b $NCS_BOARD -d $build -s $src"
+        # Checked here, because this function is called in a || list, where
+        # set -e does not end the script: a build that failed would otherwise
+        # be read as an image that came out different.
+        if ! dk_sources "$1" ||
+           ! ncs "west build -p always --no-sysbuild -b $NCS_BOARD -d $build -s $src"
+        then
+            echo "error: $2 did not build a second time, so the images cannot" \
+                 "be compared" >&2
+            return 1
+        fi
         cmp -s "$3" "$hex" && return 0
         echo "error: two builds of $2 gave different images, so comparing two" \
              "trees says nothing; make the build reproducible (fixed build" \
@@ -296,6 +304,13 @@ run_firmware_dk() {
         base=$1
         label=$2
         step "the image against $label"
+        for file in src/roles.h NCS_VERSION; do
+            if [ ! -f "$base/$file" ]; then
+                echo "error: $base holds no $file, so it is not a copy of" \
+                     "$DK_FIRMWARE to compare against" >&2
+                return 1
+            fi
+        done
         here=$(dk_fw_version "$repo/$DK_FIRMWARE")
         there=$(dk_fw_version "$base")
         # Any difference reflashes every board that runs the base's image,
@@ -360,8 +375,10 @@ run_firmware_dk() {
 
     # The sources to compare the image against: a directory of them
     # (DK_BASE_SRC, which wins where both are set), or a git ref this
-    # repository holds (DK_BASE_REF, which the Firmware workflow sets to a
-    # pull request's base branch). With neither, nothing is compared. A ref
+    # repository holds (DK_BASE_REF, which the Firmware workflow sets to the
+    # commit a pull request is against). With neither, nothing is compared.
+    # This tree's side is the working tree, so a local run compares what is
+    # there now, where the other side is a commit. A ref
     # that is set and does not resolve is an error rather than a skip: it
     # means the history the comparison needs is not there, and skipping would
     # pass a pull request nobody checked.

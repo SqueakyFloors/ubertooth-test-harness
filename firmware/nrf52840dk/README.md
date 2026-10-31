@@ -79,10 +79,11 @@ under this directory, once a week, and on request
 it is not a required check, because the image and the workspace are gigabytes.
 The image it builds is not published: a board is flashed from a local build.
 
-With `DK_BASE_REF` (a git ref) or `DK_BASE_SRC` (a directory of these
-sources) it builds those sources too and compares the two images, which is
-how the workflow holds a pull request to the rule that a change to the image
-bumps `UTDK_FW_VERSION`
+With `DK_BASE_REF` (a git ref, which the workflow sets to the commit a pull
+request is against) or `DK_BASE_SRC` (a directory of these sources) it builds
+those sources too and compares the two images, which is how the workflow
+holds a pull request to the rule that a change to the image bumps
+`UTDK_FW_VERSION`
 ([#210](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/210)):
 without a bump, `nrfdk.py ensure` leaves the old image on every board that
 already reports this version. A change that leaves the image identical, such
