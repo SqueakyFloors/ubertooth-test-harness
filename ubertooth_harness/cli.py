@@ -73,6 +73,7 @@ from ubertooth_harness.report import render_runs, write_report
 from ubertooth_harness.sequencer import NamedTestSequencer, run_started_details
 from ubertooth_harness.stateful import StateCaseError
 from ubertooth_harness.transitions import guard_boards, ubertooth_roles
+from ubertooth_harness.validate import validate_command
 
 
 _DEFAULT_PLAN = Path(__file__).resolve().parents[1] / "testplans" / "slow.yaml"
@@ -422,6 +423,12 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--output", type=Path, required=True,
                        help="new directory for sources, build trees, and the prefix")
     _add_build_options(build, optional=False)
+
+    recheck = subparsers.add_parser(
+        "validate",
+        help="run a finished run's output checks again against its saved files",
+    )
+    recheck.add_argument("run", type=Path, help="a run directory")
 
     report = subparsers.add_parser(
         "report", help="render one Markdown report from one or more run directories"
@@ -1057,6 +1064,13 @@ def _boards_command(args: argparse.Namespace) -> int:
             since = board_leases.held_for(holder)
             detail = board_leases.describe_holder(holder)
             print(f"{label:<12} held  {detail}" + (f" (for {since})" if since else ""))
+            if state.get("stale"):
+                # The command that took it is gone, so say what the next
+                # command that wants this board will do about it.
+                print(f"{'':<12} stale: {state['stale']}; "
+                      + ("the next command that wants it takes it over"
+                         if state.get("takeover")
+                         else "it stays held until somebody clears it"))
             if external.get("held") and not external.get("error"):
                 # Two parties hold the board; name the other one too.
                 print(f"{'':<12} and   " + board_leases.describe_external(
@@ -1075,6 +1089,10 @@ def _boards_command(args: argparse.Namespace) -> int:
             print(f"{label:<12} held  {board_leases.describe_holder({})}")
         else:
             print(f"{label:<12} free")
+        if state.get("waiting"):
+            # Commands queued for it: a free board with a queue is somebody
+            # else's next, and a held one shows how deep the queue is.
+            print(f"{'':<12} queue: {board_leases.describe_waiting(state['waiting'])}")
         if external.get("error"):
             print(f"{'':<12} warning: cannot read external lock: {external['error']}")
     return 0
@@ -1172,7 +1190,10 @@ def _lease_command(args: argparse.Namespace) -> int:
     for alias in args.boards:
         resource = registry.get(alias)
         if resource.type not in board_leases.LEASED_TYPES:
-            raise HarnessError(f"resource {alias} is not an Ubertooth or an nRF52840 DK")
+            raise HarnessError(
+                f"resource {alias} is not leasable; leasable types are "
+                + ", ".join(board_leases.LEASED_TYPES)
+            )
         boards.append(board_leases.Board(alias, board_leases.resource_key(resource)))
     # A manual firmware write (or DFU read-back) must not overlap another
     # command's power changes or writes on this host.
@@ -1240,6 +1261,8 @@ def main(argv: list[str] | None = None) -> int:
             # Opens a real controller: only from the harness environment.
             require_harness_environment()
             return _power_command(args)
+        if args.command == "validate":
+            return validate_command(args.run, sys.stdout, sys.stderr)
         if args.command == "report":
             text = render_runs(args.runs, redact_serials=args.redact_serials, title=args.title)
             if args.output:

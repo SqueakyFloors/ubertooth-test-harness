@@ -495,7 +495,9 @@ suites:
 """,
             )
 
-            with self.assertRaisesRegex(PlanningError, "explicit role aliases"):
+            with self.assertRaisesRegex(
+                PlanningError, "cannot select a role with 'each'"
+            ):
                 PlanCompiler(builtin_catalog(), registry).compile(plan, "slow")
 
     def test_non_distinct_multi_role_assignment_fails_compilation(self):

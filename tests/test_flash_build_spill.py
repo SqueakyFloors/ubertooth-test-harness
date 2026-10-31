@@ -94,26 +94,27 @@ class FlashSpillTests(unittest.TestCase):
                 self.assertEqual("firmware_flash", event["details"]["operation"])
 
             # Flash command IDs repeat per case: the file names the case too.
-            name = f"{OUTPUT_DIR}/003-Flash-flash-0001.log"
+            name = f"{OUTPUT_DIR}/003-Flash-flash-0001.stdout.log"
             done = first[-1]["details"]
             self.assertEqual("passed", first[-1]["status"])
-            self.assertEqual(name, done["output_file"])
+            self.assertEqual([name], [f["path"] for f in done["output_files"]])
             # The head holds block lines only; the tail ends with the result line.
             left_out = BLOCKS - RECORD_OUTPUT_EVENTS - (RECORD_TAIL_EVENTS - 1)
             self.assertEqual({"stdout": left_out, "stderr": 0},
                              done["output_omitted"]["lines"])
             log = (results / name).read_text().splitlines()
             self.assertEqual(BLOCKS + 1, len(log))
-            self.assertTrue(log[0].endswith(f"[O] {block(0).rstrip()}"))
-            self.assertTrue(log[-1].endswith("[O] Verified firmware revision"))
+            self.assertEqual(block(0).rstrip(), log[0])
+            self.assertEqual("Verified firmware revision", log[-1])
             # The second flash has its own file; short revision reads have none.
-            self.assertTrue((results / OUTPUT_DIR / "003-Flash-flash-0002.log").is_file())
-            self.assertNotIn("output_file", mine(events, "verify-0001")[-1]["details"])
+            self.assertTrue(
+                (results / OUTPUT_DIR / "003-Flash-flash-0002.stdout.log").is_file())
+            self.assertNotIn("output_files", mine(events, "verify-0001")[-1]["details"])
 
             report = (results / REPORT).read_text()
             self.assertIn(f"[M] full output in {name}; left out of run.jsonl here: "
                           f"{left_out} stdout lines", report)
-            self.assertLess(report.index(f"[M] full output in {name}"),
+            self.assertLess(report.index("[M] full output in"),
                             report.index(f"[O] {block(BLOCKS - 1).rstrip()}"))
 
             # The GUI log tail of a failed flash test shows how the flash ended.
@@ -148,19 +149,23 @@ class BuildSpillTests(unittest.TestCase):
             self.assertEqual("[0%] Building C object file0.o\n", outputs[0]["details"]["text"])
             self.assertEqual("error: last compiler error\n", outputs[-1]["details"]["text"])
 
-            name = f"{OUTPUT_DIR}/build-host-build.log"
+            out_name = f"{OUTPUT_DIR}/build-host-build.stdout.log"
+            err_name = f"{OUTPUT_DIR}/build-host-build.stderr.log"
             done = build[-1]
             self.assertEqual("failed", done["status"])
-            self.assertEqual(name, done["details"]["output_file"])
-            log = (run_dir / name).read_text().splitlines()
-            self.assertEqual(BLOCKS + 1, len(log))
-            self.assertTrue(log[-1].endswith("[E] error: last compiler error"))
+            self.assertEqual([out_name, err_name],
+                             [f["path"] for f in done["details"]["output_files"]])
+            log = (run_dir / out_name).read_text().splitlines()
+            self.assertEqual(BLOCKS, len(log))
+            self.assertEqual("error: last compiler error",
+                             (run_dir / err_name).read_text().strip())
             # Short build commands stay entirely in run.jsonl.
-            self.assertNotIn("output_file", mine(events, "build-host-configure")[-1]["details"])
+            self.assertNotIn("output_files",
+                             mine(events, "build-host-configure")[-1]["details"])
 
             # report.md shows the build's last lines, not only its first ones.
             report = (run_dir / REPORT).read_text()
-            self.assertIn(f"[M] full output in {name}", report)
+            self.assertIn(f"[M] full output in {out_name}, {err_name}", report)
             self.assertIn("[E] error: last compiler error", report)
             self.assertIn(f"[O] [{BLOCKS - 1}%] Building C object file{BLOCKS - 1}.o", report)
 
@@ -179,7 +184,10 @@ class BuildSpillTests(unittest.TestCase):
             {"event_type": "command_output", "status": "running",
              "details": {**details, "stream": "stdout", "text": "first line\npartial"}},
             {"event_type": "command_output_omitted", "status": "running",
-             "details": {**details, "output_file": "output/build-host-build.log",
+             "details": {**details,
+                         "output_files": [
+                             {"path": "output/build-host-build.stdout.log",
+                              "stream": "stdout"}],
                          "output_omitted": {"lines": {"stdout": 7, "stderr": 2}}}},
             {"event_type": "command_output", "status": "running",
              "details": {**details, "stream": "stderr", "text": "error: last"}},
@@ -191,7 +199,7 @@ class BuildSpillTests(unittest.TestCase):
             [{"step": "build", "status": "failed", "reason": "Build host tools exited 2",
               "log": ["first line", "partial",
                       "[... 9 output lines left out; full output in "
-                      "output/build-host-build.log ...]",
+                      "output/build-host-build.stdout.log ...]",
                       "error: last"]}],
             failure_summary({"status": "running"}, events),
         )

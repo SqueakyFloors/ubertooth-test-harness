@@ -10,9 +10,10 @@ cleanup failure always fails the case.
 from dataclasses import dataclass, field
 from itertools import combinations
 import re
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
 
 from ubertooth_harness.hostneeds import NO_NEEDS, Needs
+from ubertooth_harness.outputfiles import SKIP_LINE, output_of, text_lines
 
 COVERAGE_PROFILES = ("smoke", "comprehensive")
 # Run-directory subdirectory for files cases write, and its context key.
@@ -69,25 +70,29 @@ def require(context: Context, key: str) -> str:
 # ubertooth device", errors, warnings and notes go to stderr, and a setter
 # (-a -c -C -d -l -z <n>) prints nothing.
 _DIAGNOSTIC_LINE = re.compile(
-    r"(?m)^(?:Entering |Starting |Stopping ubertooth|Resetting ubertooth|"
+    r"^(?:Entering |Starting |Stopping ubertooth|Resetting ubertooth|"
     r"Flashing LEDs|Setting squelch|Ubertooth stopped|note: |warning: |error: ).*$")
 
 
-def nothing_on_stdout(stdout: str) -> str:
+def nothing_on_stdout(stdout) -> str:
     """A Step.output_check for a command that reports nothing (a setter, -S,
     -r): its progress lines belong on stderr."""
-    if stdout.strip():
-        first = stdout.strip().splitlines()[0]
-        return f"stdout is not empty (first line {first!r}); progress goes to stderr"
+    for line in text_lines(stdout):
+        if line.strip():
+            return (
+                f"stdout is not empty (first line {line.strip()!r}); "
+                "progress goes to stderr"
+            )
     return ""
 
 
-def no_diagnostics_on_stdout(stdout: str) -> str:
+def no_diagnostics_on_stdout(stdout) -> str:
     """A Step.output_check for a command that also prints a result: no
     progress, error, warning or note line on stdout."""
-    match = _DIAGNOSTIC_LINE.search(stdout)
-    if match:
-        return f"{match[0]!r} is on stdout; progress and diagnostics go to stderr"
+    for line in text_lines(stdout):
+        match = _DIAGNOSTIC_LINE.search(line)
+        if match:
+            return f"{match[0]!r} is on stdout; progress and diagnostics go to stderr"
     return ""
 
 
@@ -113,8 +118,16 @@ class Observation:
             return str(self.expected(context))
         return self.expected
 
-    def extract(self, output: str) -> str | None:
-        match = re.search(self.pattern, output)
+    def extract(self, output) -> str | None:
+        """The setting in ``output``, or None when it was not reported.
+
+        ``output`` is the command's CommandOutput, read from its saved files,
+        or a plain string when a caller has the text in memory.
+        """
+        return self.value(output_of(output).search(self.pattern))
+
+    def value(self, match: re.Match | None) -> str | None:
+        """The setting this observation's match stands for, or None."""
         if match is None:
             return None
         if self.convert is not None:
@@ -155,10 +168,14 @@ class Step:
     # Returns a reason to fail the step without running its command (for
     # example a query whose tool would write to an incompatible device).
     refuse: Callable[[Context], str] | None = None
-    # Checks stdout (stderr is diagnostics) and returns a failure reason,
-    # or "" when it is acceptable; for outputs too varied for patterns, such
-    # as a spectrum sweep.
-    output_check: Callable[[str], str] | None = None
+    # Checks stdout (stderr is diagnostics) and returns a failure reason, or
+    # "" when it is acceptable; for outputs too varied for patterns, such as
+    # a spectrum sweep. It is given the stdout lines, which it may iterate
+    # more than once, and which come a block at a time from the saved file,
+    # so a sweep that ran for hours costs no more memory than a short one.
+    # ``ubertooth-harness validate`` cannot repeat a check written as code,
+    # only the patterns, and says so.
+    output_check: Callable[[Iterable[str]], str] | None = None
     # A command that should stop itself after a timeout of its own (for
     # example ubertooth-rx -t N) must not exit before this many seconds.
     min_duration_s: float = 0.0
@@ -196,7 +213,11 @@ class Step:
             return StepOutcome(f"{self.name}: command timed out", expected)
         elif (self.skip_returncode is not None
               and result.returncode == self.skip_returncode):
-            match = re.search(r"(?m)^SKIP: (.+)$", result.stdout)
+            saved = output_of(result)
+            match = saved.search(SKIP_LINE, ("stdout",))
+            saved.note_pattern("skip-line", self.name, SKIP_LINE, match,
+                               streams=("stdout",),
+                               value=match[1].strip() if match else "")
             if match is None:
                 return StepOutcome(
                     f"{self.name}: command exited {result.returncode} without a "
@@ -213,37 +234,50 @@ class Step:
                 f"its {self.min_duration_s:g}s minimum",
                 expected,
             )
-        output = result.stdout + result.stderr
+        output = output_of(result)
         for pattern in self.output_patterns:
-            if not re.search(pattern, output):
-                return StepOutcome(
-                    f"{self.name}: expected output pattern {pattern!r} was not found",
-                    expected,
-                )
+            match = output.search(pattern)
+            reason = (
+                "" if match
+                else f"{self.name}: expected output pattern {pattern!r} was not found"
+            )
+            output.note_pattern("expected", self.name, pattern, match, reason=reason)
+            if reason:
+                return StepOutcome(reason, expected)
         for pattern in self.forbidden_patterns:
-            if re.search(pattern, output):
-                return StepOutcome(
-                    f"{self.name}: forbidden output pattern {pattern!r} was found",
-                    expected,
-                )
+            match = output.search(pattern)
+            reason = (
+                f"{self.name}: forbidden output pattern {pattern!r} was found"
+                if match else ""
+            )
+            output.note_pattern("forbidden", self.name, pattern, match, reason=reason)
+            if reason:
+                return StepOutcome(reason, expected)
         if self.output_check is not None:
-            reason = self.output_check(result.stdout)
+            reason = self.output_check(output.lines("stdout"))
+            output.note_case(self.name, reason)
             if reason:
                 return StepOutcome(f"{self.name}: {reason}", expected)
         if self.observe is None:
             return StepOutcome("")
-        observed = self.observe.extract(output)
+        found = output.search(self.observe.pattern)
+        observed = self.observe.value(found)
+        name = f"{self.name}: {self.observe.key}"
+        mismatch = ""
         if observed is None:
-            return StepOutcome(
-                f"{self.name}: {self.observe.key} was not reported", expected
-            )
-        if expected is not None and observed != expected:
-            return StepOutcome(
-                f"{self.name}: expected {self.observe.key}={expected}, "
-                f"observed {observed}",
-                expected,
-                observed,
-            )
+            mismatch = f"{self.name}: {self.observe.key} was not reported"
+        elif expected is not None and observed != expected:
+            mismatch = (f"{self.name}: expected {self.observe.key}={expected}, "
+                        f"observed {observed}")
+        # Recorded after the comparison: a setting that was reported but is
+        # not the expected one is a failed check, and the record is what the
+        # report and `validate` read.
+        output.note_pattern("observed", name, self.observe.pattern, found,
+                            value=observed or "", reason=mismatch)
+        if observed is None:
+            return StepOutcome(mismatch, expected)
+        if mismatch:
+            return StepOutcome(mismatch, expected, observed)
         if self.observe.reject is not None:
             reason = self.observe.reject(observed)
             if reason:

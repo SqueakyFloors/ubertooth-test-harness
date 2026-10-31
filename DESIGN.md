@@ -226,10 +226,31 @@ additionally emits `command_started`, bounded incremental `command_output`
 chunks tagged `stdout`/`stderr`, and `command_finished`. run.jsonl keeps only
 the first and last output records of a command that prints a lot (200 records
 or 64 KiB, then 50 records or 16 KiB), with a `command_output_omitted` record
-between them; that command's full output goes to `output/<command id>.log` in
-the run directory, the only other per-command file. Stdout and stderr are drained concurrently before process
+between them; that command's streams go to `output/<command id>.stdout.log`
+and `.stderr.log` in the run directory as they arrive, the only other
+per-command files. Stdout and stderr are drained concurrently before process
 completion, timeout, or cancellation, so a CLI or GUI displays the command as
 it happens without deadlocking a noisy child.
+
+Output is checked from those files, not from memory. The in-memory copy of
+each stream in `CommandResult` is bounded (`executor.MEMORY_WINDOW_CHARS`),
+which is what keeps a mode that streams for hours from growing the harness;
+a check reads the file a block at a time instead
+(`outputfiles.CommandOutput`). A command whose output stayed inside the
+run.jsonl limits has no file and the same checks read its complete in-memory
+copy, so a check behaves the same either way.
+
+Checks are recorded, so they can be run again without hardware. Each command
+gets one `output_checks` record naming the files its checks read and, per
+check, its kind, its pattern, whether it matched, and what it matched; a case
+gets an `output_files` record for the captures and target serial logs it
+wrote, each with its size and SHA-256. `ubertooth-harness validate <run dir>`
+(`validate.py`) measures every recorded file again and re-runs every recorded
+pattern over the same bytes, reporting a file that changed, a check that now
+reaches a different verdict, and the checks it cannot repeat. A check written
+as code (`Step.output_check`) is one of those: its record holds its verdict,
+not its logic, which is the price of letting a case express a count or a
+shape that no pattern can.
 
 A durable fsynced JSONL sink is always present; composite sinks allow the same
 event to feed a future live controller/GUI stream without coupling presentation
@@ -346,11 +367,13 @@ not offered as the one that satisfies the placement: `default` prefers the
 host's default and otherwise takes the lowest-alias unit that satisfies the
 requirement, `each` covers the matching units alone, and an explicit alias
 that cannot satisfy it is a planning error (its role is checked first, since
-that is a different mistake). A host with
-no matching unit is left out as not applicable (`hostneeds.NotApplicable`),
-with a reason naming the requirement and the placement of every unit of that
-type on the host, so a report says what was missing rather than silently
-selecting a board that cannot show what the test is for.
+that is a different mistake). A host with no matching unit is left out as not
+applicable (`hostneeds.NotApplicable`), with a reason naming the requirement
+and the placement of every unit of that type on the host, so a report says
+what was missing rather than silently selecting a board that cannot show what
+the test is for. On a step that names one host rather than `each`, as the
+`range-weak-link` suite does, there is no other host to fall back to, so that
+same reason fails planning instead.
 
 Placement is recorded, never re-derived, and only where the registry states
 it: the planner puts the placement of every bound unit that has one on the
@@ -512,7 +535,12 @@ each board's own lock file from other tools on the host is taken in the same
 attempt, before the host lock: external board locks (serial order), host
 lock, leases (serial order). A lab wrapper that takes a board's file and then
 a lease follows the same hierarchy, so neither can wait on the other in a
-cycle (README, "External board locks").
+cycle (README, "External board locks"). An attempt also holds
+`<lease dir>/takeover.lock` shared while it takes and checks its locks, and a
+takeover of a lease whose command is gone holds that file exclusively
+([#215](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/215),
+README "Stale leases"); it locks no resource and nothing ever blocks on it,
+so it is in no cycle.
 
 The exclusive-topology btle case runs `timeout --foreground -k 2 -s INT`, so
 [`timeout`](https://www.gnu.org/software/coreutils/manual/html_node/timeout-invocation.html) and btle stay in the command's own process group (the executor
@@ -804,6 +832,52 @@ before relying on reset-into-new-image for unattended runs.
   Forks before the one `-V` answer (ubertooth#813) answered the host line on
   `-H` instead, which preflight falls back to.
 - `ubertooth-util -v` — firmware revision alone (from device).
+
+---
+
+### 3e. Test radios: nRF52840 DKs and ESP32 Classic peers
+
+The Ubertooth is receive-only in every test, so anything that has to be
+captured must be transmitted by hardware the harness owns. Two kinds are
+registered as typed resources, each driven by one module and one firmware
+image that holds every role, so no test reflashes a radio to change what it
+does:
+
+| Resource type | Radio | Driver | Firmware |
+|---|---|---|---|
+| `nRF52840 DK` | Bluetooth LE | `ubertooth_harness/nrfdk.py` | `firmware/nrf52840dk` |
+| `ESP32 Classic peer` | Classic Bluetooth (BR/EDR) | `ubertooth_harness/esp32peer.py` | `firmware/esp32-classic-peer` |
+
+Both speak the same line shell over a serial port — one command line in,
+data lines out, then one `OK` or `ERR <reason>`, with `status` on a single
+JSON line — so a reader of one driver can read the other. Both are leased
+like an Ubertooth, under a prefixed key (`nrf52840dk-<J-Link serial>`,
+`esp32-<bridge serial>`), and both are checked in preflight by asking the
+board to identify itself.
+
+They differ in one way that shapes how a case is written. **A DK keeps its
+state when its serial port is closed; an ESP32 does not.** On an ESP32 dev
+board DTR and RTS are wired to the chip's EN and IO0 pins, and the kernel
+asserts both when a process first opens the bridge, so every open resets the
+board. A BLE case can therefore set the DK advertising in one step and
+capture in the next, as `advertiser_cases.py` does; a Classic case cannot,
+because the capture step's own `status` read would drop the link it is
+capturing.
+
+So `esp32peer.py stream` holds both bridges for one whole session: it brings
+the Serial Port Profile link up, runs the tool under test as a child while
+the pair streams, stops the pair, and reports what both boards did. The tool
+keeps standard output to itself and the pair's report goes to standard error,
+which keeps the case's checks on the tool's real output
+(`classic_cases.py`). The same wiring gives a reliable release: a reset pulse
+on RTS leaves the board in the firmware's boot state, which is what every
+Classic case's cleanup does.
+
+One consequence is worth stating because it decides what a case can assert:
+in a Classic piconet the LAP on the air is the **master's**, and the master
+is whichever board paged. The initiator pages, so the initiator's LAP and UAP
+are what `ubertooth-rx -l` and `-u` take, and exchanging the two role
+bindings moves the piconet to the other board's address.
 
 ---
 

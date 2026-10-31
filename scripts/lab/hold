@@ -1,0 +1,317 @@
+#!/usr/bin/env python3
+"""Hold lab devices for the length of one command, naming them by serial.
+
+    hold [options] <device>[,<device>...] -- <command> [arg...]
+
+A device is a registry alias, a full serial, or an unambiguous prefix of one
+(``a1b2``), and for an nRF52840 DK its J-Link serial with or without the
+leading zeros, which is how ``nrfutil`` and sysfs each print it.
+That is what a bench note or another agent's message gives you, so it is what
+this takes; ``ubertooth-harness lease`` wants registry aliases.
+
+Everything else is the harness's own lease machinery. For the device types the
+harness leases this script resolves the names and runs
+``ubertooth-harness lease``, so the locks, their order, the all-or-nothing
+attempt, the wait, the holder reporting, and the automatic host lock for a
+command line that names ``ubertooth-dfu`` are the harness's, not a second
+implementation. A type the harness does not lease yet gets its lock here, by
+the same key the harness will use when it does.
+
+Nothing about a bench is built in: the registry, the lab's own per-device lock
+files, the lease directory, the owner label, and the wait all come from
+options or the environment. Set them once in the environment and the command
+is as short as the bench's own wrapper was:
+
+    export UBERTOOTH_HARNESS_HARDWARE=~/bench/hardware.yaml
+    export UBERTOOTH_HARNESS_EXTERNAL_BOARD_LOCK=~/bench/board-{serial}.lock
+    scripts/lab/hold UT_Linux0 -- ubertooth-util -U <serial> -v
+
+Exit status is the command's, or 2 if a device could not be held, which is
+what the harness CLI exits on an error of its own.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+# Run as a script, sys.path[0] is this directory, not the checkout, so neither
+# the harness package nor the shared helpers beside this file are importable.
+# Both are added here, which is what makes the documented command work from
+# any working directory.
+_HERE = Path(__file__).resolve().parent
+sys.path[:0] = [str(_HERE), str(_HERE.parents[1])]
+
+try:
+    from ubertooth_harness import leases
+    # The rule for "this command line writes firmware", so the host lock is
+    # asked for on exactly the command lines `ubertooth-harness lease` asks
+    # for it on, rather than by a second copy of the rule here.
+    from ubertooth_harness.cli import _writes_firmware as writes_firmware
+    from ubertooth_harness.resources import FileResourceRegistry, RegistryError
+
+    from _bench import bench_lock_board, board, lock_key
+except ImportError:  # run from outside the harness environment
+    sys.exit(
+        "hold: run this from the harness environment "
+        "(python3 bootstrap.py, then .venv/bin/python scripts/lab/hold ...)"
+    )
+
+HARDWARE_ENV = "UBERTOOTH_HARNESS_HARDWARE"
+# The shortest prefix of a serial this will match. Bench notes name a board by
+# its first four hex digits, and an ambiguous prefix is refused below, so a
+# short name can never quietly select the wrong device.
+MIN_PREFIX = 4
+
+
+def _identity_values(resource) -> list[str]:
+    """The serials of a resource, as a bench note or a tool would print them.
+
+    Serials only. A radio address is also in the identity, and it is not a
+    device name: matching it would accept `hold <a BLE address>`, which no
+    document promises and which reads as a mistake.
+    """
+    values = []
+    for key, value in resource.identity.items():
+        text = str(value or "").strip()
+        if not text or "serial" not in key or key == "serial device":
+            continue
+        values.append(text)
+        if text.isdigit():
+            values.append(text.lstrip("0"))  # nrfutil's form of a J-Link serial
+    return values
+
+
+def resolve(registry, name: str):
+    """The one resource a name selects, or an error naming what it matched."""
+    if not name:
+        raise RegistryError("empty device name")
+    if name in registry.resources:
+        return registry.resources[name]
+    wanted = name.strip().lower()
+    exact = [
+        resource for resource in registry.resources.values()
+        if any(value.lower() == wanted for value in _identity_values(resource))
+    ]
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        raise RegistryError(
+            f"'{name}' is the serial of " + _and(exact) + "; name one alias"
+        )
+    if len(wanted) < MIN_PREFIX:
+        raise RegistryError(
+            f"'{name}' is no alias or serial in the registry, and is too short "
+            f"to be a prefix of one (at least {MIN_PREFIX} characters)"
+        )
+    matches = [
+        resource for resource in registry.resources.values()
+        if any(value.lower().startswith(wanted) for value in _identity_values(resource))
+    ]
+    if not matches:
+        raise RegistryError(f"'{name}' is no alias, serial, or serial prefix in the registry")
+    if len(matches) > 1:
+        raise RegistryError(
+            f"'{name}' is the start of the serial of " + _and(matches)
+            + "; give more of the serial, or an alias"
+        )
+    return matches[0]
+
+
+def _and(resources) -> str:
+    aliases = sorted(resource.alias for resource in resources)
+    return ", ".join(aliases[:-1]) + " and " + aliases[-1]
+
+
+HELP_FLAGS = ("-h", "--help")
+
+
+def _usage(message: str) -> int:
+    """Report a usage error and give argparse's own exit status for one."""
+    print(f"hold: {message}", file=sys.stderr)
+    return 2
+
+
+def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
+    """Options and devices before `--`, the command after it."""
+    if "--" in argv:
+        split = argv.index("--")
+        before, command = argv[:split], argv[split + 1:]
+    elif argv[:1] and argv[0] in HELP_FLAGS:
+        # Only as the first word: `hold UT0 mytool -h` means the tool's help,
+        # and with no `--` that is a usage error, not this script's help.
+        before, command = argv, []  # argparse prints the help and exits 0
+    else:
+        raise SystemExit(_usage(
+            "usage: hold [options] <device>[,<device>...] -- <command> [arg...]"
+            " (-h for the options)"
+        ))
+    parser = argparse.ArgumentParser(
+        prog="hold", add_help=True,
+        description="Hold lab devices by serial for the length of one command.",
+        epilog="Every option also has an environment variable; see the script.",
+    )
+    parser.add_argument(
+        "devices",
+        help="comma-separated aliases, serials, or unambiguous serial prefixes",
+    )
+    parser.add_argument(
+        "--hardware", type=Path,
+        default=os.environ.get(HARDWARE_ENV) or None,
+        help=f"resource registry (default ${HARDWARE_ENV})",
+    )
+    parser.add_argument(
+        "--external-board-lock", metavar="TEMPLATE", default=None,
+        help="the bench's own per-device lock files, for example "
+             f"'~/bench/board-{{serial}}.lock' (default ${leases.EXTERNAL_LOCK_ENV}); "
+             "'' turns the variable off for one command",
+    )
+    parser.add_argument(
+        "--lease-dir", type=Path, default=None,
+        help=f"harness lease directory (default ${leases.LEASE_DIR_ENV})",
+    )
+    parser.add_argument(
+        "--owner", default=None,
+        help=f"how you are named in another holder's error (default ${leases.OWNER_ENV})",
+    )
+    parser.add_argument(
+        "--wait-for-boards", type=float, default=30.0, metavar="MINUTES",
+        help="how long to wait for a busy device (default 30)",
+    )
+    parser.add_argument(
+        "--host-lock", action="store_true",
+        help="also hold the host's power/firmware lock; automatic for a "
+             "command line that names ubertooth-dfu",
+    )
+    args = parser.parse_args(before)
+    if not command:
+        raise SystemExit(_usage("no command after --"))
+    if args.hardware is None:
+        raise SystemExit(_usage(
+            f"no registry; pass --hardware or set ${HARDWARE_ENV}"
+        ))
+    if args.wait_for_boards < 0:
+        raise SystemExit(_usage("--wait-for-boards cannot be negative"))
+    return args, command
+
+
+def child_environment(environ=None) -> dict:
+    """The environment for the delegate, with the checkout importable.
+
+    This process put the checkout on its own `sys.path`; a child does not
+    inherit that, so `python -m ubertooth_harness` in the delegate would not
+    find the package unless the checkout happens to be the working directory.
+    """
+    environment = dict(os.environ if environ is None else environ)
+    root = str(_HERE.parents[1])
+    existing = environment.get("PYTHONPATH", "")
+    environment["PYTHONPATH"] = (
+        root + os.pathsep + existing if existing else root
+    )
+    return environment
+
+
+def harness_lease_argv(args, aliases, command) -> list[str]:
+    """The `ubertooth-harness lease` command line this delegates to."""
+    argv = [
+        sys.executable, "-m", "ubertooth_harness", "lease",
+        "--hardware", str(args.hardware),
+        "--wait-for-boards", str(args.wait_for_boards),
+    ]
+    if args.owner:
+        argv += ["--owner", args.owner]
+    if args.lease_dir is not None:
+        argv += ["--lease-dir", str(args.lease_dir)]
+    if args.external_board_lock is not None:
+        argv += ["--external-board-lock", args.external_board_lock]
+    if args.host_lock:
+        argv += ["--host-lock"]
+    return argv + list(aliases) + ["--"] + list(command)
+
+
+def extra_boards(resources) -> list[leases.Board]:
+    """Locks `ubertooth-harness lease` does not take for these devices.
+
+    A type it does not lease yet, and the bench's older lock name for a device
+    whose lease key is not its serial.
+    """
+    extra = [board(r) for r in resources if r.type not in leases.LEASED_TYPES]
+    extra += [
+        second for r in resources
+        for second in (bench_lock_board(r),)
+        if second is not None
+    ]
+    return extra
+
+
+def main(argv: list[str] | None = None) -> int:
+    args, command = parse_args(list(sys.argv[1:] if argv is None else argv))
+    try:
+        registry = FileResourceRegistry.load(args.hardware)
+        resources = [resolve(registry, name) for name in args.devices.split(",")]
+        # LeaseError too: a registry can load and still hold a serial no lock
+        # file can be named after.
+        keys = {resource.alias: lock_key(resource) for resource in resources}
+        extra = extra_boards(resources)
+    except (RegistryError, leases.LeaseError) as error:
+        return _fail(error)
+
+    # With nothing extra to take, this is purely a wrapper: the harness holds
+    # every lock, decides the host lock, and runs the command.
+    if not extra:
+        return leases.exit_status(
+            subprocess.call(
+                harness_lease_argv(args, [r.alias for r in resources], command),
+                env=child_environment(),
+            )
+        )
+
+    # Otherwise every lock is taken here, in one all-or-nothing attempt in the
+    # harness's own order, rather than nesting a second attempt inside this
+    # one: a wait must never happen while some of the locks are already held.
+    boards = extra + [
+        leases.Board(r.alias, keys[r.alias])
+        for r in resources if r.type in leases.LEASED_TYPES
+    ]
+    host_lock = args.host_lock or writes_firmware(command)
+    if host_lock and not args.host_lock:
+        print(
+            "note: this command line names ubertooth-dfu, so it asks for this "
+            "host's power/firmware lock as well as its devices, and holds it "
+            "until the command exits",
+            file=sys.stderr,
+        )
+    try:
+        template = leases.external_lock_template(args.external_board_lock)
+        with leases.acquire(
+            boards,
+            leases.holder_info(
+                run_id=None, owner=args.owner,
+                purpose="hold: " + " ".join(command),
+            ),
+            directory=args.lease_dir,
+            wait_s=args.wait_for_boards * 60,
+            host_lock=host_lock,
+            external_template=template,
+        ) as held:
+            # The command inherits the locks, so they are held for as long as
+            # it runs even if this process is killed first.
+            fds = [lease.fd for lease in held.leases]
+            for fd in fds:
+                os.set_inheritable(fd, True)
+            return leases.exit_status(subprocess.call(command, pass_fds=fds))
+    except leases.LeaseError as error:
+        return _fail(error)
+
+
+def _fail(error) -> int:
+    """Report like the harness CLI does, and exit as it does (2)."""
+    print(f"hold: error: {error}", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
