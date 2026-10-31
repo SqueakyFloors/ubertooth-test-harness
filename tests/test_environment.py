@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -45,12 +46,17 @@ class EnvironmentIdentityTests(unittest.TestCase):
         current = capture()
 
         self.assertEqual(
-            {"python", "pip", "dependencies", "os"}, set(current)
+            {"python", "pip", "dependencies", "host_tools", "os"}, set(current)
         )
         self.assertEqual(sys.executable, current["python"]["executable"])
         self.assertEqual(
             set(environment.requirement_names()), set(current["dependencies"])
         )
+        # A host program a case runs that the fork does not build: the version
+        # where it is installed, None where it is not (#148).
+        self.assertEqual(["tshark"], list(current["host_tools"]))
+        tshark = current["host_tools"]["tshark"]
+        self.assertTrue(tshark is None or re.match(r"^\d+\.\d+", tshark), tshark)
         self.assertTrue(current["os"]["architecture"])
         json.dumps(current)
 
@@ -104,7 +110,7 @@ class EnvironmentIdentityTests(unittest.TestCase):
             manifest.write_atomic(path)
             recorded = json.loads(path.read_text())
 
-        self.assertEqual(4, MANIFEST_SCHEMA_VERSION)
+        self.assertEqual(5, MANIFEST_SCHEMA_VERSION)
         self.assertEqual(MANIFEST_SCHEMA_VERSION, recorded["schema_version"])
         self.assertEqual(capture(), recorded["environment"])
 

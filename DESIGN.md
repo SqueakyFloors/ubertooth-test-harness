@@ -263,12 +263,12 @@ Therefore the target runner MUST identify devices by **serial number**, not inde
   and "sender" roles are deterministic regardless of enumeration order.
 
 The fork's `-U` also accepts a serial string, but libubertooth treats an
-all-digit value as an index and matches any other value as the *end* of a
-serial (first matching board wins). The flash runner therefore refuses
-digit-only selectors and any selector that is the ending of another, and the
-registry should hold full 32-hex-digit serials. With `alternate Ubertooths`,
-the planner binds every other registered board on the host as an
-`alternated Ubertooth N` resource of the flash invocation (requiring a
+all-digit value as an index and matches any other value case-insensitively
+against the *start* of a serial. The flash runner therefore refuses digit-only
+selectors and any selector that is the beginning of another, which would name
+one board twice, and the registry should hold full 32-hex-digit serials. With
+`alternate Ubertooths`, the planner binds every other registered board on the
+host as an `alternated Ubertooth N` resource of the flash invocation (requiring a
 `hosts: [...]` list, full serials, at least two boards, a single selected board rather than `each`, and
 a flash count that divides evenly), so preflight, the firmware-order check,
 the manifest, and the report treat each written board as a resource. After
@@ -311,6 +311,62 @@ The file-backed CLI implementation and future controller implementation share a
 valid host attachments, type-correct defaults, and valid power relationships.
 Actual identities live in ignored `hardware.yaml`; [`hardware.example.yaml`](hardware.example.yaml) is
 the committed template.
+
+### RF placement
+
+A bench may hold a board set up as a weak-link receiver: away from the others,
+with an inline attenuator between it and its antenna. An attached unit
+therefore MAY declare its RF placement, which
+[`ubertooth_harness/rf.py`](ubertooth_harness/rf.py) owns:
+
+```yaml
+  UT_Linux2:
+    type: Ubertooth
+    attached to: Host_Linux
+    rf: {antenna: true, attenuation_db: 20, distance_m: 1}
+```
+
+A placement is set by hand and describes the bench; nothing measures or
+infers it, and a unit with no `rf:` is read as an ordinary one (antenna
+attached, no attenuation, distance not recorded). That default is what makes
+`max_attenuation_db: 0` select the ordinary receivers without every registry
+having to spell `rf:` out on each of them. A `Host` and a `USB power
+controller` are refused a placement: neither has a radio, and no test selects
+either by placement.
+
+A test states what it needs of the unit bound to each hardware role as a
+`PlacementRequirement` (`antenna`, `min_attenuation_db`,
+`max_attenuation_db`), from the plan's `rf:` argument or, failing that, the
+test's own `rf_defaults`. Captures, surveys, and tests that hold a live
+connection default to an ordinary link, so the planner keeps them off an
+attenuated board; a plan's `rf:` overrides that per role. The requirement
+narrows `ResourceRegistry.resolve_hardware` before the selector is read, and
+is filtered by the role as well, so a unit that could never take the role is
+not offered as the one that satisfies the placement: `default` prefers the
+host's default and otherwise takes the lowest-alias unit that satisfies the
+requirement, `each` covers the matching units alone, and an explicit alias
+that cannot satisfy it is a planning error (its role is checked first, since
+that is a different mistake). A host with
+no matching unit is left out as not applicable (`hostneeds.NotApplicable`),
+with a reason naming the requirement and the placement of every unit of that
+type on the host, so a report says what was missing rather than silently
+selecting a board that cannot show what the test is for.
+
+Placement is recorded, never re-derived, and only where the registry states
+it: the planner puts the placement of every bound unit that has one on the
+invocation
+(`TestInvocation.resource_placements`), the manifest carries it per invocation
+(`resource_placements`, manifest schema 5), the sequencer repeats it in each
+`test_started` record, and the report shows it in a setup row and beside the
+resources of every result row. A run's range, transmit power, sensitivity, and
+RSSI figures can then be read against the attenuation they were taken at, and
+two runs at different attenuations cannot be confused for one another.
+
+What each role asked of its placement is recorded beside it
+(`TestInvocation.placement_requirements`, `rf_required` in `test_started`),
+whether the plan asked or the test's own default did. Without it a narrowed selection has no explanation in the run record: a
+host default passed over, or a unit `each` left out because its placement does
+not match, would read as an arbitrary choice.
 
 ### Power-controller boundary
 
@@ -509,7 +565,8 @@ after resolution cannot change an active run.
 
 Once preflight passes, the run reads each bound Ubertooth's firmware watchdog
 record (`ubertooth-util -w`) as its baseline, and again between cases of a
-long test, after each test, and at the end of the run
+long test, between the writes of a flash soak (which is one case however long
+it runs), after each test, and at the end of the run
 ([`ubertooth_harness/watchdog.py`](ubertooth_harness/watchdog.py); README,
 "Firmware watchdog"). A board that reset itself is reported, never failed: the
 watchdog brought it back, and what it points to belongs on the fork, so the
@@ -578,7 +635,10 @@ boards reset themselves more than `n` times. Leaving it out means no limit,
 and a self-reset is then only reported (README, "Firmware watchdog").
 
 Every test accepts `platforms:` (`linux`, `macos`, no duplicates), and a step
-that leaves it out runs on every platform. `hosts:` chooses the registered
+that leaves it out runs on every platform. Every test that binds hardware also
+accepts `rf:`, one placement requirement per hardware role (see
+[RF placement](#rf-placement)); a role the test does not bind is refused at
+load. `hosts:` chooses the registered
 hosts a step may run on; `platforms:` narrows those to the ones that can run
 it, as a test-wide need (`hostneeds.Needs`), so the planner compiles the step
 only for hosts whose platform it lists and records the rest as not applicable.

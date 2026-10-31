@@ -6,6 +6,7 @@ per-run prefix. Nothing is installed system-wide, and machine setup (system
 packages, udev rules) stays a separate one-time step (the fork's install.sh).
 """
 
+import contextlib
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
@@ -360,6 +361,33 @@ def _host_version_line(text: str) -> str:
     return text
 
 
+# A step's or the build's reason is a sentence, and it lands in a one-line
+# marker in the transcript. The bound is a backstop: a reason built from a
+# tool's output or from a cancellation message someone else wrote must still
+# fit the record. It is well under the limit a case's reason uses
+# (sequencer._MAX_REASON_CHARS), because this one is a marker, not a report.
+_MAX_MARKER_REASON_CHARS = 500
+
+
+def _one_line_reason(reason: object) -> str:
+    """One bounded line, whatever the reason was built from.
+
+    A line break becomes "; " rather than a space, so a reason built from
+    several lines still reads as several statements. There is nowhere else to
+    name for the rest of a reason this long: the step's and the build's
+    markers are both bounded, and the command's own output is in the
+    transcript above them.
+    """
+    text = "; ".join(
+        " ".join(line.split())
+        for line in str(reason).splitlines() if line.strip()
+    )
+    if len(text) <= _MAX_MARKER_REASON_CHARS:
+        return text
+    marker = " ... [truncated]"
+    return text[:_MAX_MARKER_REASON_CHARS - len(marker)] + marker
+
+
 def _first_line(result: CommandResult) -> str:
     text = (result.stdout or result.stderr).strip()
     return text.splitlines()[0] if text else ""
@@ -389,6 +417,51 @@ class Builder:
         self.deadline_s = deadline_s
         self.clock = clock or time.monotonic
         self._deadline = None
+
+    @contextlib.contextmanager
+    def _step(self, step_id: str, name: str):
+        """One build step, bracketed by its own started and finished records.
+
+        A step's outcome is not the outcome of its commands: it may accept a
+        command that exited non-zero, and may run a second command when the
+        first did not answer (verify-host-version below). So the step says
+        what it decided itself, in ``build_step_finished``, which is the line
+        report.md and the GUI show. Set ``status`` and ``reason`` on the
+        yielded outcome to say more than "passed"; a BuildError raised inside
+        is the step's failure and its reason. Reasons stay to one line: the
+        marker they land in is one line.
+
+        Anything that is not a BuildError (an executor OSError, Ctrl-C in a
+        place nothing handles) leaves the step open with no record, as it
+        leaves the build itself without a ``build_finished``; report.md then
+        says the step did not finish, which is what happened. A canceled
+        build reaches here as a BuildError, so its step reads failed with the
+        cancellation as its reason, as ``build_finished`` does.
+        """
+        self.publisher.emit(
+            "build_step_started", "running",
+            {"step_id": step_id, "step_name": name},
+        )
+        outcome = {"status": "passed", "reason": ""}
+        try:
+            yield outcome
+        except BuildError as error:
+            self._finish_step(step_id, name, "failed", str(error))
+            raise
+        self._finish_step(step_id, name, outcome["status"], outcome["reason"])
+
+    def _finish_step(self, step_id: str, name: str, status: str, reason: str) -> None:
+        text = _one_line_reason(reason)
+        # A BuildError names the step it came from, because the BUILD marker
+        # needs it; inside the step's own marker that says the name twice.
+        for prefix in (f"{name}: ", f"{name} "):
+            if text.startswith(prefix):
+                text = text[len(prefix):]
+                break
+        self.publisher.emit(
+            "build_step_finished", status,
+            {"step_id": step_id, "step_name": name, "reason": text},
+        )
 
     def _run(self, argv: Sequence[str], timeout_s: float, label: str, cwd=None):
         owner = {"phase": "build", "step_id": label}
@@ -445,24 +518,23 @@ class Builder:
                 "print('Python', platform.python_version(), sys.executable)",
             )))
         missing_libraries = []
-        self.publisher.emit(
-            "build_step_started", "running",
-            {"step_id": "toolchain", "step_name": "Read toolchain versions"},
-        )
-        for name, argv in commands:
-            result = self._run(argv, 30.0, f"toolchain-{name}")
-            if result.returncode != 0 or result.timed_out:
-                if argv[0] == "pkg-config" and len(argv) > 2:
-                    missing_libraries.append(argv[-1])
-                    continue
-                raise BuildError(f"cannot read the {name} version: {_first_line(result)}")
-            versions[name] = _first_line(result)
-        if missing_libraries:
-            hint = _INSTALL_HINTS.get(plan.platform, "")
-            raise BuildError(
-                "missing library: " + ", ".join(missing_libraries)
-                + (f"; install with: {hint}" if hint else "")
-            )
+        with self._step("toolchain", "Read toolchain versions"):
+            for name, argv in commands:
+                result = self._run(argv, 30.0, f"toolchain-{name}")
+                if result.returncode != 0 or result.timed_out:
+                    if argv[0] == "pkg-config" and len(argv) > 2:
+                        missing_libraries.append(argv[-1])
+                        continue
+                    raise BuildError(
+                        f"cannot read the {name} version: {_first_line(result)}"
+                    )
+                versions[name] = _first_line(result)
+            if missing_libraries:
+                hint = _INSTALL_HINTS.get(plan.platform, "")
+                raise BuildError(
+                    "missing library: " + ", ".join(missing_libraries)
+                    + (f"; install with: {hint}" if hint else "")
+                )
         return versions
 
     def run(self, plan: BuildPlan) -> BuildResult:
@@ -475,7 +547,12 @@ class Builder:
         try:
             result = self._run_plan(plan)
         except BuildError as error:
-            self.publisher.emit("build_finished", "failed", {"reason": str(error)})
+            self.publisher.emit(
+                "build_finished", "failed",
+                # The BUILD marker is one line too, and a cancellation reason
+                # comes from whoever asked for it.
+                {"reason": _one_line_reason(error)},
+            )
             raise
         self.publisher.emit(
             "build_finished", "passed",
@@ -504,55 +581,81 @@ class Builder:
             return result
 
         for command in plan.commands:
-            self.publisher.emit(
-                "build_step_started", "running",
-                {"step_id": command.step_id, "step_name": command.name},
-            )
-            result = run_step(command, command.argv, command.step_id)
-            if command.step_id == "verify-host-version":
-                host_version = (result.stdout + result.stderr).strip()
-                tried = [(command.argv, result)]
-                if (command.fallback_argv and not result.timed_out
-                        and HOST_VERSION_LABEL not in host_version):
-                    # Nothing answered under the label, so this commit of the
-                    # fork answers the host version on the older option: ask
-                    # that one. A version under the label that is not the
-                    # resolved one is a failure, reported below, and so is a
-                    # command killed at its deadline: the fallback answering
-                    # afterwards would hide that the first command hung.
-                    result = run_step(command, command.fallback_argv,
-                                      f"{command.step_id}-fallback")
+            with self._step(command.step_id, command.name) as step:
+                result = run_step(command, command.argv, command.step_id)
+                if command.step_id == "verify-host-version":
                     host_version = (result.stdout + result.stderr).strip()
-                    tried.append((command.fallback_argv, result))
-                # `-V` goes on to read any attached board and exits 1 if one
-                # cannot be read -- busy, or held by another run. The built
-                # tools' own version is what this step checks, so the line
-                # decides it and the exit status does not. A command killed at
-                # its deadline is still a failed step: it answered and then
-                # hung.
-                if _host_version_matches(plan, host_version) and not result.timed_out:
-                    host_version = _host_version_line(host_version)
+                    tried = [(command.argv, result)]
+                    if (command.fallback_argv and not result.timed_out
+                            and HOST_VERSION_LABEL not in host_version):
+                        # Nothing answered under the label, so this commit of
+                        # the fork answers the host version on the older
+                        # option: ask that one. A version under the label that
+                        # is not the resolved one is a failure, reported
+                        # below, and so is a command killed at its deadline:
+                        # the fallback answering afterwards would hide that
+                        # the first command hung.
+                        result = run_step(command, command.fallback_argv,
+                                          f"{command.step_id}-fallback")
+                        host_version = (result.stdout + result.stderr).strip()
+                        tried.append((command.fallback_argv, result))
+                    # Each command that did not exit 0, named by the option
+                    # asked, for the step's own reason line either way.
+                    failures = "; ".join(
+                        f"{argv[-1]} "
+                        + ("timed out" if attempt.timed_out
+                           else f"exited {attempt.returncode}")
+                        for argv, attempt in tried
+                        if attempt.timed_out or attempt.returncode != 0
+                    )
+                    # `-V` goes on to read any attached board and exits 1 if
+                    # one cannot be read -- busy, or held by another run. The
+                    # built tools' own version is what this step checks, so
+                    # the line decides it and the exit status does not, and
+                    # the step says which exit status it accepted. A command
+                    # killed at its deadline is still a failed step: it
+                    # answered and then hung.
+                    if _host_version_matches(plan, host_version) and not result.timed_out:
+                        host_version = _host_version_line(host_version)
+                        if failures:
+                            # Which option answered, so a fallback that
+                            # answered is not read as a busy board.
+                            step["reason"] = (
+                                "the version line is the resolved revision, "
+                                f"from {tried[-1][0][-1]}; the exit status is "
+                                f"not what this step reads ({failures})"
+                            )
+                        continue
+                    # Either command may be the real problem, and the reason
+                    # line is what an operator reads.
+                    if failures:
+                        raise BuildError(f"{command.name}: {failures}")
+                    # Both answered, with a version this build did not ask
+                    # for; _run_plan raises below with both revisions, and
+                    # this is the last of plan.commands (plan_build), so no
+                    # step runs after one that failed here. The
+                    # reason carries one line, not the whole of -V: the
+                    # firmware lines it prints under the version would break
+                    # the step's own marker in the transcript.
+                    reported = _host_version_line(host_version).splitlines()
+                    step["status"] = "failed"
+                    step["reason"] = (
+                        "not the resolved revision: "
+                        + (reported[0] if reported else "no version line")
+                    )
                     continue
-                # Both commands, named by the option asked: either may be the
-                # real problem, and the reason line is what an operator reads.
-                failures = "; ".join(
-                    f"{argv[-1]} "
-                    + ("timed out" if attempt.timed_out
-                       else f"exited {attempt.returncode}")
-                    for argv, attempt in tried
-                    if attempt.timed_out or attempt.returncode != 0
-                )
-                if failures:
-                    raise BuildError(f"{command.name}: {failures}")
-                continue
-            if result.timed_out or result.returncode != 0:
-                reason = "timed out" if result.timed_out else f"exited {result.returncode}"
-                raise BuildError(f"{command.name} {reason}")
+                if result.timed_out or result.returncode != 0:
+                    reason = (
+                        "timed out" if result.timed_out
+                        else f"exited {result.returncode}"
+                    )
+                    raise BuildError(f"{command.name} {reason}")
         if not _host_version_matches(plan, host_version):
+            # What was expected first: the version read can be long enough to
+            # be cut by the reason bound, and it is in the transcript anyway.
             raise BuildError(
-                f"built ubertooth-util reports {host_version!r}, expected "
-                f"{plan.ubertooth.expected_revision} and "
-                f"{plan.libbtbb.expected_revision}"
+                f"built ubertooth-util expected {plan.ubertooth.expected_revision} "
+                f"and {plan.libbtbb.expected_revision}, reports {host_version!r}"
             )
         expected_tools = required_tools(plan)
         missing = [tool for tool in expected_tools if not (plan.bin_dir / tool).is_file()]

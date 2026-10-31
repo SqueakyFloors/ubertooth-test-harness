@@ -20,6 +20,11 @@ port (VCOM0, the DK's uart0). Run as a script by the advertiser cases::
     python nrfdk.py stop       --jlink SERIAL [--port PATH]
     python nrfdk.py idle       --jlink SERIAL [--port PATH]
     python nrfdk.py status     --jlink SERIAL [--port PATH]
+    python nrfdk.py check-image IMAGE
+
+``check-image`` is the one command that touches no board: it makes the check
+``ensure`` makes before it flashes, that an image carries FIRMWARE_VERSION, so
+a build can be checked where it is made (scripts/ci.sh firmware-dk).
 
 ``idle`` is the release command: it leaves the board in the advertiser role
 with every setting back to its boot value, whatever it was doing.
@@ -802,6 +807,10 @@ def main(argv: Sequence[str] | None = None, run: Runner = run_tool) -> int:
             help="the board's registry alias; with it, every line to and from "
                  "its shell is written to stderr marked with that alias")
         commands[name] = command
+    # The only command that touches no board: it reads an image, as `ensure`
+    # does before it flashes one (scripts/ci.sh firmware-dk).
+    image_parser = sub.add_parser("check-image")
+    image_parser.add_argument("hex", type=Path, help="Intel HEX image to check")
     commands["ensure"].add_argument("--hex", type=Path, help="image to flash if needed")
     commands["ensure"].add_argument("--address", help="expected BLE address")
     commands["ensure"].add_argument("--role", default="advertiser", choices=ROLES)
@@ -827,6 +836,11 @@ def main(argv: Sequence[str] | None = None, run: Runner = run_tool) -> int:
     commands["update"].add_argument("--interval", required=True, type=int, help="ms")
     args = parser.parse_args(argv)
     try:
+        if args.command == "check-image":
+            check_image(args.hex)
+            print(f"image: {args.hex}")
+            print(f"firmware version: {FIRMWARE_VERSION}")
+            return 0
         dk = resolve(args.jlink, args.port, run, args.alias)
         if args.command == "identify":
             identify(dk)

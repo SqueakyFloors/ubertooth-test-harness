@@ -164,14 +164,18 @@ class FakeUbertooth:
         pa_zero_sets=True,
         set_and_read=True,
         one_value_each=True,
+        version_ends=True,
     ):
         self.serial = serial
+        self.version_ends = version_ends
         # Fork behaviors the option cases check; False models older builds:
         # next_word (8b58f75/0b63b01), reject_strays (#146/#155),
         # pa_zero_sets (4ed4a1d; before it -a0 was a query), set_and_read
         # (5b45b3e, #228; before it a later read of a value dropped its set),
-        # and one_value_each (opt_check_once(); before it an option given a
-        # value twice kept the last value, and -c with -C sent the second).
+        # one_value_each (opt_check_once(); before it an option given a
+        # value twice kept the last value, and -c with -C sent the second),
+        # and version_ends (f898fe5, #813; before it -V was one report among
+        # the others instead of the version command that ends the command).
         self.next_word = next_word
         self.set_and_read = set_and_read
         self.one_value_each = one_value_each
@@ -234,6 +238,20 @@ class FakeUbertooth:
         if self.mode is not None:
             self.state.update(self.IDLE_RESET)
             self.mode = None
+
+    def _firmware_line(self):
+        return (f"Firmware version: {self.firmware} "
+                f"(API:{transitions.format_api(self.api)})")
+
+    def _version_answer(self):
+        """The whole -V answer for one board (libubertooth's version file)."""
+        return "".join(line + "\n" for line in (
+            f"Host tools version: libubertooth 1.1 ({self.firmware}), "
+            "libbtbb 1.0 (git-btbb)",
+            "libbtbb loaded from: /p/lib/libbtbb.so.1",
+            self._firmware_line(),
+            f"Firmware build: {self.compile_info}",
+        ))
 
     @staticmethod
     def _result(command, returncode, stdout, stderr, on_output, timed_out=False):
@@ -450,6 +468,13 @@ class FakeUbertooth:
                 flags.add(option)
         if leftover and self.reject_strays:
             return fail(f"error: unexpected argument '{leftover[0]}'")
+        # -V is the version command: since fork f898fe5 it prints the whole
+        # answer and ends the command, before the mode checks and before
+        # anything else on the command line runs. ``version_ends`` False
+        # models the older build, where -V was one report among the others:
+        # the bare build string, with no label, printed in report order.
+        if "V" in flags and self.version_ends:
+            return self._result(command, 0, self._version_answer(), "", on_output)
         if len(modes) > 1:
             if self.reject_conflicts:
                 named = " ".join(o for o in UTIL_MODE_ORDER if o[1] in modes)
@@ -491,9 +516,7 @@ class FakeUbertooth:
             mhz = self.state["channel"]
             lines.append(f"Current frequency: {mhz} MHz (Bluetooth channel {int(mhz) - 2402})")
         if "v" in flags:
-            lines.append(
-                f"Firmware version: {self.firmware} (API:{transitions.format_api(self.api)})"
-            )
+            lines.append(self._firmware_line())
         if "V" in flags:
             lines.append(self.compile_info)
         if usr == "q" or "l" in gets:
@@ -557,13 +580,22 @@ def run_test(test_name, executor, *, coverage="smoke", cancellation=None):
 
 
 class HostVersionPassthrough:
-    """Answer the mandatory host-version preflight, forward everything else."""
+    """Answer the mandatory host-version preflight, forward everything else.
+
+    The preflight asks ``ubertooth-util -V`` before any test runs, and
+    Multi-board selection's ``-V`` with no selector asks the same command
+    later (tests/test_util_cases.py, through test_guards.run_guarded), so
+    only the first call is answered here; the rest reach the device, which
+    answers -V itself. One instance per run.
+    """
 
     def __init__(self, device):
         self.device = device
+        self.answered = False
 
     def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
-        if tuple(argv) == ("ubertooth-util", "-V"):
+        if not self.answered and tuple(argv) == ("ubertooth-util", "-V"):
+            self.answered = True
             output = "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)\n"
             return CommandResult(tuple(argv), 0, output, "", 0.01, False)
         return self.device.run(
@@ -632,13 +664,25 @@ class CoverageGenerationTests(unittest.TestCase):
         options = tuple(option for option, _label, _pattern in transitions._QUERY_OPTIONS)
         _args, cases = cases_for("Ubertooth util compositions", "comprehensive")
 
-        composed = {frozenset(case.argv[3:]) for case in cases if len(case.argv) == 5}
+        # -V does not compose: its cases are a pair of options but not a
+        # composition, so they are left out of the pair set.
+        composed = {frozenset(case.argv[3:]) for case in cases
+                    if len(case.argv) == 5
+                    and case.case_id not in transitions.VERSION_CASES}
 
         self.assertEqual(
             {frozenset(pair) for pair in compatible_pairs(options)}, composed
         )
+        self.assertNotIn("-V", options)
         full = next(case for case in cases if case.case_id == "full-readback-composition")
         self.assertEqual(options, full.argv[3:])
+        # -V with the query after it and before it, so an order the fork
+        # treats alike is checked both ways.
+        self.assertEqual(
+            transitions.VERSION_CASES,
+            {case.case_id: case.argv[3:] for case in cases
+             if case.case_id in transitions.VERSION_CASES},
+        )
 
     def test_plans_select_valid_profiles_for_every_transition_test(self):
         expected = {"fast.yaml": ("fast", "smoke"), "release.yaml": ("release", "comprehensive")}
@@ -756,7 +800,8 @@ class CoverageGenerationTests(unittest.TestCase):
                             if item == "-U"
                         ]
                         self.assertEqual(SERIAL, selections[-1])
-                        self.assertNotIn("-vVspb", command)
+                        # The reads are written out, never bundled.
+                        self.assertNotIn("-vspb", command)
 
 
 class TransitionExecutionTests(unittest.TestCase):
@@ -1005,12 +1050,34 @@ class TransitionExecutionTests(unittest.TestCase):
 
         self.assertTrue(summary.passed, summary.failure_reason)
 
+    def test_a_v_that_does_not_end_the_command_fails_the_version_case(self):
+        # Before fork f898fe5 -V was one report among the others, so -V -s
+        # printed the serial too and no version answer. Harness #162.
+        summary, events = run_test(
+            "Ubertooth util compositions", FakeUbertooth(version_ends=False),
+            coverage="comprehensive",
+        )
+
+        self.assertFalse(summary.passed)
+        failed = sorted(
+            event.details["case_id"].rsplit("compositions-", 1)[1]
+            for event in case_results(events) if event.status == "failed"
+        )
+        self.assertEqual(sorted(transitions.VERSION_CASES), failed)
+        self.assertIn("answers the version alone", summary.failure_reason)
+
     def test_compositions_do_not_repeat_identical_commands(self):
         _args, cases = cases_for("Ubertooth util compositions", "comprehensive")
 
         commands = [case.argv for case in cases]
 
-        self.assertEqual(len(commands), len({frozenset(c) for c in commands}))
+        self.assertEqual(len(commands), len({tuple(c) for c in commands}))
+        # No two compositions ask for the same set of reports. The two -V
+        # cases are the one place where one pair appears twice, written in
+        # both orders on purpose, so they are compared as written above.
+        composed = [c for c in commands
+                    if c[3:] not in transitions.VERSION_CASES.values()]
+        self.assertEqual(len(composed), len({frozenset(c) for c in composed}))
 
     def test_a_board_at_pa_zero_runs_every_case_and_gets_pa_zero_back(self):
         # Harness #5: -a0 sets PA 0 (fork 4ed4a1d), so nothing skips and the
