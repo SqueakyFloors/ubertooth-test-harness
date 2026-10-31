@@ -11,8 +11,11 @@ filter with a "warning: " line; the options Wireshark sends only for a feature
 the listing advertises (--extcap-reload-option, --extcap-control-in, ...) are
 refused like any unknown option. A usage error is "error: ..." on stderr, exit
 1, with no usage line after it since fork 12211ce (the message says what is
-wrong); a stray word ("error: unexpected argument '<word>'") is refused even
-with -h, and --capture refuses
+wrong). Since fork 5310a5d (#481) an option the script does not know reads
+"error: unrecognized option '--extcap-bogus'", the line every tool here gives
+for that mistake; it used to be getopt's own words ("error: option
+--extcap-bogus not recognized"). A stray word ("error: unexpected argument
+'<word>'") is refused even with -h, and --capture refuses
 a channel outside 37-39 before ubertooth-btle runs. A capture that fails exits
 non-zero (ubertooth-btle's status); one ended by SIGTERM or by the reader
 closing the FIFO exits 0. The commands run through pytools.py, which finds
@@ -92,6 +95,17 @@ _USAGE = r"(?m)^Usage: \S*btle-extcap\S* --extcap-interfaces \| "
 # text; only -h and a bare command print it.
 _NO_USAGE = r"\A(?![\s\S]*(?m:^Usage: ))"
 
+
+def _unknown_option(option: str) -> str:
+    """The refusal of a long option the script does not have, as a whole line.
+
+    Since fork 5310a5d (#481) the script rewrites getopt's own wording to the
+    line opt_parse.c gives for the same mistake, so every tool here refuses an
+    unknown option the same way.
+    """
+    return rf"(?m)^error: unrecognized option '--{re.escape(option)}'$"
+
+
 # --extcap-dlts and --extcap-config open no board, so any serial will do.
 _INTERFACE = "--extcap-interface=ubertooth" + "0123456789abcdef" * 2
 _DLT_LINE = _line(f"dlt {{number={EXTCAP_DLT}}}"
@@ -161,7 +175,7 @@ def python_tool_cases(arguments, _resources, _resource_identities):
         _case(
             "extcap-unknown-option", "btle-extcap rejects an unknown option",
             "extcap", ("--extcap-bogus",),
-            (r"(?m)^error: option --extcap-bogus not recognized$", _NO_USAGE),
+            (_unknown_option("extcap-bogus"), _NO_USAGE),
             returncodes=(1,),
         ),
         # --extcap-version, which Wireshark adds to its calls, in each form
@@ -188,7 +202,7 @@ def python_tool_cases(arguments, _resources, _resource_identities):
             _case(
                 f"extcap-refuses-{option}", f"btle-extcap refuses --{option}",
                 "extcap", (_INTERFACE, f"--{option}=x", "--extcap-config"),
-                (rf"(?m)^error: option --{option} not recognized$", _NO_USAGE,
+                (_unknown_option(option), _NO_USAGE,
                  r"\A(?![\s\S]*(?m:^(?:arg|value) \{))"),
                 returncodes=(1,),
             )
