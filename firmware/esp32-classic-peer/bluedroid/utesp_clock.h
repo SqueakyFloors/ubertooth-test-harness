@@ -37,6 +37,7 @@ enum {
     UTESP_CLOCK_NO_MEMORY = -3,
     UTESP_CLOCK_TIMED_OUT = -4,   /* the controller did not answer */
     UTESP_CLOCK_BAD_ANSWER = -5,  /* it answered success, but short */
+    UTESP_CLOCK_WRONG_LINK = -6,  /* it answered about another link */
 };
 
 /* Makes the semaphores one read needs. Call once, while Bluedroid is

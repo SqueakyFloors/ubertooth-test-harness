@@ -60,11 +60,26 @@ static SemaphoreHandle_t request_lock;
 static SemaphoreHandle_t answer;
 static SemaphoreHandle_t slot_lock;
 static struct {
-    bool waiting; /* a reader still wants the answer */
-    bool pending; /* the controller has not replied to the command sent */
+    bool waiting;      /* a reader still wants the answer */
+    bool pending;      /* the controller has not replied to the command sent */
+    BT_HDR *free_me;   /* a command buffer the reader must free; see below */
     int64_t sent_us;
     struct utesp_clock got;
 } slot;
+
+/* Takes the command buffer a Command Status left behind, if there is one.
+ * Called from the reader, which is the only place it can be freed: the HCI
+ * layer is still reading it when clock_status() runs. */
+static BT_HDR *take_leftover(void)
+{
+    BT_HDR *buf;
+
+    xSemaphoreTake(slot_lock, portMAX_DELAY);
+    buf = slot.free_me;
+    slot.free_me = NULL;
+    xSemaphoreGive(slot_lock);
+    return buf;
+}
 
 int utesp_clock_init(void)
 {
@@ -109,7 +124,10 @@ static void clock_complete(BT_HDR *response, void *context)
     (void)context;
     memset(&got, 0, sizeof(got));
     got.answered_us = esp_timer_get_time();
-    got.status = HCI_ERR_UNSPECIFIED; /* until the event says otherwise */
+    /* An event too short to hold a status is reported as a short answer
+     * rather than as a refusal, which is what leaving this as success
+     * does. */
+    got.status = HCI_SUCCESS;
 
     /* A controller that refuses the command may answer with the status
      * alone, so each part is read only once it is known to be there. */
@@ -121,6 +139,7 @@ static void clock_complete(BT_HDR *response, void *context)
         STREAM_TO_UINT16(got.handle, stream);
         STREAM_TO_UINT32(got.clock, stream);
         STREAM_TO_UINT16(got.accuracy, stream);
+        got.handle &= 0x0fff; /* 12 bits meaningful, the rest reserved */
         /* The clock is 28 bits and the rest of the word is reserved. */
         got.clock &= 0x0fffffff;
         got.complete = true;
@@ -139,6 +158,35 @@ static void clock_complete(BT_HDR *response, void *context)
     osi_free(response);
 }
 
+/* Read Clock is answered with a Command Complete (Core 6.0 Vol 4 Part E
+ * 7.5.6), so this runs only if a controller answers out of spec. Without it
+ * the HCI layer would call nothing, and every later read would say the
+ * controller is silent.
+ *
+ * It must not free the command buffer: the layer reads the metadata in it
+ * after this returns, to decide what to free itself. So the buffer is handed
+ * to the reader, which frees it once it is awake. */
+static void clock_status(uint8_t status, BT_HDR *command, void *context)
+{
+    struct utesp_clock got;
+
+    (void)context;
+    memset(&got, 0, sizeof(got));
+    got.answered_us = esp_timer_get_time();
+    got.status = status;
+
+    xSemaphoreTake(slot_lock, portMAX_DELAY);
+    slot.pending = false;
+    slot.free_me = command;
+    if (slot.waiting) {
+        got.read_us = got.answered_us - slot.sent_us;
+        slot.got = got;
+        slot.waiting = false;
+        xSemaphoreGive(answer);
+    }
+    xSemaphoreGive(slot_lock);
+}
+
 /* Builds the command and waits for its answer. The caller holds
  * request_lock. */
 static int read_clock(uint16_t handle, uint8_t which, struct utesp_clock *out)
@@ -146,6 +194,7 @@ static int read_clock(uint16_t handle, uint8_t which, struct utesp_clock *out)
     BT_HDR *cmd;
     hci_cmd_metadata_t *metadata;
     uint8_t *pp;
+    BT_HDR *free_me;
     bool owed, answered;
 
     /* A command the controller never replied to still holds its place in the
@@ -158,6 +207,12 @@ static int read_clock(uint16_t handle, uint8_t which, struct utesp_clock *out)
     xSemaphoreGive(slot_lock);
     if (owed) {
         return UTESP_CLOCK_TIMED_OUT;
+    }
+
+    /* One left by a read that had already given up waiting, so a second one
+     * cannot push the first out of the slot unfreed. */
+    if ((free_me = take_leftover()) != NULL) {
+        HCI_FREE_CMD_BUF(free_me);
     }
 
     if ((cmd = HCI_GET_CMD_BUF(READ_CLOCK_PARAM_LEN)) == NULL) {
@@ -173,17 +228,11 @@ static int read_clock(uint16_t handle, uint8_t which, struct utesp_clock *out)
 
     /* The HCI layer reads the callbacks and the opcode out of the buffer's
      * metadata rather than out of the arguments to transmit_command(), so
-     * they are set here, as Bluedroid's own btu_hcif_send_cmd() sets them.
-     *
-     * No status callback: Read Clock is answered with a Command Complete
-     * (Core 6.0 Vol 4 Part E 7.5.6), and a callback here would have to free
-     * the command buffer the HCI layer still reads after the call. If a
-     * controller ever did answer with a Command Status, the layer would free
-     * the command and this read would time out. */
+     * they are set here, as Bluedroid's own btu_hcif_send_cmd() sets them. */
     metadata = HCI_GET_CMD_METAMSG(cmd);
     metadata->opcode = HCI_READ_CLOCK;
     metadata->command_complete_cb = clock_complete;
-    metadata->command_status_cb = NULL;
+    metadata->command_status_cb = clock_status;
 
     /* Any leftover from a read that timed out, so the wait below is this
      * command's. */
@@ -194,7 +243,7 @@ static int read_clock(uint16_t handle, uint8_t which, struct utesp_clock *out)
     slot.sent_us = esp_timer_get_time();
     xSemaphoreGive(slot_lock);
 
-    hci_layer_get_interface()->transmit_command(cmd, clock_complete, NULL, NULL);
+    hci_layer_get_interface()->transmit_command(cmd, clock_complete, clock_status, NULL);
 
     xSemaphoreTake(answer, pdMS_TO_TICKS(ANSWER_TIMEOUT_MS));
 
@@ -210,11 +259,22 @@ static int read_clock(uint16_t handle, uint8_t which, struct utesp_clock *out)
     slot.waiting = false;
     xSemaphoreGive(slot_lock);
 
+    if ((free_me = take_leftover()) != NULL) {
+        HCI_FREE_CMD_BUF(free_me);
+    }
+
     if (!answered) {
         return UTESP_CLOCK_TIMED_OUT;
     }
     if (out->status == HCI_SUCCESS && !out->complete) {
         return UTESP_CLOCK_BAD_ANSWER;
+    }
+    /* A clock for a link other than the one asked about would be worse than
+     * no clock at all. The handle is only meaningful in an answer that
+     * succeeded. */
+    if (out->status == HCI_SUCCESS && which == WHICH_CLOCK_PICONET &&
+        out->handle != handle) {
+        return UTESP_CLOCK_WRONG_LINK;
     }
     return UTESP_CLOCK_OK;
 }

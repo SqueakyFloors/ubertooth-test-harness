@@ -70,8 +70,8 @@ static struct {
     bool connecting; /* an outgoing connection is on its way */
     bool connected;
     uint32_t handle;
-    unsigned acl_links;  /* live baseband links; the clock read needs one */
-    bool acl_known;      /* and needs to know which, see gap_cb() */
+    unsigned acl_links;   /* live baseband links; the clock read needs one */
+    bool acl_known;       /* and needs to know which, see gap_cb() */
     uint16_t acl_handle;
     esp_bd_addr_t peer;   /* what "spp peer" set: who the initiator calls */
     esp_bd_addr_t remote; /* the far end of the live link */
@@ -293,9 +293,7 @@ static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
         if (st.acl_links) {
             st.acl_links--;
         }
-        if (st.acl_links != 1) {
-            st.acl_known = false;
-        }
+        st.acl_known = false;
         UNLOCK();
         break;
 
@@ -1130,6 +1128,8 @@ static const char *read_failure(int result)
         return "the controller did not answer the clock read";
     case UTESP_CLOCK_BAD_ANSWER:
         return "the controller's clock answer was short";
+    case UTESP_CLOCK_WRONG_LINK:
+        return "the controller answered the clock read for another link";
     default:
         return "the clock read failed";
     }
@@ -1159,7 +1159,7 @@ const char *bt_clock_json(char *out, size_t len)
 
     LOCK();
     started = st.started;
-    in_piconet = st.acl_links == 1 && st.acl_known;
+    in_piconet = st.acl_known;
     acl_handle = st.acl_handle;
     UNLOCK();
     if (!started) {
@@ -1183,6 +1183,14 @@ const char *bt_clock_json(char *out, size_t len)
         } else if (piconet.status != 0) {
             return refused(piconet.status);
         }
+    }
+    if (in_piconet) {
+        /* A second link opening while the command was in flight would make
+         * the piconet a guess again, so the answer counts only if the link
+         * the board knew is still the only one. */
+        LOCK();
+        in_piconet = st.acl_known && st.acl_handle == acl_handle;
+        UNLOCK();
     }
 
     if (in_piconet) {
