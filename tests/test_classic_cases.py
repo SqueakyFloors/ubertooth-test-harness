@@ -155,7 +155,8 @@ class CaptureCaseTests(unittest.TestCase):
         # The peers are bound the other way round, so the other board pages.
         self.assertEqual(INITIATOR_ADDRESS, argv[argv.index("--acceptor-address") + 1])
         self.assertEqual(ACCEPTOR_ADDRESS, argv[argv.index("--initiator-address") + 1])
-        self.assertIn(rf"(?m)^central LAP: {OTHER_LAP}$", stream.output_patterns)
+        self.assertIn(rf"(?m)^central LAP: {OTHER_LAP}$",
+                      stream.output_patterns)
 
     def test_the_cleanup_resets_each_peer_through_the_driver(self):
         case = known_classic_cases(arguments("Capture known Classic device"), {},

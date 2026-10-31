@@ -1342,15 +1342,15 @@ them. `coverage:` and a required `duration:`; the pair streams 200 bytes every
 `utesp-1.0.0` or a later 1.x image, which mandatory preflight checks.
 
 **Expected outcome.** Smoke runs 2 cases: `ubertooth-rx -z` lists the
-central's LAP in its survey results, and a run with no target reports at least ten
-packet lines carrying it. Comprehensive runs 4, adding the survey into PCAPNG
-(where the file must hold packets, not just a header) and the same survey with
-the peers' roles exchanged, which must list the other board's LAP and not the
-first one's. Every case also requires that the link never went down, that the
-initiator reported at least fifty writes, and that the capture ran for its
-whole duration; it then resets both peers to the firmware's boot state and
-restores the Ubertooth's channel, squelch, and LEDs. About 40 s per case on
-the bench, most of it the two board resets and the page.
+central's LAP in its survey results, and a run with no target reports at least
+ten packet lines carrying it. Comprehensive runs 4, adding the survey into
+PCAPNG (where the file must hold packets, not just a header) and the same
+survey with the peers' roles exchanged, which must list the other board's LAP
+and not the first one's. Every case also requires that the link never went
+down, that the initiator reported at least fifty writes, and that the capture
+ran for its whole duration; it then resets both peers to the firmware's boot
+state and restores the Ubertooth's channel, squelch, and LEDs. About 40 s per
+case on the bench, most of it the two board resets and the page.
 
 **Known limits.** Ten packet lines is a floor, not an expected count: eight
 25 s captures on the bench gave 50 to 189 lines of the pair's piconet, and a

@@ -404,9 +404,9 @@ def known_classic_cases(arguments, resources, resource_identities):
             name=f"ubertooth-rx -z -r (PCAPNG) lists LAP {central} and writes a file",
             options=("-z",),
             check=_all(packet_check(survey=True), survey_lists(central)),
-            expected_state=(f"the survey results list LAP {central}; -r wrote a "
-                            f"pcapng file with link type {LINKTYPE_BREDR} and "
-                            f"{MIN_PACKETS}+ packets in it"),
+            expected_state=(f"the survey results list LAP {central}; -r wrote "
+                            f"a pcapng file with link type {LINKTYPE_BREDR} "
+                            f"and {MIN_PACKETS}+ packets in it"),
             files=(("-r", "survey.pcapng"),),
             verify=(_capture_file_step(
                 "verify-capture",

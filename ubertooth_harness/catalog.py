@@ -1196,10 +1196,10 @@ def builtin_catalog() -> TestCatalog:
         ),
         TestDefinition(
             "Capture known Classic device",
-            "ubertooth-rx finds two registered ESP32 Classic peers streaming over "
-            "a Serial Port Profile link: the survey lists the piconet central's "
-            "LAP, an unfiltered run reports its packets, and swapping the peers' "
-            "roles moves the LAP on the air to the other board",
+            "ubertooth-rx finds two registered ESP32 Classic peers streaming "
+            "over a Serial Port Profile link: the survey lists the piconet "
+            "central's LAP, an unfiltered run reports its packets, and swapping "
+            "the peers' roles moves the LAP on the air to the other board",
             MappingProxyType({
                 "hosts": HOSTS, "Ubertooth": UBERTOOTH,
                 "acceptor": ArgumentRule(_selector, default="default"),
