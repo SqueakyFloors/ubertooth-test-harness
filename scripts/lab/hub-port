@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""Switch one port of a registered USB power controller, by hand.
+
+    hub-port <controller> on    <port>
+    hub-port <controller> off   <port>
+    hub-port <controller> cycle <port> [seconds]
+
+This is the manual recovery path for a device that has stopped answering: its
+port goes off, then on, and it enumerates again. A harness run switches power
+itself and needs none of this.
+
+Reading changes nothing and belongs to the harness:
+
+    ubertooth-harness power --hardware <registry> <controller>
+
+The controller is a registry alias, so the hub's serial, its driver, and which
+ports it has come from the registry and nothing is built in. The driver and
+the port range are whatever the registry says: 0 to 7 on an Acroname
+USBHub3+, 1 to 3 on a StarTech managed hub.
+
+It holds the harness's host power/firmware lock while it switches, so it can
+never overlap a run that is flashing or switching power. It does **not** take
+the device's lease: switch a port only when you know nobody else is using what
+is on it. `ubertooth-harness boards` says who holds what, and
+`scripts/lab/hold` is how to hold it while you work.
+
+Switch only the port of the device you are recovering. Taking a port down
+takes its device off the bus, and on a host near its USB endpoint limit a
+device that leaves may not come back (see docs/hardware.md). Cycle once, then
+look; do not loop.
+
+Exit status is 0 when the port was switched and read back, 1 otherwise.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import time
+from pathlib import Path
+
+try:
+    from ubertooth_harness import leases
+    from ubertooth_harness.power import (
+        PowerControllerError,
+        controller_from_resource,
+        controller_ports,
+        snapshot_ports,
+    )
+    from ubertooth_harness.resources import FileResourceRegistry, RegistryError
+except ImportError:  # run from outside the harness environment
+    sys.exit(
+        "hub-port: run this from the harness environment "
+        "(python3 bootstrap.py, then .venv/bin/python scripts/lab/hub-port ...)"
+    )
+
+HARDWARE_ENV = "UBERTOOTH_HARNESS_HARDWARE"
+# How long to wait for the host lock. A run holds it for a build and a flash
+# stage, so a recovery that waits a minute is better than one that gives up.
+HOST_LOCK_WAIT_S = 120.0
+SETTLE_S = 0.5
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="hub-port",
+        description="Switch one port of a registered USB power controller.",
+        epilog="Read the ports with: ubertooth-harness power --hardware H ALIAS",
+    )
+    parser.add_argument("controller", metavar="ALIAS", help="registered USB power controller")
+    parser.add_argument("action", choices=("on", "off", "cycle"))
+    parser.add_argument("port", type=int, help="downstream port number")
+    parser.add_argument(
+        "seconds", nargs="?", type=float, default=2.0,
+        help="how long the port stays off in a cycle (default 2)",
+    )
+    parser.add_argument(
+        "--hardware", type=Path, default=os.environ.get(HARDWARE_ENV) or None,
+        help=f"resource registry (default ${HARDWARE_ENV})",
+    )
+    parser.add_argument("--lease-dir", type=Path, default=None, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--owner", default=None,
+        help=f"how you are named in another holder's error (default ${leases.OWNER_ENV})",
+    )
+    args = parser.parse_args(argv)
+    if args.hardware is None:
+        parser.error(f"no registry; pass --hardware or set ${HARDWARE_ENV}")
+    if not 0.0 <= args.seconds <= 60.0:
+        parser.error("seconds must be between 0 and 60")
+    return args
+
+
+def describe(state) -> str:
+    volts = "-" if state.vbus_microvolts is None else f"{state.vbus_microvolts / 1e6:.2f} V"
+    amps = "-" if state.vbus_microamps is None else f"{state.vbus_microamps / 1e3:.1f} mA"
+    return (
+        f"port {state.port}: power {'on ' if state.power_enabled else 'off'} "
+        f"data {'on ' if state.data_enabled else 'off'} VBUS {volts:>7} {amps:>9}"
+    )
+
+
+def switch(controller, port: int, action: str, seconds: float, sleep=time.sleep) -> None:
+    if action == "cycle":
+        controller.set_power_enabled(port, False)
+        sleep(seconds)
+        controller.set_power_enabled(port, True)
+    else:
+        controller.set_power_enabled(port, action == "on")
+    # The driver reads every write back, so this wait is only for the device:
+    # VBUS and current need a moment to mean anything.
+    sleep(SETTLE_S)
+
+
+def main(argv: list[str] | None = None, *, sleep=time.sleep) -> int:
+    args = parse_args(list(sys.argv[1:] if argv is None else argv))
+    try:
+        registry = FileResourceRegistry.load(args.hardware)
+        resource = registry.get(args.controller)
+        ports = controller_ports(resource)
+        if args.port not in ports:
+            raise PowerControllerError(
+                f"{resource.alias} ({resource.driver}) has no port {args.port}; "
+                "its switchable ports are " + ", ".join(str(p) for p in ports)
+            )
+        controller = controller_from_resource(resource, allow_real_changes=True)
+    except (RegistryError, PowerControllerError) as error:
+        return _fail(error)
+
+    try:
+        with leases.acquire(
+            [],
+            leases.holder_info(
+                run_id=None, owner=args.owner,
+                purpose=f"hub-port {args.action} {resource.alias} port {args.port}",
+            ),
+            directory=args.lease_dir,
+            wait_s=HOST_LOCK_WAIT_S,
+            host_lock=True,
+        ):
+            controller.connect()
+            try:
+                switch(controller, args.port, args.action, args.seconds, sleep=sleep)
+                for state in snapshot_ports(controller, (args.port,)):
+                    print(describe(state))
+            finally:
+                try:
+                    controller.close()
+                except PowerControllerError:
+                    pass  # the switch result above is what matters
+    except leases.LeaseError as error:
+        return _fail(error)
+    except PowerControllerError as error:
+        return _fail(f"{resource.alias}: {error}")
+    return 0
+
+
+def _fail(error) -> int:
+    """Report like the harness CLI does, and exit as it does (2)."""
+    print(f"hub-port: error: {error}", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
