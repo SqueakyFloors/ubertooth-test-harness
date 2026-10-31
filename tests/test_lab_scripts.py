@@ -98,6 +98,7 @@ def load(path: Path):
     return module
 
 
+sys.path.insert(0, str(LAB))  # the scripts import _bench from beside themselves
 hold = load(HOLD)
 hub_port = load(HUB_PORT)
 
@@ -215,6 +216,8 @@ class HoldLockKeys(Bench):
     def test_each_type_gets_the_key_the_harness_uses(self):
         registry = self.load_registry()
         self.assertEqual(UT_SERIAL, hold.lock_key(registry.get("UT0")))
+        # One rule, so the two scripts can never name a lock differently.
+        self.assertIs(hold.lock_key, hub_port.device_board.__globals__["lock_key"])
         self.assertEqual("nrf52840dk-123456789", hold.lock_key(registry.get("DK0")))
         self.assertEqual(f"esp32-{BRIDGE}", hold.lock_key(registry.get("ESP0")))
 
@@ -527,6 +530,12 @@ class HubPortArguments(Bench):
                         ["--hardware", str(self.registry), "Hub0", action, "1", "5"]
                     )
 
+    def test_a_negative_wait_is_refused(self):
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            hub_port.parse_args(
+                ["--hardware", str(self.registry), "--wait", "-1", "Hub0", "off", "1"]
+            )
+
     def test_cycle_gets_the_default_wait(self):
         args = hub_port.parse_args(["--hardware", str(self.registry), "Hub0", "cycle", "1"])
         self.assertEqual(hub_port.DEFAULT_CYCLE_S, args.seconds)
@@ -552,7 +561,8 @@ class HubPortSwitches(Bench):
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
             status = hub_port.main(
-                ["--hardware", str(self.registry), "--lease-dir", str(self.leases), *argv],
+                ["--hardware", str(self.registry), "--lease-dir", str(self.leases),
+                 "--wait", "0", *argv],
                 sleep=self.slept.append,
             )
         return status, out.getvalue(), err.getvalue()
@@ -621,7 +631,11 @@ class HubPortSwitches(Bench):
         self.assertIn("second attempt failed", message)
 
     def test_it_refuses_a_port_whose_device_someone_holds(self):
-        """UT0 is mapped to port 3 in the test registry."""
+        """UT0 is mapped to port 3 in the test registry.
+
+        The device is held for the switch, not merely checked, so there is no
+        window in which a run can take it and lose its power.
+        """
         holder = leases.acquire(
             [leases.Board("UT0", UT_SERIAL)],
             leases.holder_info(run_id=None, owner="bob", purpose="a capture"),
@@ -635,6 +649,28 @@ class HubPortSwitches(Bench):
         self.assertIn("bob", err)
         self.assertIn("--force", err)
 
+    def test_the_device_is_held_while_its_port_is_switched(self):
+        seen = {}
+
+        def switch(controller, port, action, seconds, sleep=None):
+            seen["states"] = leases.board_states(
+                [leases.Board("UT0", UT_SERIAL)], directory=self.leases
+            )
+            controller.set_power_enabled(port, False)
+
+        original = hub_port.switch
+        hub_port.switch = switch
+        self.addCleanup(setattr, hub_port, "switch", original)
+        status, _, err = self.run_hub_port(["Hub0", "off", "3"])
+        self.assertEqual(0, status, err)
+        self.assertTrue(seen["states"][0]["held"])
+
+    def test_a_peer_on_a_port_is_held_too(self):
+        """A type the harness does not lease must not read as free here."""
+        registry = self.load_registry()
+        peer = registry.get("ESP0")
+        self.assertEqual(f"esp32-{BRIDGE}", hub_port.device_board(peer).key)
+
     def test_force_switches_a_held_port_and_says_so(self):
         holder = leases.acquire(
             [leases.Board("UT0", UT_SERIAL)],
@@ -646,6 +682,7 @@ class HubPortSwitches(Bench):
         self.assertEqual(0, status)
         self.assertEqual([("power", 3, False)], self.controller.calls)
         self.assertIn("--force", err)
+        self.assertIn("UT0", err)
 
     def test_an_empty_port_is_switched_with_no_holder_check(self):
         status, _, err = self.run_hub_port(["Hub0", "off", "7"])
@@ -660,9 +697,6 @@ class HubPortSwitches(Bench):
             host_lock=True,
         )
         self.addCleanup(holder.release)
-        original = hub_port.HOST_LOCK_WAIT_S
-        hub_port.HOST_LOCK_WAIT_S = 0.0
-        self.addCleanup(setattr, hub_port, "HOST_LOCK_WAIT_S", original)
         status, _, err = self.run_hub_port(["Hub0", "off", "1"])
         self.assertEqual(2, status)
         self.assertEqual([], self.controller.calls)

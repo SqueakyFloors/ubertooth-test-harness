@@ -82,11 +82,14 @@ It holds the harness's host power/firmware lock while it switches, so it
 cannot overlap a run that is flashing or switching power, and it prints the
 port's state afterwards so you can see the result.
 
-It also refuses a port whose registered device someone is holding, naming the
-holder, so it cannot cut power under another run or another person. `--force`
-switches anyway, which is what a wedged device whose holder has given up on it
-needs. A cycle whose power-on fails tries once more rather than leaving the
-port off.
+It holds the port's registered device as well, so it cannot cut power under
+another run or another person, and a device already held is reported with its
+holder's name rather than switched. `--wait SECONDS` sets how long it waits
+for either lock (two minutes by default, since a run holds the host lock
+across a build and a flash); `--wait 0` reports the holder at once. `--force`
+switches without holding the device, which is what a wedged device whose
+holder has given up on it needs. A cycle whose power-on fails tries once more
+rather than leaving the port off.
 
 Switch only the port of the device you are recovering, and cycle once before
 looking rather than looping, because on a host near its USB endpoint limit a

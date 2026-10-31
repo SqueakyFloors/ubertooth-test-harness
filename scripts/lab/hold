@@ -38,6 +38,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+# The shared bench helpers sit beside this script. Running it as a script puts
+# this directory on the path already; loading it by path (as the tests do)
+# does not, so it is added either way.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 try:
     from ubertooth_harness import leases
     # The rule for "this command line writes firmware", so the host lock is
@@ -45,6 +50,8 @@ try:
     # for it on, rather than by a second copy of the rule here.
     from ubertooth_harness.cli import _writes_firmware as writes_firmware
     from ubertooth_harness.resources import FileResourceRegistry, RegistryError
+
+    from _bench import HELD_TYPES, bench_lock_board, board, lock_key, plain_serial
 except ImportError:  # run from outside the harness environment
     sys.exit(
         "hold: run this from the harness environment "
@@ -52,48 +59,10 @@ except ImportError:  # run from outside the harness environment
     )
 
 HARDWARE_ENV = "UBERTOOTH_HARNESS_HARDWARE"
-PEER_TYPE = "ESP32 Classic peer"
 # The shortest prefix of a serial this will match. Bench notes name a board by
 # its first four hex digits, and an ambiguous prefix is refused below, so a
 # short name can never quietly select the wrong device.
 MIN_PREFIX = 4
-
-
-def lock_key(resource) -> str:
-    """The lease key of a device, the harness's own where it has one."""
-    if resource.type in leases.LEASED_TYPES:
-        return leases.resource_key(resource)
-    if resource.type == PEER_TYPE:
-        # Until the harness leases this type itself, its key is set here, in
-        # the form the harness uses for a type whose serial is not an
-        # Ubertooth's: the type, then the serial that identifies the device.
-        serial = str(resource.identity.get("bridge serial", "") or "").strip().lower()
-        if not serial:
-            raise RegistryError(
-                f"{resource.alias} needs a 'bridge serial' in the hardware "
-                "registry to be held"
-            )
-        return f"esp32-{serial}"
-    raise RegistryError(
-        f"{resource.alias} is a {resource.type}, which this does not hold "
-        "(it holds Ubertooths, nRF52840 DKs, and ESP32 Classic peers)"
-    )
-
-
-def plain_serial(resource) -> str:
-    """The serial a bench's own scripts name a device's lock file after.
-
-    An Ubertooth's lease key is its serial, so the two names are the same. A
-    DK's and a peer's are not: the harness names their locks after the lease
-    key (`nrf52840dk-<serial without leading zeros>`, `esp32-<serial>`) while
-    a bench's own scripts may still use the serial as registered. Both names
-    are taken below, so a holder of either kind still excludes the other.
-    """
-    for key in ("jlink serial", "bridge serial"):
-        value = str(resource.identity.get(key, "") or "").strip().lower()
-        if value:
-            return value
-    return ""
 
 
 def _identity_values(resource) -> list[str]:
@@ -235,21 +204,17 @@ def harness_lease_argv(args, aliases, command) -> list[str]:
     return argv + list(aliases) + ["--"] + list(command)
 
 
-def extra_boards(resources, keys) -> list[leases.Board]:
+def extra_boards(resources) -> list[leases.Board]:
     """Locks `ubertooth-harness lease` does not take for these devices.
 
     A type it does not lease yet, and the bench's older lock name for a device
     whose lease key is not its serial.
     """
-    extra = [
-        leases.Board(r.alias, keys[r.alias])
-        for r in resources if r.type not in leases.LEASED_TYPES
-    ]
+    extra = [board(r) for r in resources if r.type not in leases.LEASED_TYPES]
     extra += [
-        leases.Board(f"{r.alias} (bench lock)", serial)
-        for r in resources
-        for serial in (plain_serial(r),)
-        if serial and serial != keys[r.alias]
+        second for r in resources
+        for second in (bench_lock_board(r),)
+        if second is not None
     ]
     return extra
 
@@ -262,7 +227,7 @@ def main(argv: list[str] | None = None) -> int:
         # LeaseError too: a registry can load and still hold a serial no lock
         # file can be named after.
         keys = {resource.alias: lock_key(resource) for resource in resources}
-        extra = extra_boards(resources, keys)
+        extra = extra_boards(resources)
     except (RegistryError, leases.LeaseError) as error:
         return _fail(error)
 
