@@ -11,6 +11,7 @@ from ubertooth_harness.report import (
     LEGACY_OUTPUT_HEAD_RECORDS,
     LEGACY_OUTPUT_TAIL_CHARS,
     LEGACY_OUTPUT_TAIL_RECORDS,
+    REDACTED,
     _take_chunks,
     _tail_on_whole_lines,
     elapsed,
@@ -63,6 +64,17 @@ def command_event(ms: int, event_type: str, status: str, details: dict) -> dict:
         "run_id": "run-a", "event_type": event_type, "status": status,
         "timestamp": moment.isoformat(timespec="milliseconds"),
         "details": {"command_id": "c", **details},
+    }
+
+
+def ubertooth_manifest(serial: str) -> dict:
+    """A manifest record naming one registered Ubertooth."""
+    return {
+        "run_id": "run-a", "event_type": "manifest", "status": "passed",
+        "timestamp": _START.isoformat(timespec="milliseconds"),
+        "details": {"manifest": {"invocations": [
+            {"resource_identities": {"Ubertooth": {"serial": serial}}},
+        ]}},
     }
 
 
@@ -355,6 +367,71 @@ class ReportTests(unittest.TestCase):
             _redact("enumerated: aaaaf123ffaaaaaaaaaaaaaaaaaaaaaa",
                     _serial_set("000123")),
         )
+
+    def test_a_serial_the_output_cap_cut_in_half_is_masked(self):
+        # #214: output is cut where the limit falls, not where the text
+        # allows, so the start of a serial can survive a cut inside one. A
+        # piece that wide still names the board.
+        serial = "0123456789abcdef0123456789abcdef"
+        kept = 16  # digits of it the head's cut leaves behind
+        line = ("x" * (LEGACY_OUTPUT_HEAD_CHARS - kept) + serial
+                + "y" * LEGACY_OUTPUT_TAIL_CHARS + "\n")
+        events = [ubertooth_manifest(serial)] + dump_events([line])
+
+        report = render_run(events, redact_serials=True)
+
+        self.assertIn(serial[:kept], render_run(events))  # shown unredacted
+        self.assertNotIn(serial[:kept], report)
+        self.assertIn(f"x{REDACTED}", report)
+        self.assertIn("more characters of output are in run.jsonl", report)
+
+    def test_a_piece_of_a_serial_is_masked_where_a_cut_leaves_one(self):
+        # Either end of a serial can be what survives, and only a piece that
+        # ends a line can have come from a cut: the gap note that follows a
+        # cut ends the line, and the output after the gap starts on a whole
+        # one.
+        from ubertooth_harness.report import _redact
+
+        serial = "0123456789abcdef0123456789abcdef"
+        self.assertEqual(
+            "[O] boards: <serial>\n", _redact(f"[O] boards: {serial[:20]}\n", {serial}))
+        self.assertEqual(
+            "[O] boards: <serial>\n", _redact(f"[O] boards: {serial[12:]}\n", {serial}))
+        # A J-Link serial in the width the tools write it (_serial_widths).
+        self.assertEqual(
+            "[O] --jlink <serial>\n",
+            _redact("[O] --jlink 10502101\n", _serial_set("001050210121")))
+        # Inside a line it is some other value: no cut could have left it
+        # there.
+        self.assertEqual(
+            f"[O] boards: {serial[:20]} and more\n",
+            _redact(f"[O] boards: {serial[:20]} and more\n", {serial}))
+
+    def test_a_cut_serial_no_board_registered_is_masked_by_its_width(self):
+        # The serial of a board the run never named (what _SERIAL_TOKEN
+        # catches when it is whole) can only be recognized by its shape.
+        from ubertooth_harness.report import _redact
+
+        self.assertEqual(
+            "[O] enumerated: <serial>\n",
+            _redact("[O] enumerated: 1cc001038088cb956c43ad61\n", ()))
+        # Narrower than that, an unknown value is left to read: masking it
+        # would mask ordinary output.
+        self.assertEqual(
+            "[O] AA: 8e89bed6\n", _redact("[O] AA: 8e89bed6\n", ()))
+
+    def test_a_line_ending_in_hex_that_is_no_serial_is_left_alone(self):
+        from ubertooth_harness.report import _redact
+
+        serial = "0123456789abcdef0123456789abcdef"
+        kept = (
+            f"[M] commit {'f' * 40}\n"       # a git SHA
+            f"[M] digest {'e' * 64}\n"       # a sha256 digest
+            "[O] transfer errors 00000000\n"  # one digit repeated
+            "[O] clkn 0012abcd\n"             # too narrow, and no serial's end
+        )
+
+        self.assertEqual(kept, _redact(kept, {serial}))
 
     def test_the_padded_width_is_the_one_a_dk_port_name_carries(self):
         # _SERIAL_PADDED_DIGITS restates the padding in targets.DK_BY_ID;

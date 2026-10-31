@@ -1553,7 +1553,11 @@ is masked only where it stands alone, so it cannot mask part of a count. A
 serial port path keeps its shape with the serial inside it masked
 (`/dev/serial/by-id/usb-SEGGER_J-Link_<serial>-if00`), whether the registry
 held that path or the harness found it. Any standalone 32-hex-digit token is
-masked too, since that is the shape of an Ubertooth serial.
+masked too, since that is the shape of an Ubertooth serial. Where a command's
+output was cut inside a serial, which the output caps can do, what the cut
+left at the end of that line is masked as well: 8 digits or more of a serial
+the run names, or 24 digits or more of any hex run, since that is wide enough
+to be a board's serial and nothing else.
 
 ## Flash reliability
 

@@ -1113,6 +1113,56 @@ def _reason(details: Mapping, key: str = "reason") -> str:
 # this may also mask an unrelated 32-hex value. Longer hex runs such as git
 # SHAs (40) and sha256 digests (64) are left alone.
 _SERIAL_TOKEN = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{32}(?![0-9A-Fa-f])")
+# Where a command's output was cut inside a serial, what is left of it is
+# neither the whole serial nor 32 digits wide, so neither rule above masks
+# it (#214). Output is cut in two places, both without regard to what the
+# text holds: run.jsonl caps each command as it is recorded, in pieces of a
+# fixed size (rawlog.RECORD_PIECE_CHARS), and the report's fallback cap for a
+# run recorded before that caps a single long line by character count.
+#
+# Such a piece always ends a line of the transcript: the gap note that
+# follows it ends any partial line (rawlog._output_lines), and the tail after
+# the gap starts on a whole line. So only a hex run at the end of a line is
+# considered here, which leaves a value inside a line (an address, a hex dump)
+# alone.
+#
+# A piece this long is masked where it is the start or the end of a serial the
+# run names: 8 digits of a 32-digit serial still say which board it was, and
+# an unrelated value that ends a line and matches a known serial at either end
+# is improbable.
+_PARTIAL_HEX_DIGITS = 8
+# A cut serial the run never names (the case _SERIAL_TOKEN is there for) can
+# only be recognized by its shape, so a hex run of this many digits at the end
+# of a line is masked whatever it is. The token rule above already takes that
+# view of a standalone 32-hex value.
+_UNKNOWN_HEX_DIGITS = 24
+# Up to 31 digits: a 32-digit run is a serial the rule above masked, and a
+# longer one is a git SHA or a digest, which every rule here leaves alone.
+_HEX_LINE_END = re.compile(
+    rf"(?<![0-9A-Fa-f])[0-9A-Fa-f]{{{_PARTIAL_HEX_DIGITS},31}}(?=\n|$)"
+)
+
+
+def _mask_cut_serials(text: str, serials: Iterable[str]) -> str:
+    """Mask what a cut inside a serial left at the end of a line."""
+    known = {serial.lower() for serial in serials}
+
+    def mask(match: re.Match) -> str:
+        piece = match.group(0).lower()
+        # One digit repeated (00000000, ffffffff) names no board, and output
+        # carries such a value for its own reasons.
+        if len(set(piece)) == 1:
+            return match.group(0)
+        if len(piece) >= _UNKNOWN_HEX_DIGITS:
+            return REDACTED
+        for serial in known:
+            if len(serial) > len(piece) and (
+                serial.startswith(piece) or serial.endswith(piece)
+            ):
+                return REDACTED
+        return match.group(0)
+
+    return _HEX_LINE_END.sub(mask, text)
 
 
 def _redact(text: str, serials: Iterable[str]) -> str:
@@ -1131,7 +1181,9 @@ def _redact(text: str, serials: Iterable[str]) -> str:
             # it. A serial this long inside a longer number would be masked
             # too, which costs a reader nothing.
             text = text.replace(serial, REDACTED)
-    return text
+    # Last, so a whole serial is masked as one and only the pieces a cut left
+    # behind reach this rule.
+    return _mask_cut_serials(text, serials)
 
 
 def render_run(events: Sequence[Mapping], *, redact_serials: bool = False, transcript: bool = True) -> str:
