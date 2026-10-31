@@ -686,3 +686,75 @@ def text_lines(source) -> Iterable[str]:
     if isinstance(source, str):
         return split_lines(source)
     return source
+
+
+@dataclass(frozen=True)
+class SavedOutput:
+    """One saved file as a run's records describe it, with what read it.
+
+    ``owner`` is the run record fields naming where the file came from (its
+    phase, invocation, case, and command), and ``checks`` are the recorded
+    checks that read it. This is what the report's Output files table and the
+    GUI's file list are built from; both read it from run.jsonl, so neither
+    has to open the file to list it.
+    """
+
+    file: OutputFile
+    owner: dict
+    checks: tuple[OutputCheck, ...] = ()
+
+    @property
+    def group(self) -> str:
+        """Which test or phase the file belongs to, for grouping a list."""
+        return str(
+            self.owner.get("invocation_id") or self.owner.get("phase") or "run"
+        )
+
+
+# Event types that record a saved file: a command's own streams, and the
+# files a case's tools wrote.
+FILE_EVENTS = ("command_finished", "output_files")
+CHECKS_EVENT = "output_checks"
+_OWNER_KEYS = ("phase", "invocation_id", "case_id", "check_id", "step_id",
+               "command_id", "argv")
+
+
+def _owner(details) -> dict:
+    return {key: details[key] for key in _OWNER_KEYS if key in details}
+
+
+def saved_output(events) -> tuple[SavedOutput, ...]:
+    """Every saved file a run recorded, in the order the run produced them.
+
+    Each file carries the checks whose record names it. A file named by no
+    check carries none: a capture, or a stream no check read.
+    """
+    # One pass, so ``events`` may be a generator reading run.jsonl a line at
+    # a time (output_records). The checks are collected as they come and
+    # attached at the end, since a command's checks are recorded after its
+    # files.
+    by_path: dict[str, list[OutputCheck]] = {}
+    found: list[tuple[OutputFile, dict]] = []
+    seen: set[OutputFile] = set()
+    for event in events:
+        kind = event.get("event_type")
+        details = event.get("details") or {}
+        if kind == CHECKS_EVENT:
+            for value in details.get("checks") or []:
+                check = OutputCheck.from_dict(value)
+                for name in check.files:
+                    by_path.setdefault(name, []).append(check)
+        elif kind in FILE_EVENTS:
+            for file in saved_files(details):
+                # The same file is named by command_finished and by the
+                # note before it, so a repeat is normal; a repeat that
+                # describes the file differently is not, and listing both is
+                # the point of a table carrying hashes.
+                if file in seen:
+                    continue
+                seen.add(file)
+                found.append((file, _owner(details)))
+    return tuple(
+        SavedOutput(file, owner, tuple(by_path.get(file.path, ())))
+        for file, owner in found
+    )

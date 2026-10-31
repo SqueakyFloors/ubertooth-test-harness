@@ -18,6 +18,7 @@ from typing import Iterable, Mapping, Sequence
 from ubertooth_harness import targets
 from ubertooth_harness.events import REPORT, RUN_LOG
 from ubertooth_harness.executor import CommandResult
+from ubertooth_harness import outputfiles
 from ubertooth_harness.outputfiles import output_file_list
 from ubertooth_harness.rawlog import (
     NOTE,
@@ -229,7 +230,12 @@ def _duration(first: Mapping | None, last: Mapping | None) -> str:
 
 
 def _cell(value) -> str:
-    return str(value).replace("|", "\\|").replace("\n", " ")
+    # A line ending of any kind would end the table row, and an unescaped
+    # pipe would add a column; values come from run records, which are data.
+    text = str(value).replace("|", "\\|")
+    for ending in ("\r\n", "\n", "\r"):
+        text = text.replace(ending, " ")
+    return text
 
 
 # The registry identity key that names a device differs by kind: an Ubertooth
@@ -617,6 +623,136 @@ def _watchdog_section(run: _Run) -> list[str]:
         lines += ["````text", f"Title: {issue.get('title', '')}", ""]
         lines += str(issue.get("body", "")).splitlines()
         lines.append("````")
+    return lines
+
+
+def _known_target_section(run: _Run) -> list[str]:
+    """One line per test naming the known device it ran against, or none."""
+    if not run.tests or not run.known_targets:
+        return []
+    lines = ["", "## Known targets", "",
+             "Which device the harness drove for each test, so a capture "
+             "against a known device is told apart from one of whatever "
+             "traffic was there. The serial, port, and address are what the "
+             "registry records and the test's own ready case checks; the "
+             "firmware version is the one that device's driver requires, and "
+             "the board's own answer is in the transcript.", ""]
+    for record in run.tests:
+        invocation = record["started"]["details"].get("invocation_id", "")
+        details = run.known_targets.get(invocation)
+        if details is None:
+            # A test the host could not run drove nothing, and a run recorded
+            # before the harness kept this record says nothing either way.
+            continue
+        lines.append(f"- `{invocation}`: {details.get('summary', '')}")
+    return lines
+
+
+def _target_cell(run: _Run, invocation: str) -> str:
+    details = run.known_targets.get(invocation)
+    if details is None:
+        return ""
+    return targets.column(details.get("targets") or ())
+
+
+# Sizes in the Output files table: the magnitude a reader wants at a glance,
+# and the exact count beside it.
+_UNITS = (("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10))
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _size(count: int) -> str:
+    for name, step in _UNITS:
+        if count >= step:
+            return f"{count / step:.1f} {name} ({count} bytes)"
+    return f"{count} bytes"
+
+
+def _check_failed(check) -> bool:
+    """Did this recorded check come out against the run?
+
+    Not every kind records a reason when it fails: a step that failed on an
+    observed setting, or on a missing ``SKIP:`` line, says so in its own
+    step record and leaves the check's reason empty. So what the check
+    found decides as well.
+    """
+    if check.reason:
+        return True
+    if check.found is None:
+        return False
+    if check.kind == "forbidden":
+        return check.found
+    return not check.found
+
+
+def _checks_cell(saved) -> str:
+    """The checks that read one file, and how they came out."""
+    if not saved.checks:
+        return "none"
+    failed = [check for check in saved.checks if _check_failed(check)]
+    kinds = {}
+    for check in saved.checks:
+        kinds[check.kind] = kinds.get(check.kind, 0) + 1
+    counts = ", ".join(f"{count} {kind}" for kind, count in sorted(kinds.items()))
+    if not failed:
+        return f"{counts}: all passed"
+    named = "; ".join(
+        f"{check.name}: {check.reason or _not_found(check)}" for check in failed[:3]
+    )
+    if len(failed) > 3:
+        named += f"; and {len(failed) - 3} more"
+    return f"{counts}: {len(failed)} against the run ({named})"
+
+
+def _not_found(check) -> str:
+    if check.kind == "forbidden":
+        return f"{check.pattern!r} was found"
+    return f"{check.pattern!r} was not found"
+
+
+def _hash_cell(value: str) -> str:
+    """A SHA-256 as a code span, or the value escaped when it is not one.
+
+    A run record is data, so a value that is not a digest must not be able to
+    add a column to the table.
+    """
+    return f"`{value}`" if _SHA256.fullmatch(value) else _cell(value)
+
+
+def _output_files_section(run: _Run) -> list[str]:
+    """The files the run saved, by test, with the checks that read each one.
+
+    Together with the SHA-256 this is what lets a reader check a result
+    afterwards from the report alone, and `ubertooth-harness validate` run
+    the same checks again.
+    """
+    saved = outputfiles.saved_output(run.events)
+    if not saved:
+        return []
+    names = {
+        record["started"]["details"].get("invocation_id"):
+            record["started"]["details"].get("test_name", "")
+        for record in run.tests
+    }
+    lines = ["", "## Output files", ""]
+    groups: dict[str, list] = {}
+    for item in saved:
+        groups.setdefault(item.group, []).append(item)
+    for group, items in groups.items():
+        named = names.get(group)
+        lines += [
+            f"### {group}" + (f": {named}" if named else ""), "",
+            "| File | Stream | Size | Lines | SHA-256 | Checks |",
+            "|---|---|---|---|---|---|",
+        ]
+        for item in items:
+            lines.append(
+                f"| {_cell(item.file.path)} | {_cell(item.file.stream)} "
+                f"| {_size(item.file.bytes)} "
+                f"| {item.file.lines or ''} | {_hash_cell(item.file.sha256)} "
+                f"| {_cell(_checks_cell(item))} |"
+            )
+        lines.append("")
     return lines
 
 
@@ -1224,6 +1360,7 @@ def render_run(events: Sequence[Mapping], *, redact_serials: bool = False, trans
     lines += ["", "## Results", ""] + _results_table(run)
     lines += _known_target_section(run) + _not_applicable_section(run)
     lines += _watchdog_section(run)
+    lines += _output_files_section(run)
     if transcript:
         lines += ["", "## Transcript", "", LEGEND, "", "```text"] + _transcript(run) + ["```"]
     text = "\n".join(lines) + "\n"

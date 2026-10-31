@@ -1659,9 +1659,11 @@ a capture case ran, and `output/` when a command printed a lot):
 - `report.md`: compiled from `run.jsonl` when the run ends, including failed or
   canceled runs. It lists the setup (commits, host and platform, toolchain,
   Python, device serials and firmware, RF placement, artifact hashes) and a
-  results table, then a Watchdog section when any board was read, then the
-  full transcript. A board that reset itself puts its warning in the test's
-  Reason column too, since the test itself passed.
+  results table, then a Watchdog section when any board was read, an Output
+  files section when the run saved any (see [Checks read the output
+  files](#checks-read-the-output-files)), then the full transcript. A board
+  that reset itself puts its warning in the test's Reason column too, since
+  the test itself passed.
 
 Where a board the run used records an RF placement
 ([RF placement](#rf-placement-where-a-board-sits-on-the-bench)), the manifest
@@ -1775,6 +1777,16 @@ tools wrote (captures, `-d` dumps, and any target device's shell traffic in
 `<name>.serial.log`) are recorded the same way, in an `output_files` record
 with each file's size and SHA-256.
 
+<<<<<<< HEAD
+Each file the run saved is listed in report.md's **Output files** section,
+grouped by test (and under `build` or `preflight` for a file those phases
+saved): its path, stream, size, line count, SHA-256, and the checks that read
+it with their results. A check counts against the run when it recorded a
+reason, when an expected pattern or an observed setting was not found, or
+when a forbidden pattern was.
+
+=======
+>>>>>>> origin/main
 ### Re-running a finished run's output checks
 
 ```sh
