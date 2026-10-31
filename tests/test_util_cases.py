@@ -9,7 +9,7 @@ import time
 import unittest
 from pathlib import Path
 
-from ubertooth_harness import ledblink, util_cases
+from ubertooth_harness import ledblink, transitions, util_cases
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.stateful import StateCase
@@ -662,6 +662,8 @@ class LedBlinkSamplerTests(unittest.TestCase):
 LABELS = dict(util_cases.LISTING_LABELS)
 REPORT_ORDER = [query for query, _label in util_cases.LISTING_LABELS]
 IDENTITY = set(LABELS)
+# The option letters the listing can show, for a bundle such as -bvps.
+IDENTITY_LETTERS = {query[1] for query in IDENTITY}
 
 
 class MultiBench:
@@ -699,7 +701,7 @@ class MultiBench:
     def _expand(self, options):
         expanded = []
         for option in options:
-            if option.startswith("-") and len(option) > 2 and set(option[1:]) <= set("vVspb"):
+            if option.startswith("-") and len(option) > 2 and set(option[1:]) <= IDENTITY_LETTERS:
                 expanded += [f"-{c}" for c in option[1:]]
             else:
                 expanded.append(option)
@@ -708,6 +710,27 @@ class MultiBench:
     def _report(self, serial, query):
         command = ("ubertooth-util", "-U", serial, query)
         return self.boards[serial].run(command, timeout_s=5).stdout.splitlines()
+
+    VERSION_HOST_LINES = (
+        "Host tools version: libubertooth 1.1 (git-test), libbtbb 1.0 (git-btbb)",
+        "libbtbb loaded from: /p/lib/libbtbb.so.1",
+    )
+
+    def _versions(self):
+        """The -V answer with several boards: the host tools' lines, then the
+        firmware version and build of every board, each carrying its index."""
+        lines = list(self.VERSION_HOST_LINES)
+        for index, serial in enumerate(self.order):
+            if index in self.unreadable:
+                # One line, where the version would have been.
+                lines.append(f"Firmware version ({index}): {self.UNAVAILABLE}")
+                continue
+            board = self.boards[serial]
+            api = transitions.format_api(board.api)
+            lines.append(
+                f"Firmware version ({index}): {board.firmware} (API:{api})")
+            lines.append(f"Firmware build ({index}): {board.compile_info}")
+        return "".join(line + "\n" for line in lines)
 
     def _listing(self, queries):
         requested = [q for q in REPORT_ORDER if q in queries]
@@ -725,9 +748,8 @@ class MultiBench:
             for query in requested:
                 for line in self._report(serial, query):
                     # The report's label moves into the listing's, which
-                    # carries the index. Compile info has no label of its
-                    # own, and neither does a line that does not start with
-                    # one, so those keep the bare index prefix.
+                    # carries the index. A line that does not start with the
+                    # query's label keeps the bare index prefix.
                     label = LABELS[query]
                     if label and line.startswith(f"{label}: "):
                         value = line.removeprefix(f"{label}: ")
@@ -744,6 +766,12 @@ class MultiBench:
                                                cancellation=cancellation,
                                                on_output=on_output)
         options = list(command[1:])
+        # -V is the version command: since fork f898fe5 it ends the command
+        # and reports every attached board itself, so -U all is not refused
+        # for it and no selector is needed. -U <serial> -V falls through to
+        # that board, which prints the single-board form.
+        if "-V" in options and (options[:2] == ["-U", "all"] or "-U" not in options):
+            return self._result(command, 0, self._versions())
         if options[:2] == ["-U", "all"]:
             queries = self._expand(options[2:])
             if not queries or set(queries) - IDENTITY:
@@ -830,7 +858,7 @@ class MultiBoardCaseTests(unittest.TestCase):
         full = definition.command_cases(full_invocation.arguments,
                                         full_invocation.resources,
                                         full_invocation.resource_identities)
-        self.assertEqual(7, len(full))
+        self.assertEqual(9, len(full))
         past = next(c for c in full if c.case_id == "index-past-end-refused")
         # No option: a buggy open must not send a request to another device.
         self.assertEqual(("ubertooth-util", "-U2"), past.steps[0].resolve_argv({}))
@@ -864,17 +892,76 @@ class MultiBoardCaseTests(unittest.TestCase):
             "board 1 query read failed",
             check(f"Serial No (0): {A}\nSerial No (1): read failed\n"),
         )
-        # The unlabelled -V form names the query in the value instead.
         identity = util_cases.identity_listing_check((A,))
+
+        def block(board_id="Board ID Number (0): 1 (Ubertooth One)",
+                  firmware="Firmware version (0): bluetooth_rxtx git-x (API:1.37)",
+                  part="Part ID (0): 1234abcd",
+                  serial=f"Serial No (0): {A}"):
+            # -bvps in ubertooth-util's report order.
+            return "".join(line + "\n"
+                           for line in (board_id, firmware, part, serial))
+
+        self.assertEqual("", identity(block()))
         self.assertIn("board 0 query read failed",
-                      identity("0: compile info read failed\n"))
-        # An unlabelled board ID line is a regression, even though -V's is not.
-        block = (f"0: 1\n"
-                 f"Firmware version (0): bluetooth_rxtx git-x (API:1.37)\n"
-                 f"0: bluetooth_rxtx git-x (API:1.37)\n"
-                 f"Part ID (0): 1234abcd\n"
-                 f"Serial No (0): {A}\n")
-        self.assertIn("not 'Board ID Number'", identity(block))
+                      identity(block(part="Part ID (0): read failed")))
+        # An unlabelled line is a regression: every query the listing can
+        # show prints a label of its own.
+        self.assertIn("not 'Board ID Number'", identity(block(board_id="0: 1")))
+        # -V is not one of the listed queries, so its lines are not expected
+        # among them: five lines per board is not four.
+        self.assertIn("is not 4 per board", identity(
+            block() + "Firmware build (0): ubertooth git-x (u@h) ts\n"))
+
+    def test_version_listing_check(self):
+        check = util_cases.version_listing_check(2)
+        HEAD = ("Host tools version: libubertooth 1.1 (git-x), libbtbb 1.3 (git-b)",
+                "libbtbb loaded from: /p/lib/libbtbb.so.1")
+
+        def answer(*boards, head=HEAD):
+            return "".join(line + "\n" for line in (*head, *boards))
+
+        boards = (
+            "Firmware version (0): bluetooth_rxtx git-x (API:1.37)",
+            "Firmware build (0): ubertooth git-x (u@h) ts",
+            "Firmware version (1): bluetooth_rxtx git-x (API:1.37)",
+            "Firmware build (1): ubertooth git-x (u@h) ts",
+        )
+        self.assertEqual("", check(answer(*boards)))
+        # The host tools' two lines open the answer, in that order and once
+        # each: a missing, repeated, or reordered one is not that answer.
+        for head in ((), HEAD[:1], HEAD[::-1],
+                     ("Host tools version: 1.1", HEAD[1])):
+            self.assertIn("does not open with the host tools' version",
+                          check(answer(*boards, head=head)), head)
+        # A repeated head line lands where board 0's version should be.
+        self.assertIn("line is not", check(answer(*boards, head=HEAD + HEAD[1:])))
+        self.assertIn("ends before the Firmware version of board 1",
+                      check(answer(*boards[:2])))
+        self.assertIn("ends before the Firmware build of board 1",
+                      check(answer(*boards[:3])))
+        self.assertIn("carries 1 line(s) after the last board",
+                      check(answer(*boards, boards[3])))
+        self.assertIn("expected the Firmware version of board 1 here",
+                      check(answer(*boards[:2], boards[3], boards[2])))
+        # A board that could not be opened, and a read that failed, get one
+        # line where two would be, which is what the fork prints.
+        self.assertIn("board 1 could not be opened", check(answer(
+            *boards[:2],
+            "Firmware version (1): unavailable, in use by another program")))
+        self.assertIn("board 1 Firmware version is not a reading", check(answer(
+            *boards[:2], "Firmware version (1): read failed")))
+        self.assertIn("board 1 Firmware build is not a reading", check(answer(
+            *boards[:3], "Firmware build (1): read failed")))
+        self.assertIn("board 1 Firmware build is not a reading", check(answer(
+            *boards[:3], "Firmware build (1): not reported")))
+        # Lines with no index name no board, which is the single-board form
+        # the fork prints only when one board is attached.
+        self.assertIn("line is not", check(answer(
+            *(line.replace(" (0)", "").replace(" (1)", "") for line in boards))))
+        # A value that is not a build string fails on its own line.
+        self.assertIn("board 1 Firmware build line", check(answer(
+            *boards[:3], "Firmware build (1): not a build string")))
 
     def test_smoke_passes_on_fork_main_and_guards_hold(self):
         bench = MultiBench((A, B))

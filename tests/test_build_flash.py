@@ -119,7 +119,16 @@ class FakeBoards:
             else:
                 output = f"Firmware version: {self.revisions[serial]} (API:1.07)\n"
         elif command[-1] == "-V":
-            output = f"Compile info: ubertooth {self.revisions[command[2]]} (builder@host)\n"
+            # The whole answer one board gives since fork f898fe5; the
+            # compile-info check reads the build string off its last line.
+            revision = self.revisions[command[2]]
+            output = (
+                f"Host tools version: libubertooth 1.1 ({revision}), "
+                "libbtbb 1.0 (git-btbb)\n"
+                "libbtbb loaded from: /p/lib/libbtbb.so.1\n"
+                f"Firmware version: {revision} (API:1.07)\n"
+                f"Firmware build: ubertooth {revision} (builder@host) timestamp\n"
+            )
         elif command[-1] == "-s":
             output = f"Serial No: {command[2]}\n"
         else:
