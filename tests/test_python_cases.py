@@ -209,10 +209,16 @@ def bare_listing(*serials):
     return "".join(f"{index}: {serial}\n" for index, serial in enumerate(serials))
 
 
+def labelled_line(index, value):
+    """One line of that listing. The value is a serial, or the reason a board
+    gives when it has none."""
+    return f"Serial No ({index}): {value}\n"
+
+
 def labelled_listing(*serials):
     """`ubertooth-util -U all -s` since fork 201c3c4, which keeps each
     report's own label and puts the board's index in it."""
-    return "".join(f"Serial No ({index}): {serial}\n"
+    return "".join(labelled_line(index, serial)
                    for index, serial in enumerate(serials))
 
 
@@ -228,10 +234,11 @@ def labelled_listing(*serials):
 #   a bad option       is named in the C tools' wording (5310a5d, #481).
 #
 # It is trimmed to what the cases exercise, so it is not the whole of main:
-# the "no Ubertooth devices found" carve-out in list_interfaces(), the
-# -V option, and the stream and exit-status work of #806, #890, #919, #925,
-# #927, #937 and #980 are not modelled, and report_bad_option()'s other four
-# outcomes come out in the words of the one these cases make.
+# the "no Ubertooth devices found" carve-out in list_interfaces() (which is
+# why the stderr it passes on is not weighed here), the -V option, and the
+# stream and exit-status work of #806, #890, #919, #925, #927, #937 and #980
+# are not modelled, and report_bad_option()'s other four outcomes come out in
+# the words of the one these cases make.
 BARE_INTERFACE_LINE = r"""r'(\d+): ([0-9a-fA-F]+)$'"""
 LABELLED_INTERFACE_LINE = r"""r'Serial No \((\d+)\): ([0-9a-fA-F]+)$'"""
 _D04F79E_LISTING = '''def list_interfaces():
@@ -244,9 +251,11 @@ _D04F79E_LISTING = '''def list_interfaces():
                   % (m.group(2), m.group(2)))
 '''
 _MAIN_LISTING = '''def list_interfaces():
-    proc = Popen(['ubertooth-util', '-U', 'all', '-s'], stdout=PIPE,
+    proc = Popen(['ubertooth-util', '-U', 'all', '-s'], stdout=PIPE, stderr=PIPE,
                  universal_newlines=True)
-    out = proc.communicate()[0]
+    out, errors = proc.communicate()
+    for line in errors.splitlines():
+        print(line, file=sys.stderr)
     for line in out.split('\\n'):
         m = re.match(''' + LABELLED_INTERFACE_LINE + ''', line.strip())
         if m:
@@ -284,6 +293,7 @@ def git(*args, cwd):
 
 
 _LABELLED_SERIAL_LINE = re.compile(r"\ASerial No \(\d+\): \S")
+_BARE_SERIAL_LINE = re.compile(r"\A\d+: \S")
 
 
 def _script_listing_era(extcap):
@@ -298,14 +308,25 @@ def _script_listing_era(extcap):
 
 
 def _output_listing_era(util_output):
-    """Which listing a stub ubertooth-util prints, from its first line, which
-    has to be a whole listing record either way. An empty listing is not
-    classified: it belongs to no era."""
+    """Which listing a stub ubertooth-util prints, from its lines, each of
+    which has to be a whole listing record of one form or the other.
+
+    Returns None where there is no era to compare: an empty listing, output
+    that is not a listing at all (a diagnostic, say), or a mix of the two
+    forms, which no ubertooth-util prints and so is nobody's era.
+    """
+    eras = set()
     for line in util_output.splitlines():
-        if not line.strip():
+        text = line.strip()
+        if not text:
             continue
-        return "labelled" if _LABELLED_SERIAL_LINE.match(line.strip()) else "bare"
-    return None
+        if _LABELLED_SERIAL_LINE.match(text):
+            eras.add("labelled")
+        elif _BARE_SERIAL_LINE.match(text):
+            eras.add("bare")
+        else:
+            return None
+    return eras.pop() if len(eras) == 1 else None
 
 
 class FakeFork:
@@ -352,9 +373,15 @@ class FakeFork:
         }
 
 
-def run_case(case, env):
+def case_result(case, env):
+    """The case's command run as the harness runs it, as a CommandResult."""
     result = subprocess.run(case.argv, env=env, capture_output=True, text=True, timeout=60)
-    command = CommandResult(case.argv, result.returncode, result.stdout, result.stderr, 0.1, False)
+    return CommandResult(case.argv, result.returncode, result.stdout, result.stderr,
+                         0.1, False)
+
+
+def run_case(case, env):
+    command = case_result(case, env)
     return case.missing_tool(command), case.result_failure(command)
 
 
@@ -495,8 +522,8 @@ class ExtcapInterfaceCaseTests(unittest.TestCase):
         # Fork 201c3c4 (SqueakyFloors/ubertooth#610) labelled every listed
         # line and btle-extcap.py's INTERFACE_LINE followed. Either half on
         # its own finds no serial in the other's listing, so every case that
-        # expects an interface fails on its listing pattern; the stray word is
-        # still refused, and nothing is listed either way.
+        # expects an interface fails on its listing pattern; the stray word
+        # is still refused.
         listing_cases = {"extcap-interfaces", "extcap-interfaces-serials",
                          "extcap-interfaces-version", "extcap-interfaces-version-word"}
         for util_output, extcap, era in (
@@ -512,13 +539,16 @@ class ExtcapInterfaceCaseTests(unittest.TestCase):
                     self.assertIn("expected output pattern", failures[case_id])
 
     def test_mixing_the_eras_by_accident_is_refused(self):
-        with tempfile.TemporaryDirectory() as directory:
-            for util_output, extcap in ((bare_listing(SERIAL_A), EXTCAP),
-                                        (labelled_listing(SERIAL_A), EXTCAP_D04F79E)):
+        for util_output, extcap in ((bare_listing(SERIAL_A), EXTCAP),
+                                    (labelled_listing(SERIAL_A), EXTCAP_D04F79E)):
+            with tempfile.TemporaryDirectory() as directory:
                 with self.assertRaisesRegex(AssertionError, "different eras"):
                     FakeFork(directory, util_output, extcap)
-            # An empty listing belongs to no era, so it is allowed with either.
-            FakeFork(directory, "", EXTCAP)
+        # Output with no listing in it belongs to no era, so it is allowed
+        # with either script: an empty listing, and a diagnostic.
+        for util_output in ("", "error: no Ubertooth devices found\n"):
+            with tempfile.TemporaryDirectory() as directory:
+                FakeFork(directory, util_output, EXTCAP)
 
     def test_the_old_index_listing_fails(self):
         extcap = EXTCAP[:EXTCAP.index("def list_interfaces")] + OLD_LISTING.lstrip()
@@ -539,18 +569,17 @@ class ExtcapInterfaceCaseTests(unittest.TestCase):
         # ubertooth-util exits 1 for it. Since 4633988 (#766) the script lists
         # the boards it could name and then fails too, so the readable board
         # reaches standard output and the case fails on the exit status.
-        listing = labelled_listing(SERIAL_A, LABELLED_UNAVAILABLE)
+        listing = (labelled_listing(SERIAL_A)
+                   + labelled_line(1, LABELLED_UNAVAILABLE))
         with tempfile.TemporaryDirectory() as directory:
             fork = FakeFork(directory, listing, util_status=UTIL_PARTIAL_STATUS)
             case = self.cases("comprehensive", [SERIAL_A])["extcap-interfaces"]
-            result = subprocess.run(case.argv, env=fork.env, capture_output=True,
-                                    text=True, timeout=60)
+            result = case_result(case, fork.env)
         self.assertEqual(
             f"interface {{value=ubertooth{SERIAL_A}}}"
             f"{{display=Ubertooth One {SERIAL_A}}}\n", result.stdout)
         self.assertEqual(UTIL_PARTIAL_STATUS, result.returncode)
-        self.assertIn("exited 1", case.result_failure(CommandResult(
-            case.argv, result.returncode, result.stdout, result.stderr, 0.1, False)))
+        self.assertIn("exited 1", case.result_failure(result))
 
     def test_case_sets(self):
         self.assertEqual(list(COMPREHENSIVE_INTERFACES[:3]),
