@@ -1231,6 +1231,15 @@ class NamedTestSequencer:
             },
             max_bytes=MANIFEST_MAX_BYTES,
         )
+        if not started_externally:
+            # A lease of a command that was gone, which this run took over to
+            # get its devices. It does not promise the device was idle, so it
+            # belongs in the run record and not only on the standard error of
+            # whoever started the run. A run that had a publisher before this
+            # one (one that builds) recorded them before its build, which may
+            # be where it fails.
+            for taken_over in manifest.lease_takeovers:
+                publisher.emit("lease_takeover", "warning", json_value(taken_over))
         publisher.emit(
             "host_capabilities",
             "passed",

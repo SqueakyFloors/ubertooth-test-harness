@@ -1419,6 +1419,18 @@ keeps coming back cannot make a command spin. A board whose lease could not
 be taken over (another command was taking one over at that moment) is
 reported with the same explanation the host lock gets below.
 
+A `run-suite` that took a lease over carries that into its run record: a
+`lease_takeover` record in run.jsonl (the board, the record of the holder
+that was gone, why it was read as gone, and the lock file), a line in the
+transcript, and a "Leases taken over" row in report.md once the run reaches
+its manifest (a run that fails in its build has the record and the
+transcript line). Since a takeover does
+not promise the board was idle, that is what to look at when a later result
+in the run looks odd — and a run started by a deployed runner leaves no
+other trace, because the line on standard error goes to the runner's own
+log. `lease` keeps that line and records nothing else: it is a person at a
+terminal. (`boards` never takes a lease over at all.)
+
 The host lock is never taken over. It is the only thing that keeps USB power
 changes and firmware writes on a host from overlapping, and what still holds
 its file could be a firmware write in flight — a process that left the

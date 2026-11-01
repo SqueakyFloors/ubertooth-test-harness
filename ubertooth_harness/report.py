@@ -18,6 +18,7 @@ from typing import Iterable, Mapping, Sequence
 from ubertooth_harness import targets
 from ubertooth_harness.events import REPORT, RUN_LOG
 from ubertooth_harness.executor import CommandResult
+from ubertooth_harness.leases import describe_holder, describe_takeover
 from ubertooth_harness import outputfiles
 from ubertooth_harness.outputfiles import output_file_list
 from ubertooth_harness.rawlog import (
@@ -468,6 +469,7 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
             "; ".join(f"{item.get('resource')} {item.get('lock')}" for item in external)
             + " (held for the whole run)",
         ))
+    rows.extend(_takeover_rows(manifest))
     rows.extend(_placement_rows(run))
     if artifacts:
         rows.append((
@@ -475,6 +477,29 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
             "; ".join(f"{a['name']} sha256 {a['sha256'][:12]}" for a in artifacts),
         ))
     return rows
+
+
+def _takeover_rows(manifest: Mapping) -> list[tuple[str, str]]:
+    """Leases of commands that were gone and this run took over to start.
+
+    A takeover does not promise the device was idle: something still held
+    that lock file, and it may have been a leftover command on the device.
+    So a reader of an odd result later in the run needs to see it here, not
+    only on the standard error of whoever started the run.
+    """
+    taken_over = manifest.get("lease_takeovers") or []
+    if not taken_over:
+        return []
+    return [(
+        "Leases taken over",
+        "; ".join(
+            f"{item.get('resource')} at {item.get('taken_at')} "
+            f"from {describe_holder(item.get('holder') or {})}: {item.get('reason')} "
+            f"({item.get('lock')})"
+            for item in taken_over
+        ) + " (a takeover does not promise the device was idle; a leftover "
+        "command of that session may have been using it)",
+    )]
 
 
 def _flash_row(run: _Run, built: bool) -> str:
@@ -1158,6 +1183,8 @@ def _transcript(run: _Run) -> list[str]:
             line(event, f"=== TEST {details.get('invocation_id')}: {details.get('test_name')} on {details.get('host')}{suffix} ===")
         elif kind == "known_target":
             line(event, f"[M] {details.get('summary', '')}")
+        elif kind == "lease_takeover":
+            line(event, f"[M] {describe_takeover(details)}")
         elif kind == "test_finished":
             line(
                 event,

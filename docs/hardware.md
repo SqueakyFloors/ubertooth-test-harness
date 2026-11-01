@@ -475,7 +475,9 @@ anything that switches USB power or writes firmware also takes the host lock.
 A device lease left behind by a session that is gone (a dropped connection, a
 batch kill) is taken over by the next command that wants the device, which
 says so and what is left of that command's process group, so a leftover
-command still on the device can be found. The host lock is never taken over,
+command still on the device can be found; a run also records the takeover in
+its run record and report, because it does not promise the device was idle.
+The host lock is never taken over,
 because a firmware write may still be running; its error says what to look
 for. Commands waiting for a device are served in the order they arrived, so a
 run that wants several devices is not left behind by short leases on one of
