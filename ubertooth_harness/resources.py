@@ -28,6 +28,23 @@ class RegistryError(ValueError):
     """Resource configuration or selection is invalid."""
 
 
+class MissingResource(RegistryError):
+    """This registry does not have a host or device a plan asked for.
+
+    The one refusal that says nothing about the plan: the same plan is
+    compiled against every bench's registry, and a bench that has no ESP32
+    peer, or is not the Linux host a step names, simply cannot run that step.
+    Run planning records it as not applicable (planner.py); explicit
+    validation (``validate-plan --hardware``) still refuses it, because there
+    the registry is named on purpose.
+
+    A name this registry does have, used wrongly (an Ubertooth asked for as a
+    host, a DK asked for a role it does not declare), and a name that differs
+    from a registered one only in case, are mistakes in the plan: they stay
+    plain ``RegistryError`` and fail everywhere.
+    """
+
+
 STARTECH_DRIVER = "startech managed USB hub"
 # Port 4 carries the hub's management controller; only 1-3 are DUT ports.
 STARTECH_PORTS = (1, 2, 3)
@@ -381,6 +398,28 @@ class FileResourceRegistry:
         except KeyError as error:
             raise RegistryError(f"unknown resource '{alias}'") from error
 
+    def named(self, alias, what: str = "resource") -> Resource:
+        """One resource a plan named, telling absence from a misspelling.
+
+        A name this registry does not have is absence (``MissingResource``):
+        another bench may well have it. A name that matches a registered one
+        but for its case cannot be absence, since aliases are written by
+        hand in both files, so it is reported as the typo it is.
+        """
+        if not isinstance(alias, str):
+            raise RegistryError(f"{what} must be named by alias, not {alias!r}")
+        if alias in self.resources:
+            return self.resources[alias]
+        close = sorted(
+            name for name in self.resources if name.lower() == alias.lower()
+        )
+        if close:
+            raise RegistryError(
+                f"this registry has no {what} '{alias}'; it has "
+                f"'{close[0]}', so check the spelling in the plan"
+            )
+        raise MissingResource(f"this registry has no {what} '{alias}'")
+
     def hosts(self) -> tuple[Resource, ...]:
         return tuple(
             sorted(
@@ -402,7 +441,7 @@ class FileResourceRegistry:
         else:
             raise RegistryError("hosts must be each or explicit host aliases")
         for alias in aliases:
-            if self.get(alias).type != "Host":
+            if self.named(alias, "host").type != "Host":
                 raise RegistryError(f"resource {alias} is not a Host")
         return aliases
 
@@ -477,7 +516,7 @@ class FileResourceRegistry:
             if alias is None:
                 alias = host_resource.defaults.get(resource_type)
             if alias is None:
-                raise RegistryError(
+                raise MissingResource(
                     f"host {host} has no default {resource_type}"
                     + (f" for the {role} role" if role else "")
                 )
@@ -497,7 +536,7 @@ class FileResourceRegistry:
             return (alias,)
         if selector == "each":
             if not eligible:
-                raise RegistryError(f"host {host} has no {resource_type} resources")
+                raise MissingResource(f"host {host} has no {resource_type} resources")
             if not placement:
                 return eligible
             if not matching:
@@ -505,7 +544,7 @@ class FileResourceRegistry:
             return matching
         if selector in ("any", "random"):
             raise RegistryError(f"ambiguous selector '{selector}' is unsupported")
-        resource = self.get(selector)
+        resource = self.named(selector, resource_type)
         if resource.type != resource_type or resource.attached_to != host:
             raise RegistryError(
                 f"resource {selector} is not a {resource_type} attached to {host}"

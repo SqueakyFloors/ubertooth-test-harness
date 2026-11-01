@@ -47,6 +47,15 @@ self-reset is reported and judged by a person, not failed
 `Exclusive Ubertooth topology`, and `MAC polling soak` must state their
 platforms.
 
+**Hardware the bench has not got.** A step whose `hosts:` name a host this
+registry does not have, or whose hardware roles no selected host can bind
+(no ESP32 Classic peer, no DK, no default for the role), is left out before
+the run as not applicable, the same way a platform mismatch is. So a plan
+every host runs may still hold a step for hardware only one bench has.
+`validate-plan --hardware <registry>` refuses the same absence instead, since
+there the bench is named on purpose (README, "Hardware a registry has not
+got").
+
 **RF placement.** Every test with a hardware role also accepts `rf:`, one
 requirement per role, which says what the role's placement on the bench must
 be: `antenna`, `min_attenuation_db`, and `max_attenuation_db`

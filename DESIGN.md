@@ -696,6 +696,20 @@ Ubertooth topology`, and `MAC polling soak` must state their platforms and
 keep the argument required; the flash reliability compatibility view
 (`plan.flash_steps`) is built per listed platform.
 
+One plan is compiled against every bench's registry, so hardware the registry
+has not got is the one refusal that says nothing about the plan: a `hosts:`
+alias this registry does not have, and a host with no device for a role the
+test binds (`resources.MissingResource`), are recorded as not applicable and
+left out, so a step for one bench's hardware does not stop every other bench
+running the plan. `PlanCompiler.compile_suite(strict_hardware=True)` makes
+the same absence a `PlanningError` instead, and `validate-plan --hardware`
+uses it: a registry named on the command line is the bench being checked
+against, so a host or role it cannot provide is a typo or a bench set up
+differently. A name the registry does have, used as something it is not, and
+a name that differs from a registered one only in case, stay plan errors
+everywhere; so does a role or argument name the catalog does not know, which
+is refused at load with no registry at all.
+
 Host version, firmware version, compile identity, and serial identity are
 mandatory generated preflight checks rather than optional suite items. Their
 catalog/check implementations remain reusable for direct diagnostics.

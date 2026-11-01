@@ -175,6 +175,37 @@ roles may name each one by alias or narrow it by RF placement, but not with
 discovery is reconciled as present/missing/unknown before execution and never
 silently reassigns an alias.
 
+### Hardware a registry has not got
+
+One plan is compiled against every bench's registry, so a step may name a
+host this registry has not got, or a device no host here has. Run planning
+records that as not applicable and leaves the step out, the way it leaves out
+a host whose platform the step does not list:
+
+- a `hosts:` alias this registry does not have (`this registry has no host
+  'Host_Linux'`);
+- a host with no device for a hardware role the test binds (`host Host_Mac
+  has no default ESP32 Classic peer for the acceptor role`, `host Host_Mac
+  has no nRF52840 DK resources`).
+
+So the release plan, which every registered host runs, can hold a step for
+hardware only the bench host has: the other hosts, and the other registries,
+record it and run the rest. A suite with nothing this registry can run is
+still an error, and it names each step it left out.
+
+`validate-plan --hardware <registry>` is the strict one: there the registry
+is named on purpose, so the same absence fails. That is what catches a plan
+entry for hardware a bench is meant to provide, and CI validates every plan
+against [`hardware.example.yaml`](hardware.example.yaml) that way.
+
+Two refusals are mistakes in the plan rather than absence, and fail wherever
+the plan is compiled: an alias that differs from a registered one only in
+case (`it has 'Host_Linux', so check the spelling in the plan`), and a
+registered alias used as something it is not (`resource UT_Linux0 is not a
+Host`, `resource DK_Linux0 is not a Ubertooth attached to Host_Linux`). A
+role or argument name the test does not have is refused when the plan loads,
+with no registry at all.
+
 ### RF placement: where a board sits on the bench
 
 A unit may record its RF placement, so a test can ask for a weak link and a
@@ -617,9 +648,11 @@ section, a `Not applicable cases` column, and a `Host can run` row in report.md,
 `not_applicable_cases` and `not_applicable_tests` in the run summary, and
 `not applicable` in the web GUI. `run-suite --dry-run` prints the same decision
 for every case before any build, lease, or run. A plan entry that no host it
-names can run (no case applies on any of them) fails planning. A test whose
-every case is not applicable finishes `not_applicable` and does not fail the
-run.
+names can run (no case applies on any of them) fails planning, unless what
+the hosts lack is the hardware it binds, which is recorded instead (see
+[Hardware a registry has not got](#hardware-a-registry-has-not-got)). A test
+whose every case is not applicable finishes `not_applicable` and does not
+fail the run.
 
 | Needs | Cases | Not applicable when |
 |---|---|---|

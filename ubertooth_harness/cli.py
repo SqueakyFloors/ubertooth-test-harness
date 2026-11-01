@@ -642,7 +642,13 @@ def _validate(
         compiler = PlanCompiler(catalog, registry)
         selected_suites = (suite,) if suite else tuple(plan.suites)
         for suite_name in selected_suites:
-            compiled = compiler.compile_suite(plan, suite_name)
+            # Strict: a registry named on the command line is the bench the
+            # plan is being checked against, so a host or role it has not got
+            # is a typo in the plan or a bench set up differently, not a step
+            # to leave out. Run planning is the permissive one.
+            compiled = compiler.compile_suite(
+                plan, suite_name, strict_hardware=True
+            )
             invocations = compiled.invocations
             print(f"compiled {suite_name}: {len(invocations)} invocation(s)")
             for item in compiled.not_applicable:
