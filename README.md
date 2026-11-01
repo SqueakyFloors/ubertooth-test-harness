@@ -1426,8 +1426,8 @@ over" row in report.md, and a line in the transcript. Since a takeover does
 not promise the board was idle, that is what to look at when a later result
 in the run looks odd — and a run started by a deployed runner leaves no
 other trace, because the line on standard error goes to the runner's own
-log. `lease` and `boards` are a person at a terminal, so they say it there
-and nowhere else.
+log. `lease` keeps that line and records nothing else: it is a person at a
+terminal. (`boards` never takes a lease over at all.)
 
 The host lock is never taken over. It is the only thing that keeps USB power
 changes and firmware writes on a host from overlapping, and what still holds

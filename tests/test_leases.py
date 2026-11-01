@@ -14,8 +14,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from ubertooth_harness import leases
+from ubertooth_harness import cli, leases
 from ubertooth_harness.cli import main
+from ubertooth_harness.manifest import ManifestError
 from ubertooth_harness.report import _Run, _setup_rows
 from ubertooth_harness.resources import FileResourceRegistry
 from ubertooth_harness.topology import PowerIsolationAction
@@ -296,7 +297,7 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
         self.assertEqual("gone-agent", taken["holder"]["owner"])
         self.assertEqual(record["pid"], taken["holder"]["pid"])
         self.assertIn(f"pid {record['pid']}", taken["reason"])
-        self.assertRegex(taken["at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}$")
+        self.assertRegex(taken["taken_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}$")
         # The line on standard error is that record, said once.
         self.assertEqual([leases.describe_takeover(taken)], self.notes)
 
@@ -796,16 +797,82 @@ class LeaseCliTests(RawHoldMixin, unittest.TestCase):
         self.assertIn("a takeover does not promise the device was idle", report)
         self.assertIn("[M] UT_0 was held by a lease that no longer holds it", report)
 
-    def test_a_run_that_took_over_nothing_records_no_takeover(self):
-        rows = dict(_setup_rows(_Run([{
+    def test_a_run_that_fails_before_its_manifest_still_records_a_takeover(self):
+        """The record must not wait for the manifest: a build can fail first.
+
+        A run that builds writes its first records before the build, and a
+        flash before preflight is where a board that was just taken over
+        would fail — which is exactly when a reader needs to know.
+        """
+        from tests.test_cli import make_source
+
+        source, _short = make_source(self.root)
+        kgv = self.root / "early-kgv.dfu"
+        kgv.write_bytes(b"kgv")
+        test = self.root / "early-test.dfu"
+        test.write_bytes(b"test")
+        plan = self.root / "early.yaml"
+        plan.write_text(textwrap.dedent(f"""\
+            plan: takeover cli
+            suites:
+              slow:
+                - Flash reliability:
+                    hosts: each
+                    platforms: [{PLATFORM}]
+                    Ubertooth: default
+                    flashes: 2
+                    image sequence: [test build, KGV]
+                    KGV sha256: {hashlib.sha256(b"kgv").hexdigest()}
+                    KGV revision: 2020-12-R1
+            """))
+        output = self.root / "runs"
+        self.hold_raw(self.lease_dir, A, dead_holder())
+        with mock.patch.object(cli, "_prepare_run",
+                               side_effect=ManifestError("artifact vanished")):
+            code, _out, _err = self._main(
+                "run-suite", "--plan", str(plan), "--suite", "slow",
+                "--hardware", str(self.hardware), "--host", "Host_Local",
+                "--ubertooth-source", str(source), "--ubertooth-ref", "HEAD",
+                "--libbtbb-source", str(source), "--libbtbb-ref", "HEAD",
+                "--artifact", f"test build={test}", "--artifact", f"KGV={kgv}",
+                "--run-id", "failed-early", "--output", str(output),
+                "--lease-dir", str(self.lease_dir),
+            )
+        self.assertEqual(2, code)
+        events = [json.loads(line) for line
+                  in (output / "failed-early" / "run.jsonl").read_text().splitlines()]
+        types = [event["event_type"] for event in events]
+        self.assertNotIn("manifest", types)  # the run never got that far
+        self.assertEqual(1, types.count("lease_takeover"), types)
+        self.assertEqual("UT_0", events[types.index("lease_takeover")]
+                         ["details"]["resource"])
+        self.assertEqual("failed", events[-1]["status"])
+
+    def _report_rows(self, **manifest):
+        return dict(_setup_rows(_Run([{
             "run_id": "r", "event_type": "manifest",
             "timestamp": "2026-01-01T00:00:00.000",
-            "details": {"manifest": {"leases": [
-                {"resource": "UT_0", "key": A.key, "acquired_at": "2026-01-01"},
-            ]}},
+            "details": {"manifest": {
+                "leases": [{"resource": "UT_0", "key": A.key,
+                            "acquired_at": "2026-01-01T00:00:00.000"}],
+                **manifest,
+            }},
         }])))
-        self.assertIn("Board leases", rows)
-        self.assertNotIn("Leases taken over", rows)
+
+    def test_the_report_names_a_taken_over_lease_beside_the_leases(self):
+        taken_over = leases.takeover_record(
+            A, self.lease_dir / f"{A.key}.lock", "its process (pid 7) is gone",
+            {"owner": "gone-agent", "pid": 7},
+        )
+        rows = self._report_rows(lease_takeovers=[taken_over])
+        self.assertTrue(rows["Board leases"].startswith("UT_0 since "))
+        self.assertIn(f"UT_0 at {taken_over['taken_at']} from gone-agent, pid 7: "
+                      "its process (pid 7) is gone", rows["Leases taken over"])
+        self.assertIn(str(self.lease_dir / f"{A.key}.lock"), rows["Leases taken over"])
+        # A run that took nothing over says nothing, and an older record
+        # (from before this was recorded at all) reads the same way.
+        self.assertNotIn("Leases taken over", self._report_rows(lease_takeovers=[]))
+        self.assertNotIn("Leases taken over", self._report_rows())
 
     def test_boards_lists_free_and_held_boards(self):
         with leases.acquire([B], holder("agent-7"), directory=self.lease_dir):

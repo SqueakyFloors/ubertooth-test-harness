@@ -493,7 +493,7 @@ def _takeover_rows(manifest: Mapping) -> list[tuple[str, str]]:
     return [(
         "Leases taken over",
         "; ".join(
-            f"{item.get('resource')} at {item.get('at')} "
+            f"{item.get('resource')} at {item.get('taken_at')} "
             f"from {describe_holder(item.get('holder') or {})}: {item.get('reason')} "
             f"({item.get('lock')})"
             for item in taken_over

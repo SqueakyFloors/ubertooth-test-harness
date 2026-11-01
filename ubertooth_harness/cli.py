@@ -294,6 +294,21 @@ def _record_libbtbb_pin(publisher, sources) -> None:
         publisher.emit(libbtbbpin.EVENT, check.status, check.details())
 
 
+def _record_lease_takeovers(publisher, leases) -> None:
+    """Record every lease this run took over to get its devices (#224).
+
+    A takeover does not promise the device was idle, so the run record
+    carries it: the standard error line the takeover printed is the only
+    other trace, and a run started by a deployed runner leaves that in the
+    runner's own log. The sequencer records them for a run that has no
+    publisher yet when it starts.
+    """
+    if leases is None:
+        return
+    for taken_over in leases.takeovers:
+        publisher.emit("lease_takeover", "warning", dict(taken_over))
+
+
 def _build_command(args: argparse.Namespace) -> int:
     sources = _resolve_sources(args)
     if Path(args.output).exists():
@@ -945,6 +960,9 @@ def _run_leased(
             "run_started", "running",
             run_started_details(plan.name, args.suite, args.host, sources),
         )
+        # Before the build, which may be where the run fails: a run that
+        # took a device over says so whatever happens next.
+        _record_lease_takeovers(publisher, leases)
         try:
             _record_libbtbb_pin(publisher, sources)
         except BaseException as error:

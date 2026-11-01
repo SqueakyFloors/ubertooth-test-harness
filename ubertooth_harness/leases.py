@@ -1137,7 +1137,7 @@ def takeover_record(board: Board, path: Path, reason: str, dead: Mapping) -> dic
         "lock": str(path),
         "reason": reason,
         "holder": _recorded_holder(dead),
-        "at": datetime.datetime.now(datetime.timezone.utc)
+        "taken_at": datetime.datetime.now(datetime.timezone.utc)
         .replace(tzinfo=None).isoformat(timespec="milliseconds"),
     }
 
