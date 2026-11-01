@@ -1366,10 +1366,12 @@ def _mask_cut_serials(text: str, serials: Sequence[str]) -> str:
 # N will ever carry, and nothing bounds where it may be looked for. Such a
 # shape is masked over the page, and for that it has to say enough about the
 # board to be worth matching ordinary text: four characters of its own,
-# counting the punctuation, where a shape read inside a run needs two. One
-# character is where the line is drawn in either case, because the shape of
-# a serial with a single letter in it (`Na`) would cut that letter out of
-# every word of the report.
+# counting the punctuation, where a shape read inside a run needs two.
+# A shape with one character of its own (`Na`, a serial of 31 digits and a
+# letter) is left alone either way, because masking it would take that
+# letter out of every word of the report; one with two or three of its own
+# is left alone where it has to be looked for over the page, which leaves a
+# bridge serial such as `1a.2b` its shape.
 _SHAPE_MIN_LETTERS = 4
 _SHAPE_MIN_OWN_CHARS = 2
 _LOOSE_SHAPE_MIN_OWN_CHARS = 4
@@ -1379,6 +1381,9 @@ _SHAPE_TOKEN = re.compile(
 # A shape a run of hex letters and N can hold, so one the rules read there.
 _SHAPE_IN_A_RUN = re.compile(r"[A-Fa-fN]+")
 _SHAPE_LETTER = re.compile(r"[A-Fa-f]")
+# The runs line_shape replaced, counted in the serial rather than in its
+# shape, because a serial may hold an N of its own.
+_DIGIT_RUN = re.compile(r"\d+")
 
 
 def _shape_letters(token: str) -> int:
@@ -1450,10 +1455,15 @@ def _mask_shape_pieces(token: str, pieces: set[str], longest: int) -> str:
     return "".join(out)
 
 
-def _shape_own_chars(shape: str) -> int:
-    """Characters of a shape that are the serial's own, not the N standing
-    where a run of its digits was: what the shape says about the board."""
-    return len(shape) - shape.count("N")
+def _shape_own_chars(serial: str, shape: str) -> int:
+    """Characters of a shape that are the serial's own, not an N standing
+    where a run of its digits was: what the shape says about the board.
+
+    Counted from the runs of digits the serial held, not from the N's in the
+    shape, because a serial may hold an N of its own: a bridge serial is any
+    string of letters, digits and ``_.:+-``.
+    """
+    return len(shape) - len(_DIGIT_RUN.findall(serial))
 
 
 def _mask_serial_shapes(text: str, serials: Sequence[str]) -> str:
@@ -1464,7 +1474,7 @@ def _mask_serial_shapes(text: str, serials: Sequence[str]) -> str:
         # No digits in it, so the shape is the serial itself, already masked.
         if shape == serial:
             continue
-        own = _shape_own_chars(shape)
+        own = _shape_own_chars(serial, shape)
         if _SHAPE_IN_A_RUN.fullmatch(shape):
             # A numeric serial shapes to a bare `N`, which names nothing.
             if own >= _SHAPE_MIN_OWN_CHARS:

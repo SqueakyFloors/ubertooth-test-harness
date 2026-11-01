@@ -616,6 +616,23 @@ class ReportTests(unittest.TestCase):
         self.assertEqual("Na", line_shape(serial))
         self.assertEqual(page, _redact(page, {serial}))
 
+    def test_a_serials_own_n_is_not_read_as_a_digit_placeholder(self):
+        # A bridge serial may hold an N of its own, so what a shape says
+        # about the board is counted from the runs of digits the serial held
+        # and not from the N's in the shape, or a shape that names a board
+        # reads as one that names nothing.
+        from ubertooth_harness.report import _redact, _shape_own_chars
+
+        serial = "N1a2"
+        shape = line_shape(serial)
+
+        self.assertEqual("NNaN", shape)
+        self.assertEqual(2, _shape_own_chars(serial, shape))
+        self.assertEqual(
+            f"  1 x [E] x {REDACTED} y\n",
+            _redact(f"  1 x [E] x {shape} y\n", {serial}),
+        )
+
     def test_a_shape_no_hex_run_can_hold_is_masked_over_the_page(self):
         # An ESP32 peer's bridge serial is whatever string the bridge
         # reports, of any letters, digits and _.:+- (resources.py), so its
