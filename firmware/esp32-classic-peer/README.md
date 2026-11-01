@@ -20,6 +20,11 @@ clock and the clock of the piconet it is in, which is the number an
 Ubertooth's recovered clock can be checked against. See
 [The clocks](#the-clocks).
 
+The piconet can also be held to part of the band: `afh` asks the controller
+to hop over a chosen channel map, so a test can check that an Ubertooth
+following the piconet sees it only on those channels. See
+[The channel map](#the-channel-map).
+
 One image holds both roles, and one command switches between them:
 
 | Role | What it does |
@@ -36,7 +41,7 @@ The channel is opened with no security (`ESP_SPP_SEC_NONE`), so a link needs
 no pairing and a capture holds only the SDP lookup, the connection, and the
 data.
 
-Firmware version: `utesp-1.2.0` (`UTESP_FW_VERSION` in `main/peer.h`).
+Firmware version: `utesp-1.3.0` (`UTESP_FW_VERSION` in `main/peer.h`).
 
 ## Versions
 
@@ -98,8 +103,8 @@ not part of any answer, so a driver skips them:
 
 | Notice | When |
 |---|---|
-| `utesp: utesp-1.2.0 ready` | after boot, once Bluetooth is up |
-| `utesp: utesp-1.2.0 start failed: <reason>` | after boot, if it is not |
+| `utesp: utesp-1.3.0 ready` | after boot, once Bluetooth is up |
+| `utesp: utesp-1.3.0 start failed: <reason>` | after boot, if it is not |
 | `utesp: spp connected <address>` | a link came up, either role |
 | `utesp: spp disconnected` | the link went down |
 | `utesp: sco connected` | the synchronous audio link came up |
@@ -108,6 +113,7 @@ not part of any answer, so a driver skips them:
 | `utesp: sco frame size <n> unusable, sending no audio` | a link came up asking for a frame size this firmware cannot fill |
 | `utesp: sco the profile is still running: <reason>` | a start failed and could not put the profile away either |
 | `utesp: clock read unavailable` | after boot, if only the clock read failed to set up; everything else works and `clock` answers `ERR` |
+| `utesp: channel map read unavailable` | after boot, if only the read of the link's own channel map failed to set up; everything else works and `status` says so in `afh_link_error` |
 
 ESP-IDF's own log lines start with `W (` or `E (` and are warnings or errors;
 `sdkconfig.defaults` keeps the log at that level so nothing else appears.
@@ -129,6 +135,8 @@ ESP-IDF's own log lines start with `W (` or `E (` and are warnings or errors;
 | `sco stop` | drop the audio link and stop the profile |
 | `sco stats` | one JSON line of the controller's packet counters, then `OK` |
 | `clock` | one JSON line of the native and piconet clocks, then `OK` |
+| `afh <20 hex digits>` | hop over this channel map |
+| `afh off` | hop over every channel again |
 | `defaults` | restore every boot setting and zero the counters |
 | `reset` | answer `OK`, then restart the board |
 
@@ -161,7 +169,7 @@ mistaken for its own.
 `status` reports every field on one line, whichever role is running:
 
 ```json
-{"role":"initiator","fw":"utesp-1.2.0","bt":true,"address":"20:50:0D:E9:C5:BA","lap":"e9c5ba","uap":"0d","nap":"2050","name":"UT-ESP32-E9C5BA","discoverable":true,"spp_server":false,"connecting":false,"connected":true,"peer":"C8:85:41:2A:1B:2A","remote":"C8:85:41:2A:1B:2A","stream":true,"period_ms":20,"payload_len":200,"counter":1483,"writes":1483,"write_errors":0,"rx_bytes":0,"connects":1,"disconnects":0,"last_err":0}
+{"role":"initiator","fw":"utesp-1.3.0","bt":true,"address":"20:50:0D:E9:C5:BA","lap":"e9c5ba","uap":"0d","nap":"2050","name":"UT-ESP32-E9C5BA","discoverable":true,"spp_server":false,"connecting":false,"connected":true,"peer":"C8:85:41:2A:1B:2A","remote":"C8:85:41:2A:1B:2A","stream":true,"period_ms":20,"payload_len":200,"counter":1483,"writes":1483,"write_errors":0,"rx_bytes":0,"connects":1,"disconnects":0,"last_err":0,"sco":"off","sco_profile":"none","sco_codec":"none","sco_handle":0,"sco_frame_len":0,"sco_tx_frames":0,"sco_tx_errors":0,"sco_rx_frames":0,"sco_rx_bad":0,"afh":"ffffffffff0000000000","afh_used":40,"afh_link":"fefffffeff0000000000","afh_link_used":38,"afh_mode":"on","afh_link_error":""}
 ```
 
 - `address`: the BD_ADDR, split out as `lap`, `uap` and `nap` as well,
@@ -178,6 +186,13 @@ mistaken for its own.
   received. A write still in flight when a status line is read is why the
   other side's `rx_bytes` can be one payload behind `writes`.
 - `last_err`: the last Bluetooth API error, 0 for none.
+- the `sco_*` fields are the audio link's, described under
+  [What `status` reports](#what-status-reports), and the `afh*` fields are
+  the channel map's, under [The channel map](#the-channel-map).
+
+Reading a status line while a link is up asks the controller for that link's
+channel map, which normally takes well under a millisecond and at worst a
+second; see [The channel map](#the-channel-map).
 
 ## The pair
 
@@ -449,6 +464,152 @@ same command credits, and the HCI layer matches the Command Complete to it by
 opcode and calls the callback. Host and controller stay in step, and nothing
 in ESP-IDF's own tree is modified: a different ESP-IDF checkout needs no
 patching, only the same version.
+
+## The channel map
+
+A Classic Bluetooth piconet using Adaptive Frequency Hopping (AFH) hops over
+the channels its leader has kept, not all 79. `afh` picks those channels, so
+a test can watch an Ubertooth follow a piconet that is using part of the band
+and check that it sees traffic on those channels and nowhere else:
+
+```
+afh ffffffffff0000000000    channels 0 to 39, the lower half of the band
+afh off                     every channel again
+```
+
+The map is the 79 channels as twenty hex digits: ten bytes, in which bit `b`
+of byte `i` is channel `8i + b`, a set bit meaning the channel may be used.
+That is the order the spec's `Set_AFH_Host_Channel_Classification` uses, and
+the order libbtbb prints a recovered map in, so what `ubertooth-afh` prints
+as `AFH map: 0x...` can be compared with this string as it stands.
+
+Set it on the board that leads the piconet, which is the initiator because it
+pages: the leader decides the map and announces it to the other board. The
+acceptor takes the command too, because the spec lets either side tell its
+controller what it thinks of the channels, but on this bench only the leader's
+map decides what is on the air. Nothing here pins the baseband role, and the
+board does not report it, so a test that depends on which board leads should
+read the LAP on the air, which is the leader's.
+
+Either command answers once the controller has taken the map, rather than as
+soon as the command was sent. Taken is not yet on the air: the leader then
+announces the map to the other board and the hop sequence follows, so a test
+that has just set a map should give the link a moment and watch the air, not
+assume the next packet is on the new map.
+
+Set it before the link comes up for a test that wants the whole link on one
+map; that is the way the bench has measured it. The command is accepted with
+a link up as well, and the controller reports the new map on the link, but
+how soon the air follows a mid-link change has not been measured here.
+
+Every answer `afh` can give:
+
+| Answer | Why |
+|---|---|
+| `OK` | the controller took the map |
+| `ERR the channel map must be twenty hex digits` | not twenty hex digits |
+| `ERR the top bit of the last byte is reserved and must be zero` | bit 79 is reserved |
+| `ERR a piconet needs at least 20 channels` | fewer than 20 channels marked used |
+| `ERR the controller refused the channel map, status <n>` | the controller said no, with its own status |
+| `ERR the channel map was not answered` | nothing came back within three seconds |
+| `ERR the last channel map has not been answered` | an earlier `afh` timed out and is still unanswered; `reset` is the way out |
+| `ERR the stack would not take the channel map` | ESP-IDF refused the call |
+| `ERR bluetooth is not up` | the board's Bluetooth failed to start, which the boot notice says |
+| `ERR afh takes twenty hex digits or off` | the wrong number of words |
+
+A refused map changes nothing.
+
+The 20-channel minimum is the spec's (Core 6.0 Vol 4 Part E 7.3.46, and
+`N_min` in Vol 2 Part B 2.6.3), and nothing in ESP-IDF checks it:
+`BTM_SetAfhChannels()` in
+`components/bt/host/bluedroid/stack/btm/btm_devctl.c` passes the ten bytes
+straight to the controller. The reserved bit it does handle, by clearing it:
+`esp_bt_gap_set_afh_channels()` in
+`components/bt/host/bluedroid/api/esp_gap_bt_api.c` masks the last byte with
+`0x7f`, so a map that sets that bit would be applied as a different map from
+the one asked for. Refusing is the honest answer to both, and it keeps a test
+from reading whatever the controller does with a map no piconet can use as a
+result.
+
+### The two maps in `status`
+
+| Field | Meaning |
+|---|---|
+| `afh` | the map the controller has taken from this board, twenty hex digits; the all-channel map until `afh` has been run |
+| `afh_used` | how many of the 79 channels that map marks used |
+| `afh_link` | the map the live link is really hopping over, read from the controller, or `null` |
+| `afh_link_used` | how many channels that map marks used, or `null` |
+| `afh_mode` | `on` or `off` as the controller reports AFH for the link, `null` with no link or no answer |
+| `afh_link_error` | why `afh_link` is `null` when something went wrong, otherwise empty |
+
+The two maps are worth having separately because they can differ. The map the
+host asks for is a classification, not an order: the leader's controller
+keeps its own view of the channels as well, so the map it ends up hopping
+over can be a subset of what was asked for. `afh_link` is that map, which is
+the one to compare a recovered map against.
+
+`afh` changes when the controller takes the map, not when the command sends
+it, so a map the controller accepts after `afh` has given up waiting on it
+still shows up there rather than leaving `status` reporting the map before
+it.
+
+With no one link there is no link map: `afh_link`, `afh_link_used` and
+`afh_mode` read `null` and `afh_link_error` is empty, and `afh` still reports
+what was asked for. That covers a board with no link and a board with more
+than one, which is no one piconet, exactly as the clock read treats it; these
+boards are connectable, so something else in the room can open the second
+one. A link whose AFH the controller reports as off reads the same way except
+that `afh_mode` is `"off"`, because the map means nothing then.
+
+An empty `afh_link_error` therefore means nothing went wrong, and anything
+else is a reason: a board that has a link the controller will not answer
+about reads `the controller does not know this link`, which is not the same
+as having no link, and a link that changed under the read says so too.
+
+The link map is read first and the rest of the line is gathered after it, so
+on a link that is going down the three link fields can describe a link the
+same line reports as `"connected":false`. The read is also what makes a
+status line with a link up cost a round trip to the controller.
+
+`defaults` puts every channel back, and only sends a command if a map was
+asked for, so `defaults` behaves exactly as it did on a board that has never
+run `afh`. It does that last, after everything else is restored, and answers
+with the reasons in the table above if the channel map is the part that
+failed. A `reset` or a power cycle leaves the controller hopping over every
+channel.
+
+### How the link's map is read
+
+Nothing in ESP-IDF reports the map a link is hopping over.
+`esp_bt_gap_set_afh_channels()` is the only AFH call it offers, and its
+completion event, `ESP_BT_GAP_SET_AFH_CHANNELS_EVT`, carries a status and
+nothing else. Bluedroid names the HCI command that would answer the question,
+`HCI_READ_AFH_CH_MAP` in
+`components/bt/host/bluedroid/stack/include/stack/hcidefs.h`, and references
+it nowhere else in the tree.
+
+So it is read the way the clock is read: `bluedroid/utesp_afh.c` is compiled
+as part of ESP-IDF's `bt` component and sends `HCI_Read_AFH_Channel_Map`
+(opcode `0x1406`) down Bluedroid's own command queue, which is the only route
+to a chosen opcode. [How the command is sent](#how-the-command-is-sent)
+carries the whole argument for why no public route works; it applies here
+word for word.
+
+One read at a time, and a read that times out cannot leave its answer for the
+next one. A controller that answers the command and refuses it costs nothing
+but the `afh_link_error` line: the map that was asked for, and everything else
+`status` reports, is unaffected. A controller that stops answering altogether
+is the case the clock section describes: the command it never answered keeps
+its place in the host's pending list, so later status lines say the controller
+did not answer without sending anything more, and `reset` is the way back.
+
+If an answer never comes, the `afh` that was waiting says so after three
+seconds, and every `afh` after it answers `ERR the last channel map has not
+been answered` at once, because a late answer must not be read as the new
+map's. `reset` is the way out, as it is for the clock. Neither message blames
+the controller, because the answer can also go missing inside the stack:
+`bta_dm_set_afh_channels()` drops `BTM_SetAfhChannels()`'s own refusal, so a
+map ESP-IDF never sent looks the same from here.
 
 ## Extending
 
