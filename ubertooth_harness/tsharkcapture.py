@@ -463,7 +463,14 @@ def check_listing(installed, env, held, failures, out=print) -> int:
         # The fork's rule is that a listing which fails says why; without a
         # reason there is nothing to tell a busy bench from a broken listing.
         failures.append(f"the listing exited {result.returncode} without saying why")
-    return in_use
+    elif result.returncode != 1:
+        # A partial listing exits 1. Any other status, or a signal, is
+        # something else going wrong, whatever the listing also reported.
+        failures.append(f"the listing exited {result.returncode}, where a board "
+                        "another program holds gives 1")
+    else:
+        return in_use
+    return 0
 
 
 def capture(interface, seconds, address, *, program: Program,

@@ -302,6 +302,16 @@ class ListingTests(unittest.TestCase):
         self.assertEqual(1, code, out)
         self.assertIn("exited 1 without saying why", out)
 
+    def test_a_busy_board_with_another_exit_status_is_a_failure(self):
+        # A partial listing exits 1. Exit 2 is the plugin's setup error, and a
+        # negative status is a signal: neither is this bench's contention,
+        # whatever else the listing reported.
+        code, out = self.listing(FAKE_EXTCAP_BUSY="1",
+                                 FAKE_EXTCAP_LISTING_STATUS="2")
+
+        self.assertEqual(1, code, out)
+        self.assertIn("exited 2, where a board another program holds gives 1", out)
+
     def test_a_listing_that_reports_a_failure_and_exits_0_is_a_failure(self):
         # The other half of the fork's rule: a partial listing exits 1. A 0
         # here would let Wireshark take a listing that is missing a board.
