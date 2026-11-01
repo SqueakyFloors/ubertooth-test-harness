@@ -225,7 +225,7 @@ static int parse_data_map(const char *text, uint8_t *map)
  * the connection that carried it, and a narrowed map left behind would
  * narrow the next test's CONNECT_IND.
  */
-static void restore_data_map(void)
+static int restore_data_map(void)
 {
 	uint8_t all[DATA_MAP_BYTES];
 	int64_t since;
@@ -237,7 +237,7 @@ static void restore_data_map(void)
 	since = k_uptime_get() - cn.data_map_at;
 	k_mutex_unlock(&lock);
 	if (!narrowed) {
-		return;
+		return 0;
 	}
 	if (since < DATA_MAP_GAP_MS) {
 		k_sleep(K_MSEC(DATA_MAP_GAP_MS - since));
@@ -255,6 +255,7 @@ static void restore_data_map(void)
 	}
 	cn.data_map_at = k_uptime_get();
 	k_mutex_unlock(&lock);
+	return err;
 }
 
 /* --------------------------------------------------------------------- */
@@ -710,7 +711,7 @@ int conn_init(void)
 	return 0;
 }
 
-void conn_leave(void)
+int conn_leave(void)
 {
 	bool waiting;
 
@@ -745,7 +746,7 @@ void conn_leave(void)
 		waiting = cn.conn != NULL;
 		k_mutex_unlock(&lock);
 	}
-	restore_data_map();
+	return restore_data_map();
 }
 
 static const char *phy_name(uint8_t phy)
@@ -1230,7 +1231,11 @@ static int cmd_defaults(const struct shell *sh, size_t argc, char **argv)
 	if (err) {
 		return err;
 	}
-	conn_leave();
+	err = conn_leave();
+	if (err) {
+		return utdk_err(sh, "the controller kept the connection's channel "
+				"map (%d); the board is not idle", err);
+	}
 	return utdk_ok(sh);
 }
 

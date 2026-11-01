@@ -76,6 +76,11 @@ void adv_leave(void);
 /* Central and peripheral roles (connection.c). */
 int conn_init(void);
 void conn_status(char *buf, size_t len);
-void conn_leave(void);
+/* Returns the error from putting the controller's channel classification
+ * back (0 when there was nothing to put back or it was taken): the
+ * classification outlives the link, so a board that kept a narrowed one
+ * must not be reported as idle.
+ */
+int conn_leave(void);
 
 #endif /* UTDK_ROLES_H_ */

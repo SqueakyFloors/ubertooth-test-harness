@@ -169,7 +169,7 @@ instead; `nrfdk.py` treats both as a refusal.
 for example a central with a live connection:
 
 ```json
-{"role":"central","fw":"utdk-1.3.0","bt":true,"address":"C0:7D:CD:95:52:86","address_type":"random static","adv":false,"running":false,"type":"nonconn","chmap":"all","interval_ms":100,"payload":"","counter":0,"starts":0,"connections":0,"last_err":0,"conn_on":true,"connected":true,"peer":"C1:92:EC:E7:71:BC","conn_interval_ms":30,"update_ms":60,"dle":true,"interval_units":48,"latency":0,"timeout_units":400,"tx_octets":251,"rx_octets":251,"mtu":247,"phy":"1M","payload_len":244,"period_ms":100,"data_map":"ffffffff1f","data_map_used":37,"data_map_sets":0,"cycle_ms":4000,"autoupdate_ms":60,"writes":74,"write_errors":4,"received":0,"updates":3,"connects":3,"disconnects":2,"conn_err":0}
+{"role":"central","fw":"utdk-1.3.0","bt":true,"address":"C0:7D:CD:95:52:86","address_type":"random static","adv":false,"running":false,"type":"nonconn","chmap":"all","interval_ms":100,"payload":"","counter":0,"starts":0,"connections":0,"last_err":0,"conn_on":true,"connected":true,"peer":"C1:92:EC:E7:71:BC","conn_interval_ms":30,"update_ms":60,"dle":true,"interval_units":48,"latency":0,"timeout_units":400,"tx_octets":251,"rx_octets":251,"mtu":247,"phy":"1M","payload_len":244,"period_ms":100,"conn_chmap":"37","data_map":"ffffffff1f","data_map_used":37,"data_map_sets":0,"cycle_ms":4000,"autoupdate_ms":60,"writes":74,"write_errors":4,"received":0,"updates":3,"connects":3,"disconnects":2,"conn_err":0}
 ```
 
 - `address`: the identity address, a static random address derived from
@@ -199,8 +199,9 @@ for example a central with a live connection:
   asked for, not a map read back from the link: the controller may drop
   channels of its own as well, so a recovered map can be narrower.
   `data_map_used`: how many of the 37 channels the classification leaves in
-  use; `data_map_sets`: how many classifications the controller has taken
-  since boot, which is how the driver tells a real change from an echo.
+  use; `data_map_sets`: how many `conn datamap` requests the controller has
+  taken since boot, which is how the driver tells a real change from an
+  echo. Putting the channels back on leaving the role does not count.
 - `writes` and `write_errors` count the central's writes (a write can be
   refused when buffers are full as a link is coming down); `received` is
   the bytes the peripheral's characteristic got; `updates`, `connects`

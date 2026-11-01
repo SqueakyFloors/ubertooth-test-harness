@@ -742,7 +742,8 @@ def peripheral(dk: Dk, dle: bool = True, chmap: str = "37", out=None) -> dict:
     shell = _open(dk)
     try:
         # `role` already leaves both roles idle with their boot settings.
-        for command in ("role peripheral", f"conn chmap {chmap}",
+        shell.command("role peripheral", LEAVE_TIMEOUT_S)
+        for command in (f"conn chmap {chmap}",
                         f"conn dle {'on' if dle else 'off'}", "conn start"):
             shell.command(command)
         status = require_connection_fields(shell.status())
@@ -770,8 +771,7 @@ def central(dk: Dk, peer: str, interval_ms: int, dle: bool = True,
     """
     address = normalize_address(peer)
     interval = _conn_interval(interval_ms)
-    commands = ["role central", f"conn peer {address}",
-                f"conn interval {interval}",
+    commands = [f"conn peer {address}", f"conn interval {interval}",
                 f"conn dle {'on' if dle else 'off'}"]
     if payload is not None:
         commands.append(f"conn payload {payload}")
@@ -790,6 +790,7 @@ def central(dk: Dk, peer: str, interval_ms: int, dle: bool = True,
         intervals.add(conn_units(_conn_interval(autoupdate_ms)))
     shell = _open(dk)
     try:
+        shell.command("role central", LEAVE_TIMEOUT_S)
         for command in commands:
             shell.command(command, CONNECT_TIMEOUT_S if command == "conn start"
                           else COMMAND_TIMEOUT_S)
@@ -870,6 +871,10 @@ def datamap(dk: Dk, channels: str, out=None) -> dict:
         # The count before, so a board that answered OK and changed nothing
         # cannot pass by echoing the map back.
         before = shell.status().get("data_map_sets")
+        if not isinstance(before, int) or isinstance(before, bool):
+            raise NrfDkError(
+                f"this firmware does not report how many channel maps its "
+                f"controller has taken; it needs {FIRMWARE_VERSION}")
         shell.command(f"conn datamap {channels}")
         status = require_connection_fields(shell.status())
     finally:
@@ -888,7 +893,7 @@ def datamap(dk: Dk, channels: str, out=None) -> dict:
     if status["data_map_used"] != used:
         raise NrfDkError(f"the board reports {status['data_map_used']} channels in "
                          f"use, not the {used} its own map {wanted} leaves")
-    if isinstance(before, int) and status["data_map_sets"] <= before:
+    if status["data_map_sets"] <= before:
         raise NrfDkError(f"the board still reports {status['data_map_sets']} channel "
                          "map(s) taken by its controller, so this one was not")
     if not status["connected"]:

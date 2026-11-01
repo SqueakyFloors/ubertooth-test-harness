@@ -27,6 +27,9 @@ class FakeFirmware:
         # restore, which leaves the narrow map in place.
         self.data_map = nrfdk.DATA_MAP_ALL
         self.data_map_sets = 0
+        # True until a command has reached the controller, as the firmware's
+        # data_map_at starts at 0. A test that wants another map sets it
+        # again, standing for the second having passed.
         self.data_map_gap_passed = True
         self.data_map_restore_fails = False
         self.defaults()
@@ -134,22 +137,28 @@ class FakeFirmware:
         if wanted not in nrfdk.ROLES:
             return ["ERR role must be advertiser, central or peripheral"]
         self.conn_defaults()
-        self._restore_data_map()
+        kept = self._restore_data_map()
         self.defaults()
         self.role = wanted
+        if kept:
+            return ["ERR the controller kept the connection's channel map "
+                    "(-22); the board is not idle"]
         return ["OK"]
 
     def _restore_data_map(self):
         """What the firmware's restore_data_map() does on leaving the role.
 
-        The count and the one-second gap survive it, and a controller that
-        refuses leaves the narrow map reported as it is.
+        The count and the one-second gap survive it. Returns whether the
+        controller kept the narrow map, which the firmware reports as an
+        ERR from `role` and `conn defaults`.
         """
         if self.data_map == nrfdk.DATA_MAP_ALL:
-            return
+            return False
         self.data_map_gap_passed = False
-        if not self.data_map_restore_fails:
-            self.data_map = nrfdk.DATA_MAP_ALL
+        if self.data_map_restore_fails:
+            return True
+        self.data_map = nrfdk.DATA_MAP_ALL
+        return False
 
     def _conn(self, words):
         if self.role == "advertiser":
@@ -169,7 +178,9 @@ class FakeFirmware:
             return ["OK"]
         if command == "defaults":
             self.conn_defaults()
-            self._restore_data_map()
+            if self._restore_data_map():
+                return ["ERR the controller kept the connection's channel map "
+                        "(-22); the board is not idle"]
             return ["OK"]
         if command == "datamap" and args:
             if self.role != "central":
@@ -182,7 +193,7 @@ class FakeFirmware:
                         "2 data channels 0-36, for example 0,12,36"]
             if not self.connected:
                 return ["ERR no connection to update"]
-            if self.data_map_sets > 0 and not self.data_map_gap_passed:
+            if not self.data_map_gap_passed:
                 return ["ERR channel map updates must be 1000 ms apart; the "
                         "last one was 0 ms ago"]
             self.data_map = wanted

@@ -630,9 +630,9 @@ class RoleTests(unittest.TestCase):
         board = Board()
         self.run_quiet(nrfdk.central, board.dk, "C1:92:EC:E7:71:BC", 30)
         status = board.firmware.status
-        board.firmware.status = lambda: {**status(), "data_map_sets": "two"}
+        board.firmware.status = lambda: {**status(), "data_map_used": "three"}
 
-        with self.assertRaisesRegex(nrfdk.NrfDkError, "valid 'data_map_sets'"):
+        with self.assertRaisesRegex(nrfdk.NrfDkError, "valid 'data_map_used'"):
             self.run_quiet(nrfdk.datamap, board.dk, "0,1,2")
 
     def test_firmware_that_does_not_report_the_map_is_named(self):
@@ -645,7 +645,7 @@ class RoleTests(unittest.TestCase):
         }
 
         with self.assertRaisesRegex(nrfdk.NrfDkError,
-                                    "does not report a valid 'data_map'"):
+                                    "does not report how many channel maps"):
             self.run_quiet(nrfdk.datamap, board.dk, "0,1,2")
 
     def test_leaving_a_role_puts_every_channel_back(self):
@@ -674,8 +674,9 @@ class RoleTests(unittest.TestCase):
         for release in (nrfdk.idle, lambda dk, out=None: nrfdk.role(
                 dk, "advertiser", out=out)):
             board.firmware.data_map = "0700000000"
-            with self.assertRaisesRegex(nrfdk.NrfDkError,
-                                        "channel map 0700000000, not all 37"):
+            # The board itself refuses the release: the firmware answers ERR
+            # when the controller kept the narrow map.
+            with self.assertRaisesRegex(nrfdk.NrfDkError, "not idle"):
                 self.run_quiet(release, board.dk)
 
     def test_leaving_a_role_forgets_the_peer(self):
