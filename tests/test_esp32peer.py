@@ -428,9 +428,11 @@ class AudioTests(unittest.TestCase):
         # inside the window, at 50 frames a read in the fake.
         self.assertIn("initiator audio frames while the command ran: sent 100 "
                       "refused 0 received 100 damaged 0", report)
+        # No two of the fake's counters are equal, so this pins each field to
+        # its own label rather than agreeing with a transposition.
         self.assertIn("acceptor audio packets while the command ran: sent 100 "
-                      "discarded 0 received 100 good 100 errors 0 missing 0 "
-                      "lost 0", report)
+                      "discarded 2 received 100 good 100 errors 4 missing 10 "
+                      "lost 20", report)
         # The mask each controller supports, so a refused type can be read
         # rather than puzzled over.
         self.assertIn("audio types supported: initiator 003d, acceptor 003d",
@@ -518,17 +520,28 @@ class AudioTests(unittest.TestCase):
         # The firmware's own word on a link that dropped and came back, which
         # the counters and even the handle can hide.
         class Flapping(FakePeerFirmware):
+            """Drops and recovers as the window's closing status is read.
+
+            The read after a `sco stats` is the session's closing one, which
+            is the latest moment this stand-in can act; the link is back up
+            by the time that status answers, so the notice is all there is.
+            """
+
+            armed = False
             flapped = False
 
             def handle(self, line):
-                answer = super().handle(line)
-                if line == "sco stats" and not self.flapped:
+                if line == "status" and self.armed:
+                    self.armed = False
                     self.flapped = True
                     far = self.peer_firmware
                     self._sco_stop()  # the board says so by itself
                     self.sco_profile = "ag"
                     self._sco_up("2ev3")  # and it comes straight back
                     far._sco_up("2ev3")
+                answer = super().handle(line)
+                if line == "sco stats" and not self.flapped:
+                    self.armed = True
                 return answer
 
         with self.assertRaisesRegex(
@@ -742,18 +755,24 @@ class AudioTests(unittest.TestCase):
             self._audio(pair=_audio_pair(initiator_class=Rewound),
                         min_frames=10)
 
-    def test_what_the_boards_said_while_the_command_ran_is_reported(self):
+    def test_what_the_boards_said_inside_the_window_is_reported(self):
         # Nothing is in flight during a capture, so the board's own notice is
         # the only word on a link that went down; a later command would clear
         # it from the buffer unread.
         class Dropping(FakePeerFirmware):
+            """Drops as the window's closing status is read."""
+
+            armed = False
             dropped = False
 
             def handle(self, line):
-                answer = super().handle(line)
-                if line == "sco stats" and not self.dropped:
+                if line == "status" and self.armed:
+                    self.armed = False
                     self.dropped = True
                     self._sco_stop()
+                answer = super().handle(line)
+                if line == "sco stats" and not self.dropped:
+                    self.armed = True
                 return answer
 
         acceptor_firmware, initiator_firmware = _audio_pair(
@@ -764,6 +783,32 @@ class AudioTests(unittest.TestCase):
             esp32peer.audio(acceptor, initiator, TRUE, out=report, settle_s=0.0)
         self.assertIn("initiator said: utesp: sco disconnected",
                       report.getvalue())
+
+    def test_what_a_board_said_before_the_window_is_not_laid_at_its_door(self):
+        # A notice still sitting in a buffer when the command starts belongs
+        # to what went before, so it is read first and not reported as the
+        # command's.
+        class Early(FakePeerFirmware):
+            dropped = False
+
+            def handle(self, line):
+                answer = super().handle(line)
+                if line == "sco stats" and not self.dropped:
+                    self.dropped = True
+                    self._sco_stop()  # before the command, saying so
+                return answer
+
+        acceptor_firmware, initiator_firmware = _audio_pair(
+            initiator_class=Early)
+        acceptor, initiator = _peers(acceptor_firmware, initiator_firmware)
+        report = io.StringIO()
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "the initiator reports the audio link off, not up, after the "
+            "command ran"
+        ):
+            esp32peer.audio(acceptor, initiator, TRUE, out=report, settle_s=0.0)
+        self.assertNotIn("said: utesp: sco disconnected", report.getvalue())
 
     def test_a_refused_stop_is_reported_after_the_counters_not_instead(self):
         acceptor, initiator = _audio_pair()

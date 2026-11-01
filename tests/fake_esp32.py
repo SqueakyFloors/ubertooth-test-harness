@@ -4,6 +4,12 @@ FakePeerFirmware answers the line protocol of firmware/esp32-classic-peer
 (README, "Shell protocol"); FakePeerPort feeds it from pyserial-like calls.
 Two firmwares can be wired to each other with ``link``, so a whole pair
 session can be exercised without hardware.
+
+What it cannot do is act while the thing under test runs: the driver runs
+that as a subprocess and this board only moves when the driver reads it. So
+a test that wants an event "while the command ran" hooks the last read
+before the command, which is the first moment the window covers; a link that
+falls silent or drops in the middle of a real capture is the bench's to show.
 """
 
 import json
@@ -182,10 +188,17 @@ class FakePeerFirmware:
         return [*BOOT_LOG, f"utesp: {self.version} ready"]
 
     def sco_stats(self) -> dict:
-        """The controller's own packet counters, as `sco stats` answers."""
-        return {"rx_total": self.sco_packets, "rx_correct": self.sco_packets,
-                "rx_err": 0, "rx_none": 0, "rx_lost": 0,
-                "tx_total": self.sco_packets, "tx_discarded": 0}
+        """The controller's own packet counters, as `sco stats` answers.
+
+        No two of these are equal, as the firmware's own measured sample is
+        not, so a driver that reads or reports one field as another is
+        caught rather than agreeing with itself.
+        """
+        sent = self.sco_packets
+        return {"tx_total": sent, "tx_discarded": sent // 50,
+                "rx_total": max(sent - 2, 0), "rx_correct": max(sent - 6, 0),
+                "rx_err": sent // 25, "rx_none": sent // 10,
+                "rx_lost": sent // 5}
 
     def status(self) -> dict:
         lap, uap = esp32peer.address_parts(self.address)

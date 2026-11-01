@@ -137,50 +137,56 @@ link uses a type both of them allowed:
 | `2ev3` | 2-EV3: the same payload as EDR, which is what the stack asks for by itself |
 | `default` | whatever the stack's own table picks, which is 2-EV3 |
 
-A link that is not eSCO, or that comes up as another packet type than the one
-asked for, fails rather than being reported as a pass, so a decode test cannot
-quietly get EDR or a plain SCO link. Both boards are read for this, because
-each works out what its link is from what its own controller told it.
+A link that is not eSCO, or whose packet type is not the one asked for, fails
+rather than being reported as a pass, so a decode test cannot quietly get EDR
+or a plain SCO link. Both boards are read for it, before the command and
+again after, and both have to agree. What that proves is that the request
+reached each controller and the link settled on the length that type carries:
+nothing in HCI reports the packet type itself, so the firmware works it out
+from the types the board allowed and the length the link uses.
 
-The session reports the type, the packet length, the interval in slots and
-milliseconds, the retransmission window, and the packet types each controller
-supports. Then, **counted across the command and not since the link came up**,
-the firmware's frame counters from both boards and the controllers' own packet
-counters, which is the number a capture of the air is compared with. Bringing
-the link up and settling put frames on the air before the command starts, so a
-total would flatter the run; the difference is what the capture window saw.
+### What it reports, and what the floors mean
+
+First the link: the type, the packet length, the interval in slots and
+milliseconds, the retransmission window, and the packet types each
+controller supports. Then, **counted across the command rather than since the
+link came up**, each board's own frame counters and its controller's packet
+counters.
+
+The difference is the point. Bringing the link up and settling put frames on
+the air before the command starts, so a total would flatter the run. The
+window is bounded by the reads either side of the command — each board's
+status, counters, and notices, a few tens of milliseconds in all — rather
+than by the command itself.
+
 `--min-frames` and `--min-packets` are the floors those differences must
-reach, and both boards must meet them, so a link that fell silent part way
-through does not pass on what it carried at first. The window is bounded by
-the reads either side of the command rather than by the command itself: each
-board's own status, counters, and notices, a few tens of milliseconds in all.
-Set the floors from the rate the link reports, not to the last packet.
+reach, on both boards, so a link that fell silent part way through does not
+pass on what it carried at first. Set them from the rate the link reports,
+not to the last packet. The controller's packet count is the number to hold a
+capture against, bearing in mind that a receiver reads a fraction of what the
+air carries: the bench's EV3 measurement is 18800 packets at the controller
+against 2891 read from the air.
 
-A link that went down during the command fails the session even if it came
-straight back: its counters would otherwise add two links' traffic together.
-The board's own `utesp: sco disconnected` is what says so. Behind it are a
-changed connection handle and a controller's count that started again, and
-neither is certain — a controller may hand the same handle back, and the
-firmware's frame counters run on across a new link — so the notice is the
-check to rely on.
+`--min-seconds` and `--timeout` work as they do for `stream`.
 
-A board that cannot be put back in its boot state fails the session too, even
-when the capture itself went well: a board whose audio profile is still
-running refuses the next `role` or `defaults`, and `reset` is the way out. `--min-seconds` and
-`--timeout` work as they do for `stream`.
+### What fails a session
 
-The link is checked again after the command: one that came back as another
-packet type, or as plain SCO, fails even though it was right at the start.
-
-A counter read the board refuses — with no link up, for the rest of a boot
-after a request of its own went unanswered, or because its controller would
-not give them — is reported as not counted, with the reason, and the packet
-floor is reported as not checked, rather than ending the session. A link that dropped during the capture is then
-named in its own words, with the frame counters still there to read.
-
-If a board cannot be put back in its boot state at the end, the session says
-so: a board whose audio profile is still running refuses the next `role` or
-`defaults`, and `reset` is the way out.
+- A link that went down during the command, even if it came straight back:
+  its counters would otherwise add two links' traffic together. The board's
+  own `utesp: sco disconnected` is what says so. Behind it are a changed
+  connection handle and a controller's count that started again, and neither
+  is certain — a controller may hand the same handle back, and the frame
+  counters run on across a new link — so the notice is the check to rely on.
+- A board that cannot be put back in its boot state, even when the capture
+  went well: a board whose audio profile is still running refuses the next
+  `role` or `defaults`. The session has already pulsed a reset at it; one
+  that stays stuck needs another, or the maintainer.
+- A counter read that times out or cannot be read, as against one the board
+  refuses. A refusal — no link up, a request of its own that went unanswered,
+  or a controller that would not give the counters — is reported as not
+  counted, with the reason, and its floor as not checked. A link that dropped
+  during the capture is then named in its own words, with the frame counters
+  still there to read.
 
 An EV3 link is the busiest traffic this pair can make: half the payload per
 packet, half the interval, so about twice the packet rate of the 2-EV3 the

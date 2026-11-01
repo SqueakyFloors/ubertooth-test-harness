@@ -681,9 +681,9 @@ Two protocol facts that look like harness or tool faults and are not:
   with `-u`, rather than trusting a short survey.
 - **An audio link's packets carry their type in the header, which needs no
   clock.** `ubertooth-rx` has not been seen to settle on this pair's clock from
-  a voice link, with or without the data stream alongside, so a follow-mode
-  capture of one is not something to count on yet; the packet type, the timing,
-  and the count are read from the records a capture writes without it.
+  a voice link, so a follow-mode capture of one is not something to count on
+  yet; the packet type, the timing, and the count are read from the records a
+  capture writes without it.
 
 ## A worked bench layout
 

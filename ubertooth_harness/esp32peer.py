@@ -379,8 +379,23 @@ class Shell:
     def _note(self, line: str) -> None:
         self.notices.append(line)
 
+    def _keep_notices(self) -> None:
+        """File any notice already read but not yet looked at.
+
+        A board's notice can arrive in the same chunk as the answer to the
+        last command, after its `OK`, and nothing has looked at it. Clearing
+        the buffer without this would throw away the board's own news, which
+        for an audio link is how a link that went down says so.
+        """
+        while b"\n" in self._buffer:
+            raw, self._buffer = self._buffer.split(b"\n", 1)
+            line = raw.decode("utf-8", "replace").strip("\r \t\x00")
+            if _NOTICE.match(line):
+                self._note(line)
+
     def command(self, text: str, timeout: float = COMMAND_TIMEOUT_S) -> list[str]:
         """Send one command; return its data lines. ERR or silence raises."""
+        self._keep_notices()
         self.port.reset_input_buffer()
         self._buffer = b""
         self.port.write(text.encode("ascii") + b"\n")
@@ -814,7 +829,7 @@ def _release(shell: Shell, label: str = "peer", out=None) -> str:
     try:
         shell.reset()
         status = shell.status()
-    except PeerError as error:
+    except Exception as error:  # a bridge can fail here as well as a board
         print(f"note: the {label} was not released: {error}", file=out)
         return str(error)
     wrong = boot_state_problems(status)
@@ -985,8 +1000,10 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         print("command: " + " ".join(command), file=out)
         out.flush()
         # Everything either board says from here on belongs to the command's
-        # own window, whether this driver reads it as a line of its own or in
-        # the middle of a later answer.
+        # own window. Anything said before it is read first, so a notice
+        # still sitting in a buffer is not laid at the command's door.
+        initiator_shell.drain_notices()
+        acceptor_shell.drain_notices()
         marks = {initiator.label: len(initiator_shell.notices),
                  acceptor.label: len(acceptor_shell.notices)}
         status, seconds = _run_command(command, timeout)
@@ -996,13 +1013,15 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         # itself, and during a capture nothing is in flight to carry it.
         initiator_shell.drain_notices()
         acceptor_shell.drain_notices()
-        said = {label: shell.notices[marks[label]:]
-                for label, shell in ((initiator.label, initiator_shell),
-                                     (acceptor.label, acceptor_shell))}
         # Read the counters again while the link is still up: the
         # controller's own belong to a live link, and `sco stop` ends it.
         after_initiator = _read_counts(initiator_shell, initiator.label)
         after_acceptor = _read_counts(acceptor_shell, acceptor.label)
+        # Taken after those reads, so a notice that arrived as they were
+        # made counts too: the window ends with them, not before them.
+        said = {label: shell.notices[marks[label]:]
+                for label, shell in ((initiator.label, initiator_shell),
+                                     (acceptor.label, acceptor_shell))}
         stopped = ""
         if after_initiator.status["sco"] == SCO_UP:
             try:
@@ -1299,6 +1318,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             status_command(peer)
     except PeerError as error:
         print(f"error: {error}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        # The boards have been released by the session's own cleanup; this is
+        # only to report it as a line rather than a traceback.
+        print("error: interrupted", file=sys.stderr)
         return 1
     return 0
 
