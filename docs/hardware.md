@@ -128,7 +128,22 @@ One image holds both roles:
 | `initiator` | looks the peer's SPP channel up over SDP, connects, and streams a counted payload |
 
 The link is opened with no security, so it needs no pairing and a capture holds
-only the SDP lookup, the connection, and the data.
+only the SDP lookup, the connection, and the data. Nothing in it is encrypted,
+which is what lets a capture's payload lengths and CRCs be checked against the
+bytes beside them.
+
+**Voice traffic too.** `sco start` adds a synchronous (eSCO) link over the
+Hands-Free Profile alongside the data stream, so the air carries
+reserved-slot voice packets as well. `sco type ev3` asks for a plain EV3
+link, whose payload is on the air at the basic rate a receive-only Ubertooth
+can decode; the 2-EV3 link the stack chooses by default carries the same
+payload as enhanced rate, which a basic-rate decoder cannot read. The
+hands-free unit has to be listening before the gateway pages it, so a session
+runs `sco start` on the acceptor first and `sco start` on the initiator last,
+and the initiator's packet type is set after its `role` command, which puts
+the choice back to the firmware's default.
+[`esp32peer.py`](../ubertooth_harness/esp32peer.py)'s `audio` mode does the
+whole sequence in one invocation, as `stream` does for the data link.
 
 Registered with the bridge serial and the BD_ADDR its `status` reports (the
 factory MAC plus two in the last byte, so it too is fixed per board). Those
@@ -156,11 +171,14 @@ The device name is not settable and does not need to be: it carries the
 board's own LAP (`UT-ESP32-<LAP>`), so it is fixed for the life of the board
 and different from the other one with no setup step.
 
-`Capture known Classic device` and `Follow Classic Bluetooth piconet` bind a
-pair, through [`esp32peer.py`](../ubertooth_harness/esp32peer.py). Nothing in
-the harness flashes a peer, so the driver asks for `utesp-1.0.0` or a later
-1.x image rather than an exact version, and each board's own version goes in
-the run record. A peer is leased like a board, under `esp32-<bridge serial>`.
+`Capture known Classic device`, `Follow Classic Bluetooth piconet`, and
+`Classic capture record fields` bind a pair, through
+[`esp32peer.py`](../ubertooth_harness/esp32peer.py). Nothing in the harness
+flashes a peer, so the driver asks for `utesp-1.0.0` or a later 1.x image
+rather than an exact version, and each board's own version goes in the run
+record. The audio link is the one thing that needs more: `sco type` arrived in
+`utesp-1.4.0`, so the `audio` mode asks for that and names the version a
+board reports when it is older. A peer is leased like a board, under `esp32-<bridge serial>`.
 
 By hand, [`scripts/lab/peer`](../scripts/lab/README.md) names the boards by
 their registry aliases, holds them, and runs that module, which is how a
@@ -273,7 +291,7 @@ nothing in the harness can catch it.
 |---|---|---|---|---|
 | Ubertooth One | the [fork's](https://github.com/SqueakyFloors/ubertooth) `firmware/bluetooth_rxtx` | the resolved commit under test | `arm-none-eabi-gcc` | `ubertooth-dfu` |
 | nRF52840 DK | [`firmware/nrf52840dk`](../firmware/nrf52840dk/README.md) | `utdk-1.3.0` | nRF Connect SDK v3.4.1 and its toolchain bundle | `nrfutil device program` |
-| ESP32 peer | [`firmware/esp32-classic-peer`](../firmware/esp32-classic-peer/README.md) | `utesp-1.3.0` | ESP-IDF v5.5.6 | `esptool`, through `idf.py flash` |
+| ESP32 peer | [`firmware/esp32-classic-peer`](../firmware/esp32-classic-peer/README.md) | `utesp-1.4.0` | ESP-IDF v5.5.6 | `esptool`, through `idf.py flash` |
 
 Each firmware README holds the full build and flash procedure, the pinned
 toolchain versions, and the shell command reference. Images are built outside

@@ -835,6 +835,12 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "Follow Classic Bluetooth piconet": _profiles(
         Estimate(40.0, per_duration=2), Estimate(80.0, per_duration=4)
     ),
+    # ESTIMATE_PENDING_HW: two capture cases in smoke, four comprehensive,
+    # each with the same bring-up as the two tests above and a record check
+    # per capture file afterwards.
+    "Classic capture record fields": _profiles(
+        Estimate(45.0, per_duration=2), Estimate(95.0, per_duration=4)
+    ),
 })
 
 
@@ -845,6 +851,7 @@ RF_DEFAULTS: Mapping[str, Mapping[str, PlacementRequirement]] = MappingProxyType
     name: MappingProxyType({"Ubertooth": NORMAL_LINK})
     for name in (
         "Classic Bluetooth receive",
+        "Classic capture record fields",
         "Raw receive",
         "BLE extcap capture",
         "BLE extcap in tshark",
@@ -1253,6 +1260,26 @@ def builtin_catalog() -> TestCatalog:
                 "acceptor": ESP32_CLASSIC_PEER, "initiator": ESP32_CLASSIC_PEER,
             }),
             command_builder=classic_cases.follow_classic_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+        ),
+        TestDefinition(
+            "Classic capture record fields",
+            "Decode the BR/EDR records ubertooth-rx writes while two "
+            "registered ESP32 Classic peers hold a link: every record carries "
+            "this piconet's LAP and reference address, and its own payload "
+            "length, HEC, and CRC agree with the header beside them",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH,
+                "acceptor": ArgumentRule(_selector, default="default"),
+                "initiator": ArgumentRule(_selector, default="default"),
+                "coverage": COVERAGE, "duration": DURATION,
+            }),
+            MappingProxyType({
+                "Ubertooth": "Ubertooth",
+                "acceptor": ESP32_CLASSIC_PEER, "initiator": ESP32_CLASSIC_PEER,
+            }),
+            command_builder=classic_cases.record_fields_cases,
             continue_on_case_failure=True,
             guards_other_ubertooths=True,
         ),

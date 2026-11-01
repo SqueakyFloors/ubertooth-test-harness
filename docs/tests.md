@@ -1506,6 +1506,110 @@ reads the clock and the AFH map from a local BlueZ controller, which the bench
 has no adapter for
 ([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)).
 
+## Classic capture record fields
+
+**What it does.** The same two peers hold the same link, and this test reads
+what is *inside* the BR/EDR capture files `ubertooth-rx` writes: every field
+of every record, decoded from the bytes, rather than the packet lines the tool
+prints.
+
+**Theory of operation.** The two Classic tests above count packet lines and
+check a LAP. That leaves most of a capture unchecked: another packet's header,
+a stale clock, a reference address that belongs to nothing, or a flag that
+claims a check nobody made would all pass. The record is a documented layout
+(`LINKTYPE_BLUETOOTH_BREDR_BB`, the pseudo-header both of libbtbb's BR/EDR
+writers build), so it can be decoded and held to what it says about itself.
+
+Three of the checks need nothing known about the bench, because they tie a
+record's fields to each other:
+
+- the payload's own length field, with the packet type's header size and CRC,
+  must come to exactly as many payload bytes as the record holds;
+- the header's HEC, run backwards, must give the reference upper address part
+  (UAP) the record carries, in every record that says the HEC passed;
+- the payload's CRC, recomputed with that UAP, must match the one carried in
+  the payload, in every record that says the CRC passed.
+
+A record that mixed one packet's header with another's metadata fails all
+three. The rest are flag-to-field agreements of the same kind: the noise flag
+is set exactly when the noise figure is below the signal, the payload flag
+exactly when the record holds payload bytes, the two reference flags exactly
+when the reference fields hold an address, a valid check is never one that was
+not made, and the transport and rate nibbles say what a receive-only
+basic-rate capture knows and nothing more. On top of those, the bench
+contributes what it knows: the piconet's LAP, the reference LAP and UAP the
+capture was given, and, in a PCAPNG, the address `ubertooth-rx -l` records
+once in an interface option.
+
+The role-swapped case is what keeps the address checks honest. Which board is
+the piconet central is decided by which one pages, so binding the pair the
+other way round moves the LAP and the reference address in every record to the
+other board; a decoder reading a constant, or a tool writing whatever it had
+lying around, passes one case and fails the other.
+
+The audio case puts a synchronous (eSCO) link on the air instead of the data
+stream, at `sco type ev3`, so its payload is on the air at the basic rate the
+Ubertooth receives; the records must then name `HV3/EV3/3-EV3` packets. That
+is the one check here with no equivalent in the other Classic tests, because
+voice packets never appear in a capture of the SPP stream.
+
+The decoder is `ubertooth_harness/bredrrecord.py`, run as an ordinary logged
+command per capture file. It prints counts, ranges, flag tallies and packet
+type names, and never a payload byte, so no traffic of the piconet reaches the
+run record. Its two reverse computations, the HEC and the CRC, are checked in
+the unit tests against the forward pair in `rxreplay.py`, which are written
+from the Bluetooth Core specification for building synthetic packets, so an
+error in either shows up instead of agreeing with itself.
+
+**Hardware and arguments.** As `Capture known Classic device`: one `Ubertooth`
+and two ESP32 Classic peers as `acceptor` and `initiator`, `coverage:`, a
+required `duration:`, Linux only. The comprehensive profile's audio case needs
+the peers on `utesp-1.4.0` or a later 1.x image, which is where `sco type`
+arrived; preflight reports the version either way, and the case fails naming
+it on anything older.
+
+**Expected outcome.** Smoke runs 2 cases. `-l <central LAP> -u <central UAP>`
+with both `-q` and `-r`, after which each file must hold at least ten records,
+all of the central's LAP, all carrying that LAP and UAP as the reference
+address, all internally consistent, and the PCAPNG must name the central's
+BD_ADDR with a full UAP mask as the address followed; then the same with the
+roles swapped, where every record must carry the other board's LAP instead.
+Comprehensive runs 4, adding the EV3 audio link, whose records must include at
+least one `HV3/EV3/3-EV3` packet, and a survey (`-z -r`), whose records must
+include at least one carrying a UAP the survey recovered for itself. Each case
+keeps its capture files in the run directory. The cleanup is the same as the
+other two Classic tests: both peers reset to their boot state, the Ubertooth's
+channel, squelch, and LEDs restored.
+
+**Known limits.** The packet floors are floors, for the same reason as the
+other Classic tests: how much of a piconet a sweeping receiver hears varies
+widely between runs.
+
+The payload length and CRC checks need a link whose payloads are not
+encrypted, which this pair's are not — they pair with nobody. A capture of an
+encrypted piconet would decode neither, and `--no-payload-checks` is there for
+one; no catalog case uses it.
+
+A malformed record cannot be produced on purpose here. A well-behaved peer
+will not send a payload header that disagrees with its own packet, or a
+header whose HEC names another piconet, so what this test proves is that the
+fields agree on real traffic, not that the decoder rejects a bad record. The
+rejections are covered where they can be made deterministic: in the unit tests
+here, which build records field by field and check each failure is named, and
+in the forks' own tests, which drive libbtbb and the callbacks with crafted
+input.
+
+The survey case cannot assert whose records it reads. A survey is given no
+address, so it records every piconet in range, and the bench hears ambient
+traffic now and then; its checks are therefore the internal ones plus a count
+of records carrying a recovered UAP.
+
+An EV3 capture's packet *names* are read from the records, not from the tool's
+packet lines: `ubertooth-rx` does not settle on this pair's clock from audio
+traffic, so a follow-mode capture of the voice link does not happen, and the
+case puts no floor on the tool's own output. Whether the clock recovery should
+manage it is the fork's question, not this test's.
+
 ## CLI usage smoke
 
 **What it does.** Nothing yet: a catalog entry for exercising host tool usage

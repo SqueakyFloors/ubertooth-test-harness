@@ -44,7 +44,7 @@ import sys
 from types import MappingProxyType
 from typing import Callable, Iterable, Mapping
 
-from ubertooth_harness import capturefile, esp32peer
+from ubertooth_harness import bredrrecord, capturefile, esp32peer
 from ubertooth_harness.hostneeds import Needs
 from ubertooth_harness.outputfiles import text_lines
 from ubertooth_harness.receive_cases import (
@@ -72,6 +72,7 @@ from ubertooth_harness.transitions import (
 
 CAPTURE_TEST_NAME = "Capture known Classic device"
 FOLLOW_TEST_NAME = "Follow Classic Bluetooth piconet"
+RECORD_TEST_NAME = "Classic capture record fields"
 ACCEPTOR_ROLE = "acceptor"
 INITIATOR_ROLE = "initiator"
 
@@ -102,11 +103,36 @@ PAIR_SETUP_S = (
     + 2 * (esp32peer.BOOT_TIMEOUT_S                   # the two releases
            + 2 * esp32peer.COMMAND_TIMEOUT_S)
 )
+# The audio bring-up sends four more commands than the stream's and reads
+# one more status, and `sco start` on the initiator pages.
+AUDIO_SETUP_S = PAIR_SETUP_S + 5 * esp32peer.COMMAND_TIMEOUT_S
 # One identify or reset: an open with its reset, then a status read.
 PEER_TIMEOUT_S = esp32peer.BOOT_TIMEOUT_S + 4 * esp32peer.COMMAND_TIMEOUT_S
 
+# The audio link's packet type the record cases ask for. An EV3 link carries
+# its payload on the air at the basic rate, which is the rate the Ubertooth
+# receives, so its packets decode; the 2-EV3 link the stack would choose
+# carries the same payload as enhanced rate.
+AUDIO_TYPE = "ev3"
+# What libbtbb names an EV3 packet. The four header bits cannot tell an EV3
+# from an HV3 or a 3-EV3, so this one name covers all three
+# (bredrrecord.TYPE_NAMES).
+AUDIO_TYPE_NAME = "HV3/EV3/3-EV3"
+# Audio frames each board must report sending. The bench measured about 268
+# packets a second each way on an EV3 link, so a capture window of a few
+# seconds clears this with room to spare; it is here so a link that came up
+# and carried nothing cannot pass.
+MIN_AUDIO_FRAMES = 100
+# Records of a survey that must carry a UAP the survey recovered. A survey
+# is given no address: the decoder keeps a piconet per LAP it hears and
+# fills the UAP in once a packet's CRC settles it, so the records before
+# that carry none, and how many that is depends on how much of the piconet
+# the sweep happened to hear.
+MIN_SURVEY_UAP_RECORDS = 1
+
 _ESP32PEER = str(Path(esp32peer.__file__).resolve())
 _CAPTURE_CHECKER = str(Path(capturefile.__file__).resolve())
+_RECORD_CHECKER = str(Path(bredrrecord.__file__).resolve())
 # Link type libbtbb writes for a BR/EDR capture.
 LINKTYPE_BREDR = capturefile.LINKTYPE_BLUETOOTH_BREDR_BB
 CHECK_TIMEOUT_S = 30.0
@@ -304,58 +330,83 @@ def _capture_file_step(step_id, name, file_name, fmt, minimum):
     )
 
 
-def _stream_argv(acceptor, initiator, serial, seconds, options, files):
-    """esp32peer.py stream ... -- ubertooth-rx -U <serial> -t <seconds> ..."""
+def _pair_argv(mode, acceptor, initiator, serial, seconds, options, files,
+               extra):
+    """esp32peer.py <mode> ... -- ubertooth-rx -U <serial> -t <seconds> ..."""
     def argv(context):
         capture = []
         for option, file_name in files:
             capture += [option, _capture_path(file_name)(context)]
         return (
-            sys.executable, _ESP32PEER, "stream",
+            sys.executable, _ESP32PEER, mode,
             "--acceptor", acceptor["device"],
             "--acceptor-address", acceptor["address"],
             "--acceptor-alias", acceptor["alias"],
             "--initiator", initiator["device"],
             "--initiator-address", initiator["address"],
             "--initiator-alias", initiator["alias"],
-            "--period", str(STREAM_PERIOD_MS),
-            "--payload", str(STREAM_PAYLOAD),
-            "--min-writes", str(MIN_WRITES),
             "--min-seconds", str(seconds - EARLY_EXIT_S),
             "--timeout", str(seconds + EXIT_SLACK_S),
+        ) + tuple(extra) + (
             "--", "ubertooth-rx", "-U", serial, "-t", str(seconds),
         ) + tuple(options) + tuple(capture)
     return argv
 
 
-def _pair_patterns(acceptor, initiator) -> tuple[str, ...]:
+def _stream_argv(acceptor, initiator, serial, seconds, options, files):
+    return _pair_argv("stream", acceptor, initiator, serial, seconds, options,
+                      files, ("--period", str(STREAM_PERIOD_MS),
+                              "--payload", str(STREAM_PAYLOAD),
+                              "--min-writes", str(MIN_WRITES)))
+
+
+def _audio_argv(acceptor, initiator, serial, seconds, options, files):
+    return _pair_argv("audio", acceptor, initiator, serial, seconds, options,
+                      files, ("--type", AUDIO_TYPE,
+                              "--min-frames", str(MIN_AUDIO_FRAMES)))
+
+
+def _pair_patterns(acceptor, initiator, *, audio=False) -> tuple[str, ...]:
     """What the pair's report must say for the capture to mean anything."""
-    return (
+    common = (
         rf"(?m)^acceptor address: {acceptor['address']}$",
         rf"(?m)^initiator address: {initiator['address']}$",
         rf"(?m)^central LAP: {initiator['lap']}$",
         rf"(?m)^central UAP: {initiator['uap']}$",
-        r"(?m)^link: up to ",
-        r"(?m)^command exit: 0 after \d+\.\d s$",
-        r"(?m)^pair streamed: yes$",
     )
+    exited = (r"(?m)^command exit: 0 after \d+\.\d s$",)
+    if audio:
+        # The type the link settled on, which is the one the records on the
+        # air must carry: a 2-EV3 link would put its payload on the air as
+        # enhanced rate, where a basic-rate capture reads a different type.
+        return common + (
+            rf"(?m)^audio link: esco {AUDIO_TYPE} ",
+            rf"(?m)^initiator audio: on {AUDIO_TYPE}, sent \d+ received \d+ frames$",
+        ) + exited + (rf"(?m)^pair carried audio: {AUDIO_TYPE}$",)
+    return common + (r"(?m)^link: up to ",) + exited + (
+        r"(?m)^pair streamed: yes$",)
 
 
 def _capture_case(serial, acceptor, initiator, seconds, *, case_id, name,
-                  options, check, expected_state, files=(), verify=()):
-    """One bounded ubertooth-rx run while the pair streams."""
+                  options, check, expected_state, files=(), verify=(),
+                  audio=False):
+    """One bounded ubertooth-rx run while the pair streams, or carries audio."""
+    argv = (_audio_argv if audio else _stream_argv)(
+        acceptor, initiator, serial, seconds, options, files)
+    setup_s = AUDIO_SETUP_S if audio else PAIR_SETUP_S
+    doing = "carries an audio link" if audio else "streams"
     steps = (
         _stop(serial, "establish-idle", "Establish idle before reading"),
         *_read_originals(serial, MODE_RESET_SETTINGS),
         Step("stream-and-receive",
-             f"The pair streams while ubertooth-rx -t {seconds} "
+             f"The pair {doing} while ubertooth-rx -t {seconds} "
              + " ".join(tuple(options) + tuple(option for option, _f in files)),
-             _stream_argv(acceptor, initiator, serial, seconds, options, files),
-             timeout_s=PAIR_SETUP_S + seconds + EXIT_SLACK_S,
+             argv,
+             timeout_s=setup_s + seconds + EXIT_SLACK_S,
              # A floor on the capture's own run belongs to the driver, which
              # times the child; this step's duration is the whole session.
              mutates=True,
-             output_patterns=_pair_patterns(acceptor, initiator),
+             output_patterns=_pair_patterns(acceptor, initiator, audio=audio),
              output_check=check),
         _stop(serial),
         *verify,
@@ -472,4 +523,148 @@ def follow_classic_cases(arguments, resources, resource_identities):
                 "verify-capture",
                 "The -q file is a BR/EDR pcap and holds the packets",
                 "follow.pcap", "pcap", MIN_PACKETS),)))
+    return tuple(cases)
+
+
+# ---------------------------------------------------------------------------
+# Classic capture record fields
+
+
+def _record_step(step_id, name, file_name, checks) -> Step:
+    """Run the record decoder over one capture file, with these checks."""
+    return Step(
+        step_id, name,
+        lambda context: (sys.executable, _RECORD_CHECKER,
+                         _capture_path(file_name)(context)) + tuple(checks),
+        timeout_s=CHECK_TIMEOUT_S,
+        output_patterns=(rf"(?m)^BR/EDR records: \d+ in {re.escape(file_name)}$",
+                         r"(?m)^BR/EDR flags: .*hec-valid",),
+        # The decoder exits non-zero for any of these, so this only puts the
+        # reason in the step's own failure rather than in its output alone.
+        forbidden_patterns=(r"BR/EDR record problem:",),
+    )
+
+
+def _record_checks(central=None, *, minimum=MIN_PACKETS, following=None,
+                   extra=()) -> tuple[str, ...]:
+    """What the records of a capture must hold.
+
+    With a ``central``, this is a capture that was given one piconet to
+    follow, so every record belongs to it and carries it as the reference
+    address. Without one, the capture is a survey: it records whatever is in
+    range, and the caller says what to look for instead.
+    """
+    checks = ("--min-packets", str(minimum))
+    if central is not None:
+        checks += ("--lap", central["lap"],
+                   "--reference-lap", central["lap"],
+                   "--reference-uap", central["uap"])
+    if following is not None:
+        # ubertooth-rx -l records the address it was told to follow once, in
+        # a PCAPNG interface option. With -u as well, the mask says the
+        # whole UAP was known.
+        checks += ("--following", following, "--following-uap-mask", "ff")
+    return checks + tuple(extra)
+
+
+def record_fields_cases(arguments, resources, resource_identities):
+    """Classic capture record fields: decode what a BR/EDR capture holds."""
+    serial = _serial(resource_identities, RECORD_TEST_NAME)
+    acceptor, initiator = _pair(resource_identities, RECORD_TEST_NAME, resources)
+    seconds = seconds_arg(arguments)
+    central, central_uap = initiator["lap"], initiator["uap"]
+    follow = ("-l", central, "-u", central_uap)
+
+    def capture(**options):
+        return _capture_case(serial, acceptor, initiator, seconds, **options)
+
+    cases = [
+        _capture_case(
+            serial, acceptor, initiator, seconds, case_id="follow-fields",
+            name=f"Every record of a -l {central} -u {central_uap} capture "
+                 "holds this piconet's fields, in both formats",
+            options=follow,
+            check=piconet_packets(central, MIN_PACKETS, only=True),
+            expected_state=(
+                f"the pcap and the pcapng each hold {MIN_PACKETS}+ records of "
+                f"LAP {central} with reference LAP {central} and reference UAP "
+                f"{central_uap}, each record's payload length, HEC, and CRC "
+                f"agreeing with its own header; the pcapng names "
+                f"{initiator['address']} as the address followed"),
+            files=(("-q", "records.pcap"), ("-r", "records.pcapng")),
+            verify=(
+                _record_step("verify-pcap",
+                             "The PCAP's records hold this piconet's fields",
+                             "records.pcap", _record_checks(initiator)),
+                _record_step("verify-pcapng",
+                             "The PCAPNG's records hold this piconet's fields, "
+                             "and it names the address followed",
+                             "records.pcapng",
+                             _record_checks(initiator,
+                                            following=initiator["address"])),
+            )),
+        # Which board is the central is decided by which one pages, so the
+        # LAP and the reference address in the records follow the roles
+        # rather than being whatever the decoder had lying around.
+        _capture_case(
+            serial, initiator, acceptor, seconds, case_id="swapped-fields",
+            name=f"With the roles swapped the records hold LAP "
+                 f"{acceptor['lap']}, not {central}",
+            options=("-l", acceptor["lap"], "-u", acceptor["uap"]),
+            check=piconet_packets(acceptor["lap"], MIN_PACKETS, only=True),
+            expected_state=(f"the pcapng holds {MIN_PACKETS}+ records, all of "
+                            f"LAP {acceptor['lap']} and none of {central}"),
+            files=(("-r", "swapped.pcapng"),),
+            verify=(_record_step(
+                "verify-pcapng",
+                f"The records hold LAP {acceptor['lap']}",
+                "swapped.pcapng",
+                _record_checks(acceptor, following=acceptor["address"])),)),
+    ]
+    if arguments["coverage"] == "comprehensive":
+        cases.append(capture(
+            case_id="audio-fields",
+            name=f"An {AUDIO_TYPE.upper()} audio link's records are named "
+                 f"{AUDIO_TYPE_NAME} and hold this piconet's fields",
+            options=follow,
+            # The tool's own packet lines need the piconet's clock, which it
+            # does not settle on from audio traffic alone, so the floor here
+            # is on the records; the headers they carry need no clock.
+            check=None,
+            expected_state=(f"the pcapng holds {MIN_PACKETS}+ records of LAP "
+                            f"{central}, at least one named {AUDIO_TYPE_NAME}, "
+                            f"each record's fields agreeing with its own header"),
+            files=(("-r", "audio.pcapng"),),
+            audio=True,
+            verify=(
+                _record_step("verify-pcapng",
+                             f"The records name {AUDIO_TYPE_NAME} packets",
+                             "audio.pcapng",
+                             _record_checks(
+                                 initiator, following=initiator["address"],
+                                 extra=("--require-types", AUDIO_TYPE_NAME))),
+            )))
+        cases.append(capture(
+            case_id="survey-fields",
+            name="A survey's records carry the UAP it recovered as it went",
+            options=("-z",),
+            check=_all(packet_check(survey=True), survey_lists(central)),
+            expected_state=(
+                f"the pcapng holds {MIN_PACKETS}+ records, at least "
+                f"{MIN_SURVEY_UAP_RECORDS} of them carrying a UAP the survey "
+                "recovered, and every record's fields agreeing with its own "
+                "header"),
+            files=(("-r", "survey.pcapng"),),
+            verify=(
+                # A survey is given no piconet: it records whatever is in
+                # range, under no reference LAP, and fills in each piconet's
+                # UAP once it has settled it, so the records before that
+                # carry none and the LAP is not this pair's alone.
+                _record_step("verify-pcapng",
+                             "The survey's records carry the UAP it recovered",
+                             "survey.pcapng",
+                             _record_checks(
+                                 extra=("--min-reference-uap",
+                                        str(MIN_SURVEY_UAP_RECORDS)))),
+            )))
     return tuple(cases)

@@ -14,6 +14,12 @@ serial. Run as a script by the Classic cases::
                                  [--period MS] [--payload BYTES]
                                  [--min-writes N] [--timeout S]
                                  -- COMMAND [ARGUMENT ...]
+    python esp32peer.py audio    --acceptor PATH --initiator PATH
+                                 [--acceptor-address ADDR]
+                                 [--initiator-address ADDR]
+                                 [--type ev3|2ev3|default]
+                                 [--min-frames N] [--timeout S]
+                                 -- COMMAND [ARGUMENT ...]
 
 **Opening the bridge resets the board.** DTR and RTS are wired to the chip's
 EN and IO0 pins on these dev boards, and the kernel asserts both when the
@@ -28,6 +34,12 @@ command it runs is the thing under test (``ubertooth-rx ...``), so its
 standard output is passed straight through; this module's own report goes on
 standard error, as ``key: value`` lines for the cases' patterns.
 
+``audio`` does the same with a synchronous (eSCO) link over the Hands-Free
+Profile instead of the data stream, so the air carries reserved-slot voice
+packets. With ``--type ev3`` the link's payload is on the air at the basic
+rate, which is the one a receive-only capture can decode; the default the
+stack would pick, 2-EV3, carries it as enhanced-rate.
+
 The initiator pages, so it is the piconet central and its LAP is the one on
 the air. ``central LAP`` and ``central UAP`` name it, which is what
 ``ubertooth-rx -l`` and ``-u`` take.
@@ -36,8 +48,8 @@ Every command fails closed: a port that cannot be opened, a board that does
 not answer, an ``ERR`` reply, firmware of another version, an address that is
 not the registered one, a link that did not come up or did not stay up, or a
 pair that sent nothing prints ``error: <why>`` on stderr and exits 1. Exit
-status 2 is a usage error. Otherwise ``stream`` exits with the status of the
-command it ran.
+status 2 is a usage error. Otherwise ``stream`` and ``audio`` exit with the
+status of the command they ran.
 """
 
 from __future__ import annotations
@@ -94,6 +106,22 @@ PERIOD_MIN_MS, PERIOD_MAX_MS = 5, 10000
 PAYLOAD_MIN, PAYLOAD_MAX = 8, 512
 DEFAULT_PERIOD_MS = 20
 DEFAULT_PAYLOAD = 200
+
+# The synchronous (eSCO) audio link's packet type a caller may ask for.
+# `ev3` carries its payload on the air at the basic rate, which is what a
+# receive-only basic-rate decoder can read; `2ev3`, what the stack asks for
+# by default, carries the same payload as enhanced-rate. `default` leaves
+# the choice alone.
+AUDIO_TYPES = ("ev3", "2ev3", "default")
+DEFAULT_AUDIO_TYPE = "ev3"
+# The two subcommands that hold the pair's link up while another command
+# runs, as opposed to the ones that read or reset one board.
+PAIR_COMMANDS = ("stream", "audio")
+# The oldest image whose shell can choose the audio link's packet type
+# (`sco type`); the audio link itself arrived in utesp-1.1.0.
+AUDIO_FIRMWARE = "utesp-1.4.0"
+# What `status` must report for the link to be up and carrying audio.
+AUDIO_ON = "on"
 
 COMMAND_TIMEOUT_S = 5.0
 # Opening the port resets the board; it then has to boot and start Bluetooth
@@ -609,6 +637,133 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
     return status
 
 
+def audio(acceptor: Peer, initiator: Peer, command: Sequence[str], *,
+          packet_type: str = DEFAULT_AUDIO_TYPE, min_frames: int = 1,
+          min_seconds: float = 0.0, timeout: float = 300.0, out=None,
+          settle_s: float = SETTLE_S) -> int:
+    """Hold a synchronous audio link up between the pair while ``command`` runs.
+
+    The air then carries reserved-slot voice packets as well as the data the
+    SPP stream puts there, and an ``ev3`` link's payload is at the basic
+    rate, so a receive-only capture can decode it. As with ``stream``, both
+    ports are opened first, which resets both boards.
+    """
+    out = out or sys.stderr
+    if packet_type not in AUDIO_TYPES:
+        raise PeerError("the audio packet type must be one of "
+                        + ", ".join(AUDIO_TYPES))
+    if acceptor.device == initiator.device:
+        raise PeerError("the acceptor and the initiator are the same bridge; an "
+                        "audio link needs two boards")
+    acceptor_shell = acceptor.open()
+    try:
+        initiator_shell = initiator.open()
+        try:
+            return _audio(acceptor, acceptor_shell, initiator, initiator_shell,
+                          command, packet_type=packet_type,
+                          min_frames=min_frames, min_seconds=min_seconds,
+                          timeout=timeout, out=out, settle_s=settle_s)
+        finally:
+            initiator_shell.close()
+    finally:
+        acceptor_shell.close()
+
+
+def _audio_field(status: dict, key: str, kind, label: str):
+    """One of the audio link's own status fields, which older images lack."""
+    value = status.get(key)
+    if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
+        raise PeerError(f"{label}: status has no valid '{key}'; the audio link "
+                        f"needs {AUDIO_FIRMWARE} or a later 1.x image")
+    return value
+
+
+def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
+           packet_type, min_frames, min_seconds, timeout, out, settle_s) -> int:
+    acceptor_shell.wait_ready()
+    initiator_shell.wait_ready()
+    acceptor_status = check_status(acceptor_shell.status(), acceptor.label,
+                                  acceptor.address)
+    initiator_status = check_status(initiator_shell.status(), initiator.label,
+                                    initiator.address)
+    if acceptor_status["address"] == initiator_status["address"]:
+        raise PeerError("both bridges lead to one board: they report the same "
+                        f"BD_ADDR {acceptor_status['address']}")
+    for peer_status, peer in ((acceptor_status, acceptor),
+                              (initiator_status, initiator)):
+        check_firmware(peer_status["fw"], peer.label, AUDIO_FIRMWARE)
+    _report(out, acceptor.label, acceptor_status)
+    _report(out, initiator.label, initiator_status)
+    # The initiator pages, so it is the central and its LAP is on the air.
+    print(f"central LAP: {initiator_status['lap']}", file=out)
+    print(f"central UAP: {initiator_status['uap']}", file=out)
+    print(f"audio: {packet_type} packets", file=out)
+    try:
+        # Each board states the packet types it will allow and the link uses
+        # one both allowed, so the type goes to both. The hands-free unit
+        # has to be listening before the gateway pages it, so the acceptor
+        # starts its profile first; `sco start` there only waits. The
+        # initiator is told its type after `role`, which puts the choice
+        # back to the firmware's default.
+        if packet_type != "default":
+            acceptor_shell.command(f"sco type {packet_type}")
+        acceptor_shell.command("sco start")
+        initiator_shell.command("role initiator")
+        initiator_shell.command(f"spp peer {acceptor_status['address']}")
+        if packet_type != "default":
+            initiator_shell.command(f"sco type {packet_type}")
+        initiator_shell.command("sco start", CONNECT_TIMEOUT_S)
+        # Both ends have to report the link, not just the one that paged.
+        # The audio link is the Hands-Free Profile's, not the Serial Port
+        # Profile's, so `remote` stays empty here: whose link it is, is
+        # fixed by the address the initiator was given to page.
+        linked = initiator_shell.status()
+        for peer_status, peer in ((linked, initiator),
+                                  (acceptor_shell.status(), acceptor)):
+            if _audio_field(peer_status, "sco", str, peer.label) != AUDIO_ON:
+                raise PeerError(
+                    f"the {peer.label}'s audio link to "
+                    f"{acceptor_status['address']} is not up after 'sco start' "
+                    f"(sco {peer_status['sco']})")
+        print(f"audio link: {_audio_field(linked, 'sco_link', str, initiator.label)} "
+              f"{_audio_field(linked, 'sco_pkt_type', str, initiator.label)}, "
+              f"{_audio_field(linked, 'sco_tx_len', int, initiator.label)} bytes "
+              f"every {_audio_field(linked, 'sco_interval', int, initiator.label)} "
+              f"slots, up to {acceptor_status['address']} at "
+              f"{time.strftime('%H:%M:%SZ', time.gmtime())}", file=out)
+        time.sleep(settle_s)
+        print("command: " + " ".join(command), file=out)
+        out.flush()
+        status, seconds = _run_command(command, timeout)
+        print(f"command exit: {status} after {seconds:.1f} s", file=out)
+        after_initiator = initiator_shell.status()
+        after_acceptor = acceptor_shell.status()
+    finally:
+        _release(initiator_shell)
+        _release(acceptor_shell)
+    problems = []
+    for peer_status, peer in ((after_initiator, initiator),
+                              (after_acceptor, acceptor)):
+        sent = _audio_field(peer_status, "sco_tx_frames", int, peer.label)
+        received = _audio_field(peer_status, "sco_rx_frames", int, peer.label)
+        print(f"{peer.label} audio: {peer_status['sco']} "
+              f"{peer_status['sco_pkt_type']}, sent {sent} received "
+              f"{received} frames", file=out)
+        if peer_status["sco"] != AUDIO_ON:
+            problems.append(f"the {peer.label}'s audio link read "
+                            f"{peer_status['sco']} afterwards, not {AUDIO_ON}")
+        if sent < min_frames:
+            problems.append(f"the {peer.label} sent {sent} audio frames, fewer "
+                            f"than the {min_frames} this test needs")
+    if seconds < min_seconds:
+        problems.append(f"{command[0]} ran {seconds:.1f} s, less than the "
+                        f"{min_seconds:g} s this test needs: it stopped early")
+    if problems:
+        raise PeerError("the pair did not carry audio: " + "; ".join(problems))
+    print(f"pair carried audio: {after_initiator['sco_pkt_type']}", file=out)
+    return status
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="esp32peer.py",
                                      description=__doc__.splitlines()[0])
@@ -624,25 +779,41 @@ def main(argv: Sequence[str] | None = None) -> int:
                          help="the board's registry alias; with it, every line "
                               "to and from its shell is written to stderr "
                               "marked with that alias")
-    pair = sub.add_parser("stream")
-    pair.add_argument("--acceptor", required=True, help="the listening board's bridge")
-    pair.add_argument("--initiator", required=True,
-                      help="the paging board's bridge; it is the piconet central")
-    pair.add_argument("--acceptor-address", help="the acceptor's registered BD_ADDR")
-    pair.add_argument("--initiator-address", help="the initiator's registered BD_ADDR")
-    pair.add_argument("--period", type=int, default=DEFAULT_PERIOD_MS, help="ms")
-    pair.add_argument("--payload", type=int, default=DEFAULT_PAYLOAD, help="bytes")
-    pair.add_argument("--min-writes", type=int, default=1,
-                      help="writes the initiator must report afterwards")
-    pair.add_argument("--acceptor-alias", default="",
-                      help="the acceptor's registry alias, for the transcript")
-    pair.add_argument("--initiator-alias", default="",
-                      help="the initiator's registry alias, for the transcript")
-    pair.add_argument("--min-seconds", type=float, default=0.0,
-                      help="seconds the command must run for, so a capture "
-                           "that stopped early is not taken for a pass")
-    pair.add_argument("--timeout", type=float, default=300.0,
-                      help="seconds the command may take")
+    # `stream` and `audio` both hold the pair's link up while a command
+    # runs, so they take the same two boards and the same deadlines; what
+    # differs is what goes on the air.
+    for name in PAIR_COMMANDS:
+        pair = sub.add_parser(name)
+        pair.add_argument("--acceptor", required=True,
+                          help="the listening board's bridge")
+        pair.add_argument("--initiator", required=True,
+                          help="the paging board's bridge; it is the piconet central")
+        pair.add_argument("--acceptor-address",
+                          help="the acceptor's registered BD_ADDR")
+        pair.add_argument("--initiator-address",
+                          help="the initiator's registered BD_ADDR")
+        pair.add_argument("--acceptor-alias", default="",
+                          help="the acceptor's registry alias, for the transcript")
+        pair.add_argument("--initiator-alias", default="",
+                          help="the initiator's registry alias, for the transcript")
+        pair.add_argument("--min-seconds", type=float, default=0.0,
+                          help="seconds the command must run for, so a capture "
+                               "that stopped early is not taken for a pass")
+        pair.add_argument("--timeout", type=float, default=300.0,
+                          help="seconds the command may take")
+        if name == "stream":
+            pair.add_argument("--period", type=int, default=DEFAULT_PERIOD_MS,
+                              help="ms")
+            pair.add_argument("--payload", type=int, default=DEFAULT_PAYLOAD,
+                              help="bytes")
+            pair.add_argument("--min-writes", type=int, default=1,
+                              help="writes the initiator must report afterwards")
+        else:
+            pair.add_argument("--type", dest="packet_type",
+                              default=DEFAULT_AUDIO_TYPE, choices=AUDIO_TYPES,
+                              help="the audio link's packet type")
+            pair.add_argument("--min-frames", type=int, default=1,
+                              help="audio frames each board must report sending")
     # Everything after the first -- is the command to run, untouched: its own
     # options (-U, -t, -z) must not be read as this script's.
     options = list(sys.argv[1:] if argv is None else argv)
@@ -651,20 +822,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         split = options.index("--")
         options, command = options[:split], options[split + 1:]
     args = parser.parse_args(options)
-    if args.command == "stream" and not command:
-        parser.error("stream needs the command to run after --")
-    if args.command != "stream" and command:
+    if args.command in PAIR_COMMANDS and not command:
+        parser.error(f"{args.command} needs the command to run after --")
+    if args.command not in PAIR_COMMANDS and command:
         parser.error(f"{args.command} takes no command after --")
     try:
-        if args.command == "stream":
+        if args.command in PAIR_COMMANDS:
+            acceptor = Peer(args.acceptor, "acceptor", args.acceptor_address,
+                            args.acceptor_alias)
+            initiator = Peer(args.initiator, "initiator", args.initiator_address,
+                             args.initiator_alias)
+            if args.command == "audio":
+                return audio(acceptor, initiator, command,
+                             packet_type=args.packet_type,
+                             min_frames=args.min_frames,
+                             min_seconds=args.min_seconds, timeout=args.timeout)
             return stream(
-                Peer(args.acceptor, "acceptor", args.acceptor_address,
-                     args.acceptor_alias),
-                Peer(args.initiator, "initiator", args.initiator_address,
-                     args.initiator_alias),
-                command, period=args.period, payload=args.payload,
-                min_writes=args.min_writes, min_seconds=args.min_seconds,
-                timeout=args.timeout)
+                acceptor, initiator, command, period=args.period,
+                payload=args.payload, min_writes=args.min_writes,
+                min_seconds=args.min_seconds, timeout=args.timeout)
         peer = Peer(args.device, args.role, args.address, args.alias)
         if args.command == "identify":
             identify(peer)
