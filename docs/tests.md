@@ -1044,6 +1044,99 @@ refused before any record is decoded.
 this covers the decode path and not the receive path. There is no LE
 equivalent: no tool calls libbtbb's LE file replay.
 
+## Interrupting a capture
+
+**What it does.** Sends a real SIGINT to a running capture tool and requires
+that one Ctrl-C ends it promptly, leaves a capture file a reader can open,
+leaves no process behind and nothing still streaming, and leaves a board that
+answers the next command at once.
+
+**Theory of operation.** Ctrl-C is how a capture normally ends, so what it
+leaves behind is what an operator meets every time. The fork's handler only
+raises a flag; the capture loop reads it on its own thread, ends the stream,
+stops the mode, closes the capture files, and exits 0. The handlers go on
+before the board is opened, so a signal arriving while one is being found is
+not thrown away. Nothing in the harness asserted any of that before this.
+Bounded modes are stopped with SIGTERM; the one place a fork tool met a SIGINT
+is the no-selector follow case, where `timeout -s INT` is a deadline and the
+expected outcome is status 124 with SIGKILL behind it; and the cases that do
+check a SIGINT send it to tshark.
+
+The signal has to reach the tool itself, so
+[`captureinterrupt.py`](../ubertooth_harness/captureinterrupt.py) starts it
+directly, with no shell and no `timeout` wrapper (which would be signalled
+instead), sends one SIGINT to that process's own pid, then waits for it and
+reaps it. It starts the tool in a process group of its own, which is what lets it say
+whether the run left a process behind, and take it down afterwards: the group
+goes down on the way out, and a SIGTERM, SIGINT or SIGHUP to the helper —
+which is what a canceled run or a step deadline sends — takes it down and
+then re-raises, so a tool with a mode started cannot outlive its step. The
+verdict is reached before any of that, so a process the run left is a finding
+and not something the helper tidied away before looking.
+
+For the two cases that can wait for evidence, the moment is chosen by it, not
+by a clock. `ubertooth-dump -d` and `ubertooth-specan -d` stream whether or
+not there is traffic, so the capture file growing past a floor is proof that
+the mode is running. `ubertooth-dump` flushes each record, so its file grows a
+record at a time; `ubertooth-specan` does not, so its file grows a stdio
+buffer at a time and the floor is a buffer's worth rather than a few samples.
+A capture that never gets there, and a tool that exits on its own before the
+signal, both fail the case: these streams do not depend on the air, so neither
+is something the bench decides, and no case here can pass by skipping.
+
+**Hardware and arguments.** One `Ubertooth` role, no peer, no firmware write,
+no transmission, and every other registered board is read as a guard.
+`hosts:`, `coverage:`. No RF placement requirement: none of the cases needs
+traffic, so an attenuated board will do.
+
+**Expected outcome.** Smoke runs 2 cases: `ubertooth-dump -d` interrupted once
+it has written 20 whole records, and `ubertooth-btle -n -r -q` interrupted
+1.5 s after its PCAPNG appears. Comprehensive runs 3, adding `ubertooth-specan
+-d` interrupted once it has written a buffer's worth of samples. Every case
+requires: exit 0 within 5 s of the one signal and not death by that signal;
+nothing left in the process group the tool ran in; the capture file read again
+after the exit and not grown, so no mode is still streaming into it; no
+`error:`, `warning:` or progress line on standard output — `note:` is not one
+of those, because `ubertooth-btle` prints its undecoded-packet note on the
+report stream, which is standard output for a capture written to a file, and
+the fork puts it there deliberately; for the two tools that report
+unconditionally, their own line on standard error, so a quiet or misdirected
+teardown is caught (`rx block timestamp ...` for the dump, `Ubertooth stopped`
+for the sweep, while `ubertooth-btle` and `ubertooth-rx` print on their error
+and note paths only, so their cases ask for none); the file itself readable
+(whole 68-byte records for the dump, whole 3-byte in-band samples for the
+sweep, a walkable PCAPNG and PCAP for the two LE writers); the channel and the
+squelch back at the 2441 MHz and -120 a mode stop leaves, read before the
+cleanup's own stop, so a board still carrying the mode's settings is seen;
+`ubertooth-util -v` answered within 5 s; and then the usual cleanup restoring
+the channel, the squelch, and the LEDs, with the identity read again. The tool's own two streams are kept beside the capture, as
+`<capture>.stdout.log` and `.stderr.log`, so a failed run keeps its
+evidence.
+
+**Known limits.** The `ubertooth-btle` case's moment is a settling time, not
+evidence: the tool creates both capture files after the board is open and
+before the mode requests, and libbtbb sizes a PCAPNG in pages, so the file
+reaches its floor as soon as it appears. That case therefore rests on the exit
+and the teardown, not on having caught a running mode. For the same two
+writers "the capture stopped growing" is weak, because a quiet LE capture
+would not grow in the half second after the exit either; and the no-orphan
+check cannot fail for any of these tools, since none of them forks, so it is
+a guard rather than a measurement. What that case really rests on is the
+prompt exit 0, the readable capture files, and the board's state afterwards. A stop that lands inside an *unanswered* poll, which is
+where the fork drops the retries still to come
+([ubertooth#856](https://github.com/SqueakyFloors/ubertooth/pull/856)), cannot
+be produced here: it needs a board that has stopped answering, which is the
+board-lost-mid-capture work and its hub power control
+([#141](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/141)).
+A signal aimed at the board-open window is out of reach from here, so no case
+claims it. A lookup finishes in 10 to 20 ms on the bench host, so landing
+inside it would take many tries; and on a build from before the handlers moved
+ahead of the open ([ubertooth#839](https://github.com/SqueakyFloors/ubertooth/pull/839),
+fork `3311ce36`) a signal that landed there killed the tool outright, which is
+indistinguishable from one that arrived before the handler was installed on a
+build that has the fix. There is no outcome that separates the two, so a case
+built on it would either fail a correct build or retry a broken one away. Nothing here checks a second Ctrl-C, because one is meant to be enough.
+
 ## Refused command lines
 
 **What it does.** Refuses a command line that names output files and requires

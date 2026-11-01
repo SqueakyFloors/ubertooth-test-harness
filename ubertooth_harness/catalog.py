@@ -26,7 +26,8 @@ from ubertooth_harness.resources import ESP32_CLASSIC_PEER
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
     advertiser_cases, boardstate_cases, capture_failure_cases, classic_cases,
-    connection_cases, dfu_cases, dfu_host_cases, python_cases, receive_cases,
+    connection_cases, dfu_cases, dfu_host_cases, interrupt_cases, python_cases,
+    receive_cases,
     refusal_cases, tool_cases, transitions, tshark_cases, util_cases,
     util_refusal_cases,
 )
@@ -811,6 +812,15 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # fork 166b4f91 with a 3 s duration.
     "Board state between runs": _default(Estimate(15.5, per_duration=1)),
     "Raw receive replay": _profiles(Estimate(0.9), Estimate(3.9)),
+    # Two cases and 35 commands in smoke, three and 52 comprehensive.
+    # Measured on the Linux bench host: smoke 11.2 s, and comprehensive 17.5,
+    # 18.3 and 23.4 s over three runs. Each case establishes idle, reads three
+    # settings, runs a capture for its 1.5 s settling time plus the SIGINT
+    # teardown, reads the file it was left with, reads the board's channel and
+    # squelch, asks for its identity, and restores; the comprehensive-only
+    # sweep case costs the most, since specan takes longest to reach its
+    # floor.
+    "Interrupting a capture": _profiles(Estimate(11.2), Estimate(18.5)),
     "Refused command lines": _profiles(Estimate(10.0), Estimate(20.7)),
     # No hardware: 6 cases and 39 commands in smoke, 16 and 112
     # comprehensive, all of them short (preflight is not counted, as it is in
@@ -1118,6 +1128,21 @@ def builtin_catalog() -> TestCatalog:
             }),
             MappingProxyType({"Ubertooth": "Ubertooth"}),
             command_builder=boardstate_cases.board_state_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+        ),
+        TestDefinition(
+            interrupt_cases.TEST_NAME,
+            "A real SIGINT to a running capture: one Ctrl-C ends the run "
+            "promptly with exit 0, leaves no process behind and nothing still "
+            "streaming, leaves a capture file a reader can open, and leaves a "
+            "board back at its idle settings that answers the next command at "
+            "once",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH, "coverage": COVERAGE,
+            }),
+            MappingProxyType({"Ubertooth": "Ubertooth"}),
+            command_builder=interrupt_cases.interrupt_cases,
             continue_on_case_failure=True,
             guards_other_ubertooths=True,
         ),
