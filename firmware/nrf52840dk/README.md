@@ -17,7 +17,7 @@ the new one, so a board can be handed from one test to another without
 reflashing. The boot role is the advertiser, so a board that was reset or
 power-cycled is in a known state.
 
-Firmware version: `utdk-1.3.0` (`UTDK_FW_VERSION` in `src/roles.h`; the
+Firmware version: `utdk-1.4.0` (`UTDK_FW_VERSION` in `src/roles.h`; the
 harness pins the same string in `ubertooth_harness/nrfdk.py` and flashes a
 board that reports anything else).
 
@@ -56,6 +56,19 @@ The image is `/tmp/utdk-build/zephyr/zephyr.hex` (about 130 KB of flash,
 27 KB of RAM). Builds go outside the repository; nothing under `firmware/`
 is generated.
 
+The second image, whose connections hop with channel selection algorithm 1
+(below), is the same command with the two files that configure it:
+
+```sh
+... west build --no-sysbuild -b nrf52840dk/nrf52840 -d /tmp/utdk-chansel1 \
+  -s /path/to/ubertooth-test-harness/firmware/nrf52840dk \
+  -- -DEXTRA_CONF_FILE=chan-sel-1.conf -DEXTRA_DTC_OVERLAY_FILE=chan-sel-1.overlay
+```
+
+It reports `utdk-1.4.0-chansel1` as its version, so the harness tells the two
+apart and flashes a board that carries the wrong one
+(`nrfdk.py ensure --version`). It takes about 160 KB of flash and 35 KB of RAM.
+
 ### Without installing the SDK
 
 `scripts/ci.sh firmware-dk` builds the same image in Nordic's toolchain
@@ -83,6 +96,8 @@ under this directory, once a week, and on request
 ([#147](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/147));
 it is not a required check, because the image and the workspace are gigabytes.
 The image it builds is not published: a board is flashed from a local build.
+It builds the default image only; the algorithm 1 image comes from the same
+sources, so a source change that needs a version bump is caught either way.
 
 With `DK_BASE_REF` (a git ref, which the workflow sets to the commit a pull
 request is against) or `DK_BASE_SRC` (a directory of these sources) it builds
@@ -124,7 +139,7 @@ The shell is on uart0, which is the J-Link's first virtual COM port (VCOM0;
 115200 baud, 8N1, no flow control. It prints no prompt, no echo and no
 colors. Send one command line ended by CR; the board answers with zero or
 more data lines, then exactly one line `OK` or `ERR <reason>`. Any other line
-(the boot banner `*** Booting nRF Connect SDK ...`, `utdk: utdk-1.3.0 ready`)
+(the boot banner `*** Booting nRF Connect SDK ...`, `utdk: utdk-1.4.0 ready`)
 is not a response.
 
 | Command | Answer |
@@ -169,7 +184,7 @@ instead; `nrfdk.py` treats both as a refusal.
 for example a central with a live connection:
 
 ```json
-{"role":"central","fw":"utdk-1.3.0","bt":true,"address":"C0:7D:CD:95:52:86","address_type":"random static","adv":false,"running":false,"type":"nonconn","chmap":"all","interval_ms":100,"payload":"","counter":0,"starts":0,"connections":0,"last_err":0,"conn_on":true,"connected":true,"peer":"C1:92:EC:E7:71:BC","conn_interval_ms":30,"update_ms":60,"dle":true,"interval_units":48,"latency":0,"timeout_units":400,"tx_octets":251,"rx_octets":251,"mtu":247,"phy":"1M","payload_len":244,"period_ms":100,"conn_chmap":"37","data_map":"ffffffff1f","data_map_used":37,"data_map_sets":0,"cycle_ms":4000,"autoupdate_ms":60,"writes":74,"write_errors":4,"received":0,"updates":3,"connects":3,"disconnects":2,"conn_err":0}
+{"role":"central","fw":"utdk-1.4.0","bt":true,"address":"C0:7D:CD:95:52:86","address_type":"random static","chan_sel_2":true,"adv":false,"running":false,"type":"nonconn","chmap":"all","interval_ms":100,"payload":"","counter":0,"starts":0,"connections":0,"last_err":0,"conn_on":true,"connected":true,"peer":"C1:92:EC:E7:71:BC","conn_interval_ms":30,"update_ms":60,"dle":true,"interval_units":48,"latency":0,"timeout_units":400,"tx_octets":251,"rx_octets":251,"mtu":247,"phy":"1M","payload_len":244,"period_ms":100,"conn_chmap":"37","chan_sel":"unknown","data_map":"ffffffff1f","data_map_used":37,"data_map_sets":0,"cycle_ms":4000,"autoupdate_ms":60,"writes":74,"write_errors":4,"received":0,"updates":3,"connects":3,"disconnects":2,"conn_err":0}
 ```
 
 - `address`: the identity address, a static random address derived from
@@ -183,6 +198,9 @@ for example a central with a live connection:
   since boot; `connections`: connections accepted to `ADV_IND` (each is
   dropped at once and advertising starts again); `last_err`: the last
   Bluetooth API error (0 is none).
+- `chan_sel_2`: whether this image's controller can use channel selection
+  algorithm 2; `chan_sel`: which algorithm the live link uses (`none`, `1` or
+  `unknown`). See "Channel selection algorithm 1".
 - `conn_on`: the connection role was started; `connected`: the link is up
   now. `interval_units`, `latency` and `timeout_units` are the connection
   parameters in use, in the units the air interface uses (1.25 ms and
@@ -210,6 +228,35 @@ for example a central with a live connection:
 The board does not count advertising events: the counter steps once a
 second while advertising, so a capture's counters show which second of the
 run each packet came from.
+
+## Channel selection algorithm 1
+
+A Bluetooth LE connection hops over its data channels with one of two channel
+selection algorithms. Algorithm 2, added in Bluetooth 5.0, is used only when
+both ends support it, and both ends normally do, so every connection this
+firmware made used it. `ubertooth-btle -p`, which joins a connection that is
+already up, recovers algorithm 1 connections only, so it had no peer here it
+could be shown working on.
+
+`chan-sel-1.conf` and `chan-sel-1.overlay` build a second image of the same
+three roles whose controller has no algorithm 2 at all. One DK on that image
+is enough: a link it is part of hops with algorithm 1 whatever the peer can
+do.
+
+Which controller is built is the whole of it. The nRF Connect SDK's default
+SoftDevice Controller always has algorithm 2 and offers no way to turn it off;
+Zephyr's own link layer has `CONFIG_BT_CTLR_CHAN_SEL_2`, and the overlay is
+what selects that link layer, because `CONFIG_BT_LL_SW_SPLIT` depends on the
+`zephyr,bt-hci-ll-sw-split` devicetree node being the chosen HCI. So the
+algorithm 1 image runs a different link layer from the default one, which is
+why it is a second image and not a run-time switch.
+
+`status` says which: `chan_sel_2` is whether this image's controller can use
+algorithm 2, and `chan_sel` is what the live link uses — `none` with no link,
+`1` on an image without algorithm 2, and `unknown` otherwise. `unknown` is not
+a hedge: the two ends agree the algorithm with the ChSel bit of the ADV_IND
+and the CONNECT_IND, which is on the air, and neither controller reports what
+was agreed. A receiver reads it off the air.
 
 ## The connection pair
 

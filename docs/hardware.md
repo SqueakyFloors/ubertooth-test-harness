@@ -272,7 +272,7 @@ nothing in the harness can catch it.
 | Device | Source | Version | Built with | Flashed with |
 |---|---|---|---|---|
 | Ubertooth One | the [fork's](https://github.com/SqueakyFloors/ubertooth) `firmware/bluetooth_rxtx` | the resolved commit under test | `arm-none-eabi-gcc` | `ubertooth-dfu` |
-| nRF52840 DK | [`firmware/nrf52840dk`](../firmware/nrf52840dk/README.md) | `utdk-1.3.0` | nRF Connect SDK v3.4.1 and its toolchain bundle | `nrfutil device program` |
+| nRF52840 DK | [`firmware/nrf52840dk`](../firmware/nrf52840dk/README.md) | `utdk-1.4.0` | nRF Connect SDK v3.4.1 and its toolchain bundle | `nrfutil device program` |
 | ESP32 peer | [`firmware/esp32-classic-peer`](../firmware/esp32-classic-peer/README.md) | `utesp-1.3.0` | ESP-IDF v5.5.6 | `esptool`, through `idf.py flash` |
 
 Each firmware README holds the full build and flash procedure, the pinned
@@ -329,7 +329,8 @@ so each is recorded with where its sources come from and its SHA-256.
 | Image | What it is | Version | Source | SHA-256 |
 |---|---|---|---|---|
 | `kgv.dfu` | the known-good Ubertooth firmware that `Flash reliability` alternates against the run's own build | `2020-12-R1` | upstream Ubertooth release `2020-12-R1` | `e3fcb486c6e0ce7cc991bf6439f6dbc0156ed1229c2b95ebfd02198f9675bb11` |
-| `zephyr.hex` | the nRF52840 DK role firmware | `utdk-1.3.0` | this repository, `firmware/nrf52840dk` at that version ([the change that built this image](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/236)) | `0f976c591195ee363307ec51f6c836d07ba3be40d6465c85cd6dec3398fbf288` |
+| `zephyr.hex` | the nRF52840 DK role firmware | `utdk-1.4.0` | this repository, `firmware/nrf52840dk` at that version ([the change that built this image](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/242)) | `f98bb7b7a08eca4ab9999be6b00bface5e441e3de7592ebb7959ad64205f55c0` |
+| `zephyr.hex` (algorithm 1) | the same roles on a controller without channel selection algorithm 2, built with `chan-sel-1.conf` and `chan-sel-1.overlay` | `utdk-1.4.0-chansel1` | the same sources and the same change | `9fac198b2bdb7a46cb63219070f220cbb82fd0507fc369bae79b69fe3451f21b` |
 | `esp32-classic-peer.bin` | the ESP32 Classic peer firmware | `utesp-1.3.0` | this repository at `9530765`, which is where `firmware/esp32-classic-peer` carries that version | `4893b30dea47896dd7b0e5cd174ee9e633a89362e5fe4505caed4c364f5c55f2` |
 
 The KGV is the one the repository pins: the plan carries its revision and its

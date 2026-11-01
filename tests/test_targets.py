@@ -39,6 +39,22 @@ class FirmwareVersionTests(unittest.TestCase):
         header = (ROOT / "firmware" / "nrf52840dk" / "src" / "roles.h").read_text()
         self.assertIn(f'#define UTDK_FW_VERSION "{targets.DK_FIRMWARE}"', header)
 
+    def test_the_algorithm_1_image_reports_the_version_the_harness_expects(self):
+        # The two images are told apart by this string, so the suffix the
+        # firmware appends and the one the harness pins have to be the same
+        # one: otherwise `ensure` would flash a board in a loop, or accept the
+        # wrong image.
+        header = (ROOT / "firmware" / "nrf52840dk" / "src" / "roles.h").read_text()
+        suffix = targets.DK_FIRMWARE_CHAN_SEL_1.removeprefix(targets.DK_FIRMWARE)
+        self.assertIn(f'#define UTDK_FW_REPORTED UTDK_FW_VERSION "{suffix}"', header)
+        self.assertIn(targets.DK_FIRMWARE_CHAN_SEL_1, nrfdk.FIRMWARE_VERSIONS)
+
+    def test_the_algorithm_1_image_is_built_by_the_files_its_readme_names(self):
+        readme = (ROOT / "firmware" / "nrf52840dk" / "README.md").read_text()
+        for name in ("chan-sel-1.conf", "chan-sel-1.overlay"):
+            self.assertTrue((ROOT / "firmware" / "nrf52840dk" / name).is_file(), name)
+            self.assertIn(name, readme)
+
     def test_peer_firmware_is_the_version_the_peer_firmware_reports(self):
         header = (ROOT / "firmware" / "esp32-classic-peer" / "main" / "peer.h").read_text()
         self.assertIn(f'#define UTESP_FW_VERSION "{targets.PEER_FIRMWARE}"', header)

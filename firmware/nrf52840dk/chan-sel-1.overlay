@@ -1,0 +1,25 @@
+/*
+ * Build the roles on Zephyr's own Bluetooth LE link layer instead of the
+ * nRF Connect SDK's default SoftDevice Controller, which is what lets the
+ * image be built without Channel Selection Algorithm #2 (README.md,
+ * "Channel selection algorithm 1"). Which link layer is built is a
+ * devicetree choice: CONFIG_BT_LL_SW_SPLIT depends on the
+ * zephyr,bt-hci-ll-sw-split node being the chosen HCI.
+ *
+ * Copyright (c) 2026 The Ubertooth test harness authors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/ {
+	chosen {
+		zephyr,bt-hci = &bt_hci_controller;
+	};
+};
+
+&bt_hci_sdc {
+	status = "disabled";
+};
+
+&bt_hci_controller {
+	status = "okay";
+};

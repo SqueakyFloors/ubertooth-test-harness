@@ -1669,6 +1669,53 @@ name it.
 Classic peers; what is missing is the case
 ([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)).
 
+## Recover a BLE connection promiscuously
+
+**What it does.** Nothing yet: a catalog entry for `ubertooth-btle -p` against
+a live connection between two nRF52840 DKs that hops with Bluetooth channel
+selection algorithm 1.
+
+**Theory of operation.** `-p` joins a connection that is already up, with no
+CONNECT_IND to read, so it has to work the connection out from the air: the
+access address, then the CRC init value, then the connection interval from the
+spacings between the connection's visits to the one channel it listens on, and
+last the hop increment. Only algorithm 1 repeats those visits on a cycle it can
+measure, which is why the fork's `ubertooth-btle` documents `-p` as recovering
+algorithm 1 connections only.
+
+Until now the bench had no algorithm 1 connection to point it at: every DK
+link negotiated algorithm 2, which both ends support. The second DK image
+(`firmware/nrf52840dk`, built with `chan-sel-1.conf` and `chan-sel-1.overlay`)
+has a controller without algorithm 2, and a link uses algorithm 2 only when
+both ends have it, so one DK on that image makes every connection it is part
+of an algorithm 1 one. Its `status` carries the proof: `chan_sel_2` false, and
+`chan_sel` `1` while the link is up. The peer on the default image reports
+`chan_sel` `unknown`, which is honest — a controller that has algorithm 2 is
+not told which one was agreed.
+
+**Hardware and arguments.** One `Ubertooth`, a `central` and a `peripheral`
+(nRF52840 DK). The central would run the algorithm 1 image, since it is the
+side whose CONNECT_IND carries the ChSel bit, and the peripheral the default
+one; `coverage:` and a `duration:`. The pair would run with `conn cycle off`,
+because `-p` needs a connection that stays up, and the board's squelch has to
+be raised from its default −120 dBm first: the access-address hunt is gated by
+it, and at the default the hunt latches onto noise.
+
+**Expected outcome.** No implementation; only a `runnable: false` plan may
+name it. The outcome it is meant to check is all four of the lines `-p`
+reports — access address, CRC init, hop interval, and hop increment — with the
+hop interval equal to the interval the central asked for.
+
+**Known limits.** The hardware it needs is on the bench, and the connection is
+confirmed to be an algorithm 1 one. What is not yet shown is the outcome: in a
+90-second run against such a connection, with the squelch at −60 dBm, `-p`
+reported the access address and the CRC init value and went no further, and
+over a hundred packets on that access address decoded with valid CRCs. Whether
+a longer run, another squelch, or a change in the fork reaches the interval and
+the increment is open
+([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)), so
+the case is not written to a result nobody has seen.
+
 ## Bluetooth inquiry scan
 
 **What it does.** Nothing yet: a catalog entry for running inquiry with a host

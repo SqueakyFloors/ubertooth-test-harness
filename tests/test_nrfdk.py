@@ -155,6 +155,24 @@ class ShellTests(unittest.TestCase):
         with self.assertRaisesRegex(nrfdk.NrfDkError, "not JSON"):
             nrfdk.parse_status("{nope")
 
+    def test_the_channel_selection_fields_are_read_and_checked(self):
+        base = ('{"role":"central","fw":"x","bt":true,"address":"A","adv":false,'
+                '"running":false,"type":"nonconn","chmap":"all","interval_ms":100,'
+                '"payload":"","counter":0')
+        status = nrfdk.parse_status(
+            base + ',"chan_sel_2":false,"chan_sel":"1"}')
+        self.assertEqual("1", status["chan_sel"])
+        self.assertFalse(status["chan_sel_2"])
+        # An image older than the two images reports neither, and `ensure` has
+        # to be able to read its status to decide to flash it.
+        self.assertNotIn("chan_sel", nrfdk.parse_status(base + "}"))
+        # One without the other is a status nothing wrote: say so rather than
+        # read half of it.
+        with self.assertRaisesRegex(nrfdk.NrfDkError, "no valid 'chan_sel'"):
+            nrfdk.parse_status(base + ',"chan_sel_2":true}')
+        with self.assertRaisesRegex(nrfdk.NrfDkError, "chan_sel 'two'"):
+            nrfdk.parse_status(base + ',"chan_sel_2":true,"chan_sel":"two"}')
+
 
 class ToolTests(unittest.TestCase):
     def test_pinned_nrfutil_versions_pass(self):
