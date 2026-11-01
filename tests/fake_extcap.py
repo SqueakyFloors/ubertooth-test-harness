@@ -22,13 +22,26 @@ harness.
 Environment:
 
 - ``FAKE_EXTCAP_ADDRESS``: the advertiser's address (default C3:11:22:33:44:55)
-- ``FAKE_EXTCAP_SERIAL``: the serial the interface is listed under
+- ``FAKE_EXTCAP_SERIAL``: the serial, or comma-separated serials, the
+  interfaces are listed under
 - ``FAKE_EXTCAP_PERIOD_S``: seconds between records (default 0.05)
 - ``FAKE_EXTCAP_REFUSE``: refuse ``--capture`` with this message, exit 1
 - ``FAKE_EXTCAP_QUIET_FILTER``: take a capture filter without warning about
   it, which the real plugin never does and the checks must notice
 - ``FAKE_EXTCAP_SILENT``: open the FIFO and write the PCAP header, then no
   records, as a capture with no advertising traffic in range looks
+- ``FAKE_EXTCAP_BUSY``: list the interfaces, then report this many boards as
+  held by another program and exit 1, as the plugin does when
+  ``ubertooth-util`` could not open every board on the host
+- ``FAKE_EXTCAP_LISTING_ERROR``: report this on ``--extcap-interfaces`` and
+  exit 1, for a listing that failed for some other reason
+- ``FAKE_EXTCAP_LISTING_BARE``: the same, written without the ``error: ``
+  prefix, as libubertooth writes some of its failures
+- ``FAKE_EXTCAP_LISTING_STATUS``: the exit status of ``--extcap-interfaces``,
+  whatever it reported, for a status the plugin would never give
+
+``FAKE_EXTCAP_SERIAL`` takes several serials separated by commas, which is a
+host with several boards attached.
 """
 
 import getopt
@@ -129,9 +142,26 @@ def main(argv) -> int:
     values = dict(options)
     if "--extcap-interfaces" in names:
         print("extcap {version=1.0}{display=Ubertooth One}")
-        print(f"interface {{value=ubertooth{serial}}}"
-              f"{{display=Ubertooth One {serial}}}")
-        return 0
+        for name in serial.split(","):
+            print(f"interface {{value=ubertooth{name}}}"
+                  f"{{display=Ubertooth One {name}}}")
+        # A board another program holds: the plugin lists the ones it could
+        # open and exits 1 all the same, so the listing is a partial answer
+        # with a non-zero status.
+        busy = int(os.environ.get("FAKE_EXTCAP_BUSY", "0"))
+        for index in range(busy):
+            print(f"error: Ubertooth at index {index} is in use by another "
+                  "program (libusb -6)", file=sys.stderr)
+        other = os.environ.get("FAKE_EXTCAP_LISTING_ERROR")
+        if other:
+            print(f"error: {other}", file=sys.stderr)
+        # libubertooth writes some of its failures with no "error: " prefix,
+        # and the plugin passes those on as they are.
+        bare = os.environ.get("FAKE_EXTCAP_LISTING_BARE")
+        if bare:
+            print(bare, file=sys.stderr)
+        status = 1 if (busy or other or bare) else 0
+        return int(os.environ.get("FAKE_EXTCAP_LISTING_STATUS", status))
     if "--extcap-dlts" in names:
         print(f"dlt {{number={DLT}}}{{name=DLT_BLUETOOTH_LE_LL_WITH_PHDR}}"
               "{display=Bluetooth LE}")

@@ -314,7 +314,7 @@
     return {
       run_id: runId, seen: new Set(), events: [], items: [],
       byInvocation: new Map(), log: [], partial: "", stage: "waiting",
-      invocations: null, boards: new Map(),
+      invocations: null, boards: new Map(), queued: [],
     };
   }
 
@@ -375,6 +375,7 @@
     live.planned = Array.isArray(live.invocations) || Boolean(suite);
     live.byInvocation = new Map();
     live.boards = new Map();
+    live.queued = [];
     // Records from the socket and from REST may interleave; replay in order.
     const events = [...live.events].sort((a, b) => a.sequence - b.sequence);
     live.events = [];
@@ -403,7 +404,12 @@
 
   function pushLog(line) {
     const live = state.live;
-    live.log.push(String(line).slice(0, LOG_LINE_CHARS));
+    // Long lines are cut, and say so, so a reader is never left thinking a
+    // sentence ended where the log stopped.
+    const text = String(line);
+    live.log.push(text.length > LOG_LINE_CHARS
+      ? `${text.slice(0, LOG_LINE_CHARS - 4)} ...`
+      : text);
     if (live.log.length > LOG_LINES) live.log.splice(0, live.log.length - LOG_LINES);
   }
 
@@ -459,6 +465,16 @@
     if (kind === "libbtbb_pin" && status !== "passed") {
       // The libbtbb differs from the fork's install.sh pin, or was not compared.
       pushLog(`warning: ${String(details.message ?? "")}`);
+    }
+    if (kind === "lease_queued") {
+      // A device was free while this run waited, and still not its turn:
+      // why a run can start late with the bench looking idle. The harness
+      // sends the line the report shows.
+      const text = String(details.message ?? "");
+      if (text) {
+        if (!live.queued.includes(text)) live.queued.push(text);
+        pushLog(`note: ${text}`);
+      }
     }
     if (kind === "watchdog") {
       // The firmware reset a board, or did not: a count, never a failure.
@@ -733,6 +749,13 @@
             : `; watchdog ${board.state}`),
       }),
       board.warning ? el("span", { className: "reason", text: ` — ${board.warning}` }) : null)));
+
+    // Devices that were free while this run waited for its turn, and the
+    // command that had the turn: why a run can start late with the bench
+    // looking idle. Hidden unless the run waited behind somebody.
+    $("live-queued").hidden = live.queued.length === 0;
+    $("queued").replaceChildren(
+      ...live.queued.map((text) => el("li", { text })));
 
     $("checklist").replaceChildren(...live.items.map((item) => {
       const shown = itemStatus(item, run);

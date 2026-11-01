@@ -1080,6 +1080,81 @@ when the name is absent. That is a run-time skip because only the built
 library can tell. The test says nothing about what the tools do once a command
 line is accepted.
 
+## Failed capture files
+
+**What it does.** Drives each capture-output path into a controlled failure and
+requires that nothing a user would later read as a capture is left behind, and
+that what the run did decode is kept as a file a reader can open.
+
+**Theory of operation.** An empty capture file is worse than no file: a user
+cannot tell it apart from a capture that ran and caught nothing. Every tool
+creates its capture files once the board is open and usable, so a run refused
+before that leaves none; `ubertooth-rx` and `ubertooth-follow` go further,
+doing every step that can fail first and taking the files back again if the
+run fails after creating them. The line they are kept from is the first whole
+record a replay read, whatever the decoder made of it, because from there the
+file holds evidence. Two ways in make all of that checkable with no board at
+all. `UBERTOOTH_TEST_NO_DEVICES=1` lets a command
+line be accepted and then stopped at the board lookup, which is the setup
+failure. `ubertooth-rx -i <fixture>` replays a synthetic file
+([`rxreplay.py`](../ubertooth_harness/rxreplay.py)) with no board and no USB,
+and is the one path on which a capture file is really created, written to, and
+then judged: the `partial` fixture is one record cut short, so the run fails
+with its files created and nothing in them yet; the `truncated` fixture holds
+whole records and then a cut-short one, so the same failure arrives after real
+packets; and the `skipped` fixture holds one whole record the decoder skips
+and then a cut-short one, which is the line itself: a record was read and no
+packet came of it, and the files still stay. Each case states its whole directory before the command
+and again afterwards (`dfuimage.py state`), so a temporary file, a truncated
+destination, or a file removed that should have stayed fails the case; a file
+a case does leave stays in the run directory under the name of the attempt
+that wrote it.
+
+**Hardware and arguments.** No board role. `hosts:` and `coverage:`.
+
+**Expected outcome.** Smoke runs 6 cases: `ubertooth-rx -r -q -d`,
+`ubertooth-btle -n -r -q`, and `ubertooth-dump -d` stopped at the board lookup
+(exit 1, the error on stderr, nothing on stdout, and no new file created; the
+`rx` and `btle` cases give one of their options the seeded file, so they also
+require that a destination the user already had is not truncated); a replay that reads no
+whole record taking back all three files it created; a replay that reads
+records and then meets a cut-short one keeping all three, the two captures
+readable and the dump compared with the fixture records it came from, byte
+for byte; and a PCAPNG destination in a directory that
+is not there, reported as `error: <file>: No such file or directory` with
+nothing created. Comprehensive runs 16, adding the same lookup case for
+`ubertooth-btle -c`, which is its own create call, and one for
+`ubertooth-dump -d` on the seeded destination, which has only the one capture
+option to give it; the same missing directory
+for a PCAP destination; a replay whose one whole record the decoder skips,
+which keeps its files all the same, with the two captures holding no packet
+and the dump empty; a capture bound for standard output whose
+failure must stay on standard error; a read error before any record; a
+destination that is an existing directory; a destination in a read-only
+directory; and the two paths a user arranged rather than a file the run may
+remove, a symbolic link, which must still be there and still name its target,
+and `/dev/null`. The last two cases are skipped when the run is root, where a
+wrong removal would succeed in silence. No case expects
+`warning: cannot remove`, so a run that reached for a path it should have left
+alone fails.
+
+**Known limits.** Only the host side. A writer that fails *while* writing its
+header, which is what libbtbb
+[#117](https://github.com/SqueakyFloors/libbtbb/pull/117) and
+[#119](https://github.com/SqueakyFloors/libbtbb/pull/119) take the file away
+for, needs a destination that opens and then refuses a write; nothing here
+produces one, so the removal is checked on the create and decode failures
+instead. `ubertooth-follow`'s own discard
+([ubertooth#1000](https://github.com/SqueakyFloors/ubertooth/pull/1000)) is
+not covered: the tool is built only with BlueZ, and it has no replay path, so
+reaching its capture files needs the HCI adapter the bench does not have.
+`ubertooth-btle` and `ubertooth-dump` appear only in their lookup cases,
+because neither takes a capture file back: for them the test states the
+ordering, not a removal. `ubertooth-specan -d` with no board
+is checked by Refused command lines (`specan-d-unopenable`) and the `-d`
+writer in a missing directory by Raw receive replay
+(`replay-dump-unopenable`), so neither is repeated here.
+
 ## Util mode refusals
 
 **What it does.** Refuses `ubertooth-util` command lines that combine the ISP
@@ -1294,11 +1369,26 @@ a host without it runs none of them (not applicable, named in `--dry-run`)
 rather than flashing the DK to find out; the version that read the records is
 recorded in the run manifest.
 
+**A host with more than one board.** The plugin lists the boards it could open
+and still exits 1 when another one could not, and Wireshark and tshark throw
+away the output of a listing call that failed. So one Ubertooth held by
+something outside the run leaves tshark with no interface to capture on, and
+the harness cannot stop a program it does not control from opening a board it
+does not hold. Each case therefore asks the plugin for the listing itself,
+before tshark's own copy of the same call, and is given every board the run
+holds: each of them must be named in the listing, and the exit status must
+match what the listing reported. A listing regression fails there on any host,
+busy or not. Only when that check passes and the boards another program holds
+are ones this run never had does the case skip, saying how many they were; the
+run leases the board under test and every other registered board on the host,
+so a board it does hold and cannot open is a failure, not a skip.
+
 **Expected outcome.** Smoke runs 2 cases: the DK is confirmed to run the
-pinned firmware at its registered address, then `tshark -i ubertooth<serial>`
-captures for the duration and at least one row carries the DK's address as an
-ADV_NONCONN_IND, with tshark exiting 0 and no process left behind.
-Comprehensive runs 4, adding a capture filter, which Wireshark passes on as
+pinned firmware at its registered address, then the plugin's listing names
+every board the run holds and `tshark -i ubertooth<serial>` captures for the
+duration, with at least one row carrying the DK's address as an
+ADV_NONCONN_IND, tshark exiting 0 and no process left behind. Comprehensive
+runs 4, adding a capture filter, which Wireshark passes on as
 `--extcap-capture-filter` and the plugin cannot apply: its warning must reach
 tshark (which relays what the plugin wrote) and the capture must run anyway;
 and a capture stopped with SIGINT halfway, which must exit 0 with the rows

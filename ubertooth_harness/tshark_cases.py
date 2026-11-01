@@ -16,6 +16,10 @@ Each case sets the DK advertising on one channel, runs tshark through
 declares that it needs tshark installed, so a host without it runs none of
 them (not applicable, which ``--dry-run`` names) and no DK is touched to find
 that out.
+
+Each case also passes the serial of every other board the run holds, so the
+driver can tell a listing regression from a bench where someone else holds a
+board the run never had (harness issue #237; ``tsharkcapture.check_listing``).
 """
 
 from __future__ import annotations
@@ -28,9 +32,10 @@ from ubertooth_harness import nrfdk, pytools, tsharkcapture
 from ubertooth_harness.advertiser_cases import (
     CHANNELS, DK_TIMEOUT_S, _advertiser, _dk, _dk_idle, _ensure_case,
 )
+from ubertooth_harness.cases import guard_roles
 from ubertooth_harness.hostneeds import Needs
 from ubertooth_harness.receive_cases import seconds_arg
-from ubertooth_harness.stateful import StateCase, Step
+from ubertooth_harness.stateful import StateCase, StateCaseError, Step
 from ubertooth_harness.transitions import (
     MODE_RESET_SETTINGS, _cleanup, _read_originals, _serial, _stop,
 )
@@ -47,19 +52,20 @@ CHANNEL = CHANNELS[0]
 ADVERTISING_INTERVAL_MS = 100
 PAYLOAD_TAG = "c0ffee"
 # Fetching the plugin, asking tshark where its extcap directory is, listing
-# the interfaces, and stopping tshark, beyond the capture itself. It must
-# cover everything tsharkcapture.py allows itself, so that the step's timeout
-# never kills it with a tshark of its own still running (it starts tshark in
-# a session of its own, which nothing outside would then reap);
-# tests/test_tshark_capture.py checks this against those limits.
-CAPTURE_SLACK_S = 150.0
+# the interfaces twice (the plugin's own answer, then tshark's), and stopping
+# tshark, beyond the capture itself. It must cover everything tsharkcapture.py
+# allows itself, so that the step's timeout never kills it with a tshark of
+# its own still running (it starts tshark in a session of its own, which
+# nothing outside would then reap); tests/test_tshark_capture.py checks this
+# against those limits.
+CAPTURE_SLACK_S = 180.0
 # The capture filter Wireshark would pass on; the plugin cannot apply it.
 CAPTURE_FILTER = "btle.length > 20"
 # How far into the capture the SIGINT case stops tshark.
 INTERRUPT_SHARE = 0.5
 
 
-def _tshark_case(serial, dk, seconds, *, case_id, name, expected_state,
+def _tshark_case(serial, dk, seconds, guards, *, case_id, name, expected_state,
                  capture_filter=None, interrupt=False):
     argv = [
         sys.executable, _TSHARK_CAPTURE, "capture",
@@ -68,6 +74,8 @@ def _tshark_case(serial, dk, seconds, *, case_id, name, expected_state,
         "--address", dk["address"],
         "--min-packets", "1",
     ]
+    for guard in guards:
+        argv += ["--held", f"ubertooth{guard}"]
     if capture_filter is not None:
         argv += ["--filter", capture_filter]
     if interrupt:
@@ -99,10 +107,27 @@ def _tshark_case(serial, dk, seconds, *, case_id, name, expected_state,
     )
 
 
+def _guard_serials(resource_identities):
+    """The serials of the other registered boards this run holds.
+
+    The plugin's listing must name every one of them, so a board the run holds
+    that cannot be opened fails the case; a board on the host that the run does
+    not hold is what the skip is for (see tsharkcapture.check_listing).
+    """
+    serials = []
+    for role in guard_roles(resource_identities):
+        serial = resource_identities.get(role, {}).get("serial")
+        if not serial:
+            raise StateCaseError(f"{TEST_NAME}: {role} has no registered serial")
+        serials.append(serial.lower())
+    return tuple(serials)
+
+
 def extcap_tshark_cases(arguments, resources, resource_identities):
     """tshark captures through btle-extcap from the selected board; the other
     registered boards are guards."""
     serial = _serial(resource_identities, TEST_NAME).lower()
+    guards = _guard_serials(resource_identities)
     dk = _advertiser(resources, resource_identities)
     seconds = seconds_arg(arguments)
     decoded = (f"Wireshark decodes the advertiser's {nrfdk.FIRMWARE_VERSION} packets "
@@ -110,7 +135,7 @@ def extcap_tshark_cases(arguments, resources, resource_identities):
     cases = [
         replace(_ensure_case(dk), needs=NEEDS),
         _tshark_case(
-            serial, dk, seconds, case_id="tshark-fields",
+            serial, dk, seconds, guards, case_id="tshark-fields",
             name=f"tshark -i ubertooth{serial} decodes the advertiser's address",
             expected_state=decoded + ", tshark exit 0"),
     ]
@@ -121,7 +146,7 @@ def extcap_tshark_cases(arguments, resources, resource_identities):
         # plugin cannot apply one, says so, and captures anyway. tshark
         # relays what the plugin wrote, so the warning is visible to a user.
         _tshark_case(
-            serial, dk, seconds, case_id="tshark-capture-filter",
+            serial, dk, seconds, guards, case_id="tshark-capture-filter",
             name="tshark -f (a capture filter the plugin cannot apply) still captures",
             expected_state=decoded + ", tshark exit 0, with the plugin's warning that "
                            "no capture filter is applied",
@@ -129,7 +154,7 @@ def extcap_tshark_cases(arguments, resources, resource_identities):
         # The other way a user ends a capture: Ctrl-C. tshark must stop its
         # capture and exit 0 with what it decoded, not die.
         _tshark_case(
-            serial, dk, seconds, case_id="tshark-interrupt",
+            serial, dk, seconds, guards, case_id="tshark-interrupt",
             name="tshark stopped with SIGINT partway exits 0 with what it decoded",
             expected_state=decoded + " before the SIGINT, tshark exit 0",
             interrupt=True),

@@ -412,6 +412,10 @@ class RunManifest:
     # Leases of commands that were gone and this run took over to get those
     # (leases.takeover_record); empty when it took none, as in most runs.
     lease_takeovers: tuple = ()
+    # Devices that were free while this run waited, and still not its turn,
+    # because an older command that wants several could not take them all
+    # (leases.queued_record); empty when it waited for nobody.
+    lease_queue_waits: tuple = ()
 
     @staticmethod
     def hash_file(path: Path | str) -> str:
@@ -472,6 +476,8 @@ class RunManifest:
             **({"leases": [_plain(item) for item in self.leases]} if self.leases else {}),
             **({"lease_takeovers": [_plain(item) for item in self.lease_takeovers]}
                if self.lease_takeovers else {}),
+            **({"lease_queue_waits": [_plain(item) for item in self.lease_queue_waits]}
+               if self.lease_queue_waits else {}),
         }
 
     def write_atomic(self, path: Path | str) -> None:
@@ -501,6 +507,7 @@ def build_run_manifest(
     build: Mapping | None = None,
     leases: Sequence[Mapping] = (),
     lease_takeovers: Sequence[Mapping] = (),
+    lease_queue_waits: Sequence[Mapping] = (),
 ) -> RunManifest:
     if not sources:
         raise ManifestError("at least one resolved source is required")
@@ -534,4 +541,5 @@ def build_run_manifest(
         build=_frozen(build or {}),
         leases=tuple(_frozen(item) for item in leases),
         lease_takeovers=tuple(_frozen(item) for item in lease_takeovers),
+        lease_queue_waits=tuple(_frozen(item) for item in lease_queue_waits),
     )
