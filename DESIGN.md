@@ -176,8 +176,8 @@ Semantics:
   ones as busy (503); it reads off the event loop and in its own task, so a
   page of a soak's log does not delay a cancel. The controller asks only for
   a file that run's own run.jsonl records and this host does not hold, holds
-  at most eight requests per target, and answers 503 while the runner is not
-  connected.
+  at most eight requests per target, answers 503 while the runner is not
+  connected, and 504 if it does not answer within the reply timeout.
 - The run continues if the controller disconnects. The runner reconnects with
   bounded exponential backoff (0.5 s to 30 s), registers with
   `active_run_id`, and replays that run's records from the start of

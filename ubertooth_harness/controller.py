@@ -175,18 +175,7 @@ def valid_identifier(value) -> bool:
     return isinstance(value, str) and bool(_ID_RE.fullmatch(value))
 
 
-def unreadable_log(run_id: str, error: Exception) -> str:
-    """Why a stored run.jsonl gave neither a file list nor a page.
 
-    A stored record is ordinary data: a line that is JSON but holds, say, a
-    size that is not a number stops a list or a page being built from it.
-    That is a refusal naming the run, not a server failure, and it names what
-    went wrong without a path on this host.
-    """
-    return (
-        f"run {run_id} has a record its saved output files cannot be read "
-        f"from ({type(error).__name__})"
-    )
 
 
 # ----- state ---------------------------------------------------------------
@@ -937,12 +926,20 @@ class Controller:
                     f"{kind} names run {message['run_id']}, not the "
                     f"{asked.get('run_id')} that was asked for"
                 )
-            if kind == "run_file_page" and message["page"]["path"] != asked.get("path"):
-                # Checked before the request is taken off the pending list,
-                # so a refused answer leaves it there for the right one.
-                raise _Violation(
-                    "run_file_page answers a file other than the one asked for"
-                )
+            if kind == "run_file_page":
+                page = message["page"]
+                # The page must be the file and the place that were asked
+                # for, so nobody is shown one page while being told it is
+                # another. An offset past the end comes back clamped to the
+                # end, exactly as a read here clamps it. Checked before the
+                # request is taken off the pending list, so a refused answer
+                # leaves it there for the right one.
+                at = min(asked.get("offset", 0), page["file_bytes"])
+                if page["path"] != asked.get("path") or page["offset"] != at:
+                    raise _Violation(
+                        "run_file_page answers another file or another place "
+                        "in it than was asked for"
+                    )
             del self._pending_files[request_id]
             if kind == "run_file_page":
                 pending.resolve(message["page"])
@@ -1221,7 +1218,7 @@ class Controller:
         """
         try:
             return await asyncio.to_thread(
-                read_output_page, run.directory, path, offset, limit
+                read_output_page, self._own_run_directory(run), path, offset, limit
             )
         except OutputFileError as error:
             # Only a file the run recorded and this host does not have is
@@ -1230,6 +1227,8 @@ class Controller:
             # is already answered, and reaching out would not change it.
             if not error.on_target:
                 raise ControllerError(error.detail, error.status) from None
+        except ControllerError:
+            raise
         except Exception as error:  # noqa: BLE001 - a stored record is data
             raise self._unreadable_log(run, error) from None
         return await self._fetch_run_file(run, path, offset, limit)
@@ -1241,9 +1240,26 @@ class Controller:
         is not parsed into memory to list a few files.
         """
         try:
-            return await asyncio.to_thread(listing, run.directory)
+            return await asyncio.to_thread(listing, self._own_run_directory(run))
+        except ControllerError:
+            raise
         except Exception as error:  # noqa: BLE001 - a stored record is data
             raise self._unreadable_log(run, error) from None
+
+    def _own_run_directory(self, run: Run) -> Path:
+        """``run``'s directory in this controller's own results store.
+
+        No symbolic link is followed here either, as none is for a file
+        inside a run directory: a link in the results store would serve
+        whatever it points at, which is what reading only the files a run
+        recorded is meant to prevent.
+        """
+        directory = run.directory
+        if directory.parent != self.results_dir or directory.is_symlink():
+            raise ControllerError(
+                f"run {run.run_id} has no directory in this results store", 404
+            )
+        return directory
 
     def _unreadable_log(self, run: Run, error: Exception) -> ControllerError:
         """A stored run.jsonl that gave neither a file list nor a page.
@@ -1257,7 +1273,10 @@ class Controller:
             f"run {run.run_id}: its saved output files cannot be read from "
             f"{RUN_LOG} ({type(error).__name__}: {error})"
         )
-        return ControllerError(unreadable_log(run.run_id, error), 404)
+        return ControllerError(
+            f"run {run.run_id} has a record its saved output files cannot be "
+            f"read from ({type(error).__name__})", 404,
+        )
 
     async def _fetch_run_file(
         self, run: Run, path: str, offset: int, limit: int
@@ -1300,19 +1319,19 @@ class Controller:
         )
         self._pending_files[request_id] = pending
         try:
-            await self._send(link, text)
-        except Exception as error:
-            self._pending_files.pop(request_id, None)
-            raise ControllerError(
-                f"cannot reach target {run.target}: {error}", 503
-            ) from None
-        try:
+            try:
+                await self._send(link, text)
+            except Exception as error:
+                raise ControllerError(
+                    f"cannot reach target {run.target}: {error}", 503
+                ) from None
             return await self._await_reply(pending)
         finally:
-            # Dropped as soon as its caller is gone: a page that arrives
-            # after the caller timed out can do nothing for anyone, where a
-            # late run_accepted still has a run to create. This is also what
-            # keeps the count above honest.
+            # Dropped as soon as its caller is gone, whether it was answered,
+            # timed out, or cancelled: a page that arrives after the caller
+            # left can do nothing for anyone, where a late run_accepted still
+            # has a run to create. This is also what keeps the count above
+            # honest, so one cancelled caller cannot hold a slot.
             if self._pending_files.get(request_id) is pending:
                 del self._pending_files[request_id]
 

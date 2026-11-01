@@ -335,11 +335,14 @@ class RunnerService:
                     pass
             finally:
                 self._connection = None
-                # A file request being answered belongs to this connection.
-                outstanding = (*tasks, *self._file_tasks)
-                for task in outstanding:
+                for task in tasks:
                     task.cancel()
-                await asyncio.gather(*outstanding, return_exceptions=True)
+                await asyncio.gather(*tasks, return_exceptions=True)
+                # A file request being answered is left to finish rather
+                # than cancelled: cancelling would not stop the read it is
+                # waiting on, only forget it, and the next connection would
+                # admit that many requests again on top of it. Its answer
+                # then finds the connection gone and is logged.
         self.log("controller connection closed")
         return True
 
@@ -548,14 +551,17 @@ class RunnerService:
             self._answer_run_file, run_id, message["path"],
             message["offset"], message["limit"],
         )
-        if answer == "run_file_refused":
-            self.log(f"refused a file of run {run_id}: {fields['reason']}")
         try:
             await self._send(
                 answer, request_id=message["request_id"], run_id=run_id, **fields
             )
         except Exception as error:  # noqa: BLE001 - the connection may have gone
             self.log(f"could not answer the file request for {run_id}: {error}")
+            return
+        # After the answer, so that nothing between here and the answer can
+        # keep it from being sent.
+        if answer == "run_file_refused":
+            self.log(f"refused a file of run {run_id}: {fields['reason']}")
 
     def _answer_run_file(
         self, run_id: str, path: str, offset: int, limit: int

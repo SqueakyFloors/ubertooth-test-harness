@@ -39,6 +39,10 @@ MAX_FILE_PAGE_BYTES = 256 * 1024
 # What a path in a ``run_file`` request may be; the real confinement is
 # ``runfiles.confined`` on the side that opens the file.
 MAX_FILE_PATH_CHARS = 1024
+# The largest size or offset of a saved output file a message may name: 2**53,
+# past any file a run can write and the largest integer a JSON number carries
+# exactly.
+MAX_FILE_BYTES = 1 << 53
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -162,6 +166,16 @@ def _page_limit(value) -> bool:
     return _integer(value) and 0 < value <= MAX_FILE_PAGE_BYTES
 
 
+def _file_count(value) -> bool:
+    """A size, offset or line count of a saved output file.
+
+    Bounded, so the bound is stated here rather than left to how long a
+    number an interpreter is willing to read: the limit is past any file a
+    run can write and is still an integer JSON carries exactly.
+    """
+    return _non_negative_integer(value) and value <= MAX_FILE_BYTES
+
+
 def _page_text(value) -> bool:
     # A page is at most MAX_FILE_PAGE_BYTES bytes of the file, and no byte
     # decodes to more than one character, so this bounds the text as well.
@@ -173,12 +187,12 @@ def _page_text(value) -> bool:
 _FILE_PAGE_FIELDS: Mapping[str, Validator] = {
     "path": _recorded_path,
     "stream": _text,
-    "bytes": _non_negative_integer,
-    "lines": _non_negative_integer,
+    "bytes": _file_count,
+    "lines": _file_count,
     "sha256": _text,
-    "file_bytes": _non_negative_integer,
-    "offset": _non_negative_integer,
-    "length": _non_negative_integer,
+    "file_bytes": _file_count,
+    "offset": _file_count,
+    "length": _file_count,
     "eof": _boolean,
     "page_bytes": _page_limit,
     "text": _page_text,
@@ -242,7 +256,7 @@ CONTROLLER_MESSAGES: Mapping[str, Mapping[str, Validator]] = {
         "request_id": _identifier,
         "run_id": _identifier,
         "path": _recorded_path,
-        "offset": _non_negative_integer,
+        "offset": _file_count,
         "limit": _page_limit,
     },
 }

@@ -17,6 +17,7 @@ import unittest
 from ubertooth_harness.events import RUN_LOG
 from ubertooth_harness.outputfiles import OUTPUT_DIR, OutputFile, saved_output
 from ubertooth_harness.protocol import (
+    MAX_FILE_BYTES,
     MAX_FILE_PAGE_BYTES,
     PROTOCOL_VERSION,
     ProtocolError,
@@ -471,6 +472,9 @@ class ProtocolMessageTests(unittest.TestCase):
             ("path", "o" * (1024 + 1)),
             ("offset", -1),
             ("offset", 1.5),
+            # Bounded here rather than left to how long a number an
+            # interpreter will read.
+            ("offset", MAX_FILE_BYTES + 1),
             ("limit", 0),
             ("limit", MAX_FILE_PAGE_BYTES + 1),
             ("run_id", "../other"),
@@ -484,6 +488,8 @@ class ProtocolMessageTests(unittest.TestCase):
             {"text": "x" * (MAX_FILE_PAGE_BYTES + 1)},
             {"page_bytes": MAX_FILE_PAGE_BYTES + 1},
             {"offset": -1},
+            {"offset": MAX_FILE_BYTES + 1},
+            {"bytes": MAX_FILE_BYTES + 1},
             {"eof": "yes"},
             {"path": "/absolute.log"},
         ):
@@ -677,6 +683,39 @@ class RunnerPageTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("on the target, not here", answer["reason"])
         self.assertIn("no longer in its run directory", answer["reason"])
 
+    async def test_a_read_outlives_the_connection_rather_than_being_forgotten(self):
+        # Cancelling the task would not stop the read it waits on, only
+        # forget it, and the next connection would admit as many requests
+        # again on top of it.
+        finish = threading.Event()
+        reading = threading.Semaphore(0)
+        real = runner_service.read_output_page
+
+        def slow(*args, **kwargs):
+            reading.release()
+            finish.wait(TIMEOUT_S)
+            return real(*args, **kwargs)
+
+        runner_service.read_output_page = slow
+        try:
+            await self.stub.send(encode_controller_message(
+                "run_file", request_id="f1", run_id=self.RUN_ID,
+                path=STDOUT_FILE, offset=0, limit=64))
+            await asyncio.to_thread(reading.acquire, True, TIMEOUT_S)
+            await self.stub.connections[-1].close()
+            await asyncio.sleep(0.2)
+            # Still there, so the next connection counts it against the four
+            # this runner answers at once.
+            self.assertEqual(1, len(self.service._file_tasks))
+            task, = self.service._file_tasks
+            finish.set()
+            await wait_until(task.done)
+            self.assertFalse(task.cancelled())
+            self.assertIsNone(task.exception())
+        finally:
+            finish.set()
+            runner_service.read_output_page = real
+
     async def test_more_requests_at_once_than_it_serves_are_refused_as_busy(self):
         reading = threading.Semaphore(0)
         finish = threading.Event()
@@ -830,7 +869,76 @@ class ForwardedFileTests(ControllerTestCase):
             self.assertEqual(STDOUT_FILE, payload["path"])
             target = self.controller.targets["Host_A"]
             self.assertEqual(1, target.protocol_errors)
-            self.assertIn("other than the one asked for", target.last_protocol_error)
+            self.assertIn("another file", target.last_protocol_error)
+
+    async def test_an_answer_for_another_place_in_the_file_is_ignored(self):
+        run_id = await self.stored_run()
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            get = await self.get_file(run_id, query="&offset=100&limit=50")
+            request = await runner.recv()
+            for page in (page_for(STDOUT_FILE, 0, 50),
+                         page_for(STDOUT_FILE, 100, 50)):
+                await runner.send(
+                    "run_file_page", request_id=request["request_id"],
+                    run_id=run_id, page=page)
+            status, payload, _ = await get
+            self.assertEqual(200, status, payload)
+            self.assertEqual(100, payload["offset"])
+            target = self.controller.targets["Host_A"]
+            self.assertEqual(1, target.protocol_errors)
+            self.assertIn("another place", target.last_protocol_error)
+
+    async def test_an_offset_past_the_end_may_come_back_clamped(self):
+        # A read here clamps an offset past the end to the end, so an answer
+        # that does the same is the right answer, not another place.
+        run_id = await self.stored_run()
+        size = len(BODY.encode())
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            get = await self.get_file(run_id, query=f"&offset={size * 2}")
+            request = await runner.recv()
+            await runner.send(
+                "run_file_page", request_id=request["request_id"], run_id=run_id,
+                page=page_for(STDOUT_FILE, size, PAGE_BYTES))
+            status, payload, _ = await get
+            self.assertEqual(200, status, payload)
+            self.assertEqual(("", True), (payload["text"], payload["eof"]))
+            self.assertEqual(0, self.controller.targets["Host_A"].protocol_errors)
+
+    async def test_a_cancelled_caller_does_not_keep_a_slot(self):
+        run_id = await self.stored_run()
+        run = self.controller.get_run(run_id)
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            asked = asyncio.create_task(
+                self.controller.read_run_file(run, STDOUT_FILE, 0, 64))
+            await runner.recv()
+            asked.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await asked
+            # Whatever became of its caller, the request is not holding one
+            # of the eight slots this target has.
+            self.assertEqual({}, self.controller._pending_files)
+
+    async def test_a_run_directory_that_is_a_symbolic_link_is_refused(self):
+        # As on the runner: no link is followed for the run directory, so a
+        # link in the results store cannot serve whatever it points at.
+        run_id = await self.stored_run()
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        write_run(elsewhere)
+        directory = self.results / run_id
+        shutil.rmtree(directory)
+        directory.symlink_to(elsewhere, target_is_directory=True)
+        for path in (f"/api/runs/{run_id}/files",
+                     f"/api/runs/{run_id}/file?path={STDOUT_FILE}"):
+            with self.subTest(path=path):
+                status, payload, _ = await self.http("GET", path)
+                self.assertEqual(404, status, payload)
+                self.assertIn("no directory in this results store",
+                              payload["detail"])
+                self.assertNotIn(str(self.root), payload["detail"])
 
     async def test_an_answer_naming_another_run_is_ignored(self):
         run_id = await self.stored_run()
