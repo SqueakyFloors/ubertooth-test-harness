@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 from unittest import mock
 import unittest
 from pathlib import Path
@@ -741,6 +742,13 @@ class ChannelMapTests(unittest.TestCase):
                  "time.sleep(60)\n")
 
         def fails(_elapsed):
+            # Wait for the child to be up before failing the sample: a loaded
+            # machine can take longer to start an interpreter than the sample
+            # interval, and the point of the test is what happens to a
+            # command that is running.
+            deadline = time.monotonic() + 10.0
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
             raise esp32peer.PeerError("the controller does not know this link")
 
         started = []
