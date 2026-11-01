@@ -1412,6 +1412,76 @@ one for every CONNECT_IND it decodes and another device in range gets one
 too, and when none matches it names each field of the pair's own option that
 differs.
 
+## Follow a BLE connection across its end
+
+**What it does.** The same two nRF52840 DKs connect and reconnect for about
+18 seconds while one `ubertooth-btle -f` capture runs across the whole
+window, and the board is read back as soon as the capture stops.
+
+**Theory of operation.** `Capture known BLE connection` deliberately keeps its
+window inside one connection, so it says nothing about what happens at the
+end of one. This test takes the other window. Three things only a multi-cycle
+capture can show:
+
+- A follow that ends cleanly finds the next connection. The capture has to
+  hold a CONNECT_IND for two of the pair's connections, with packets on each
+  one's own access address, which means the board stopped following the first
+  connection when it closed and picked the second one up from its own
+  CONNECT_IND.
+- A follow is not hijacked. During a follow the board writes the access
+  address it synchronized on into every record it sends, and it synchronizes
+  on exactly one at a time: the advertising address while it hunts, then the
+  connection's own. So a packet on an access address that no CONNECT_IND in
+  the file handed out is a connection the file cannot explain, and the check
+  refuses it. A CONNECT_IND from another device in range explains its own
+  packets just as well as the pair's explains the pair's.
+- A follow survives the parameter update. The central asks for the new
+  interval 1.2 s into each connection and the update's instant is a few
+  connection events later, so a packet with a correct CRC 2 s or more after
+  its own CONNECT_IND is one the board tracked across the update. The capture
+  records carry the time each packet arrived, which is what that distance is
+  measured in.
+
+The DKs are then asked what they did, which is the only place the number of
+cycles can be read: a window the central spent on one long connection reports
+one connect and no disconnect, and is told apart from one it spent cycling.
+Last, the board itself is read: it must answer an identity and a settings read
+at once, report itself back in idle mode rather than still in BLE follow mode,
+and show no new unrequested watchdog reset against the count read before the
+capture. The other registered Ubertooths on the host are guarded, as in every
+case here.
+
+**Hardware and arguments.** The same hardware as `Capture known BLE
+connection`: one `Ubertooth` and two nRF52840 DKs as `central` and
+`peripheral`. A required `duration:`, `interval:` (default 30 ms) and
+`update:` (default 60 ms); no `coverage:`, because there is one capture case.
+The duration must be longer than three of the central's 5 s connections and
+at most 30 s, so one case does not hold the boards for long. The Ubertooth
+needs an ordinary link. Writes DK firmware, so the run holds the host lock.
+
+**Expected outcome.** 2 cases: both DKs confirmed on the pinned firmware at
+their registered addresses, and the capture across the window. The capture
+case passes when every CONNECT_IND it holds from the pair carries the
+parameters the central was told to ask for, at least two distinct connections
+appear with at least three packets each on their own access addresses, no
+packet is on an unannounced access address, at least one packet with a correct
+CRC arrives 2 s or more after its own CONNECT_IND, the central reports at
+least three connects and two disconnects, and the board reads back idle with
+an unchanged self-reset count. Cleanup leaves both DKs idle in the advertiser
+role and restores the Ubertooth's channel, squelch, and LEDs.
+
+**Known limits.** Like the single-connection cases, the counts are floors a
+working follow clears, not expected counts, and a capture that misses them is
+taken again, up to three captures. Only the capture and the checks of it are
+retried: the reads after them have to see the board as the last capture left
+it. Two connections is a floor rather than the three or four the window spans,
+because the board hunts on one advertising channel and catches part of what is
+there, so it is not expected to see every reconnection. A window spanning
+several reconnections used to die partway through
+([ubertooth#505](https://github.com/SqueakyFloors/ubertooth/issues/505),
+fixed), which is why the single-connection test still keeps its window inside
+one connection.
+
 ## Capture known Classic device
 
 **What it does.** Two ESP32 Classic peers hold a Serial Port Profile link and

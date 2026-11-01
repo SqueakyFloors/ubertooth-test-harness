@@ -1,4 +1,4 @@
-"""Capture known BLE connection: two nRF52840 DKs connect, the Ubertooth follows.
+"""Two nRF52840 DKs connect and reconnect while the Ubertooth follows them.
 
 The DKs run the harness's role firmware (firmware/nrf52840dk), one as the
 central and one as the peripheral, driven by nrfdk.py; the capture is checked
@@ -31,6 +31,12 @@ for a CONNECT_IND: the parameters a reader takes from the file to follow the
 connection in it. Until SqueakyFloors/libbtbb#21 was fixed they were copied
 6 bytes early, so every one of them belonged to another field.
 
+`Follow a BLE connection across its end` takes the window those cases avoid:
+one capture spanning several of the central's reconnections. It asks what a
+capture of one connection cannot: that the follow ends when the connection
+does, that the next connection in the file is one the file also announced,
+and that the board is idle and answering as soon as the capture stops.
+
 Every case's cleanup leaves both DKs idle in the advertiser role with their
 boot settings, and restores the Ubertooth's channel, squelch, and LEDs.
 """
@@ -51,10 +57,12 @@ from ubertooth_harness.advertiser_cases import (
     _dk_idle,
 )
 from ubertooth_harness.outputfiles import search_lines
+from ubertooth_harness.patterns import serial_pattern
 from ubertooth_harness.receive_cases import seconds_arg
 from ubertooth_harness.stateful import (
     ATTEMPT_KEY,
     CAPTURE_DIR_KEY,
+    Observation,
     StateCase,
     StateCaseError,
     Step,
@@ -62,12 +70,14 @@ from ubertooth_harness.stateful import (
     require,
 )
 from ubertooth_harness.transitions import (
+    CHANNEL,
     MODE_RESET_SETTINGS,
     _btle,
     _cleanup,
     _read_originals,
     _serial,
     _stop,
+    _util,
 )
 
 TEST_NAME = "Capture known BLE connection"
@@ -119,6 +129,39 @@ CAPTURE_ATTEMPTS = 3
 CHECK_TIMEOUT_S = 30.0
 # Settling and status reads after the capture.
 STATUS_TIMEOUT_S = 30.0
+# `-w` is two control reads and a board that has gone costs a libusb timeout
+# or two before it says so.
+WATCHDOG_TIMEOUT_S = 15.0
+
+# ---------------------------------------------------------------------------
+# Follow a BLE connection across its end
+
+FOLLOW_END_TEST_NAME = "Follow a BLE connection across its end"
+# How many of the central's connections the capture window must span. Three,
+# so the window holds the end of one connection, a whole one and the start of
+# another: exactly what the single-connection cases above leave out.
+MIN_CYCLES = 3
+# How many of those connections the capture itself must hold a CONNECT_IND
+# for. The Ubertooth hunts on one advertising channel and catches part of
+# what is there, so it is not expected to see every reconnection; two is what
+# shows a follow that ended and then found the next connection.
+MIN_CONNECTIONS = 2
+# Packets each of those connections must carry on its own access address.
+# A floor, like MIN_DATA_PACKETS: it says the capture followed each
+# connection rather than only hearing it start.
+MIN_CONNECTION_PACKETS = 3
+# How long after a CONNECT_IND a packet has to arrive for the central's
+# parameter update to have taken effect. The central asks 1200 ms into each
+# connection (the firmware's AUTOUPDATE_DELAY) and the update's instant is a
+# few connection events after that, so 2 s is past it either way. A packet
+# that late with a correct CRC is a follow that survived the update.
+AFTER_UPDATE_MS = 2000
+# What the board must read right after the capture: back in idle mode, so
+# nothing of the follow is left running.
+IDLE_AFTER_CAPTURE = r"(?m)^Now in idle mode\b"
+WATCHDOG_RESETS = "watchdog resets"
+_RESETS_PATTERN = (r"Unrequested watchdog resets since power-on: (?P<value>\d+) "
+                   r"\(in \d+ boots?\)")
 
 _CONNCAPTURE = str(Path(conncapture.__file__).resolve())
 
@@ -140,21 +183,22 @@ def _attempt_capture_path(name: str):
     return path
 
 
-def _pair(resources: Mapping, resource_identities: Mapping) -> tuple[dict, dict]:
+def _pair(resources: Mapping, resource_identities: Mapping,
+          test_name: str = TEST_NAME) -> tuple[dict, dict]:
     """The central and the peripheral, from the registry's identities."""
     pair = []
     for role in (CENTRAL_ROLE, PERIPHERAL_ROLE):
         identity = resource_identities.get(role)
         if not identity:
-            raise StateCaseError(f"{TEST_NAME} requires a {role} (nRF52840 DK)")
+            raise StateCaseError(f"{test_name} requires a {role} (nRF52840 DK)")
         try:
             serial = nrfdk.jlink_serial(identity.get("jlink serial", ""))
             address = nrfdk.normalize_address(identity.get("BLE address", ""))
         except nrfdk.NrfDkError as error:
-            raise StateCaseError(f"{TEST_NAME}: {role} {error}") from error
+            raise StateCaseError(f"{test_name}: {role} {error}") from error
         if not nrfdk.is_static_random(address):
             raise StateCaseError(
-                f"{TEST_NAME}: {role} BLE address {address} is not a static random "
+                f"{test_name}: {role} BLE address {address} is not a static random "
                 "address (the two top bits must be set)")
         pair.append({"serial": str(serial), "address": address,
                      "port": identity.get("serial device") or None,
@@ -162,7 +206,7 @@ def _pair(resources: Mapping, resource_identities: Mapping) -> tuple[dict, dict]
     central, peripheral = pair
     if central["serial"] == peripheral["serial"]:
         raise StateCaseError(
-            f"{TEST_NAME} needs two DKs; the central and the peripheral are both "
+            f"{test_name} needs two DKs; the central and the peripheral are both "
             f"J-Link {central['serial']}")
     return central, peripheral
 
@@ -208,7 +252,8 @@ def _ready_case(central: Mapping, peripheral: Mapping) -> StateCase:
 
 _TRAFFIC = re.compile(
     r"(?m)^traffic: writes (?P<writes>\d+) received \d+ bytes "
-    r"updates (?P<updates>\d+) connects (?P<connects>\d+)$")
+    r"updates (?P<updates>\d+) connects (?P<connects>\d+) "
+    r"disconnects (?P<disconnects>\d+)$")
 _UPDATE = re.compile(r"(?m)^update: asked (?P<ms>\d+) ms \(\d+ units\)$")
 
 
@@ -243,6 +288,35 @@ def _central_did_the_work(update_ms: int):
         if int(asked["ms"]) != update_ms:
             return (f"the central's accepted update was {asked['ms']} ms, not the "
                     f"{update_ms} ms it was told to ask for")
+        return ""
+    return check
+
+
+def _central_cycled(update_ms: int, cycles: int):
+    """...and made and dropped the link at least ``cycles`` times.
+
+    The capture says what reached the air; only the DK can say how many
+    times the link really went down and came back, so a capture window that
+    the central spent on one long connection is told apart from one it spent
+    cycling. One fewer disconnect than connection is allowed, because the
+    last connection is usually still up when the status is read.
+    """
+    did_the_work = _central_did_the_work(update_ms)
+
+    def check(stdout) -> str:
+        # did_the_work has found the traffic line when it reports nothing
+        # wrong, so the search below has a match.
+        reason = did_the_work(stdout)
+        if reason:
+            return reason
+        counts = {name: int(value) for name, value
+                  in search_lines(stdout, _TRAFFIC).groupdict().items()}
+        if counts["connects"] < cycles:
+            return (f"the central made {counts['connects']} connection(s), fewer "
+                    f"than the {cycles} the capture window spans")
+        if counts["disconnects"] < cycles - 1:
+            return (f"the central dropped {counts['disconnects']} connection(s), "
+                    f"fewer than the {cycles - 1} its cycling must have ended")
         return ""
     return check
 
@@ -320,6 +394,116 @@ def _capture_case(serial, central, peripheral, seconds, *, case_id, name,
         # while it ran, and the check of the file it wrote.
         retry_steps=("capture", "stop", "central-report", "check-capture"),
         attempts=CAPTURE_ATTEMPTS,
+    )
+
+
+def cycles_in(seconds) -> int:
+    """How many of the central's connections a capture that long spans."""
+    return int(seconds) // (CYCLE_MS // 1000)
+
+
+def _follow_end_case(serial, central, peripheral, seconds, *, interval_ms,
+                     update_ms) -> StateCase:
+    """One capture across several of the pair's connections."""
+    interval_units = nrfdk.conn_units(interval_ms)
+    capture_file = _attempt_capture_path("capture.pcapng")
+    cycles = cycles_in(seconds)
+
+    def check(context):
+        return [sys.executable, _CONNCAPTURE, capture_file(context),
+                "--central", central["address"],
+                "--peripheral", peripheral["address"],
+                "--interval-units", str(interval_units),
+                "--latency", "0",
+                "--timeout-units", str(conncapture.DEFAULT_TIMEOUT_UNITS),
+                "--min-data-packets", str(MIN_DATA_PACKETS),
+                "--min-valid-packets", str(MIN_VALID_PACKETS),
+                "--min-connections", str(MIN_CONNECTIONS),
+                "--min-connection-packets", str(MIN_CONNECTION_PACKETS),
+                "--after-update-ms", str(AFTER_UPDATE_MS),
+                "--require-announced"]
+
+    steps = (
+        _stop(serial, "establish-idle", "Establish idle before reading"),
+        *_read_originals(serial, MODE_RESET_SETTINGS),
+        Step("read-original-watchdog", "Read the board's self-reset count",
+             _util(serial, "-w"), timeout_s=WATCHDOG_TIMEOUT_S,
+             observe=Observation(WATCHDOG_RESETS, _RESETS_PATTERN)),
+        Step("peripheral-start",
+             f"Peripheral advertises connectable on channel {ADV_CHANNEL}",
+             _dk(peripheral, "peripheral", "--dle", "on", "--chmap",
+                 str(ADV_CHANNEL)),
+             timeout_s=DK_TIMEOUT_S, mutates=True,
+             output_patterns=(r"(?m)^role: peripheral$",)),
+        Step("central-start",
+             f"Central connects at {interval_ms} ms and remakes the link every "
+             f"{CYCLE_MS / 1000:g}s",
+             _dk(central, "central", "--peer", peripheral["address"],
+                 "--interval", str(interval_ms), "--dle", "on",
+                 "--payload", str(WRITE_BYTES), "--period", str(WRITE_PERIOD_MS),
+                 "--cycle", str(CYCLE_MS), "--autoupdate", str(update_ms)),
+             timeout_s=STATUS_TIMEOUT_S, mutates=True,
+             output_patterns=(
+                 r"(?m)^role: central$",
+                 rf"(?m)^data length: tx {nrfdk.DATA_LENGTH_MAX} rx "
+                 rf"{nrfdk.DATA_LENGTH_MAX} octets mtu \d+ phy 1M$",
+             )),
+        Step("capture",
+             f"ubertooth-btle -f -A{ADV_CHANNEL} -r for {seconds}s, across "
+             f"{cycles} connections",
+             lambda context: _btle(serial, "-f", f"-A{ADV_CHANNEL}", "-r",
+                                   capture_file(context)),
+             timeout_s=float(seconds), mutates=True, continuous=True),
+        _stop(serial),
+        Step("central-report", "What the central did while the case ran",
+             _dk(central, "status"), timeout_s=DK_TIMEOUT_S,
+             output_patterns=(r"(?m)^role: central$",),
+             output_check=_central_cycled(update_ms, cycles)),
+        Step("check-capture",
+             "The capture holds several of the pair's connections and nothing else",
+             check, timeout_s=CHECK_TIMEOUT_S,
+             output_patterns=(r"(?m)^capture checks passed$",)),
+        Step("read-back", "The board answers identity and settings reads at once",
+             _util(serial, "-s", "-C"),
+             output_patterns=(serial_pattern(serial), CHANNEL.pattern)),
+        Step("idle-after-capture",
+             "The board is back in idle mode, with no new self-reset",
+             _util(serial, "-w"), timeout_s=WATCHDOG_TIMEOUT_S,
+             output_patterns=(IDLE_AFTER_CAPTURE,),
+             observe=Observation(
+                 f"{WATCHDOG_RESETS} after the capture", _RESETS_PATTERN,
+                 expected=lambda context: require(context, WATCHDOG_RESETS))),
+    )
+    return StateCase(
+        "follow-across-end",
+        f"ubertooth-btle -f follows {MIN_CONNECTIONS}+ of the pair's "
+        "connections in one capture and leaves the board ready",
+        steps,
+        (_dk_idle(central, "central-idle"),
+         _dk_idle(peripheral, "peripheral-idle"))
+        + _cleanup(serial, MODE_RESET_SETTINGS),
+        expected_state=(
+            f"{MIN_CONNECTIONS}+ CONNECT_INDs at {interval_units} units, each "
+            f"with {MIN_CONNECTION_PACKETS}+ packets on its access address and "
+            f"none on an unannounced one; the board idle with no new self-reset; "
+            "both DKs idle; channel, squelch, and LEDs restored"),
+        capture_dir=True,
+        # Only the capture and the checks of it are taken again: the reads
+        # after them must see the board as the last capture left it.
+        retry_steps=("capture", "stop", "central-report", "check-capture"),
+        attempts=CAPTURE_ATTEMPTS,
+    )
+
+
+def follow_end_cases(arguments, resources, resource_identities):
+    serial = _serial(resource_identities, FOLLOW_END_TEST_NAME)
+    central, peripheral = _pair(resources, resource_identities,
+                                FOLLOW_END_TEST_NAME)
+    return (
+        _ready_case(central, peripheral),
+        _follow_end_case(serial, central, peripheral, seconds_arg(arguments),
+                         interval_ms=arguments["interval"],
+                         update_ms=arguments["update"]),
     )
 
 

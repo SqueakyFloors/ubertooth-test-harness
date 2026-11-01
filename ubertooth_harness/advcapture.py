@@ -60,14 +60,23 @@ PAYLOAD_FORMAT = 1
 CHMAP_BITS = {"37": 0x01, "38": 0x02, "39": 0x04, "all": 0x07}
 AD_MANUFACTURER = 0xFF
 
+# Byte order and timestamp ticks per second of each PCAP magic: the original
+# magic counts microseconds in a record's second field, the 2013 one
+# nanoseconds. libbtbb writes the nanosecond magic.
 _PCAP_MAGIC = {
-    b"\xd4\xc3\xb2\xa1": "<", b"\xa1\xb2\xc3\xd4": ">",
-    b"\x4d\x3c\xb2\xa1": "<", b"\xa1\xb2\x3c\x4d": ">",
+    b"\xd4\xc3\xb2\xa1": ("<", 1_000_000), b"\xa1\xb2\xc3\xd4": (">", 1_000_000),
+    b"\x4d\x3c\xb2\xa1": ("<", 1_000_000_000), b"\xa1\xb2\x3c\x4d": (">", 1_000_000_000),
 }
 _PCAPNG_SHB = 0x0A0D0D0A
 _PCAPNG_IDB = 0x00000001
 _PCAPNG_EPB = 0x00000006
 _PCAPNG_SPB = 0x00000003
+# A PCAPNG interface option: one byte saying how finely its records are
+# timed. Without it a reader is to assume microseconds (pcapng, Section
+# 4.2); libbtbb writes 9, nanoseconds.
+_PCAPNG_IF_TSRESOL = 9
+_PCAPNG_IDB_FIXED = 8  # link type, reserved, snaplen, before the options
+DEFAULT_TICKS_PER_SECOND = 1_000_000
 
 
 class CaptureError(ValueError):
@@ -108,8 +117,28 @@ def _crc_bytes(header_and_pdu: bytes) -> bytes:
     return crc24(header_and_pdu).to_bytes(3, "little")
 
 
+@dataclass(frozen=True)
+class TimedRecord:
+    """One record and when the capture tool wrote it.
+
+    ``micros`` is microseconds on the file's own clock, so only differences
+    between records mean anything. It is None for a record the file carries
+    no time for (a PCAPNG simple packet block), which a check that needs
+    times has to leave out rather than treat as time zero.
+    """
+
+    micros: int | None
+    data: bytes
+
+
 def read_records(data: bytes) -> tuple[str, int, list[bytes]]:
     """(format, link type, records) of a PCAP or PCAPNG file."""
+    file_format, link_type, timed = read_timed_records(data)
+    return file_format, link_type, [record.data for record in timed]
+
+
+def read_timed_records(data: bytes) -> tuple[str, int, list[TimedRecord]]:
+    """(format, link type, records with their times) of a PCAP or PCAPNG file."""
     if len(data) >= 24 and data[:4] in _PCAP_MAGIC:
         return _read_pcap(data)
     if len(data) >= 12 and struct.unpack("<I", data[:4])[0] == _PCAPNG_SHB:
@@ -119,20 +148,42 @@ def read_records(data: bytes) -> tuple[str, int, list[bytes]]:
     raise CaptureError(f"magic {data[:4].hex()} is neither PCAP nor PCAPNG")
 
 
+def _micros(ticks: int, ticks_per_second: int) -> int:
+    return ticks * 1_000_000 // ticks_per_second
+
+
 def _read_pcap(data: bytes):
-    endian = _PCAP_MAGIC[data[:4]]
+    endian, ticks_per_second = _PCAP_MAGIC[data[:4]]
     link_type = struct.unpack(endian + "I", data[20:24])[0]
     records, offset = [], 24
     while offset < len(data):
         if offset + 16 > len(data):
             raise CaptureError(f"record header cut short at byte {offset}")
-        _sec, _frac, caplen, _length = struct.unpack(endian + "IIII", data[offset:offset + 16])
+        sec, frac, caplen, _length = struct.unpack(endian + "IIII", data[offset:offset + 16])
         end = offset + 16 + caplen
         if end > len(data):
             raise CaptureError(f"record at byte {offset} is cut short")
-        records.append(data[offset + 16:end])
+        records.append(TimedRecord(
+            sec * 1_000_000 + _micros(frac, ticks_per_second),
+            data[offset + 16:end]))
         offset = end
     return "pcap", link_type, records
+
+
+def _interface_ticks_per_second(body: bytes, endian: str) -> int:
+    """How finely an interface description block says its records are timed."""
+    at = _PCAPNG_IDB_FIXED
+    while at + 4 <= len(body):
+        code, option_length = struct.unpack(endian + "HH", body[at:at + 4])
+        if code == 0:  # end of options
+            break
+        value = body[at + 4:at + 4 + option_length]
+        if code == _PCAPNG_IF_TSRESOL and len(value) >= 1:
+            # The top bit chooses the base: set means 2^-n, clear means 10^-n.
+            power = value[0] & 0x7F
+            return 2 ** power if value[0] & 0x80 else 10 ** power
+        at += 4 + 4 * ((option_length + 3) // 4)
+    return DEFAULT_TICKS_PER_SECOND
 
 
 def _read_pcapng(data: bytes):
@@ -145,6 +196,7 @@ def _read_pcapng(data: bytes):
     else:
         raise CaptureError("PCAPNG section header has no byte-order magic")
     link_types: list[int] = []
+    ticks: list[int] = []
     records, offset = [], 0
     while offset < len(data):
         if offset + 12 > len(data):
@@ -155,15 +207,19 @@ def _read_pcapng(data: bytes):
         body = data[offset + 8:offset + length - 4]
         if block_type == _PCAPNG_SHB:
             link_types = []
+            ticks = []
         elif block_type == _PCAPNG_IDB:
             link_types.append(struct.unpack(endian + "H", body[:2])[0])
+            ticks.append(_interface_ticks_per_second(body, endian))
         elif block_type == _PCAPNG_EPB:
-            interface, _high, _low, caplen, _orig = struct.unpack(endian + "IIIII", body[:20])
+            interface, high, low, caplen, _orig = struct.unpack(endian + "IIIII", body[:20])
             if interface >= len(link_types):
                 raise CaptureError(f"packet block at byte {offset} names no interface")
-            records.append(body[20:20 + caplen])
+            records.append(TimedRecord(
+                _micros(high << 32 | low, ticks[interface]), body[20:20 + caplen]))
         elif block_type == _PCAPNG_SPB:
-            records.append(body[4:])
+            # A simple packet block carries no timestamp at all.
+            records.append(TimedRecord(None, body[4:]))
         offset += length
     if not link_types:
         raise CaptureError("PCAPNG has no interface description block")

@@ -176,6 +176,30 @@ def _check_connection_duration(arguments) -> None:
             "reconnections and not two")
 
 
+# The longest capture the multi-cycle follow case takes. Three captures of
+# this plus the DK setup is a couple of minutes, which keeps the case inside
+# a short hardware session.
+_MAX_FOLLOW_END_CAPTURE_S = 30
+
+
+def _check_follow_end_duration(arguments) -> None:
+    """The capture must span several of the central's reconnections.
+
+    At least MIN_CYCLES of them, which is what the test is for, and not so
+    many that one case holds the boards for long: the capture is taken up to
+    CAPTURE_ATTEMPTS times.
+    """
+    cycle_s = connection_cases.CYCLE_MS / 1000.0
+    least = connection_cases.MIN_CYCLES * cycle_s
+    most = _MAX_FOLLOW_END_CAPTURE_S
+    seconds = receive_cases.seconds_arg(arguments)
+    if not least < seconds <= most:
+        raise CatalogError(
+            f"duration must be longer than {least:g}s, so the capture spans "
+            f"{connection_cases.MIN_CYCLES} of the central's connections, and "
+            f"at most {most:g}s, so one case does not hold the boards for long")
+
+
 def _payload_tag(value):
     # The advertiser firmware's payload tag: up to 12 bytes, or none.
     text = str(value).lower() if isinstance(value, (str, int)) else None
@@ -826,6 +850,12 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "Capture known BLE connection": _profiles(
         Estimate(30.0, per_duration=4), Estimate(60.0, per_duration=10)
     ),
+    # ESTIMATE_PENDING_HW
+    # One capture case, taken up to CAPTURE_ATTEMPTS times, plus the pair's
+    # setup and the reads after the capture.
+    "Follow a BLE connection across its end": _default(
+        Estimate(35.0, per_duration=3)
+    ),
     # Each capture case opens both ESP32 bridges, which resets both boards,
     # and waits for the link: about 13 s before its capture starts, plus the
     # board reads around it. Two capture cases in smoke, four comprehensive.
@@ -857,6 +887,7 @@ RF_DEFAULTS: Mapping[str, Mapping[str, PlacementRequirement]] = MappingProxyType
         "BLE extcap in tshark",
         "Capture known BLE advertiser",
         "Capture known BLE connection",
+        "Follow a BLE connection across its end",
     )
 })
 
@@ -1218,6 +1249,32 @@ def builtin_catalog() -> TestCatalog:
             }),
             check_arguments=_check_connection_duration,
             command_builder=connection_cases.known_connection_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+            # Its first case flashes a DK when the board runs another
+            # firmware version, so the run holds the host lock.
+            writes_firmware=True,
+        ),
+        TestDefinition(
+            connection_cases.FOLLOW_END_TEST_NAME,
+            "ubertooth-btle -f follows two registered nRF52840 DKs across "
+            "several of the central's reconnections: the capture holds a "
+            "CONNECT_IND for each connection it carries packets for, and the "
+            "board is idle and answering as soon as the capture stops",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH,
+                "central": ArgumentRule(_selector, default="default"),
+                "peripheral": ArgumentRule(_selector, default="default"),
+                "duration": DURATION,
+                "interval": ArgumentRule(_connection_interval, default=30),
+                "update": ArgumentRule(_connection_interval, default=60),
+            }),
+            MappingProxyType({
+                "Ubertooth": "Ubertooth", "central": "nRF52840 DK",
+                "peripheral": "nRF52840 DK",
+            }),
+            check_arguments=_check_follow_end_duration,
+            command_builder=connection_cases.follow_end_cases,
             continue_on_case_failure=True,
             guards_other_ubertooths=True,
             # Its first case flashes a DK when the board runs another

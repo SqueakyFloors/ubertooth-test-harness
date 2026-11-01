@@ -1,4 +1,5 @@
 import contextlib
+import contextlib
 import io
 from pathlib import Path
 import struct
@@ -199,6 +200,154 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(["link type 192, not 256"], result.problems)
         _header, result = self.check(b"")
         self.assertIn("empty", result.problems[0])
+
+
+SECOND_ACCESS = 0x11223344
+SECOND_CRC_INIT = 0x123456
+
+
+def second_connect_ind():
+    return connect_ind(data=lldata(access=SECOND_ACCESS, crc_init=SECOND_CRC_INIT))
+
+
+class RepeatedConnectionTests(unittest.TestCase):
+    """A capture across several of the pair's connections: each one's own
+    packets, when they arrived, and nothing the file does not announce."""
+
+    def check(self, data, **options):
+        options.setdefault("central", CENTRAL)
+        options.setdefault("peripheral", PERIPHERAL)
+        options.setdefault("interval_units", INTERVAL_UNITS)
+        options.setdefault("latency", 0)
+        options.setdefault("timeout_units", TIMEOUT_UNITS)
+        return conncapture.check(data, **options)
+
+    def two_cycles(self):
+        """Two connections, each with packets up to 4 s after its CONNECT_IND."""
+        records = [connect_ind(), data_packet(251), data_packet(251),
+                   second_connect_ind(),
+                   data_packet(251, access=SECOND_ACCESS, crc_init=SECOND_CRC_INIT),
+                   data_packet(251, access=SECOND_ACCESS, crc_init=SECOND_CRC_INIT)]
+        times = [0, 1_000_000, 4_000_000,
+                 5_200_000, 6_200_000, 9_200_000]
+        return records, times
+
+    def cycles(self, **options):
+        records, times = self.two_cycles()
+        return self.check(pcapng(records, times=times, tsresol=9), **options)
+
+    def test_two_connections_with_late_packets_pass(self):
+        _header, result = self.cycles(min_connections=2, min_connection_packets=2,
+                                      after_update_ms=2000, require_announced=True)
+        self.assertEqual([], result.problems)
+        self.assertEqual([ACCESS, SECOND_ACCESS],
+                         [item.access_address for item in result.connections])
+        self.assertEqual([4000, 4000],
+                         [item.last_valid_after_ms for item in result.connections])
+        self.assertEqual(9200, result.span_ms)
+
+    def test_one_connection_does_not_meet_the_floor(self):
+        records = [connect_ind()] + [data_packet(251)] * 3
+        _header, result = self.check(
+            pcapng(records, times=[0, 1_000, 2_000, 3_000_000], tsresol=9),
+            min_connections=2)
+        self.assertEqual(
+            [f"1 connection(s) from {CENTRAL} to {PERIPHERAL}, fewer than 2"],
+            result.problems)
+
+    def test_a_connection_with_too_few_packets_is_named(self):
+        records = [connect_ind(), data_packet(251), second_connect_ind()]
+        _header, result = self.check(
+            pcapng(records, times=[0, 3_000_000, 5_200_000], tsresol=9),
+            min_connections=2, min_connection_packets=2)
+        # Each connection that falls short is named, not just the first.
+        self.assertEqual(
+            [f"connection {ACCESS:08x} carries 1 packet(s), fewer than 2",
+             f"connection {SECOND_ACCESS:08x} carries 0 packet(s), fewer than 2"],
+            result.problems)
+
+    def test_packets_only_at_the_start_of_a_connection_fail_the_update_floor(self):
+        """A follow that stopped at the parameter update looks like this."""
+        records = [connect_ind()] + [data_packet(251)] * 2
+        _header, result = self.check(
+            pcapng(records, times=[0, 100_000, 900_000], tsresol=9),
+            after_update_ms=2000)
+        self.assertEqual(1, len(result.problems))
+        self.assertIn("surviving the parameter update", result.problems[0])
+        self.assertIn("the latest was 900 ms", result.problems[0])
+
+    def test_no_timed_packet_at_all_fails_the_update_floor(self):
+        # A simple packet block carries no time, so no distance can be read
+        # from it and the check must not pass on it.
+        data = _block(0x0A0D0D0A, struct.pack("<IHHq", 0x1A2B3C4D, 1, 0, -1))
+        data += _block(1, struct.pack("<HHI", 256, 0, 65535))
+        for item in (connect_ind(), data_packet(251)):
+            data += _block(3, struct.pack("<I", len(item)) + item)
+        _header, result = self.check(data, after_update_ms=2000)
+        self.assertIn("the latest was none", result.problems[0])
+
+    def test_a_corrupt_late_packet_does_not_satisfy_the_update_floor(self):
+        records = [connect_ind(), data_packet(251, corrupt=True)]
+        _header, result = self.check(
+            pcapng(records, times=[0, 4_000_000], tsresol=9), after_update_ms=2000)
+        self.assertIn("the latest was none", result.problems[0])
+
+    def test_a_connection_the_capture_never_announced_is_refused(self):
+        """The board writes the address it synchronized on into each record,
+        so a packet on an address no CONNECT_IND handed out is a connection
+        the file cannot explain."""
+        records = [connect_ind(), data_packet(251),
+                   data_packet(27, access=0xDEADBEEF, crc_init=0x111111),
+                   data_packet(27, access=0xDEADBEEF, crc_init=0x111111)]
+        times = [0, 4_000_000, 4_100_000, 4_200_000]
+        data = pcapng(records, times=times, tsresol=9)
+        _header, result = self.check(data, require_announced=True)
+        self.assertEqual({0xDEADBEEF: 2}, result.unannounced)
+        self.assertEqual(
+            ["packet(s) on an access address no CONNECT_IND in this capture "
+             "handed out: deadbeef x2"],
+            result.problems)
+        # Without the option the packets are still counted and reported.
+        _header, result = self.check(data)
+        self.assertEqual([], result.problems)
+        self.assertEqual({0xDEADBEEF: 2}, result.unannounced)
+
+    def test_another_pair_s_announced_connection_is_explained(self):
+        """A CONNECT_IND of another device in range explains its packets."""
+        other = connect_ind(initiator=OTHER,
+                            data=lldata(access=0xDEADBEEF, crc_init=0x111111))
+        records = [connect_ind(), data_packet(251), other,
+                   data_packet(27, access=0xDEADBEEF, crc_init=0x111111)]
+        _header, result = self.check(
+            pcapng(records, times=[0, 4_000_000, 4_100_000, 4_200_000], tsresol=9),
+            min_connections=1, require_announced=True)
+        self.assertEqual([], result.problems)
+        self.assertEqual({}, result.unannounced)
+        # Only our pair's connections are measured.
+        self.assertEqual([ACCESS], [item.access_address
+                                    for item in result.connections])
+
+    def test_main_reports_each_connection_and_the_span(self):
+        records, times = self.two_cycles()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "capture.pcapng"
+            path.write_bytes(pcapng(records, times=times, tsresol=9))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                status = conncapture.main([
+                    str(path), "--central", CENTRAL, "--peripheral", PERIPHERAL,
+                    "--interval-units", str(INTERVAL_UNITS), "--latency", "0",
+                    "--timeout-units", str(TIMEOUT_UNITS),
+                    "--min-connections", "2", "--min-connection-packets", "2",
+                    "--after-update-ms", "2000", "--require-announced"])
+        text = out.getvalue()
+        self.assertEqual(0, status, text)
+        self.assertIn("span 9.2s", text)
+        self.assertIn("connections: 2", text)
+        self.assertIn(f"connection 2: access address {SECOND_ACCESS:08x}, "
+                      "2 packet(s), 2 with a correct CRC, last correct CRC "
+                      "4000 ms after its CONNECT_IND", text)
+        self.assertIn("unannounced access addresses: none", text)
 
 
 class ConnectionInfoOptionTests(unittest.TestCase):

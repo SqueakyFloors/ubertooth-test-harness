@@ -7,6 +7,8 @@ Run as a script by the Capture known BLE connection cases::
         [--min-data-packets N --min-valid-packets N
          --min-data-length N --long-packets N]
         [--check-connection-info]
+        [--min-connections N --min-connection-packets N
+         --after-update-ms MS --require-announced]
 
 FILE is PCAP or PCAPNG as ``ubertooth-btle -q`` and ``-r`` write it; the
 records are read by advcapture.py.
@@ -28,6 +30,16 @@ The checks:
 - at least ``--long-packets`` of those data packets at least
   ``--min-data-length`` bytes long, which is what Data Length Extension is
   for: without it the link layer would cap the payload at 27 bytes;
+- with the cycle options, a capture that spans several of the pair's
+  connections rather than one: at least ``--min-connections`` of them,
+  counted by access address, each carrying at least
+  ``--min-connection-packets`` packets, and at least one packet with a
+  correct CRC ``--after-update-ms`` or more after its own CONNECT_IND, which
+  is long enough that the central's parameter update has taken effect. With
+  ``--require-announced``, no packet may be on an access address that no
+  CONNECT_IND in the capture handed out: in a follow the board writes the
+  address it synchronized on into each record, so such a packet is a
+  connection the board followed without the file saying where it came from;
 - with ``--check-connection-info``, that one of the connection information
   options libbtbb recorded in the PCAPNG is a CONNECT_IND this capture
   decoded from this pair, byte for byte. Those 34 bytes are what a reader
@@ -65,7 +77,7 @@ from ubertooth_harness.advcapture import (  # noqa: E402
     _PCAPNG_SHB,
     crc24,
     format_address,
-    read_records,
+    read_timed_records,
 )
 
 CONNECT_IND = 0x5
@@ -137,35 +149,73 @@ class ConnectInd:
         )
 
 
+def _connect_ind_body(record, central: str | None = None,
+                      peripheral: str | None = None) -> bytes | None:
+    """The CONNECT_IND this record carries, from its access address on, or None.
+
+    With ``central`` and ``peripheral`` a CONNECT_IND between any other pair
+    of addresses is left out.
+    """
+    if len(record) < LE_PHDR_LEN + 4 + 2 + CONNECT_IND_LEN:
+        return None
+    body = record[LE_PHDR_LEN:]
+    if struct.unpack("<I", body[:4])[0] != ADV_ACCESS_ADDRESS:
+        return None
+    header = body[4:6]
+    if header[0] & 0x0F != CONNECT_IND or header[1] & 0x3F != CONNECT_IND_LEN:
+        return None
+    pdu = body[6:6 + CONNECT_IND_LEN]
+    # The advertising CRC, so a corrupted packet is not read as one.
+    if (len(body) < 6 + CONNECT_IND_LEN + 3
+            or body[6 + CONNECT_IND_LEN:9 + CONNECT_IND_LEN]
+            != crc24(header + pdu).to_bytes(3, "little")):
+        return None
+    if central is not None and format_address(pdu[0:6]) != central.upper():
+        return None
+    if peripheral is not None and format_address(pdu[6:12]) != peripheral.upper():
+        return None
+    return bytes(body[:6 + CONNECT_IND_LEN])
+
+
 def connect_ind_bodies(records, central: str | None = None,
                        peripheral: str | None = None) -> list[bytes]:
-    """Each CONNECT_IND record from its access address on (header and LLData).
+    """Each CONNECT_IND record from its access address on (header and LLData)."""
+    found = (_connect_ind_body(record, central, peripheral) for record in records)
+    return [body for body in found if body is not None]
 
-    With ``central`` and ``peripheral`` only the connections between those
-    two addresses are returned.
+
+def timed_connect_inds(records, central: str | None = None,
+                       peripheral: str | None = None) -> list[tuple]:
+    """(time, CONNECT_IND) of each one in the records, in capture order.
+
+    The time is what a later packet's distance from the CONNECT_IND is
+    measured against, so a connection whose CONNECT_IND the file carries no
+    time for keeps None and is left out of that measurement.
     """
-    bodies = []
+    found = []
     for record in records:
-        if len(record) < LE_PHDR_LEN + 4 + 2 + CONNECT_IND_LEN:
-            continue
-        body = record[LE_PHDR_LEN:]
-        if struct.unpack("<I", body[:4])[0] != ADV_ACCESS_ADDRESS:
-            continue
-        header = body[4:6]
-        if header[0] & 0x0F != CONNECT_IND or header[1] & 0x3F != CONNECT_IND_LEN:
-            continue
-        pdu = body[6:6 + CONNECT_IND_LEN]
-        # The advertising CRC, so a corrupted packet is not read as one.
-        if (len(body) < 6 + CONNECT_IND_LEN + 3
-                or body[6 + CONNECT_IND_LEN:9 + CONNECT_IND_LEN]
-                != crc24(header + pdu).to_bytes(3, "little")):
-            continue
-        if central is not None and format_address(pdu[0:6]) != central.upper():
-            continue
-        if peripheral is not None and format_address(pdu[6:12]) != peripheral.upper():
-            continue
-        bodies.append(bytes(body[:6 + CONNECT_IND_LEN]))
-    return bodies
+        body = _connect_ind_body(record.data, central, peripheral)
+        if body is not None:
+            found.append((record.micros,
+                          ConnectInd.parse(body[6:6 + CONNECT_IND_LEN])))
+    return found
+
+
+def _data_packet(record, access_address: int, crc_init: int):
+    """(payload length, CRC is right) if the record is on this access address."""
+    if len(record) < LE_PHDR_LEN + 4 + 2:
+        return None
+    body = record[LE_PHDR_LEN:]
+    if struct.unpack("<I", body[:4])[0] != access_address:
+        return None
+    # A data PDU header is two bytes: flags, then the payload length.
+    header = body[4:6]
+    length = header[1]
+    whole = body[6:6 + length + 3]
+    if len(whole) != length + 3:
+        return length, False
+    expected = crc24(header + whole[:length], crc_init).to_bytes(3, "little")
+    return length, whole[length:] == expected
 
 
 def data_packets(records, access_address: int, crc_init: int) -> list[tuple[int, bool]]:
@@ -174,22 +224,37 @@ def data_packets(records, access_address: int, crc_init: int) -> list[tuple[int,
     The CRC is computed here with the connection's own CRC init, so a
     corrupted length byte cannot pass for a long packet.
     """
+    found = (_data_packet(record, access_address, crc_init) for record in records)
+    return [item for item in found if item is not None]
+
+
+def timed_data_packets(records, access_address: int, crc_init: int) -> list[tuple]:
+    """(time, payload length, CRC is right) of each packet on this address."""
     found = []
     for record in records:
-        if len(record) < LE_PHDR_LEN + 4 + 2:
+        item = _data_packet(record.data, access_address, crc_init)
+        if item is not None:
+            found.append((record.micros,) + item)
+    return found
+
+
+def connection_addresses(records) -> list[int]:
+    """The access address of every record that is not an advertising packet.
+
+    In a follow the board writes the access address it synchronized on into
+    the record itself, and it synchronizes on exactly one at a time: the
+    advertising address while it hunts, then the connection's own. So each
+    address here is a connection the board followed, and one that no
+    CONNECT_IND in the file handed out is a connection the file cannot
+    explain.
+    """
+    found = []
+    for record in records:
+        if len(record.data) < LE_PHDR_LEN + 4:
             continue
-        body = record[LE_PHDR_LEN:]
-        if struct.unpack("<I", body[:4])[0] != access_address:
-            continue
-        # A data PDU header is two bytes: flags, then the payload length.
-        header = body[4:6]
-        length = header[1]
-        whole = body[6:6 + length + 3]
-        if len(whole) != length + 3:
-            found.append((length, False))
-            continue
-        expected = crc24(header + whole[:length], crc_init).to_bytes(3, "little")
-        found.append((length, whole[length:] == expected))
+        address, = struct.unpack("<I", record.data[LE_PHDR_LEN:LE_PHDR_LEN + 4])
+        if address != ADV_ACCESS_ADDRESS:
+            found.append(address)
     return found
 
 
@@ -239,6 +304,19 @@ def recorded_connections(data: bytes) -> list[ConnectInd]:
 
 
 @dataclass
+class Connection:
+    """One connection of the pair the capture announced, and what followed it."""
+
+    access_address: int
+    micros: int | None
+    packets: int = 0
+    valid: int = 0
+    # How long after this connection's own CONNECT_IND the last packet with a
+    # correct CRC arrived. None where either has no time in the file.
+    last_valid_after_ms: int | None = None
+
+
+@dataclass
 class Result:
     records: int = 0
     connect_inds: int = 0
@@ -247,6 +325,11 @@ class Result:
     long_packets: int = 0
     longest: int = 0
     connection: ConnectInd | None = None
+    connections: list = field(default_factory=list)
+    # Access address -> how many packets, for addresses no CONNECT_IND in the
+    # capture handed out.
+    unannounced: dict = field(default_factory=dict)
+    span_ms: int | None = None
     connection_info: str = "not looked for"
     connection_info_options: int = 0
     problems: list = field(default_factory=list)
@@ -257,10 +340,13 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
           min_valid_packets: int = 0,
           min_data_length: int = DEFAULT_DATA_LENGTH + 1,
           long_packets: int = 0,
-          check_connection_info: bool = False) -> tuple[str, Result]:
+          check_connection_info: bool = False,
+          min_connections: int = 0, min_connection_packets: int = 0,
+          after_update_ms: int | None = None,
+          require_announced: bool = False) -> tuple[str, Result]:
     result = Result()
     try:
-        file_format, link_type, records = read_records(data)
+        file_format, link_type, timed = read_timed_records(data)
     except CaptureError as error:
         result.problems.append(str(error))
         return "unreadable", result
@@ -269,13 +355,16 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
         result.problems.append(
             f"link type {link_type}, not {LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR}")
         return header, result
+    records = [record.data for record in timed]
     result.records = len(records)
+    times = [record.micros for record in timed if record.micros is not None]
+    result.span_ms = (max(times) - min(times)) // 1000 if times else None
     central = central.upper()
     peripheral = peripheral.upper()
     # Only our pair's CONNECT_INDs, so another device in range cannot decide
     # what the checks below are measured against.
-    our_bodies = connect_ind_bodies(records, central=central, peripheral=peripheral)
-    ours = [ConnectInd.parse(body[6:6 + CONNECT_IND_LEN]) for body in our_bodies]
+    ours_timed = timed_connect_inds(timed, central=central, peripheral=peripheral)
+    ours = [connection for _at, connection in ours_timed]
     result.connect_inds = len(ours)
     if not ours:
         result.problems.append(
@@ -301,9 +390,24 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
                   f"every data channel ({ALL_DATA_CHANNELS:#011x})"] = True
     result.problems.extend(wrong)
     packets = []
-    for connection in ours:
-        packets += data_packets(records, connection.access_address,
-                                connection.crc_init)
+    for at, connection in ours_timed:
+        if any(item.access_address == connection.access_address
+               for item in result.connections):
+            # The same connection announced twice: its packets are counted
+            # once, against the CONNECT_IND that opened it.
+            continue
+        found = timed_data_packets(timed, connection.access_address,
+                                   connection.crc_init)
+        packets += [(length, crc_ok) for _when, length, crc_ok in found]
+        after = [when - at for when, _length, crc_ok in found
+                 if crc_ok and when is not None and at is not None]
+        result.connections.append(Connection(
+            access_address=connection.access_address,
+            micros=at,
+            packets=len(found),
+            valid=sum(1 for _when, _length, crc_ok in found if crc_ok),
+            last_valid_after_ms=max(after) // 1000 if after else None,
+        ))
     valid = [length for length, crc_ok in packets if crc_ok]
     result.data_packets = len(packets)
     result.valid_packets = len(valid)
@@ -321,6 +425,39 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
         result.problems.append(
             f"{result.long_packets} packet(s) of {min_data_length} bytes or more, "
             f"fewer than {long_packets} (longest {result.longest})")
+    # Every connection the capture announced, whoever made it: a followed
+    # connection whose CONNECT_IND is not in the file is what the check
+    # below is for, and another pair's CONNECT_IND explains their packets
+    # just as well as ours explains ours.
+    announced = {connection.access_address
+                 for _at, connection in timed_connect_inds(timed)}
+    for address in connection_addresses(timed):
+        if address not in announced:
+            result.unannounced[address] = result.unannounced.get(address, 0) + 1
+    if len(result.connections) < min_connections:
+        result.problems.append(
+            f"{len(result.connections)} connection(s) from {central} to "
+            f"{peripheral}, fewer than {min_connections}")
+    for item in result.connections:
+        if item.packets < min_connection_packets:
+            result.problems.append(
+                f"connection {item.access_address:08x} carries {item.packets} "
+                f"packet(s), fewer than {min_connection_packets}")
+    if after_update_ms is not None:
+        latest = max((item.last_valid_after_ms for item in result.connections
+                      if item.last_valid_after_ms is not None), default=None)
+        if latest is None or latest < after_update_ms:
+            result.problems.append(
+                f"no packet with a correct CRC {after_update_ms} ms or more after "
+                "its own CONNECT_IND, so the capture does not show a followed "
+                "connection surviving the parameter update (the latest was "
+                + (f"{latest} ms" if latest is not None else "none") + ")")
+    if require_announced and result.unannounced:
+        result.problems.append(
+            "packet(s) on an access address no CONNECT_IND in this capture "
+            "handed out: "
+            + ", ".join(f"{address:08x} x{count}"
+                        for address, count in sorted(result.unannounced.items())))
     recorded = recorded_connections(data)
     result.connection_info_options = len(recorded)
     ours_recorded = [found for found in recorded
@@ -390,6 +527,17 @@ def main(argv=None) -> int:
     parser.add_argument("--check-connection-info", action="store_true",
                         help="require the recorded connection information option to "
                              "hold this pair's CONNECT_IND and its parameters")
+    parser.add_argument("--min-connections", type=int, default=0,
+                        help="how many of the pair's connections the capture must "
+                             "hold, counted by access address")
+    parser.add_argument("--min-connection-packets", type=int, default=0,
+                        help="packets each of those connections must carry")
+    parser.add_argument("--after-update-ms", type=int,
+                        help="require a packet with a correct CRC this long after "
+                             "its own CONNECT_IND")
+    parser.add_argument("--require-announced", action="store_true",
+                        help="refuse a packet on an access address no CONNECT_IND "
+                             "in the capture handed out")
     args = parser.parse_args(argv)
     try:
         with open(args.file, "rb") as stream:
@@ -404,9 +552,24 @@ def main(argv=None) -> int:
         min_valid_packets=args.min_valid_packets,
         min_data_length=args.min_data_length, long_packets=args.long_packets,
         check_connection_info=args.check_connection_info,
+        min_connections=args.min_connections,
+        min_connection_packets=args.min_connection_packets,
+        after_update_ms=args.after_update_ms,
+        require_announced=args.require_announced,
     )
-    print(f"capture: {header}, {result.records} records")
+    span = "unknown" if result.span_ms is None else f"{result.span_ms / 1000:.1f}s"
+    print(f"capture: {header}, {result.records} records, span {span}")
     print(f"connect_ind: {result.connect_inds}")
+    print(f"connections: {len(result.connections)}")
+    for index, item in enumerate(result.connections, start=1):
+        after = ("no timed packet" if item.last_valid_after_ms is None
+                 else f"last correct CRC {item.last_valid_after_ms} ms after its "
+                      "CONNECT_IND")
+        print(f"connection {index}: access address {item.access_address:08x}, "
+              f"{item.packets} packet(s), {item.valid} with a correct CRC, {after}")
+    unannounced = ", ".join(f"{address:08x} x{count}" for address, count
+                            in sorted(result.unannounced.items()))
+    print(f"unannounced access addresses: {unannounced or 'none'}")
     found = result.connection
     if found is not None:
         print(f"parameters: interval {found.interval} units "

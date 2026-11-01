@@ -29,10 +29,21 @@ def record(address=ADDRESS, rf_channel=0, pdu_type=0x2, tx_add=1, data=None,
     return phdr + struct.pack("<I", access) + header + pdu + crc
 
 
-def pcap(records, link_type=256):
-    out = struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, link_type)
-    for item in records:
-        out += struct.pack("<IIII", 1, 2, len(item), len(item)) + item
+def pcap(records, link_type=256, times=None, magic=0xA1B2C3D4, ticks=1_000_000):
+    """PCAP of these records, each at ``times[i]`` microseconds if given.
+
+    ``magic`` and ``ticks`` go together: the original magic counts
+    microseconds in a record's second field, 0xA1B23C4D nanoseconds, which
+    is what libbtbb writes.
+    """
+    out = struct.pack("<IHHiIII", magic, 2, 4, 0, 0, 65535, link_type)
+    for index, item in enumerate(records):
+        if times is None:
+            seconds, fraction = 1, 2
+        else:
+            micros = times[index]
+            seconds, fraction = divmod(micros * ticks // 1_000_000, ticks)
+        out += struct.pack("<IIII", seconds, fraction, len(item), len(item)) + item
     return out
 
 
@@ -42,11 +53,23 @@ def _block(block_type, body):
     return struct.pack("<II", block_type, length) + body + struct.pack("<I", length)
 
 
-def pcapng(records, link_type=256):
+def pcapng(records, link_type=256, times=None, tsresol=None):
+    """PCAPNG of these records, each at ``times[i]`` microseconds if given.
+
+    ``tsresol`` writes the interface option that says how finely the records
+    are timed (9 for nanoseconds, as libbtbb writes); without it a reader
+    has to assume microseconds.
+    """
+    ticks = 1_000_000 if tsresol is None else 10 ** tsresol
+    options = b""
+    if tsresol is not None:
+        options = struct.pack("<HHB", 9, 1, tsresol) + b"\x00" * 3
     out = _block(0x0A0D0D0A, struct.pack("<IHHq", 0x1A2B3C4D, 1, 0, -1))
-    out += _block(1, struct.pack("<HHI", link_type, 0, 65535))
-    for item in records:
-        out += _block(6, struct.pack("<IIIII", 0, 0, 1, len(item), len(item)) + item)
+    out += _block(1, struct.pack("<HHI", link_type, 0, 65535) + options)
+    for index, item in enumerate(records):
+        count = 1 if times is None else times[index] * ticks // 1_000_000
+        out += _block(6, struct.pack("<IIIII", 0, count >> 32, count & 0xFFFFFFFF,
+                                     len(item), len(item)) + item)
     return out
 
 
@@ -56,6 +79,44 @@ class CrcTests(unittest.TestCase):
         self.assertEqual(ADDRESS, good.address)
         self.assertIsNone(advcapture.parse_advertising(record(corrupt=True)))
         self.assertIsNone(advcapture.parse_advertising(record(access=0x12345678)))
+
+
+class TimedRecordTests(unittest.TestCase):
+    """When each record was captured, which a check of a window spanning
+    several connections measures distances in."""
+
+    def times(self, data):
+        _format, _link_type, timed = advcapture.read_timed_records(data)
+        return [item.micros for item in timed]
+
+    def test_pcap_microseconds_and_nanoseconds(self):
+        wanted = [0, 1_500_000, 18_000_123]
+        self.assertEqual(wanted, self.times(
+            pcap([record()] * 3, times=wanted)))
+        # The nanosecond magic libbtbb writes carries the same instants.
+        self.assertEqual(wanted, self.times(
+            pcap([record()] * 3, times=wanted, magic=0xA1B23C4D,
+                 ticks=1_000_000_000)))
+
+    def test_pcapng_default_microseconds_and_a_declared_resolution(self):
+        wanted = [0, 1_500_000, 18_000_123]
+        self.assertEqual(wanted, self.times(pcapng([record()] * 3, times=wanted)))
+        self.assertEqual(wanted, self.times(
+            pcapng([record()] * 3, times=wanted, tsresol=9)))
+
+    def test_a_record_with_no_time_keeps_none(self):
+        # A simple packet block carries no timestamp, so it cannot be read
+        # as time zero.
+        item = record()
+        data = (_block(0x0A0D0D0A, struct.pack("<IHHq", 0x1A2B3C4D, 1, 0, -1))
+                + _block(1, struct.pack("<HHI", 256, 0, 65535))
+                + _block(3, struct.pack("<I", len(item)) + item))
+        self.assertEqual([None], self.times(data))
+
+    def test_read_records_still_hands_back_the_records_alone(self):
+        _format, _link_type, records = advcapture.read_records(
+            pcap([record()], times=[7]))
+        self.assertEqual([record()], records)
 
 
 class CheckTests(unittest.TestCase):
