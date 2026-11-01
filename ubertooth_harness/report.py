@@ -1350,12 +1350,15 @@ def _mask_cut_serials(text: str, serials: Sequence[str]) -> str:
 # like any other, so a cut shape is masked too.
 #
 # The run must carry an N, since a serial with no digits in it has its own
-# characters as its shape and is masked as a serial; and a piece must carry
-# this many hex letters, because the letters are what names the board. Fewer
-# than that (`NabN`, the shape of `1ab2`) sits in the shape of too much
-# ordinary output to mask, and a run of hex letters with no N of its own is
-# left to _mask_cut_serials and its width rule, for the same reason: `cafe`
-# and `dead` are words a tool prints.
+# characters as its shape and is masked as a serial. A whole shape of a
+# serial the run names is masked however few hex letters it carries, because
+# the run naming that serial settles the question by itself, the view
+# _mask_cut_serials takes of a piece of a known serial. A piece of one needs
+# this many letters, because the letters are what names the board and a piece
+# is all the rule has to go on: fewer than that (`NabN`, the shape of `1ab2`)
+# sits in the shape of too much ordinary output to mask. A run of hex letters
+# with no N of its own is left to _mask_cut_serials and its width rule, for
+# the same reason: `cafe` and `dead` are words a tool prints.
 _SHAPE_MIN_LETTERS = 4
 _SHAPE_TOKEN = re.compile(
     r"(?<![0-9A-Fa-fN])[A-Fa-fN]*N[A-Fa-fN]*(?![0-9A-Fa-fN])"
@@ -1383,12 +1386,15 @@ def _shape_pieces(shapes: Iterable[str]) -> tuple[set[str], int]:
     return pieces, max((len(shape) for shape in shapes), default=0)
 
 
-def _mask_shape_pieces(token: str, pieces: set[str], longest: int) -> str:
+def _mask_shape_pieces(
+    token: str, shapes: Sequence[str], pieces: set[str], longest: int
+) -> str:
     """``token`` with every piece of a known serial's shape masked.
 
     Read from the left, taking the longest piece the known shapes hold at
     each character: what a shape holds is a shape, so masking it is right,
-    and a piece that starts later is shorter. Where no piece wide enough
+    and a piece that starts later is shorter. A piece too narrow to name a
+    board on its own still masks where it is a whole shape. Where neither
     starts at this character, the character is kept and the next one tried.
     """
     lowered = token.lower()
@@ -1403,8 +1409,17 @@ def _mask_shape_pieces(token: str, pieces: set[str], longest: int) -> str:
                and lowered[index:end + 1] in pieces):
             end += 1
         if _shape_letters(lowered[index:end]) >= _SHAPE_MIN_LETTERS:
+            taken = end - index
+        else:
+            # Longest first, so one shape that begins another is no reason
+            # to mask less of the text.
+            taken = len(next(
+                (shape for shape in shapes if lowered.startswith(shape, index)),
+                "",
+            ))
+        if taken:
             out.append(REDACTED)
-            index = end
+            index += taken
         else:
             out.append(token[index])
             index += 1
@@ -1419,14 +1434,17 @@ def _mask_serial_shapes(text: str, serials: Sequence[str]) -> str:
         # No digits in it, so the shape is the serial itself, already masked.
         if shape == serial.lower():
             continue
-        if _shape_letters(shape) >= _SHAPE_MIN_LETTERS:
+        # With no hex letter in it the shape names nothing: a numeric serial
+        # shapes to a bare `N`, and masking that would mask every shape.
+        if _shape_letters(shape):
             shapes.add(shape)
     if not shapes:
         return text
     pieces, longest = _shape_pieces(shapes)
+    shapes = sorted(shapes, key=len, reverse=True)
 
     def mask(match: re.Match) -> str:
-        return _mask_shape_pieces(match.group(0), pieces, longest)
+        return _mask_shape_pieces(match.group(0), shapes, pieces, longest)
 
     return _SHAPE_TOKEN.sub(mask, text)
 

@@ -1886,20 +1886,20 @@ digits in it reads `N`, so a line that named a board would arrive with the
 serial's digits gone and its hex letters and their positions intact, which
 is enough to pick one board out of a small bench. So a shape that the shape
 of a serial the run names appears in is masked as well, whole or as the
-200-character shape limit cut it. The shapes keep their point: masked is a
-run of hex letters and `N` that holds four or more of those letters and
-sits in a known serial's shape, wherever it sits, including written against
-a word of its own as a serial reaches a line. Every other shape is left to
-read. The cost, as with the width rule, is that a short value whose own
-shape a known serial's shape happens to hold reads `<serial>` too, and a
-serial whose shape carries fewer than four hex letters (mostly digits, so
-the shape says little) keeps its shape.
+200-character shape limit cut it. The shapes keep their point: masked is the
+whole shape of a serial the run names, wherever it sits, including written
+against a word of its own as a serial reaches a line, and a piece of such a
+shape that carries four or more hex letters, since a piece is all the rule
+has to go on. Every other shape is left to read. The cost, as with the width
+rule, is that a short value whose own shape a known serial's shape holds
+reads `<serial>` too.
 
-What the option does not mask is anything that is not a serial, and a
-transcript holds more than serials: the paths the commands ran with, which
-carry a user name and a home directory where the run built its tools, and
-the addresses and LAPs of whatever third-party devices were on the air. Read
-a report before publishing it, as you would a run's own `report.md`.
+What the option does not mask is anything that is not a serial the run
+names, and a transcript holds more than those: the decimal serial of a
+device the run never named, the paths the commands ran with, which carry a
+user name and a home directory where the run built its tools, and the
+addresses and LAPs of whatever third-party devices were on the air. Read a
+report before publishing it, as you would a run's own `report.md`.
 
 Redaction is the `report` page only: a run's own `report.md` is always
 written with its serials.

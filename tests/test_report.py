@@ -561,6 +561,29 @@ class ReportTests(unittest.TestCase):
                 _redact(line, {serial}), before,
             )
 
+    def test_a_whole_shape_is_masked_however_few_letters_it_carries(self):
+        # A serial with its digits in threes leaves a shape of three hex
+        # letters, and three letters in known positions still name a board
+        # on a small bench. A whole shape is masked for the same reason a
+        # piece of a known serial is: the run naming that serial settles it.
+        # What the letter count decides is whether a *piece* of a shape is
+        # masked, which is all the rule has to go on for a cut shape.
+        from ubertooth_harness.report import _redact
+
+        serial = "1a2b3c45678901234567890123456789"
+
+        self.assertEqual("NaNbNcN", line_shape(serial))
+        self.assertEqual(
+            f"  1 x [E] board {REDACTED} is idle\n",
+            _redact(f"  1 x [E] board {line_shape(serial)} is idle\n", {serial}),
+        )
+        # A piece of a shape that narrow is left to read.
+        self.assertEqual(
+            "  1 x [E] x NabNc y\n",
+            _redact("  1 x [E] x NabNc y\n",
+                    {"1ab23cd45ef67ab89cd01ef23ab45cd6"}),
+        )
+
     def test_a_line_shape_no_serials_shape_holds_is_left_to_read(self):
         # What the shape rule leaves readable, which is what the shapes are
         # in the report for.
