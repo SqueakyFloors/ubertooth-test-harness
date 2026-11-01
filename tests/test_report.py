@@ -584,6 +584,39 @@ class ReportTests(unittest.TestCase):
                     {"1ab23cd45ef67ab89cd01ef23ab45cd6"}),
         )
 
+    def test_a_shape_that_repeats_itself_is_masked_whole(self):
+        # A whole shape is masked before the pieces of one, so a word that
+        # happens to read as more of a shape that repeats itself cannot
+        # carry its start into a piece and leave the tail behind.
+        from ubertooth_harness.report import _redact
+
+        serial = "1ab2" * 8
+
+        self.assertEqual("NabNabNabNabNabNabNabNabN", line_shape(serial))
+        self.assertEqual(
+            f"  1 x [E] ab{REDACTED} is idle\n",
+            _redact(f"  1 x [E] ab{line_shape(serial)} is idle\n", {serial}),
+        )
+
+    def test_a_serial_or_shape_in_another_case_is_masked(self):
+        # A tool prints in the case it likes, and the registry holds one.
+        # The 32-hex token rule reaches a serial standing on its own, so
+        # what needs the case to be ignored is one written against
+        # something else.
+        from ubertooth_harness.report import _redact
+
+        serial = "1ab23cd45ef67ab89cd01ef23ab45cd6"
+        serials = {serial, serial.lower()}  # what _Run.serials() collects
+
+        self.assertEqual(
+            f"[O] face{REDACTED} is idle\n",
+            _redact(f"[O] face{serial.upper()} is idle\n", serials),
+        )
+        self.assertEqual(
+            f"  1 x [E] {REDACTED}\n",
+            _redact(f"  1 x [E] {line_shape(serial).upper()}\n", serials),
+        )
+
     def test_a_line_shape_no_serials_shape_holds_is_left_to_read(self):
         # What the shape rule leaves readable, which is what the shapes are
         # in the report for.

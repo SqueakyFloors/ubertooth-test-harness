@@ -1869,7 +1869,8 @@ to read as an ordinary number (the `123` of a serial registered as `000123`)
 is masked only where it stands alone, so it cannot mask part of a count. A
 serial port path keeps its shape with the serial inside it masked
 (`/dev/serial/by-id/usb-SEGGER_J-Link_<serial>-if00`), whether the registry
-held that path or the harness found it. Any standalone 32-hex-digit token is
+held that path or the harness found it. Case is ignored throughout, since a
+tool prints a serial in the case it likes. Any standalone 32-hex-digit token is
 masked too, since that is the shape of an Ubertooth serial. Where output was
 cut inside a serial, which either output cap can do, the piece the cut left
 behind is masked as well: a run of 8 hex digits or more that a serial the run
