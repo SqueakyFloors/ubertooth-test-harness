@@ -313,6 +313,14 @@ class Consistency(unittest.TestCase):
                       " ".join(bredrrecord.problems(one, min_with_payload=1)))
         self.assertIn("passed a payload CRC",
                       " ".join(bredrrecord.problems(one, min_crc_valid=1)))
+        # The one record does carry a valid HEC, so a floor of one passes and
+        # a floor of two does not.
+        self.assertEqual([], bredrrecord.problems(one, min_hec_valid=1))
+        self.assertIn("passed a header HEC",
+                      " ".join(bredrrecord.problems(one, min_hec_valid=2)))
+        self.assertEqual([], bredrrecord.problems(one, min_reference_uap=1))
+        self.assertIn("carry a reference UAP",
+                      " ".join(bredrrecord.problems(one, min_reference_uap=2)))
         self.assertIn("records on 1 channels",
                       " ".join(bredrrecord.problems(one, min_channels=2)))
 

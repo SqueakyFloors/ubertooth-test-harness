@@ -129,6 +129,12 @@ MIN_AUDIO_FRAMES = 100
 # that carry none, and how many that is depends on how much of the piconet
 # the sweep happened to hear.
 MIN_SURVEY_UAP_RECORDS = 1
+# Records whose header HEC must have passed. A header only passes when it
+# decoded at the piconet's clock and its HEC gave the piconet's UAP, which
+# is what makes the header and reference-UAP checks bite; how many of a
+# capture's records manage it depends on what the sweep heard, so this is a
+# floor rather than a share.
+MIN_HEC_VALID_RECORDS = 1
 
 _ESP32PEER = str(Path(esp32peer.__file__).resolve())
 _CAPTURE_CHECKER = str(Path(capturefile.__file__).resolve())
@@ -537,8 +543,7 @@ def _record_step(step_id, name, file_name, checks) -> Step:
         lambda context: (sys.executable, _RECORD_CHECKER,
                          _capture_path(file_name)(context)) + tuple(checks),
         timeout_s=CHECK_TIMEOUT_S,
-        output_patterns=(rf"(?m)^BR/EDR records: \d+ in {re.escape(file_name)}$",
-                         r"(?m)^BR/EDR flags: .*hec-valid",),
+        output_patterns=(rf"(?m)^BR/EDR records: \d+ in {re.escape(file_name)}$",),
         # The decoder exits non-zero for any of these, so this only puts the
         # reason in the step's own failure rather than in its output alone.
         forbidden_patterns=(r"BR/EDR record problem:",),
@@ -554,7 +559,10 @@ def _record_checks(central=None, *, minimum=MIN_PACKETS, following=None,
     address. Without one, the capture is a survey: it records whatever is in
     range, and the caller says what to look for instead.
     """
-    checks = ("--min-packets", str(minimum))
+    # A record whose header carries another packet's bits, or none, cannot
+    # pass its HEC, so this is the floor that makes the header checks bite.
+    checks = ("--min-packets", str(minimum),
+              "--min-hec-valid", str(MIN_HEC_VALID_RECORDS))
     if central is not None:
         checks += ("--lap", central["lap"],
                    "--reference-lap", central["lap"],

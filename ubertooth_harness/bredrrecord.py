@@ -425,7 +425,7 @@ def _consistency(record: Record, *, payload_checks: bool) -> list[str]:
 def problems(found: list[Record], *, lap: int | None = None,
              reference_lap: int | None = None, reference_uap: int | None = None,
              min_packets: int = 0, min_reference_uap: int = 0,
-             min_with_payload: int = 0,
+             min_with_payload: int = 0, min_hec_valid: int = 0,
              min_crc_valid: int = 0, min_channels: int = 0,
              types: tuple[str, ...] = (), require_types: tuple[str, ...] = (),
              payload_checks: bool = True) -> list[str]:
@@ -463,6 +463,10 @@ def problems(found: list[Record], *, lap: int | None = None,
     if len(with_payload) < min_with_payload:
         failures.append(f"{len(with_payload)} records carry a payload, expected "
                         f"at least {min_with_payload}")
+    hec_valid = [record for record in found if record.has(HEC_VALID)]
+    if len(hec_valid) < min_hec_valid:
+        failures.append(f"{len(hec_valid)} records passed a header HEC, "
+                        f"expected at least {min_hec_valid}")
     crc_valid = [record for record in found if record.has(CRC_VALID)]
     if len(crc_valid) < min_crc_valid:
         failures.append(f"{len(crc_valid)} records passed a payload CRC, expected "
@@ -577,6 +581,10 @@ def main(argv: list[str] | None = None) -> int:
         help="records that must carry a reference UAP, for a capture that "
              "recovers one as it goes rather than being given one")
     parser.add_argument("--min-with-payload", type=int, default=0)
+    parser.add_argument(
+        "--min-hec-valid", type=int, default=0,
+        help="records whose header HEC must have passed, so a record "
+             "carrying another packet's header, or none, cannot pass")
     parser.add_argument("--min-crc-valid", type=int, default=0)
     parser.add_argument("--min-channels", type=int, default=0)
     parser.add_argument("--types", default="",
@@ -615,6 +623,7 @@ def main(argv: list[str] | None = None) -> int:
         reference_uap=args.reference_uap, min_packets=args.min_packets,
         min_reference_uap=args.min_reference_uap,
         min_with_payload=args.min_with_payload,
+        min_hec_valid=args.min_hec_valid,
         min_crc_valid=args.min_crc_valid, min_channels=args.min_channels,
         types=types, require_types=require_types,
         payload_checks=not args.no_payload_checks)
