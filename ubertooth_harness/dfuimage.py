@@ -1,5 +1,9 @@
 """DFU image files and read-backs for the DFU images and DFU image checks tests.
 
+The file and directory commands here say nothing about DFU, so other tests
+that have to state what a directory holds use them too: Failed capture files
+runs ``state``, ``not-root`` and ``symlink``.
+
 Run as ``python <this file> COMMAND ...`` from a transition step. Every
 command prints short summary lines (never image bytes) and exits 0 when the
 check holds, 1 when it does not, and 2 for a usage error. File commands use
@@ -631,6 +635,9 @@ def _parser() -> argparse.ArgumentParser:
     regular = sub.add_parser("regular", help="PATH is a regular file, not a symlink")
     regular.add_argument("path")
     regular.add_argument("--mode", help="its permission bits, in octal")
+    symlink = sub.add_parser("symlink", help="PATH is still a symbolic link to TARGET")
+    symlink.add_argument("path")
+    symlink.add_argument("--to", required=True, help="what it must still name")
     sub.add_parser("not-root", help="say whether this process runs as root")
     state.add_argument("--allow", action="append", default=[],
                        help="an entry that may change (or appear)")
@@ -747,6 +754,20 @@ def _main(args, board_factory) -> int:
             print(f"Mode {mode:o}, not {args.mode}: {args.path}")
             return 1
         print(f"Regular file: {entry.st_size} bytes, mode {mode:o}")
+        return 0
+    if command == "symlink":
+        # A link is a path the user arranged, so a run that removed it, or
+        # replaced it with a file of its own, has taken that choice away.
+        path = Path(args.path)
+        if not path.is_symlink():
+            print(f"Not a symbolic link: {args.path}: "
+                  + ("it is gone" if not path.exists() else "it is a file now"))
+            return 1
+        names = os.readlink(path)
+        if names != args.to:
+            print(f"Symbolic link changed: {args.path} -> {names}, not {args.to}")
+            return 1
+        print(f"Symbolic link: {args.path} -> {names}")
         return 0
     if command == "not-root":
         uid = os.geteuid()
