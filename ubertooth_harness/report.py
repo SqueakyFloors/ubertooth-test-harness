@@ -1339,22 +1339,23 @@ def _mask_cut_serials(text: str, serials: Sequence[str]) -> str:
 # letters and their positions intact, which is enough to pick one board out
 # of a small bench.
 #
-# What is masked is a token of a shape that a serial's own shape holds: a run
-# of hex letters and N, as long as it will reach, bounded as _HEX_RUN bounds a
-# run of hex, so the characters that could carry more of the same shape are
-# what ends it and nothing else is. A shape written after a letter of some
-# other word is masked like one standing alone, because that is how a serial
-# reaches the output it was cut from (`ubertooth<serial>`,
-# `/dev/cu.usbmodem<serial>`). A token the 200-character shape limit cut is a
-# piece of the serial's shape and is masked like the whole.
+# What is masked is a piece of a shape that a serial's own shape holds. The
+# rule looks inside a run of hex letters and N rather than at the run as a
+# whole, because the shape arrives written against whatever stood beside the
+# serial in the output: a serial reaches a line as `ubertooth<serial>` or
+# `/dev/cu.usbmodem<serial>`, and a word that ends in a hex letter would
+# otherwise carry the shape past the comparison and leave it readable. Each
+# piece is masked where it sits and the rest of the run is left as it is. A
+# piece the 200-character shape limit cut is a piece of the serial's shape
+# like any other, so a cut shape is masked too.
 #
-# A token must carry an N, since a serial with no digits in it has its own
-# characters as its shape and is masked as a serial; and this many hex
-# letters, because the letters are what names the board. Fewer than that
-# (`NabN`, the shape of `1ab2`) sits in the shape of too much ordinary
-# output to mask, and a run of hex letters with no N of its own is left to
-# _mask_cut_serials and its own width rule, for the same reason: `cafe` and
-# `dead` are words a tool prints.
+# The run must carry an N, since a serial with no digits in it has its own
+# characters as its shape and is masked as a serial; and a piece must carry
+# this many hex letters, because the letters are what names the board. Fewer
+# than that (`NabN`, the shape of `1ab2`) sits in the shape of too much
+# ordinary output to mask, and a run of hex letters with no N of its own is
+# left to _mask_cut_serials and its width rule, for the same reason: `cafe`
+# and `dead` are words a tool prints.
 _SHAPE_MIN_LETTERS = 4
 _SHAPE_TOKEN = re.compile(
     r"(?<![0-9A-Fa-fN])[A-Fa-fN]*N[A-Fa-fN]*(?![0-9A-Fa-fN])"
@@ -1368,8 +1369,50 @@ def _shape_letters(token: str) -> int:
     return len(_SHAPE_LETTER.findall(token))
 
 
+def _shape_pieces(shapes: Iterable[str]) -> tuple[set[str], int]:
+    """Every piece of every known shape, and the width of the longest.
+
+    Held as a set, because the rule asks of thousands of positions in a long
+    report whether the characters there are a piece of some shape.
+    """
+    pieces = set()
+    for shape in shapes:
+        for start in range(len(shape)):
+            for end in range(start + 1, len(shape) + 1):
+                pieces.add(shape[start:end])
+    return pieces, max((len(shape) for shape in shapes), default=0)
+
+
+def _mask_shape_pieces(token: str, pieces: set[str], longest: int) -> str:
+    """``token`` with every piece of a known serial's shape masked.
+
+    Read from the left, taking the longest piece the known shapes hold at
+    each character: what a shape holds is a shape, so masking it is right,
+    and a piece that starts later is shorter. Where no piece wide enough
+    starts at this character, the character is kept and the next one tried.
+    """
+    lowered = token.lower()
+    out = []
+    index = 0
+    while index < len(token):
+        end = index
+        # Every prefix of a piece of a shape is a piece of that shape, so
+        # the longest one is reached by growing until there is no longer a
+        # piece there.
+        while (end < min(len(token), index + longest)
+               and lowered[index:end + 1] in pieces):
+            end += 1
+        if _shape_letters(lowered[index:end]) >= _SHAPE_MIN_LETTERS:
+            out.append(REDACTED)
+            index = end
+        else:
+            out.append(token[index])
+            index += 1
+    return "".join(out)
+
+
 def _mask_serial_shapes(text: str, serials: Sequence[str]) -> str:
-    """Mask a line shape that the shape of a known serial appears in."""
+    """Mask the shape of a line that named a board the run names."""
     shapes = set()
     for serial in serials:
         shape = line_shape(serial).lower()
@@ -1380,13 +1423,10 @@ def _mask_serial_shapes(text: str, serials: Sequence[str]) -> str:
             shapes.add(shape)
     if not shapes:
         return text
+    pieces, longest = _shape_pieces(shapes)
 
     def mask(match: re.Match) -> str:
-        token = match.group(0).lower()
-        if (_shape_letters(token) >= _SHAPE_MIN_LETTERS
-                and any(token in shape for shape in shapes)):
-            return REDACTED
-        return match.group(0)
+        return _mask_shape_pieces(match.group(0), pieces, longest)
 
     return _SHAPE_TOKEN.sub(mask, text)
 
