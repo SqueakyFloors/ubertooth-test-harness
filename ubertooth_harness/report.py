@@ -83,14 +83,17 @@ def _time(event: Mapping) -> datetime.datetime:
     return moment
 
 
-# Fewest digits a number needs to be masked wherever it appears rather than
-# only where it stands alone (_redact). A SEGGER probe's serial is nine
+# Fewest characters a serial needs to be masked wherever it appears rather
+# than only where it stands alone (_redact). A SEGGER probe's serial is nine
 # digits or more, so this is about the short width of a registry entry like
 # `000123`, which the tools write as `123`: masking every "123" inside every
 # longer number would mangle the transcript, and a standalone one is masked
 # either way. The padded width of that same entry is 12 digits, so it is
-# masked everywhere, including inside a device path.
-_SERIAL_MIN_DIGITS = 6
+# masked everywhere, including inside a device path. A bridge serial is 1 to
+# 64 characters of the registry's choosing (resources.py), so a short one
+# can read as a word rather than a number; the same width settles both, and
+# what counts as standing alone differs (_redact).
+_SERIAL_MIN_CHARS = 6
 # How wide a DK's by-id name writes its J-Link serial (targets.DK_BY_ID).
 _SERIAL_PADDED_DIGITS = 12
 
@@ -1350,7 +1353,11 @@ def _mask_cut_serials(text: str, serials: Sequence[str]) -> str:
 # shape of such a line reads `bInter<serial>umber N of N`. Working on the
 # note's lines also means a change to the note's format shows up as a
 # failure of the test that renders a capped command through it, rather than
-# as redaction quietly stopping.
+# as redaction quietly stopping. What it costs is that the rules read a
+# rendered line rather than the record's own field: a record from another
+# version of the harness whose count is not a whole number, or whose shape
+# holds a line ending, renders a line this does not recognize, and that
+# shape goes out as it is.
 #
 # In a shape, a whole known shape is masked wherever it sits, at every
 # occurrence, overlapping ones as one mask: a serial that repeats itself
@@ -1404,16 +1411,17 @@ def _fold(text: str) -> str:
 _DIGIT_RUN = re.compile(r"\d+")
 
 
-def _own_chars_of_piece(piece: str) -> int:
+def _own_chars_of_piece(folded: str) -> int:
     """Characters of a piece of a shape that a serial held, as far as the
     piece can say: what it says about which board.
 
-    Every N in it is read as one line_shape left where a run of digits was,
-    since the piece alone cannot say whether the serial held that letter.
-    For a serial that did, this counts low, which leaves a narrow piece to
-    read rather than masking ordinary text.
+    Takes the piece folded, so an `n` is read as one line_shape left where a
+    run of digits was whichever case the line was printed in. The piece
+    alone cannot say whether the serial held that letter instead; for a
+    serial that did, this counts low, which leaves a narrow piece to read
+    rather than masking ordinary text.
     """
-    return len(piece) - piece.count("N")
+    return len(folded) - folded.count("n")
 
 
 def _shape_pieces(shapes: Iterable[str]) -> tuple[set[str], int]:
@@ -1463,8 +1471,11 @@ def _mask_shape_pieces(shape: str, pieces: set[str], longest: int) -> str:
         while (end < min(len(shape), index + longest)
                and folded[index:end + 1] in pieces):
             end += 1
-        piece = shape[index:end]
-        if "N" in piece and _own_chars_of_piece(piece) >= _PIECE_MIN_OWN_CHARS:
+        # Folded, like the lookup above: a shape printed in lower case
+        # carries its placeholder as `n`, and a piece of one is still a
+        # piece of a shape.
+        piece = folded[index:end]
+        if "n" in piece and _own_chars_of_piece(piece) >= _PIECE_MIN_OWN_CHARS:
             out.append(REDACTED)
             index = end
         else:
@@ -1546,7 +1557,7 @@ def _redact(text: str, serials: Iterable[str]) -> str:
     # would leave the rest of that token, which this rule is there to catch.
     text = _SERIAL_TOKEN.sub(REDACTED, text)
     for serial in serials:
-        if len(serial) < _SERIAL_MIN_DIGITS:
+        if len(serial) < _SERIAL_MIN_CHARS:
             # Short enough to read as an ordinary number or an ordinary
             # word, so it is masked only where it stands alone and not
             # inside a longer one: a bridge serial is 1 to 64 characters of

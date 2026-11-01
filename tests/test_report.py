@@ -671,6 +671,22 @@ class ReportTests(unittest.TestCase):
             _redact(line, {serial}),
         )
 
+    def test_a_cut_piece_of_a_shape_is_read_in_either_case(self):
+        # The lookup and the test for a placeholder are both folded, so a
+        # piece of a shape printed in lower case is read like one printed
+        # as line_shape wrote it. Before that, a piece whose placeholder
+        # arrived as `n` was left to read.
+        from ubertooth_harness.report import _redact
+
+        serial = "abcden1x2y3"
+        shape = line_shape(serial)
+
+        self.assertEqual("abcdenNxNyN", shape)
+        for piece in (shape[:8], shape[:8].lower(), shape[:6]):
+            self.assertEqual(
+                shape_note(REDACTED),
+                _redact(shape_note(piece), {serial}), piece)
+
     def test_a_shape_is_matched_in_either_case_including_its_n(self):
         # The fold ignores case everywhere, the `N` that stands where a run
         # of digits was included. The cost is that a shape whose own letters
