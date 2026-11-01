@@ -5,7 +5,7 @@ import re
 import tempfile
 import unittest
 
-from ubertooth_harness import btbr_cases, btbrconsole
+from ubertooth_harness import btbr_cases, btbrconsole, esp32peer
 from ubertooth_harness.btbr_cases import btbr_console_cases
 from ubertooth_harness.build import (
     APPLICATION_IMAGE,
@@ -39,7 +39,9 @@ PEER_NAME = "UT-ESP32-2A1B2A"
 RESOURCES = {"Ubertooth": "UT_Linux0", "acceptor": "ESP32_Linux0"}
 
 
-def identities(name=PEER_NAME):
+def identities(name=None):
+    """The registry entries one invocation binds; ``name`` writes the peer's
+    device name down beside its address, which is optional."""
     peer = {"bridge serial": "a" * 32, "BD_ADDR": PEER_ADDRESS,
             "serial device": "/dev/serial/by-id/fake"}
     if name is not None:
@@ -47,7 +49,7 @@ def identities(name=PEER_NAME):
     return {"Ubertooth": {"serial": SERIAL}, "acceptor": peer}
 
 
-def cases(coverage="smoke", sessions=1, name=PEER_NAME):
+def cases(coverage="smoke", sessions=1, name=None):
     return btbr_console_cases({"coverage": coverage, "sessions": sessions},
                               RESOURCES, identities(name))
 
@@ -133,7 +135,12 @@ class CaseTests(unittest.TestCase):
         # flashing a board it cannot put back.
         self.assertEqual((BTBR_IMAGE_LABEL, APPLICATION_IMAGE_LABEL),
                          case.artifacts)
+        # Decided before anything is flashed: the peer's bridge path is
+        # Linux's, ubertooth-btbr comes from a --with-python build, and both
+        # images from a --with-firmware one.
         self.assertEqual(("linux",), case.needs.platforms)
+        self.assertTrue(case.needs.python_tools)
+        self.assertTrue(case.needs.firmware_build)
         self.assertIn("written back", case.expected_state)
 
     def test_only_one_flash_each_way_whatever_the_profile(self):
@@ -182,17 +189,11 @@ class CaseTests(unittest.TestCase):
         self.assertIn(f"--peer-name {PEER_NAME}", argv)
         self.assertNotIn("--no-answer", argv)
         self.assertEqual(btbrconsole.SKIP_EXIT, step.skip_returncode)
-        # The step's deadline outlasts every window the driver may wait out,
-        # so a failing check ends in the driver's reason.
-        self.assertGreater(step.timeout_s,
-                           btbr_cases.console_budget(no_answer=False))
 
     def test_the_comprehensive_profile_adds_the_page_nothing_answers(self):
         (case,) = cases("comprehensive")
         step = case.steps[-1]
         self.assertIn("--no-answer", " ".join(step.resolve_argv({})))
-        self.assertGreater(step.timeout_s,
-                           btbr_cases.console_budget(no_answer=True))
         self.assertIn("12 checks", step.name)
 
     def test_the_patterns_accept_a_passing_report_and_reject_a_failing_one(self):
@@ -253,12 +254,30 @@ class CaseTests(unittest.TestCase):
         self.assertIn("reset-peer-after",
                       [step.step_id for step in case.cleanup])
 
-    def test_a_peer_with_no_registered_name_is_refused(self):
-        for name in (None, "", "   "):
-            with self.subTest(repr(name)):
-                with self.assertRaisesRegex(StateCaseError,
-                                            "registered name"):
-                    cases(name=name)
+    def test_the_peers_name_comes_from_its_address(self):
+        # The firmware builds it from the board's own LAP and the shell cannot
+        # set it, so a registry need not carry it.
+        (case,) = cases()
+        self.assertIn(PEER_NAME, case.name)
+        self.assertEqual(PEER_NAME, esp32peer.device_name(PEER_ADDRESS))
+        # A registry may write it down, and then it has to agree.
+        (same,) = cases(name=PEER_NAME.lower())
+        self.assertEqual(case.name, same.name)
+        with self.assertRaisesRegex(StateCaseError,
+                                    "registered name is UT-ESP32-OTHER"):
+            cases(name="UT-ESP32-OTHER")
+
+    def test_the_step_deadline_outlasts_every_wait_the_driver_may_sit_out(self):
+        # Counted from the driver's own windows, check by check, so a check
+        # that grows a wait grows the budget with it.
+        for coverage, no_answer in (("smoke", False), ("comprehensive", True)):
+            (case,) = cases(coverage)
+            step = case.steps[-1]
+            with self.subTest(coverage):
+                self.assertGreater(step.timeout_s,
+                                   btbrconsole.worst_case_seconds(no_answer))
+        self.assertGreater(btbrconsole.worst_case_seconds(True),
+                           btbrconsole.worst_case_seconds(False))
 
 
 class CatalogTests(unittest.TestCase):
@@ -277,9 +296,16 @@ class CatalogTests(unittest.TestCase):
         self.assertTrue(self.definition.guards_other_ubertooths)
         self.assertTrue(self.definition.continue_on_case_failure)
 
+    def test_it_asks_for_consent_to_transmit(self):
+        # The board transmits: an inquiry train, a page train, and then a
+        # live connection it holds as the piconet central.
+        rule = self.definition.arguments["allow RF transmission"]
+        self.assertTrue(rule.required)
+
     def test_it_asks_for_an_ordinary_link(self):
         placement = self.definition.placement_requirements(
-            {"coverage": "smoke", "sessions": 1})
+            {"coverage": "smoke", "sessions": 1,
+             "allow RF transmission": True})
         self.assertTrue(placement["Ubertooth"].antenna)
         self.assertEqual(0, placement["Ubertooth"].max_attenuation_db)
 

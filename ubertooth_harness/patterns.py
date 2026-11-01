@@ -53,15 +53,24 @@ BTBR_IMAGE = "btbr"
 APPLICATION_IMAGE_PATTERN = rf"(?:{APPLICATION_IMAGE}\s+)?"
 
 
-def firmware_image(output: str) -> str | None:
-    """The image name a `ubertooth-util -v` line reports, if it names one.
+def matched_image(match: re.Match | None) -> str | None:
+    """The image name a match of FIRMWARE_VERSION_RE names, if it names one.
 
     None where the line carries no image name, which is firmware older than
-    the info block (`Firmware version: 2020-12-R1 (API:1.07)`), and where
-    there is no version line at all.
+    the info block (`Firmware version: 2020-12-R1 (API:1.07)`), where there
+    was no match, and where the match came from a pattern with no image group
+    at all, as the compile-info one has none.
     """
-    match = FIRMWARE_VERSION_RE.search(output)
-    return match["image"] if match else None
+    if match is None:
+        return None
+    return match.groupdict().get("image")
+
+
+def firmware_image(output: str) -> str | None:
+    """The image name a `ubertooth-util -v` line in ``output`` reports."""
+    return matched_image(FIRMWARE_VERSION_RE.search(output))
+
+
 PART_ID_PATTERN = r"Part ID:\s+[0-9A-Fa-f]+"
 BOARD_ID_PATTERN = r"Board ID Number:\s+\d+"
 

@@ -40,14 +40,17 @@ class SessionTests(unittest.TestCase):
     def setUp(self):
         # The fake answers at once, so every wait the driver may sit out is
         # shortened: a failing check then costs a moment, not its real window.
-        for name, value in (("START_TIMEOUT_S", 5.0), ("REPLY_TIMEOUT_S", 3.0),
-                            ("IDLE_TIMEOUT_S", 3.0), ("EXIT_TIMEOUT_S", 3.0)):
+        for name, value in (("START_TIMEOUT_S", 5.0), ("REPLY_TIMEOUT_S", 0.6),
+                            ("IDLE_TIMEOUT_S", 0.6), ("EXIT_TIMEOUT_S", 3.0)):
             patch = unittest.mock.patch.object(btbrconsole, name, value)
             patch.start()
             self.addCleanup(patch.stop)
 
-    def run_session(self, *, faults=(), name=PEER_NAME, tools=True,
-                    **overrides):
+    def run_session(self, *, faults=(), name=PEER_NAME, peer_name=None,
+                    tools=True, **overrides):
+        """Run one session; ``name`` is what the fake board answers with and
+        ``peer_name`` what the registry says, which differ only in the
+        mismatch test."""
         with tempfile.TemporaryDirectory() as directory:
             environment = {"PATH": "/usr/bin:/bin"}
             if tools:
@@ -57,7 +60,8 @@ class SessionTests(unittest.TestCase):
                 environment[PYTHON_TOOLS_ENV] = str(Path(directory) / "bin")
             out, err = io.StringIO(), io.StringIO()
             status = btbrconsole.run_session(
-                arguments(peer_name=name, **overrides), out, err, environment)
+                arguments(peer_name=peer_name or name, **overrides),
+                out, err, environment)
             return status, out.getvalue(), err.getvalue()
 
     def test_a_good_session_passes_every_check_and_reports_each_one(self):
@@ -82,10 +86,18 @@ class SessionTests(unittest.TestCase):
             "session exit: 0 after ",
         ):
             self.assertIn(line, report)
-        self.assertIn("checks: 11 passed of 11, 0 failed", report)
-        # The capture is passed through on standard output, and only it.
-        self.assertIn("RX FHS: FHS: bdaddr=", captured)
-        self.assertNotIn("bt> ", captured)
+        self.assertIn("checks: 11 passed of 11, 0 failed, 0 not run", report)
+        # The capture never leaves the driver: an inquiry hears every
+        # discoverable device in range, and those addresses and names must not
+        # reach the run record. Nothing is written to standard output at all.
+        self.assertEqual("", captured)
+        self.assertNotIn("[TV] UN75J6300", report)
+        self.assertNotIn("f877b844d1b9", report)
+        # What it does report of the capture is the record it matched for the
+        # registered peer, which is the bench's own device.
+        self.assertIn(f"  record: 09:11:00 RX FHS: FHS: bdaddr="
+                      f"{PEER_ADDRESS.replace(':', '').lower()}", report)
+        self.assertIn("  record: 09:11:00 RX LMP: ", report)
         # The tool's own progress is marked, so a report line cannot be
         # mistaken for it.
         self.assertIn("btbr| Type ? to list commands", report)
@@ -94,7 +106,7 @@ class SessionTests(unittest.TestCase):
         status, _captured, report = self.run_session(no_answer=True)
         self.assertEqual(0, status, report)
         self.assertIn("check page-no-answer: 'paging timeout' after ", report)
-        self.assertIn("checks: 12 passed of 12, 0 failed", report)
+        self.assertIn("checks: 12 passed of 12, 0 failed, 0 not run", report)
 
     def test_without_a_python_tool_build_the_case_skips(self):
         status, captured, _report = self.run_session(tools=False)
@@ -124,7 +136,9 @@ class SessionTests(unittest.TestCase):
             ("deaf-peer", "did not answer the page"),
             ("no-lmp-name", "no LMP_NAME_RES on the air carried the peer's name"),
             ("repeat-unhandled",
-             "an unhandled LMP opcode was reported more than once: 0x20 2 times"),
+             "an unhandled LMP opcode was reported more than once: 0x20 3 times"),
+            ("quiet-lmp",
+             "no LMP request with no handler was reported at all"),
             ("capture-on-stderr", "a capture line is on stderr"),
             ("stuck-idle", "idle did not reach"),
             ("bad-exit", "the session exited 1 after"),
@@ -140,13 +154,28 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(1, status)
         self.assertIn("the session did not exit within", report)
 
-    def test_the_peers_name_must_match_the_registry(self):
-        # The fake answers with the name it was given, so a registry naming
-        # another board is the mismatch this check is for.
-        status, _captured, report = self.run_session(
-            name="UT-ESP32-OTHER", faults=("silent-inquiry",))
+    def test_a_board_answering_with_another_name_fails_the_inquiry_check(self):
+        # The name follows from the peer's address, so a board answering with
+        # another one is a board the registry does not describe. The fake
+        # answers with the name it is given; the driver is told the one the
+        # registry derived.
+        status, _captured, report = self.run_session(name="UT-ESP32-OTHER",
+                                                     peer_name=PEER_NAME)
         self.assertEqual(1, status)
-        self.assertIn("the inquiry did not hear the peer", report)
+        self.assertIn("no Extended Inquiry Response named 'UT-ESP32-2A1B2A'",
+                      report)
+        self.assertIn("response(s) carried a name", report)
+        # The names it did carry are counted, never reported.
+        self.assertNotIn("UT-ESP32-OTHER", report)
+
+    def test_a_session_that_stops_early_says_which_checks_never_ran(self):
+        status, _captured, report = self.run_session(faults=("no-help",))
+        self.assertEqual(1, status)
+        # The help check failed and the rest still ran.
+        self.assertIn("checks: 10 passed of 11, 1 failed, 0 not run", report)
+        status, _captured, report = self.run_session(faults=("no-usb",))
+        self.assertEqual(1, status)
+        self.assertIn("checks: 0 passed of 11, 0 failed, 11 not run", report)
 
 
 class CheckListTests(unittest.TestCase):

@@ -43,10 +43,10 @@ import sys
 from ubertooth_harness import btbrconsole
 from ubertooth_harness.classic_cases import (
     ACCEPTOR_ROLE,
-    LINUX_ONLY,
     _peer,
     _reset_step,
 )
+from ubertooth_harness.hostneeds import Needs
 from ubertooth_harness.patterns import (
     APPLICATION_IMAGE,
     BTBR_IMAGE,
@@ -73,6 +73,13 @@ CASE_ID = "btbr-console"
 # application image its cleanup writes back.
 BTBR_LABEL = BTBR_IMAGE_LABEL
 APPLICATION_LABEL = APPLICATION_IMAGE_LABEL
+
+# What the case needs of the host and of the run, so a host or a run that
+# cannot do it leaves the case out before anything is flashed rather than
+# skipping it afterwards: the peers are reached through /dev/serial/by-id,
+# which is Linux's; `ubertooth-btbr` is installed only by a --with-python
+# build; and both firmware images come from a --with-firmware one.
+NEEDS = Needs(platforms=("linux",), python_tools=True, firmware_build=True)
 
 _CONSOLE = str(Path(btbrconsole.__file__).resolve())
 # A write and the board's reset. Four seconds each way on the lab bench, and
@@ -135,25 +142,13 @@ def console_argv(serial: str, peer, *, no_answer: bool) -> tuple[str, ...]:
 
 
 def console_budget(*, no_answer: bool) -> float:
-    """Every window the driver may wait out, plus its startup and its exit.
+    """Every wait the driver may sit out, which it works out per check.
 
-    A check that fails then ends in the driver's own report rather than in the
-    harness calling the step hung, which is the difference between a reason
-    and a timeout.
+    The step's deadline is this and a little more, so a check that fails ends
+    in the driver's own reason rather than in the harness killing the step.
+    The measured session is about 40 s; this is the backstop.
     """
-    budget = (
-        btbrconsole.START_TIMEOUT_S
-        # The refusals, the help, and the waits for a prompt after each.
-        + 12 * btbrconsole.REPLY_TIMEOUT_S
-        + btbrconsole.DEFAULT_INQUIRY_S
-        + btbrconsole.DEFAULT_PAGE_S
-        + btbrconsole.DEFAULT_HOLD_S
-        + 2 * btbrconsole.IDLE_TIMEOUT_S
-        + btbrconsole.EXIT_TIMEOUT_S
-    )
-    if no_answer:
-        budget += btbrconsole.DEFAULT_NO_ANSWER_S + btbrconsole.IDLE_TIMEOUT_S
-    return budget
+    return btbrconsole.worst_case_seconds(no_answer)
 
 
 def _reset_peer(step_id: str, peer) -> Step:
@@ -264,5 +259,5 @@ def _case(serial, peer, number: int, sessions: int, *, no_answer: bool) -> State
             f"the {APPLICATION_IMAGE} image written back and reported at the "
             f"run's revision; the {ACCEPTOR_ROLE} reset to its boot state"),
         artifacts=(BTBR_LABEL, APPLICATION_LABEL),
-        needs=LINUX_ONLY,
+        needs=NEEDS,
     )

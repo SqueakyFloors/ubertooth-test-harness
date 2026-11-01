@@ -73,6 +73,7 @@ suites:
         hosts: [Host_Linux]
         Ubertooth: default
         acceptor: default
+        allow RF transmission: true
         coverage: smoke
 
   # Comprehensive adds the page nothing answers, which costs the firmware's
@@ -82,6 +83,7 @@ suites:
         hosts: [Host_Linux]
         Ubertooth: default
         acceptor: default
+        allow RF transmission: true
         coverage: comprehensive
 
   # The repetition suite: five flash-and-session cycles, about five minutes,
@@ -92,5 +94,6 @@ suites:
         hosts: [Host_Linux]
         Ubertooth: default
         acceptor: default
+        allow RF transmission: true
         coverage: smoke
         sessions: 5

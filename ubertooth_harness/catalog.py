@@ -1261,6 +1261,10 @@ def builtin_catalog() -> TestCatalog:
                 # Flash-and-session cycles, for a long suite; one by default,
                 # because each costs two firmware writes.
                 "sessions": ArgumentRule(_positive_integer, default=1),
+                # The board transmits: an inquiry train, a page train, and
+                # then a live connection it holds as the piconet central.
+                "allow RF transmission": ArgumentRule(_required_true,
+                                                      required=True),
                 "coverage": COVERAGE,
             }),
             MappingProxyType({

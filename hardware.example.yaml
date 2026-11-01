@@ -131,9 +131,8 @@ resources:
       LAP: "000001"
       # The name its `status` reports, which is also what it answers an
       # inquiry and an LMP name request with. It is not settable: the
-      # firmware builds it from the board's own LAP. `Classic btbr console`
-      # needs it, and checks it against the board after a reset; the other
-      # Classic tests do not read it.
+      # firmware builds it from the board's own LAP, so the harness derives
+      # it. Written down here it has to agree, as the LAP and UAP do.
       name: UT-ESP32-000001
 
   ESP32_Linux1:

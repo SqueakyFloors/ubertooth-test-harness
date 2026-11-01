@@ -134,9 +134,15 @@ Because the boot role is discoverable and connectable, one peer on its own is
 also a device an Ubertooth can discover and connect to, which is what
 `Classic btbr console` pages. That test binds one peer as `acceptor` and resets
 it before the session, so an earlier test's role, link, or `disc off` cannot
-reach it. The registered `name` is what the peer answers an inquiry and an LMP
-name request with; it carries the board's own LAP, so it names which board
-replied.
+reach it.
+
+The device name is what the peer answers an inquiry and an LMP name request
+with, and the firmware builds it from the board's own address
+(`UT-ESP32-` and the LAP in upper case) and will not let the shell set it. So
+the harness derives it rather than asking a registry for it, and the reset
+before a session checks the board's own against it. A registry may still write
+it down beside the address, as it may the LAP and the UAP, and then all three
+have to agree with the address.
 
 Registered with the bridge serial and the BD_ADDR its `status` reports (the
 factory MAC plus two in the last byte, so it too is fixed per board). Those

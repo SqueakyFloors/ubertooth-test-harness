@@ -18,6 +18,7 @@ from ubertooth_harness.patterns import (
     HOST_VERSION_TIMEOUT_S,
     compile_info_pattern,
     firmware_version_pattern,
+    matched_image,
     revision_pattern,
     same_revision,
 )
@@ -120,7 +121,7 @@ class PreflightCheck:
                 # none of the tools the other tests call. Say which image it
                 # is carrying, because "identity mismatch" against a board
                 # reporting the right commit reads like a harness fault.
-                image = match.groupdict().get("image") if match else None
+                image = matched_image(match)
                 if image and image != APPLICATION_IMAGE:
                     return (
                         f"{self.name}: {target} runs the {image} image at "

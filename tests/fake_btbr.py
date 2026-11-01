@@ -36,6 +36,7 @@ PEER_NAME = "UT-ESP32-2A1B2A"
 #   stuck-idle          `idle` never reports the command stopped
 #   bad-exit            the session exits non-zero
 #   never-exits         the session ignores `exit`
+#   quiet-lmp           the connection brings no unhandled LMP request
 
 _SCRIPT = '''#!/usr/bin/env python3
 """A fake ubertooth-btbr console. See tests/fake_btbr.py."""
@@ -160,8 +161,10 @@ while True:
                 "LMP_NAME_RES | 04 00 0f " + name)
         warning = ("warning: LMP opcode 0x20 is not handled in state 1, "
                    "refused")
-        err(warning)
+        if "quiet-lmp" not in FAULTS:
+            err(warning)
         if "repeat-unhandled" in FAULTS:
+            err(warning)
             err(warning)
         if "capture-on-stderr" in FAULTS:
             err("09:11:00 RX LMP: BBHdr(lt_addr=1, type=DM1, flags=F) | x")

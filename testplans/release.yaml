@@ -133,4 +133,5 @@ suites:
         hosts: [Host_Linux]
         Ubertooth: default
         acceptor: default
+        allow RF transmission: true
         coverage: smoke

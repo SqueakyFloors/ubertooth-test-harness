@@ -65,16 +65,21 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import shutil
 import subprocess
 import sys
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Sequence
 
-from ubertooth_harness import esp32peer
-from ubertooth_harness.pytools import PYTHON_TOOLS_ENV, SKIP_EXIT
+if __package__ in (None, ""):
+    # Run as a script, which is how a case step runs it: make the package
+    # importable for the two modules below.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from ubertooth_harness import esp32peer  # noqa: E402
+from ubertooth_harness.pytools import PYTHON_TOOLS_ENV, SKIP_EXIT  # noqa: E402
 
 TOOL = "ubertooth-btbr"
 # The prompt has no newline of its own, so it is matched in the stream's text
@@ -87,14 +92,15 @@ INTRO = "Type ? to list commands"
 USB_CONNECTED = "USB connected"
 EIR_UPDATED = "EIR updated"
 
-# Startup: the board is opened, given its address and that response, and the
-# thread reading it started before the prompt appears. A board carrying the
-# wrong image times the first write out instead, in libusb's own time, so this
-# is generous.
+# The first startup line, `USB connected`. A board carrying the wrong image
+# times the first write out instead, in libusb's own time, so this is
+# generous; the lines after it follow at once and get REPLY_TIMEOUT_S.
 START_TIMEOUT_S = 30.0
-# One prompt command that needs no radio: the answer is printed as the line is
-# read.
-REPLY_TIMEOUT_S = 10.0
+# One prompt command that needs no radio. The answer is printed as the line is
+# read: every one of them arrived inside 0.1 s on the bench, and a session
+# makes about twenty of these waits, so a generous window here is what would
+# push the whole session past its step deadline.
+REPLY_TIMEOUT_S = 5.0
 # `exit` with nothing running.
 EXIT_TIMEOUT_S = 15.0
 # How long after `idle` the firmware has to stop the running command and the
@@ -157,8 +163,11 @@ LMP_NAME_RES = "LMP_NAME_RES"
 # opcode, the fragment offset, and the length, so a fourteen-character name
 # fits whole and a longer one is cut.
 NAME_BYTES_CHECKED = 10
-# Lines that belong on one stream only.
-CAPTURE_LINE = re.compile(r"(?m)^\d\d:\d\d:\d\d [A-Z0-9]")
+# Records and progress lines, each of which belongs on one stream only. The
+# capture pattern is not anchored to the start of a line: the prompt carries no
+# newline of its own, so a record printed right after one does not start a
+# line, and that is the likeliest place for a stray record to appear.
+CAPTURE_LINE = re.compile(r"(?m)\d\d:\d\d:\d\d [A-Z0-9]")
 PROGRESS_LINE = re.compile(
     r"(?m)^(?:bt> |State |Starting BTCtl|Send idle|Paging |Inquiry |"
     r"Connection |Central started|Rx thread)")
@@ -192,7 +201,7 @@ class Stream:
     reader would block on it; the matching below therefore runs over the text.
     """
 
-    def __init__(self, name: str, source, sink, prefix: str = ""):
+    def __init__(self, name: str, source, sink=None, prefix: str = ""):
         self.name = name
         self._source = source
         self._sink = sink
@@ -232,9 +241,16 @@ class Stream:
         self._echo(lines)
 
     def _echo(self, lines: Sequence[str]) -> None:
-        # The tool's standard output is passed through unchanged; its standard
-        # error is marked, so the report lines cannot be read as the tool's.
-        if not lines:
+        """Write the lines on, where this stream has somewhere to write them.
+
+        The tool's standard error is marked, so the report lines cannot be
+        read as the tool's. Its standard output has no sink at all: it is the
+        capture, and an inquiry hears every discoverable device in range, so
+        passing it on would put third-party addresses and device names into
+        the run record. The checks below read it in memory and report only
+        what they matched, which is the registered peer's own.
+        """
+        if not lines or self._sink is None:
             return
         self._sink.write("".join(self._prefix + line + "\n" for line in lines))
         self._sink.flush()
@@ -248,9 +264,8 @@ class Stream:
 class Console:
     """A running ubertooth-btbr session: send a line, wait for an answer."""
 
-    def __init__(self, argv: Sequence[str], out, err, environment=None):
+    def __init__(self, argv: Sequence[str], err, environment=None):
         self.argv = tuple(argv)
-        self._out = out
         self._err = err
         self._environment = environment
         self.process: subprocess.Popen | None = None
@@ -267,7 +282,7 @@ class Console:
             raise ConsoleError(f"could not run {self.argv[0]}: {error}") from error
         self.started = _now()
         self.streams = {
-            "stdout": Stream("stdout", self.process.stdout, self._out),
+            "stdout": Stream("stdout", self.process.stdout),
             "stderr": Stream("stderr", self.process.stderr, self._err, "btbr| "),
         }
         for stream in self.streams.values():
@@ -299,6 +314,10 @@ class Console:
         session that exits while this waits is given one last look at the text
         it left, so an answer is not lost to that race.
         """
+        if self.streams[stream].overflowed:
+            raise ConsoleError(
+                f"the session's {stream} passed {MAX_STREAM_CHARS} characters; "
+                "what it printed after that is lost, so no check can be decided")
         pattern = (needle if isinstance(needle, re.Pattern)
                    else re.compile(re.escape(needle)))
         start = _now()
@@ -351,6 +370,24 @@ class Console:
 
 # ---------------------------------------------------------------------------
 # What the checks share
+
+
+def _record(text: str, match: re.Match) -> str:
+    """The whole capture line a match landed on, trimmed for a report line.
+
+    Only ever called on a record the check matched for the registered peer, so
+    what it reports is the bench's own device. The lines of an inquiry it did
+    not match are counted, never reported: they belong to whatever else is in
+    range.
+    """
+    start = text.rfind("\n", 0, match.start()) + 1
+    end = text.find("\n", match.end())
+    line = text[start:end if end >= 0 else len(text)].strip()
+    return line[:_MAX_RECORD_CHARS - 3] + "..." if len(line) > _MAX_RECORD_CHARS else line
+
+
+# A reported record is one line of a report; a capture line is well inside it.
+_MAX_RECORD_CHARS = 200
 
 
 @dataclass
@@ -493,11 +530,12 @@ def check_inquiry(session: Session) -> str:
         re.compile(rf"\bbdaddr={session.peer_bdaddr}\b"),
         session.inquiry_seconds, stream="stdout", since=out_mark)
     if found is None:
-        heard = sorted({match["address"]
-                        for match in FHS_BDADDR.finditer(console.text("stdout")[out_mark:])})
+        # Counted, not named: the other devices are whatever is in range.
+        heard = len({match["address"] for match
+                     in FHS_BDADDR.finditer(console.text("stdout")[out_mark:])})
         return (f"the inquiry did not hear the peer {session.peer_bdaddr} in "
-                f"{session.inquiry_seconds:g}s; it heard "
-                + (", ".join(heard) if heard else "nothing"))
+                f"{session.inquiry_seconds:g}s; it heard {heard} other "
+                "device(s)")
     # The response's Extended Inquiry Response follows it as fields of their
     # own, so the name arrives just after the address.
     named, _ = console.wait(
@@ -505,15 +543,15 @@ def check_inquiry(session: Session) -> str:
         REPLY_TIMEOUT_S, stream="stdout", since=found.end())
     captured = console.text("stdout")[out_mark:]
     if named is None:
-        names = [match["name"] for match in EIR_NAME.finditer(captured)]
+        names = len(EIR_NAME.findall(captured))
         return (f"the inquiry heard the peer {session.peer_bdaddr} but no "
-                f"Extended Inquiry Response named {session.peer_name!r}; it "
-                "carried " + (", ".join(repr(name) for name in names)
-                              if names else "no name"))
+                f"Extended Inquiry Response named {session.peer_name!r}; "
+                f"{names} response(s) carried a name")
     responses = len(set(FHS_BDADDR.findall(captured)))
     session.report(
         f"check inquiry: peer {session.peer_bdaddr} answered after {took:.1f} s, "
         f"name {session.peer_name!r}, {responses} device(s) heard in all")
+    session.report(f"  record: {_record(captured, found)}")
     return session.idle("inquiry-idle", INQUIRY_DONE)
 
 
@@ -562,6 +600,7 @@ def _check_peer_named(session: Session, out_mark: int) -> str:
                 f"{wanted})")
     session.report(f"check page-peer-name: {LMP_NAME_RES} carried "
                    f"{session.peer_name!r}")
+    session.report(f"  record: {_record(session.console.text('stdout'), match)}")
     return ""
 
 
@@ -575,9 +614,19 @@ def check_lmp_unhandled(session: Session) -> str:
         return ("an unhandled LMP opcode was reported more than once: "
                 + ", ".join(f"{opcode} {found[opcode]} times"
                             for opcode in repeated))
+    if not found:
+        # Nothing arrived, so nothing was decided. These controllers ask for
+        # power control about four times a second for the life of the link,
+        # and this link layer has no handler for it, so a connection held for
+        # the hold above always brings one: none at all is either a peer that
+        # no longer asks or a tool that stopped saying so, and both are worth
+        # a look rather than a quiet pass.
+        return ("no LMP request with no handler was reported at all, so "
+                "nothing was checked: the peer asks for power control several "
+                "times a second, and this link layer refuses it")
     session.opcodes = sorted(found)
-    named = ", ".join(session.opcodes) if found else "none"
-    session.report(f"check lmp-unhandled: {named} refused, each named once")
+    session.report("check lmp-unhandled: " + ", ".join(session.opcodes)
+                   + " refused, each named once")
     return ""
 
 
@@ -641,6 +690,59 @@ SMOKE_CHECKS = (
 NO_ANSWER_CHECK = ("page-no-answer", check_page_no_answer)
 
 
+# What each check may wait out, in the module's windows above. A case sets its
+# step deadline from worst_case_seconds() below, so a check that fails ends in
+# this module's own reason rather than in the harness killing the step: the
+# difference between a diagnosis and a timeout. Each count is the waits in the
+# check's own code, so a check that grows a wait has to grow its entry here;
+# tests/test_btbrconsole.py counts the waits and compares.
+def _check_seconds(label: str, *, inquiry: float, page: float, hold: float,
+                   no_answer: float) -> float:
+    reply, idle = REPLY_TIMEOUT_S, IDLE_TIMEOUT_S
+    return {
+        # The heading, and the prompt is not waited for.
+        "help": reply,
+        "help-one": reply,
+        # The refusal, then the prompt after it.
+        "no-such-command": 2 * reply,
+        "no-help": 2 * reply,
+        # Three addresses, each a refusal and a prompt.
+        "bad-address": 3 * 2 * reply,
+        # The refusal, the prompt, and the look for a paging line.
+        "page-no-address": 2 * reply,
+        "set-address": reply,
+        # The start, the peer's response, its name, then idle: the stop line
+        # and the prompt after it.
+        "inquiry": 2 * reply + inquiry + idle + reply,
+        # The start, the page, ready, LMP complete, the name on the air, the
+        # hold, then idle.
+        "page": 5 * reply + page + hold + idle + reply,
+        # Both read what is already there.
+        "lmp-unhandled": 0.0,
+        "streams": 0.0,
+        # The start, the timeout, the look for a connection, and the done line.
+        "page-no-answer": 3 * reply + no_answer,
+    }[label]
+
+
+def worst_case_seconds(no_answer: bool, *, inquiry: float = DEFAULT_INQUIRY_S,
+                       page: float = DEFAULT_PAGE_S,
+                       hold: float = DEFAULT_HOLD_S,
+                       no_answer_seconds: float = DEFAULT_NO_ANSWER_S) -> float:
+    """Every wait a session may sit out, with its startup and its exit.
+
+    The startup waits for the first line, then for the two after it and the
+    prompt.
+    """
+    return (
+        START_TIMEOUT_S + 3 * REPLY_TIMEOUT_S
+        + sum(_check_seconds(label, inquiry=inquiry, page=page, hold=hold,
+                             no_answer=no_answer_seconds)
+              for label, _check in checks(no_answer))
+        + EXIT_TIMEOUT_S
+    )
+
+
 def checks(no_answer: bool):
     """The checks to run, in order."""
     if not no_answer:
@@ -658,12 +760,17 @@ def checks(no_answer: bool):
 
 
 def tool_path(environment) -> str | None:
-    """The ubertooth-btbr this run built, or one on PATH."""
+    """The ubertooth-btbr this run built, and only that one.
+
+    There is deliberately no fall back to whatever is on ``PATH``: the point
+    of the test is the tool of the commit under test, and an installed copy
+    from another commit answering in its place would be reported as a pass.
+    """
     tools = environment.get(PYTHON_TOOLS_ENV)
-    if tools:
-        candidate = os.path.join(tools, TOOL)
-        return candidate if os.path.isfile(candidate) else None
-    return shutil.which(TOOL, path=environment.get("PATH"))
+    if not tools:
+        return None
+    candidate = os.path.join(tools, TOOL)
+    return candidate if os.path.isfile(candidate) else None
 
 
 def run_session(arguments, out, err, environment) -> int:
@@ -674,7 +781,7 @@ def run_session(arguments, out, err, environment) -> int:
         out.flush()
         return SKIP_EXIT
     argv = (tool, "-U", arguments.serial)
-    console = Console(argv, out, err, environment)
+    console = Console(argv, err, environment)
 
     def report(line: str) -> None:
         err.write(line + "\n")
@@ -691,25 +798,31 @@ def run_session(arguments, out, err, environment) -> int:
     )
     planned = checks(arguments.no_answer)
     failures: list[str] = []
-    console.start()
+    failed_checks: list[str] = []
+    decided: list[str] = []
     try:
+        # start() inside the try: a tool that cannot be run is reported in the
+        # same line as everything else, not as a traceback.
+        console.start()
         _start(console, report)
         for label, check in planned:
             reason = check(session)
+            decided.append(label)
             if reason:
+                failed_checks.append(label)
                 failures.append(f"{label}: {reason}")
                 report(f"check {label}: FAILED: {reason}")
     except ConsoleError as error:
         failures.append(str(error))
         report(f"session: FAILED: {error}")
     status = _end(console, report, failures)
-    for stream in console.streams.values():
-        if stream.overflowed:
-            failures.append(f"the session's {stream.name} passed "
-                            f"{MAX_STREAM_CHARS} characters")
-            report(f"session: FAILED: {failures[-1]}")
-    report(f"checks: {len(planned) - len(failures)} passed of {len(planned)}, "
-           f"{len(failures)} failed")
+    # Checks, not failures: a session-level failure (the startup, the exit, a
+    # stream that overflowed) is not a check, and a session that stopped early
+    # leaves checks that never ran. Reporting them apart is what keeps the
+    # count honest.
+    passed = len(decided) - len(failed_checks)
+    report(f"checks: {passed} passed of {len(planned)}, "
+           f"{len(failed_checks)} failed, {len(planned) - len(decided)} not run")
     if failures:
         report("session failed: " + "; ".join(failures))
         return 1
@@ -717,13 +830,20 @@ def run_session(arguments, out, err, environment) -> int:
 
 
 def _start(console: Console, report) -> None:
-    """Wait for the startup the `btbr` image answers, then for the prompt."""
+    """Wait for the startup the `btbr` image answers, then for the prompt.
+
+    Only the first line gets the long window: it is the one a board on the
+    wrong image never answers, and the two after it are printed in the same
+    breath.
+    """
     reached = 0
-    for needle in (USB_CONNECTED, EIR_UPDATED, INTRO):
-        match, _ = console.wait(needle, START_TIMEOUT_S, since=reached)
+    for needle, window in ((USB_CONNECTED, START_TIMEOUT_S),
+                           (EIR_UPDATED, REPLY_TIMEOUT_S),
+                           (INTRO, REPLY_TIMEOUT_S)):
+        match, _ = console.wait(needle, window, since=reached)
         if match is None:
             raise ConsoleError(
-                f"{TOOL} printed no {needle!r} line within {START_TIMEOUT_S:g}s; "
+                f"{TOOL} printed no {needle!r} line within {window:g}s; "
                 "a board carrying bluetooth_rxtx fails here")
         reached = match.end()
     prompt, _ = console.wait(PROMPT, REPLY_TIMEOUT_S, since=reached)
