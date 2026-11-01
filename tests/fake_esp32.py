@@ -230,10 +230,12 @@ class FakePeerFirmware:
         self.commands.append(line)
         if self.silent or line in self.silent_for:
             return []
-        # A live link carries frames the whole time it is up, so the counters
-        # move between one read and the next: a count taken across a command
-        # grows the way a board's does. `carrying` False is a link that is up
-        # and sending nothing.
+        # A live link's counters move while nobody is looking, which this
+        # stands in for by adding a read's worth of frames to each read:
+        # enough for a count taken across a command to grow, with no clock to
+        # model. So the totals a test asserts follow from how many times the
+        # driver reads this board. `carrying` False is a link that is up and
+        # sending nothing.
         if self.sco == "on" and self.carrying:
             self._carry()
         if line in self.refuse:

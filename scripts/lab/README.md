@@ -149,7 +149,15 @@ the link up and settling put frames on the air before the command starts, so a
 total would flatter the run; the difference is what the capture window saw.
 `--min-frames` and `--min-packets` are the floors those differences must
 reach, and both boards must meet them, so a link that fell silent part way
-through does not pass on what it carried at first. `--min-seconds` and
+through does not pass on what it carried at first. The window is the two
+counter reads either side of the command, so it is a few milliseconds wider
+than the command itself; set the floors from the rate the link reports rather
+than to the last packet.
+
+A link that went down during the command fails the session even if it came
+straight back: its counters would otherwise add two links' traffic together.
+The board's own `utesp: sco disconnected` is what says so, with a changed
+connection handle, or a controller's count that started again, behind it. `--min-seconds` and
 `--timeout` work as they do for `stream`.
 
 The link is checked again after the command: one that came back as another

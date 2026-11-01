@@ -462,14 +462,72 @@ class AudioTests(unittest.TestCase):
         self.assertLess(initiator.commands.index("role initiator"),
                         initiator.commands.index("sco type ev3"))
 
-    def test_a_type_only_one_board_asked_for_does_not_open_a_link(self):
-        # The link uses a type both boards allowed, and `default` does not
-        # allow plain EV3, so this is the failure a one-sided choice gives.
+    def test_a_board_that_refuses_the_type_ends_the_session_there(self):
         acceptor, initiator = _audio_pair()
         acceptor.refuse["sco type ev3"] = "test: this board kept the default"
         with self.assertRaisesRegex(esp32peer.PeerError,
                                     "'sco type ev3' refused"):
             self._audio(pair=(acceptor, initiator), sco_type="ev3")
+
+    def test_a_type_only_one_board_asked_for_does_not_open_a_link(self):
+        # The link uses a type both boards allowed, and the stack's default
+        # does not allow plain EV3, so a one-sided choice opens nothing.
+        class Ignoring(FakePeerFirmware):
+            """Answers `sco type` and keeps the stack's own choice."""
+
+            def _sco(self, words):
+                if words[:1] == ["type"]:
+                    return ["OK"]
+                return super()._sco(words)
+
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "'sco start' refused: the controller did not open a synchronous "
+            "link"
+        ):
+            self._audio(pair=_audio_pair(acceptor_class=Ignoring),
+                        sco_type="ev3")
+
+    def test_a_failed_start_carries_what_the_board_said_with_it(self):
+        # The answer says why the start failed; the notice says the profile is
+        # still the firmware's to stop, which is why the next `role` refuses.
+        class Stuck(FakePeerFirmware):
+            def _sco_start(self):
+                self.unsolicited.append(
+                    "utesp: sco the profile is still running: test")
+                return ["ERR audio connect timed out"]
+
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "'sco start' refused: audio connect timed out; the acceptor said: "
+            "utesp: sco the profile is still running: test"
+        ):
+            self._audio(pair=_audio_pair(acceptor_class=Stuck))
+
+    def test_a_board_that_said_the_link_went_down_fails_the_session(self):
+        # The firmware's own word on a link that dropped and came back, which
+        # the counters and even the handle can hide.
+        class Flapping(FakePeerFirmware):
+            flapped = False
+
+            def handle(self, line):
+                answer = super().handle(line)
+                if line == "sco stats" and not self.flapped:
+                    self.flapped = True
+                    far = self.peer_firmware
+                    self._sco_stop()  # the board says so by itself
+                    self.sco_profile = "ag"
+                    self._sco_up("2ev3")  # and it comes straight back
+                    far._sco_up("2ev3")
+                return answer
+
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "the initiator said the audio link went down while the command "
+            "ran, so what it carried is not one link's traffic"
+        ):
+            self._audio(pair=_audio_pair(initiator_class=Flapping),
+                        min_frames=10)
 
     def test_a_link_of_another_type_than_the_one_asked_for_fails(self):
         class Stubborn(FakePeerFirmware):
@@ -608,7 +666,7 @@ class AudioTests(unittest.TestCase):
         # The frame counters carry over a new link, so the floors would pass
         # on the traffic of two links; a new link has a new handle.
         class Flapping(FakePeerFirmware):
-            """Its link goes down and comes back once the counters are read."""
+            """A link that went and came back, and whose notice was missed."""
 
             flapped = False
 
@@ -622,6 +680,10 @@ class AudioTests(unittest.TestCase):
                     self._sco_up("2ev3")
                     far._sco_up("2ev3")
                     self.sco_handle = 130  # a new link, a new handle
+                    # Nothing said: the notice is the first line of defense,
+                    # and this is what is left when it does not arrive.
+                    self.unsolicited.clear()
+                    far.unsolicited.clear()
                 return answer
 
         with self.assertRaisesRegex(

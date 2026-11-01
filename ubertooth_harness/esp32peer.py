@@ -129,6 +129,8 @@ SCO_TYPE_ON_LINK = {"ev3": "ev3", "2ev3": "2-ev3"}
 # session carries voice over: both EV3 and 2-EV3 are eSCO packet types.
 SCO_UP = "on"
 ESCO = "esco"
+# The notice a board sends the moment an audio link goes down.
+SCO_DISCONNECTED = "sco disconnected"
 # One Bluetooth slot, which is what sco_interval and sco_retrans_window count.
 SLOT_US = 625
 
@@ -159,6 +161,9 @@ STOP_TIMEOUT_S = 10.0
 # Seconds the reset pulse holds EN low, as esptool's hard reset does.
 RESET_PULSE_S = 0.1
 POLL_S = 0.05
+# Time given to reading what the board said while nothing was being asked.
+# The lines are already on their way, so this is a read, not a wait.
+NOTICE_DRAIN_S = 0.3
 # Time for the first writes to reach the air before the command starts.
 SETTLE_S = 1.0
 # Time an overrunning command gets to stop itself after SIGINT.
@@ -407,22 +412,23 @@ class Shell:
                 return parse_status(line, self.label)
         raise PeerError(f"{self.label}: status printed no JSON line")
 
-    def drain_notices(self) -> list[str]:
-        """Read what the board said by itself and return the new notices.
+    def drain_notices(self, timeout: float = NOTICE_DRAIN_S) -> None:
+        """Read what the board said by itself, into ``notices``.
 
         A command clears the input buffer before it writes, so a notice that
         arrived while nothing was being asked would be thrown away. The one
         that matters here is `utesp: sco disconnected`, which the board sends
         the moment a link goes down: during a capture, which is the whole
         point of the session, no command is in flight to carry it.
+
+        The timeout is a real one, however short: the line is in the kernel's
+        buffer, not this driver's, so the port has to be read for it.
         """
-        seen = len(self.notices)
-        for line in self._lines(self.clock()):  # whatever has already arrived
+        for line in self._lines(self.clock() + timeout):
             if line and self.log is not None:
                 self.log(targets.RECEIVED, line)
             if _NOTICE.match(line):
                 self._note(line)
-        return self.notices[seen:]
 
     def sco_stats(self, timeout: float = COMMAND_TIMEOUT_S) -> dict:
         """The controller's own (e)SCO packet counters, as one JSON line."""
@@ -911,9 +917,9 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
             initiator_shell.command(f"sco type {sco_type}")
         # The acceptor's hands-free profile has to be listening before the
         # gateway pages it.
-        acceptor_shell.command("sco start", SCO_START_TIMEOUT_S)
+        _sco_start(acceptor_shell, acceptor.label)
         initiator_shell.command(f"spp peer {acceptor_status['address']}")
-        initiator_shell.command("sco start", SCO_START_TIMEOUT_S)
+        _sco_start(initiator_shell, initiator.label)
         # The initiator's `sco start` answered once the link was open, so its
         # own view is ready; the acceptor's lags that by a callback.
         linked = check_audio_status(initiator_shell.status(), initiator.label)
@@ -931,13 +937,21 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         before_acceptor = _read_counts(acceptor_shell, acceptor.label)
         print("command: " + " ".join(command), file=out)
         out.flush()
+        # Everything either board says from here on belongs to the command's
+        # own window, whether this driver reads it as a line of its own or in
+        # the middle of a later answer.
+        marks = {initiator.label: len(initiator_shell.notices),
+                 acceptor.label: len(acceptor_shell.notices)}
         status, seconds = _run_command(command, timeout)
         print(f"command exit: {status} after {seconds:.1f} s", file=out)
-        # What the boards said while the command ran, before the next command
-        # clears it: `utesp: sco disconnected` is how a link that went down
-        # announces itself.
-        said = {initiator.label: initiator_shell.drain_notices(),
-                acceptor.label: acceptor_shell.drain_notices()}
+        # Read what they said before the next command clears the buffer:
+        # `utesp: sco disconnected` is how a link that went down announces
+        # itself, and during a capture nothing is in flight to carry it.
+        initiator_shell.drain_notices()
+        acceptor_shell.drain_notices()
+        said = {label: shell.notices[marks[label]:]
+                for label, shell in ((initiator.label, initiator_shell),
+                                     (acceptor.label, acceptor_shell))}
         # Read the counters again while the link is still up: the
         # controller's own belong to a live link, and `sco stop` ends it.
         after_initiator = _read_counts(initiator_shell, initiator.label)
@@ -963,11 +977,25 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
     if stopped:
         problems.append(f"the audio link would not stop: {stopped}")
     for label, before, after in sides:
+        # A link that is down is that, not a link that came back: the
+        # firmware zeroes the handle when it goes, so the flap check below
+        # would describe the same failure wrongly.
+        if after.status["sco"] != SCO_UP:
+            problems.append(f"the {label} reports the audio link "
+                            f"{after.status['sco']}, not up, after the command "
+                            "ran")
+            continue
         # A link that went down and came back carries its frame counters
         # over, so the floors below would pass on the traffic of two links.
-        # A new link has a new handle, and the controller's counters start
-        # again with it, which is what a count going backwards means.
-        if after.status["sco_handle"] != before.status["sco_handle"]:
+        # The board's own notice is the reliable sign of it; a new handle, or
+        # a controller's count that started again, catch what it misses.
+        dropped = [notice for notice in said.get(label, ())
+                   if SCO_DISCONNECTED in notice]
+        if dropped:
+            problems.append(f"the {label} said the audio link went down while "
+                            "the command ran, so what it carried is not one "
+                            "link's traffic")
+        elif after.status["sco_handle"] != before.status["sco_handle"]:
             problems.append(
                 f"the {label}'s audio link went down and came back while the "
                 f"command ran (handle {before.status['sco_handle']}, then "
@@ -978,11 +1006,6 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
             problems.append(f"the {label}'s counters went backwards while the "
                             "command ran, so this is not the link they were "
                             "first read from")
-        if after.status["sco"] != SCO_UP:
-            problems.append(f"the {label} reports the audio link "
-                            f"{after.status['sco']}, not up, after the command "
-                            "ran")
-            continue
         # Each side answers every frame it receives with one of its own, so
         # both ends receiving frames is what shows the link carried audio
         # while the command ran, rather than only before it.
@@ -1028,11 +1051,12 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
 class _Counts:
     """One board's counters at a moment, with why the controller's are missing.
 
-    ``stats`` is None when the firmware refused the packet counters, which it
-    does when no link is up and for the rest of a boot after a request of its
-    own went unanswered. That is a fact about the run, not a reason to abandon
-    it: the frame counters say more, and the likeliest cause, a link that
-    dropped while the command ran, has a message of its own.
+    ``stats`` is None when the board refused the packet counters, whatever its
+    reason: no link up, a request of its own that went unanswered, or a
+    controller that would not give them. That is a fact about the run, not a
+    reason to abandon it: these counters say nothing about the link that the
+    frame counters do not, and the likeliest cause, a link that dropped while
+    the command ran, has a message of its own.
     """
 
     status: dict
@@ -1045,14 +1069,36 @@ def _read_counts(shell: Shell, label: str) -> _Counts:
     try:
         return _Counts(status, shell.sco_stats())
     except PeerRefused as error:
-        # Only the board's own refusal is carried on from. A silence, a
-        # timeout, or an answer that cannot be read is the bridge or the
-        # driver being lost, which no floor should be waived for.
+        # Only the board's own refusal is carried on from, whichever of its
+        # reasons it gives. A silence, a timeout, or an answer that cannot be
+        # read is the bridge or the driver being lost, which no floor should
+        # be waived for.
         return _Counts(status, None, str(error))
 
 
 def _grew(before: _Counts, after: _Counts, key: str) -> int:
     return after.status[key] - before.status[key]
+
+
+def _sco_start(shell: Shell, label: str) -> None:
+    """Start this board's side of the audio link, with what it said if it fails.
+
+    A start that fails tries to put the profile away, and says so in a notice
+    of its own if it could not: the answer is why the start failed, and the
+    notice is the reason the next `role` or `defaults` will refuse. Both
+    belong in the error, because nothing later in the session reports it.
+    """
+    seen = len(shell.notices)
+    try:
+        shell.command("sco start", SCO_START_TIMEOUT_S)
+    except PeerError as error:
+        # The notice arrives beside the refusal, so it may still be unread.
+        shell.drain_notices()
+        said = shell.notices[seen:]
+        if said:
+            raise PeerError(f"{error}; the {label} said: "
+                            + "; ".join(said)) from None
+        raise
 
 
 def _wait_for_link(shell: Shell, label: str,
