@@ -584,6 +584,29 @@ class ReportTests(unittest.TestCase):
                     {"1ab23cd45ef67ab89cd01ef23ab45cd6"}),
         )
 
+    def test_a_loose_shape_that_begins_again_inside_itself_is_masked(self):
+        # A shape looked for over the page is masked at every occurrence,
+        # overlapping ones included: a bridge serial that repeats itself
+        # shapes into something that begins again inside itself, and a
+        # search that resumed after each match would leave the tail of the
+        # second occurrence to read.
+        from ubertooth_harness.report import _redact
+
+        serial = "abc-1abc-1abc-1abc-1"
+        shape = line_shape(serial)
+
+        self.assertEqual("abc-Nabc-Nabc-Nabc-N", shape)
+        for line in (f"  1 x [E] {shape}\n",
+                     f"  1 x [E] abc-N{shape}\n",
+                     f"  1 x [E] {shape}{shape}\n"):
+            self.assertEqual(
+                f"  1 x [E] {REDACTED}\n", _redact(line, {serial}), line)
+        # Two occurrences with text between them are two masks.
+        self.assertEqual(
+            f"  1 x [E] x {REDACTED} y {REDACTED} z\n",
+            _redact(f"  1 x [E] x {shape} y {shape} z\n", {serial}),
+        )
+
     def test_a_shape_that_repeats_itself_is_masked_whole(self):
         # A whole shape is masked before the pieces of one, so a word that
         # happens to read as more of a shape that repeats itself cannot
@@ -1050,10 +1073,37 @@ class ReportTests(unittest.TestCase):
 
             report = render_runs([mac, linux], redact_serials=True)
 
-            self.assertEqual(2, report.count("## Transcript"))
+            self.assertEqual(2, report.count("### Transcript"))
             self.assertIn(f"[C] ubertooth-util -U {REDACTED} -s", report)
             self.assertIn(f"[O] Serial No: {REDACTED}", report)
             self.assertNotIn(SERIAL, report)
+            # Each run's own sections sit under that run's heading, so a
+            # reader scrolling through two transcripts can see which is which.
+            self.assertIn("## Run `mac-run`", report)
+            self.assertIn("### Results", report)
+            self.assertNotIn("\n## Results\n", report)
+
+    def test_one_runs_board_is_masked_in_the_others_transcript(self):
+        # The page is masked once with every run's serials, not run by run:
+        # the macOS and Linux runs of a release may be taken on one bench,
+        # and a board one run names can be named in the other's output.
+        with tempfile.TemporaryDirectory() as directory:
+            mac = Path(directory) / "mac-run"
+            linux = Path(directory) / "linux-run"
+            write_run(mac, host="Host_Mac")
+            write_run(linux, host="Host_Linux", dk_serial="001050210121")
+            publisher = open_run_publisher(mac, "mac-run")
+            publisher.emit("command_started", "running", {
+                "command_id": "x", "argv": ["nrfdk.py", "--jlink", "1050210121"],
+            })
+            publisher.emit("command_finished", "passed", {
+                "command_id": "x", "returncode": 0, "duration_s": 0.1,
+            })
+
+            report = render_runs([mac, linux], redact_serials=True)
+
+            self.assertIn(f"[C] nrfdk.py --jlink {REDACTED}", report)
+            self.assertNotIn("1050210121", report)
 
     def test_records_are_valid_json_lines(self):
         with tempfile.TemporaryDirectory() as directory:

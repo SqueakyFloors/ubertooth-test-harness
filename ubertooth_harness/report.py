@@ -1455,6 +1455,34 @@ def _mask_shape_pieces(token: str, pieces: set[str], longest: int) -> str:
     return "".join(out)
 
 
+def _mask_everywhere(text: str, wanted: str) -> str:
+    """``text`` with every occurrence of ``wanted`` masked, in either case.
+
+    Overlapping occurrences included, as one mask: a serial that repeats
+    itself (`abc-1abc-1abc-1`) shapes into something that can begin again
+    inside itself, and a search that resumed after each match would leave
+    the tail of the second occurrence to read.
+    """
+    found = []
+    lowered, needle = text.lower(), wanted.lower()
+    at = lowered.find(needle)
+    while at >= 0:
+        if found and at <= found[-1][1]:
+            found[-1] = (found[-1][0], max(found[-1][1], at + len(needle)))
+        else:
+            found.append((at, at + len(needle)))
+        at = lowered.find(needle, at + 1)
+    if not found:
+        return text
+    out, end = [], 0
+    for start, stop in found:
+        out.append(text[end:start])
+        out.append(REDACTED)
+        end = stop
+    out.append(text[end:])
+    return "".join(out)
+
+
 def _shape_own_chars(serial: str, shape: str) -> int:
     """Characters of a shape that are the serial's own, not an N standing
     where a run of its digits was: what the shape says about the board.
@@ -1484,7 +1512,7 @@ def _mask_serial_shapes(text: str, serials: Sequence[str]) -> str:
     # A shape no run of hex letters and N can hold, masked wherever it sits.
     # Longest first, as below.
     for shape in sorted(loose, key=len, reverse=True):
-        text = re.sub(re.escape(shape), REDACTED, text, flags=re.IGNORECASE)
+        text = _mask_everywhere(text, shape)
     if not shapes:
         return text
     pieces, longest = _shape_pieces(shapes)
@@ -1532,6 +1560,26 @@ def _redact(text: str, serials: Iterable[str]) -> str:
     return _mask_cut_serials(text, serials)
 
 
+# The sections render_run writes, for a combined page to put under the run
+# they belong to. Matched as whole lines: every line of a transcript starts
+# with its elapsed time, so none of them can read as one of these.
+_RUN_SECTIONS = ("## Results", "## Known targets", "## Not applicable",
+                 "## Watchdog", "## Output files", "## Transcript")
+
+
+def _as_a_section(text: str) -> str:
+    """One run's page as a section of a report covering several.
+
+    Its title becomes the section heading and its own sections move under
+    that heading, so a reader scrolling through two transcripts can see
+    which run each belongs to.
+    """
+    text = text.replace("# Ubertooth test run", "## Run", 1)
+    for heading in _RUN_SECTIONS:
+        text = text.replace(f"\n{heading}\n", f"\n#{heading}\n")
+    return text
+
+
 def render_run(events: Sequence[Mapping], *, redact_serials: bool = False, transcript: bool = True) -> str:
     run = _Run(events)
     lines = [f"# Ubertooth test run `{run.run_id}`", "", "| | |", "|---|---|"]
@@ -1567,10 +1615,11 @@ def render_runs(paths: Sequence[Path | str], *, redact_serials: bool = False, ti
     text = "\n".join(lines) + "\n"
     for run in runs:
         # Not masked per run: the whole page is masked below, with every
-        # run's serials, so a board that two runs used is masked in both.
-        text += "\n" + render_run(
-            run.events, transcript=redact_serials,
-        ).replace("# Ubertooth test run", "## Run", 1)
+        # run's serials, so a board one run names is masked in the other's
+        # transcript too.
+        text += "\n" + _as_a_section(
+            render_run(run.events, transcript=redact_serials)
+        )
     serials = set().union(*(run.serials() for run in runs)) if runs else set()
     return _redact(text, serials) if redact_serials else text
 
