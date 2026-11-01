@@ -4,7 +4,7 @@ Run as a script by the BLE extcap in tshark cases::
 
     python tsharkcapture.py capture --interface ubertooth<serial> --seconds N
         --address ADDR [--min-packets N] [--filter EXPR]
-        [--interrupt-after S] [--program PATH]
+        [--interrupt-after S] [--program PATH] [--held ubertooth<serial>]...
     python tsharkcapture.py read FILE --address ADDR [--min-packets N]
 
 The other extcap cases (``extcapcapture.py``) play Wireshark's part
@@ -40,6 +40,9 @@ to stop a capture after, and the run reports a skip rather than a guess.
 
 Checks (each failure is a ``FAIL:`` line and exit status 1):
 
+- the plugin's own ``--extcap-interfaces`` names every board this run holds
+  (``--interface`` and each ``--held``) and its exit status matches what it
+  reported: 0 with nothing wrong, 1 naming a board it could not open;
 - tshark lists the interface the plugin offers, and exits 0;
 - at least ``--min-packets`` rows carry the advertiser's address with the
   expected PDU type (ADV_NONCONN_IND by default), which is Wireshark's own
@@ -60,8 +63,9 @@ Only counts and the advertiser's own address are printed, never another
 device's address or any packet data, so no nearby traffic reaches the run
 record. Exit status 2 is a usage or setup error; ``pytools.SKIP_EXIT`` with a
 ``SKIP: <reason>`` line means tshark is not installed on this host, the run
-has no extcap script to install, or (``--interrupt-after``) nothing was
-decoded to stop the capture after.
+has no extcap script to install, (``--interrupt-after``) nothing was decoded
+to stop the capture after, or another program on the host holds an Ubertooth
+this run does not (harness issue #237; see ``check_listing``).
 """
 
 from __future__ import annotations
@@ -118,6 +122,13 @@ PROGRAM_NAME = "btle-extcap"
 EXTCAP_FOLDER_LINE = re.compile(r"(?mi)^Personal Extcap path:\s*(.+?)\s*$")
 FALLBACK_EXTCAP_DIR = Path(".local") / "lib" / "wireshark" / "extcap"
 NO_ROWS = "no packet reached tshark in the capture window"
+# One interface the plugin offers, as it prints it.
+INTERFACE_LINE = re.compile(r"(?mi)^interface \{value=(ubertooth[0-9a-f]+)\}")
+# How ubertooth-util names a board another program has open, which the plugin
+# passes on. The index is the USB order and gives no serial, so which board it
+# is can only be told by which ones were listed.
+BOARD_IN_USE = re.compile(r"(?mi)^error: Ubertooth at index \d+ is in use by "
+                          r"another program")
 
 
 def version(run=subprocess.run) -> str | None:
@@ -394,9 +405,70 @@ def _isolated_env(home: Path) -> dict:
     return env
 
 
+def boards_in_use(count: int) -> str:
+    """The skip reason when other boards on the host are not ours to free."""
+    return (f"{count} other Ubertooth(s) on this host are in use by another "
+            "program, so the plugin's listing exits 1 and tshark throws it away")
+
+
+def check_listing(installed, env, held, failures, out=print) -> int:
+    """Ask the plugin itself for the interfaces and check what it answers.
+
+    held is every board this run holds, named as interfaces
+    ("ubertooth<serial>"), the one under test among them. Returns how many
+    further boards on the host another program has open; anything wrong with
+    the listing goes to failures instead.
+
+    This is what keeps the test honest on a shared bench. The plugin lists the
+    boards it could open and still exits 1 when another could not (the fork's
+    decided behavior, ubertooth#386 and #766), and Wireshark and tshark throw
+    away the output of a listing call that failed. So one board held by
+    something outside this run leaves tshark with no Ubertooth to capture on,
+    whatever the plugin got right. Asking the plugin first tells the two apart:
+    every board this run holds must be listed, and the exit status must match
+    what the listing reported. A listing regression fails here on any host,
+    busy or not, and only the tshark half is given up.
+    """
+    argv = (str(installed), "--extcap-interfaces")
+    out("listing command: " + " ".join(argv))
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True,
+                                timeout=START_WAIT_S, env=env)
+    except (OSError, subprocess.SubprocessError):
+        failures.append(f"{PROGRAM_NAME} --extcap-interfaces did not answer within "
+                        f"{START_WAIT_S:g}s")
+        return 0
+    listed = {found[1].lower()
+              for found in INTERFACE_LINE.finditer(result.stdout or "")}
+    reported = [line.strip() for line in (result.stderr or "").splitlines()
+                if line.startswith("error: ")]
+    for line in reported:
+        out("the listing reported: " + line)
+    out(f"the listing offered {len(listed)} interface(s), exit {result.returncode}")
+    missing = [name for name in held if name.lower() not in listed]
+    if missing:
+        failures.append(f"{PROGRAM_NAME} --extcap-interfaces does not list "
+                        + ", ".join(missing) + ", which this run holds")
+    in_use = len(BOARD_IN_USE.findall(result.stderr or ""))
+    unexplained = [line for line in reported if not BOARD_IN_USE.match(line)]
+    if result.returncode == 0:
+        if reported:
+            failures.append(f"the listing exited 0 having reported "
+                            f"{len(reported)} failure(s): {reported[0]}")
+        return 0
+    if unexplained:
+        failures.append(f"the listing exited {result.returncode} for something other "
+                        f"than a board another program holds: {unexplained[0]}")
+    elif not in_use:
+        # The fork's rule is that a listing which fails says why; without a
+        # reason there is nothing to tell a busy bench from a broken listing.
+        failures.append(f"the listing exited {result.returncode} without saying why")
+    return in_use
+
+
 def capture(interface, seconds, address, *, program: Program,
             pdu_type=PDU_TYPES["nonconn"], min_packets=1, capture_filter=None,
-            interrupt_after=None, out=print) -> int:
+            interrupt_after=None, held=(), out=print) -> int:
     """Capture through the plugin with tshark and check the decoded rows."""
     failures = []
     with tempfile.TemporaryDirectory(prefix="tshark-home-") as directory:
@@ -411,6 +483,21 @@ def capture(interface, seconds, address, *, program: Program,
         marker = home / "extcap-calls"
         installed = _install(extcap, program, marker)
         out(f"extcap program: {installed.name} in {extcap}")
+        # What the plugin itself answers, before tshark's copy of the same
+        # call: tshark keeps nothing of a listing that failed, so without this
+        # a board held elsewhere on the host and a broken listing look alike.
+        in_use = check_listing(installed, env, (interface,) + tuple(held),
+                               failures, out)
+        if failures or in_use:
+            for failure in failures:
+                out(f"FAIL: {failure}")
+            if failures:
+                return 1
+            # Every board this run holds was listed and the status matched, so
+            # the listing is right and the capture is the part that cannot be
+            # had here. Nothing has been started yet to clean up.
+            out("SKIP: " + boards_in_use(in_use))
+            return pytools.SKIP_EXIT
         # Listing the interfaces runs the program too, so a tshark that does
         # not answer is reported like any other failure rather than ending
         # the command with a traceback; what the program started is caught by
@@ -534,6 +621,9 @@ def main(argv=None) -> int:
                       help="send SIGINT this many seconds in")
     live.add_argument("--program", help="extcap program to install (default: the "
                                        "fork's btle-extcap.py)")
+    live.add_argument("--held", action="append", default=[], metavar="INTERFACE",
+                      help="another ubertooth<serial> this run holds; the "
+                           "listing must name it (repeatable)")
     sub.choices["read"].add_argument("file", help="capture file tshark reads")
     options = parser.parse_args(argv)
     # Every argument is checked before the host is looked at, so a command
@@ -558,7 +648,8 @@ def main(argv=None) -> int:
     return capture(options.interface, options.seconds, options.address,
                    program=program, pdu_type=pdu_type,
                    min_packets=options.min_packets, capture_filter=options.filter,
-                   interrupt_after=options.interrupt_after)
+                   interrupt_after=options.interrupt_after,
+                   held=tuple(options.held))
 
 
 if __name__ == "__main__":
