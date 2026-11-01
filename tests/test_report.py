@@ -1083,6 +1083,23 @@ class ReportTests(unittest.TestCase):
             self.assertIn("### Results", report)
             self.assertNotIn("\n## Results\n", report)
 
+    def test_a_runs_subsections_move_down_with_their_section(self):
+        # Everything a run wrote moves a level, so a section that has
+        # subsections (the watchdog's issue to file, a file's checks) keeps
+        # them under it rather than beside it.
+        from ubertooth_harness.report import _as_a_section
+
+        page = (
+            "# Ubertooth test run `run-a`\n\n## Watchdog\n\n"
+            "### Issue to file on the fork\n\n````text\nTitle: a reset\n````\n"
+        )
+
+        self.assertEqual(
+            "## Run `run-a`\n\n### Watchdog\n\n"
+            "#### Issue to file on the fork\n\n````text\nTitle: a reset\n````\n",
+            _as_a_section(page),
+        )
+
     def test_one_runs_board_is_masked_in_the_others_transcript(self):
         # The page is masked once with every run's serials, not run by run:
         # the macOS and Linux runs of a release may be taken on one bench,

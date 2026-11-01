@@ -1560,24 +1560,22 @@ def _redact(text: str, serials: Iterable[str]) -> str:
     return _mask_cut_serials(text, serials)
 
 
-# The sections render_run writes, for a combined page to put under the run
-# they belong to. Matched as whole lines: every line of a transcript starts
-# with its elapsed time, so none of them can read as one of these.
-_RUN_SECTIONS = ("## Results", "## Known targets", "## Not applicable",
-                 "## Watchdog", "## Output files", "## Transcript")
+# A heading of a run's own page, to move down a level when the page becomes
+# a section of a report covering several runs. Every heading at once, so a
+# section keeps the subsections under it. A line of a transcript cannot be
+# read as a heading: each one starts with its elapsed time.
+_RUN_HEADING = re.compile(r"(?m)^(#{2,5}) ")
 
 
 def _as_a_section(text: str) -> str:
     """One run's page as a section of a report covering several.
 
-    Its title becomes the section heading and its own sections move under
-    that heading, so a reader scrolling through two transcripts can see
-    which run each belongs to.
+    Its title becomes the section heading and everything it wrote moves a
+    level down, so a reader scrolling through two transcripts can see which
+    run each belongs to.
     """
-    text = text.replace("# Ubertooth test run", "## Run", 1)
-    for heading in _RUN_SECTIONS:
-        text = text.replace(f"\n{heading}\n", f"\n#{heading}\n")
-    return text
+    text = _RUN_HEADING.sub(r"#\1 ", text)
+    return text.replace("# Ubertooth test run", "## Run", 1)
 
 
 def render_run(events: Sequence[Mapping], *, redact_serials: bool = False, transcript: bool = True) -> str:
