@@ -320,12 +320,12 @@ again immediately before each write.
 An Ubertooth's firmware is built per run and hashed into that run's manifest,
 so it needs no record here: the run says what it flashed. The other three
 images are built or fetched once and flashed for as long as they are current,
-so each is recorded with the commit its sources come from and its SHA-256.
+so each is recorded with where its sources come from and its SHA-256.
 
 | Image | What it is | Version | Source | SHA-256 |
 |---|---|---|---|---|
 | `kgv.dfu` | the known-good Ubertooth firmware that `Flash reliability` alternates against the run's own build | `2020-12-R1` | upstream Ubertooth release `2020-12-R1` | `e3fcb486c6e0ce7cc991bf6439f6dbc0156ed1229c2b95ebfd02198f9675bb11` |
-| `zephyr.hex` | the nRF52840 DK role firmware | `utdk-1.3.0` | this repository at `ca674d6`, which is where `firmware/nrf52840dk` carries that version | `0f976c591195ee363307ec51f6c836d07ba3be40d6465c85cd6dec3398fbf288` |
+| `zephyr.hex` | the nRF52840 DK role firmware | `utdk-1.3.0` | this repository, `firmware/nrf52840dk` at that version ([the change that built this image](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/236)) | `0f976c591195ee363307ec51f6c836d07ba3be40d6465c85cd6dec3398fbf288` |
 | `esp32-classic-peer.bin` | the ESP32 Classic peer firmware | `utesp-1.0.0` | this repository at `1d3a049`, which is where `firmware/esp32-classic-peer` carries that version | `6ff85eb6d7069b8663ac78af7836b99af25f3a72b6b34f4f55881145c62266c0` |
 
 The KGV is the one the repository pins: the plan carries its revision and its
