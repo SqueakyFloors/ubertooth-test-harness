@@ -572,10 +572,14 @@ class RunnerService:
             return "run_file_refused", {
                 "status": error.status, "reason": error.detail,
             }
-        except (OSError, ValueError) as error:
+        except Exception as error:  # noqa: BLE001 - silence is the worst answer
             # A run.jsonl that cannot be read at all, or one holding a record
-            # a page cannot be built from (a record is ordinary data). The
-            # reason names the run and the path, never a path on this target.
+            # a page cannot be built from. A record is ordinary data, and
+            # data takes many shapes: a size that is not a number, one too
+            # large for an integer, a details field that is not an object.
+            # Whatever it was, the request is answered. The reason names the
+            # run, the path and the kind of fault, never a path on this
+            # target.
             return "run_file_refused", {
                 "status": 404,
                 "reason": f"{path!r} cannot be served from run {run_id}: "

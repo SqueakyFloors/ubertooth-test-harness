@@ -131,6 +131,35 @@ def page_for(path=None, offset=0, limit=PAGE_BYTES, body=BODY, stream="stdout"):
     }
 
 
+def malformed_runs() -> dict:
+    """run.jsonl records that are JSON but describe no readable file.
+
+    A stored record is ordinary data, and bad data takes more shapes than a
+    wrong number: each of these raises a different exception inside the file
+    list, and none of them may end as silence or as a server failure.
+    """
+    saved = file_record(STDOUT_FILE, "stdout", BODY)
+    files = lambda value: [event(1, "command_finished", {  # noqa: E731
+        "phase": "test", "invocation_id": "002",
+        "command_id": "002-command-1", "output_files": [value],
+    })]
+    return {
+        "a size that is not a number": files({**saved, "bytes": "no"}),
+        "a size too large for an integer": files(
+            {**saved, "bytes": float("inf")}),
+        "details that are not an object": [
+            event(1, "command_finished", "not an object")],
+        "a check whose files are not a list": [
+            *files(saved),
+            event(2, "output_checks", {
+                "phase": "test", "invocation_id": "002",
+                "command_id": "002-command-1",
+                "checks": [{"kind": "expected", "name": "x", "files": 5}],
+            }),
+        ],
+    }
+
+
 def write_run(root: Path, events=None) -> Path:
     events = run_events() if events is None else events
     (root / RUN_LOG).write_text(
@@ -618,17 +647,15 @@ class RunnerPageTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("no run", answer["reason"])
 
     async def test_a_record_a_page_cannot_be_built_from_is_refused(self):
-        # A run.jsonl record is data. Nothing here may end without an
-        # answer: the caller would wait out its timeout for one.
-        write_run(self.run_dir, events=[event(1, "command_finished", {
-            "phase": "test", "invocation_id": "002",
-            "command_id": "002-command-1", "returncode": 0,
-            "output_files": [{**file_record(STDOUT_FILE, "stdout", BODY),
-                              "bytes": "not a number"}],
-        })])
-        answer = await self.refusal(STDOUT_FILE)
-        self.assertEqual(404, answer["status"])
-        self.assertIn("cannot be served", answer["reason"])
+        # A run.jsonl record is data, and bad data takes many shapes. None of
+        # them may end without an answer: the caller on the other side would
+        # wait out its timeout for one that never comes.
+        for shape, events in malformed_runs().items():
+            with self.subTest(shape=shape):
+                write_run(self.run_dir, events=events)
+                answer = await self.refusal(STDOUT_FILE)
+                self.assertEqual(404, answer["status"])
+                self.assertIn("cannot be served", answer["reason"])
 
     async def test_a_record_the_protocol_cannot_carry_is_refused(self):
         write_run(self.run_dir, events=[event(1, "command_finished", {
@@ -916,24 +943,19 @@ class ForwardedFileTests(ControllerTestCase):
 
     async def test_a_record_the_list_cannot_be_built_from_is_a_refusal(self):
         # A stored record is data: a 500 with a traceback is the wrong answer
-        # for a run.jsonl that holds a size which is not a number.
+        # for a run.jsonl that holds, say, a size which is not a number.
         run_id = await self.stored_run()
-        directory = self.results / run_id
-        (directory / RUN_LOG).write_text("".join(json.dumps(e) + "\n" for e in [
-            event(1, "command_finished", {
-                "phase": "test", "invocation_id": "002",
-                "command_id": "002-command-1", "returncode": 0,
-                "output_files": [{**file_record(STDOUT_FILE, "stdout", BODY),
-                                  "bytes": "not a number"}],
-            }),
-        ]), encoding="utf-8")
-        for path in (f"/api/runs/{run_id}/files",
-                     f"/api/runs/{run_id}/file?path={STDOUT_FILE}"):
-            with self.subTest(path=path):
-                status, payload, _ = await self.http("GET", path)
-                self.assertEqual(404, status, payload)
-                self.assertIn("cannot be read from", payload["detail"])
-                self.assertNotIn(str(self.results), payload["detail"])
+        log = self.results / run_id / RUN_LOG
+        for shape, events in malformed_runs().items():
+            log.write_text(
+                "".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+            for path in (f"/api/runs/{run_id}/files",
+                         f"/api/runs/{run_id}/file?path={STDOUT_FILE}"):
+                with self.subTest(shape=shape, path=path):
+                    status, payload, _ = await self.http("GET", path)
+                    self.assertEqual(404, status, payload)
+                    self.assertIn("cannot be read from", payload["detail"])
+                    self.assertNotIn(str(self.results), payload["detail"])
 
 
 if __name__ == "__main__":

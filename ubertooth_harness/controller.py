@@ -1230,9 +1230,34 @@ class Controller:
             # is already answered, and reaching out would not change it.
             if not error.on_target:
                 raise ControllerError(error.detail, error.status) from None
-        except (OSError, ValueError) as error:
-            raise ControllerError(unreadable_log(run.run_id, error), 404) from None
+        except Exception as error:  # noqa: BLE001 - a stored record is data
+            raise self._unreadable_log(run, error) from None
         return await self._fetch_run_file(run, path, offset, limit)
+
+    async def saved_files(self, run: Run) -> list[dict]:
+        """The files the run recorded, each marked readable on this host.
+
+        Read from the run's own run.jsonl a line at a time, so a soak's log
+        is not parsed into memory to list a few files.
+        """
+        try:
+            return await asyncio.to_thread(listing, run.directory)
+        except Exception as error:  # noqa: BLE001 - a stored record is data
+            raise self._unreadable_log(run, error) from None
+
+    def _unreadable_log(self, run: Run, error: Exception) -> ControllerError:
+        """A stored run.jsonl that gave neither a file list nor a page.
+
+        A record is ordinary data, so a line that is JSON but holds, say, a
+        size that is not a number stops a list or a page being built from it.
+        That is a refusal naming the run, not a server failure; the log line
+        carries the detail, and the answer carries no path on this host.
+        """
+        self.log(
+            f"run {run.run_id}: its saved output files cannot be read from "
+            f"{RUN_LOG} ({type(error).__name__}: {error})"
+        )
+        return ControllerError(unreadable_log(run.run_id, error), 404)
 
     async def _fetch_run_file(
         self, run: Run, path: str, offset: int, limit: int
@@ -1594,13 +1619,7 @@ def create_app(controller: Controller):
 
     @app.get("/api/runs/{run_id}/files")
     async def get_run_files(run_id: str):
-        run = controller.get_run(run_id)
-        # Read from run.jsonl a line at a time (runfiles.saved_in), so a
-        # soak's log is not parsed into memory to list a few files.
-        try:
-            return {"files": await asyncio.to_thread(listing, run.directory)}
-        except (OSError, ValueError) as error:
-            raise ControllerError(unreadable_log(run_id, error), 404) from None
+        return {"files": await controller.saved_files(controller.get_run(run_id))}
 
     @app.get("/api/runs/{run_id}/file")
     async def get_run_file(run_id: str, path: str, offset: int = 0, limit: int = PAGE_BYTES):

@@ -2088,8 +2088,9 @@ run.jsonl, so the controller deduplicates by `(run_id, sequence)`. SIGINT,
 SIGTERM, or SIGHUP stops the runner after cancelling and waiting for an
 active run.
 
-Messages are JSON objects with `"version": 3` and a `type` (version 2 added
-the run's `commit`, version 3 its `flash_build`; a runner or controller of
+Messages are JSON objects with `"version": 4` and a `type` (version 2 added
+the run's `commit`, version 3 its `flash_build`, version 4 the `run_file`
+request and its answers; a runner or controller of
 another version is refused); each type has an
 exact field set, and anything else (unknown version or type, a missing or
 extra field, a wrong value) gets `protocol_error` and is not acted on. The

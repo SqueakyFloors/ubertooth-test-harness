@@ -1,6 +1,6 @@
 """Controller service on 127.0.0.1 with an ephemeral port and no hardware.
 
-Most tests drive the controller with a scripted protocol-v3 runner; one runs
+Most tests drive the controller with a scripted protocol-v4 runner; one runs
 the real target runner end to end with the Host-only plan the runner tests
 use.
 """
