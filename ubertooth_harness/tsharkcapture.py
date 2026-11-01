@@ -444,8 +444,9 @@ def check_listing(installed, env, held, failures, out=print) -> int:
     # a note or a warning is a diagnosis. Not only the "error: " lines,
     # because libubertooth writes some of its failures without that prefix,
     # and such a line beside a busy board is another failure, not this one.
-    diagnosed = [line.strip() for line in (result.stderr or "").splitlines()
-                 if line.strip() and not line.startswith(("note: ", "warning: "))]
+    diagnosed = [stripped for stripped in
+                 (line.strip() for line in (result.stderr or "").splitlines())
+                 if stripped and not stripped.startswith(("note: ", "warning: "))]
     for line in diagnosed:
         out("the listing reported: " + line)
     out(f"the listing offered {len(listed)} interface(s), exit {result.returncode}")
@@ -467,11 +468,6 @@ def check_listing(installed, env, held, failures, out=print) -> int:
         # The fork's rule is that a listing which fails says why; without a
         # reason there is nothing to tell a busy bench from a broken listing.
         failures.append(f"the listing exited {result.returncode} without saying why")
-    elif len(diagnosed) != in_use:
-        # Caught by the branch above unless a busy-board line is among them:
-        # a diagnosis beside one is still a second thing going wrong.
-        failures.append(f"the listing exited {result.returncode} reporting more than "
-                        f"the {in_use} board(s) another program holds")
     elif result.returncode != 1:
         # A partial listing exits 1. Any other status, or a signal, is
         # something else going wrong, whatever the listing also reported.

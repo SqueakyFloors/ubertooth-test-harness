@@ -497,6 +497,18 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(1, code, out)
         self.assertIn("tshark -D did not answer within 1s", out)
 
+    def test_tshark_not_listing_the_interface_is_still_reported(self):
+        # A board can be taken between the plugin's listing and tshark's own
+        # copy of the same call, and tshark then has no interface to capture
+        # on. The plugin's answer is stood in for here, because the two calls
+        # run the same program and cannot disagree in one run.
+        with mock.patch.object(tsharkcapture, "check_listing", return_value=0):
+            code, out = self.capture(seconds=3.0,
+                                     environment={"FAKE_EXTCAP_SERIAL": "0badc0de"})
+
+        self.assertEqual(1, code, out)
+        self.assertIn(f"tshark -D does not list {INTERFACE}", out)
+
     def test_every_other_board_on_the_host_is_listed_and_the_capture_runs(self):
         # A host with three boards, all openable: the listing exits 0 and the
         # capture goes ahead as on a host with one.
