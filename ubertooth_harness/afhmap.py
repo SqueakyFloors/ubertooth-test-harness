@@ -87,6 +87,10 @@ DEFAULT_MAX_STRAY_SHARE = 0.70
 DEFAULT_MIN_DROPPED_CHANNELS = 10
 # Seconds a bucket of the per-minute series covers.
 MINUTE_S = 60
+# The fewest channels a piconet hops over (Core 6.0 Vol 4 Part E 7.3.46, and
+# N_min in Vol 2 Part B 2.6.3), which the peer firmware enforces too. A link
+# map below it is not a map this comparison can mean anything about.
+MIN_PICONET_CHANNELS = 20
 
 
 class AfhMapError(RuntimeError):
@@ -248,6 +252,14 @@ def load_peer_report(path: Path) -> PeerReport:
             + "; ".join(f"{sample.at} {sample.link or 'none'}" for sample in samples))
     (link,) = maps
     link_channels = channels_from_hex(link, "the in-force map")
+    if len(link_channels) < MIN_PICONET_CHANNELS:
+        # Below the spec's floor there is no hopping piconet to compare a
+        # recovered map with, and an empty map would make "every in-force
+        # channel found" true of a tool that found nothing.
+        raise AfhMapError(
+            f"the link's map {link} keeps {len(link_channels)} channels, fewer "
+            f"than the {MIN_PICONET_CHANNELS} a piconet hops over; there is no "
+            "map here to compare a recovery with")
     beyond = link_channels - requested_channels
     if beyond:
         # The controller may drop channels the host asked to keep; it must
@@ -413,11 +425,17 @@ def judge(comparison: Comparison, *, min_found_share: float,
             f"{len(comparison.found)} of {len(comparison.in_force)} in-force "
             f"channels found, below the {min_found_share:.0%} this test needs "
             f"(missing {runs(comparison.missing)})")
-    if len(comparison.dropped) < min_dropped_channels:
+    if max_stray_share >= 1.0:
+        # Every channel out of force allowed: the caller is measuring the
+        # recovery and not its selectivity, which is what the detection
+        # phase's map calls for (it fills gaps and removes nothing).
+        lines.append("stray share: not judged, this test allows every channel "
+                     "out of force")
+    elif len(comparison.dropped) < max(min_dropped_channels, 1):
         lines.append(
             f"stray share: not judged, only {len(comparison.dropped)} channels "
             f"are out of force and this test judges the share from "
-            f"{min_dropped_channels}")
+            f"{max(min_dropped_channels, 1)}")
     elif comparison.stray_share > max_stray_share:
         problems.append(
             f"{len(comparison.stray)} of {len(comparison.dropped)} channels out "

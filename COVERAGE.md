@@ -282,7 +282,7 @@ Combinations: `-c` with `-l`: last one wins. Covered (Raw receive, comprehensive
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
 | `-h` | help | Covered | Host CLI surface |
-| `-l <LAP>` | target LAP | Covered | Recover AFH map (smoke, `classic` and `release` plans): the piconet's LAP, against two ESP32 Classic peers held to a chosen channel map |
+| `-l <LAP>` | target LAP | Covered | Recover AFH map (`classic` plan): the piconet's LAP, against two ESP32 Classic peers held to a chosen channel map |
 | `-u <UAP>` | target UAP | Covered | Same |
 | `-m <n>` | channel-removal threshold | Hard | Left at its default by Recover AFH map: a channel the piconet stops using inside one capture is not something the peers make happen |
 | `-r` | print the map every second | Covered | Recover AFH map (smoke): one `<time> <80 bits>` line per second, and the last of them is the recovered map, judged against the map the link is hopping over. Classic Bluetooth receive (comprehensive) covers the line format with no piconet |
@@ -292,7 +292,7 @@ Combinations: `-c` with `-l`: last one wins. Covered (Raw receive, comprehensive
 | `-V` | version | Covered | Host CLI surface (fast, release): host version line |
 | `-U <index\|serial>` | select device | Covered | Classic Bluetooth receive by serial; an unknown serial exits 1 with `no Ubertooth found with serial matching` (comprehensive; it segfaulted before `219a5b0`, [ubertooth#185](https://github.com/SqueakyFloors/ubertooth/issues/185)) |
 
-The receive transfer is given back between the detection and monitoring phases (libubertooth, fork `553b8b8`, [ubertooth#307](https://github.com/SqueakyFloors/ubertooth/issues/307)): Covered by Recover AFH map (comprehensive), whose `-t` case runs on into the monitoring phase and is stopped there; with no piconet, `-t N` ends after the detection phase.
+The receive transfer is given back between the detection and monitoring phases (libubertooth, fork `553b8b8`, [ubertooth#307](https://github.com/SqueakyFloors/ubertooth/issues/307)): Covered by Recover AFH map (comprehensive), whose `-t` case runs on into the monitoring phase and is stopped there, with the map it detected checked against the one the link was hopping over; with no piconet, `-t N` ends after the detection phase.
 
 ## ubertooth-ego
 

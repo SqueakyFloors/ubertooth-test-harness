@@ -61,12 +61,17 @@ from ubertooth_harness.classic_cases import (
     _pair,
     _pair_patterns,
     _reset_step,
-    _capture_path,
     ACCEPTOR_ROLE,
     INITIATOR_ROLE,
 )
 from ubertooth_harness.receive_cases import EARLY_EXIT_S, EXIT_SLACK_S, seconds_arg
-from ubertooth_harness.stateful import StateCase, Step
+from ubertooth_harness.stateful import (
+    ATTEMPT_KEY,
+    CAPTURE_DIR_KEY,
+    StateCase,
+    Step,
+    require,
+)
 from ubertooth_harness.transitions import (
     MODE_RESET_SETTINGS,
     _cleanup,
@@ -99,13 +104,25 @@ AC_ERRORS = 0
 # all 40 channels of a 40-channel map, so a capture of this length missing
 # one is a change worth failing for.
 MIN_FOUND_SHARE = 1.0
-# Up to 70% of the channels out of force may be marked used. The same bench
-# recovered 59 channels against 38 in force after three minutes, 21 of 41 out
-# of force, and the skirt is wider for a shorter capture because the band
-# beside the block is where the first strays appear. The ceiling is what
-# separates a recovery from a tool marking everything used, not a measure of
-# the skirt.
+# Up to 70% of the channels out of force may be marked used by the -r cases.
+# The same bench recovered 59 channels against 38 in force after three
+# minutes: 21 of 41 out of force, 51%. The ceiling is what separates a
+# recovery from a tool marking everything used, not a measure of the skirt.
 MAX_STRAY_SHARE = 0.70
+# The detection phase's map is not held to that, and 1.0 is how the checker
+# is told to report the share without judging it. Two things make its map
+# wider than -r's, both by design: it fills a single channel gap between two
+# channels it has seen, and it never removes a channel once seen, so its map
+# is an upper bound that grows with the capture. The bench's own -t 60 map
+# marked 29 of 41 channels out of force used, 71%, which is already past the
+# -r ceiling, and a longer window marks more. So the -r cases are where
+# selectivity is measured, and this case measures that the detection phase
+# finds the channels in use at all.
+DETECTION_MAX_STRAY_SHARE = 1.0
+# Channels that must be out of force for the stray share to be judged at
+# all. A map that keeps nearly the whole band leaves too few for a share to
+# mean anything; both maps here leave 39 or more.
+MIN_DROPPED_CHANNELS = afhmap.DEFAULT_MIN_DROPPED_CHANNELS
 
 # The capture is stopped by the driver, because ubertooth-afh keeps watching
 # for map changes once it has a map and stops only when it is signalled. The
@@ -122,6 +139,24 @@ R_LINE = r"(?m)^\d+ [01]{80}$"
 CHECK_TIMEOUT_S = 60.0
 MAPS_FILE = "afh-maps.txt"
 REPORT_FILE = "afh-peer-report.json"
+
+
+def _attempt_path(name: str):
+    """The file of the attempt that is running.
+
+    Each attempt keeps its own pair of files (``afh-maps-1.txt`` and
+    ``afh-peer-report-1.json``, then ``-2``), as the BLE connection cases
+    keep a capture per attempt, so the run directory holds what every try
+    measured rather than only the last.
+    """
+    stem, _, extension = name.rpartition(".")
+
+    def path(context):
+        attempt = context.get(ATTEMPT_KEY, "1")
+        return str(Path(require(context, CAPTURE_DIR_KEY))
+                   / f"{stem}-{attempt}.{extension}")
+
+    return path
 
 
 def _afh_argv(acceptor, initiator, serial, lap, uap, seconds, wanted, options,
@@ -148,8 +183,8 @@ def _afh_argv(acceptor, initiator, serial, lap, uap, seconds, wanted, options,
             "--min-seconds", str(seconds - EARLY_EXIT_S),
             "--timeout", str(interrupt_after + EXIT_SLACK_S),
             "--map", wanted,
-            "--map-report", _capture_path(REPORT_FILE)(context),
-            "--command-output", _capture_path(MAPS_FILE)(context),
+            "--map-report", _attempt_path(REPORT_FILE)(context),
+            "--command-output", _attempt_path(MAPS_FILE)(context),
             "--interrupt-after", str(interrupt_after),
             "--", "ubertooth-afh", "-U", serial, "-l", lap, "-u", uap,
             "-e", str(AC_ERRORS),
@@ -186,17 +221,20 @@ def _found_pattern() -> str:
     return r"(?m)^in-force channels found: \d+ of \d+ \(\d+%\)$"
 
 
-def _judge_step(wanted: str) -> Step:
+def _judge_step(wanted: str, max_stray_share: float) -> Step:
     """Compare the recovered map with the one the link was hopping over."""
     return Step(
         "judge-map",
         f"The recovered map covers the channels in force for {wanted}",
         lambda context: (
             sys.executable, _AFHMAP,
-            "--peer-report", _capture_path(REPORT_FILE)(context),
-            "--maps", _capture_path(MAPS_FILE)(context),
+            "--peer-report", _attempt_path(REPORT_FILE)(context),
+            "--maps", _attempt_path(MAPS_FILE)(context),
             "--min-found-share", str(MIN_FOUND_SHARE),
-            "--max-stray-share", str(MAX_STRAY_SHARE),
+            "--max-stray-share", str(max_stray_share),
+            # Named rather than left to the checker's default, so the run
+            # record says which floor decided whether the share was judged.
+            "--min-dropped-channels", str(MIN_DROPPED_CHANNELS),
         ),
         timeout_s=CHECK_TIMEOUT_S,
         output_patterns=(
@@ -204,6 +242,9 @@ def _judge_step(wanted: str) -> Step:
             r"(?m)^in-force map: [0-9a-f]{20} used \d+ ",
             r"(?m)^recovered map: [0-9a-f]{20} used \d+ ",
             _found_pattern(),
+            r"(?m)^stray channels marked used: \d+ of \d+ out of force ",
+        ) + ((r"(?m)^stray share: not judged, this test allows every channel ",)
+             if max_stray_share >= 1.0 else ()) + (
             r"(?m)^afh recovery: ok$",
         ),
     )
@@ -211,7 +252,7 @@ def _judge_step(wanted: str) -> Step:
 
 def _map_case(serial, acceptor, initiator, seconds, *, case_id, name, wanted,
               options, tool_line, expected_state, tool_pattern,
-              interrupt_after):
+              interrupt_after, max_stray_share=MAX_STRAY_SHARE):
     """One capture on one map, then the comparison, with one retry.
 
     The capture and the comparison are one retried group: whether a channel
@@ -233,7 +274,7 @@ def _map_case(serial, acceptor, initiator, seconds, *, case_id, name, wanted,
              output_patterns=_pair_patterns(acceptor, initiator)
              + _map_patterns(wanted)
              + (tool_pattern, r"(?m)^command interrupted after [0-9.]+ s$")),
-        _judge_step(wanted),
+        _judge_step(wanted, max_stray_share),
         _stop(serial),
     )
     return StateCase(
@@ -297,6 +338,9 @@ def afh_map_cases(arguments, resources, resource_identities):
             # it arrives.
             interrupt_after=seconds + DETECT_GRACE_S,
             tool_line=f"ubertooth-afh -e {AC_ERRORS} -t {seconds} detects the map",
-            expected_state=f"an AFH map line after about {seconds} s; "
-                           + recovered))
+            max_stray_share=DETECTION_MAX_STRAY_SHARE,
+            expected_state=f"an AFH map line after about {seconds} s; every "
+                           "channel the link was hopping over in the map it "
+                           "printed, with the stray channels reported and not "
+                           "judged"))
     return tuple(cases)

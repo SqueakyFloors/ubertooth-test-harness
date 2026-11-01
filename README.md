@@ -1360,8 +1360,7 @@ the smoke run above plus `Recover AFH map`, `classic-comprehensive` adds the
 capture files, the role exchange, and the AFH detection phase, and
 `classic-long` is the bounded long variant: the same two follow cases over a
 five-minute capture each, which is what shows that a receive run and the
-pair's link hold up for minutes rather than seconds. `Recover AFH map` is in
-the release plan as well, on the host the peers are attached to. The sampling
+pair's link hold up for minutes rather than seconds. The sampling
 soak, `Classic Bluetooth receive soak`, is still a backlog entry; sampling is
 what it waits for, not traffic.
 

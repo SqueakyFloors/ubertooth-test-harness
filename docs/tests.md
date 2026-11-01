@@ -2034,7 +2034,9 @@ attenuated or more distant receiver) if a run's skirt makes it ambiguous.
 peers must run `utesp-1.3.0` or a later 1.x image, which is where `afh` and
 the link map arrived; an older one fails the case naming what it found. No
 `rf:` default, so a plan may place the receiver anywhere; two minutes is the
-capture window the classic plan uses and 90 seconds the release gate's.
+capture window the classic plan uses. The release plan does not name it:
+every entry there runs on each registered host, and naming the one host the
+peers are attached to would fail planning on the others.
 
 **Expected outcome.** Smoke runs 2 cases, one per map: channels 0 to 39, and
 channels 30 to 49, the twenty the spec allows at least and the firmware's own
@@ -2052,12 +2054,17 @@ force with its three readings, the recovered map, the channels found and
 missing, the stray channels, and a line per minute of the capture showing what
 the map had grown to by then. Comprehensive runs 3, adding the tool's other
 path: `-t <duration>` detects the map for that long and prints it as
-`AFH map: 0x...`, which also fills a single channel gap between two channels
-it has seen, where `-r` does not.
+`AFH map: 0x...`. That map is held to the found measure alone, and its stray
+share is reported and not judged: the detection phase fills a single channel
+gap between two channels it has seen, and never drops a channel once seen, so
+its map is an upper bound that grows with the capture. Selectivity is what the
+two `-r` cases measure.
 
 A capture and its comparison are one retried group, run up to twice: whether
 a channel was heard depends on where the sweep and the hop sequence met, and
 the peers keep making the traffic, so a second window costs only its own time.
+Each attempt writes its own pair of files, so the run directory holds what
+every window measured.
 The cleanup is the same as the other peer cases: both peers reset to their
 boot state, the Ubertooth's channel, squelch, and LEDs restored.
 

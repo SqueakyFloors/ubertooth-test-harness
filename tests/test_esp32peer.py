@@ -2,6 +2,7 @@
 
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -628,7 +629,8 @@ class ChannelMapTests(unittest.TestCase):
         # (the link check and the traffic reads) take the earlier entries.
         initiator_firmware.link_maps = [self.IN_FORCE] * 2 + [other] * 8
         acceptor, initiator = _peers(acceptor_firmware, initiator_firmware)
-        with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(
+        with tempfile.TemporaryDirectory() as directory, _captured_stdout(), \
+                self.assertRaisesRegex(
             esp32peer.PeerError, "channel map changed under the command"
         ):
             esp32peer.stream(acceptor, initiator, self.TOOL,
@@ -644,7 +646,7 @@ class ChannelMapTests(unittest.TestCase):
         acceptor_firmware.version = esp32peer.AFH_MINIMUM_FIRMWARE
         initiator_firmware.link_error = "the controller does not know this link"
         acceptor, initiator = _peers(acceptor_firmware, initiator_firmware)
-        with self.assertRaisesRegex(
+        with _captured_stdout(), self.assertRaisesRegex(
             esp32peer.PeerError,
             "could not be read at the start of the command: the controller does"
         ):
@@ -710,6 +712,32 @@ class ChannelMapTests(unittest.TestCase):
             esp32peer.PeerError, "did not finish within"
         ):
             self._stream(directory, command=deaf, timeout=1.0)
+
+    def test_a_sample_that_fails_mid_capture_does_not_leave_the_tool_running(self):
+        # A link that drops under the capture makes the middle read fail. A
+        # capture tool left running would hold the board past the step and
+        # into the retry, so the command is stopped before the error goes up.
+        marker = Path(tempfile.mkdtemp()) / "still-running"
+        child = (sys.executable, "-c",
+                 "import signal, sys, time\n"
+                 "signal.signal(signal.SIGINT, lambda *_a: sys.exit(0))\n"
+                 f"open({str(marker)!r}, 'w').close()\n"
+                 "time.sleep(60)\n")
+
+        def fails(_elapsed):
+            raise esp32peer.PeerError("the controller does not know this link")
+
+        report = io.StringIO()
+        with _captured_stdout(), self.assertRaisesRegex(
+            esp32peer.PeerError, "does not know this link"
+        ):
+            esp32peer._run_command_watched(
+                child, timeout=30.0, interrupt_after=10.0, sample_at=0.3,
+                sample=fails, out=report)
+        self.assertTrue(marker.exists())  # it really started
+        # Nothing of ours is left behind: the command was interrupted and
+        # reaped, so this process has no live child.
+        self.assertEqual([], [p for p in subprocess._active if p.poll() is None])
 
     def test_a_map_report_without_a_map_is_a_usage_error(self):
         acceptor_firmware, initiator_firmware = _pair()

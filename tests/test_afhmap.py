@@ -134,6 +134,21 @@ class PeerReportTests(unittest.TestCase):
             with self.assertRaisesRegex(afhmap.AfhMapError, "no link map sample"):
                 afhmap.load_peer_report(files.report)
 
+    def test_a_link_map_below_the_spec_floor_is_refused(self):
+        # "every in-force channel found" would otherwise be true of a tool
+        # that found nothing at all.
+        for link in (afhmap.hex_from_channels(()),
+                     afhmap.hex_from_channels(range(19))):
+            with tempfile.TemporaryDirectory() as directory:
+                files = _Files(directory,
+                               _report(requested=afhmap.hex_from_channels(range(40)),
+                                       links=(link,) * 3),
+                               _r_lines([frozenset()]))
+                with self.subTest(link), self.assertRaisesRegex(
+                    afhmap.AfhMapError, "fewer than the 20 a piconet hops over"
+                ):
+                    afhmap.load_peer_report(files.report)
+
     def test_a_sample_field_that_is_not_a_number_is_refused(self):
         report = _report()
         report["samples"][1]["used"] = "thirty-eight"
@@ -240,6 +255,16 @@ class ComparisonTests(unittest.TestCase):
                                                         IN_FORCE_CHANNELS),
                                       min_found_share=0.95, max_stray_share=0.7,
                                       min_dropped_channels=10))
+
+    def test_a_ceiling_of_one_reports_the_stray_share_without_judging_it(self):
+        # How the detection phase's case is run: its map fills gaps and
+        # never drops a channel, so selectivity is not its measure.
+        verdict = afhmap.judge(
+            afhmap.Comparison(frozenset(range(afhmap.CHANNELS)), IN_FORCE_CHANNELS),
+            min_found_share=1.0, max_stray_share=1.0, min_dropped_channels=10)
+        self.assertIn("stray share: not judged, this test allows every channel",
+                      verdict[0])
+        self.assertEqual("afh recovery: ok", verdict[-1])
 
     def test_the_stray_share_is_left_unjudged_for_a_nearly_full_band(self):
         # A map that keeps 76 of 79 channels leaves three out of force,

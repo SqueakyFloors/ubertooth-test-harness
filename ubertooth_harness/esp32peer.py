@@ -648,10 +648,10 @@ def reset(peer: Peer, out=None) -> dict:
 def _tee(stream, sinks) -> None:
     """Pass the command's output on, line by line, to every sink.
 
-    One line at a time and flushed, because the sinks are this process's own
-    standard output, where the step's record reads it, and the saved file a
-    later step reads: a capture stopped partway must leave both complete up
-    to the last line the command wrote.
+    One line at a time and flushed, because the sinks are the stream the
+    step's record reads and the saved file a later step reads: a capture
+    stopped partway must leave both complete up to the last line the command
+    wrote.
     """
     for line in stream:
         for sink in sinks:
@@ -659,12 +659,31 @@ def _tee(stream, sinks) -> None:
             sink.flush()
 
 
+def _stop_child(child, grace: float = INTERRUPT_TIMEOUT_S) -> None:
+    """End the command, interrupt first, kill if it will not go.
+
+    SIGINT rather than a kill, for the reason _run_command gives: a capture
+    tool stops its board and closes its files on it. Nothing here raises,
+    because every caller is already reporting something that went wrong.
+    """
+    if child.poll() is not None:
+        return
+    try:
+        child.send_signal(signal.SIGINT)
+        child.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait()
+    except OSError:
+        pass
+
+
 def _run_command_watched(command: Sequence[str], *, timeout: float,
                          interrupt_after: float | None = None,
                          output_path: str | None = None,
                          sample_at: float | None = None,
                          sample: Callable[[float], None] | None = None,
-                         out) -> tuple[int, float]:
+                         out, pass_through=None) -> tuple[int, float]:
     """Run the thing under test, saving its output and stopping it on time.
 
     ``interrupt_after`` is for a command that runs until it is signalled:
@@ -673,6 +692,11 @@ def _run_command_watched(command: Sequence[str], *, timeout: float,
     and its exit status is the command's own. ``sample_at`` reads the peer
     while the command runs, which costs a round trip to the board's shell
     and nothing on the air.
+
+    The command is never left running. A sample that fails, which is what a
+    link going down mid-capture looks like, would otherwise leave a capture
+    tool holding the board while the harness waited out the step's deadline,
+    and the retry would start on a board that was still busy.
     """
     started = time.monotonic()
     saved = (open(output_path, "w", encoding="utf-8")  # noqa: SIM115 (closed below)
@@ -683,57 +707,38 @@ def _run_command_watched(command: Sequence[str], *, timeout: float,
                                      text=True, errors="replace")
         except OSError as error:
             raise PeerError(f"cannot run {command[0]}: {error}") from error
-        sinks = [sys.stdout] + ([saved] if saved else [])
+        sinks = [pass_through if pass_through is not None else sys.stdout]
+        if saved:
+            sinks.append(saved)
         pump = threading.Thread(target=_tee, args=(child.stdout, sinks),
                                 daemon=True)
         pump.start()
-        deadline = started + timeout
-        stop_at = None if interrupt_after is None else started + interrupt_after
-        due = None if sample_at is None or sample is None else started + sample_at
-        overran = False
-        while child.poll() is None:
-            now = time.monotonic()
-            if due is not None and now >= due:
-                due = None
-                sample(now - started)
-                continue
-            if stop_at is not None and now >= stop_at:
-                stop_at = None
-                print(f"command interrupted after {now - started:.1f} s", file=out)
-                out.flush()
-                child.send_signal(signal.SIGINT)
-                # From the interrupt, the command gets the same grace as an
-                # overrunning one: long enough to stop its board and close
-                # its files, not long enough to hold the boards for a run
-                # that is already over.
-                deadline = min(deadline, time.monotonic() + INTERRUPT_TIMEOUT_S)
-                continue
-            if now >= deadline:
-                overran = True
-                break
-            time.sleep(POLL_S)
+
         def drained() -> None:
             """Wait for the reader, then let go of the pipe.
 
             The reader is given the same grace to pass on what the command
-            wrote before it exited; one still blocked after that is a daemon
-            and does not hold this process open. The pipe is closed only once
-            the reader has let go of it, because closing it underneath would
-            raise in the thread instead of here.
+            wrote before it exited. One still blocked after that keeps the
+            pipe open until this process ends, which is close enough behind
+            it; closing the pipe underneath the thread would raise there
+            instead of here, and the thread is a daemon either way.
             """
             pump.join(INTERRUPT_TIMEOUT_S)
             if not pump.is_alive():
                 child.stdout.close()
 
+        try:
+            overran = _watch(child, out, started=started, timeout=timeout,
+                             interrupt_after=interrupt_after,
+                             sample_at=sample_at, sample=sample)
+        except BaseException:
+            # A sample that raised, or a cancellation: the command goes
+            # first, so nothing is left holding the board.
+            _stop_child(child)
+            drained()
+            raise
         if overran:
-            # Interrupt first, for the reason _run_command gives: a capture
-            # tool stops its board and closes its files on SIGINT.
-            child.send_signal(signal.SIGINT)
-            try:
-                child.wait(timeout=INTERRUPT_TIMEOUT_S)
-            except subprocess.TimeoutExpired:
-                child.kill()
-                child.wait()
+            _stop_child(child)
             drained()
             raise PeerError(f"{command[0]} did not finish within {timeout:g}s")
         status = child.wait()
@@ -742,6 +747,40 @@ def _run_command_watched(command: Sequence[str], *, timeout: float,
     finally:
         if saved is not None:
             saved.close()
+
+
+def _watch(child, out, *, started: float, timeout: float,
+           interrupt_after: float | None, sample_at: float | None,
+           sample: Callable[[float], None] | None) -> bool:
+    """Wait for the command, sampling and interrupting on time.
+
+    True when it was still running at its deadline, which is the caller's to
+    report; False when it ended by itself or at the interrupt.
+    """
+    deadline = started + timeout
+    stop_at = None if interrupt_after is None else started + interrupt_after
+    due = None if sample_at is None or sample is None else started + sample_at
+    while child.poll() is None:
+        now = time.monotonic()
+        if due is not None and now >= due:
+            due = None
+            sample(now - started)
+            continue
+        if stop_at is not None and now >= stop_at:
+            stop_at = None
+            print(f"command interrupted after {now - started:.1f} s", file=out)
+            out.flush()
+            child.send_signal(signal.SIGINT)
+            # From the interrupt, the command gets the same grace as an
+            # overrunning one: long enough to stop its board and close its
+            # files, not long enough to hold the boards for a run that is
+            # already over.
+            deadline = min(deadline, time.monotonic() + INTERRUPT_TIMEOUT_S)
+            continue
+        if now >= deadline:
+            return True
+        time.sleep(POLL_S)
+    return False
 
 
 def _run_command(command: Sequence[str], timeout: float) -> tuple[int, float]:
