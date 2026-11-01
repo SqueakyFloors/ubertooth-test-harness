@@ -1440,7 +1440,10 @@ capture can show:
   connection events later, so a packet with a correct CRC 2 s or more after
   its own CONNECT_IND is one the board tracked across the update. The capture
   records carry the time each packet arrived, which is what that distance is
-  measured in.
+  measured in. Every connection the file holds a later CONNECT_IND for has to
+  show one, so a follow that died on the second connection's update cannot
+  pass on the first connection's evidence; the last connection in the file is
+  left out, because the capture window, not the follow, is what ends it.
 
 The DKs are then asked what they did, which is the only place the number of
 cycles can be read: a window the central spent on one long connection reports
@@ -1481,6 +1484,23 @@ several reconnections used to die partway through
 ([ubertooth#505](https://github.com/SqueakyFloors/ubertooth/issues/505),
 fixed), which is why the single-connection test still keeps its window inside
 one connection.
+
+Two things the checks cannot separate. A connection's packets look
+unexplained whether the board followed a connection it never announced or
+the CONNECT_IND itself was lost on the way to the host, which does happen —
+the firmware counts capture transfer errors for that reason. Three captures
+make it unlikely rather than impossible. And the connect and disconnect
+counters the central reports run from the board's boot, so on a second or
+third capture attempt they cover the whole case rather than that one window:
+they say the central is cycling while the case runs, and the capture check,
+which wants two of the pair's connections in the file the attempt just
+wrote, is what binds per window.
+
+"No stale records from follow mode" is checked as far as one command can: the
+board reports itself back in idle mode, and the capture file holds no packet
+on an access address it does not also announce. Whether a *later* capture
+picks up records left by this one is a different measurement, which `BLE CRC
+transitions` makes with `stalecheck.py`.
 
 ## Capture known Classic device
 

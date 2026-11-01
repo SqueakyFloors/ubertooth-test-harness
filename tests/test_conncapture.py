@@ -277,28 +277,69 @@ class RepeatedConnectionTests(unittest.TestCase):
 
     def test_packets_only_at_the_start_of_a_connection_fail_the_update_floor(self):
         """A follow that stopped at the parameter update looks like this."""
-        records = [connect_ind()] + [data_packet(251)] * 2
+        records = [connect_ind()] + [data_packet(251)] * 2 + [second_connect_ind()]
         _header, result = self.check(
-            pcapng(records, times=[0, 100_000, 900_000], tsresol=9),
+            pcapng(records, times=[0, 100_000, 900_000, 5_200_000], tsresol=9),
             after_update_ms=2000)
         self.assertEqual(1, len(result.problems))
         self.assertIn("surviving the parameter update", result.problems[0])
         self.assertIn("the latest was 900 ms", result.problems[0])
+
+    def test_every_connection_that_ended_inside_the_capture_is_asked(self):
+        """One connection's late packet does not excuse another's missing
+        one: a follow that died on the second connection's update would
+        otherwise pass on the first connection's evidence."""
+        records = [connect_ind(), data_packet(251),
+                   second_connect_ind(),
+                   data_packet(251, access=SECOND_ACCESS, crc_init=SECOND_CRC_INIT),
+                   connect_ind(data=lldata(access=0x77665544, crc_init=0x223344))]
+        times = [0, 4_000_000, 5_200_000, 5_600_000, 10_400_000]
+        _header, result = self.check(
+            pcapng(records, times=times, tsresol=9), after_update_ms=2000)
+        self.assertEqual(
+            [f"connection {SECOND_ACCESS:08x} has no packet with a correct CRC "
+             "2000 ms or more after its own CONNECT_IND, so the capture does "
+             "not show the follow surviving the parameter update (the latest "
+             "was 400 ms)"],
+            result.problems)
+
+    def test_the_last_connection_in_the_file_is_not_asked(self):
+        """The capture window is what ends it, not the follow."""
+        records = [connect_ind(), data_packet(251), second_connect_ind(),
+                   data_packet(251, access=SECOND_ACCESS, crc_init=SECOND_CRC_INIT)]
+        _header, result = self.check(
+            pcapng(records, times=[0, 4_000_000, 5_200_000, 5_600_000],
+                   tsresol=9),
+            after_update_ms=2000)
+        self.assertEqual([], result.problems)
+
+    def test_one_connection_alone_shows_nothing_about_the_update(self):
+        # Nothing in the file ended inside it, so there is no connection the
+        # check can ask, and passing on that would be passing on no evidence.
+        records = [connect_ind(), data_packet(251)]
+        _header, result = self.check(
+            pcapng(records, times=[0, 4_000_000], tsresol=9), after_update_ms=2000)
+        self.assertEqual(
+            ["the capture holds no connection that ended inside it, so nothing "
+             "in it shows a follow surviving the parameter update 2000 ms in"],
+            result.problems)
 
     def test_no_timed_packet_at_all_fails_the_update_floor(self):
         # A simple packet block carries no time, so no distance can be read
         # from it and the check must not pass on it.
         data = _block(0x0A0D0D0A, struct.pack("<IHHq", 0x1A2B3C4D, 1, 0, -1))
         data += _block(1, struct.pack("<HHI", 256, 0, 65535))
-        for item in (connect_ind(), data_packet(251)):
+        for item in (connect_ind(), data_packet(251), second_connect_ind()):
             data += _block(3, struct.pack("<I", len(item)) + item)
         _header, result = self.check(data, after_update_ms=2000)
         self.assertIn("the latest was none", result.problems[0])
 
     def test_a_corrupt_late_packet_does_not_satisfy_the_update_floor(self):
-        records = [connect_ind(), data_packet(251, corrupt=True)]
+        records = [connect_ind(), data_packet(251, corrupt=True),
+                   second_connect_ind()]
         _header, result = self.check(
-            pcapng(records, times=[0, 4_000_000], tsresol=9), after_update_ms=2000)
+            pcapng(records, times=[0, 4_000_000, 5_200_000], tsresol=9),
+            after_update_ms=2000)
         self.assertIn("the latest was none", result.problems[0])
 
     def test_a_connection_the_capture_never_announced_is_refused(self):

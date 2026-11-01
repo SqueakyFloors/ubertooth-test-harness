@@ -33,9 +33,12 @@ The checks:
 - with the cycle options, a capture that spans several of the pair's
   connections rather than one: at least ``--min-connections`` of them,
   counted by access address, each carrying at least
-  ``--min-connection-packets`` packets, and at least one packet with a
-  correct CRC ``--after-update-ms`` or more after its own CONNECT_IND, which
-  is long enough that the central's parameter update has taken effect. With
+  ``--min-connection-packets`` packets, and, for every connection the file
+  holds a later CONNECT_IND for, a packet with a correct CRC
+  ``--after-update-ms`` or more after its own CONNECT_IND, which is long
+  enough that the central's parameter update has taken effect. The last
+  connection in the file is left out of that one, because the capture
+  window, not the follow, is what ends it. With
   ``--require-announced``, no packet may be on an access address that no
   CONNECT_IND in the capture handed out: in a follow the board writes the
   address it synchronized on into each record, so such a packet is a
@@ -211,18 +214,12 @@ def _data_packet(record, access_address: int, crc_init: int):
     return length, whole[length:] == expected
 
 
-def data_packets(records, access_address: int, crc_init: int) -> list[tuple[int, bool]]:
-    """(payload length, CRC is right) of each packet on this access address.
+def timed_data_packets(records, access_address: int, crc_init: int) -> list[tuple]:
+    """(time, payload length, CRC is right) of each packet on this address.
 
     The CRC is computed here with the connection's own CRC init, so a
     corrupted length byte cannot pass for a long packet.
     """
-    found = (_data_packet(record, access_address, crc_init) for record in records)
-    return [item for item in found if item is not None]
-
-
-def timed_data_packets(records, access_address: int, crc_init: int) -> list[tuple]:
-    """(time, payload length, CRC is right) of each packet on this address."""
     found = []
     for record in records:
         item = _data_packet(record.data, access_address, crc_init)
@@ -348,8 +345,7 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
         result.problems.append(
             f"link type {link_type}, not {LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR}")
         return header, result
-    records = [record.data for record in timed]
-    result.records = len(records)
+    result.records = len(timed)
     times = [record.micros for record in timed if record.micros is not None]
     result.span_ms = (max(times) - min(times)) // 1000 if times else None
     central = central.upper()
@@ -443,14 +439,28 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
                 f"connection {item.access_address:08x} carries {item.packets} "
                 f"packet(s), fewer than {min_connection_packets}")
     if after_update_ms is not None:
-        latest = max((item.last_valid_after_ms for item in result.connections
-                      if item.last_valid_after_ms is not None), default=None)
-        if latest is None or latest < after_update_ms:
+        # Every connection but the last one, which the capture window cuts
+        # short: a connection the file holds a later CONNECT_IND for ran to
+        # its own end inside the window, so a follow that survived the
+        # central's parameter update has a late packet from each of those.
+        # Asking it of the last one as well would fail on where the window
+        # happened to stop rather than on the follow.
+        whole = result.connections[:-1]
+        if not whole:
             result.problems.append(
-                f"no packet with a correct CRC {after_update_ms} ms or more after "
-                "its own CONNECT_IND, so the capture does not show a followed "
-                "connection surviving the parameter update (the latest was "
-                + (f"{latest} ms" if latest is not None else "none") + ")")
+                f"the capture holds no connection that ended inside it, so "
+                f"nothing in it shows a follow surviving the parameter update "
+                f"{after_update_ms} ms in")
+        for item in whole:
+            if (item.last_valid_after_ms is None
+                    or item.last_valid_after_ms < after_update_ms):
+                result.problems.append(
+                    f"connection {item.access_address:08x} has no packet with a "
+                    f"correct CRC {after_update_ms} ms or more after its own "
+                    "CONNECT_IND, so the capture does not show the follow "
+                    "surviving the parameter update (the latest was "
+                    + (f"{item.last_valid_after_ms} ms"
+                       if item.last_valid_after_ms is not None else "none") + ")")
     if require_announced and result.unannounced:
         result.problems.append(
             "packet(s) on an access address no CONNECT_IND in this capture "

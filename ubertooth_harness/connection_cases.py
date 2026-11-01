@@ -312,6 +312,13 @@ def _central_cycled(update_ms: int, cycles: int):
     ``cycles`` is the floor the duration rule guarantees, not what the
     duration works out to: each reconnection costs a moment on top of the
     cycle, so a longer window does not reach a proportionally higher count.
+
+    The firmware counts connects and disconnects from the board's boot, and
+    nothing in a case resets them, so on a second capture attempt they cover
+    the whole case rather than that one window. That is what this floor is
+    for: a central that is making and dropping links while the case runs.
+    What binds per window is the capture check, which wants two of the
+    pair's connections in the file the attempt just wrote.
     """
     did_the_work = _central_did_the_work(update_ms)
 
