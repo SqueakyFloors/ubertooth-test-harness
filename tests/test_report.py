@@ -542,6 +542,24 @@ class ReportTests(unittest.TestCase):
             _redact(f"  1 x [E] {shape[:12]}\n", {serial}),
         )
 
+    def test_a_line_shape_written_after_a_word_is_masked_too(self):
+        # A serial reaches the output it was cut from written straight after
+        # a letter (`ubertooth<serial>`, a device path), so its shape arrives
+        # that way as well. The run of hex letters and N ends where a
+        # character that could carry more of the same shape ends it, and a
+        # letter of some other word is not one.
+        from ubertooth_harness.report import _redact
+
+        serial = "1ab23cd45ef67ab89cd01ef23ab45cd6"
+        shape = line_shape(serial)
+
+        for line in (f"  1 x [O] ubertooth{shape}\n",
+                     f"  1 x [E] /dev/cu.usbmodem{shape}\n",
+                     f"  1 x [E] id=Z{shape}\n",
+                     f"  1 x [E] 0x{shape}\n"):
+            self.assertIn(REDACTED, _redact(line, {serial}), line)
+            self.assertNotIn(shape, _redact(line, {serial}), line)
+
     def test_a_line_shape_no_serials_shape_holds_is_left_to_read(self):
         # What the shape rule leaves readable, which is what the shapes are
         # in the report for.
@@ -553,7 +571,8 @@ class ReportTests(unittest.TestCase):
             "  4 x [O] Serial No: N\n"           # a numeric serial's own shape
             "  2 x [E] systime=N ch=N LAP=N err=N\n"
             "  1 x [E] Nab is idle\n"            # too few letters to name a board
-            "  1 x [E] deadbeef cafe\n"          # no shape token in it at all
+            "  1 x [E] deadbeef cafe\n"          # no N, so no shape token
+            "  1 x [E] isNaN NaN banana\n"       # words a tool prints
         )
 
         self.assertEqual(kept, _redact(kept, {serial, "001050210121"}))

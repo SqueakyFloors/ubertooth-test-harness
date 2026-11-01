@@ -1888,7 +1888,15 @@ is enough to pick one board out of a small bench. So a shape that the shape
 of a serial the run names appears in is masked as well, whole or as the
 200-character shape limit cut it. The shapes keep their point: masked is a
 run of hex letters and `N` that holds four or more of those letters and
-sits in a known serial's shape, and every other shape is left to read.
+sits in a known serial's shape, and every other shape is left to read. A
+serial whose shape carries fewer than four hex letters (mostly digits, so
+the shape says little) keeps its shape for that reason.
+
+What the option does not mask is anything that is not a serial, and a
+transcript holds more than serials: the paths the commands ran with, which
+carry a user name and a home directory where the run built its tools, and
+the addresses and LAPs of whatever third-party devices were on the air. Read
+a report before publishing it, as you would a run's own `report.md`.
 
 Redaction is the `report` page only: a run's own `report.md` is always
 written with its serials.

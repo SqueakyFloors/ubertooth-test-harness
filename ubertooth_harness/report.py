@@ -1339,21 +1339,25 @@ def _mask_cut_serials(text: str, serials: Sequence[str]) -> str:
 # letters and their positions intact, which is enough to pick one board out
 # of a small bench.
 #
-# What is masked is a token of a shape that a serial's own shape holds. The
-# token is a run of hex letters and N bounded by something that is neither,
-# so the rule reads a shape the way _mask_cut_serials reads a run of hex: a
-# piece glued to letters of its own is one longer value no serial's shape
-# holds, and is left to read. A token the 200-character shape limit cut is a
+# What is masked is a token of a shape that a serial's own shape holds: a run
+# of hex letters and N, as long as it will reach, bounded as _HEX_RUN bounds a
+# run of hex, so the characters that could carry more of the same shape are
+# what ends it and nothing else is. A shape written after a letter of some
+# other word is masked like one standing alone, because that is how a serial
+# reaches the output it was cut from (`ubertooth<serial>`,
+# `/dev/cu.usbmodem<serial>`). A token the 200-character shape limit cut is a
 # piece of the serial's shape and is masked like the whole.
 #
 # A token must carry an N, since a serial with no digits in it has its own
 # characters as its shape and is masked as a serial; and this many hex
 # letters, because the letters are what names the board. Fewer than that
 # (`NabN`, the shape of `1ab2`) sits in the shape of too much ordinary
-# output to mask.
+# output to mask, and a run of hex letters with no N of its own is left to
+# _mask_cut_serials and its own width rule, for the same reason: `cafe` and
+# `dead` are words a tool prints.
 _SHAPE_MIN_LETTERS = 4
 _SHAPE_TOKEN = re.compile(
-    r"(?<![0-9A-Za-z])[A-Fa-fN]*N[A-Fa-fN]*(?![0-9A-Za-z])"
+    r"(?<![0-9A-Fa-fN])[A-Fa-fN]*N[A-Fa-fN]*(?![0-9A-Fa-fN])"
 )
 _SHAPE_LETTER = re.compile(r"[A-Fa-f]")
 
