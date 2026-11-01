@@ -227,6 +227,9 @@ code { overflow-wrap: anywhere; }
 }
 .summary dt { color: var(--muted); font-size: 0.85rem; font-weight: 500; }
 .summary dd { margin: 0; overflow-wrap: anywhere; }
+/* One line per device this run waited behind, in the run's summary. */
+.queued p { margin: 0 0 0.25rem; font-size: 0.85rem; }
+.queued p:last-child { margin-bottom: 0; }
 
 /* ----- targets ---------------------------------------------------------- */
 

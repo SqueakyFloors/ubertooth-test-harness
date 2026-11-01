@@ -18,7 +18,11 @@ from typing import Iterable, Mapping, Sequence
 from ubertooth_harness import targets
 from ubertooth_harness.events import REPORT, RUN_LOG
 from ubertooth_harness.executor import CommandResult
-from ubertooth_harness.leases import describe_holder, describe_takeover
+from ubertooth_harness.leases import (
+    describe_holder,
+    describe_queued_resource,
+    describe_takeover,
+)
 from ubertooth_harness import outputfiles
 from ubertooth_harness.outputfiles import output_file_list
 from ubertooth_harness.rawlog import (
@@ -470,6 +474,7 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
             + " (held for the whole run)",
         ))
     rows.extend(_takeover_rows(manifest))
+    rows.extend(_queued_rows(manifest))
     rows.extend(_placement_rows(run))
     if artifacts:
         rows.append((
@@ -499,6 +504,26 @@ def _takeover_rows(manifest: Mapping) -> list[tuple[str, str]]:
             for item in taken_over
         ) + " (a takeover does not promise the device was idle; a leftover "
         "command of that session may have been using it)",
+    )]
+
+
+def _queued_rows(manifest: Mapping) -> list[tuple[str, str]]:
+    """Devices that were free while this run waited for its turn (#234).
+
+    A run that wants several devices gives way to an older command doing
+    the same for as long as anything that command asked for is held, so a
+    lease nobody will give back (one held by a stuck command, or recorded
+    on another host) can keep this run queued for its whole wait with the
+    bench looking idle. This row says which devices those were, which
+    command had the turn, and what was in its way, so a late run explains
+    itself and a reader knows what to clear.
+    """
+    queued = manifest.get("lease_queue_waits") or []
+    if not queued:
+        return []
+    return [(
+        "Queued behind another command",
+        "; ".join(describe_queued_resource(item) for item in queued),
     )]
 
 
@@ -1185,6 +1210,8 @@ def _transcript(run: _Run) -> list[str]:
             line(event, f"[M] {details.get('summary', '')}")
         elif kind == "lease_takeover":
             line(event, f"[M] {describe_takeover(details)}")
+        elif kind == "lease_queued":
+            line(event, f"[M] {describe_queued_resource(details)}")
         elif kind == "test_finished":
             line(
                 event,

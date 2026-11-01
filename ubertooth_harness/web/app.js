@@ -314,7 +314,7 @@
     return {
       run_id: runId, seen: new Set(), events: [], items: [],
       byInvocation: new Map(), log: [], partial: "", stage: "waiting",
-      invocations: null, boards: new Map(),
+      invocations: null, boards: new Map(), queued: [],
     };
   }
 
@@ -375,6 +375,7 @@
     live.planned = Array.isArray(live.invocations) || Boolean(suite);
     live.byInvocation = new Map();
     live.boards = new Map();
+    live.queued = [];
     // Records from the socket and from REST may interleave; replay in order.
     const events = [...live.events].sort((a, b) => a.sequence - b.sequence);
     live.events = [];
@@ -459,6 +460,14 @@
     if (kind === "libbtbb_pin" && status !== "passed") {
       // The libbtbb differs from the fork's install.sh pin, or was not compared.
       pushLog(`warning: ${String(details.message ?? "")}`);
+    }
+    if (kind === "lease_queued") {
+      // A device was free while this run waited, and still not its turn:
+      // why a run can start late with the bench looking idle. The harness
+      // sends the line the report shows.
+      const text = String(details.message ?? "");
+      if (text && !live.queued.includes(text)) live.queued.push(text);
+      pushLog(`note: ${text}`);
     }
     if (kind === "watchdog") {
       // The firmware reset a board, or did not: a count, never a failure.
@@ -711,6 +720,11 @@
       ["Finished", timeElement(run.finished_at)],
     ];
     if (run.reason) fields.push(["Reason", run.reason]);
+    if (live.queued.length) {
+      // What the run waited behind before it started, one line each.
+      fields.push(["Queued behind", el("div", { className: "queued" },
+        ...live.queued.map((text) => el("p", { className: "reason", text })))]);
+    }
     $("live-summary").replaceChildren(...fields.flatMap(([term, value]) =>
       [el("dt", { text: term }), el("dd", {}, value)]));
     $("cancel-button").hidden = run.status !== "running";

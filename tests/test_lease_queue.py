@@ -13,28 +13,26 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from ubertooth_harness import leases
+from types import SimpleNamespace
+
+from ubertooth_harness import cli, leases
 from ubertooth_harness.cli import main
+from ubertooth_harness.report import _Run, _setup_rows, render_run
 
-from tests.test_leases import A, B, HARDWARE, dead_holder, holder
+from tests.test_leases import A, B, HARDWARE, RawHoldMixin, dead_holder, holder
 
 
-class QueueFixture(unittest.TestCase):
+class QueueFixture(RawHoldMixin, unittest.TestCase):
 
     def setUp(self):
+        super().setUp()  # self.raw, and closing it when the test ends
         self._dir = tempfile.TemporaryDirectory()
         self.addCleanup(self._dir.cleanup)
         self.root = Path(self._dir.name)
         self.dir = self.root / "leases"
-        self.raw = []
-        self.addCleanup(self._close_raw)
-
-    def _close_raw(self):
-        for fd in self.raw:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+        # Where a test reads the lines a wait says on standard error, rather
+        # than printing them in the suite's output (note=self.notes.append).
+        self.notes = []
 
     def ticket_dir(self, board):
         return self.dir / leases.TICKET_DIR / board.key
@@ -69,8 +67,33 @@ class QueueFixture(unittest.TestCase):
         """A ticket name from before any this test's commands will take."""
         return f"{1:020d}-{os.getpid()}-aaaaaa"
 
+    def waited(self, seconds):
+        """A ticket name of a command that started waiting that long ago.
+
+        A ticket's number is the wall clock when its command began waiting,
+        so this is how a test gets a wait a person would recognize.
+        """
+        return f"{leases.time.time_ns() - int(seconds * 1e9):020d}-{os.getpid()}-aaaaaa"
+
     def newer(self):
         return f"{leases.time.time_ns() * 2:020d}-{os.getpid()}-ffffff"
+
+    def wanting(self, *boards, **fields):
+        """A waiting command's record, naming every resource it asked for."""
+        return self.live_holder(
+            waiting_for=[{"key": board.key, "resource": board.alias}
+                         for board in boards],
+            **fields,
+        )
+
+    def _virtual_clock(self):
+        """(clock, sleep) that let a wait reach its deadline at once."""
+        now = [0.0]
+        return (lambda: now[0]), (lambda seconds: now.__setitem__(0, now[0] + seconds))
+
+    def hold_lease(self, board, record):
+        """A lease file of another command, locked, with a record we choose."""
+        return self.hold_raw(self.dir, board, record)
 
 
 class QueueTests(QueueFixture):
@@ -95,7 +118,8 @@ class QueueTests(QueueFixture):
             while not stop.is_set():
                 waiting = not outcome
                 try:
-                    with leases.acquire([A], holder("quick"), directory=self.dir):
+                    with leases.acquire([A], holder("quick"), directory=self.dir,
+                                        note=self.notes.append):
                         counts["took it after" if outcome else "took it first"] += 1
                 except leases.LeaseError:
                     pass  # busy, or told to wait its turn
@@ -436,19 +460,6 @@ class MultiResourceQueueTests(QueueFixture):
     them is held, so the free ones are still free when the last one arrives.
     """
 
-    def wanting(self, *boards, **fields):
-        """A waiting command's record, naming every resource it asked for."""
-        return self.live_holder(
-            waiting_for=[{"key": board.key, "resource": board.alias}
-                         for board in boards],
-            **fields,
-        )
-
-    def _virtual_clock(self):
-        """(clock, sleep) that let a wait reach its deadline at once."""
-        now = [0.0]
-        return (lambda: now[0]), (lambda seconds: now.__setitem__(0, now[0] + seconds))
-
     def test_a_free_board_is_kept_for_a_waiter_held_up_at_another(self):
         self.hold_ticket(A, self.older(), self.wanting(A, B))
         clock, sleep = self._virtual_clock()
@@ -456,7 +467,7 @@ class MultiResourceQueueTests(QueueFixture):
             with self.assertRaises(leases.LeaseError) as caught:
                 leases.acquire(
                     [A], holder("newcomer"), directory=self.dir, wait_s=30,
-                    clock=clock, sleep=sleep,
+                    clock=clock, sleep=sleep, note=self.notes.append,
                 )
         message = str(caught.exception)
         self.assertIn("UT_0 is queued after waiting 30s", message)
@@ -480,7 +491,7 @@ class MultiResourceQueueTests(QueueFixture):
             ):
                 with leases.acquire(
                     [A], holder("newcomer"), directory=self.dir, wait_s=600,
-                    clock=lambda: 0.0, sleep=rounds.append,
+                    clock=lambda: 0.0, sleep=rounds.append, note=self.notes.append,
                 ) as taken:
                     self.assertEqual([A], [lease.board for lease in taken.leases])
         self.assertLessEqual(len(rounds), 4, "gave way for longer than one stretch")
@@ -503,7 +514,7 @@ class MultiResourceQueueTests(QueueFixture):
 
         with leases.acquire(
             [A], holder("newcomer"), directory=self.dir, wait_s=600,
-            clock=lambda: 0.0, sleep=sleep,
+            clock=lambda: 0.0, sleep=sleep, note=self.notes.append,
         ) as taken:
             self.assertEqual([A], [lease.board for lease in taken.leases])
         self.assertGreater(len(rounds), 8, "took UT_0 while UT_1 was held")
@@ -527,7 +538,8 @@ class MultiResourceQueueTests(QueueFixture):
                 while not stop.is_set():
                     try:
                         with leases.acquire(
-                            [board], holder("quick"), directory=self.dir
+                            [board], holder("quick"), directory=self.dir,
+                            note=self.notes.append,
                         ):
                             counts["after the run" if outcome else "before the run"] += 1
                     except leases.LeaseError:
@@ -539,6 +551,7 @@ class MultiResourceQueueTests(QueueFixture):
             try:
                 with leases.acquire(
                     [A, B], holder("run"), directory=self.dir, wait_s=20,
+                    note=self.notes.append,
                 ) as held:
                     outcome["boards"] = [lease.board for lease in held.leases]
             except leases.LeaseError as error:
@@ -586,7 +599,7 @@ class MultiResourceQueueTests(QueueFixture):
             with self.assertRaises(leases.LeaseError) as caught:
                 leases.acquire(
                     [A, B], holder("newcomer"), directory=self.dir, wait_s=30,
-                    clock=clock, sleep=sleep,
+                    clock=clock, sleep=sleep, note=self.notes.append,
                 )
             message = str(caught.exception)
             self.assertIn("UT_1 is queued after waiting 30s", message)
@@ -651,7 +664,7 @@ class MultiResourceQueueTests(QueueFixture):
             with self.assertRaises(leases.LeaseError) as caught:
                 leases.acquire(
                     [A], holder("newcomer"), directory=self.dir, wait_s=30,
-                    clock=clock, sleep=sleep,
+                    clock=clock, sleep=sleep, note=self.notes.append,
                 )
         self.assertIn("that command is waiting for host lock too",
                       str(caught.exception))
@@ -731,6 +744,219 @@ class MultiResourceQueueTests(QueueFixture):
             queue.release()
 
 
+class QueuedReportTests(QueueFixture):
+    """A free resource nobody can take says why, and what to clear (#234).
+
+    While a command that wants several resources waits for the last of
+    them, giving way to it is not bounded, so the ones already free stay
+    queued. That is seconds when what holds the last one is a run that
+    ends, and the whole of that command's wait when it is a lease nobody
+    will give back. The wait stays bounded by that command's own
+    --wait-for-boards; what the bench gets is the reason in words.
+    """
+
+    def test_a_free_board_says_which_waiter_has_it_and_what_is_in_the_way(self):
+        name = self.waited(252)
+        self.hold_ticket(A, name, self.wanting(A, B, wait_s=600.0))
+        self.hold_ticket(B, name, self.wanting(A, B, wait_s=600.0))
+        with leases.acquire([B], holder("holder"), directory=self.dir):
+            states = leases.board_states([A, B], directory=self.dir)
+        queued = states[0]["queued_for"]
+        self.assertEqual("UT_0", queued["resource"])
+        self.assertEqual(name, queued["ticket"])
+        self.assertEqual("waiting-agent", queued["command"]["owner"])
+        self.assertEqual(
+            [{"key": A.key, "resource": "UT_0"}, {"key": B.key, "resource": "UT_1"}],
+            queued["waiting_for"],
+        )
+        self.assertAlmostEqual(252, queued["waited_s"], delta=5)
+        self.assertEqual(600.0, queued["wait_s"])
+        self.assertEqual(["UT_1"], [item["resource"] for item in queued["blocked_by"]])
+        self.assertEqual("live", queued["blocked_by"][0]["lease"])
+        self.assertEqual("holder", queued["blocked_by"][0]["holder"]["owner"])
+        # The board that is held needs no explaining: it is held.
+        self.assertNotIn("queued_for", states[1])
+        line = leases.describe_queued_resource(queued)
+        self.assertIn("UT_0 is free but queued for waiting-agent", line)
+        self.assertIn("it asked for UT_0 and UT_1", line)
+        self.assertIn("has waited 4m1", line)
+        self.assertIn("of the 10m00s it asked to wait", line)
+        self.assertIn("is still waiting for UT_1, held by holder", line)
+
+    def test_what_the_lease_in_the_way_records_decides_how_long_this_lasts(self):
+        """The forms of a lease that keeps a waiter queued.
+
+        A board lease whose command is gone is taken over within a poll
+        round, so the queue clears itself. One recorded on another host, or
+        holding no record at all, is left alone: it stays held until
+        somebody clears it, and until then this waiter keeps its other
+        boards queued for its whole wait. That difference is the reason to
+        report any of this, so each form says which it is.
+        """
+        cases = {
+            "gone": (dead_holder(), True,
+                     "the command that took it is gone", "takes it over"),
+            "another host": (self.live_holder(hostname="another-host"), False,
+                             "that lease is left alone",
+                             "stays held until somebody clears it"),
+            "no record": ({}, False, "its lock file records no holder",
+                          "stays held until somebody clears it"),
+        }
+        for what, (record, takeover, expected, ending) in cases.items():
+            with self.subTest(lease=what):
+                lock = self.hold_lease(B, record)
+                ticket = self.hold_ticket(A, self.waited(600), self.wanting(A, B))
+                queued = leases.board_states([A], directory=self.dir)[0]["queued_for"]
+                blocking = queued["blocked_by"][0]
+                self.assertEqual("UT_1", blocking["resource"])
+                self.assertEqual(takeover, blocking["takeover"])
+                line = leases.describe_queued_resource(queued)
+                self.assertIn(expected, line)
+                self.assertIn(ending, line)
+                for _held_file in (lock, ticket):
+                    os.close(self.raw.pop())
+                os.unlink(lock)
+                os.unlink(ticket)
+
+    def test_the_record_goes_when_the_waiter_does(self):
+        """A record must never outlive the wait it describes.
+
+        It is read from the waiter's own ticket every time, so a waiter
+        that exits (its ticket removed with its wait) or one whose process
+        is gone (an expired ticket, dropped by the listing) leaves nothing
+        behind to explain.
+        """
+        with leases.acquire([B], holder("holder"), directory=self.dir):
+            ticket = self.hold_ticket(A, self.waited(300), self.wanting(A, B))
+            self.assertIn("queued_for", leases.board_states([A], directory=self.dir)[0])
+            os.close(self.raw.pop())  # the waiter exits: its ticket is released
+            os.unlink(ticket)
+            self.assertNotIn(
+                "queued_for", leases.board_states([A], directory=self.dir)[0])
+            # And a ticket whose command is gone: expired, and removed.
+            expired = self.hold_ticket(
+                A, self.waited(300),
+                dict(dead_holder(), waiting_for=[
+                    {"key": A.key, "resource": "UT_0"},
+                    {"key": B.key, "resource": "UT_1"},
+                ]),
+                locked=False,
+            )
+            self.assertNotIn(
+                "queued_for", leases.board_states([A], directory=self.dir)[0])
+            self.assertFalse(expired.exists())
+
+    def test_a_waiter_nothing_is_holding_back_is_not_reported(self):
+        # Two commands the queue serves in seconds, not the case in #234:
+        # one that wants a single board (giving way to it is bounded at half
+        # a second), and one that could take everything it asked for right
+        # now and simply has not yet.
+        single = self.hold_ticket(A, self.waited(300), self.live_holder())
+        with leases.acquire([B], holder("holder"), directory=self.dir):
+            self.assertNotIn(
+                "queued_for", leases.board_states([A], directory=self.dir)[0])
+        os.close(self.raw.pop())
+        os.unlink(single)
+        self.hold_ticket(A, self.waited(200), self.wanting(A, B))
+        self.assertNotIn("queued_for", leases.board_states([A], directory=self.dir)[0])
+
+    def test_a_command_that_gives_way_records_it_once(self):
+        """What a run carries out of its wait, for its own record.
+
+        The command that waited is the one whose report has to explain a
+        late start, so acquire() keeps a record of every free resource it
+        gave way at, and says it once on standard error rather than on
+        every poll round.
+        """
+        name = self.waited(120)
+        self.hold_ticket(A, name, self.wanting(A, B, wait_s=600.0))
+        self.hold_ticket(B, name, self.wanting(A, B, wait_s=600.0))
+        held = leases.acquire([B], holder("holder"), directory=self.dir)
+        notes, rounds = [], []
+
+        def sleep(_seconds):
+            rounds.append(len(rounds) + 1)
+            if len(rounds) == 4:
+                # The waiter ahead gets UT_1 and its turn is over; the
+                # tickets go with it, and this command takes UT_0.
+                held.release()
+                os.close(self.raw.pop())
+                os.close(self.raw.pop())
+                os.unlink(self.ticket_dir(A) / name)
+                os.unlink(self.ticket_dir(B) / name)
+
+        with leases.acquire(
+            [A], holder("newcomer"), directory=self.dir, wait_s=600,
+            clock=lambda: 0.0, sleep=sleep, note=notes.append,
+        ) as taken:
+            self.assertEqual([A], [lease.board for lease in taken.leases])
+        self.assertEqual(1, len(notes), notes)
+        self.assertIn("UT_0 is free but queued for waiting-agent", notes[0])
+        self.assertEqual(1, len(taken.queued))
+        self.assertEqual("UT_0", taken.queued[0]["resource"])
+        self.assertEqual(["UT_1"],
+                         [item["resource"] for item in taken.queued[0]["blocked_by"]])
+
+    def test_a_command_says_nothing_about_a_resource_that_is_held(self):
+        # Giving way at a board somebody is using explains itself, and the
+        # error that follows names its holder: nothing to report here.
+        name = self.waited(120)
+        self.hold_ticket(A, name, self.wanting(A, B))
+        self.hold_ticket(B, name, self.wanting(A, B))
+        notes = []
+        clock, sleep = self._virtual_clock()
+        with leases.acquire([A, B], holder("holder"), directory=self.dir):
+            with self.assertRaises(leases.LeaseError):
+                leases.acquire(
+                    [A], holder("newcomer"), directory=self.dir, wait_s=30,
+                    clock=clock, sleep=sleep, note=notes.append,
+                )
+        self.assertEqual([], notes)
+
+    def test_the_queued_error_says_whether_what_is_in_the_way_comes_back(self):
+        # The command that is told to wait its turn needs the same thing the
+        # listing shows: whether the lease in the way will be taken over, or
+        # whether somebody has to clear it.
+        self.hold_lease(B, self.live_holder(hostname="another-host", owner="elsewhere"))
+        self.hold_ticket(A, self.waited(300), self.wanting(A, B))
+        clock, sleep = self._virtual_clock()
+        with self.assertRaises(leases.LeaseError) as caught:
+            leases.acquire(
+                [A], holder("newcomer"), directory=self.dir, wait_s=30,
+                clock=clock, sleep=sleep, note=lambda _line: None,
+            )
+        message = str(caught.exception)
+        self.assertIn("that command is waiting for UT_1 too", message)
+        self.assertIn("that lease is left alone: it was taken on another-host", message)
+        self.assertIn("stays held until somebody clears it", message)
+
+    def test_a_wait_reads_as_a_person_would_say_it(self):
+        self.assertEqual("0s", leases.describe_seconds(0))
+        self.assertEqual("45s", leases.describe_seconds(45.4))
+        self.assertEqual("4m12s", leases.describe_seconds(252))
+        self.assertEqual("1h02m03s", leases.describe_seconds(3723))
+        self.assertEqual("", leases.describe_seconds(None))
+        self.assertEqual("", leases.describe_seconds("soon"))
+        self.assertEqual("0s", leases.describe_seconds(-5))
+
+    def test_how_long_a_waiter_has_waited_comes_from_its_ticket_name(self):
+        now = leases.time.time_ns()
+        name = f"{now - 90_000_000_000:020d}-{os.getpid()}-aaaaaa"
+        self.assertAlmostEqual(90.0, leases.ticket_waited_s(name, now_ns=now), places=3)
+        # A clock set backwards reads as no time at all, never a negative wait.
+        self.assertEqual(0.0, leases.ticket_waited_s(
+            f"{now + 10_000_000_000:020d}-7-aaaaaa", now_ns=now))
+        self.assertIsNone(leases.ticket_waited_s("not-a-ticket"))
+        # A ticket of an earlier harness records no deadline, and the line
+        # says so rather than making one up.
+        record = leases.queued_record(
+            A, name, self.wanting(A, B), [], now_ns=now,
+        )
+        self.assertIsNone(record["wait_s"])
+        self.assertIn("of a deadline its ticket does not record",
+                      leases.describe_queued(record))
+
+
 class QueueCliTests(QueueFixture):
 
     def setUp(self):
@@ -762,6 +988,90 @@ class QueueCliTests(QueueFixture):
             "--json",
         )
         self.assertEqual([1, 2], [state["waiting"] for state in json.loads(raw)[:2]])
+
+    def test_boards_says_why_a_free_board_is_nobody_s_to_take(self):
+        """#234: a bench that looks idle explains itself.
+
+        UT_1 is held by a lease recorded on another host, which the harness
+        never takes over, and the command whose turn it is wants both
+        boards. So UT_0 is free and still nobody's, for as long as that
+        command waits or until somebody clears UT_1.
+        """
+        name = self.waited(252)
+        self.hold_lease(B, self.live_holder(hostname="another-host", owner="elsewhere"))
+        self.hold_ticket(A, name, self.wanting(A, B, wait_s=600.0, owner="flash-run"))
+        self.hold_ticket(B, name, self.wanting(A, B, wait_s=600.0, owner="flash-run"))
+        code, out, _err = self._main(
+            "boards", "--hardware", str(self.hardware), "--lease-dir", str(self.dir),
+        )
+        self.assertEqual(0, code)
+        lines = out.splitlines()
+        self.assertRegex(lines[0], r"^UT_0 +free$")
+        self.assertRegex(lines[1], r"^ +queue: 1 command is waiting for it$")
+        self.assertIn("queued for flash-run", lines[2])
+        self.assertIn("it asked for UT_0 and UT_1", lines[2])
+        self.assertIn("of the 10m00s it asked to wait", lines[2])
+        self.assertIn("still waiting for UT_1, held by elsewhere", lines[2])
+        self.assertIn("that lease is left alone: it was taken on another-host", lines[2])
+        self.assertIn("stays held until somebody clears it", lines[2])
+        # The held board says it is held, and nothing about the queue's shape.
+        self.assertRegex(lines[3], r"^UT_1 +held  elsewhere")
+        _code, raw, _err = self._main(
+            "boards", "--hardware", str(self.hardware), "--lease-dir", str(self.dir),
+            "--json",
+        )
+        states = json.loads(raw)
+        self.assertEqual("UT_1", states[0]["queued_for"]["blocked_by"][0]["resource"])
+        self.assertEqual("foreign", states[0]["queued_for"]["blocked_by"][0]["lease"])
+        self.assertNotIn("queued_for", states[1])
+        # Nothing in any of it names a lock file, which lives in a private
+        # directory; the resources and the commands are what a reader needs.
+        self.assertNotIn(str(self.dir), out)
+        self.assertNotIn(str(self.dir), raw)
+
+    def test_a_run_record_and_a_report_carry_what_the_run_waited_behind(self):
+        name = self.waited(252)
+        record = leases.queued_record(
+            A, name, self.wanting(A, B, wait_s=600.0, owner="flash-run"),
+            [{"resource": "UT_1", "key": B.key, "lease": "unknown",
+              "why": "its lock file records no holder", "takeover": False,
+              "holder": {}}],
+        )
+        events = []
+
+        class Publisher:
+            def emit(self, kind, status, details, **_kwargs):
+                events.append((kind, status, details))
+
+        cli._record_lease_queued(Publisher(), SimpleNamespace(queued=[record]))
+        self.assertEqual(1, len(events))
+        kind, status, details = events[0]
+        self.assertEqual(("lease_queued", "warning"), (kind, status))
+        self.assertEqual("UT_0", details["resource"])
+        self.assertIn("UT_0 is free but queued for flash-run", details["message"])
+        # The report's setup table, and the transcript line.
+        rows = dict(_setup_rows(_Run([{
+            "run_id": "r", "event_type": "manifest",
+            "timestamp": "2026-01-01T00:00:00.000",
+            "details": {"manifest": {"lease_queue_waits": [record]}},
+        }])))
+        self.assertIn("UT_0 is free but queued for flash-run",
+                      rows["Queued behind another command"])
+        self.assertNotIn("Queued behind another command", dict(_setup_rows(_Run([{
+            "run_id": "r", "event_type": "manifest",
+            "timestamp": "2026-01-01T00:00:00.000", "details": {"manifest": {}},
+        }]))))
+        transcript = render_run([{
+            "schema_version": 1, "run_id": "r", "sequence": 1,
+            "timestamp": "2026-01-01T00:00:00.000", "event_type": "lease_queued",
+            "status": "warning", "details": details,
+        }])
+        self.assertIn("[M] UT_0 is free but queued for flash-run", transcript)
+        # And the browser live view shows the same line.
+        js = (Path(__file__).resolve().parents[1] / "ubertooth_harness" / "web"
+              / "app.js").read_text(encoding="utf-8")
+        self.assertIn('kind === "lease_queued"', js)
+        self.assertIn('"Queued behind"', js)
 
     def test_a_lease_that_has_to_wait_its_turn_says_so(self):
         with leases.acquire([A], holder("holder"), directory=self.dir):

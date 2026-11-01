@@ -25,6 +25,7 @@ from ubertooth_harness.events import (
 from ubertooth_harness.enumeration import EnumerationError
 from ubertooth_harness.executor import CommandExecutor, CommandResult
 from ubertooth_harness.isolation import IsolationRuntime, IsolationSetupError
+from ubertooth_harness.leases import describe_queued_resource
 from ubertooth_harness.manifest import ManifestError, RunManifest, json_value
 from ubertooth_harness.planner import TestInvocation, alternated_roles
 from ubertooth_harness.power import PowerControllerError
@@ -1270,6 +1271,14 @@ class NamedTestSequencer:
             # be where it fails.
             for taken_over in manifest.lease_takeovers:
                 publisher.emit("lease_takeover", "warning", json_value(taken_over))
+            # And the devices that were free while the run waited and still
+            # not its turn, which is why a run can start minutes late with
+            # the bench looking idle (#234).
+            for queued in manifest.lease_queue_waits:
+                record = json_value(queued)
+                publisher.emit("lease_queued", "warning", dict(
+                    record, message=describe_queued_resource(record)
+                ))
         publisher.emit(
             "host_capabilities",
             "passed",
