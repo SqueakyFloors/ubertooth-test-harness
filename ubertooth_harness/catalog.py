@@ -784,7 +784,7 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # A reset at each end, a killed capture, one capture of the duration, and
     # about a dozen board reads around them. Measured on the Linux lab host at
     # fork 166b4f91 with a 3 s duration.
-    "Board state between runs": _default(Estimate(13.5, per_duration=1)),
+    "Board state between runs": _default(Estimate(15.5, per_duration=1)),
     "Raw receive replay": _profiles(Estimate(0.9), Estimate(3.9)),
     "Refused command lines": _profiles(Estimate(10.0), Estimate(20.7)),
     "Util mode refusals": _profiles(Estimate(1.9), Estimate(3.0)),
