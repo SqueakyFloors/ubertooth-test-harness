@@ -910,9 +910,10 @@ class QueuedReportTests(QueueFixture):
                          [item["resource"] for item in record["blocked_by"]])
         # How long this command gave way, counted in poll rounds like every
         # other stretch in acquire(), and kept up to date to the last round.
-        self.assertAlmostEqual(40 * leases._POLL_S, record["gave_way_s"], places=2)
-        self.assertIn("This command has given way for 10s",
-                      leases.describe_queued_resource(record))
+        self.assertAlmostEqual(40 * leases._POLL_S, record["gave_way_s"],
+                               delta=leases._QUEUED_REPORT_S)
+        self.assertRegex(leases.describe_queued_resource(record),
+                         r"This command has given way for \d+s$")
 
     def test_a_moment_of_giving_way_is_not_worth_a_line(self):
         # Two commands sorting themselves out in a second say nothing: the
@@ -959,7 +960,8 @@ class QueuedReportTests(QueueFixture):
             self.assertEqual([A], [lease.board for lease in taken.leases])
         self.assertEqual(1, len(notes), notes)
         self.assertAlmostEqual(
-            30 * leases._POLL_S, taken.queued[0]["gave_way_s"], places=2)
+            30 * leases._POLL_S, taken.queued[0]["gave_way_s"],
+            delta=leases._QUEUED_REPORT_S)
 
     def test_a_resource_freed_during_the_wait_is_still_reported(self):
         """The case #234 is about: a short run frees a board mid-wait.
@@ -1000,9 +1002,12 @@ class QueuedReportTests(QueueFixture):
         self.assertIn("UT_0 is free but queued for waiting-agent", notes[0])
         self.assertEqual(["UT_0"], [item["resource"] for item in taken.queued])
         # Only the rounds UT_0 was free and queued count: the four rounds
-        # the short run still held it explain themselves.
+        # the short run still held it explain themselves. The record is
+        # refreshed no more often than a line is worth saying, so it is
+        # that far behind the last round at most.
         self.assertAlmostEqual(
-            36 * leases._POLL_S, taken.queued[0]["gave_way_s"], places=2)
+            36 * leases._POLL_S, taken.queued[0]["gave_way_s"],
+            delta=leases._QUEUED_REPORT_S)
 
     def test_a_run_keeps_what_it_waited_behind_as_its_own_history(self):
         """The record outlives the wait, and says so.
@@ -1094,13 +1099,33 @@ class QueuedReportTests(QueueFixture):
         )
         record = leases.queued_record(
             A, self.waited(300), crowded,
+            # Every resource of that set held, each by a command whose
+            # record is as long as one may be.
             [leases._blocking_entry(
-                leases.Board("U" * 200, B.key), "foreign", "w" * 400, crowded)],
+                leases.Board("U" * 200, f"{number:032x}"), "foreign",
+                "w" * 400, crowded)
+             for number in range(leases._MAX_WAITING_FOR + 10)],
         )
-        self.assertEqual(leases._MAX_QUEUED_SET, len(record["waiting_for"]))
+        # Entries are dropped until the record and its line fit, and what
+        # went is counted rather than quietly left out.
+        self.assertGreater(record["blocked_by_more"], 0)
+        self.assertLessEqual(len(record["waiting_for"]), leases._MAX_QUEUED_SET)
         details = dict(record, message=leases.describe_queued_resource(record, past=True))
-        # What a publisher does with it: over the limit this raises.
+        # What a publisher does with it: over the limit this raises, which
+        # would fail a run over another command's file.
         self.assertEqual(details, events._validated_details(details))
+        self.assertLessEqual(leases._queued_bytes(record), leases._MAX_QUEUED_BYTES)
+
+    def test_a_record_carries_no_number_json_cannot_write(self):
+        # json.loads accepts NaN and the infinities, so a lock file can
+        # hold one; writing it back out would be JSON only Python reads.
+        odd = self.live_holder(pid=float("nan"), wait_s=float("inf"))
+        record = leases.queued_record(
+            A, self.waited(60), odd,
+            [leases._blocking_entry(B, "foreign", "elsewhere", odd)])
+        text = json.dumps(record, allow_nan=False)  # raises on any of them
+        self.assertNotIn("NaN", text)
+        self.assertNotIn("Infinity", text)
 
     def test_a_record_names_every_lease_in_the_way(self):
         # A reader told to clear one lock must not find another behind it,
@@ -1126,29 +1151,27 @@ class QueuedReportTests(QueueFixture):
         self.assertEqual(5, record["waiting_for_more"])
         self.assertIn("and 5 more", leases.describe_queued(record))
 
-    def test_the_record_of_a_wait_that_is_over_makes_room_for_one_that_is_not(self):
+    def test_a_command_keeps_the_last_of_its_records(self):
         # A command keeps a bounded number of records; when they are full,
-        # a wait that has ended gives way to the one happening now.
-        records, live, reported = {}, {}, set()
-        for number in range(leases._MAX_QUEUED_RECORDS):
-            marker = (f"{number:032x}", "old-ticket")
+        # the oldest goes, so what is going on now is always among them.
+        records, reported = {}, set()
+        for number in range(leases._MAX_QUEUED_RECORDS + 4):
             leases._keep_queued_record(
-                records, marker, live, {"resource": f"UT_{number}"}, reported,
+                records, (f"{number:032x}", "ticket"),
+                {"resource": f"UT_{number}", "gave_way_s": 2.0}, reported,
                 lambda _line: None)
         self.assertEqual(leases._MAX_QUEUED_RECORDS, len(records))
-        now = (B.key, "now-ticket")
-        live[now] = 1.0  # the pair this command is giving way at right now
+        self.assertEqual(
+            [f"UT_{number}" for number in range(4, leases._MAX_QUEUED_RECORDS + 4)],
+            [item["resource"] for item in records.values()],
+        )
+        # A record already kept is refreshed in place, taking no new room.
+        kept = next(iter(records))
         leases._keep_queued_record(
-            records, now, live, {"resource": "UT_1"}, reported, lambda _line: None)
-        self.assertIn(now, records)
-        self.assertEqual(leases._MAX_QUEUED_RECORDS, len(records))
-        # With nothing left to drop, the newest is left out rather than a
-        # record of a wait this command is still in.
-        live.update({pair: 1.0 for pair in records})
-        leases._keep_queued_record(
-            records, (A.key, "another"), live, {"resource": "UT_0"}, reported,
+            records, kept, {"resource": "UT_4", "gave_way_s": 9.0}, reported,
             lambda _line: None)
         self.assertEqual(leases._MAX_QUEUED_RECORDS, len(records))
+        self.assertEqual(9.0, records[kept]["gave_way_s"])
 
     def test_a_deadline_that_is_not_a_number_of_seconds_says_nothing(self):
         # JSON carries infinities, and a ticket is another command's file.

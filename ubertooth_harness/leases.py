@@ -258,6 +258,12 @@ _QUEUED_REPORT_S = 2.0
 # a ticket is another command's file: its set may hold up to
 # _MAX_WAITING_FOR entries of bounded but not small strings.
 _MAX_QUEUED_SET = 16
+# How much of a run record one queue record may take, with the line it
+# carries: comfortably under the per-event limit (events.py), since a run
+# may record one per device. Entries are dropped until it fits
+# (_fit_queued_record), because their number comes from other commands'
+# files and a record must never be what fails a run.
+_MAX_QUEUED_BYTES = 8 * 1024
 # What a taken-over lease's holder record carries into a run record, and how
 # long each of its fields may be there: a lock file is another command's and
 # may hold anything, where a run record has a size limit (see events.py).
@@ -1034,7 +1040,10 @@ def _blocking(root: Path, ticket: Mapping, board: Board):
     A board lease counts whatever its record says, as it did before: one
     whose holder is gone is taken over within a poll round, and one this
     command cannot account for is still a lock the command ahead has to wait
-    for.
+    for. A lab's own lock file is not read here, as it was not before: the
+    harness cannot tell what holds one or whether that party is waiting for
+    a lease in turn, which is why giving way to a command held up only by
+    one is bounded (acquire()).
     """
     for resource in waiting_resources(ticket, board):
         path = root / f"{resource.key}.lock"
@@ -1133,7 +1142,7 @@ def queued_record(
     wait_s = ticket.get("wait_s")
     waited = ticket_waited_s(name, now_ns=now_ns)
     wanted = waiting_resources(ticket, board)
-    return {
+    return _fit_queued_record({
         "resource": board.alias,
         "key": board.key,
         "ticket": str(name),
@@ -1158,8 +1167,7 @@ def queued_record(
         # deadline is not a number of seconds (JSON carries infinities).
         "wait_s": (
             float(wait_s)
-            if isinstance(wait_s, (int, float)) and not isinstance(wait_s, bool)
-            and math.isfinite(wait_s)
+            if _plain_number(wait_s) and not isinstance(wait_s, bool)
             else None
         ),
         "blocked_by": [dict(item) for item in blocking[:_MAX_QUEUED_SET]],
@@ -1167,7 +1175,38 @@ def queued_record(
         # counted in poll rounds like every other stretch in acquire(). A
         # listing gives way to nobody, so it leaves this at zero.
         "gave_way_s": round(gave_way_s, 2),
-    }
+    })
+
+
+def _fit_queued_record(record: dict) -> dict:
+    """Shrink a record until it and its line fit a run's per-event limit.
+
+    Every field is bounded already, but their number is not bounded by
+    anything the harness controls: the entries come from another command's
+    ticket and from the lock files it is waiting for, and the line is
+    carried with the record. So the entries are dropped from the end, the
+    resources in the way first, until the whole thing fits, and what went
+    is counted like any other entry left out. A record whose one entry each
+    is still too big would fail a run rather than shrink, which is why the
+    per-field bounds are what they are.
+    """
+    while _queued_bytes(record) > _MAX_QUEUED_BYTES:
+        if len(record["blocked_by"]) > 1:
+            record["blocked_by"].pop()
+            record["blocked_by_more"] += 1
+        elif len(record["waiting_for"]) > 1:
+            record["waiting_for"].pop()
+            record["waiting_for_more"] += 1
+        else:
+            break
+    return record
+
+
+def _queued_bytes(record: Mapping) -> int:
+    """How much of a run record one queue record takes, with its line."""
+    return len(json.dumps(record, sort_keys=True, default=str).encode()) + len(
+        describe_queued_resource(record, past=True).encode()
+    )
 
 
 def _lease_form(kind: str, why: str, takeover) -> str:
@@ -1212,8 +1251,8 @@ def _listed(items: Iterable) -> str:
 
 
 def _and_more(count) -> str:
-    """', and 48 more' for the entries a record leaves out, or nothing."""
-    return f", and {count} more" if isinstance(count, int) and count > 0 else ""
+    """'; also 48 more' for the entries a record leaves out, or nothing."""
+    return f"; also {count} more" if isinstance(count, int) and count > 0 else ""
 
 
 def describe_queued(record: Mapping, *, past: bool = False) -> str:
@@ -1224,11 +1263,16 @@ def describe_queued(record: Mapping, *, past: bool = False) -> str:
     situation it describes was true while the run waited and is over by the
     time anybody reads it, so the line says so.
     """
+    left_out = record.get("waiting_for_more")
     requested = _listed(
-        item.get("resource") or item.get("key") or ""
-        for item in record.get("waiting_for") or []
+        [
+            item.get("resource") or item.get("key") or ""
+            for item in record.get("waiting_for") or []
+        ]
+        # Counted as one more name, so the list reads as a list: "UT_0,
+        # UT_1, and 5 more".
+        + ([f"{left_out} more"] if isinstance(left_out, int) and left_out > 0 else [])
     )
-    requested += _and_more(record.get("waiting_for_more"))
     waited = describe_seconds(record.get("waited_s"))
     bound = record.get("wait_s")
     if bound is None:
@@ -1239,7 +1283,9 @@ def describe_queued(record: Mapping, *, past: bool = False) -> str:
         # The effective one: a wait shorter than the grace every command
         # has is that grace (see acquire()).
         deadline = f"the {describe_seconds(max(bound, _BUSY_GRACE_S))} it asked to wait"
-    blocked = "; ".join(
+    # "also", not a comma or a semicolon: each entry is a clause of its own
+    # and may carry a parenthesis with punctuation inside it.
+    blocked = "; also ".join(
         describe_blocking(item) for item in record.get("blocked_by") or []
     ) + _and_more(record.get("blocked_by_more"))
     gave_way = describe_seconds(record.get("gave_way_s"))
@@ -1411,6 +1457,18 @@ class LeaseSet:
         self.release()
 
 
+def _plain_number(value) -> bool:
+    """Whether this value can go into a record as itself, as a number.
+
+    Not an infinity or a not-a-number: ``json.loads`` accepts those, so
+    another command's lock file can hold one, and writing it back out
+    produces something no other language's JSON reader accepts.
+    """
+    if isinstance(value, bool) or isinstance(value, int):
+        return True
+    return isinstance(value, float) and math.isfinite(value)
+
+
 def _recorded_holder(holder: Mapping) -> dict:
     """A lock file's holder record, cut down to what a run record carries.
 
@@ -1426,7 +1484,7 @@ def _recorded_holder(holder: Mapping) -> dict:
         value = holder[field]
         # A number in such a file can be as long as the file: one that reads
         # like a number is carried as itself, a longer one as its text.
-        plain = value is None or isinstance(value, (bool, int, float))
+        plain = value is None or _plain_number(value)
         record[field] = (
             value if plain and len(str(value)) <= _RECORDED_HOLDER_CHARS
             else _printable(value, _RECORDED_HOLDER_CHARS)
@@ -1482,10 +1540,11 @@ def _queued_wait(
 
     None when the command ahead wants only this one resource, so giving way
     to it is bounded and over in half a second, or when nothing it asked
-    for is held any more. Every resource in the way is read, as a listing
-    does: a reader told to clear one lock must not find another behind it.
-    This is only reached for a stretch that has already lasted
-    _QUEUED_REPORT_S, not on every poll round of every wait.
+    for is held any more. Every lease in the way is read, as a listing
+    does, so a reader told to clear one is not left to find another behind
+    it; what is not read is a lab's own lock file, which the queue does not
+    count either (see _blocking()). Reached only for a stretch that has
+    already lasted _QUEUED_REPORT_S, and then no more often than that.
     """
     if len(waiting_resources(ticket, board)) < 2:
         return None
@@ -1496,24 +1555,21 @@ def _queued_wait(
 
 
 def _keep_queued_record(
-    records: dict, marker: tuple[str, str], live: Mapping, record: Mapping | None,
+    records: dict, marker: tuple[str, str], record: Mapping | None,
     reported: set, note: Callable[[str], None],
 ) -> None:
     """Keep this record of a free resource kept queued, and say it once.
 
     A command keeps one record per (resource, waiter) for its own run
-    record, bounded by _MAX_QUEUED_RECORDS. When that is full, a record of
-    a wait that is over (its marker is no longer one this command is
-    giving way at, ``live``) makes room for the one happening now, which is
-    what a reader needs most; otherwise the new one is left out.
+    record, the last _MAX_QUEUED_RECORDS of them: when they are full the
+    oldest goes, because a wait that happened later in a long wait is the
+    one a reader of that run is looking for, and the wait that is going on
+    now is always among them.
     """
     if record is None:
         return
     if marker not in records and len(records) >= _MAX_QUEUED_RECORDS:
-        stale = next((pair for pair in records if pair not in live), None)
-        if stale is None:
-            return
-        records.pop(stale)
+        records.pop(next(iter(records)))
     records[marker] = record
     if marker not in reported:
         reported.add(marker)
@@ -1662,9 +1718,18 @@ def acquire(
                         given.pop(marker, None)
                     else:
                         given[marker] = given.get(marker, 0.0) + _POLL_S
-                        if given[marker] >= _QUEUED_REPORT_S:
+                        kept = queued_waits.get(marker)
+                        # Made once the stretch is worth a line, then kept
+                        # up to date, but no more often than that: reading
+                        # what is in the way means a lock probe for each
+                        # resource that command asked for, and a wait can
+                        # last for thousands of rounds.
+                        if (given[marker] >= _QUEUED_REPORT_S
+                                and (kept is None
+                                     or given[marker] - kept["gave_way_s"]
+                                     >= _QUEUED_REPORT_S)):
                             _keep_queued_record(
-                                queued_waits, marker, given,
+                                queued_waits, marker,
                                 _queued_wait(root, board, ticket, other,
                                              gave_way_s=given[marker]),
                                 reported, note,
@@ -1714,8 +1779,11 @@ def acquire(
                             f"; that command is waiting for {blocked.alias} too, "
                             f"which is held by {describe_holder(other_holder)}"
                             # Whether that lease comes back on its own is
-                            # what decides how long this command waits.
-                            + _lease_form(kind, why, takeover_allowed(blocked, kind))
+                            # what decides how long this command waits, and
+                            # only while it is still held: a lock file keeps
+                            # its record after it is released.
+                            + (_lease_form(kind, why, takeover_allowed(blocked, kind))
+                               if _held(other_lock) else "")
                         )
                     elif external_template:
                         # The command ahead may be stuck on the lab's own

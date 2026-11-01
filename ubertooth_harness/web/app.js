@@ -404,7 +404,12 @@
 
   function pushLog(line) {
     const live = state.live;
-    live.log.push(String(line).slice(0, LOG_LINE_CHARS));
+    // Long lines are cut, and say so, so a reader is never left thinking a
+    // sentence ended where the log stopped.
+    const text = String(line);
+    live.log.push(text.length > LOG_LINE_CHARS
+      ? `${text.slice(0, LOG_LINE_CHARS - 4)} ...`
+      : text);
     if (live.log.length > LOG_LINES) live.log.splice(0, live.log.length - LOG_LINES);
   }
 

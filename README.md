@@ -1589,17 +1589,19 @@ and a ticket whose command died leaves nothing behind. No lock file path
 appears in any of it: the lease directory is private, and the resource and
 the command are what a reader needs.
 
-A line is said once a command has given way at that board for more than two
-seconds, so two commands sorting themselves out are not reported as a bench
-standing still. The command that gives way says it on standard error, so a
-`lease` that sits there explains itself, and `run-suite` carries it into its
-run record: a `lease_queued` record in run.jsonl, a line in the transcript, a
-"Queued behind another command" row in report.md, and the same line in the
-browser's live view. A run whose first test started ten minutes late has to
-be able to say why. Those read in the past tense ("UT_0 was free and queued
-for ..."), because the run has its boards by the time anybody reads them, and
-they say how long the run itself gave way; the record is kept up to date for
-as long as the wait lasts, so it is the whole wait, not its first moment.
+A command that is giving way says the same thing itself, once that board has
+been free and queued for more than two seconds, so two commands sorting
+themselves out are not reported as a bench standing still (`boards`, which
+answers a person asking why nothing is running, shows it as soon as it is
+true). That makes a `lease` that sits there explain itself on standard error,
+and `run-suite` carries it into its run record: a `lease_queued` record in
+run.jsonl, a line in the transcript, a "Queued behind another command" row in
+report.md, and the same line in the browser's live view. A run whose first
+test started ten minutes late has to be able to say why. Those read in the
+past tense ("UT_0 was free and queued for ..."), because the run has its
+boards by the time anybody reads them, and each says how long the run gave
+way at that board while it was free; the record is kept up to date while the
+wait lasts, so it is that stretch, not its first moment.
 
 ### The host lock
 
