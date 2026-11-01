@@ -99,7 +99,11 @@ The image it builds is not published: a board is flashed from a local build.
 It builds both images and checks that each carries its own version string.
 Only the default image is compared against the base commit's; a change
 confined to `chan-sel-1.conf` or `chan-sel-1.overlay` is caught by comparing
-those two files, which asks for the same version bump.
+those two files, which asks for the same version bump. What neither catches is
+a change confined to an `#if !UTDK_CHAN_SEL_2` branch of the shared sources:
+the default image is then unchanged, so nothing asks for the bump, and a board
+already carrying the algorithm 1 image keeps the old one. Bump the version by
+hand for such a change.
 
 With `DK_BASE_REF` (a git ref, which the workflow sets to the commit a pull
 request is against) or `DK_BASE_SRC` (a directory of these sources) it builds
