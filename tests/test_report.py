@@ -862,6 +862,39 @@ class ReportTests(unittest.TestCase):
         self.assertIn(
             REDACTED, _redact(shape_note("faceNabcdefN"), {serial}))
 
+    def test_a_shape_holding_a_carriage_return_is_still_one_line(self):
+        # A tool printing its progress in place writes a carriage return,
+        # and the whole of that is one line of output, so its shape holds
+        # one. The note writes it visibly, because the transcript would
+        # otherwise render the shape as two lines with the count and the tag
+        # on the first alone, and the second would go out unmasked.
+        serial = "1ab23cd45ef67ab89cd01ef23ab45cd6"
+        line = f"progress 10%\rboard {serial} is idle\n"
+        events = [ubertooth_manifest(serial)] + capped_events(line * 4000)
+
+        plain = render_run(events)
+        report = render_run(events, redact_serials=True)
+
+        self.assertIn(r"x [E] progress N%\rboard", plain)
+        self.assertNotIn(line_shape(serial), report)
+        self.assertIn(rf"x [E] progress N%\rboard {REDACTED} is idle", report)
+
+    def test_one_serials_characters_do_not_hide_anothers_shape(self):
+        # A bridge serial is any string the registry chooses, so one
+        # serial's own characters can read as a piece of another's shape.
+        # The shapes are masked before any serial is masked as itself, or
+        # that piece would be masked first and leave the rest of the shape
+        # with no shape to match.
+        from ubertooth_harness.report import _redact
+
+        serial, other = "abc1def2ghij", "defNgh"
+
+        self.assertEqual("abcNdefNghij", line_shape(serial))
+        self.assertEqual(
+            shape_note(REDACTED),
+            _redact(shape_note(line_shape(serial)), {serial, other}),
+        )
+
     def test_the_shape_summary_of_left_out_output_is_masked(self):
         # End to end: a command whose output passed the record limits leaves
         # the lines between the head and the tail counted by shape, and the

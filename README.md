@@ -1872,7 +1872,11 @@ between characters that are neither letters nor digits. So it cannot mask
 part of a count or of a word, and it is still masked in a `by-id` path,
 where `_`, `-` and `.` stand around it. What it leaves is a serial that
 short written straight against a letter or a digit, as the macOS probe name
-writes one (`/dev/cu.usbmodemab1`). A
+writes one (`/dev/cu.usbmodemab1`). A serial of one or two characters is
+masked wherever it stands alone, so it takes a short word or an option
+letter with it (`-a 0` reads `-<serial> 0`): the registry allows such a
+serial and nothing tells it from an ordinary word, and a registered serial
+is masked rather than published. A
 serial port path keeps its shape with the serial inside it masked
 (`/dev/serial/by-id/usb-SEGGER_J-Link_<serial>-if00`), whether the registry
 held that path or the harness found it. Case is ignored throughout, since a

@@ -855,6 +855,29 @@ def elapsed(origin: datetime.datetime):
     return stamp
 
 
+# A line break other than the newline the output was split on. A line's
+# shape can hold one: a tool printing its progress in place writes a
+# carriage return, and the whole of that goes into one line of output.
+# The transcript splits what it renders the way str.splitlines() does, so
+# such a shape would arrive as two lines of the note, with the count and the
+# tag on the first alone, and redaction reads a shape by that head
+# (_SHAPE_NOTE_LINE): the rest of the shape would go out as it is. Written
+# the way a reader can see it instead, each shape on its own line.
+_BREAK_IN_A_SHAPE = re.compile("[\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]")
+_BREAK_NAMES = {"\r": r"\r", "\v": r"\v", "\f": r"\f"}
+
+
+def _one_line(text: str) -> str:
+    """``text`` with every line break but a newline written visibly."""
+    def written(match: re.Match) -> str:
+        char = match.group(0)
+        if char in _BREAK_NAMES:
+            return _BREAK_NAMES[char]
+        return f"\\u{ord(char):04x}" if ord(char) > 0xFF else f"\\x{ord(char):02x}"
+
+    return _BREAK_IN_A_SHAPE.sub(written, text)
+
+
 def _omitted_text(note: Mapping) -> str:
     """[M] note text for output kept in the output/ files, not run.jsonl."""
     summary = note.get("output_omitted") or {}
@@ -872,7 +895,7 @@ def _omitted_text(note: Mapping) -> str:
     for shape in summary.get("common_shapes") or []:
         text += (
             f"  {shape.get('count', 0)} x {TAGS.get(shape.get('stream'), '[?]')} "
-            f"{shape.get('shape', '')}\n"
+            f"{_one_line(str(shape.get('shape', '')))}\n"
         )
     rest = summary.get("distinct_shapes", 0) - len(summary.get("common_shapes") or [])
     if rest > 0:
@@ -1556,6 +1579,11 @@ def _redact(text: str, serials: Iterable[str]) -> str:
     # The token rule first: masking a short serial inside a 32-hex token
     # would leave the rest of that token, which this rule is there to catch.
     text = _SERIAL_TOKEN.sub(REDACTED, text)
+    # Then the shapes, before any serial is masked as itself: one serial's
+    # own characters can read as a piece of another's shape (two bridge
+    # serials of the registry's choosing), and masking that piece first
+    # would leave the rest of the shape with no shape to match.
+    text = _mask_serial_shapes(text, serials)
     for serial in serials:
         if len(serial) < _SERIAL_MIN_CHARS:
             # Short enough to read as an ordinary number or an ordinary
@@ -1582,9 +1610,6 @@ def _redact(text: str, serials: Iterable[str]) -> str:
             # reaches only a serial standing on its own.
             text = re.sub(re.escape(serial), lambda _match: REDACTED, text,
                           flags=re.IGNORECASE)
-    # Before the cut rule, so a shape whose letters happen to run 8 wide is
-    # masked as one shape and not in pieces with its N between them.
-    text = _mask_serial_shapes(text, serials)
     # Last, so a whole serial is masked as one and only the pieces a cut left
     # behind reach this rule.
     return _mask_cut_serials(text, serials)
