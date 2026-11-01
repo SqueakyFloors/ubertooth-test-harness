@@ -143,12 +143,17 @@ MIN_SURVEY_UAP_RECORDS = 10
 # carried it (285, 109 and 394 of them), so this has room for a capture that
 # loses the clock partway and records none for a while.
 MIN_REFERENCE_UAP_RECORDS = 10
+# Access-code bit errors ubertooth-rx allows when no -e says otherwise
+# (ubertooth-rx(1)), and so the most any record of these captures may
+# report. The bench's captures reported 0, 1 and 2.
+DEFAULT_MAX_AC_ERRORS = 2
 # Records whose header HEC must have passed. A header only passes when it
 # decoded at the piconet's clock and its HEC gave the piconet's UAP, which
 # is what makes the header and reference-UAP checks bite; how many of a
 # capture's records manage it depends on what the sweep heard, so this is a
-# floor rather than a share. Four 25-second captures on the bench gave 59 of
-# 285, 26 of 109, and 112 of 394 for a followed piconet.
+# floor rather than a share. The bench's three followed captures gave 59 of
+# 285, 26 of 109, and 112 of 394; its survey, which is not held to this,
+# gave 1 of 235.
 MIN_HEC_VALID_RECORDS = 5
 
 _ESP32PEER = str(Path(esp32peer.__file__).resolve())
@@ -570,7 +575,7 @@ def _record_step(step_id, name, file_name, checks) -> Step:
 
 
 def _record_checks(central=None, *, minimum=MIN_PACKETS, following=False,
-                   extra=()) -> tuple[str, ...]:
+                   extra=()) -> tuple[str, ...]:  # noqa: C901
     """What the records of a capture must hold.
 
     With a ``central``, this is a capture that was given one piconet to
@@ -578,7 +583,13 @@ def _record_checks(central=None, *, minimum=MIN_PACKETS, following=False,
     address. Without one, the capture is a survey: it records whatever is in
     range, and the caller says what to look for instead.
     """
-    checks = ("--min-packets", str(minimum),)
+    if following and central is None:
+        raise StateCaseError("the address a capture was following is the "
+                             "central's, so a check of it needs the central")
+    # No case passes -e, so the tool allows its default of two bit errors in
+    # an access code, and no record may report more.
+    checks = ("--min-packets", str(minimum),
+              "--max-access-code-errors", str(DEFAULT_MAX_AC_ERRORS))
     if central is not None:
         # A record whose header carries another packet's bits, or none,
         # cannot pass its HEC, so this is the floor that makes the header
@@ -667,10 +678,11 @@ def record_fields_cases(arguments, resources, resource_identities):
             name=f"An {AUDIO_TYPE.upper()} audio link's records are named "
                  f"{AUDIO_TYPE_NAME} and hold this piconet's fields",
             options=follow,
-            # The tool's own packet lines need the piconet's clock, which it
-            # does not settle on from audio traffic alone, so the floor here
-            # is on the records; the headers they carry need no clock.
-            check=None,
+            # A packet line is printed for every access code that matched,
+            # before the decoder is asked for a clock, so an audio capture
+            # prints them like any other; what it does not do is enter
+            # follow mode, which none of these checks needs.
+            check=piconet_packets(central, MIN_PACKETS, only=True),
             expected_state=(f"the pcapng holds {MIN_PACKETS}+ records of LAP "
                             f"{central}, at least one named {AUDIO_TYPE_NAME}, "
                             f"each record's fields agreeing with its own header"),

@@ -748,7 +748,7 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         if far.get("sco") != AUDIO_ON:
             time.sleep(settle_s)
             far = acceptor_shell.status()
-        _require_audio_up(far, acceptor, acceptor_status["address"])
+        _require_audio_up(far, acceptor, initiator_status["address"])
         print(f"audio link: {_audio_field(linked, 'sco_link', str, initiator.label)} "
               f"{_audio_field(linked, 'sco_pkt_type', str, initiator.label)}, "
               f"{_audio_field(linked, 'sco_tx_len', int, initiator.label)} bytes "

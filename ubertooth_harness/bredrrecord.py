@@ -41,10 +41,16 @@ report a passing HEC with no UAP beside it; those checks skip it rather than
 guess, and a caller asks for a floor of records that carry both
 (``--min-hec-valid``).
 
-The flag rules below assume the libbtbb this harness pins, which clears the
-HEC and CRC answers for a clock trial it abandons and drops the payload with
-them. A libbtbb without those clears can write an honest record that these
-rules call inconsistent.
+The flag rules below, and the floors a caller sets on them, assume the
+libbtbb this harness pins: it records what it checked, clears those answers
+for a clock trial it abandons, and drops the payload with them. A libbtbb
+that records no HEC or CRC answer at all leaves those floors unreachable,
+and one without the clears can write an honest record that these rules call
+inconsistent.
+
+A record whose header never decoded carries eighteen zero bits where the
+header goes, so it is reported as a NULL packet with address 0 and no flags
+set. In a survey that is most of them.
 
 The last two need the link to be unencrypted, which the bench's ESP32 peers
 are (they pair with nobody). A capture of an encrypted piconet would decode
@@ -486,6 +492,7 @@ def problems(found: list[Record], *, lap: int | None = None,
              min_packets: int = 0, min_reference_uap: int = 0,
              min_with_payload: int = 0, min_hec_valid: int = 0,
              min_crc_valid: int = 0, min_channels: int = 0,
+             max_access_code_errors: int | None = None,
              types: tuple[str, ...] = (), require_types: tuple[str, ...] = (),
              payload_checks: bool = True) -> list[str]:
     """Everything wrong with these records, worst first; empty when they pass."""
@@ -527,14 +534,25 @@ def problems(found: list[Record], *, lap: int | None = None,
     if len(with_payload) < min_with_payload:
         failures.append(f"{len(with_payload)} records carry a payload, expected "
                         f"at least {min_with_payload}")
-    hec_valid = [record for record in found if record.has(HEC_VALID)]
+    # Records whose HEC passed AND that carry a reference UAP: those are
+    # the ones the cross-check above actually runs on, so a floor on them
+    # is a floor on checks made, not on two unrelated counts.
+    hec_valid = [record for record in found
+                 if record.has(HEC_VALID) and record.has(REFUAP_VALID)]
     if len(hec_valid) < min_hec_valid:
-        failures.append(f"{len(hec_valid)} records passed a header HEC, "
-                        f"expected at least {min_hec_valid}")
+        failures.append(f"{len(hec_valid)} records passed a header HEC with a "
+                        f"reference UAP to check it against, expected at least "
+                        f"{min_hec_valid}")
     crc_valid = [record for record in found if record.has(CRC_VALID)]
     if len(crc_valid) < min_crc_valid:
         failures.append(f"{len(crc_valid)} records passed a payload CRC, expected "
                         f"at least {min_crc_valid}")
+    if max_access_code_errors is not None:
+        worst = max((record.access_code_offenses for record in found),
+                    default=0)
+        if worst > max_access_code_errors:
+            failures.append(f"a record with {worst} access-code bit errors, "
+                            f"where the run allowed {max_access_code_errors}")
     channels = {record.rf_channel for record in found}
     if len(channels) < min_channels:
         failures.append(f"records on {len(channels)} channels, expected at least "
@@ -686,8 +704,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-with-payload", type=int, default=0)
     parser.add_argument(
         "--min-hec-valid", type=int, default=0,
-        help="records whose header HEC must have passed, so a record "
-             "carrying another packet's header, or none, cannot pass")
+        help="records whose header HEC must have passed with a reference UAP "
+             "to check it against, so a record carrying another packet's "
+             "header, or none, cannot pass")
+    parser.add_argument(
+        "--max-access-code-errors", type=int,
+        help="access-code bit errors no record may exceed; ubertooth-rx -e "
+             "fixes the ceiling for a run, and allows two by default")
     parser.add_argument("--min-crc-valid", type=int, default=0)
     parser.add_argument("--min-channels", type=int, default=0)
     parser.add_argument("--types", default="",
@@ -727,6 +750,7 @@ def main(argv: list[str] | None = None) -> int:
         min_reference_uap=args.min_reference_uap,
         min_with_payload=args.min_with_payload,
         min_hec_valid=args.min_hec_valid,
+        max_access_code_errors=args.max_access_code_errors,
         min_crc_valid=args.min_crc_valid, min_channels=args.min_channels,
         types=types, require_types=require_types,
         payload_checks=not args.no_payload_checks)

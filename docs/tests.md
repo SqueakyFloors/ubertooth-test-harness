@@ -1541,12 +1541,14 @@ those two checks skip such a record rather than guessing at the UAP, and the
 followed cases require a floor of records that do carry both.
 
 A record that mixed one packet's header with another's metadata fails all
-three. The rest are flag-to-field agreements of the same kind: the noise flag
-is set exactly when the noise figure is below the signal, the payload flag
-exactly when the record holds payload bytes, the two reference flags exactly
-when the reference fields hold an address, a valid check is never one that was
-not made, and the transport and rate nibbles say what a receive-only
-basic-rate capture knows and nothing more. On top of those, the bench
+three. The rest are flag-to-field agreements of the same kind, for each flag that
+describes a field the record carries: the noise flag is set exactly when the
+noise figure is below the signal, the payload flag exactly when the record
+holds payload bytes, the two reference flags exactly when the reference fields
+hold an address, a valid check is never one that was not made, and the
+transport and rate nibbles say what a receive-only basic-rate capture knows
+and nothing more. Two flags are read and reported but not constrained, because
+this writer never sets either: a decrypted payload and an aliased channel. On top of those, the bench
 contributes what it knows: the piconet's LAP, the reference LAP and UAP the
 capture was given, and, in a PCAPNG, the address `ubertooth-rx -l` records
 once in an interface option. That address is only as much as the tool knows:
@@ -1655,10 +1657,12 @@ these checks call inconsistent. A run against another `--libbtbb-ref` should
 expect that.
 
 An EV3 capture's packet *names* are read from the records, not from the tool's
-packet lines: `ubertooth-rx` does not settle on this pair's clock from audio
-traffic, so a follow-mode capture of the voice link does not happen, and the
-case puts no floor on the tool's own output. Whether the clock recovery should
-manage it is the fork's question, not this test's.
+packet lines, which carry no packet type. `ubertooth-rx` does not settle on
+this pair's clock from audio traffic, so it never enters follow mode on it;
+none of these checks needs it to, because a packet line is printed for every
+access code that matched and a record's header decodes without a clock of the
+piconet. Whether the clock recovery should manage it is the fork's question,
+not this test's.
 
 ## CLI usage smoke
 

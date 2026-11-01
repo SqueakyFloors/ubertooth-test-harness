@@ -344,9 +344,11 @@ class RecordFieldCaseTests(unittest.TestCase):
         self.assertTrue(any("audio link: esco" in pattern
                             for pattern in step.output_patterns))
         self.assertGreater(step.timeout_s, 25.0 + AUDIO_SETUP_S - 1)
-        # The tool's own packet lines need the piconet's clock, which it does
-        # not settle on from audio traffic, so the records carry the check.
-        self.assertIsNone(step.output_check)
+        # A packet line is printed for every matched access code, before any
+        # clock is asked for, so an audio capture is held to the same floor.
+        self.assertEqual("", step.output_check(packets(CENTRAL_LAP, MIN_PACKETS)))
+        self.assertIn("expected at least",
+                      step.output_check(packets(CENTRAL_LAP, 1)))
         checks = list(steps["verify-pcapng"].resolve_argv({CAPTURE_DIR_KEY: "/x"}))
         self.assertEqual(AUDIO_TYPE_NAME,
                          checks[checks.index("--require-types") + 1])
