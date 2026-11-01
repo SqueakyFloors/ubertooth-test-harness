@@ -124,7 +124,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--max-stale", type=int, default=None,
         help="fail when more than this many records are left from an earlier "
-             "mode (full format); the count is added to the summary line",
+             "mode (full format); the count is added to the summary line. "
+             "stale_records() finds a basic-rate leftover by its clock, so "
+             "one whose clock is not ahead of the new stream's first record "
+             "is not counted; an LE record is found whatever its clock",
     )
     args = parser.parse_args(argv)
     types = tuple(item for item in args.types.split(",") if item)

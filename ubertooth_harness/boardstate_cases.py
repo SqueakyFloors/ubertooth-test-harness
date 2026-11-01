@@ -67,7 +67,7 @@ from ubertooth_harness.transitions import (
     RESET_TIMEOUT_S,
     RESTORED_SETTINGS,
     SQUELCH,
-    _cleanup,
+    _identity,
     _read_originals,
     _serial,
     _stop,
@@ -167,11 +167,10 @@ def _kill_step(tool_argv, capture: str, record: str) -> Step:
         # The board is left in its mode with no STOP sent, so the kill must be
         # of the tool itself and the process must be gone, zombie included.
         output_patterns=(
-            r"SIGKILL reaped as signal 9, pid gone, nothing left in its "
-            r"process group",
+            r"SIGKILL reaped as signal 9, nothing left in its process group",
         ),
         observe=Observation("killed capture", r"Killed capture: (?P<value>\S+) pid \d+",
-                            tool_argv[0]),
+                            Path(tool_argv[0]).name),
     )
 
 
@@ -224,6 +223,38 @@ def _evidence_steps(serial: str, capture: str, record: str) -> tuple[Step, ...]:
     )
 
 
+def _cleanup(serial: str) -> tuple[Step, ...]:
+    """Stop, reset, check the board is at its documented defaults, and put
+    back what the case recorded.
+
+    The reset is not the usual cleanup's business, but this case is the one
+    that leaves a board in a mode on purpose, so it hands the next test a
+    board it has seen boot rather than one it has only asked to stop.
+    """
+    steps = [
+        _stop(serial, "cleanup-stop", "Return to idle"),
+        Step("cleanup-reset", "Reset the board", _util(serial, "-r"),
+             timeout_s=RESET_TIMEOUT_S, mutates=True,
+             output_patterns=(r"Resetting ubertooth device",),
+             output_check=nothing_on_stdout),
+    ]
+    steps += [
+        setting.verify(serial, f"cleanup-verify-{setting.key}",
+                       f"{setting.key} is the boot default after the reset",
+                       f"{setting.key} after the cleanup reset",
+                       setting.after_mode_stop)
+        for setting in MODE_RESET_SETTINGS
+    ]
+    steps.append(PA_LEVEL.verify(
+        serial, "cleanup-verify-pa-level",
+        "pa-level is the boot default after the reset",
+        "pa-level after the cleanup reset", PA_BOOT_DEFAULT))
+    for setting in RESTORED_SETTINGS:
+        steps.extend(setting.restore(serial))
+    steps.append(_identity(serial))
+    return tuple(steps)
+
+
 def _case(serial: str, case_id: str, name: str, *, killed_argv, capture: str,
           record: str, second: Step, verify: tuple[Step, ...],
           expected_state: str) -> StateCase:
@@ -237,7 +268,7 @@ def _case(serial: str, case_id: str, name: str, *, killed_argv, capture: str,
         + (_stop(serial, "stop-second-capture", "Return the board to idle"),)
         + verify
         + _evidence_steps(serial, capture, record),
-        _cleanup(serial, RESTORED_SETTINGS),
+        _cleanup(serial),
         expected_state=expected_state,
         capture_dir=True,
     )

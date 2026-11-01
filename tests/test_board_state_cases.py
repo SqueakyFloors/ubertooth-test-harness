@@ -107,8 +107,8 @@ class BoardStateUbertooth(ToolUbertooth):
         self.left_in_mode = self.MODES[tool]
         return self._result(command, 0, (
             f"Killed capture: {tool} pid 31337 streamed {KILLED_BYTES} bytes "
-            "in 1.2 s, SIGKILL reaped as signal 9, pid gone, nothing left in "
-            "its process group\n"
+            "in 1.2 s, SIGKILL reaped as signal 9, nothing left in its "
+            "process group\n"
         ), "", on_output)
 
     def _previous_mode(self):
@@ -235,8 +235,9 @@ class CaseGenerationTests(unittest.TestCase):
             self.assertIn("--", argv)
             tool = argv[argv.index("--") + 1]
             self.assertIn(tool, ("ubertooth-specan", "ubertooth-dump"))
-            self.assertIn("nothing left in its process group",
-                          " ".join(step.output_patterns))
+            self.assertEqual(
+                (r"SIGKILL reaped as signal 9, nothing left in its process group",),
+                step.output_patterns)
 
     def test_the_second_capture_is_the_other_tool_and_names_the_mode_left(self):
         context = {"capture dir": "/run/captures"}
@@ -269,7 +270,8 @@ class CaseGenerationTests(unittest.TestCase):
         self.assertEqual(["--max-stale", "0"], argv[-2:])
         self.assertIn("br,keep-alive", argv)
         # 2 s at the 50 records a second floor.
-        self.assertIn("100", argv)
+        self.assertEqual(["--min-records", "100"],
+                         argv[argv.index("--min-records"):][:2])
 
     def test_the_sweep_check_requires_the_whole_stated_range(self):
         step = next(s for s in self.sweep.steps if s.step_id == "verify-second-capture")
@@ -285,12 +287,18 @@ class CaseGenerationTests(unittest.TestCase):
                             "read-leds-after-kill", "read-modulation-after-kill"):
                 self.assertIn(step_id, ids)
 
-    def test_the_cleanup_restores_every_setting_it_recorded(self):
+    def test_the_cleanup_stops_resets_checks_defaults_and_restores(self):
         for case in self.cases:
             ids = [step.step_id for step in case.cleanup]
-            for key in ("channel", "pa-level", "squelch", "leds"):
+            self.assertEqual(["cleanup-stop", "cleanup-reset"], ids[:2])
+            for key in ("channel", "squelch", "leds", "pa-level"):
+                self.assertIn(f"cleanup-verify-{key}", ids)
                 self.assertIn(f"restore-{key}", ids)
                 self.assertIn(f"verify-restored-{key}", ids)
+                # The defaults are checked before the originals go back.
+                self.assertLess(ids.index(f"cleanup-verify-{key}"),
+                                ids.index(f"restore-{key}"))
+            self.assertEqual("restored-device-identity", ids[-1])
 
 
 class CaseOutcomeTests(unittest.TestCase):

@@ -926,9 +926,12 @@ about 2000 records a second, `ubertooth-specan` about 16 kB a second -- so
 each capture's own contents are the evidence and no peer is needed. They also
 leave different modes, and each one's file says whether a record of the other
 is in it. A dump's 68-byte records carry the firmware's packet type, so a
-record left from the sweep before it fails by type, and a record from before
-the stream started fails by its clock, which restarts at mode entry
-([`rxdump.py`](../ubertooth_harness/rxdump.py), `--max-stale`). A sweep states
+record left from the sweep before it fails by type, since the firmware types a
+sweep's records SPECAN. A record of a mode that writes basic-rate records
+would pass that and fails instead by its clock, which restarts at mode entry
+([`rxdump.py`](../ubertooth_harness/rxdump.py), `--max-stale`): no mode in
+this test writes those, so that half is the general check rather than the one
+this pairing needs. A sweep states
 the band before it asks for its mode and writes the frequency of every
 sample, so a sample outside that band, a frequency of the band missing, or one
 byte more than whole samples says either that the stated range was lost at
@@ -954,11 +957,18 @@ dump. Each resets the board and reads back the documented boot defaults
 other tool, checks that capture's contents, confirms the killed capture is
 byte for byte what the kill left, and then reads firmware version, serial,
 channel, PA level, squelch, and the modulation register, each once: a read
-that needs a second try fails the case. A self-reset the firmware records
-while this runs is reported by the usual watchdog read between cases, and the
-guard boards are checked as in every guarded test.
+that needs a second try fails the case. Cleanup stops the board, resets it,
+requires the documented boot defaults again, and then puts back every setting
+the case recorded; this is the one test that leaves a board in a mode on
+purpose, so it hands the next test a board it has seen boot. A self-reset the
+firmware records while this runs is reported by the usual watchdog read
+between cases, and the guard boards are checked as in every guarded test.
 
-**Known limits.** A pass does not separate a build that waits for the board
+**Known limits.** The clock half of the record check sees a leftover
+basic-rate record only when its clock is ahead of the new stream's first one,
+so a short previous stream can go unseen there; the packet type is what
+catches a record of the sweep, whatever its clock. A pass does not separate a
+build that waits for the board
 to leave the mode from one that warns and starts anyway. The only difference
 between them is a packet or so of the previous mode reaching the new capture,
 which is what the record and sample checks look for, so a run where nothing

@@ -10,6 +10,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -89,8 +90,8 @@ class KilledCaptureTests(unittest.TestCase):
     def test_the_tool_itself_is_killed_reaped_and_gone(self):
         code, line = self.kill(STREAMER)
         self.assertEqual(0, code, line)
-        self.assertIn("SIGKILL reaped as signal 9, pid gone, nothing left in "
-                      "its process group", line)
+        self.assertIn("SIGKILL reaped as signal 9, nothing left in its "
+                      "process group", line)
         self.assertIn("ubertooth-dump pid ", line)
         self.assertRegex(line, r"streamed \d+ bytes in \d+\.\d s")
 
@@ -173,6 +174,29 @@ class KilledCaptureTests(unittest.TestCase):
         self.assertEqual(1, code)
         self.assertIn("not the", line)
 
+    def test_a_signal_during_the_kill_step_takes_the_capture_with_it(self):
+        # The tool runs in a session of its own, so the harness's own deadline
+        # and stop signals do not reach it; the module has to pass them on.
+        tool = self.tool(SPAWNER)
+        argv = ["kill", "--capture", str(self.capture), "--record",
+                str(self.record), "--min-bytes", str(1 << 30), "--max-wait",
+                "60", "--", tool, "-U", SERIAL, "-d", str(self.capture)]
+        child = subprocess.Popen(
+            [sys.executable, killedcapture.__file__] + argv,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        helper = self.root / "capture.bin.helper"
+        for _ in range(400):
+            if helper.exists():
+                break
+            time.sleep(0.05)
+        self.assertTrue(helper.exists(), "the fake tool never started")
+        left = int(helper.read_text(encoding="utf-8"))
+        self.addCleanup(self.reap, left)
+        child.terminate()
+        child.wait(timeout=30)
+        child.stdout.close()
+        self.assertTrue(self.gone(left), "the capture outlived the signal")
+
     def test_a_missing_capture_is_a_problem_not_a_traceback(self):
         code, line = run(["verify", "--capture", str(self.root / "gone.bin"),
                           "--record", str(self.record)])
@@ -188,13 +212,24 @@ class KilledCaptureTests(unittest.TestCase):
 
 class ProcessCheckTests(unittest.TestCase):
 
-    def test_a_process_whose_status_nobody_has_read_is_not_gone(self):
-        # Why the module checks the pid as well as the exit status: a process
-        # that has exited still owns its open device until it is reaped.
-        pid = os.posix_spawn("/bin/sh", ["sh", "-c", "exit 0"], {})
-        self.assertFalse(killedcapture.pid_gone(pid))
-        os.waitpid(pid, 0)
-        self.assertTrue(killedcapture.pid_gone(pid))
+    def test_a_process_whose_status_nobody_has_read_keeps_its_group(self):
+        # Why the group check is enough on its own: a process that has exited
+        # still owns its open device, and keeps its group, until it is reaped.
+        # The child is given one end of a pipe and nothing to write to it, so
+        # the end closes when the process exits and the read here returns at
+        # that moment. No sleep, and no wait that would reap it: the state
+        # under test is certainly the one reached.
+        read_fd, write_fd = os.pipe()
+        child = subprocess.Popen(["/bin/sh", "-c", "exit 0"],
+                                 pass_fds=(write_fd,), start_new_session=True)
+        os.close(write_fd)
+        with os.fdopen(read_fd, "rb") as closed_at_exit:
+            self.assertEqual(b"", closed_at_exit.read())
+        self.assertFalse(killedcapture.pid_gone(child.pid))
+        self.assertFalse(killedcapture.group_gone(child.pid))
+        child.wait(timeout=30)
+        self.assertTrue(killedcapture.pid_gone(child.pid))
+        self.assertTrue(killedcapture.group_gone(child.pid))
 
     def test_this_process_and_its_group_are_there(self):
         self.assertFalse(killedcapture.pid_gone(os.getpid()))
