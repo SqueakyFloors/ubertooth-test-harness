@@ -198,6 +198,15 @@ def _refusal_status(value) -> bool:
     return value in (400, 404, 503) and _integer(value)
 
 
+def valid_file_page(page) -> bool:
+    """Whether ``page`` can be carried in a ``run_file_page`` answer.
+
+    For the runner, which builds a page from a run.jsonl record and has to
+    answer a request it cannot carry with a refusal rather than fall silent.
+    """
+    return _file_page(page)
+
+
 # Controller -> runner.
 CONTROLLER_MESSAGES: Mapping[str, Mapping[str, Validator]] = {
     # Start one run. ``commit`` is the commit the controller listed for

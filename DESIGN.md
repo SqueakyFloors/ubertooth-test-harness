@@ -94,9 +94,10 @@ the runner refuses any controller URL whose host is not loopback (`127.0.0.1`,
 connects to the checked address itself, ignores proxies, and follows no HTTP
 redirects.
 
-Implemented protocol, version 3 (`ubertooth_harness/protocol.py`; version 2
-added the run's `commit`, version 3 its `flash_build`). Every message is one
-JSON text frame `{"version": 3, "type": ..., ...fields}`. Each
+Implemented protocol, version 4 (`ubertooth_harness/protocol.py`; version 2
+added the run's `commit`, version 3 its `flash_build`, version 4 the
+`run_file` request and its answers). Every message is one
+JSON text frame `{"version": 4, "type": ..., ...fields}`. Each
 type has an exact field set; the receiver rejects any other version, unknown
 type, missing or extra field, or wrongly typed value, and does not act on it
 (the runner answers `protocol_error {reason}`). Inbound messages to the runner
@@ -110,6 +111,7 @@ Controller → target runner:
 |------|--------|
 | `run` | `request_id`, `ref` (git ref name, for the record; no whitespace, no leading `-`), `commit` (the full commit the controller listed for `ref`, which the runner runs; `null` only when the controller could not list refs, and then the runner resolves `ref` in its own Ubertooth checkout), `plan` (name of `<plans dir>/<plan>.yaml`), `suite`, `tests` (exact test names; empty = whole suite), `build` (bool), `flash_build` (bool: with `build`, flash the run's boards with that build's firmware before preflight; false passes `--no-flash-build`; ignored without `build`, and the controller sends and records it false then) |
 | `cancel` | `run_id`, `reason` |
+| `run_file` | `request_id`, `run_id`, `path` (a path that run's own run.jsonl records), `offset` and `limit` in bytes (`limit` at most 256 KiB, since the page travels in one message) |
 
 Target runner → controller:
 
@@ -124,6 +126,8 @@ Target runner → controller:
 | `run_error` | `request_id`, `run_id`, `exit_code`, `reason` (run ended without a `run_finished` record) |
 | `cancel_accepted` | `run_id` |
 | `cancel_rejected` | `run_id`, `reason` |
+| `run_file_page` | `request_id`, `run_id`, `page`: what the run recorded about the file (`path`, `stream`, `bytes`, `lines`, `sha256`) and where this page sits in it (`file_bytes`, `offset`, `length`, `eof`, `page_bytes`, `text`) |
+| `run_file_refused` | `request_id`, `run_id`, `status` (400, 404 or 503, which the controller's route answers with), `reason` (names the run ID or the path only) |
 | `protocol_error` | `reason` |
 
 Semantics:
@@ -160,6 +164,20 @@ Semantics:
   shows, so no run starts only to fail.
 - `cancel` sends the child SIGINT, which run-suite maps to its cooperative
   `CancellationToken` (including power-isolation restoration).
+- `run_file` is how the GUI opens a saved output file of a run a runner
+  carried out: those files stay in the runner's own run directory and only
+  run.jsonl reaches the controller. The runner serves a page under the
+  confinement the controller's own route uses (`runfiles`, over
+  `outputfiles.confined`): only a path that run's own run.jsonl records, only
+  inside the run directory, no symbolic link followed, not even for the run
+  directory itself, and the page bounded. Every request is answered, with a
+  page or a refusal, and a refusal names the run ID or the path and never a
+  path on the target. The runner answers four at once and refuses further
+  ones as busy (503); it reads off the event loop and in its own task, so a
+  page of a soak's log does not delay a cancel. The controller asks only for
+  a file that run's own run.jsonl records and this host does not hold, holds
+  at most eight requests per target, and answers 503 while the runner is not
+  connected.
 - The run continues if the controller disconnects. The runner reconnects with
   bounded exponential backoff (0.5 s to 30 s), registers with
   `active_run_id`, and replays that run's records from the start of

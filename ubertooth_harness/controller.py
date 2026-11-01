@@ -175,6 +175,20 @@ def valid_identifier(value) -> bool:
     return isinstance(value, str) and bool(_ID_RE.fullmatch(value))
 
 
+def unreadable_log(run_id: str, error: Exception) -> str:
+    """Why a stored run.jsonl gave neither a file list nor a page.
+
+    A stored record is ordinary data: a line that is JSON but holds, say, a
+    size that is not a number stops a list or a page being built from it.
+    That is a refusal naming the run, not a server failure, and it names what
+    went wrong without a path on this host.
+    """
+    return (
+        f"run {run_id} has a record its saved output files cannot be read "
+        f"from ({type(error).__name__})"
+    )
+
+
 # ----- state ---------------------------------------------------------------
 
 
@@ -907,9 +921,15 @@ class Controller:
             await self.learn(run)
         elif kind in ("run_file_page", "run_file_refused"):
             request_id = message["request_id"]
-            self.expire_pending()
             pending = self._pending_files.get(request_id)
-            if pending is None or pending.host != target.host:
+            if pending is None:
+                # Its caller gave up (504) and the request was dropped, since
+                # a page nobody waits for is of no use to anyone. Answering
+                # late is not a fault of the runner's, so it is not counted
+                # as one; it is simply discarded.
+                self.log(f"discarded a late {kind} from {target.host}")
+                return
+            if pending.host != target.host:
                 raise _Violation(f"{kind} for unknown file request {request_id}")
             asked = pending.fields or {}
             if message["run_id"] != asked.get("run_id"):
@@ -1210,6 +1230,8 @@ class Controller:
             # is already answered, and reaching out would not change it.
             if not error.on_target:
                 raise ControllerError(error.detail, error.status) from None
+        except (OSError, ValueError) as error:
+            raise ControllerError(unreadable_log(run.run_id, error), 404) from None
         return await self._fetch_run_file(run, path, offset, limit)
 
     async def _fetch_run_file(
@@ -1223,10 +1245,13 @@ class Controller:
                 "which is not connected; it can be read again once that "
                 "target's runner is back", 503,
             )
-        self.expire_pending()
+        # Every entry counts, awaited or not: each one is a request this
+        # controller sent and is holding an answer for. Unlike a run request,
+        # a file request is dropped as soon as its caller leaves (below), so
+        # the count is what is really outstanding.
         outstanding = sum(
             1 for pending in self._pending_files.values()
-            if pending.host == run.target and pending.awaited
+            if pending.host == run.target
         )
         if outstanding >= MAX_PENDING_FILES_PER_TARGET:
             raise ControllerError(
@@ -1256,7 +1281,15 @@ class Controller:
             raise ControllerError(
                 f"cannot reach target {run.target}: {error}", 503
             ) from None
-        return await self._await_reply(pending)
+        try:
+            return await self._await_reply(pending)
+        finally:
+            # Dropped as soon as its caller is gone: a page that arrives
+            # after the caller timed out can do nothing for anyone, where a
+            # late run_accepted still has a run to create. This is also what
+            # keeps the count above honest.
+            if self._pending_files.get(request_id) is pending:
+                del self._pending_files[request_id]
 
 
 # ----- HTTP / WebSocket layer ----------------------------------------------
@@ -1564,7 +1597,10 @@ def create_app(controller: Controller):
         run = controller.get_run(run_id)
         # Read from run.jsonl a line at a time (runfiles.saved_in), so a
         # soak's log is not parsed into memory to list a few files.
-        return {"files": await asyncio.to_thread(listing, run.directory)}
+        try:
+            return {"files": await asyncio.to_thread(listing, run.directory)}
+        except (OSError, ValueError) as error:
+            raise ControllerError(unreadable_log(run_id, error), 404) from None
 
     @app.get("/api/runs/{run_id}/file")
     async def get_run_file(run_id: str, path: str, offset: int = 0, limit: int = PAGE_BYTES):

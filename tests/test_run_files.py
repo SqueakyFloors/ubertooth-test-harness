@@ -607,6 +607,40 @@ class RunnerPageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(400, answer["status"])
         self.assertIn("symbolic link", answer["reason"])
 
+    async def test_a_run_directory_that_is_a_symbolic_link_is_refused(self):
+        # As for a file inside a run, no link is followed for the run
+        # directory: one that pointed beside itself would pass a check on
+        # the parent alone and serve another run's records.
+        (self.fixture.output / "run-linked").symlink_to(
+            self.run_dir, target_is_directory=True)
+        answer = await self.refusal(STDOUT_FILE, run_id="run-linked")
+        self.assertEqual(404, answer["status"])
+        self.assertIn("no run", answer["reason"])
+
+    async def test_a_record_a_page_cannot_be_built_from_is_refused(self):
+        # A run.jsonl record is data. Nothing here may end without an
+        # answer: the caller would wait out its timeout for one.
+        write_run(self.run_dir, events=[event(1, "command_finished", {
+            "phase": "test", "invocation_id": "002",
+            "command_id": "002-command-1", "returncode": 0,
+            "output_files": [{**file_record(STDOUT_FILE, "stdout", BODY),
+                              "bytes": "not a number"}],
+        })])
+        answer = await self.refusal(STDOUT_FILE)
+        self.assertEqual(404, answer["status"])
+        self.assertIn("cannot be served", answer["reason"])
+
+    async def test_a_record_the_protocol_cannot_carry_is_refused(self):
+        write_run(self.run_dir, events=[event(1, "command_finished", {
+            "phase": "test", "invocation_id": "002",
+            "command_id": "002-command-1", "returncode": 0,
+            "output_files": [{**file_record(STDOUT_FILE, "stdout", BODY),
+                              "lines": -5}],
+        })])
+        answer = await self.refusal(STDOUT_FILE)
+        self.assertEqual(404, answer["status"])
+        self.assertIn("cannot carry", answer["reason"])
+
     async def test_a_recorded_file_that_is_gone_is_refused_plainly(self):
         (self.run_dir / STDOUT_FILE).unlink()
         answer = await self.refusal(STDOUT_FILE)
@@ -826,27 +860,80 @@ class ForwardedFileTests(ControllerTestCase):
     async def test_more_requests_than_are_held_for_one_target_are_refused(self):
         run_id = await self.stored_run()
         run = self.controller.get_run(run_id)
+        over = 4
         async with FakeRunner(self.port) as runner:
             await self.registered(runner)
-            # Through the controller rather than HTTP: eight requests waiting
-            # at once would be eight blocked threads in the test's own pool.
-            waiting = [
+            # All at once, through the controller rather than HTTP: the cap
+            # has to hold when every caller reaches it before any answer
+            # comes back, and that many HTTP calls would be that many
+            # blocked threads in the test's own pool.
+            asked = [
                 asyncio.create_task(
                     self.controller.read_run_file(run, STDOUT_FILE, 0, 64))
-                for _ in range(MAX_PENDING_FILES_PER_TARGET)
+                for _ in range(MAX_PENDING_FILES_PER_TARGET + over)
             ]
-            for _ in waiting:
-                await runner.recv()
-            with self.assertRaises(ControllerError) as caught:
-                await self.controller.read_run_file(run, STDOUT_FILE, 0, 64)
-            self.assertEqual(503, caught.exception.status)
-            self.assertIn("already waiting", caught.exception.detail)
+            await wait_until(lambda: sum(task.done() for task in asked) == over)
+            self.assertEqual(MAX_PENDING_FILES_PER_TARGET,
+                             len(self.controller._pending_files))
+            for task in asked:
+                if not task.done():
+                    continue
+                with self.assertRaises(ControllerError) as caught:
+                    task.result()
+                self.assertEqual(503, caught.exception.status)
+                self.assertIn("already waiting", caught.exception.detail)
+            for _ in range(MAX_PENDING_FILES_PER_TARGET):
+                self.assertEqual("run_file", (await runner.recv())["type"])
+            waiting = [task for task in asked if not task.done()]
+            self.assertEqual(MAX_PENDING_FILES_PER_TARGET, len(waiting))
             for request_id in list(self.controller._pending_files):
                 await runner.send(
                     "run_file_page", request_id=request_id, run_id=run_id,
                     page=page_for(STDOUT_FILE, 0, 64))
-            for pending in waiting:
-                self.assertEqual(BODY[:64], (await pending)["text"])
+            for task in waiting:
+                self.assertEqual(BODY[:64], (await task)["text"])
+
+    async def test_an_answer_nobody_waits_for_is_discarded_not_counted(self):
+        run_id = await self.stored_run()
+        run = self.controller.get_run(run_id)
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            self.controller.reply_timeout_s = 0.1
+            with self.assertRaises(ControllerError) as caught:
+                await self.controller.read_run_file(run, STDOUT_FILE, 0, 64)
+            self.assertEqual(504, caught.exception.status)
+            request = await runner.recv()
+            # A page nobody waits for can do nothing for anyone, so the
+            # request is dropped rather than kept for the grace period.
+            self.assertEqual({}, self.controller._pending_files)
+            await runner.send(
+                "run_file_page", request_id=request["request_id"], run_id=run_id,
+                page=page_for(STDOUT_FILE, 0, 64))
+            await wait_until(
+                lambda: any("discarded a late" in line for line in self.logs))
+            # Answering late is not a fault of the runner's.
+            self.assertEqual(0, self.controller.targets["Host_A"].protocol_errors)
+
+    async def test_a_record_the_list_cannot_be_built_from_is_a_refusal(self):
+        # A stored record is data: a 500 with a traceback is the wrong answer
+        # for a run.jsonl that holds a size which is not a number.
+        run_id = await self.stored_run()
+        directory = self.results / run_id
+        (directory / RUN_LOG).write_text("".join(json.dumps(e) + "\n" for e in [
+            event(1, "command_finished", {
+                "phase": "test", "invocation_id": "002",
+                "command_id": "002-command-1", "returncode": 0,
+                "output_files": [{**file_record(STDOUT_FILE, "stdout", BODY),
+                                  "bytes": "not a number"}],
+            }),
+        ]), encoding="utf-8")
+        for path in (f"/api/runs/{run_id}/files",
+                     f"/api/runs/{run_id}/file?path={STDOUT_FILE}"):
+            with self.subTest(path=path):
+                status, payload, _ = await self.http("GET", path)
+                self.assertEqual(404, status, payload)
+                self.assertIn("cannot be read from", payload["detail"])
+                self.assertNotIn(str(self.results), payload["detail"])
 
 
 if __name__ == "__main__":

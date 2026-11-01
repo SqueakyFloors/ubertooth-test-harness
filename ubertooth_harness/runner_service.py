@@ -41,6 +41,7 @@ from ubertooth_harness.protocol import (
     decode_controller_message,
     encode_runner_message,
 )
+from ubertooth_harness.protocol import valid_file_page
 from ubertooth_harness.runfiles import OutputFileError, read_output_page
 
 
@@ -543,22 +544,52 @@ class RunnerService:
 
     async def _send_run_file(self, message: dict) -> None:
         run_id = message["run_id"]
-        try:
-            page = await asyncio.to_thread(
-                self._read_page, run_id, message["path"],
-                message["offset"], message["limit"],
-            )
-            answer, fields = "run_file_page", {"page": page}
-        except OutputFileError as error:
-            self.log(f"refused a file of run {run_id}: {error.detail}")
-            answer = "run_file_refused"
-            fields = {"status": error.status, "reason": error.detail}
+        answer, fields = await asyncio.to_thread(
+            self._answer_run_file, run_id, message["path"],
+            message["offset"], message["limit"],
+        )
+        if answer == "run_file_refused":
+            self.log(f"refused a file of run {run_id}: {fields['reason']}")
         try:
             await self._send(
                 answer, request_id=message["request_id"], run_id=run_id, **fields
             )
         except Exception as error:  # noqa: BLE001 - the connection may have gone
             self.log(f"could not answer the file request for {run_id}: {error}")
+
+    def _answer_run_file(
+        self, run_id: str, path: str, offset: int, limit: int
+    ) -> tuple[str, dict]:
+        """The answer to one run_file request: a page, or a refusal.
+
+        Every failure becomes a refusal, including one nothing anticipated,
+        because a request this runner leaves unanswered makes the caller on
+        the other side wait out its timeout for an answer that never comes.
+        """
+        try:
+            page = self._read_page(run_id, path, offset, limit)
+        except OutputFileError as error:
+            return "run_file_refused", {
+                "status": error.status, "reason": error.detail,
+            }
+        except (OSError, ValueError) as error:
+            # A run.jsonl that cannot be read at all, or one holding a record
+            # a page cannot be built from (a record is ordinary data). The
+            # reason names the run and the path, never a path on this target.
+            return "run_file_refused", {
+                "status": 404,
+                "reason": f"{path!r} cannot be served from run {run_id}: "
+                          f"{type(error).__name__}",
+            }
+        if not valid_file_page(page):
+            # The same reason: a record this protocol cannot carry would make
+            # encoding the answer fail, and silence is the worst answer.
+            return "run_file_refused", {
+                "status": 404,
+                "reason": f"{path!r} is recorded in a way this protocol "
+                          "cannot carry",
+            }
+        return "run_file_page", {"page": page}
 
     def _read_page(self, run_id: str, path: str, offset: int, limit: int) -> dict:
         """One page of a file of this runner's own run ``run_id``.
@@ -569,7 +600,15 @@ class RunnerService:
         and nothing else, so an answer never says where the run directory is
         on this target.
         """
-        directory = (self.config.output / run_id).resolve()
+        named = self.config.output / run_id
+        # No symbolic link is followed for the run directory either, as none
+        # is for a file inside it: a link would let one run ID serve another
+        # run's records, which is what reading only recorded files prevents.
+        # Checked before resolving, because resolving replaces a link with
+        # its target, and its target may sit beside it.
+        if named.is_symlink():
+            raise OutputFileError(f"this runner has no run {run_id!r}", 404)
+        directory = named.resolve()
         # The protocol lets only one path component of safe characters
         # through; this also refuses one that resolves anywhere but directly
         # under this runner's output directory.
