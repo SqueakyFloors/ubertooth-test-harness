@@ -133,9 +133,11 @@ only the SDP lookup, the connection, and the data. Nothing in it is encrypted,
 which is what lets a capture's payload lengths and CRCs be checked against the
 bytes beside them.
 
-**Voice traffic too.** `sco start` adds a synchronous (eSCO) link over the
-Hands-Free Profile alongside the data stream, so the air carries
-reserved-slot voice packets as well. `sco type ev3` asks for a plain EV3
+**Voice traffic too.** `sco start` opens a synchronous (eSCO) link over the
+Hands-Free Profile, so the air carries reserved-slot voice packets. An audio
+session is that link and the profile's own service level connection, an ACL
+link; it starts no data stream, and a board can hold both at once if a test
+asks for them. `sco type ev3` asks for a plain EV3
 link, whose payload is on the air at the basic rate a receive-only Ubertooth
 can decode; the 2-EV3 link the stack chooses by default carries the same
 payload as enhanced rate, which a basic-rate decoder cannot read. The

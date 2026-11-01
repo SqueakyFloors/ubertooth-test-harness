@@ -77,8 +77,9 @@ HARDWARE_ENV = "UBERTOOTH_HARNESS_HARDWARE"
 HOLD = _HERE / "hold"
 ESP32PEER = Path(esp32peer.__file__).resolve()
 ONE_PEER = ("status", "identify", "reset")
-# The commands that take two boards and run a command inside one session.
-SESSIONS = ("stream", "audio")
+# The commands that take two boards and run a command inside one session,
+# from the module itself rather than a second list that could drift from it.
+SESSIONS = esp32peer.PAIR_COMMANDS
 # What each session forwards to the delegate, and the delegate's name for it.
 # An option left out is not passed, so the delegate's own default applies.
 SESSION_OPTIONS = {

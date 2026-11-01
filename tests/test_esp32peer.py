@@ -511,7 +511,7 @@ class AudioTests(unittest.TestCase):
         acceptor.link(initiator)
         with self.assertRaisesRegex(
             esp32peer.PeerError,
-            "the initiator reports a sco link, not esco"
+            "the initiator reports the link as sco, not esco"
         ):
             self._audio(firmwares=(acceptor, initiator))
 
@@ -533,8 +533,8 @@ class AudioTests(unittest.TestCase):
         acceptor.link(initiator)
         with self.assertRaisesRegex(
             esp32peer.PeerError,
-            r"the acceptor cannot say what its audio link carries \(packet "
-            r"type unknown, 0 bytes a packet\)"
+            r"the acceptor cannot say what its audio link carries \(link esco, "
+            r"packet type unknown, 0 bytes a packet\)"
         ):
             self._audio(firmwares=(acceptor, initiator), packet_type="default")
 
@@ -547,8 +547,7 @@ class AudioTests(unittest.TestCase):
         # `role` takes an audio link and its profile down first, which the
         # firmware allows about 18 seconds for, so it cannot run on the
         # ordinary five-second command deadline.
-        self.assertGreater(esp32peer.ROLE_TIMEOUT_S,
-                           esp32peer.COMMAND_TIMEOUT_S * 2)
+        self.assertGreaterEqual(esp32peer.ROLE_TIMEOUT_S, 18.0)
 
     def test_a_pair_that_carried_too_few_frames_fails_the_run(self):
         with self.assertRaisesRegex(esp32peer.PeerError,

@@ -719,14 +719,16 @@ def _require_audio_type(status: dict, peer: Peer, packet_type: str) -> None:
     link = _audio_field(status, "sco_link", str, peer.label)
     settled = _audio_field(status, "sco_pkt_type", str, peer.label)
     length = _audio_field(status, "sco_tx_len", int, peer.label)
+    if AUDIO_UNNAMED in (link, settled) or length == 0:
+        # The board could not read its link back, so it cannot say what is on
+        # the air. With `default` that reading is all there is to go on.
+        raise PeerError(f"the {peer.label} cannot say what its audio link "
+                        f"carries (link {link}, packet type {settled}, "
+                        f"{length} bytes a packet)")
     if link != AUDIO_ESCO:
-        raise PeerError(f"the {peer.label} reports a {link} link, not "
+        raise PeerError(f"the {peer.label} reports the link as {link}, not "
                         f"{AUDIO_ESCO}: an audio session carries voice over an "
                         f"{AUDIO_ESCO} link")
-    if settled == AUDIO_UNNAMED or length == 0:
-        raise PeerError(f"the {peer.label} cannot say what its audio link "
-                        f"carries (packet type {settled}, {length} bytes a "
-                        "packet)")
     wanted = AUDIO_TYPE_ON_LINK.get(packet_type)
     if wanted is not None and settled != wanted:
         raise PeerError(f"the {peer.label} reports an audio link using "
@@ -793,6 +795,7 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         _require_audio_up(far, acceptor, initiator_status["address"])
         for peer_status, peer in ((linked, initiator), (far, acceptor)):
             _require_audio_type(peer_status, peer, packet_type)
+        checked = packet_type
         print(f"audio link: {_audio_field(linked, 'sco_link', str, initiator.label)} "
               f"{_audio_field(linked, 'sco_pkt_type', str, initiator.label)}, "
               f"{_audio_field(linked, 'sco_tx_len', int, initiator.label)} bytes "
@@ -811,6 +814,14 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
     problems = []
     for peer_status, peer in ((after_initiator, initiator),
                               (after_acceptor, acceptor)):
+        if peer_status.get("sco") == AUDIO_ON:
+            # The link the command ran against has to be the one it was
+            # given: a link renegotiated part way through would otherwise
+            # pass on having been right when it came up.
+            try:
+                _require_audio_type(peer_status, peer, checked)
+            except PeerError as error:
+                problems.append(f"after the command ran, {error}")
         sent = _audio_field(peer_status, "sco_tx_frames", int, peer.label)
         received = _audio_field(peer_status, "sco_rx_frames", int, peer.label)
         print(f"{peer.label} audio: {peer_status['sco']} "

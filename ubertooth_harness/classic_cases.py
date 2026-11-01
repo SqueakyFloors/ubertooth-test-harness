@@ -98,6 +98,9 @@ MIN_WRITES = 50
 PAIR_SETUP_S = (
     2 * esp32peer.BOOT_TIMEOUT_S                      # both boards boot
     + 8 * esp32peer.COMMAND_TIMEOUT_S                 # settings and statuses
+    # `role` is one of those commands and has a deadline of its own, because
+    # it stops an audio link and its profile before it changes anything.
+    + (esp32peer.ROLE_TIMEOUT_S - esp32peer.COMMAND_TIMEOUT_S)
     + esp32peer.CONNECT_TIMEOUT_S                     # page and SDP lookup
     + esp32peer.SETTLE_S
     + 2 * (esp32peer.BOOT_TIMEOUT_S                   # the two releases
@@ -118,9 +121,9 @@ PEER_TIMEOUT_S = esp32peer.BOOT_TIMEOUT_S + 4 * esp32peer.COMMAND_TIMEOUT_S
 # carries the same payload as enhanced rate.
 AUDIO_TYPE = "ev3"
 # How the boards name each type back, which is the specification's spelling
-# rather than the command line's (firmware/esp32-classic-peer/README.md,
-# `sco_pkt_type`).
-REPORTED_AUDIO_TYPES = {"ev3": "ev3", "2ev3": "2-ev3"}
+# rather than the command line's. The driver checks a link against the same
+# fact, so there is one copy of it.
+REPORTED_AUDIO_TYPES = esp32peer.AUDIO_TYPE_ON_LINK
 AUDIO_PACKET_TYPE = REPORTED_AUDIO_TYPES[AUDIO_TYPE]
 # What libbtbb names an EV3 packet. The four header bits cannot tell an EV3
 # from an HV3 or a 3-EV3, so this one name covers all three
