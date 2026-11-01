@@ -1001,15 +1001,18 @@ that wrote it.
 
 **Expected outcome.** Smoke runs 6 cases: `ubertooth-rx -r -q -d`,
 `ubertooth-btle -n -r -q`, and `ubertooth-dump -d` stopped at the board lookup
-(exit 1, the error on stderr, nothing on stdout, no new file created, and the
-seeded destination one of them names not truncated); a replay that reads no
+(exit 1, the error on stderr, nothing on stdout, and no new file created; the
+`rx` and `btle` cases give one of their options the seeded file, so they also
+require that a destination the user already had is not truncated); a replay that reads no
 whole record taking back all three files it created; a replay that reads
 records and then meets a cut-short one keeping all three, the two captures
 readable and the dump compared with the fixture records it came from, byte
 for byte; and a PCAPNG destination in a directory that
 is not there, reported as `error: <file>: No such file or directory` with
-nothing created. Comprehensive runs 15, adding the same lookup case for
-`ubertooth-btle -c`, which is its own create call; the same missing directory
+nothing created. Comprehensive runs 16, adding the same lookup case for
+`ubertooth-btle -c`, which is its own create call, and one for
+`ubertooth-dump -d` on the seeded destination, which has only the one capture
+option to give it; the same missing directory
 for a PCAP destination; a replay whose one whole record the decoder skips,
 which keeps its files all the same, with the two captures holding no packet
 and the dump empty; a capture bound for standard output whose

@@ -783,12 +783,12 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     ),
     "Raw receive replay": _profiles(Estimate(0.9), Estimate(3.9)),
     "Refused command lines": _profiles(Estimate(10.0), Estimate(20.7)),
-    # No hardware: 6 cases and 40 commands in smoke, 15 and 107
-    # comprehensive, all of them short (preflight is not counted here, as it
-    # is in no estimate). Measured on the macOS host at 0.135 s a command on
-    # its lightest run; the same runs with the host busy took two to six
-    # times longer, which is why an estimate is a countdown, never a timeout.
-    "Failed capture files": _profiles(Estimate(5.4), Estimate(14.4)),
+    # No hardware: 6 cases and 39 commands in smoke, 16 and 112
+    # comprehensive, all of them short (preflight is not counted, as it is in
+    # no estimate). The lightest run of them on the macOS host cost 0.135 s a
+    # command; the same runs with that host busy took two to six times
+    # longer, which is why an estimate is a countdown, never a timeout.
+    "Failed capture files": _profiles(Estimate(5.3), Estimate(15.1)),
     "Util mode refusals": _profiles(Estimate(1.9), Estimate(3.0)),
     "DFU image checks": _profiles(Estimate(8.7), Estimate(37.4)),
     "Python tools": _profiles(Estimate(0.5), Estimate(7.7)),

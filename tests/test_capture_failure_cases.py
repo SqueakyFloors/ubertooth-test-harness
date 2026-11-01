@@ -325,7 +325,7 @@ class CaseTests(unittest.TestCase):
         _a, smoke = cases("smoke")
         self.assertEqual(6, len(smoke))
         _a, full = cases("comprehensive")
-        self.assertEqual(15, len(full))
+        self.assertEqual(16, len(full))
         self.assertEqual(len(full), len({case.case_id for case in full}))
         self.assertEqual({case.case_id for case in smoke} & {c.case_id for c in full},
                          {case.case_id for case in smoke})

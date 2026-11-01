@@ -241,31 +241,38 @@ def _case(case_id, name, tool, steps, expected_state, *, cleanup=()) -> StateCas
 def _no_device_case(tool, destinations, *, mode=(), suffix="") -> StateCase:
     """``tool`` with capture options and no board: it stops at the lookup.
 
-    One of the destinations is the seeded file, so the case states not only
-    that no file was created but that a destination the user already had is
-    not truncated on the way to the lookup. It is never given to ``-r``,
-    which refuses a name that exists (ubertooth-rx.md).
+    A destination may be the seeded file, so a case can state not only that
+    no file was created but that a destination the user already had is not
+    truncated on the way to the lookup. It is never given to ``-r``, which
+    refuses a name that exists (ubertooth-rx.md).
     """
     words = mode + tuple(
         word for option, name in destinations for word in (option, ("file", name)))
-    new = tuple(name for _option, name in destinations if name != SEEDED)
+    new_files = tuple(name for _option, name in destinations if name != SEEDED)
+    seeded = any(name == SEEDED for _option, name in destinations)
     shown = " ".join((*mode, *(f"{option} <dir>/{name}"
                                for option, name in destinations)))
+    said = []
+    if new_files:
+        said.append(", ".join(new_files) + " not created")
+    if seeded:
+        said.append(f"the seeded {SEEDED} not truncated")
     return _case(
         f"{tool.removeprefix('ubertooth-')}-no-device{suffix}",
         f"{tool} {shown} with no board", tool,
         (
-            _seed((SEEDED,)),
+            *((_seed((SEEDED,)),) if seeded else ()),
             _state_before(),
             tool_step("attempt", tool, words, patterns=(NO_BOARD_NOTE, NO_BOARD),
                       # The files are opened only once the board is, so a run
-                      # that never opened one says nothing about them.
-                      forbidden=tuple(re.escape(name) for name in new),
+                      # that never opened one says nothing about them, and
+                      # takes nothing back either.
+                      forbidden=(CANNOT_REMOVE,)
+                      + tuple(re.escape(name) for name in new_files),
                       check=nothing_on_stdout),
             _state_after(),
         ),
-        "exit 1 at the board lookup; " + ", ".join(new) + " not created; "
-        f"the seeded {SEEDED} not truncated; nothing on stdout",
+        "exit 1 at the board lookup; " + "; ".join(said) + "; nothing on stdout",
     )
 
 
@@ -323,7 +330,7 @@ def capture_failure_cases(arguments, _resources, _resource_identities, *, now=No
                         (("-r", PCAPNG), ("-q", SEEDED), ("-d", DUMP))),
         _no_device_case("ubertooth-btle", (("-r", PCAPNG), ("-q", SEEDED)),
                         mode=("-n",)),
-        _no_device_case("ubertooth-dump", (("-d", SEEDED),)),
+        _no_device_case("ubertooth-dump", (("-d", DUMP),)),
         # No whole record read: every file created goes back.
         _replay_case(
             "replay-no-record-discards-files",
@@ -366,6 +373,9 @@ def capture_failure_cases(arguments, _resources, _resource_identities, *, now=No
         # own rather than another option on the -q one.
         _no_device_case("ubertooth-btle", (("-c", PPI),), mode=("-n",),
                         suffix="-ppi"),
+        # ubertooth-dump has one capture option, so the new file and the
+        # seeded one are two cases rather than two options on one.
+        _no_device_case("ubertooth-dump", (("-d", SEEDED),), suffix="-seeded"),
         _stdout_capture_case(),
         # The line the files are kept from is the first whole record, not the
         # first packet: this input holds one record the decoder skips, and
@@ -409,7 +419,8 @@ def capture_failure_cases(arguments, _resources, _resource_identities, *, now=No
             "ubertooth-rx -i <fixture> -q <a directory>",
             FIXTURES["full"], ("-q", ("file", "in-the-way")),
             (_create_failure("in-the-way", "Is a directory"),),
-            "exit 1; the directory in the way is still there and still empty",
+            "exit 1; the directory in the way is still there, and no file "
+            "took its name",
             steps=(_fixture("full", base),
                    _run("mkdir", "mkdir <dir>/in-the-way", "mkdir",
                         ("file", "in-the-way")))),
