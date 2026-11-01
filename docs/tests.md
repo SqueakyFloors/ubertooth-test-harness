@@ -1567,12 +1567,8 @@ voice packets never appear in a capture of the SPP stream. It is held to the
 same floors as a stream capture, which the bench measured for it too: 394
 records with 112 passing headers against 285 with 59 for the stream.
 
-One thing a record does not carry is a clock, so there is nothing binary to
-check the clock against. The tool prints the clock it recovered and the
-packet's offset within its slot beside every packet, and the followed cases
-check those: a CLKN inside the 28-bit counter, and an offset inside the
-625 microsecond slot it is measured in. A rollover counted twice, or an offset
-taken from the wrong edge, shows up there and nowhere in the file.
+One thing a record does not carry is a clock, so this test asserts nothing
+about one; see the known limits.
 
 The decoder is `ubertooth_harness/bredrrecord.py`, run as an ordinary logged
 command per capture file. It prints counts, ranges, flag tallies and packet
@@ -1593,9 +1589,8 @@ it on anything older.
 with both `-q` and `-r`, after which each file must hold at least ten records,
 all of the central's LAP, all carrying that LAP and UAP as the reference
 address, all internally consistent, at least five with a header whose HEC
-passed and ten carrying the reference UAP, every printed clock and slot offset
-in range, and the PCAPNG must name the central's LAP and UAP, with a full UAP
-mask, as the address it was following; then the same with the roles swapped,
+passed and ten carrying the reference UAP, and the PCAPNG must name the
+central's LAP and UAP, with a full UAP mask, as the address it was following; then the same with the roles swapped,
 where every record must carry the other board's LAP instead.
 Comprehensive runs 4, adding the EV3 audio link, whose records must include at
 least one `HV3/EV3/3-EV3` packet, and a survey (`-z -r`), whose records must
@@ -1642,6 +1637,22 @@ the HEC flags clear, and the HEC and CRC checks pass over them. A 25-second
 survey on the bench recorded 235 packets, 182 carrying a recovered UAP and
 one a header that had been checked, which is why the header floor belongs to
 the followed cases and not this one.
+
+**Nothing here asserts a clock.** The issue asked for clock and clock-offset
+consistency, and there is nothing to assert it against. A BR/EDR record has no
+clock field; `ubertooth-rx` never writes the interface option libbtbb has for a
+piconet's clock; and the two figures it prints beside each packet are already
+masked into range before they are printed (the clock with `CLKN_MASK`, the
+offset modulo the slot), so a bound on either could not fail. What the record
+reader does instead is report the timestamps — how many, over what span, and
+the largest step backwards — so a run record carries them for a person to
+read.
+
+The flag rules assume this fork's libbtbb, the one the harness pins. It clears
+the HEC and CRC answers for a clock trial it abandons, and drops the payload
+with them; a libbtbb without those clears can write an honest record that
+these checks call inconsistent. A run against another `--libbtbb-ref` should
+expect that.
 
 An EV3 capture's packet *names* are read from the records, not from the tool's
 packet lines: `ubertooth-rx` does not settle on this pair's clock from audio

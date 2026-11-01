@@ -165,6 +165,22 @@ class Decoding(unittest.TestCase):
             payload, header=bt_header(DH5))])))
         self.assertEqual(len(body) + 4, found.payload_header_length)
         self.assertEqual(len(payload), found.payload_header_length)
+        self.assertFalse(found.payload_length_over_type)
+
+    def test_a_length_the_type_cannot_carry_is_held_down_and_counted(self):
+        # A DH1 carries 30 bytes; the decoder holds a longer declared length
+        # down to that and decodes 30, so the record is self-consistent and
+        # only the count says the payload header did not really decode.
+        header = 2 | (1 << 2) | (31 << 3)
+        payload = bytes([header]) + bytes(29)
+        found, = bredrrecord.records(self.write("dh1.pcap", pcap([record(
+            payload, header=bt_header(DH1))])))
+        self.assertEqual(34, found.declared_payload_length)
+        self.assertEqual(30, found.payload_header_length)
+        self.assertTrue(found.payload_length_over_type)
+        self.assertEqual([], bredrrecord.problems([found]))
+        self.assertIn("1 declaring more than the packet type carries",
+                      " ".join(bredrrecord.summary([found], "dh1.pcap")))
 
     def test_a_type_with_no_payload_header_has_no_length_to_read(self):
         found, = bredrrecord.records(self.write("poll.pcap", pcap([record()])))

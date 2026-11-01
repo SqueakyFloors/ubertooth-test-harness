@@ -421,8 +421,10 @@ class AudioTests(unittest.TestCase):
                          [line for line in initiator.commands
                           if line.startswith("sco")])
         self.assertIn(f"spp peer {ACCEPTOR_ADDRESS}", initiator.commands)
-        # `role` puts the packet type back to the firmware's default, so the
-        # initiator's type has to be set after it or the link comes up 2-EV3.
+        # The initiator's type is set after `role`, which is the order the
+        # bench uses. `role` takes an audio link down and keeps the chosen
+        # type, so either order works and this one also survives a firmware
+        # that put the type back.
         self.assertLess(initiator.commands.index("role initiator"),
                         initiator.commands.index("sco type ev3"))
         # Both end up reset, as the stream session leaves them.

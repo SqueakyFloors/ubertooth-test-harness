@@ -52,7 +52,6 @@ from ubertooth_harness.receive_cases import (
     EXIT_SLACK_S,
     PACKET_LINE,
     SURVEY_LINE,
-    clock_check,
     packet_check,
     seconds_arg,
 )
@@ -407,6 +406,7 @@ def _pair_patterns(acceptor, initiator, *, audio=False) -> tuple[str, ...]:
         return common + (
             rf"(?m)^audio link: esco {settled}, \d+ bytes every \d+ slots, ",
             rf"(?m)^initiator audio: on {settled}, sent \d+ received \d+ frames$",
+            rf"(?m)^acceptor audio: on {settled}, sent \d+ received \d+ frames$",
         ) + exited + (rf"(?m)^pair carried audio: {settled}$",)
     return common + (r"(?m)^link: up to ",) + exited + (
         r"(?m)^pair streamed: yes$",)
@@ -624,10 +624,7 @@ def record_fields_cases(arguments, resources, resource_identities):
             name=f"Every record of a -l {central} -u {central_uap} capture "
                  "holds this piconet's fields, in both formats",
             options=follow,
-            # The records carry no clock, so the clock the tool recovered is
-            # checked where it does appear: beside each packet it printed.
-            check=_all(piconet_packets(central, MIN_PACKETS, only=True),
-                       clock_check()),
+            check=piconet_packets(central, MIN_PACKETS, only=True),
             expected_state=(
                 f"the pcap and the pcapng each hold {MIN_PACKETS}+ records of "
                 f"LAP {central} with reference LAP {central} and reference UAP "
@@ -654,8 +651,7 @@ def record_fields_cases(arguments, resources, resource_identities):
             name=f"With the roles swapped the records hold LAP "
                  f"{acceptor['lap']}, not {central}",
             options=("-l", acceptor["lap"], "-u", acceptor["uap"]),
-            check=_all(piconet_packets(acceptor["lap"], MIN_PACKETS, only=True),
-                       clock_check()),
+            check=piconet_packets(acceptor["lap"], MIN_PACKETS, only=True),
             expected_state=(f"the pcapng holds {MIN_PACKETS}+ records, all of "
                             f"LAP {acceptor['lap']} and none of {central}"),
             files=(("-r", "swapped.pcapng"),),

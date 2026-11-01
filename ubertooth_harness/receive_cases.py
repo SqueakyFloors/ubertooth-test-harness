@@ -158,42 +158,11 @@ PACKET_LINE = re.compile(
     rf"err=(?P<err>\d+) clkn=(?P<clkn>\d+) clk_offset=(?P<offset>\d+) "
     rf"s=-?\d+ {_NOISE_AND_SNR}$"
 )
-# CLKN is CLK27-0, a counter of 2^28 ticks of 312.5 us, and the offset
-# beside it is where in one 625 us slot the packet's access code arrived, in
-# 100 ns ticks: both from the fork's own callback (CLKN_MASK and
-# CLK100NS_PER_SLOT in ubertooth_callback.c). A BR/EDR capture record carries
-# no clock field at all, so these two printed figures are the only clock a
-# capture of a piconet exposes.
-CLKN_TICKS = 1 << 28
-CLK100NS_PER_SLOT = 6250
-
-
-def clock_check():
-    """A Step.output_check: every packet line's clock figures are in range.
-
-    A clock recovered for a piconet has to be a CLKN the counter can hold,
-    and the offset has to fall inside the slot it is measured in. A capture
-    whose clock arithmetic went wrong -- a rollover counted twice, an offset
-    taken against the wrong edge -- shows up here, and nowhere in the
-    capture file, which records no clock.
-    """
-    def check(output) -> str:
-        problems = []
-        for line in text_lines(output):
-            match = PACKET_LINE.match(line)
-            if match is None:
-                continue
-            clkn, offset = int(match["clkn"]), int(match["offset"])
-            if clkn >= CLKN_TICKS:
-                problems.append(f"a packet at clock {clkn}, past the "
-                                f"{CLKN_TICKS}-tick counter")
-            if offset >= CLK100NS_PER_SLOT:
-                problems.append(f"a packet {offset} ticks into its slot, which "
-                                f"is {CLK100NS_PER_SLOT} ticks long")
-            if problems:
-                break
-        return "; ".join(problems)
-    return check
+# The clock and the slot offset a packet line carries. Nothing checks their
+# range: the fork masks the clock with CLKN_MASK and takes the offset modulo
+# CLK100NS_PER_SLOT before printing either (ubertooth_callback.c), so a
+# bound would be unreachable by construction. They are captured here so a
+# check that can say something about them has them to read.
 SURVEY_LINE = re.compile(
     r"^\?\?:\?\?:(?:\?\?|[0-9A-F]{2}):"
     r"(?P<lap>[0-9A-F]{2}:[0-9A-F]{2}:[0-9A-F]{2})$"

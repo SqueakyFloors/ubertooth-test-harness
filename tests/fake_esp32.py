@@ -138,7 +138,10 @@ class FakePeerFirmware:
             return ["ERR role must be acceptor or initiator"]
         self.stream = False
         self._drop()
-        self._sco_off()
+        # The audio link belongs to a role, so it goes down with the old
+        # one; the chosen packet type stays, and only `defaults` puts that
+        # back (bt_set_role() and bt_defaults() in the firmware).
+        self._sco_down()
         self.role = wanted
         self.spp_server = wanted == esp32peer.BOOT_ROLE
         return ["OK"]
@@ -270,10 +273,19 @@ class FakePeerFirmware:
         return [f"utesp: sco connected, {name}", "OK"]
 
     def _sco_down(self):
+        """Stop this board's audio profile, keeping its chosen packet type.
+
+        The far end goes with it only when a link was really up between
+        them: a board that has merely started its profile and is waiting is
+        nobody else's business.
+        """
+        linked = self.sco == esp32peer.AUDIO_ON
         far = self.peer_firmware
-        for board in (self, far):
+        for board in (self, far if linked else None):
             if board is not None and board.sco != "off":
+                wanted = board.sco_type
                 board._sco_off()
+                board.sco_type = wanted
 
 
 class FakePeerPort:

@@ -686,6 +686,12 @@ def _audio_field(status: dict, key: str, kind, label: str):
     return value
 
 
+def _require_audio_up(status: dict, peer: Peer, address: str) -> None:
+    if _audio_field(status, "sco", str, peer.label) != AUDIO_ON:
+        raise PeerError(f"the {peer.label}'s audio link to {address} is not up "
+                        f"after 'sco start' (sco {status['sco']})")
+
+
 def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
            packet_type, min_frames, min_seconds, timeout, out, settle_s) -> int:
     acceptor_shell.wait_ready()
@@ -710,9 +716,12 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         # Each board states the packet types it will allow and the link uses
         # one both allowed, so the type goes to both. The hands-free unit
         # has to be listening before the gateway pages it, so the acceptor
-        # starts its profile first; `sco start` there only waits. The
-        # initiator is told its type after `role`, which puts the choice
-        # back to the firmware's default.
+        # starts its profile first; `sco start` there only waits.
+        #
+        # The initiator is told its type after `role`, which is the order
+        # the bench uses. `role` takes an audio link down but keeps the
+        # chosen type (only `defaults` puts that back), so either order
+        # works; this one also works if that ever changes.
         if packet_type != "default":
             acceptor_shell.command(f"sco type {packet_type}")
         acceptor_shell.command("sco start", AUDIO_CONNECT_TIMEOUT_S)
@@ -732,18 +741,14 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         # another settle if it has not.
         time.sleep(settle_s)
         linked = initiator_shell.status()
-        for peer_status, peer, shell in ((linked, initiator, initiator_shell),
-                                         (None, acceptor, acceptor_shell)):
-            if peer_status is None:
-                peer_status = shell.status()
-                if _audio_field(peer_status, "sco", str, peer.label) != AUDIO_ON:
-                    time.sleep(settle_s)
-                    peer_status = shell.status()
-            if _audio_field(peer_status, "sco", str, peer.label) != AUDIO_ON:
-                raise PeerError(
-                    f"the {peer.label}'s audio link to "
-                    f"{acceptor_status['address']} is not up after 'sco start' "
-                    f"(sco {peer_status['sco']})")
+        _require_audio_up(linked, initiator, acceptor_status["address"])
+        # The far end is read once more if it has not caught up: it learns
+        # of the link through a callback of its own.
+        far = acceptor_shell.status()
+        if far.get("sco") != AUDIO_ON:
+            time.sleep(settle_s)
+            far = acceptor_shell.status()
+        _require_audio_up(far, acceptor, acceptor_status["address"])
         print(f"audio link: {_audio_field(linked, 'sco_link', str, initiator.label)} "
               f"{_audio_field(linked, 'sco_pkt_type', str, initiator.label)}, "
               f"{_audio_field(linked, 'sco_tx_len', int, initiator.label)} bytes "

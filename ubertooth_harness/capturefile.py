@@ -131,7 +131,11 @@ def _pcapng_link_type(path, stream, head: bytes) -> int:
 
 
 def interface_options(path: Path | str) -> list[tuple[int, bytes]]:
-    """``[(code, value)]`` of the first pcapng interface block's options.
+    """``[(code, value)]`` of the FIRST pcapng interface block's options.
+
+    libbtbb writes one interface per file, so the first block is the only
+    one; a file with several would need the options of the interface each
+    packet block names, which nothing here reads.
 
     An empty list for a pcap file, which has no options at all, and for an
     interface block that carries none. The option codes are pcapng's own
@@ -245,6 +249,11 @@ def packet_records(path: Path | str) -> Iterator[tuple[int | None, bytes]]:
 _PCAPNG_SIMPLE_PACKET = 0x00000003
 
 
+def _padded(size: int) -> int:
+    """``size`` rounded up to the 4-byte boundary a pcapng field starts on."""
+    return 4 * ((size + 3) // 4)
+
+
 def _pcapng_packet(path, stream, endian, block_type, offset, length,
                    resolution) -> tuple[int | None, bytes]:
     stream.seek(offset)
@@ -260,13 +269,16 @@ def _pcapng_packet(path, stream, endian, block_type, offset, length,
         if length < 16:
             raise CaptureFileError(f"{path}: short pcapng simple packet block")
         original = struct.unpack(endian + "I", block[8:12])[0]
-        return None, block[12:12 + min(original, length - 16)]
+        if 12 + _padded(original) + 4 > length:
+            raise CaptureFileError(f"{path}: pcapng packet longer than its block")
+        return None, block[12:12 + original]
     if length < 32:
         raise CaptureFileError(f"{path}: short pcapng packet block")
     high, low, captured = struct.unpack(endian + "III", block[12:24])
-    # The captured bytes have to end before the block's own trailing length,
-    # or what follows them would be read as frame data.
-    if 28 + captured + 4 > length:
+    # The captured bytes, padded out to the 4-byte boundary the next field
+    # starts on, have to end before the block's own trailing length, or what
+    # follows them would be read as frame data.
+    if 28 + _padded(captured) + 4 > length:
         raise CaptureFileError(f"{path}: pcapng packet longer than its block")
     return (_nanoseconds((high << 32) | low, resolution),
             block[28:28 + captured])

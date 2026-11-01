@@ -41,6 +41,11 @@ report a passing HEC with no UAP beside it; those checks skip it rather than
 guess, and a caller asks for a floor of records that carry both
 (``--min-hec-valid``).
 
+The flag rules below assume the libbtbb this harness pins, which clears the
+HEC and CRC answers for a clock trial it abandons and drops the payload with
+them. A libbtbb without those clears can write an honest record that these
+rules call inconsistent.
+
 The last two need the link to be unencrypted, which the bench's ESP32 peers
 are (they pair with nobody). A capture of an encrypted piconet would decode
 neither payload lengths nor CRCs, so ``--payload-checks`` can be turned off
@@ -138,8 +143,12 @@ MAX_PAYLOAD = 400
 # its UAP_ANY: the capture had no address to record.
 LAP_ANY = 0xFFFFFF
 UAP_ANY = 0xFF
-# A dBm figure outside this range is not a reading of this receiver.
-MIN_DBM, MAX_DBM = -128, 0
+# A dBm figure outside this range is not a reading of this receiver: the
+# host's piece-wise model of the CC2400's curve bottoms out at -120 and tops
+# out at 0 (cc2400_rssi_to_dbm() in the fork's callback). A noise figure the
+# board had nothing to estimate from is not a reading at all and arrives as
+# a sentinel above the signal, which the flag rule catches instead.
+MIN_DBM, MAX_DBM = -120, 0
 # The header's 18 bits are each sent three times, and the decoder takes the
 # majority of each three, counting every triple that disagreed. It accepts
 # the header only when fewer than a quarter of the 18 disagreed, so a header
@@ -286,16 +295,18 @@ class Record:
                      if self.flags & flag)
 
     @property
-    def payload_header_length(self) -> int:
-        """The payload's own length field plus the bytes around it, or -1.
+    def declared_payload_length(self) -> int:
+        """The payload length this record's own payload header declares, or -1.
 
-        -1 for a type whose payload has no length field to read, and for a
-        record holding too few bytes to hold one.
+        The length field plus the header bytes and the CRC around it, with
+        no regard for what the packet type can carry. -1 for a type whose
+        payload has no length field to read, and for a record holding too
+        few bytes to hold one.
         """
         sizes = _PAYLOAD_HEADER.get(self.packet_type)
         if sizes is None:
             return -1
-        header_bytes, longest = sizes
+        header_bytes, _longest = sizes
         if len(self.payload) < header_bytes:
             return -1
         if header_bytes == 1:
@@ -303,7 +314,35 @@ class Record:
         else:
             body = ((self.payload[0] >> 3) | (self.payload[1] << 5)) & 0x3FF
         crc = 0 if self.packet_type == AUX1 else 2
-        return min(body + header_bytes + crc, longest)
+        return body + header_bytes + crc
+
+    @property
+    def payload_header_length(self) -> int:
+        """How many payload bytes the record should hold, or -1.
+
+        The length its payload header declares, held down to what the
+        packet type can carry, because the decoder holds it down the same
+        way before it copies the payload out
+        (libbtbb's decode_payload_header()).
+        """
+        declared = self.declared_payload_length
+        if declared < 0:
+            return -1
+        return min(declared, _PAYLOAD_HEADER[self.packet_type][1])
+
+    @property
+    def payload_length_over_type(self) -> bool:
+        """Whether the payload header declares more than the type can carry.
+
+        The decoder holds such a length down to the maximum and decodes
+        that many bytes, so the record is self-consistent and the CRC over
+        it fails. It is a payload header that did not really decode, which
+        happens while the decoder is trying a clock out, so it is counted
+        and reported rather than called a fault in the capture.
+        """
+        declared = self.declared_payload_length
+        return (declared >= 0
+                and declared > _PAYLOAD_HEADER[self.packet_type][1])
 
 
 def records(path: Path | str) -> list[Record]:
@@ -538,9 +577,12 @@ def summary(found: list[Record], label: str) -> list[str]:
     lines.append("BR/EDR types: " + _counted(types))
     lines.append(f"BR/EDR channels: {len(channels)} distinct, "
                  f"{channels[0]} to {channels[-1]}")
+    over = sum(record.payload_length_over_type for record in found)
     lines.append(
         f"BR/EDR payloads: {len(payloads)} records carry one"
-        + (f", {min(payloads)} to {max(payloads)} bytes" if payloads else ""))
+        + (f", {min(payloads)} to {max(payloads)} bytes" if payloads else "")
+        + (f", {over} declaring more than the packet type carries" if over
+           else ""))
     lines.append(f"BR/EDR signal: {min(signals)} to {max(signals)} dBm")
     lines.append("BR/EDR noise: "
                  + (f"{min(noises)} to {max(noises)} dBm in {len(noises)} records"

@@ -139,9 +139,9 @@ link, whose payload is on the air at the basic rate a receive-only Ubertooth
 can decode; the 2-EV3 link the stack chooses by default carries the same
 payload as enhanced rate, which a basic-rate decoder cannot read. The
 hands-free unit has to be listening before the gateway pages it, so a session
-runs `sco start` on the acceptor first and `sco start` on the initiator last,
-and the initiator's packet type is set after its `role` command, which puts
-the choice back to the firmware's default.
+runs `sco start` on the acceptor first and `sco start` on the initiator last.
+`role` takes an audio link down but keeps the packet type a board was told to
+ask for; only `defaults` puts that back.
 [`esp32peer.py`](../ubertooth_harness/esp32peer.py)'s `audio` mode does the
 whole sequence in one invocation, as `stream` does for the data link.
 
