@@ -25,9 +25,11 @@ from ubertooth_harness.patterns import (
 from ubertooth_harness.resources import ESP32_CLASSIC_PEER
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
-    advertiser_cases, capture_failure_cases, classic_cases, connection_cases,
-    dfu_cases, dfu_host_cases, python_cases, receive_cases, refusal_cases,
-    tool_cases, transitions, tshark_cases, util_cases, util_refusal_cases,
+    advertiser_cases, boardstate_cases, capture_failure_cases, classic_cases,
+    connection_cases, dfu_cases, dfu_host_cases, interrupt_cases, python_cases,
+    receive_cases,
+    refusal_cases, tool_cases, transitions, tshark_cases, util_cases,
+    util_refusal_cases,
 )
 
 
@@ -174,6 +176,30 @@ def _check_connection_duration(arguments) -> None:
             f"duration must be longer than {cycle_s:g}s and shorter than "
             f"{2 * cycle_s:g}s, so the capture holds one of the central's "
             "reconnections and not two")
+
+
+# The longest capture the multi-cycle follow case takes. Three captures of
+# this plus the DK setup is a couple of minutes, which keeps the case inside
+# a short hardware session.
+_MAX_FOLLOW_END_CAPTURE_S = 30
+
+
+def _check_follow_end_duration(arguments) -> None:
+    """The capture must span several of the central's reconnections.
+
+    At least MIN_CYCLES of them, which is what the test is for, and not so
+    many that one case holds the boards for long: the capture is taken up to
+    CAPTURE_ATTEMPTS times.
+    """
+    cycle_s = connection_cases.CYCLE_MS / 1000.0
+    least = connection_cases.MIN_CYCLES * cycle_s
+    most = _MAX_FOLLOW_END_CAPTURE_S
+    seconds = receive_cases.seconds_arg(arguments)
+    if not least < seconds <= most:
+        raise CatalogError(
+            f"duration must be longer than {least:g}s, so the capture spans "
+            f"{connection_cases.MIN_CYCLES} of the central's connections, and "
+            f"at most {most:g}s, so one case does not hold the boards for long")
 
 
 def _payload_tag(value):
@@ -781,7 +807,20 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "Raw receive": _profiles(
         Estimate(2.1, per_duration=3), Estimate(9.0, per_duration=20)
     ),
+    # A reset at each end, a killed capture, one capture of the duration, and
+    # about a dozen board reads around them. Measured on the Linux lab host at
+    # fork 166b4f91 with a 3 s duration.
+    "Board state between runs": _default(Estimate(15.5, per_duration=1)),
     "Raw receive replay": _profiles(Estimate(0.9), Estimate(3.9)),
+    # Two cases and 35 commands in smoke, three and 52 comprehensive.
+    # Measured on the Linux bench host: smoke 11.2 s, and comprehensive 17.5,
+    # 18.3 and 23.4 s over three runs. Each case establishes idle, reads three
+    # settings, runs a capture for its 1.5 s settling time plus the SIGINT
+    # teardown, reads the file it was left with, reads the board's channel and
+    # squelch, asks for its identity, and restores; the comprehensive-only
+    # sweep case costs the most, since specan takes longest to reach its
+    # floor.
+    "Interrupting a capture": _profiles(Estimate(11.2), Estimate(18.5)),
     "Refused command lines": _profiles(Estimate(10.0), Estimate(20.7)),
     # No hardware: 6 cases and 39 commands in smoke, 16 and 112
     # comprehensive, all of them short (preflight is not counted, as it is in
@@ -826,6 +865,12 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "Capture known BLE connection": _profiles(
         Estimate(30.0, per_duration=4), Estimate(60.0, per_duration=10)
     ),
+    # ESTIMATE_PENDING_HW
+    # One capture case, taken up to CAPTURE_ATTEMPTS times, plus the pair's
+    # setup and the reads after the capture.
+    "Follow a BLE connection across its end": _default(
+        Estimate(35.0, per_duration=3)
+    ),
     # Each capture case opens both ESP32 bridges, which resets both boards,
     # and waits for the link: about 13 s before its capture starts, plus the
     # board reads around it. Two capture cases in smoke, four comprehensive.
@@ -834,6 +879,12 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     ),
     "Follow Classic Bluetooth piconet": _profiles(
         Estimate(40.0, per_duration=2), Estimate(80.0, per_duration=4)
+    ),
+    # ESTIMATE_PENDING_HW: two capture cases in smoke, four comprehensive,
+    # each with the same bring-up as the two tests above and a record check
+    # per capture file afterwards.
+    "Classic capture record fields": _profiles(
+        Estimate(45.0, per_duration=2), Estimate(95.0, per_duration=4)
     ),
 })
 
@@ -845,11 +896,13 @@ RF_DEFAULTS: Mapping[str, Mapping[str, PlacementRequirement]] = MappingProxyType
     name: MappingProxyType({"Ubertooth": NORMAL_LINK})
     for name in (
         "Classic Bluetooth receive",
+        "Classic capture record fields",
         "Raw receive",
         "BLE extcap capture",
         "BLE extcap in tshark",
         "Capture known BLE advertiser",
         "Capture known BLE connection",
+        "Follow a BLE connection across its end",
     )
 })
 
@@ -1066,6 +1119,34 @@ def builtin_catalog() -> TestCatalog:
             guards_other_ubertooths=True,
         ),
         TestDefinition(
+            boardstate_cases.TEST_NAME,
+            "A capture killed with SIGKILL leaves the board in its mode; the "
+            "next run on the same board stops it, captures only its own "
+            "records, and keeps the killed capture as evidence",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH, "duration": DURATION,
+            }),
+            MappingProxyType({"Ubertooth": "Ubertooth"}),
+            command_builder=boardstate_cases.board_state_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+        ),
+        TestDefinition(
+            interrupt_cases.TEST_NAME,
+            "A real SIGINT to a running capture: one Ctrl-C ends the run "
+            "promptly with exit 0, leaves no process behind and nothing still "
+            "streaming, leaves a capture file a reader can open, and leaves a "
+            "board back at its idle settings that answers the next command at "
+            "once",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH, "coverage": COVERAGE,
+            }),
+            MappingProxyType({"Ubertooth": "Ubertooth"}),
+            command_builder=interrupt_cases.interrupt_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+        ),
+        TestDefinition(
             "Raw receive replay",
             "ubertooth-rx -i decodes a synthetic raw capture with no Ubertooth: "
             "LAP/UAP lines, filters, PCAPNG/PCAP/dump output, bad input files",
@@ -1218,6 +1299,32 @@ def builtin_catalog() -> TestCatalog:
             writes_firmware=True,
         ),
         TestDefinition(
+            connection_cases.FOLLOW_END_TEST_NAME,
+            "ubertooth-btle -f follows two registered nRF52840 DKs across "
+            "several of the central's reconnections: the capture holds a "
+            "CONNECT_IND for each connection it carries packets for, and the "
+            "board is idle and answering as soon as the capture stops",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH,
+                "central": ArgumentRule(_selector, default="default"),
+                "peripheral": ArgumentRule(_selector, default="default"),
+                "duration": DURATION,
+                "interval": ArgumentRule(_connection_interval, default=30),
+                "update": ArgumentRule(_connection_interval, default=60),
+            }),
+            MappingProxyType({
+                "Ubertooth": "Ubertooth", "central": "nRF52840 DK",
+                "peripheral": "nRF52840 DK",
+            }),
+            check_arguments=_check_follow_end_duration,
+            command_builder=connection_cases.follow_end_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+            # Its first case flashes a DK when the board runs another
+            # firmware version, so the run holds the host lock.
+            writes_firmware=True,
+        ),
+        TestDefinition(
             "Capture known Classic device",
             "ubertooth-rx finds two registered ESP32 Classic peers streaming "
             "over a Serial Port Profile link: the survey lists the piconet "
@@ -1253,6 +1360,26 @@ def builtin_catalog() -> TestCatalog:
                 "acceptor": ESP32_CLASSIC_PEER, "initiator": ESP32_CLASSIC_PEER,
             }),
             command_builder=classic_cases.follow_classic_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+        ),
+        TestDefinition(
+            "Classic capture record fields",
+            "Decode the BR/EDR records ubertooth-rx writes while two "
+            "registered ESP32 Classic peers hold a link: every record carries "
+            "this piconet's LAP and reference address, and its own payload "
+            "length, HEC, and CRC agree with the header beside them",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH,
+                "acceptor": ArgumentRule(_selector, default="default"),
+                "initiator": ArgumentRule(_selector, default="default"),
+                "coverage": COVERAGE, "duration": DURATION,
+            }),
+            MappingProxyType({
+                "Ubertooth": "Ubertooth",
+                "acceptor": ESP32_CLASSIC_PEER, "initiator": ESP32_CLASSIC_PEER,
+            }),
+            command_builder=classic_cases.record_fields_cases,
             continue_on_case_failure=True,
             guards_other_ubertooths=True,
         ),

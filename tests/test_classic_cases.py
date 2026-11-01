@@ -7,10 +7,14 @@ import unittest
 from ubertooth_harness import esp32peer, leases
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.classic_cases import (
+    AUDIO_SETUP_S,
+    AUDIO_TYPE,
+    AUDIO_TYPE_NAME,
     MIN_PACKETS,
     PAIR_SETUP_S,
     follow_classic_cases,
     known_classic_cases,
+    record_fields_cases,
     no_piconet_packets,
     piconet_packets,
     survey_lists,
@@ -256,6 +260,159 @@ class FollowCaseTests(unittest.TestCase):
                       check("systime=1 ch=28 LAP=e9c5ba\n" * MIN_PACKETS))
 
 
+class RecordFieldCaseTests(unittest.TestCase):
+    """Classic capture record fields: what each case captures and checks."""
+
+    def cases(self, coverage="smoke"):
+        return {case.case_id: case
+                for case in record_fields_cases(
+                    arguments("Classic capture record fields", coverage),
+                    RESOURCES, IDENTITIES)}
+
+    def steps(self, case):
+        return {step.step_id: step for step in case.steps}
+
+    def test_smoke_captures_the_piconet_both_ways_round(self):
+        cases = self.cases()
+        self.assertEqual(["follow-fields", "swapped-fields"], list(cases))
+        self.assertEqual(("linux",), cases["follow-fields"].needs.platforms)
+        self.assertTrue(cases["follow-fields"].capture_dir)
+
+    def test_comprehensive_adds_the_audio_link_and_a_survey(self):
+        self.assertEqual(["follow-fields", "swapped-fields", "audio-fields",
+                          "survey-fields"], list(self.cases("comprehensive")))
+
+    def test_the_follow_case_writes_both_formats_and_checks_each(self):
+        steps = self.steps(self.cases()["follow-fields"])
+        argv = list(steps["stream-and-receive"].resolve_argv(
+            {CAPTURE_DIR_KEY: "/run/x"}))
+        self.assertEqual(["--", "ubertooth-rx", "-U", SERIAL, "-t", "25",
+                          "-l", CENTRAL_LAP, "-u", CENTRAL_UAP,
+                          "-q", "/run/x/records.pcap",
+                          "-r", "/run/x/records.pcapng"],
+                         argv[argv.index("--"):])
+        for step_id, name in (("verify-pcap", "records.pcap"),
+                              ("verify-pcapng", "records.pcapng")):
+            checks = list(steps[step_id].resolve_argv({CAPTURE_DIR_KEY: "/run/x"}))
+            self.assertTrue(checks[1].endswith("bredrrecord.py"))
+            self.assertEqual(f"/run/x/{name}", checks[2])
+            self.assertEqual(CENTRAL_LAP, checks[checks.index("--lap") + 1])
+            self.assertEqual(CENTRAL_LAP,
+                             checks[checks.index("--reference-lap") + 1])
+            self.assertEqual(CENTRAL_UAP,
+                             checks[checks.index("--reference-uap") + 1])
+            self.assertEqual(str(MIN_PACKETS),
+                             checks[checks.index("--min-packets") + 1])
+            self.assertIn("--min-reference-uap", checks)
+            self.assertIn("--min-hec-valid", checks)
+            self.assertIn(r"BR/EDR record problem:",
+                          steps[step_id].forbidden_patterns)
+        # Only the PCAPNG carries the address the capture was following, and
+        # the tool knows its LAP and UAP but never its NAP.
+        pcapng = list(steps["verify-pcapng"].resolve_argv({CAPTURE_DIR_KEY: "/x"}))
+        self.assertEqual(CENTRAL_LAP, pcapng[pcapng.index("--following-lap") + 1])
+        self.assertEqual(CENTRAL_UAP, pcapng[pcapng.index("--following-uap") + 1])
+        self.assertEqual("ff", pcapng[pcapng.index("--following-uap-mask") + 1])
+        self.assertNotIn(
+            "--following-lap",
+            list(steps["verify-pcap"].resolve_argv({CAPTURE_DIR_KEY: "/x"})))
+
+    def test_the_swapped_case_follows_the_other_board(self):
+        steps = self.steps(self.cases()["swapped-fields"])
+        argv = list(steps["stream-and-receive"].resolve_argv(
+            {CAPTURE_DIR_KEY: "/x"}))
+        # The peers are bound the other way round, so the other board pages.
+        self.assertEqual(INITIATOR_ADDRESS, argv[argv.index("--acceptor-address") + 1])
+        self.assertEqual(ACCEPTOR_ADDRESS, argv[argv.index("--initiator-address") + 1])
+        self.assertEqual(["-l", OTHER_LAP, "-u", OTHER_UAP],
+                         argv[argv.index("--") + 6:argv.index("-r")])
+        checks = list(steps["verify-pcapng"].resolve_argv({CAPTURE_DIR_KEY: "/x"}))
+        self.assertEqual(OTHER_LAP, checks[checks.index("--lap") + 1])
+        self.assertEqual(OTHER_LAP, checks[checks.index("--following-lap") + 1])
+        self.assertEqual(OTHER_UAP, checks[checks.index("--following-uap") + 1])
+
+    def test_the_audio_case_drives_the_pairs_audio_mode(self):
+        case = self.cases("comprehensive")["audio-fields"]
+        steps = self.steps(case)
+        step = steps["stream-and-receive"]
+        argv = list(step.resolve_argv({CAPTURE_DIR_KEY: "/x"}))
+        self.assertEqual("audio", argv[2])
+        self.assertEqual(AUDIO_TYPE, argv[argv.index("--type") + 1])
+        self.assertIn("--min-frames", argv)
+        # Its report must name the type the link settled on, and the
+        # deadline covers the longer bring-up.
+        self.assertTrue(any("audio link: esco" in pattern
+                            for pattern in step.output_patterns))
+        self.assertGreater(step.timeout_s, 25.0 + AUDIO_SETUP_S - 1)
+        # A packet line is printed for every matched access code, before any
+        # clock is asked for, so an audio capture is held to the same floor.
+        self.assertEqual("", step.output_check(packets(CENTRAL_LAP, MIN_PACKETS)))
+        self.assertIn("expected at least",
+                      step.output_check(packets(CENTRAL_LAP, 1)))
+        checks = list(steps["verify-pcapng"].resolve_argv({CAPTURE_DIR_KEY: "/x"}))
+        self.assertEqual(AUDIO_TYPE_NAME,
+                         checks[checks.index("--require-types") + 1])
+
+    def test_the_survey_case_asks_for_a_recovered_uap_and_no_address(self):
+        steps = self.steps(self.cases("comprehensive")["survey-fields"])
+        argv = list(steps["stream-and-receive"].resolve_argv({CAPTURE_DIR_KEY: "/x"}))
+        self.assertEqual(["-z", "-r", "/x/survey.pcapng"],
+                         argv[argv.index("--") + 6:])
+        checks = list(steps["verify-pcapng"].resolve_argv({CAPTURE_DIR_KEY: "/x"}))
+        # A survey records whatever is in range under no reference LAP, so
+        # the LAP and the reference address are not asked for.
+        for absent in ("--lap", "--reference-lap", "--reference-uap",
+                       "--min-hec-valid", "--following-lap"):
+            self.assertNotIn(absent, checks)
+        self.assertIn("--min-reference-uap", checks)
+
+    def test_the_steps_patterns_match_what_the_driver_really_prints(self):
+        """Each pattern against the driver's own report, not a copy of it.
+
+        A pattern is written from what the driver is meant to print, so the
+        two can drift apart and nothing fails until a bench run. This builds
+        both reports from the firmware fake and matches every pattern
+        against them.
+        """
+        import io
+        import re as regex
+        import sys as system
+
+        from tests.fake_esp32 import FakePeerFirmware, opener
+
+        for audio, cases in ((False, self.cases()),
+                             (True, self.cases("comprehensive"))):
+            acceptor = FakePeerFirmware(ACCEPTOR_ADDRESS,
+                                        version=esp32peer.AUDIO_FIRMWARE)
+            initiator = FakePeerFirmware(INITIATOR_ADDRESS,
+                                         version=esp32peer.AUDIO_FIRMWARE)
+            acceptor.link(initiator)
+            open_one = opener({"/dev/a": acceptor, "/dev/b": initiator})
+            peers = (esp32peer.Peer("/dev/a", "acceptor", ACCEPTOR_ADDRESS,
+                                    opener=open_one),
+                     esp32peer.Peer("/dev/b", "initiator", INITIATOR_ADDRESS,
+                                    opener=open_one))
+            report = io.StringIO()
+            drive = esp32peer.audio if audio else esp32peer.stream
+            extra = ({"packet_type": AUDIO_TYPE, "min_frames": 10} if audio
+                     else {"min_writes": 10})
+            drive(*peers, (system.executable, "-c", "pass"), out=report,
+                  settle_s=0.0, **extra)
+            case = cases["audio-fields" if audio else "follow-fields"]
+            step = self.steps(case)["stream-and-receive"]
+            for pattern in step.output_patterns:
+                with self.subTest(audio=audio, pattern=pattern):
+                    self.assertRegex(report.getvalue(), regex.compile(pattern))
+
+    def test_every_case_resets_both_peers_and_restores_the_board(self):
+        for case_id, case in self.cases("comprehensive").items():
+            with self.subTest(case_id):
+                cleanup = [step.step_id for step in case.cleanup]
+                self.assertEqual(["reset-initiator", "reset-acceptor",
+                                  "cleanup-stop"], cleanup[:3])
+                self.assertEqual("restored-device-identity", cleanup[-1])
+
+
 class IdentityTests(unittest.TestCase):
 
     def test_both_peers_are_required_with_an_address(self):
@@ -352,7 +509,8 @@ class RegistryTests(unittest.TestCase):
         registry = FileResourceRegistry.load(ROOT / "hardware.example.yaml")
         plan = load_plan(ROOT / "testplans" / "classic.yaml")
         catalog = builtin_catalog()
-        for suite, counts in (("classic", (2, 2)), ("classic-comprehensive", (4, 4)),
+        for suite, counts in (("classic", (2, 2, 2)),
+                              ("classic-comprehensive", (4, 4, 4)),
                               ("classic-long", (2,))):
             invocations = PlanCompiler(catalog, registry).compile(plan, suite)
             self.assertEqual(len(counts), len(invocations))

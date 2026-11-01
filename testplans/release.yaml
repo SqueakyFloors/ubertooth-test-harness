@@ -124,6 +124,13 @@ suites:
         coverage: comprehensive
         duration: 3s
 
+    # One board, no peer: a real SIGINT to a running capture, and one that
+    # arrives before the capture can be going.
+    - Interrupting a capture:
+        hosts: each
+        Ubertooth: default
+        coverage: comprehensive
+
     # No Ubertooth.
     - Raw receive replay:
         hosts: each
