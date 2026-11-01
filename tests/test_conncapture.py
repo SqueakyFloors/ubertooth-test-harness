@@ -313,6 +313,32 @@ class RepeatedConnectionTests(unittest.TestCase):
             after_update_ms=2000)
         self.assertEqual([], result.problems)
 
+    def test_a_capture_that_went_quiet_long_before_its_window_ended_fails(self):
+        """What keeps the exemption above honest: a follow that died during
+        the last connection the file announces leaves the same shape as a
+        window that ended, except that the capture falls silent early."""
+        records = [connect_ind(), data_packet(251), second_connect_ind(),
+                   data_packet(251, access=SECOND_ACCESS, crc_init=SECOND_CRC_INIT)]
+        times = [0, 4_000_000, 5_200_000, 6_400_000]
+        data = pcapng(records, times=times, tsresol=9)
+        _header, result = self.check(data, after_update_ms=2000,
+                                     capture_ms=18000, max_quiet_ms=5000)
+        self.assertEqual(11600, result.quiet_ms)
+        self.assertEqual(
+            ["the last packet with a correct CRC arrived 11600 ms before the "
+             "end of the 18000 ms window, more than 5000 ms, so the capture "
+             "stopped hearing the connections before its window ran out"],
+            result.problems)
+
+    def test_a_capture_heard_to_the_end_of_its_window_passes(self):
+        records, times = self.two_cycles()
+        _header, result = self.check(
+            pcapng(records, times=times, tsresol=9), min_connections=2,
+            min_connection_packets=2, after_update_ms=2000,
+            capture_ms=10000, max_quiet_ms=5000)
+        self.assertEqual([], result.problems)
+        self.assertEqual(800, result.quiet_ms)
+
     def test_one_connection_alone_shows_nothing_about_the_update(self):
         # Nothing in the file ended inside it, so there is no connection the
         # check can ask, and passing on that would be passing on no evidence.
@@ -394,9 +420,9 @@ class RepeatedConnectionTests(unittest.TestCase):
         self.assertEqual(0, status, text)
         self.assertIn("span 9.2s", text)
         self.assertIn("connections: 2", text)
-        self.assertIn(f"connection 2: access address {SECOND_ACCESS:08x}, "
-                      "2 packet(s), 2 with a correct CRC, last correct CRC "
-                      "4000 ms after its CONNECT_IND", text)
+        self.assertIn(f"connection 2: access address {SECOND_ACCESS:08x} at "
+                      "5200 ms, 2 packet(s), 2 with a correct CRC, last "
+                      "correct CRC 4000 ms after its CONNECT_IND", text)
         self.assertIn("unannounced access addresses: none", text)
 
 

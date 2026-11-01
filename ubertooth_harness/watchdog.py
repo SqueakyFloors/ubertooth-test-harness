@@ -109,7 +109,10 @@ _BOOT_CAUSE = re.compile(r"(?m)^Last boot cause: (?P<cause>.+?)\s*$")
 _ARMED = re.compile(
     r"(?m)^Watchdog: (?:(?P<not_armed>not armed)|armed; (?P<ms>\d+) ms\b.*?)\s*$"
 )
-_RESETS = re.compile(
+# The counter line, public because a case that judges one board's self-resets
+# across a command has to read it through the same regex this module does
+# (connection_cases.py).
+RESETS = re.compile(
     r"(?m)^Unrequested watchdog resets since power-on: (?P<resets>\d+) "
     r"\(in (?P<boots>\d+) boots?\)\s*$"
 )
@@ -264,7 +267,7 @@ def parse_report(text: str) -> WatchdogRecord | None:
     The reset count line is what says a report was printed: a read that
     failed prints an `error:` line instead and nothing to parse.
     """
-    resets = _RESETS.search(text or "")
+    resets = RESETS.search(text or "")
     if resets is None:
         return None
     cause = _BOOT_CAUSE.search(text)

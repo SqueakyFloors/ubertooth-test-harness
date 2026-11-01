@@ -156,6 +156,14 @@ MIN_CONNECTION_PACKETS = 3
 # few connection events after that, so 2 s is past it either way. A packet
 # that late with a correct CRC is a follow that survived the update.
 AFTER_UPDATE_MS = 2000
+# How long before the end of the window the capture's last good packet may
+# arrive. The last connection in a capture cannot be asked for a packet past
+# the update, because the window is what ends it, so something has to say
+# that the window is what ended the capture's traffic too, and not a follow
+# that died. One of the central's cycles is generous: during a connection the
+# central writes every WRITE_PERIOD_MS, and a reconnection costs a fraction
+# of a second.
+MAX_QUIET_MS = CYCLE_MS
 # What the board must read right after the capture: back in idle mode, so
 # nothing of the follow is left running.
 IDLE_AFTER_CAPTURE = r"(?m)^Now in idle mode\b"
@@ -168,7 +176,7 @@ def _resets_observation(key: str, expected=None) -> Observation:
     The pattern is watchdog.py's own, so the run-level monitor and this case
     read the same line through one regex.
     """
-    return Observation(key, watchdog._RESETS.pattern, expected,
+    return Observation(key, watchdog.RESETS.pattern, expected,
                        convert=lambda match: match["resets"])
 
 _CONNCAPTURE = str(Path(conncapture.__file__).resolve())
@@ -434,6 +442,8 @@ def _follow_end_case(serial, central, peripheral, seconds, *, interval_ms,
                 "--min-connections", str(MIN_CONNECTIONS),
                 "--min-connection-packets", str(MIN_CONNECTION_PACKETS),
                 "--after-update-ms", str(AFTER_UPDATE_MS),
+                "--capture-ms", str(int(seconds) * 1000),
+                "--max-quiet-ms", str(MAX_QUIET_MS),
                 "--require-announced"]
 
     steps = (

@@ -304,6 +304,8 @@ class Connection:
     # How long after this connection's own CONNECT_IND the last packet with a
     # correct CRC arrived. None where either has no time in the file.
     last_valid_after_ms: int | None = None
+    # When that packet arrived, on the file's clock.
+    last_valid_micros: int | None = None
 
 
 @dataclass
@@ -320,6 +322,9 @@ class Result:
     # capture handed out.
     unannounced: dict = field(default_factory=dict)
     span_ms: int | None = None
+    # How long before the end of the capture window the last packet with a
+    # correct CRC arrived. None where it was not asked for.
+    quiet_ms: int | None = None
     connection_info: str = "not looked for"
     connection_info_options: int = 0
     problems: list = field(default_factory=list)
@@ -333,7 +338,9 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
           check_connection_info: bool = False,
           min_connections: int = 0, min_connection_packets: int = 0,
           after_update_ms: int | None = None,
-          require_announced: bool = False) -> tuple[str, Result]:
+          require_announced: bool = False,
+          capture_ms: int | None = None,
+          max_quiet_ms: int | None = None) -> tuple[str, Result]:
     result = Result()
     try:
         file_format, link_type, timed = read_timed_records(data)
@@ -402,6 +409,7 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
             packets=len(found),
             valid=sum(1 for _when, _length, crc_ok in found if crc_ok),
             last_valid_after_ms=max(after) // 1000 if after else None,
+            last_valid_micros=at + max(after) if after else None,
         ))
     valid = [length for length, crc_ok in packets if crc_ok]
     result.data_packets = len(packets)
@@ -461,6 +469,22 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
                     "surviving the parameter update (the latest was "
                     + (f"{item.last_valid_after_ms} ms"
                        if item.last_valid_after_ms is not None else "none") + ")")
+    # The capture must still have been hearing the pair when its window ran
+    # out. Without this, a follow that died during the last connection the
+    # file announces would look the same as a window that ended: that
+    # connection is the one the post-update check has to excuse, because the
+    # window, not the follow, usually ends it.
+    if max_quiet_ms is not None and capture_ms is not None:
+        latest = max((item.last_valid_micros for item in result.connections
+                      if item.last_valid_micros is not None), default=None)
+        if times and latest is not None:
+            result.quiet_ms = (min(times) + capture_ms * 1000 - latest) // 1000
+            if result.quiet_ms > max_quiet_ms:
+                result.problems.append(
+                    f"the last packet with a correct CRC arrived "
+                    f"{result.quiet_ms} ms before the end of the {capture_ms} ms "
+                    f"window, more than {max_quiet_ms} ms, so the capture "
+                    "stopped hearing the connections before its window ran out")
     if require_announced and result.unannounced:
         result.problems.append(
             "packet(s) on an access address no CONNECT_IND in this capture "
@@ -547,6 +571,12 @@ def main(argv=None) -> int:
     parser.add_argument("--require-announced", action="store_true",
                         help="refuse a packet on an access address no CONNECT_IND "
                              "in the capture handed out")
+    parser.add_argument("--capture-ms", type=int,
+                        help="how long the capture was asked to run, which "
+                             "--max-quiet-ms is measured against")
+    parser.add_argument("--max-quiet-ms", type=int,
+                        help="how long before the end of that window the last "
+                             "packet with a correct CRC may arrive")
     args = parser.parse_args(argv)
     try:
         with open(args.file, "rb") as stream:
@@ -565,17 +595,25 @@ def main(argv=None) -> int:
         min_connection_packets=args.min_connection_packets,
         after_update_ms=args.after_update_ms,
         require_announced=args.require_announced,
+        capture_ms=args.capture_ms, max_quiet_ms=args.max_quiet_ms,
     )
     span = "unknown" if result.span_ms is None else f"{result.span_ms / 1000:.1f}s"
     print(f"capture: {header}, {result.records} records, span {span}")
     print(f"connect_ind: {result.connect_inds}")
     print(f"connections: {len(result.connections)}")
+    start = min((item.micros for item in result.connections
+                 if item.micros is not None), default=None)
     for index, item in enumerate(result.connections, start=1):
         after = ("no timed packet" if item.last_valid_after_ms is None
                  else f"last correct CRC {item.last_valid_after_ms} ms after its "
                       "CONNECT_IND")
-        print(f"connection {index}: access address {item.access_address:08x}, "
-              f"{item.packets} packet(s), {item.valid} with a correct CRC, {after}")
+        at = ("" if item.micros is None or start is None
+              else f" at {(item.micros - start) / 1000:.0f} ms")
+        print(f"connection {index}: access address {item.access_address:08x}"
+              f"{at}, {item.packets} packet(s), {item.valid} with a correct "
+              f"CRC, {after}")
+    if result.quiet_ms is not None:
+        print(f"quiet before the window ended: {result.quiet_ms} ms")
     unannounced = ", ".join(f"{address:08x} x{count}" for address, count
                             in sorted(result.unannounced.items()))
     print(f"unannounced access addresses: {unannounced or 'none'}")

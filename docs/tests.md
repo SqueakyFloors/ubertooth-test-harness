@@ -1442,16 +1442,24 @@ capture can show:
   records carry the time each packet arrived, which is what that distance is
   measured in. Every connection the file holds a later CONNECT_IND for has to
   show one, so a follow that died on the second connection's update cannot
-  pass on the first connection's evidence; the last connection in the file is
-  left out, because the capture window, not the follow, is what ends it.
+  pass on the first connection's evidence. The last connection in the file is
+  left out of that, because the capture window, not the follow, is usually
+  what ends it -- and what keeps that exemption honest is a separate check:
+  the capture's last packet with a correct CRC must arrive within one of the
+  central's cycles of the end of the window it was given. A follow that died
+  during the last connection the file announces leaves the same shape as a
+  window that ended, except that the capture falls silent early.
 
 The DKs are then asked what they did, which is the only place the number of
 cycles can be read: a window the central spent on one long connection reports
 one connect and no disconnect, and is told apart from one it spent cycling.
-Last, the board itself is read: it must answer an identity and a settings read
-at once, report itself back in idle mode rather than still in BLE follow mode,
-and show no new unrequested watchdog reset against the count read before the
-capture. The other registered Ubertooths on the host are guarded, as in every
+Last, the board itself is read, after the capture has been stopped as any
+mode is: it must answer an identity and a settings read at once, report
+itself back in idle mode rather than still in BLE follow mode, and show no
+new unrequested watchdog reset against the count read before the capture.
+That says the stop left the board usable, not that the follow ended on its
+own -- what says the follow ended on its own is the capture holding the next
+connection from its own CONNECT_IND. The other registered Ubertooths on the host are guarded, as in every
 case here.
 
 **Hardware and arguments.** The same hardware as `Capture known BLE
@@ -1459,18 +1467,21 @@ connection`: one `Ubertooth` and two nRF52840 DKs as `central` and
 `peripheral`. A required `duration:`, `interval:` (default 30 ms) and
 `update:` (default 60 ms); no `coverage:`, because there is one capture case.
 The duration must be longer than three of the central's 5 s connections and
-at most 30 s, so one case does not hold the boards for long. The Ubertooth
-needs an ordinary link. Writes DK firmware, so the run holds the host lock.
+at most 30 s, so one case does not hold the boards for long. The same entry
+is in the `connection` suite and in `ble-comprehensive`, because there is one
+capture case either way. The Ubertooth needs an ordinary link. Writes DK
+firmware, so the run holds the host lock.
 
 **Expected outcome.** 2 cases: both DKs confirmed on the pinned firmware at
 their registered addresses, and the capture across the window. The capture
 case passes when every CONNECT_IND it holds from the pair carries the
 parameters the central was told to ask for, at least two distinct connections
 appear with at least three packets each on their own access addresses, no
-packet is on an unannounced access address, at least one packet with a correct
-CRC arrives 2 s or more after its own CONNECT_IND, the central reports at
-least three connects and two disconnects, and the board reads back idle with
-an unchanged self-reset count. Cleanup leaves both DKs idle in the advertiser
+packet is on an unannounced access address, every connection but the last carries a
+packet with a correct CRC 2 s or more after its own CONNECT_IND, the capture
+is still hearing the pair within 5 s of the end of its window, the central
+reports at least three connects and two disconnects, and the board reads back
+idle with an unchanged self-reset count. Cleanup leaves both DKs idle in the advertiser
 role and restores the Ubertooth's channel, squelch, and LEDs.
 
 **Known limits.** Like the single-connection cases, the counts are floors a

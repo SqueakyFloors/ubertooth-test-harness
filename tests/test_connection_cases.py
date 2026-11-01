@@ -11,6 +11,7 @@ from ubertooth_harness.connection_cases import (
     CAPTURE_ATTEMPTS,
     CYCLE_MS,
     FOLLOW_END_TEST_NAME,
+    MAX_QUIET_MS,
     MIN_CONNECTION_PACKETS,
     MIN_CONNECTIONS,
     MIN_CYCLES,
@@ -301,7 +302,11 @@ class FollowEndTests(unittest.TestCase):
         for option, value in (("--min-connections", str(MIN_CONNECTIONS)),
                               ("--min-connection-packets",
                                str(MIN_CONNECTION_PACKETS)),
-                              ("--after-update-ms", str(AFTER_UPDATE_MS))):
+                              ("--after-update-ms", str(AFTER_UPDATE_MS)),
+                              # The window the quiet check is measured
+                              # against is the one the capture step runs for.
+                              ("--capture-ms", "18000"),
+                              ("--max-quiet-ms", str(MAX_QUIET_MS))):
             self.assertEqual(value, argv[argv.index(option) + 1])
         # A capture may hold no connection the file does not also announce.
         self.assertIn("--require-announced", argv)
