@@ -70,9 +70,6 @@ _CAPTURE_CHECKER = str(Path(capturefile.__file__).resolve())
 _DUMP_CHECKER = str(Path(rxdump.__file__).resolve())
 _SPECAN_CHECKER = str(Path(specandump.__file__).resolve())
 
-# A serial no registered board carries, so the open can never succeed: the
-# same one Raw receive uses for its unknown-selector cases.
-ABSENT_SERIAL = "f" * 32
 # How long after the one SIGINT the tool has to be gone. The teardown stops
 # the mode and closes the capture files over USB, which takes well under a
 # second on a board that is answering; this is generous, and a tool that
@@ -99,13 +96,14 @@ HEADER_MIN_BYTES = 28
 # The board has to answer the next command at once. A board left in a mode,
 # or wedged, does not.
 ANSWER_DEADLINE_S = 5.0
-# Tries at landing a signal in the board-open window, and the step between
-# their delays. The window is from the handlers going on to the mode start:
-# process start, libusb, the device list, and one serial read per attached
-# board. Ten tries spread over 10-100 ms cover it on the bench hosts; a run
-# where none lands reports a skip and says so.
-OPEN_ATTEMPTS = 10
-OPEN_DELAY_STEP_S = 0.01
+# The early case sends its signal this many seconds in, and takes up to this
+# many tries. Measured on the Linux bench host: a board lookup that matches
+# nothing finishes in 10-20 ms, so a signal sent a few milliseconds in lands
+# either while the board is being opened or just after the mode has started,
+# and both are windows a run has to survive. An attempt whose signal beat the
+# handler install is taken again, which is what the tries are for.
+EARLY_ATTEMPTS = 6
+EARLY_DELAY_S = 0.005
 
 
 def _path(name):
@@ -115,7 +113,7 @@ def _path(name):
 
 
 def _interrupt_step(name, tool_argv, *, grow, when="growing", min_bytes=1,
-                    settle=0.0, expect_status=0, no_capture_file=False,
+                    settle=0.0, expect_status=0, capture_file="kept",
                     attempts=1) -> Step:
     """One run of the tool, one SIGINT to it, and the report."""
     def argv(context):
@@ -125,10 +123,9 @@ def _interrupt_step(name, tool_argv, *, grow, when="growing", min_bytes=1,
             "--settle", f"{settle:g}", "--ready-deadline", f"{READY_DEADLINE_S:g}",
             "--exit-deadline", f"{EXIT_DEADLINE_S:g}",
             "--expect-status", str(expect_status),
-            "--attempts", str(attempts), "--delay", f"{OPEN_DELAY_STEP_S:g}",
+            "--capture-file", capture_file,
+            "--attempts", str(attempts), "--delay", f"{EARLY_DELAY_S:g}",
         ]
-        if no_capture_file:
-            options.append("--no-capture-file")
         return tuple(options) + ("--",) + tuple(
             word(context) if callable(word) else word for word in tool_argv)
 
@@ -174,15 +171,6 @@ def _specan_check(file_name) -> Step:
         lambda context: (sys.executable, _SPECAN_CHECKER, _path(file_name)(context),
                          str(SPECAN_LOW), str(SPECAN_HIGH)),
         output_patterns=(r"Specan dump: \d+ samples, ",),
-    )
-
-
-def _capture_absent(file_name) -> Step:
-    return Step(
-        "capture-absent", f"{file_name} was never created",
-        lambda context: (sys.executable, _CAPTURE_CHECKER, "--absent",
-                         _path(file_name)(context)),
-        output_patterns=(r"Capture file absent: ",),
     )
 
 
@@ -262,22 +250,24 @@ def interrupt_cases(arguments, _resources, resource_identities):
               ),
               "one SIGINT ends it with exit 0, and the samples end on a whole "
               "3-byte record inside the band"),
-        # The open window: the selector names no attached board, so this
-        # never opens one. A stopped open ends quietly with exit 0 and
-        # creates no capture file.
-        _case(serial, "board-open-interrupted",
-              "ubertooth-rx interrupted while the board is being opened", (
+        # A signal that arrives before the capture can be going: while the
+        # board is being opened, or just after the mode has started. Either
+        # way the run has to end on that one signal with exit 0. A signal in
+        # the open window used to be thrown away, and a run that threw it
+        # away would still be capturing when the deadline came.
+        _case(serial, "early-interrupted",
+              "ubertooth-rx interrupted before its capture can be going", (
                   _interrupt_step(
-                      "One SIGINT to ubertooth-rx -U <absent serial> -q "
-                      "<dir>/open.pcap while it looks for the board",
-                      ("ubertooth-rx", "-U", ABSENT_SERIAL, "-q",
-                       _path("open.pcap")),
-                      grow="open.pcap", when="opening", no_capture_file=True,
-                      attempts=OPEN_ATTEMPTS),
-                  _capture_absent("open.pcap"),
+                      f"One SIGINT to ubertooth-rx -q <dir>/early.pcap "
+                      f"{EARLY_DELAY_S:g}s in, while the board is being opened "
+                      "or just after the mode starts",
+                      ("ubertooth-rx", "-U", serial, "-q", _path("early.pcap")),
+                      grow="early.pcap", when="early", capture_file="either",
+                      attempts=EARLY_ATTEMPTS),
                   _answers_at_once(serial),
               ),
-              "the open gives up quietly on the one SIGINT and the run exits 0 "
-              "with no capture file created"),
+              "the one SIGINT ends the run with exit 0 whichever window it "
+              "landed in, nothing is left streaming, and no capture file is "
+              "left growing"),
     ]
     return tuple(cases)

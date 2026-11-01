@@ -9,6 +9,8 @@ capture, and only the last few lines of what the tool printed.
         --min-bytes N [--settle S] [--ready-deadline S]
         [--exit-deadline S] [--expect-status N] [--no-capture-file]
         [--attempts N] [--delay S] -- TOOL ARG...
+    python captureinterrupt.py interrupt --when early [--delay S]
+        [--attempts N] [--exit-deadline S] -- TOOL ARG...
 
 Why a helper rather than a shell line. The signal has to reach **the tool**,
 not a wrapper and not a process group: `timeout -s INT` would send it to
@@ -27,12 +29,14 @@ When the signal goes in:
   to be running and not merely started. A file that never grows that far by
   ``--ready-deadline`` is a ``SKIP:``, not a failure: nothing was interrupted,
   so there is nothing to say.
-- ``--when opening`` sends it ``--delay`` seconds in, while the board is
-  being opened, and takes ``--attempts`` tries at a spread of delays. Which
-  window the signal landed in is not a guess: a run stopped during the open
-  ends quietly with exit 0, and one whose open finished says why it found no
-  board and exits 1, so an attempt that was too late is told apart from one
-  that landed and is simply taken again.
+- ``--when early`` sends it ``--delay`` seconds in, before the capture can
+  have got going, so it lands while the board is being opened or just after
+  the mode has started. Which of the two it was does not change what is
+  required -- a prompt exit 0, with nothing left behind -- and that is the
+  point: a signal that arrives before the mode starts used to be thrown away,
+  and a run that threw it away would still be capturing at the deadline. The
+  one outcome that says nothing is a signal that arrived before the tool had
+  installed its handler, which kills it; that attempt is taken again.
 
 What it checks, and reports as ``Interrupt problem: ...`` with exit 1:
 
@@ -92,10 +96,15 @@ def _diagnostics_on_stdout(path: Path) -> list[str]:
 
 
 def _size(path: Path) -> int:
+    """The file's size, or -1 when it is not there."""
     try:
         return path.stat().st_size
     except OSError:
         return -1
+
+
+def _captured(size: int) -> str:
+    return "no capture file yet" if size < 0 else f"{size} byte(s) captured"
 
 
 class Attempt:
@@ -149,8 +158,8 @@ class Attempt:
         self.size_at_signal = _size(self.grow)
         self.sent_at = time.monotonic()
         self.out(f"Interrupt: one SIGINT to pid {self.process.pid} "
-                 f"{self.sent_at - self.started:.2f}s in, with "
-                 f"{self.size_at_signal} byte(s) captured")
+                 f"{self.sent_at - self.started:.3f}s in, with "
+                 f"{_captured(self.size_at_signal)}")
         os.kill(self.process.pid, signal.SIGINT)
 
     def wait_for_exit(self, deadline_s: float) -> str:
@@ -193,7 +202,7 @@ class Attempt:
             return True
         return True
 
-    def problems(self, *, expect_status: int, no_capture_file: bool) -> list[str]:
+    def problems(self, *, expect_status: int, capture_file: str) -> list[str]:
         found = []
         status = self.process.returncode
         if status < 0:
@@ -203,10 +212,14 @@ class Attempt:
             found.append(f"it exited {status}, not {expect_status}")
         if self.session_left():
             found.append("a process was left behind in the session it ran in")
-        if no_capture_file:
+        if capture_file == "absent":
             if self.grow.exists():
                 found.append(f"{self.grow.name} was created ({_size(self.grow)} "
                              "bytes), by a run that never opened a board")
+        elif capture_file == "either" and not self.grow.exists():
+            # The signal landed before the files were created, which is one
+            # of the two windows this attempt could have hit.
+            pass
         else:
             time.sleep(SETTLE_AFTER_EXIT_S)
             after = _size(self.grow)
@@ -226,8 +239,8 @@ class Attempt:
         self.final_size = _size(self.grow)
         self.out(f"Interrupt exit: status {self.process.returncode} "
                  f"{self.waited_s:.2f}s after the SIGINT; "
-                 f"{self.final_size} byte(s) captured, "
-                 f"{self.size_at_signal} at the signal")
+                 f"{_captured(self.final_size)}, "
+                 f"{_captured(self.size_at_signal)} at the signal")
         for stream, path in (("stdout", self.stdout_path),
                              ("stderr", self.stderr_path)):
             tail = _tail(path)
@@ -281,7 +294,7 @@ def interrupt(argv, options, out=print) -> int:
                 stale.unlink()
         attempt, reason, skippable = _run_once(argv, grow, options, out)
         if reason:
-            if skippable and options.when == "opening" and index < options.attempts:
+            if skippable and options.when == "early" and index < options.attempts:
                 out(f"Interrupt retry: {reason}")
                 continue
             if skippable:
@@ -290,8 +303,16 @@ def interrupt(argv, options, out=print) -> int:
             out(f"Interrupt problem: {reason}")
             return 1
         problems = attempt.problems(expect_status=options.expect_status,
-                                    no_capture_file=options.no_capture_file)
-        if problems and options.when == "opening" and index < options.attempts:
+                                    capture_file=options.capture_file)
+        # A signal that arrived before the tool installed its handler kills
+        # it, which says nothing either way: take that attempt again.
+        if (attempt.process.returncode < 0 and options.when == "early"
+                and index < options.attempts):
+            out(f"Interrupt retry: the SIGINT arrived before the handler was "
+                f"installed and killed the tool (signal "
+                f"{-attempt.process.returncode})")
+            continue
+        if problems and options.when == "early" and index < options.attempts:
             out("Interrupt retry: " + "; ".join(problems))
             continue
         if problems:
@@ -299,11 +320,11 @@ def interrupt(argv, options, out=print) -> int:
             return 1
         out(f"Interrupt done: one SIGINT ended the run in {attempt.waited_s:.2f}s "
             f"with status {attempt.process.returncode}, nothing left behind, "
-            + ("no capture file created" if options.no_capture_file
+            + ("no capture file created" if not attempt.grow.exists()
                else f"{attempt.final_size} byte(s) captured and no more"))
         return 0
-    out(f"SKIP: the SIGINT never landed while the board was being opened, in "
-        f"{options.attempts} attempts")
+    out(f"SKIP: in {options.attempts} attempts the SIGINT always arrived "
+        "before the tool had installed its handler")
     return options.skip_status
 
 
@@ -311,15 +332,20 @@ def main(raw=None) -> int:
     parser = argparse.ArgumentParser(prog="captureinterrupt.py")
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("interrupt", help="interrupt a capture with one SIGINT")
-    run.add_argument("--when", choices=("growing", "opening"), required=True)
+    run.add_argument("--when", choices=("growing", "early"), required=True)
     run.add_argument("--grow", required=True,
-                     help="the capture file the tool writes")
+                     help="the capture file the tool writes; the tool's own "
+                          "streams are saved beside it")
     run.add_argument("--min-bytes", type=int, default=1)
     run.add_argument("--settle", type=float, default=0.0)
     run.add_argument("--ready-deadline", type=float, default=20.0)
     run.add_argument("--exit-deadline", type=float, default=5.0)
     run.add_argument("--expect-status", type=int, default=0)
-    run.add_argument("--no-capture-file", action="store_true")
+    run.add_argument("--capture-file", choices=("kept", "absent", "either"),
+                     default="kept",
+                     help="kept: it must be there and have stopped growing; "
+                          "absent: it must never have been created; either: "
+                          "whichever happened, and it must have stopped")
     run.add_argument("--attempts", type=int, default=1)
     run.add_argument("--delay", type=float, default=0.03)
     run.add_argument("--skip-status", type=int, default=3)
@@ -332,6 +358,7 @@ def main(raw=None) -> int:
         parser.error("name the tool to run after --")
     if options.attempts < 1:
         parser.error("--attempts must be 1 or more")
+
     return interrupt(tool, options)
 
 
