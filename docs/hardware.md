@@ -357,12 +357,14 @@ with `--artifact "KGV=<path>"`. The harness checks every image's SHA-256
 before the run starts and again before each write, so a bench whose copy
 differs fails before it writes anything.
 
-The two peer images are not pinned, because the version string inside the
-image is what the harness checks: it refuses a DK image that does not contain
-the pinned version, and it flashes a board that reports another one. The
-hashes above let a bench confirm it holds the same image this repository's
-sources produce. Each was built as its firmware README says; a reproducible
-build is not claimed, so compare the version first and the hash second.
+The two peer images are not pinned, because what the harness checks is the
+version a board reports: a DK that reports another one is flashed, and
+`nrfdk.py` refuses a DK image that does not hold the pinned version. Nothing
+flashes an ESP32 peer, so a run fails instead when one reports a version
+older than the test needs. The hashes above let a bench confirm it holds the
+same image this repository's sources produce. Each was built as its firmware
+README says; a reproducible build is not claimed, so compare the version
+first and the hash second.
 
 Record any other image a bench keeps the same way, in its own private notes:
 
