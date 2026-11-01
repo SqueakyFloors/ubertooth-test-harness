@@ -1,8 +1,10 @@
 plan: Ubertooth reliability
 suites:
   slow:
-    # Kills a capture outright, so it runs before the flashing tests: a board
-    # it left in a mode is the state the next test has to cope with.
+    # The one test that kills a capture outright, so it runs before the tests
+    # that write firmware: it is the test most likely to find a board in a
+    # state nothing else here makes, and its own cleanup hands the next test a
+    # board it has seen boot.
     - Board state between runs:
         hosts: each
         Ubertooth: default

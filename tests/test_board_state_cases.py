@@ -1,7 +1,7 @@
 """`Board state between runs` against a model of a board left in a mode.
 
-The fake runs the real checkers (rxdump.py, specandump.py, killedcapture.py
-verify) on the files it writes, so what the cases require is checked by the
+The fake runs the real checkers (rxdump.py and killedcapture.py verify) on
+the files it writes, so what the cases require is checked by the
 code that will judge the hardware run. ``bugs`` switches on one misbehavior at
 a time, and each one has to fail the case that is there to catch it.
 """

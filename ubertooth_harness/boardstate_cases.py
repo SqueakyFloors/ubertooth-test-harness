@@ -160,15 +160,20 @@ def _kill_step(tool_argv, capture: str, record: str) -> Step:
     )
 
 
-def _second_capture(step_id: str, name: str, tool_argv, seconds: int, mode: int) -> Step:
-    """A capture started on the board the killed run left in ``mode``."""
-    still_in_mode = _STILL_IN_MODE.format(mode=mode)
+def _second_capture(serial: str, dump: str, seconds: int) -> Step:
+    """The dump, started on the board the killed sweep left in its mode."""
+    still_in_mode = _STILL_IN_MODE.format(mode=MODE_SPECAN)
 
     def argv(context):
-        return tuple(item(context) if callable(item) else item for item in tool_argv)
+        # -l: the modulation is stated before the mode request, and a mode
+        # start puts it back to basic rate, so the board keeping LE is what
+        # says the setting stated for this capture survived (fork d4aca18).
+        return ("ubertooth-dump", "-U", serial, "-l", "-d", _path(dump)(context))
 
     return Step(
-        step_id, name, argv,
+        "second-capture",
+        "Dump symbols in LE modulation on the board left sweeping",
+        argv,
         timeout_s=float(seconds) + MODE_STOP_ALLOWANCE_S,
         mutates=True, continuous=True,
         output_patterns=(
@@ -177,9 +182,9 @@ def _second_capture(step_id: str, name: str, tool_argv, seconds: int, mode: int)
         # The board has to have reported leaving the mode inside the wait:
         # this is the line printed when the wait ran out instead.
         forbidden_patterns=(rf"warning: {_NOT_STOPPED} \d+ ms",),
-        # Both captures write their data to a file, so they ask for nothing on
-        # stdout and nothing may arrive there. With the warning required in
-        # either stream, that is how the case says it was printed on stderr.
+        # The dump writes its data to a file, so it asks for nothing on stdout
+        # and nothing may arrive there. With the warning required in either
+        # stream, that is how the case says it was printed on stderr.
         output_check=nothing_on_stdout,
     )
 
@@ -221,65 +226,44 @@ def _cleanup(serial: str) -> tuple[Step, ...]:
     return tuple(steps)
 
 
-def _case(serial: str, case_id: str, name: str, *, killed_argv, capture: str,
-          record: str, second: Step, verify: tuple[Step, ...],
-          expected_state: str) -> StateCase:
+def _killed_specan_case(serial: str, seconds: int) -> StateCase:
+    """The one case: a symbol dump after a killed spectrum sweep."""
+    records = DUMP_MIN_RECORDS_PER_S * seconds
+    capture, record = "killed-specan.bin", "killed-specan.json"
+    dump = "after-killed-specan.bin"
+    sweep = ("ubertooth-specan", "-U", serial, "-l", str(SWEEP_LOW),
+             "-u", str(SWEEP_HIGH), "-d", _path(capture))
     return StateCase(
-        case_id,
-        name,
+        "killed-specan-then-dump",
+        "A symbol dump after a killed spectrum sweep",
         (_stop(serial, "establish-idle", "Establish idle before reading"),)
         + _read_originals(serial, RESTORED_SETTINGS)
         + _reset_to_defaults(serial, "", "-at-boot", "at boot defaults")
         + (Step("verify-firmware-at-boot", "Firmware answers after the reset",
-                _util(serial, "-v"), output_patterns=(FIRMWARE_PATTERN,)),)
-        + (_kill_step(killed_argv, capture, record), second)
-        + (_stop(serial, "stop-second-capture", "Return the board to idle"),)
-        + verify
+                _util(serial, "-v"), output_patterns=(FIRMWARE_PATTERN,)),
+           _kill_step(sweep, capture, record),
+           _second_capture(serial, dump, seconds),
+           _stop(serial, "stop-second-capture", "Return the board to idle"),
+           Step("verify-second-capture",
+                "The dump holds only its own basic-rate-typed records",
+                lambda context: (sys.executable, _DUMP_CHECKER, _path(dump)(context),
+                                 "full", "--min-records", str(records),
+                                 "--types", "br,keep-alive", "--max-stale", "0"),
+                output_patterns=(r"Receive dump: \d+ full records, 0 stale \(0 LE\)",)),
+           Step("verify-modulation-survived",
+                "MDMCTRL shows the LE modulation the capture stated",
+                ("ubertooth-debug", "-U", serial, "-r", "0x03", "-v0"),
+                observe=Observation("modulation after the capture",
+                                    _MDMCTRL_VALUE, MDMCTRL_LE)))
         + _evidence_steps(serial, capture, record),
         _cleanup(serial),
-        expected_state=expected_state,
-        capture_dir=True,
-    )
-
-
-def _killed_specan_case(serial: str, seconds: int) -> StateCase:
-    records = DUMP_MIN_RECORDS_PER_S * seconds
-    dump = "after-killed-specan.bin"
-    return _case(
-        serial,
-        "killed-specan-then-dump",
-        "A symbol dump after a killed spectrum sweep",
-        capture="killed-specan.bin",
-        record="killed-specan.json",
-        killed_argv=("ubertooth-specan", "-U", serial, "-l", str(SWEEP_LOW),
-                     "-u", str(SWEEP_HIGH), "-d", _path("killed-specan.bin")),
-        # -l: the modulation is stated before the mode request, and a mode
-        # start puts it back to basic rate, so the board keeping LE is what
-        # says the setting stated for this capture survived (fork d4aca18).
-        second=_second_capture("second-capture",
-                               "Dump symbols in LE modulation on the board left sweeping",
-                               ("ubertooth-dump", "-U", serial, "-l",
-                                "-d", _path(dump)),
-                               seconds, MODE_SPECAN),
-        verify=(
-            Step("verify-second-capture",
-                 "The dump holds only its own basic-rate-typed records",
-                 lambda context: (sys.executable, _DUMP_CHECKER, _path(dump)(context),
-                                  "full", "--min-records", str(records),
-                                  "--types", "br,keep-alive", "--max-stale", "0"),
-                 output_patterns=(r"Receive dump: \d+ full records, 0 stale \(0 LE\)",)),
-            Step("verify-modulation-survived",
-                 "MDMCTRL shows the LE modulation the capture stated",
-                 ("ubertooth-debug", "-U", serial, "-r", "0x03", "-v0"),
-                 observe=Observation("modulation after the capture",
-                                     _MDMCTRL_VALUE, MDMCTRL_LE)),
-        ),
         expected_state=(
             f"the dump holds at least {records} records of its own, none left "
             "from the sweep, and the LE modulation it stated before asking for "
             "its mode is the one the radio ended up in; the board answers "
             "every read; the killed sweep's file is kept as it was; channel, "
             "PA level, squelch, and LEDs restored"),
+        capture_dir=True,
     )
 
 

@@ -252,8 +252,9 @@ class KilledCaptureTests(unittest.TestCase):
 class ProcessCheckTests(unittest.TestCase):
 
     def test_a_process_whose_status_nobody_has_read_keeps_its_group(self):
-        # Why the group check is enough on its own: a process that has exited
-        # still owns its open device, and keeps its group, until it is reaped.
+        # The premise of clear_group()'s "only while the status is unread"
+        # guard: until the tool is reaped it is a member of its own group, so
+        # the group exists and is this run's, and signalling it is safe.
         # The child is given one end of a pipe and nothing to write to it, so
         # the end closes when the process exits and the read here returns at
         # that moment. No sleep, and no wait that would reap it: the state

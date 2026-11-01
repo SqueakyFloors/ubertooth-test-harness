@@ -925,21 +925,24 @@ step's streams, which an orphan would hold open. The file the killed tool wrote 
 checked again at the end of the case, so the evidence is kept rather than
 quietly rewritten by the next run.
 
-The two tools used produce data with nothing on the air -- `ubertooth-dump`
-about 2000 records a second, `ubertooth-specan` about 16 kB a second -- so
-each capture's own contents are the evidence and no peer is needed. They also
-leave different modes, and each one's file says whether a record of the other
-is in it. A dump's 68-byte records carry the firmware's packet type, so a
-record left from the sweep before it fails by type, since the firmware types a
-sweep's records SPECAN. A record of a mode that writes basic-rate records
-would pass that and fails instead by its clock, which restarts at mode entry
+Both tools used produce data with nothing on the air -- `ubertooth-specan`
+about 16 kB a second, `ubertooth-dump` about 2000 records a second -- so the
+dump's own contents are the evidence and no peer is needed. The sweep is the
+mode left behind and the dump is the capture that has to cope with it, which
+is the order that works: see the known limits below. A dump's 68-byte records
+carry the firmware's packet type, so a record left from the sweep fails by
+type, since the firmware types a sweep's records SPECAN. A record of a mode
+that writes basic-rate records would pass that and fails instead by its clock,
+which restarts at mode entry
 ([`rxdump.py`](../ubertooth_harness/rxdump.py), `--max-stale`): no mode in
-this test writes those, so that half is the general check rather than the one
-this pairing needs. A sweep states
-the band before it asks for its mode and writes the frequency of every
-sample, so a sample outside that band, a frequency of the band missing, or one
-byte more than whole samples says either that the stated range was lost at
-mode start or that a record of the previous mode is still in the stream.
+this test writes those, so that half is the "zero stale records" the issue
+asks for rather than the leak this pairing can produce.
+
+The dump states its modulation, LE, before it asks for its mode, and a mode
+start puts the modulation back to basic rate. So the radio ending up in LE is
+what says a setting stated for this capture survived the mode start on a board
+that was left in another mode; it is read afterwards from the CC2400 MDMCTRL
+register, which keeps what the last mode programmed.
 
 The warning the second command has to print comes from libubertooth's
 `ubertooth_bulk_init()`: it reads the mode the board is in, stops it, and
@@ -951,7 +954,7 @@ when the wait runs out. Together those say the board was in a mode, the
 capture found it, and the board reported leaving it inside the wait.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
-Guarded. A required `duration:`, which bounds each second capture. No RF peer,
+Guarded. A required `duration:`, which bounds the dump. No RF peer,
 no firmware write, and nothing is transmitted.
 
 **Expected outcome.** One case: a symbol dump after a killed spectrum sweep.
@@ -982,7 +985,7 @@ killed process's handle closes. On a host or kernel that reset the device
 there instead, the board would be idle, the warning the case requires would
 never print, and the case would fail for a reason that has nothing to do with
 the behavior it is about. Only Linux has been checked (the mode was still
-running both times); check a macOS host before putting this test in
+running in 3 tries of 3); check a macOS host before putting this test in
 [`mac.yaml`](../testplans/mac.yaml).
 
 The order of the two captures is not free. A board left in a spectrum sweep
@@ -1005,11 +1008,8 @@ happens to leak cannot tell them apart; the fork pins the wait itself in its
 own unit tests. It kills a capture on purpose, which is the state the test is
 about, and it is the one test here that does so; a board that comes out of it
 wedged is a real finding, not a flake, and on a switchable port a power cycle
-recovers it. The process-group check cannot see a process that left the group
-by starting a session of its own; the host tools start no processes at all, so
-there is nothing of theirs to miss. Nothing here is checked about captured
-content: both tools are judged on record structure, packet type, clock, and
-frequency, never on what the symbols mean.
+recovers it. Nothing here is checked about captured content: the dump is judged
+on record structure, packet type, and clock, never on what the symbols mean.
 
 ## Raw receive replay
 

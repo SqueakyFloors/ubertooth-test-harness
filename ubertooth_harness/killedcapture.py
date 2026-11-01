@@ -94,17 +94,21 @@ def digest(path: Path) -> tuple[int, str]:
 
 
 def clear_group(process, pgid: int, *, wait_s: float = REAP_WAIT_S) -> None:
-    """Leave nothing of this run behind, whatever its outcome.
+    """Take this run's processes down: the whole group, not just the tool, so
+    a child it started cannot keep the device while the rest of the case runs.
 
-    The whole process group, not just the tool: a child it started would
-    otherwise keep the device while the rest of the case ran against it.
+    Only while the tool's own exit status has not been read here. Until then
+    the tool is a member, so the group exists and is this run's. Afterwards the
+    group may have emptied, and an empty group's id is free to be handed to the
+    next process that starts a session of its own -- which the harness does for
+    every step it runs -- so signalling it then could reach somebody else's
+    processes.
 
-    Only while the tool's own exit status has not been read here, which is
-    every path that needs this. Until then the tool is a member, so the group
-    exists and is this run's. Afterwards the group may have emptied, and an
-    empty group's id is free to be handed to the next process that starts a
-    session of its own -- which the harness does for every step it runs -- so
-    signalling it then could reach somebody else's processes.
+    One path arrives here with the status already read: a tool that exited by
+    itself, which wait_for_data() finds with poll(). A child of that tool is
+    knowingly not signalled, because there is no safe way left to name it. The
+    tools this runs start no processes, and the step reports the exit either
+    way.
 
     Best effort throughout: this runs on paths that are already reporting a
     problem, and the problem is what the caller reports.
@@ -188,8 +192,8 @@ def kill(argv, capture: Path, record: Path, min_bytes: int, max_wait_s: float) -
         # to take down and said so; now there is.
         running["after_start"]()
         try:
-            return _kill(process, process.pid, tool, argv, capture, record,
-                         min_bytes, max_wait_s, started, output)
+            return _kill(process, tool, argv, capture, record, min_bytes,
+                         max_wait_s, started, output)
         except RuntimeError as error:
             clear_group(process, process.pid)
             # Where to look for the tool's own words, which are the only clue
@@ -201,7 +205,7 @@ def kill(argv, capture: Path, record: Path, min_bytes: int, max_wait_s: float) -
             raise
 
 
-def _kill(process, pgid, tool, argv, capture, record, min_bytes, max_wait_s,
+def _kill(process, tool, argv, capture, record, min_bytes, max_wait_s,
           started, output) -> str:
     written = wait_for_data(process, capture, min_bytes, max_wait_s)
     os.kill(process.pid, signal.SIGKILL)
