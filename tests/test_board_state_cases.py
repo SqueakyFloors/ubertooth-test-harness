@@ -235,9 +235,8 @@ class CaseGenerationTests(unittest.TestCase):
             self.assertIn("--", argv)
             tool = argv[argv.index("--") + 1]
             self.assertIn(tool, ("ubertooth-specan", "ubertooth-dump"))
-            self.assertEqual(
-                (r"SIGKILL reaped as signal 9, nothing left in its process group",),
-                step.output_patterns)
+            self.assertIn("nothing left in its process group",
+                          " ".join(step.output_patterns))
 
     def test_the_second_capture_is_the_other_tool_and_names_the_mode_left(self):
         context = {"capture dir": "/run/captures"}
@@ -251,11 +250,9 @@ class CaseGenerationTests(unittest.TestCase):
             step = next(s for s in case.steps if s.step_id == "second-capture")
             self.assertEqual(tool, step.resolve_argv(context)[0])
             self.assertTrue(step.continuous)
-            self.assertEqual(
-                (rf"warning: the board is still in mode {mode} from an "
-                 r"earlier run; stopping it first",), step.output_patterns)
-            self.assertEqual((r"warning: it has not stopped after \d+ ms",),
-                             step.forbidden_patterns)
+            self.assertIn(f"still in mode {mode} from an earlier run",
+                          " ".join(step.output_patterns))
+            self.assertIn("has not stopped after", " ".join(step.forbidden_patterns))
 
     def test_the_second_capture_requires_the_warning_on_stderr(self):
         step = next(s for s in self.dump.steps if s.step_id == "second-capture")

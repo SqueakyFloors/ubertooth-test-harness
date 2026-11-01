@@ -973,8 +973,9 @@ between cases, and the guard boards are checked as in every guarded test.
 killed process's handle closes. On a host or kernel that reset the device
 there instead, the board would be idle, the warning the case requires would
 never print, and the case would fail for a reason that has nothing to do with
-the behavior it is about; the Linux lab host does not (the mode was still
-running both times). The clock half of the record check sees a leftover
+the behavior it is about. Only Linux has been checked (the mode was still
+running both times); check a macOS host before putting this test in
+[`mac.yaml`](../testplans/mac.yaml). The clock half of the record check sees a leftover
 basic-rate record only when its clock is ahead of the new stream's first one,
 so a short previous stream can go unseen there; the packet type is what
 catches a record of the sweep, whatever its clock. A pass does not separate a

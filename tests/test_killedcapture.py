@@ -54,6 +54,18 @@ with open(path, "ab", buffering=0) as handle:
         time.sleep(0.01)
 """
 
+# A tool that streams and has something to say on both streams.
+TALKER = """#!/usr/bin/env python3
+import sys, time
+path = sys.argv[sys.argv.index("-d") + 1]
+print("the tool said this", flush=True)
+print("and this, on stderr", file=sys.stderr, flush=True)
+with open(path, "ab", buffering=0) as handle:
+    while True:
+        handle.write(b"x" * 1024)
+        time.sleep(0.01)
+"""
+
 SERIAL = "0" * 31 + "f"
 
 
@@ -115,6 +127,15 @@ class KilledCaptureTests(unittest.TestCase):
         self.assertEqual("capture.bin", saved["capture"])
         self.assertIn(SERIAL, saved["argv"])
         self.assertGreaterEqual(size, 1024)
+
+    def test_the_tools_own_output_goes_to_a_file_beside_its_capture(self):
+        # Not to the streams this process was given: a tool that outlived it
+        # would hold them open and the harness would wait for them forever.
+        code, line = self.kill(TALKER)
+        self.assertEqual(0, code, line)
+        output = self.root / "capture.bin.out"
+        self.assertIn("its own output in capture.bin.out", line)
+        self.assertIn("the tool said this", output.read_text(encoding="utf-8"))
 
     def test_a_tool_that_exits_by_itself_is_a_problem(self):
         code, line = self.kill(QUITTER)

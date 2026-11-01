@@ -127,7 +127,9 @@ def main(argv: list[str] | None = None) -> int:
              "mode (full format); the count is added to the summary line. "
              "stale_records() finds a basic-rate leftover by its clock, so "
              "one whose clock is not ahead of the new stream's first record "
-             "is not counted; an LE record is found whatever its clock",
+             "is not counted; an LE record is found whatever its clock. The "
+             "clock wraps after about 327 s, so a dump longer than that "
+             "would read as stale from the wrap on",
     )
     args = parser.parse_args(argv)
     types = tuple(item for item in args.types.split(",") if item)

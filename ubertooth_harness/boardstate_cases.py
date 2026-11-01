@@ -102,24 +102,28 @@ _STILL_IN_MODE = "the board is still in mode {mode} from an earlier run"
 _NOT_STOPPED = "it has not stopped after"
 
 
-def _boot_defaults(serial: str) -> tuple[Step, ...]:
-    """Reset the board and require the documented boot defaults."""
+def _reset_to_defaults(serial: str, prefix: str, suffix: str,
+                       where: str) -> tuple[Step, ...]:
+    """Reset the board and require every documented boot default.
+
+    Used twice in each case, at both ends: once as the state the case starts
+    from, and once in the cleanup, which is where the issue asks for it,
+    because this is the test that leaves a board in a mode on purpose.
+    """
     return (
-        Step("reset", "Full reset before the capture",
+        Step(f"{prefix}reset", f"Full reset {where}",
              _util(serial, "-r"), timeout_s=RESET_TIMEOUT_S, mutates=True,
              output_patterns=(r"Resetting ubertooth device",),
              output_check=nothing_on_stdout),
-        Step("verify-firmware-at-boot", "Firmware answers after the reset",
-             _util(serial, "-v"), output_patterns=(FIRMWARE_PATTERN,)),
     ) + tuple(
-        setting.verify(serial, f"verify-{setting.key}-at-boot",
-                       f"{setting.key} is the boot default",
-                       f"{setting.key} at boot defaults", setting.after_mode_stop)
+        setting.verify(serial, f"{prefix}verify-{setting.key}{suffix}",
+                       f"{setting.key} is the boot default {where}",
+                       f"{setting.key} {where}", setting.after_mode_stop)
         for setting in MODE_RESET_SETTINGS
     ) + (
-        PA_LEVEL.verify(serial, "verify-pa-level-at-boot",
-                        "pa-level is the boot default",
-                        "pa-level at boot defaults", PA_BOOT_DEFAULT),
+        PA_LEVEL.verify(serial, f"{prefix}verify-pa-level{suffix}",
+                        f"pa-level is the boot default {where}",
+                        f"pa-level {where}", PA_BOOT_DEFAULT),
     )
 
 
@@ -202,31 +206,10 @@ def _evidence_steps(serial: str, capture: str, record: str) -> tuple[Step, ...]:
 
 
 def _cleanup(serial: str) -> tuple[Step, ...]:
-    """Stop, reset, check the board is at its documented defaults, and put
-    back what the case recorded.
-
-    The reset is not the usual cleanup's business, but this case is the one
-    that leaves a board in a mode on purpose, so it hands the next test a
-    board it has seen boot rather than one it has only asked to stop.
-    """
-    steps = [
-        _stop(serial, "cleanup-stop", "Return to idle"),
-        Step("cleanup-reset", "Reset the board", _util(serial, "-r"),
-             timeout_s=RESET_TIMEOUT_S, mutates=True,
-             output_patterns=(r"Resetting ubertooth device",),
-             output_check=nothing_on_stdout),
-    ]
-    steps += [
-        setting.verify(serial, f"cleanup-verify-{setting.key}",
-                       f"{setting.key} is the boot default after the reset",
-                       f"{setting.key} after the cleanup reset",
-                       setting.after_mode_stop)
-        for setting in MODE_RESET_SETTINGS
-    ]
-    steps.append(PA_LEVEL.verify(
-        serial, "cleanup-verify-pa-level",
-        "pa-level is the boot default after the reset",
-        "pa-level after the cleanup reset", PA_BOOT_DEFAULT))
+    """Stop, reset, check the documented defaults, and put back what the case
+    recorded, so the next test is handed a board seen to boot."""
+    steps = [_stop(serial, "cleanup-stop", "Return to idle")]
+    steps += _reset_to_defaults(serial, "cleanup-", "", "after the cleanup reset")
     for setting in RESTORED_SETTINGS:
         steps.extend(setting.restore(serial))
     steps.append(_identity(serial))
@@ -241,7 +224,9 @@ def _case(serial: str, case_id: str, name: str, *, killed_argv, capture: str,
         name,
         (_stop(serial, "establish-idle", "Establish idle before reading"),)
         + _read_originals(serial, RESTORED_SETTINGS)
-        + _boot_defaults(serial)
+        + _reset_to_defaults(serial, "", "-at-boot", "at boot defaults")
+        + (Step("verify-firmware-at-boot", "Firmware answers after the reset",
+                _util(serial, "-v"), output_patterns=(FIRMWARE_PATTERN,)),)
         + (_kill_step(killed_argv, capture, record), second)
         + (_stop(serial, "stop-second-capture", "Return the board to idle"),)
         + verify
