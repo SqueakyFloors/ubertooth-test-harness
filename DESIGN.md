@@ -173,8 +173,9 @@ Semantics:
   directory itself, and the page bounded. Every request is answered, with a
   page or a refusal, and a refusal names the run ID or the path and never a
   path on the target. The runner answers four at once and refuses further
-  ones as busy (503); it reads off the event loop and in its own task, so a
-  page of a soak's log does not delay a cancel. The controller asks only for
+  ones as busy (503); it reads off the event loop and in its own task, so
+  reading a page of a soak's log does not hold up the next message on the
+  connection, which may be a cancel. The controller asks only for
   a file that run's own run.jsonl records and this host does not hold, holds
   at most eight requests per target, answers 503 while the runner is not
   connected, and 504 if it does not answer within the reply timeout.

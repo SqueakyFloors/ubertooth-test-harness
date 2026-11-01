@@ -175,9 +175,6 @@ def valid_identifier(value) -> bool:
     return isinstance(value, str) and bool(_ID_RE.fullmatch(value))
 
 
-
-
-
 # ----- state ---------------------------------------------------------------
 
 
@@ -761,11 +758,13 @@ class Controller:
                     pending.fail(ControllerError(reason, 503))
 
     def expire_pending(self) -> None:
-        """Drop requests nobody waits for once their grace period has passed."""
+        """Drop requests nobody waits for once their grace period has passed.
+
+        Not the file requests: each of those is dropped as its caller leaves,
+        because a page nobody waits for is of no use to anyone.
+        """
         now = self.clock()
-        for table in (
-            self._pending_runs, self._pending_cancels, self._pending_files
-        ):
+        for table in (self._pending_runs, self._pending_cancels):
             for key, pending in list(table.items()):
                 if pending.expires_at is not None and now >= pending.expires_at:
                     del table[key]
@@ -928,12 +927,14 @@ class Controller:
                 )
             if kind == "run_file_page":
                 page = message["page"]
-                # The page must be the file and the place that were asked
-                # for, so nobody is shown one page while being told it is
-                # another. An offset past the end comes back clamped to the
-                # end, exactly as a read here clamps it. Checked before the
-                # request is taken off the pending list, so a refused answer
-                # leaves it there for the right one.
+                # The page must name the file and the place that were asked
+                # for, so an answer cannot be paired with another request.
+                # An offset past the end comes back clamped to the end,
+                # exactly as a read here clamps it, which is why the size the
+                # answer reports is part of the comparison. What the page
+                # says about itself beyond that is the runner's to report.
+                # Checked before the request is taken off the pending list,
+                # so a refused answer leaves it there for the right one.
                 at = min(asked.get("offset", 0), page["file_bytes"])
                 if page["path"] != asked.get("path") or page["offset"] != at:
                     raise _Violation(
