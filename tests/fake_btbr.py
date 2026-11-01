@@ -47,6 +47,7 @@ OTHER_NAME = "Example Device"
 #   says-why            it cannot open the board and says so in one error line
 #   no-libusb1          the interpreter has no libusb1 package
 #   late-eir            the firmware's EIR line lands after the intro
+#   stray-packet        a warning on the progress stream renders a packet
 
 _SCRIPT = '''#!/usr/bin/env python3
 """A fake ubertooth-btbr console. See tests/fake_btbr.py."""
@@ -193,6 +194,10 @@ while True:
             err("09:11:00 RX LMP: BBHdr(lt_addr=1, type=DM1, flags=F) | x")
         continue
     if word == "inquiry":
+        if "stray-packet" in FAULTS:
+            # One of the tool's own warnings renders a decoded packet.
+            err("warning: a packet arrived before BTCtlInquiryCmd was ready: "
+                "RX(FHS: bdaddr=%s parity=1 cls=1f00 ltaddr=0 clk=1)" % OTHER)
         err("Starting BTCtlInquiryCmd")
         prompt()
         err("State STANDBY -> INQUIRY")

@@ -1486,13 +1486,15 @@ a run that cannot do it leaves the case out before anything is flashed.
 images by hand. A controller or GUI run cannot ask for those build options yet
 ([#257](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/257)).
 
-**Expected outcome.** One case per session. Smoke decides 11 checks in the
-session — the prompt, `?`, `? <command>`, the three refusals, `page` with no
-address, `bdaddr`, the inquiry, the page and the LMP exchange, `idle` after
-each, the once-per-opcode report of an LMP request with no handler, and the
-split between the capture on standard output and the progress on standard
-error. Comprehensive adds a twelfth: paging an address nothing answers must end
-in `paging timeout` with no connection. The report says how many checks passed,
+**Expected outcome.** One case per session. The startup and the prompt come
+first, and a session that does not reach the prompt fails there. Then smoke
+decides 11 checks: `?`, `? <command>`, a word that is no command, `?` on one,
+three addresses that are not ones, `page` with no address, `bdaddr`, the
+inquiry, the page and the LMP exchange, the once-per-opcode report of an LMP
+request with no handler, and the split between the capture on standard output
+and the progress on standard error (`idle` is checked inside the inquiry and
+the page). Comprehensive decides a twelfth: paging an address nothing answers
+must end in `paging timeout` with no connection. The report says how many checks passed,
 how many failed, and how many never ran, so a session that stopped early is not
 read as a pass. The cleanup always writes the application image back, reads it,
 and resets the peer; a cleanup failure fails the case, so the board cannot be

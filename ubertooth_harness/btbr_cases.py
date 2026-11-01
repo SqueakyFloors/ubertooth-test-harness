@@ -76,10 +76,12 @@ APPLICATION_LABEL = APPLICATION_IMAGE_LABEL
 
 # What the case needs of the host and of the run, so a host or a run that
 # cannot do it leaves the case out before anything is flashed rather than
-# skipping it afterwards: the peers are reached through /dev/serial/by-id,
+# stopping at case planning: the peers are reached through /dev/serial/by-id,
 # which is Linux's; `ubertooth-btbr` is installed only by a --with-python
-# build; and both firmware images come from a --with-firmware one.
-NEEDS = Needs(platforms=("linux",), python_tools=True, firmware_build=True)
+# build; and the two firmware images are named apart, because a run can carry
+# the application image without the alternate one.
+NEEDS = Needs(platforms=("linux",), python_tools=True, firmware_build=True,
+              btbr_build=True)
 
 _CONSOLE = str(Path(btbrconsole.__file__).resolve())
 # A write and the board's reset. Four seconds each way on the lab bench, and

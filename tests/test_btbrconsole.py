@@ -137,6 +137,16 @@ class SessionTests(unittest.TestCase):
                       "libusb1 package", captured)
         self.assertIn("session: not run: ", report)
 
+    def test_an_address_that_is_not_the_peers_is_not_named_in_the_report(self):
+        # One of the tool's own warnings renders a decoded packet, so the
+        # progress stream could name a device the capture stream does not.
+        status, _captured, report = self.run_session(faults=("stray-packet",))
+        self.assertEqual(0, status, report)
+        self.assertNotIn(fake_btbr.OTHER_ADDRESS, report)
+        self.assertIn("bdaddr=<another device>", report)
+        # The peer's own is still shown.
+        self.assertIn(f"bdaddr={PEER_ADDRESS.replace(':', '').lower()}", report)
+
     def test_the_startup_lines_may_arrive_in_any_order(self):
         # `EIR updated` is a firmware line the receive thread ferries up, and
         # the tool prints the intro milliseconds later, so which lands first
@@ -230,12 +240,9 @@ class CheckListTests(unittest.TestCase):
     def test_the_fake_names_no_real_device(self):
         # This repository must not hold captured device traffic, so the
         # second device an inquiry hears is made up too.
-        for value in (fake_btbr.OTHER_ADDRESS, fake_btbr.OTHER_NAME,
-                      fake_btbr.PEER_ADDRESS, fake_btbr.PEER_NAME):
-            with self.subTest(value):
-                self.assertNotIn("UN75", value)
         self.assertTrue(fake_btbr.OTHER_ADDRESS.startswith("02"),
                         "a locally administered address belongs to nobody")
+        self.assertEqual("Example Device", fake_btbr.OTHER_NAME)
 
     def test_no_check_sends_an_address_shorter_than_six_bytes(self):
         # The tool takes one today and acts on a different address (fork

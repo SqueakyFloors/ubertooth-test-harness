@@ -697,7 +697,7 @@ def _prepare_run(
         built = _build(
             sources, run_dir / "build", args.with_firmware, publisher, args.with_python,
             run_dir=run_dir,
-            firmware_images=getattr(args, "firmware_images", FIRMWARE_IMAGES),
+            firmware_images=args.firmware_images,
         )
         artifacts = artifacts + built.artifacts
         names = {item.name for item in artifacts}
@@ -864,6 +864,8 @@ def _run_suite(args: argparse.Namespace) -> int:
     if args.no_flash_build and not args.build:
         raise HarnessError("--no-flash-build requires --build")
     args.flash_boards = ()
+    # Both images unless the firmware build is turned on only to flash.
+    args.firmware_images = FIRMWARE_IMAGES
     if args.build and not args.no_flash_build:
         # The boards whose firmware preflight requires get the run's own
         # firmware first; that needs the firmware build.
@@ -932,6 +934,7 @@ def _dry_run(args, catalog, plan, host, invocations, not_applicable) -> int:
     capabilities = planned_capabilities(
         args.host, host.platform, build=args.build,
         with_python=bool(args.with_python), with_firmware=args.with_firmware,
+        with_btbr=BTBR_IMAGE in args.firmware_images,
         artifact_labels=labels,
     )
     print(f"dry run: {plan.name} / {args.suite} on {args.host}; nothing is built or run")

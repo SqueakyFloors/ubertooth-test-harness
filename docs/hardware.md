@@ -341,8 +341,12 @@ bluetooth_rxtx, which the other tools need: flash it with this build
 (the default when building)
 ```
 
-`ubertooth-util -v`, `-V`, and `ubertooth-dfu` are the commands that work on
-either image; everything else needs the application one.
+`ubertooth-util -v`, `-V` and `-w`, and `ubertooth-dfu`, are the commands that
+work on either image: the `btbr` firmware answers the version, firmware info,
+serial and watchdog requests, which is what those read. Everything else needs
+the application image. The watchdog monitor therefore keeps working across the
+session, except that `btbr` records no mode, so the mode field of its
+breadcrumb is empty.
 
 ### How the harness checks the running version
 

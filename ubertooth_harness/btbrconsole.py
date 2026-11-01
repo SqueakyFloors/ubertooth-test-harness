@@ -190,13 +190,17 @@ NOT_A_RECORD = re.compile(r"(?m)^(?!\d\d:\d\d:\d\d [A-Z0-9])(?P<line>.+)$")
 # here would pin that rather than check it.
 BAD_WORD = "wibble"
 BAD_ADDRESSES = ("", "zzz", "11:22:33:44:55:66:77")
-# The address to set the board to, and the one to page for the no-answer
-# check. Neither belongs to anything on the bench, and neither is
-# `11:22:33:44:55:66`, which the tool gives the board itself at startup
-# (host/doc/ubertooth-btbr.md, DESCRIPTION): paging that would depend on the
-# set-address check having run first.
+# The address to set the board to. It is not `11:22:33:44:55:66`, which the
+# tool gives the board itself at startup (host/doc/ubertooth-btbr.md,
+# DESCRIPTION), so the check is a change rather than a rewrite of the same
+# value.
 TEST_ADDRESS = "22:33:44:55:66:77"
-NO_DEVICE_ADDRESS = "02:00:00:00:00:01"
+# What the no-answer check pages is derived from the registered peer instead
+# of being a constant: a page is addressed by the access code the LAP gives,
+# and a constant would sooner or later be some bench's peer. The low byte of
+# the peer's own address is inverted, which changes the LAP and so the access
+# code, and leaves an address nothing is listening on.
+_NO_DEVICE_MASK = 0xFF
 
 
 class ConsoleError(RuntimeError):
@@ -215,11 +219,16 @@ class Stream:
     reader would block on it; the matching below therefore runs over the text.
     """
 
-    def __init__(self, name: str, source, sink=None, prefix: str = ""):
+    def __init__(self, name: str, source, sink=None, prefix: str = "",
+                 keep: str = ""):
         self.name = name
         self._source = source
         self._sink = sink
         self._prefix = prefix
+        # The one address this stream may name. The tool renders a decoded
+        # packet inside a warning or two, so a third-party address could
+        # reach the run record by the stream the capture was kept out of.
+        self._keep = keep.lower()
         self._lock = threading.Lock()
         self._chunks: list[str] = []
         self._size = 0
@@ -266,8 +275,19 @@ class Stream:
         """
         if not lines or self._sink is None:
             return
-        self._sink.write("".join(self._prefix + line + "\n" for line in lines))
+        self._sink.write("".join(self._prefix + self._redact(line) + "\n"
+                                 for line in lines))
         self._sink.flush()
+
+    def _redact(self, line: str) -> str:
+        """Any address but the peer's, replaced before the line is written."""
+        if self._keep and "bdaddr=" not in line:
+            return line
+        return FHS_BDADDR.sub(
+            lambda found: ("bdaddr=" + found["address"]
+                           if found["address"].lower() == self._keep
+                           else "bdaddr=<another device>"),
+            line)
 
     @property
     def text(self) -> str:
@@ -278,9 +298,11 @@ class Stream:
 class Console:
     """A running ubertooth-btbr session: send a line, wait for an answer."""
 
-    def __init__(self, argv: Sequence[str], err, environment=None):
+    def __init__(self, argv: Sequence[str], err, environment=None, keep=""):
         self.argv = tuple(argv)
         self._err = err
+        # The only device address the echoed progress may name.
+        self._keep = keep
         self._environment = environment
         self.process: subprocess.Popen | None = None
         self.streams: dict[str, Stream] = {}
@@ -297,13 +319,20 @@ class Console:
         self.started = _now()
         self.streams = {
             "stdout": Stream("stdout", self.process.stdout),
-            "stderr": Stream("stderr", self.process.stderr, self._err, "btbr| "),
+            "stderr": Stream("stderr", self.process.stderr, self._err, "btbr| ",
+                             keep=self._keep),
         }
         for stream in self.streams.values():
             stream.thread.start()
 
     def text(self, stream: str = "stderr") -> str:
-        return self.streams[stream].text
+        """What the stream has printed, or "" before the tool was started.
+
+        A tool that could not be run leaves no streams at all, and the one
+        path that reports that reads this first.
+        """
+        found = self.streams.get(stream)
+        return found.text if found is not None else ""
 
     def mark(self, stream: str = "stderr") -> int:
         """Where the stream's text has reached, so a wait starts from here."""
@@ -386,6 +415,18 @@ class Console:
 # What the checks share
 
 
+def no_device_address(peer: str) -> str:
+    """An address nothing answers, from the one that does.
+
+    The peer's low byte inverted: that is a different LAP, so a page for it
+    carries a different access code, and no device on a bench registered
+    around the peer can answer it.
+    """
+    parts = peer.split(":")
+    low = int(parts[-1], 16) ^ _NO_DEVICE_MASK
+    return ":".join(parts[:-1] + [f"{low:02X}"])
+
+
 def _record(text: str, match: re.Match) -> str:
     """The whole capture line a match landed on, trimmed for a report line.
 
@@ -456,13 +497,21 @@ class Session:
 
 
 def check_help(session: Session) -> str:
+    """`?` lists the commands. The list is the tool describing itself."""
     console = session.console
     mark = console.mark()
     console.send("?")
     heading, took = console.wait(HELP_HEADING, REPLY_TIMEOUT_S, since=mark)
     if heading is None:
         return f"? printed no {HELP_HEADING!r} within {REPLY_TIMEOUT_S:g}s"
-    listed = console.text()[mark:]
+    # The names come in writes of their own, after the heading and the rule
+    # under it, so the prompt that follows them is what says the list is
+    # whole: reading the text as soon as the heading arrives could catch it
+    # half written and report a command that was on its way.
+    prompt, _ = console.wait(PROMPT, REPLY_TIMEOUT_S, since=heading.end())
+    if prompt is None:
+        return f"? printed {HELP_HEADING!r} but the prompt did not come back"
+    listed = console.text()[mark:prompt.start()]
     missing = [name for name in HELP_COMMANDS
                if not re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", listed)]
     if missing:
@@ -652,19 +701,20 @@ def check_page_no_answer(session: Session) -> str:
     """A page nothing answers ends in a timeout, with no connection."""
     console = session.console
     mark = console.mark()
-    console.send(f"page {NO_DEVICE_ADDRESS}")
+    address = no_device_address(session.peer_address)
+    console.send(f"page {address}")
     started, _ = console.wait(PAGING_STARTED, REPLY_TIMEOUT_S, since=mark)
     if started is None:
-        return f"page {NO_DEVICE_ADDRESS} did not start paging"
+        return f"page {address} did not start paging"
     timeout, took = console.wait(PAGING_TIMEOUT, session.no_answer_seconds,
                                  since=started.end())
     if timeout is None:
-        return (f"paging {NO_DEVICE_ADDRESS}, which nothing answers, did not "
-                f"report {PAGING_TIMEOUT!r} in {session.no_answer_seconds:g}s")
+        return (f"paging {address}, which nothing answers, did not report "
+                f"{PAGING_TIMEOUT!r} in {session.no_answer_seconds:g}s")
     connected, _ = console.wait(PAGING_CONNECTED, 0.0, since=started.end())
     if connected is not None:
-        return (f"paging {NO_DEVICE_ADDRESS} reported {PAGING_CONNECTED!r}: "
-                "something answered for an address nothing has")
+        return (f"paging {address} reported {PAGING_CONNECTED!r}: something "
+                "answered for an address nothing has")
     ended, _ = console.wait(PAGING_DONE, REPLY_TIMEOUT_S, since=timeout.end())
     if ended is None:
         return f"the page timed out but did not report {PAGING_DONE!r}"
@@ -732,8 +782,8 @@ def _check_seconds(label: str, *, inquiry: float, page: float, hold: float,
                    no_answer: float) -> float:
     reply, idle = REPLY_TIMEOUT_S, IDLE_TIMEOUT_S
     return {
-        # The heading, and the prompt is not waited for.
-        "help": reply,
+        # The heading, then the prompt that says the list is whole.
+        "help": 2 * reply,
         "help-one": reply,
         # The refusal, then the prompt after it.
         "no-such-command": 2 * reply,
@@ -813,7 +863,8 @@ def run_session(arguments, out, err, environment) -> int:
         out.flush()
         return SKIP_EXIT
     argv = (tool, "-U", arguments.serial)
-    console = Console(argv, err, environment)
+    console = Console(argv, err, environment,
+                      keep=arguments.peer.replace(":", "").lower())
 
     def report(line: str) -> None:
         err.write(line + "\n")
