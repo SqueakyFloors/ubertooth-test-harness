@@ -102,6 +102,25 @@ def group_gone(pgid: int) -> bool:
     return _absent(lambda: os.killpg(pgid, 0))
 
 
+def clear_group(process, pgid: int) -> None:
+    """Leave nothing of this run behind, whatever its outcome.
+
+    The whole process group, not just the tool: a child it started would
+    otherwise keep the device while the rest of the case ran against it. The
+    tool is waited for, so it does not stay in the table as the group's only
+    member. Best effort throughout -- this runs on paths that are already
+    reporting a problem, and the problem is what the caller says.
+    """
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except OSError:
+        pass
+    try:
+        process.wait(timeout=REAP_WAIT_S)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+
 def wait_for_data(process, capture: Path, min_bytes: int, max_wait_s: float) -> int:
     """Bytes in ``capture`` once it holds ``min_bytes``.
 
@@ -134,19 +153,16 @@ def kill(argv, capture: Path, record: Path, min_bytes: int, max_wait_s: float) -
     started = time.monotonic()
     # No shell and no wrapper, so process.pid is the tool's own pid and the
     # signal below reaches the process that holds the board. Its own session,
-    # so the group checked at the end holds this run's processes and no others.
+    # which makes it the leader of a process group of its own: the group is
+    # its pid, it holds anything the tool starts, and nothing else is in it.
     process = subprocess.Popen(argv, start_new_session=True)
-    pgid = os.getpgid(process.pid)
+    pgid = process.pid
     try:
         written = wait_for_data(process, capture, min_bytes, max_wait_s)
     except RuntimeError:
-        # Even on a failure the tool must not be left streaming into the next
-        # step; the case's cleanup needs the board back.
-        process.kill()
-        try:
-            process.wait(timeout=REAP_WAIT_S)
-        except subprocess.TimeoutExpired:
-            pass
+        # However this ends, nothing of the tool's may be left streaming into
+        # the next step: the case's cleanup needs the board back.
+        clear_group(process, pgid)
         raise
     os.kill(process.pid, signal.SIGKILL)
     try:
@@ -165,9 +181,14 @@ def kill(argv, capture: Path, record: Path, min_bytes: int, max_wait_s: float) -
     if not pid_gone(process.pid):
         raise RuntimeError(f"pid {process.pid} is still in the process table")
     if not group_gone(pgid):
+        # Not a race with the kernel tearing the tool down: that is over by
+        # the time the wait above returned. Something of the tool's is still
+        # there, so take it down before reporting it, or it would hold the
+        # device through the rest of the case.
+        clear_group(process, pgid)
         raise RuntimeError(
-            f"process group {pgid} is not empty: {tool} left a process behind "
-            "that may still own the device"
+            f"process group {pgid} was not empty: {tool} left a process behind "
+            "that may still own the device (it has been killed)"
         )
     size, checksum = digest(capture)
     record.write_text(json.dumps({

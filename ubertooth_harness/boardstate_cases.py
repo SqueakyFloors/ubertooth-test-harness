@@ -28,8 +28,15 @@ ubertooth_bulk_init() (fork e657807, SqueakyFloors/ubertooth#438): it reads
 the mode the board is in, stops it, and waits until the board says it has
 left it, because UBERTOOTH_STOP only asks and the mode's loop can hand the
 endpoint another packet in the meantime. The step requires the first warning
-and forbids the second ("it has not stopped after N ms"), so a pass means the
-wait worked rather than ran out.
+and forbids the second ("it has not stopped after N ms"), which the same code
+prints when the wait runs out.
+
+What that pair of checks shows is that the board was in a mode, that the
+capture found it, and that the board reported leaving it within the wait. It
+does not separate a build that waits from one that warns and starts anyway:
+the only difference between those two is a packet or so of the previous mode
+in the new capture, which is the leak the record checks below look for, and a
+run where nothing happens to leak cannot tell them apart.
 """
 
 from __future__ import annotations
@@ -181,8 +188,8 @@ def _second_capture(step_id: str, name: str, tool_argv, seconds: int, mode: int)
         output_patterns=(
             rf"warning: {still_in_mode}; stopping it first",
         ),
-        # The wait for the board to leave the mode has to have worked: this is
-        # the line printed when it ran out instead.
+        # The board has to have reported leaving the mode inside the wait:
+        # this is the line printed when the wait ran out instead.
         forbidden_patterns=(rf"warning: {_NOT_STOPPED} \d+ ms",),
         output_check=_warnings_off_stdout(still_in_mode, _NOT_STOPPED),
     )

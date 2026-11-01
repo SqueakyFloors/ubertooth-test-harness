@@ -118,14 +118,35 @@ class KilledCaptureTests(unittest.TestCase):
         self.assertIn("wrote 0 bytes in 0.5 s", line)
         self.assertIn("less than the 1024", line)
 
-    def test_a_process_the_tool_left_behind_is_reported(self):
+    def test_a_process_the_tool_left_behind_is_reported_and_killed(self):
         code, line = self.kill(SPAWNER)
         helper = int((self.root / "capture.bin.helper").read_text(encoding="utf-8"))
         self.addCleanup(self.reap, helper)
         self.assertEqual(1, code)
-        self.assertIn("is not empty", line)
+        self.assertIn("was not empty", line)
         self.assertIn("may still own the device", line)
         self.assertFalse(self.record.exists())
+        # Reported is not enough: it must not hold the device through the rest
+        # of the case.
+        self.assertTrue(self.gone(helper), "the process left behind is still running")
+
+    def gone(self, pid):
+        for _ in range(200):
+            if killedcapture.pid_gone(pid):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def test_a_tool_that_produces_nothing_leaves_nothing_running(self):
+        # The failure path kills the group too: the SPAWNER writes its helper's
+        # pid before it writes any capture data, so this run gives up on the
+        # data and still has a process to clean up.
+        code, line = self.kill(SPAWNER, min_bytes=1 << 30, max_wait=1.0)
+        helper = int((self.root / "capture.bin.helper").read_text(encoding="utf-8"))
+        self.addCleanup(self.reap, helper)
+        self.assertEqual(1, code)
+        self.assertIn("less than the", line)
+        self.assertTrue(self.gone(helper), "the process left behind is still running")
 
     def reap(self, pid):
         try:

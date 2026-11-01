@@ -940,8 +940,8 @@ waits until the board reports that it has left it, because the stop request
 only asks and the mode's loop can hand the endpoint another packet in the
 meantime. The case requires that warning, requires it on stderr rather than
 among the records on stdout, and forbids the second one the same code prints
-when the wait runs out. So a pass means the wait worked, not that it was
-tried.
+when the wait runs out. Together those say the board was in a mode, the
+capture found it, and the board reported leaving it inside the wait.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
 Guarded. A required `duration:`, which bounds each second capture. No RF peer,
@@ -958,14 +958,19 @@ that needs a second try fails the case. A self-reset the firmware records
 while this runs is reported by the usual watchdog read between cases, and the
 guard boards are checked as in every guarded test.
 
-**Known limits.** It kills a capture on purpose, which is the state the test
-is about, and it is the one test here that does so; a board that comes out of
-it wedged is a real finding, not a flake, and on a switchable port a power
-cycle recovers it. The process-group check cannot see a process that left the
-group by starting a session of its own; the host tools start no processes at
-all, so there is nothing of theirs to miss. What a pass does not prove is
-anything about captured content: both tools are checked on record structure,
-packet type, clock, and frequency, never on what the symbols mean.
+**Known limits.** A pass does not separate a build that waits for the board
+to leave the mode from one that warns and starts anyway. The only difference
+between them is a packet or so of the previous mode reaching the new capture,
+which is what the record and sample checks look for, so a run where nothing
+happens to leak cannot tell them apart; the fork pins the wait itself in its
+own unit tests. It kills a capture on purpose, which is the state the test is
+about, and it is the one test here that does so; a board that comes out of it
+wedged is a real finding, not a flake, and on a switchable port a power cycle
+recovers it. The process-group check cannot see a process that left the group
+by starting a session of its own; the host tools start no processes at all, so
+there is nothing of theirs to miss. Nothing here is checked about captured
+content: both tools are judged on record structure, packet type, clock, and
+frequency, never on what the symbols mean.
 
 ## Raw receive replay
 
