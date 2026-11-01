@@ -104,6 +104,18 @@ class TimedRecordTests(unittest.TestCase):
         self.assertEqual(wanted, self.times(
             pcapng([record()] * 3, times=wanted, tsresol=9)))
 
+    def test_a_resolution_option_the_block_does_not_hold_is_not_read(self):
+        # The bytes after a short option belong to the next option, so a
+        # resolution read from them would be any number at all.
+        item = record()
+        options = struct.pack("<HH", 9, 200) + b"\x09"  # claims 200, carries 1
+        data = (_block(0x0A0D0D0A, struct.pack("<IHHq", 0x1A2B3C4D, 1, 0, -1))
+                + _block(1, struct.pack("<HHI", 256, 0, 65535) + options)
+                + _block(6, struct.pack("<IIIII", 0, 0, 1_500_000, len(item),
+                                        len(item)) + item))
+        # Microseconds, the resolution a reader assumes without the option.
+        self.assertEqual([1_500_000], self.times(data))
+
     def test_a_record_with_no_time_keeps_none(self):
         # A simple packet block carries no timestamp, so it cannot be read
         # as time zero.

@@ -48,7 +48,7 @@ import re
 import sys
 from typing import Mapping
 
-from ubertooth_harness import conncapture, nrfdk
+from ubertooth_harness import conncapture, nrfdk, watchdog
 from ubertooth_harness.advertiser_cases import (
     DK_TIMEOUT_S,
     ENSURE_TIMEOUT_S,
@@ -160,8 +160,16 @@ AFTER_UPDATE_MS = 2000
 # nothing of the follow is left running.
 IDLE_AFTER_CAPTURE = r"(?m)^Now in idle mode\b"
 WATCHDOG_RESETS = "watchdog resets"
-_RESETS_PATTERN = (r"Unrequested watchdog resets since power-on: (?P<value>\d+) "
-                   r"\(in \d+ boots?\)")
+
+
+def _resets_observation(key: str, expected=None) -> Observation:
+    """The board's unrequested self-reset count, from `ubertooth-util -w`.
+
+    The pattern is watchdog.py's own, so the run-level monitor and this case
+    read the same line through one regex.
+    """
+    return Observation(key, watchdog._RESETS.pattern, expected,
+                       convert=lambda match: match["resets"])
 
 _CONNCAPTURE = str(Path(conncapture.__file__).resolve())
 
@@ -300,6 +308,10 @@ def _central_cycled(update_ms: int, cycles: int):
     the central spent on one long connection is told apart from one it spent
     cycling. One fewer disconnect than connection is allowed, because the
     last connection is usually still up when the status is read.
+
+    ``cycles`` is the floor the duration rule guarantees, not what the
+    duration works out to: each reconnection costs a moment on top of the
+    cycle, so a longer window does not reach a proportionally higher count.
     """
     did_the_work = _central_did_the_work(update_ms)
 
@@ -397,17 +409,11 @@ def _capture_case(serial, central, peripheral, seconds, *, case_id, name,
     )
 
 
-def cycles_in(seconds) -> int:
-    """How many of the central's connections a capture that long spans."""
-    return int(seconds) // (CYCLE_MS // 1000)
-
-
 def _follow_end_case(serial, central, peripheral, seconds, *, interval_ms,
                      update_ms) -> StateCase:
     """One capture across several of the pair's connections."""
     interval_units = nrfdk.conn_units(interval_ms)
     capture_file = _attempt_capture_path("capture.pcapng")
-    cycles = cycles_in(seconds)
 
     def check(context):
         return [sys.executable, _CONNCAPTURE, capture_file(context),
@@ -428,7 +434,7 @@ def _follow_end_case(serial, central, peripheral, seconds, *, interval_ms,
         *_read_originals(serial, MODE_RESET_SETTINGS),
         Step("read-original-watchdog", "Read the board's self-reset count",
              _util(serial, "-w"), timeout_s=WATCHDOG_TIMEOUT_S,
-             observe=Observation(WATCHDOG_RESETS, _RESETS_PATTERN)),
+             observe=_resets_observation(WATCHDOG_RESETS)),
         Step("peripheral-start",
              f"Peripheral advertises connectable on channel {ADV_CHANNEL}",
              _dk(peripheral, "peripheral", "--dle", "on", "--chmap",
@@ -450,7 +456,7 @@ def _follow_end_case(serial, central, peripheral, seconds, *, interval_ms,
              )),
         Step("capture",
              f"ubertooth-btle -f -A{ADV_CHANNEL} -r for {seconds}s, across "
-             f"{cycles} connections",
+             f"{MIN_CYCLES}+ of the central's connections",
              lambda context: _btle(serial, "-f", f"-A{ADV_CHANNEL}", "-r",
                                    capture_file(context)),
              timeout_s=float(seconds), mutates=True, continuous=True),
@@ -458,7 +464,7 @@ def _follow_end_case(serial, central, peripheral, seconds, *, interval_ms,
         Step("central-report", "What the central did while the case ran",
              _dk(central, "status"), timeout_s=DK_TIMEOUT_S,
              output_patterns=(r"(?m)^role: central$",),
-             output_check=_central_cycled(update_ms, cycles)),
+             output_check=_central_cycled(update_ms, MIN_CYCLES)),
         Step("check-capture",
              "The capture holds several of the pair's connections and nothing else",
              check, timeout_s=CHECK_TIMEOUT_S,
@@ -470,9 +476,9 @@ def _follow_end_case(serial, central, peripheral, seconds, *, interval_ms,
              "The board is back in idle mode, with no new self-reset",
              _util(serial, "-w"), timeout_s=WATCHDOG_TIMEOUT_S,
              output_patterns=(IDLE_AFTER_CAPTURE,),
-             observe=Observation(
-                 f"{WATCHDOG_RESETS} after the capture", _RESETS_PATTERN,
-                 expected=lambda context: require(context, WATCHDOG_RESETS))),
+             observe=_resets_observation(
+                 f"{WATCHDOG_RESETS} after the capture",
+                 lambda context: require(context, WATCHDOG_RESETS))),
     )
     return StateCase(
         "follow-across-end",

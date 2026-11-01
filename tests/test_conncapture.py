@@ -91,8 +91,8 @@ def connect_inds(records):
     """Every CONNECT_IND in the records, as check() reads them: only the
     packets whose CRC is right, so a corrupted one cannot pass for the
     connection the harness asked for."""
-    return [conncapture.ConnectInd.parse(body[6:6 + 34])
-            for body in conncapture.connect_ind_bodies(records)]
+    timed = [advcapture.TimedRecord(None, record) for record in records]
+    return [connection for _at, connection in conncapture.timed_connect_inds(timed)]
 
 
 class ConnectIndTests(unittest.TestCase):
@@ -166,6 +166,16 @@ class CheckTests(unittest.TestCase):
                                      long_packets=4)
         self.assertEqual([], result.problems)
         self.assertEqual((2, 4), (result.connect_inds, result.valid_packets))
+
+    def test_one_connection_announced_twice_counts_its_packets_once(self):
+        """A second CONNECT_IND for an access address already in the file
+        brings no traffic with it, so counting its packets again would raise
+        the floors without a packet arriving."""
+        records = [connect_ind()] + [data_packet(251)] * 3 + [connect_ind()]
+        _header, result = self.check(pcap(records), min_data_packets=3,
+                                     min_valid_packets=3)
+        self.assertEqual([], result.problems)
+        self.assertEqual((2, 3), (result.connect_inds, result.data_packets))
 
     def test_a_wrong_parameter_in_a_later_connection_fails(self):
         records = [connect_ind(), connect_ind(data=lldata(interval=48))]

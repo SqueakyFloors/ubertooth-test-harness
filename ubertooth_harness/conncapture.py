@@ -74,6 +74,7 @@ from ubertooth_harness.advcapture import (  # noqa: E402
     CaptureError,
     LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR,
     _PCAPNG_IDB,
+    _PCAPNG_IDB_FIXED,
     _PCAPNG_SHB,
     crc24,
     format_address,
@@ -91,7 +92,6 @@ DEFAULT_TIMEOUT_UNITS = 400
 # (lib/src/pcapng-bt.c, PCAPNG_LE_LL_CONNECTION_INFO).
 CONNECTION_INFO_OPTION = 0xD380
 CONNECTION_INFO_NS_LEN = 8
-_PCAPNG_IDB_HEADER = 8 + 2 + 2 + 4  # block type, length, link type, reserved, snaplen
 # Every data channel in the channel map: 37 bits set.
 ALL_DATA_CHANNELS = (1 << 37) - 1
 # Bluetooth Core: the hop increment is 5 to 16.
@@ -175,13 +175,6 @@ def _connect_ind_body(record, central: str | None = None,
     if peripheral is not None and format_address(pdu[6:12]) != peripheral.upper():
         return None
     return bytes(body[:6 + CONNECT_IND_LEN])
-
-
-def connect_ind_bodies(records, central: str | None = None,
-                       peripheral: str | None = None) -> list[bytes]:
-    """Each CONNECT_IND record from its access address on (header and LLData)."""
-    found = (_connect_ind_body(record, central, peripheral) for record in records)
-    return [body for body in found if body is not None]
 
 
 def timed_connect_inds(records, central: str | None = None,
@@ -281,7 +274,7 @@ def connection_info_options(data: bytes) -> list[bytes]:
             return found
         if block_type == _PCAPNG_IDB:
             body = data[offset + 8:offset + length - 4]
-            at = _PCAPNG_IDB_HEADER - 8  # options start after the fixed fields
+            at = _PCAPNG_IDB_FIXED  # options start after the fixed fields
             while at + 4 <= len(body):
                 code, option_length = struct.unpack("<HH", body[at:at + 4])
                 if code == 0:  # end of options
@@ -393,14 +386,20 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
     for at, connection in ours_timed:
         if any(item.access_address == connection.access_address
                for item in result.connections):
-            # The same connection announced twice: its packets are counted
-            # once, against the CONNECT_IND that opened it.
+            # One connection announced twice. Its packets are counted once,
+            # against the CONNECT_IND that opened it: a second CONNECT_IND
+            # for an access address already in the file adds no traffic, and
+            # counting the same packets again would raise the packet floors
+            # without a packet arriving.
             continue
         found = timed_data_packets(timed, connection.access_address,
                                    connection.crc_init)
         packets += [(length, crc_ok) for _when, length, crc_ok in found]
+        # Only packets at or after this connection's own CONNECT_IND: the
+        # search above reads the whole file, so an access address that came
+        # round again would otherwise give a negative distance.
         after = [when - at for when, _length, crc_ok in found
-                 if crc_ok and when is not None and at is not None]
+                 if crc_ok and when is not None and at is not None and when >= at]
         result.connections.append(Connection(
             access_address=connection.access_address,
             micros=at,

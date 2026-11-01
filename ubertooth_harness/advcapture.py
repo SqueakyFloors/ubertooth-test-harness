@@ -177,8 +177,10 @@ def _interface_ticks_per_second(body: bytes, endian: str) -> int:
         code, option_length = struct.unpack(endian + "HH", body[at:at + 4])
         if code == 0:  # end of options
             break
+        if at + 4 + option_length > len(body):
+            break  # the option claims more than the block holds
         value = body[at + 4:at + 4 + option_length]
-        if code == _PCAPNG_IF_TSRESOL and len(value) >= 1:
+        if code == _PCAPNG_IF_TSRESOL and option_length >= 1:
             # The top bit chooses the base: set means 2^-n, clear means 10^-n.
             power = value[0] & 0x7F
             return 2 ** power if value[0] & 0x80 else 10 ** power
