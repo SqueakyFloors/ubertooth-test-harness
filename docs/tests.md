@@ -1412,6 +1412,122 @@ one for every CONNECT_IND it decodes and another device in range gets one
 too, and when none matches it names each field of the pair's own option that
 differs.
 
+## Follow a BLE connection across its end
+
+**What it does.** The same two nRF52840 DKs connect and reconnect for about
+18 seconds while one `ubertooth-btle -f` capture runs across the whole
+window, and the board is read back as soon as the capture stops.
+
+**Theory of operation.** `Capture known BLE connection` deliberately keeps its
+window inside one connection, so it says nothing about what happens at the
+end of one. This test takes the other window. Three things only a multi-cycle
+capture can show:
+
+- A follow that ends cleanly finds the next connection. The capture has to
+  hold a CONNECT_IND for two of the pair's connections, with packets on each
+  one's own access address, which means the board stopped following the first
+  connection when it closed and picked the second one up from its own
+  CONNECT_IND.
+- A follow is not hijacked. During a follow the board writes the access
+  address it synchronized on into every record it sends, and it synchronizes
+  on exactly one at a time: the advertising address while it hunts, then the
+  connection's own. So a packet on an access address that no CONNECT_IND in
+  the file handed out is a connection the file cannot explain, and the check
+  refuses it. A CONNECT_IND from another device in range explains its own
+  packets just as well as the pair's explains the pair's.
+- A follow survives the parameter update. The central asks for the new
+  interval 1.2 s into each connection and the update's instant is a few
+  connection events later, so a packet with a correct CRC 2 s or more after
+  its own CONNECT_IND is one the board tracked across the update. The capture
+  records carry the time each packet arrived, which is what that distance is
+  measured in. Every connection the file holds a later CONNECT_IND for has to
+  show one, so a follow that died on the second connection's update cannot
+  pass on the first connection's evidence. The last connection in the file is
+  left out of that, because the capture window, not the follow, is usually
+  what ends it. What keeps that exemption honest is a pair of checks on the
+  file's own clock. A board whose follow died goes back to hunting and keeps
+  recording advertising packets, so the capture may go on recording for no
+  more than two of the central's cycles after the last packet it heard of the
+  pair -- two, because the Ubertooth is not expected to catch every
+  reconnection, and missing the last one costs a whole connection's worth of
+  silence. And the records have to span all but one cycle of the window the
+  capture was given, or the capture stopped hearing everything rather than
+  just the pair's connections. Neither reads the window's start out of the
+  file, because the first record arrives some unknown time after the command
+  did.
+
+The DKs are then asked what they did, which is the only place the number of
+cycles can be read: a window the central spent on one long connection reports
+one connect and no disconnect, and is told apart from one it spent cycling.
+Last, the board itself is read, after the capture has been stopped as any
+mode is: it must answer an identity and a settings read at once, report
+itself back in idle mode rather than still in BLE follow mode, and show no
+new unrequested watchdog reset against the count read before the capture.
+That says the stop left the board usable, not that the follow ended on its
+own -- what says the follow ended on its own is the capture holding the next
+connection from its own CONNECT_IND. The other registered Ubertooths on the host are guarded, as in every
+case here.
+
+**Hardware and arguments.** The same hardware as `Capture known BLE
+connection`: one `Ubertooth` and two nRF52840 DKs as `central` and
+`peripheral`. A required `duration:`, `interval:` (default 30 ms) and
+`update:` (default 60 ms); no `coverage:`, because there is one capture case.
+The duration must be longer than three of the central's 5 s connections and
+at most 30 s, so one case does not hold the boards for long. The same entry
+is in the `connection` suite and in `ble-comprehensive`, because there is one
+capture case either way. The Ubertooth needs an ordinary link. Writes DK
+firmware, so the run holds the host lock.
+
+**Expected outcome.** 2 cases: both DKs confirmed on the pinned firmware at
+their registered addresses, and the capture across the window. The capture
+case passes when every CONNECT_IND it holds from the pair carries the
+parameters the central was told to ask for, at least two distinct connections
+appear with at least three packets each on their own access addresses, no
+packet is on an unannounced access address, every connection but the last carries a
+packet with a correct CRC 2 s or more after its own CONNECT_IND, the capture
+records nothing for more than 10 s after the pair's last good packet and its
+records span all but 5 s of its window, the central reports at least three
+connects and two disconnects, and the board reads back idle with an unchanged
+self-reset count. Cleanup leaves both DKs idle in the advertiser
+role and restores the Ubertooth's channel, squelch, and LEDs.
+
+**Known limits.** Like the single-connection cases, the counts are floors a
+working follow clears, not expected counts, and a capture that misses them is
+taken again, up to three captures. Only the capture and the checks of it are
+retried: the reads after them have to see the board as the last capture left
+it. Two connections is a floor rather than the three or four the window spans,
+because the board hunts on one advertising channel and catches part of what is
+there, so it is not expected to see every reconnection. A window spanning
+several reconnections used to die partway through
+([ubertooth#505](https://github.com/SqueakyFloors/ubertooth/issues/505),
+fixed), which is why the single-connection test still keeps its window inside
+one connection.
+
+The two checks above have tolerances of their own, so between them they
+allow a narrow worst case: a capture that stopped recording near the end of
+its permitted span, with the pair's last good packet near the start of the
+permitted quiet time, hides a longer dead follow than either tolerance
+suggests. Reaching it needs the board to stop recording anything in a
+particular few seconds, and a failed capture is taken again, so the shape is
+unlikely rather than impossible.
+
+Two things the checks cannot separate. A connection's packets look
+unexplained whether the board followed a connection it never announced or
+the CONNECT_IND itself was lost on the way to the host, which does happen —
+the firmware counts capture transfer errors for that reason. Three captures
+make it unlikely rather than impossible. And the connect and disconnect
+counters the central reports run from the board's boot, so on a second or
+third capture attempt they cover the whole case rather than that one window:
+they say the central is cycling while the case runs, and the capture check,
+which wants two of the pair's connections in the file the attempt just
+wrote, is what binds per window.
+
+"No stale records from follow mode" is checked as far as one command can: the
+board reports itself back in idle mode, and the capture file holds no packet
+on an access address it does not also announce. Whether a *later* capture
+picks up records left by this one is a different measurement, which `BLE CRC
+transitions` makes with `stalecheck.py`.
+
 ## Capture known Classic device
 
 **What it does.** Two ESP32 Classic peers hold a Serial Port Profile link and

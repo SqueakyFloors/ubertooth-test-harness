@@ -43,6 +43,19 @@ suites:
         interval: 30
         update: 60
 
+    # The window the case above leaves out: one capture across several of
+    # the central's reconnections.
+    - Follow a BLE connection across its end:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        central: default
+        peripheral: default
+        # Longer than three of the central's 5 s connections
+        # (connection_cases.MIN_CYCLES).
+        duration: 18s
+        interval: 30
+        update: 60
+
   ble-comprehensive:
     - Capture known BLE advertiser:
         hosts: [Host_Linux]
@@ -67,5 +80,15 @@ suites:
         peripheral: default
         coverage: comprehensive
         duration: 8s
+        interval: 30
+        update: 60
+
+    # One capture case either way, so the same entry as the smoke suite.
+    - Follow a BLE connection across its end:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        central: default
+        peripheral: default
+        duration: 18s
         interval: 30
         update: 60
