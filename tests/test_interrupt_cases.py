@@ -35,6 +35,8 @@ STUB = textwrap.dedent('''
     p.add_argument("--exit-status", type=int, default=0)
     p.add_argument("--no-file", action="store_true")
     p.add_argument("--quiet-stderr", action="store_true")
+    p.add_argument("--buffered", action="store_true")
+    p.add_argument("--warning-on-stdout", action="store_true")
     a = p.parse_args()
     stop = False
     def handler(_s, _f):
@@ -42,6 +44,8 @@ STUB = textwrap.dedent('''
         stop = True
     if not a.ignore_sigint:
         signal.signal(signal.SIGINT, handler)
+    if a.warning_on_stdout:
+        print("warning: a progress line in the wrong place", flush=True)
     print("note: starting" if a.note_on_stdout else "packet", flush=True)
     if not a.quiet_stderr:
         print("note: entering the mode", file=sys.stderr, flush=True)
@@ -49,7 +53,7 @@ STUB = textwrap.dedent('''
         while not stop:
             time.sleep(0.005)
     else:
-        with open(a.dump, "wb", buffering=0) as handle:
+        with open(a.dump, "wb", buffering=(-1 if a.buffered else 0)) as handle:
             while not stop:
                 handle.write(bytes(68))
                 time.sleep(0.005)
@@ -77,8 +81,15 @@ class HelperTests(unittest.TestCase):
         self.dump = self.root / "dump.bin"
         self.addCleanup(self.directory.cleanup)
 
-    def run_helper(self, *flags, when="growing", extra=()):
-        argv = ["interrupt", "--when", when, "--grow", str(self.dump),
+    def run_helper(self, *flags, extra=()):
+        # Each run writes its own capture, as a case does in its own
+        # directory: a file left by the run before would satisfy the growth
+        # wait before this tool had written anything.
+        for stale in (self.dump, Path(f"{self.dump}.stdout.log"),
+                      Path(f"{self.dump}.stderr.log")):
+            if stale.exists():
+                stale.unlink()
+        argv = ["interrupt", "--grow", str(self.dump),
                 "--min-bytes", str(rxdump.FULL_RECORD * 5), "--settle", "0.2",
                 "--ready-deadline", "10", "--exit-deadline", "2",
                 *extra, "--",
@@ -96,7 +107,7 @@ class HelperTests(unittest.TestCase):
         self.assertGreaterEqual(self.dump.stat().st_size, rxdump.FULL_RECORD * 5)
         # The tool's own streams are kept beside the capture.
         self.assertIn("note: entering the mode",
-                      (self.root / "dump.bin.1.stderr.log").read_text())
+                      (self.root / "dump.bin.stderr.log").read_text())
 
     def test_a_tool_killed_by_the_signal_fails(self):
         code, report = self.run_helper("--ignore-sigint")
@@ -116,7 +127,7 @@ class HelperTests(unittest.TestCase):
                       report)
 
     def test_a_diagnostic_line_on_standard_output_fails(self):
-        code, report = self.run_helper("--note-on-stdout")
+        code, report = self.run_helper("--warning-on-stdout")
         self.assertEqual(1, code)
         self.assertIn("is on standard output; progress and diagnostics go to "
                       "standard error", report)
@@ -134,55 +145,57 @@ class HelperTests(unittest.TestCase):
         self.assertNotIn("SKIP", report)
         self.assertIn("so no capture was running to interrupt", report)
 
-    def test_a_tool_that_says_nothing_on_standard_error_fails(self):
+    def test_a_teardown_line_is_required_only_where_it_is_asked_for(self):
+        # ubertooth-btle and ubertooth-rx print nothing on a clean run, so a
+        # silent stderr must pass unless the case names a line to look for.
         code, report = self.run_helper("--quiet-stderr")
-        self.assertEqual(1, code)
-        self.assertIn("printed nothing on standard error", report)
-
-    def test_the_early_mode_does_not_retry_a_real_failure(self):
-        # Only a signal that beat the handler install is taken again; a wrong
-        # exit status fails on the first attempt, so six tries cannot hide it.
+        self.assertEqual(0, code, report)
         code, report = self.run_helper(
-            "--exit-status", "2", when="early",
-            extra=("--capture-file", "either", "--delay", "0.3", "--attempts", "6"))
+            "--quiet-stderr", extra=("--teardown-says", "Stopping ubertooth"))
         self.assertEqual(1, code)
-        # The run stops at the real failure rather than trying again: the
-        # problem is the last thing it says. (An earlier attempt may have
-        # been killed before the stub installed its handler, which is the one
-        # outcome that is retried.)
-        self.assertTrue(report.rstrip().endswith("Interrupt problem: it exited 2, "
-                                                 "not 0"), report)
-        retries = report.count("Interrupt retry: ")
-        killed = report.count("killed the tool (signal 2)")
-        self.assertEqual(retries, killed, report)
-
-    def test_the_early_mode_accepts_a_capture_file_or_none(self):
-        for flags, extra in ((("--no-file",), ()), ((), ())):
-            with self.subTest(flags=flags):
-                code, report = self.run_helper(
-                    *flags, when="early",
-                    extra=("--capture-file", "either", "--delay", "0.3",
-                           "--attempts", "3", *extra))
-                self.assertEqual(0, code, report)
-                self.assertIn("Interrupt done: ", report)
-
-    def test_the_early_mode_takes_another_try_when_the_signal_beat_the_handler(self):
-        # A tool with no handler at all is killed every time, so every try is
-        # retried and the helper ends by saying so rather than passing.
+        self.assertIn("nothing matching 'Stopping ubertooth' is on standard "
+                      "error", report)
         code, report = self.run_helper(
-            "--ignore-sigint", when="early",
-            extra=("--capture-file", "either", "--delay", "0.3", "--attempts", "2"))
-        self.assertEqual(1, code)
-        self.assertIn("Interrupt retry: the SIGINT arrived before the handler",
-                      report)
-        # The last try decides, so a tool that is always killed fails rather
-        # than reporting a skip nobody would read.
-        self.assertNotIn("SKIP", report)
+            extra=("--teardown-says", "Stopping ubertooth"))
+        self.assertEqual(0, code, report)
 
-    def test_growing_needs_a_tool_to_run(self):
+    def test_a_capture_file_already_there_fails(self):
+        self.dump.parent.mkdir(parents=True, exist_ok=True)
+        self.dump.write_bytes(bytes(rxdump.FULL_RECORD * 50))
+        argv = ["interrupt", "--grow", str(self.dump), "--min-bytes", "1", "--",
+                sys.executable, str(self.stub), "-d", str(self.dump)]
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = captureinterrupt.main(argv)
+        self.assertEqual(1, code)
+        self.assertIn("is already there", out.getvalue())
+
+    def test_a_note_on_standard_output_is_allowed(self):
+        # ubertooth-btle prints its undecoded-packet note on the report
+        # stream, which is standard output for a capture written to a file,
+        # and the fork puts it there deliberately.
+        code, report = self.run_helper("--note-on-stdout")
+        self.assertEqual(0, code, report)
+
+    def test_a_block_buffered_writer_still_reaches_the_floor(self):
+        # ubertooth-specan does not flush per sample, so its file grows a
+        # stdio buffer at a time; the floor has to be reachable that way.
+        code, report = self.run_helper("--buffered")
+        self.assertEqual(0, code, report)
+
+    def test_nothing_is_retried(self):
+        # One run, one signal, one verdict: there is no retry to hide a
+        # failure behind.
+        code, report = self.run_helper("--exit-status", "2")
+        self.assertEqual(1, code)
+        self.assertNotIn("Interrupt retry", report)
+        self.assertNotIn("Interrupt attempt", report)
+        self.assertTrue(report.rstrip().endswith(
+            "Interrupt problem: it exited 2, not 0"), report)
+
+    def test_it_needs_a_tool_to_run(self):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            captureinterrupt.main(["interrupt", "--when", "growing",
-                                   "--grow", str(self.dump), "--"])
+            captureinterrupt.main(["interrupt", "--grow", str(self.dump), "--"])
 
 
 def cases(coverage):
@@ -337,7 +350,7 @@ class CaseTests(unittest.TestCase):
         _a, smoke = cases("smoke")
         self.assertEqual(2, len(smoke))
         _a, full = cases("comprehensive")
-        self.assertEqual(4, len(full))
+        self.assertEqual(3, len(full))
         self.assertEqual(len(full), len({case.case_id for case in full}))
         context = {"capture dir": "/run/c"}
         for case in full:
@@ -358,6 +371,12 @@ class CaseTests(unittest.TestCase):
             self.assertIn("-U", argv)
             self.assertEqual(SERIAL, argv[argv.index("-U") + 1])
             self.assertEqual("answers", case.steps[-1].step_id)
+            # The channel and the squelch are read before the cleanup's own
+            # stop, so a board still carrying the mode's settings is seen.
+            read_back = [s.step_id for s in case.steps
+                         if s.step_id.startswith("mode-stopped-")]
+            self.assertEqual(["mode-stopped-channel", "mode-stopped-squelch"],
+                             read_back)
             # Cleanup always restores and then reads the identity back.
             self.assertEqual("cleanup-stop", case.cleanup[0].step_id)
             self.assertEqual("restored-device-identity", case.cleanup[-1].step_id)

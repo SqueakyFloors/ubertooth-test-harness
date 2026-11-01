@@ -22,11 +22,13 @@ send a real SIGINT to the tool itself, and then ask the board.
 How the moment is chosen. A signal sent at a fixed time proves nothing about
 what the run was doing, so the two cases that can wait for evidence do.
 ``ubertooth-dump -d`` and ``ubertooth-specan -d`` stream whether or not there
-is traffic, and each flushes what it writes, so the capture file growing past
-a floor is proof that the mode is running, and that is when the signal goes
-in. A capture that never gets there, or a tool that exits on its own first,
-fails the case: these streams do not depend on the air, so neither outcome is
-something the bench decides.
+is traffic, so the capture file growing past a floor is proof that the mode is
+running, and that is when the signal goes in. ``ubertooth-dump`` flushes each
+record, so its file grows a record at a time; ``ubertooth-specan`` does not,
+so its file grows a stdio buffer at a time and the floor has to be a buffer's
+worth rather than a few samples. A capture that never gets there, or a tool
+that exits on its own first, fails the case: these streams do not depend on
+the air, so neither outcome is something the bench decides.
 
 ``ubertooth-btle -n -r -q`` has no such proof to offer. It creates both
 capture files after the board is open and before the mode requests, and
@@ -35,18 +37,21 @@ appears; what picks the moment there is the settling time, and the case rests
 on the exit and the teardown rather than on having caught a running mode.
 ``docs/tests.md`` says so under its limits.
 
-The early case does not try to pick the board-open window. A lookup takes 10
-to 20 ms on the bench host (measured), so aiming inside it would mean tens of
-tries, and each try is a board lookup like any other. Instead it signals a few
-milliseconds in and requires the same of either window, which is what catches
-the regression: a signal the open threw away left the run capturing until
-something else stopped it, so it would still be running at the deadline.
+A signal aimed at the board-open window is out of reach from here, and these
+cases do not pretend otherwise. A lookup takes 10 to 20 ms on the bench host,
+so landing inside it would take many tries; and on a build from before the
+handlers moved ahead of the open (fork 3311ce36) a signal that landed there
+killed the tool outright, which is indistinguishable from one that simply
+arrived before the handler was installed on a build that has the fix. So there
+is no outcome that separates the two, and a case built on it would either fail
+a correct build or retry a broken one away. ``docs/tests.md`` records that as
+a limit.
 
 The signal goes to the tool's own process, once
 ([`captureinterrupt.py`](captureinterrupt.py)): not to a process group, and
 not through a ``timeout`` wrapper, which would be signalled instead of the
 tool. The helper then waits for that process, reaps it, and reports whether
-anything was left in the session it ran in, whether the capture file kept
+anything was left in the process group it ran in, whether the capture file kept
 growing after the exit, and whether any progress or error line landed on
 standard output. Each case then reads the capture file it was left with, and
 asks the board for its identity on a short deadline, before the usual
@@ -68,11 +73,14 @@ from ubertooth_harness.stateful import (
     require,
 )
 from ubertooth_harness.transitions import (
+    CHANNEL,
     MODE_RESET_SETTINGS,
+    SQUELCH,
     _cleanup,
     _read_originals,
     _serial,
     _stop,
+    _util,
 )
 
 TEST_NAME = "Interrupting a capture"
@@ -86,8 +94,8 @@ _SPECAN_CHECKER = str(Path(specandump.__file__).resolve())
 # second on a board that is answering; this is generous, and a tool that
 # needs a second Ctrl-C never gets there at all.
 EXIT_DEADLINE_S = 5.0
-# How long a capture may take to get going before the case gives up and
-# reports a skip rather than interrupting nothing.
+# How long a capture may take to get going before the case fails rather than
+# interrupting nothing.
 READY_DEADLINE_S = 20.0
 # The capture has to be running, not merely started, before the signal.
 SETTLE_S = 1.5
@@ -97,9 +105,13 @@ SETTLE_S = 1.5
 # and the file was closed on a record boundary.
 DUMP_MIN_RECORDS = 20
 DUMP_MIN_BYTES = rxdump.FULL_RECORD * DUMP_MIN_RECORDS
-# ubertooth-specan writes 3-byte samples; a 3-second run on the bench gave
-# 32-50 kB, so a few thousand bytes is a fraction of a second once going.
-SPECAN_MIN_BYTES = 3000
+# ubertooth-specan writes 3-byte samples with no flush of its own
+# (specan_output_flushed() runs after the sweep), so the file grows a stdio
+# buffer at a time. The floor is a buffer's worth, so that reaching it really
+# does mean samples have been written: BUFSIZ is 1024 on glibc and 4096 on
+# many hosts, and a stream that writes 16 kB/s fills either within the ready
+# deadline.
+SPECAN_MIN_BYTES = 4096
 SPECAN_LOW, SPECAN_HIGH = 2402, 2480
 # libbtbb writes the PCAPNG section header as the capture starts; its size
 # differs by host (it is sized in pages), so the floor is only "the header
@@ -108,15 +120,12 @@ HEADER_MIN_BYTES = 28
 # The board has to answer the next command at once. A board left in a mode,
 # or wedged, does not.
 ANSWER_DEADLINE_S = 5.0
-# The early case sends its signal this many seconds in, and takes up to this
-# many tries. Measured on the Linux bench host: a board lookup finishes in
-# 10-20 ms, so a signal sent a few milliseconds in lands either while the
-# board is being opened or just after the mode has started, and both are
-# windows a run has to survive. The tries are for the one outcome that says
-# nothing either way, a signal that beat the handler install and killed the
-# tool; nothing else is retried.
-EARLY_ATTEMPTS = 6
-EARLY_DELAY_S = 0.005
+# What each tool prints on standard error whatever happens, so a teardown
+# that went quiet, or printed to the wrong stream, is caught. ubertooth-btle
+# and ubertooth-rx have no such line -- they print on their error and note
+# paths only -- so their cases ask for none.
+DUMP_TEARDOWN = r"(?m)^rx block timestamp \d+ \* 100 nanoseconds$"
+SPECAN_TEARDOWN = r"(?m)^Ubertooth stopped$"
 
 
 def _path(name):
@@ -125,20 +134,19 @@ def _path(name):
     return path
 
 
-def _interrupt_step(name, tool_argv, *, grow, when="growing", min_bytes=1,
-                    settle=0.0, expect_status=0, capture_file="kept",
-                    attempts=1) -> Step:
+def _interrupt_step(name, tool_argv, *, grow, min_bytes=1, settle=0.0,
+                    expect_status=0, teardown_says="") -> Step:
     """One run of the tool, one SIGINT to it, and the report."""
     def argv(context):
         options = [
-            sys.executable, _INTERRUPT, "interrupt", "--when", when,
+            sys.executable, _INTERRUPT, "interrupt",
             "--grow", _path(grow)(context), "--min-bytes", str(min_bytes),
             "--settle", f"{settle:g}", "--ready-deadline", f"{READY_DEADLINE_S:g}",
             "--exit-deadline", f"{EXIT_DEADLINE_S:g}",
             "--expect-status", str(expect_status),
-            "--capture-file", capture_file,
-            "--attempts", str(attempts), "--delay", f"{EARLY_DELAY_S:g}",
         ]
+        if teardown_says:
+            options += ["--teardown-says", teardown_says]
         return tuple(options) + ("--",) + tuple(
             word(context) if callable(word) else word for word in tool_argv)
 
@@ -146,7 +154,7 @@ def _interrupt_step(name, tool_argv, *, grow, when="growing", min_bytes=1,
         "interrupt", name, argv,
         # The helper's own bounds decide the outcome; this only stops a
         # helper that hung from holding the board forever.
-        timeout_s=(READY_DEADLINE_S + EXIT_DEADLINE_S) * attempts + 30.0,
+        timeout_s=READY_DEADLINE_S + EXIT_DEADLINE_S + 30.0,
         mutates=True,
         output_patterns=(r"(?m)^Interrupt done: one SIGINT ended the run in ",),
         forbidden_patterns=(r"(?m)^Interrupt problem: ",),
@@ -183,6 +191,23 @@ def _specan_check(file_name) -> Step:
     )
 
 
+def _mode_stopped(serial) -> tuple[Step, ...]:
+    """The teardown ran the idle reset the mode stop leaves behind.
+
+    A capture moves the board off the boot channel; ending the mode runs the
+    idle reset, which puts it back to 2441 MHz with squelch -120. Reading
+    both before the cleanup's own stop is what tells a board the teardown
+    returned to idle from one still carrying the mode's settings.
+    """
+    return tuple(
+        Step(f"mode-stopped-{setting.key}",
+             f"The teardown left {setting.key} at {setting.after_mode_stop}",
+             _util(serial, setting.query), timeout_s=ANSWER_DEADLINE_S,
+             observe=Observation(f"{setting.key} after the interrupt",
+                                 setting.pattern, setting.after_mode_stop))
+        for setting in (CHANNEL, SQUELCH))
+
+
 def _answers_at_once(serial) -> Step:
     """The board answers the next command straight away, with no retry."""
     return Step(
@@ -217,13 +242,16 @@ def interrupt_cases(arguments, _resources, resource_identities):
                       "One SIGINT to ubertooth-dump -d <dir>/dump.bin, once it "
                       f"has written {DUMP_MIN_RECORDS} records",
                       ("ubertooth-dump", "-U", serial, "-d", _path("dump.bin")),
-                      grow="dump.bin", min_bytes=DUMP_MIN_BYTES, settle=SETTLE_S),
+                      grow="dump.bin", min_bytes=DUMP_MIN_BYTES, settle=SETTLE_S,
+                      teardown_says=DUMP_TEARDOWN),
                   _dump_check("dump.bin"),
+                  *_mode_stopped(serial),
                   _answers_at_once(serial),
               ),
               "one SIGINT ends it with exit 0 within "
               f"{EXIT_DEADLINE_S:g}s, nothing is left behind, the dump stops "
-              f"growing and holds {DUMP_MIN_RECORDS} or more whole records"),
+              f"growing and holds {DUMP_MIN_RECORDS} or more whole records, and "
+              "the teardown left the board idle"),
         # A poll-driven capture with two capture writers: both files must be
         # readable afterwards, which is what a teardown that closed them
         # properly leaves.
@@ -239,6 +267,7 @@ def interrupt_cases(arguments, _resources, resource_identities):
                                  capturefile.LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR),
                   _capture_check("check-pcap", "le.pcap", "pcap",
                                  capturefile.LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR),
+                  *_mode_stopped(serial),
                   _answers_at_once(serial),
               ),
               "one SIGINT ends it with exit 0, and both capture files are "
@@ -253,30 +282,13 @@ def interrupt_cases(arguments, _resources, resource_identities):
                       "One SIGINT to ubertooth-specan -d <dir>/specan.bin, once "
                       f"it has written {SPECAN_MIN_BYTES} bytes",
                       ("ubertooth-specan", "-U", serial, "-d", _path("specan.bin")),
-                      grow="specan.bin", min_bytes=SPECAN_MIN_BYTES, settle=SETTLE_S),
+                      grow="specan.bin", min_bytes=SPECAN_MIN_BYTES,
+                      settle=SETTLE_S, teardown_says=SPECAN_TEARDOWN),
                   _specan_check("specan.bin"),
+                  *_mode_stopped(serial),
                   _answers_at_once(serial),
               ),
               "one SIGINT ends it with exit 0, and the samples end on a whole "
               "3-byte record inside the band"),
-        # A signal that arrives before the capture can be going: while the
-        # board is being opened, or just after the mode has started. Either
-        # way the run has to end on that one signal with exit 0. A signal in
-        # the open window used to be thrown away, and a run that threw it
-        # away would still be capturing when the deadline came.
-        _case(serial, "early-interrupted",
-              "ubertooth-rx interrupted before its capture can be going", (
-                  _interrupt_step(
-                      f"One SIGINT to ubertooth-rx -q <dir>/early.pcap "
-                      f"{EARLY_DELAY_S:g}s in, while the board is being opened "
-                      "or just after the mode starts",
-                      ("ubertooth-rx", "-U", serial, "-q", _path("early.pcap")),
-                      grow="early.pcap", when="early", capture_file="either",
-                      attempts=EARLY_ATTEMPTS),
-                  _answers_at_once(serial),
-              ),
-              "the one SIGINT ends the run with exit 0 whichever window it "
-              "landed in, nothing is left streaming, and no capture file is "
-              "left growing"),
     ]
     return tuple(cases)

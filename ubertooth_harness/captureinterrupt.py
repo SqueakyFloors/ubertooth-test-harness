@@ -5,13 +5,9 @@ logged command. It imports only the standard library, so it runs from any
 working directory, and it prints summary lines only: never a byte of the
 capture, and only the last few lines of what the tool printed.
 
-    python captureinterrupt.py interrupt --when growing --grow FILE
-        --min-bytes N [--settle S] [--ready-deadline S]
-        [--exit-deadline S] [--expect-status N]
-        [--capture-file kept|absent|either] -- TOOL ARG...
-    python captureinterrupt.py interrupt --when early --grow FILE
-        [--delay S] [--attempts N] [--exit-deadline S]
-        [--capture-file ...] -- TOOL ARG...
+    python captureinterrupt.py interrupt --grow FILE --min-bytes N
+        [--settle S] [--ready-deadline S] [--exit-deadline S]
+        [--expect-status N] [--teardown-says PATTERN] -- TOOL ARG...
 
 Why a helper rather than a shell line. The signal has to reach **the tool**,
 not a wrapper and not a process group: ``timeout -s INT`` would send it to
@@ -21,31 +17,21 @@ directly (``subprocess.Popen``, no shell), the signal goes to that process's
 own pid exactly once, and the process is then waited for and reaped.
 
 It is started in a process group of its own, for two reasons. It lets this
-report what the run left behind: a process the tool had started, or the tool
-itself escaping the wait (``os.killpg(pgid, 0)``). And it lets this leave
-nothing running whatever happens: the group is taken down on the way out of
-every attempt, and a SIGTERM or SIGINT to this helper -- which is what a
-canceled run or a step deadline sends -- takes it down and then re-raises, so
-a tool with a mode started cannot outlive the step that started it.
+say whether the run left a process behind -- one the tool had started, which
+would still hold the board (``os.killpg(pgid, 0)``, asked after the leader has
+been reaped). And it lets this leave nothing running whatever happens: the
+group is taken down on the way out, and a SIGTERM, SIGINT or SIGHUP to this
+helper -- which is what a canceled run or a step deadline sends -- takes it
+down and then re-raises, so a tool with a mode started cannot outlive the step
+that started it.
 
-When the signal goes in:
-
-- ``--when growing`` waits until ``--grow`` has at least ``--min-bytes``
-  bytes, and until ``--settle`` seconds have passed, so the capture is known
-  to be running and not merely started. A capture that never gets that far by
-  ``--ready-deadline``, and a tool that exits on its own before the signal,
-  are failures: every tool these cases run streams whether or not there is
-  traffic, so neither is something the bench can decide.
-- ``--when early`` sends it ``--delay`` seconds in, before the capture can
-  have got going, so it lands while the board is being opened or just after
-  the mode has started. Which of the two it was does not change what is
-  required -- a prompt exit with nothing left behind -- and that is the
-  point: a signal that arrives before the mode starts used to be thrown away,
-  and a run that threw it away would still be capturing at the deadline.
-  Exactly one outcome says nothing either way, a signal that arrived before
-  the tool had installed its handler and so killed it; that attempt is taken
-  again, up to ``--attempts`` times, and nothing else is ever retried, so a
-  real failure cannot be retried away.
+When the signal goes in. The wait is for evidence, not a clock: ``--grow``
+must hold at least ``--min-bytes`` bytes, and ``--settle`` seconds must have
+passed, so the capture is known to be running and not merely started. A
+capture that never gets that far by ``--ready-deadline``, and a tool that
+exits on its own before the signal, are failures: every tool this is used on
+streams whether or not there is traffic, so neither is something the bench can
+decide, and nothing here can pass by skipping.
 
 What it checks, and reports as ``Interrupt problem: ...`` with exit 1:
 
@@ -55,17 +41,20 @@ What it checks, and reports as ``Interrupt problem: ...`` with exit 1:
 - nothing is left in its process group once it has been reaped;
 - the capture file stopped growing: its size is read again after the exit, so
   a mode still streaming into it shows up;
-- ``--capture-file absent``, that the file was never created at all;
-- the streams are where they belong: no ``error:``, ``warning:``, ``note:``
-  or progress line on standard output, and the teardown's own lines on
-  standard error, so a tool that printed nothing anywhere does not pass
-  (the fork's rule, cli-output.md).
+- the streams are where they belong: no ``error:``, ``warning:`` or progress
+  line on standard output (the fork's rule, cli-output.md), and, where
+  ``--teardown-says`` gives a pattern, that line on standard error, so a
+  teardown that went quiet or printed to the wrong stream is caught.
+
+``note:`` is deliberately not in that list. ``ubertooth-btle`` prints
+``note: N packet(s) held data that could not be decoded`` on its report
+stream, which is standard output for a capture written to a file, and the
+fork's cli-output.md says that is where it belongs; forbidding it would fail
+a correct run on any bench with LE traffic.
 
 Whatever the outcome, the tool's own standard output and standard error are
-written beside the capture, one pair per attempt
-(``<grow file>.<attempt>.stdout.log`` and ``.stderr.log``), and the capture of
-an attempt that is taken again is kept as ``<grow file>.<attempt>``, so every
-attempt keeps its evidence.
+written beside the capture (``<grow file>.stdout.log`` and ``.stderr.log``),
+so a failed run keeps its evidence.
 """
 
 from __future__ import annotations
@@ -89,12 +78,17 @@ POLL_S = 0.02
 # How long the group a failed attempt left behind gets to go away.
 TEARDOWN_WAIT_S = 5.0
 # A line that belongs on standard error, never on standard output: the fork
-# keeps stdout for what the user asked for (host/doc, DIAGNOSTICS). The same
-# prefixes as stateful._DIAGNOSTIC_LINE, which checks this for the ordinary
-# steps, plus ubertooth-dump's per-record progress line, which is the one
-# these captures produce (libubertooth cb_dump_full).
+# keeps stdout for what the user asked for (host/doc, DIAGNOSTICS). These are
+# stateful._DIAGNOSTIC_LINE's prefixes, less "note: " and plus
+# ubertooth-dump's per-record progress line (libubertooth cb_dump_full), which
+# is the one these captures produce.
+#
+# "note: " is left out on purpose. ubertooth-btle prints its undecoded-packet
+# note on the report stream, which is standard output when the capture goes to
+# a file, and the fork's cli-output.md puts it there deliberately, so a bench
+# with LE traffic would fail a correct run.
 DIAGNOSTIC = re.compile(
-    r"^(?:error: |warning: |note: |Entering |Starting |Stopping ubertooth|"
+    r"^(?:error: |warning: |Entering |Starting |Stopping ubertooth|"
     r"Resetting ubertooth|Flashing LEDs|Setting squelch|Ubertooth stopped|"
     r"rx block timestamp )")
 
@@ -133,13 +127,12 @@ def _captured(size: int) -> str:
 class Attempt:
     """One run of the tool, with one signal sent to it."""
 
-    def __init__(self, argv, grow: Path, out, attempt: int = 1):
+    def __init__(self, argv, grow: Path, out):
         self.argv = list(argv)
         self.grow = grow
         self.out = out
-        self.attempt = attempt
-        self.stdout_path = Path(f"{grow}.{attempt}.stdout.log")
-        self.stderr_path = Path(f"{grow}.{attempt}.stderr.log")
+        self.stdout_path = Path(f"{grow}.stdout.log")
+        self.stderr_path = Path(f"{grow}.stderr.log")
         self.process = None
         self.sent_at = None
         self.waited_s = 0.0
@@ -174,12 +167,6 @@ class Attempt:
                 f"{min_bytes} wanted after {deadline_s:g}s, so no capture was "
                 "running to interrupt")
 
-    def wait_before_signal(self, delay_s: float) -> None:
-        """Let the tool get as far as it can in ``delay_s``."""
-        limit = self.started + delay_s
-        while time.monotonic() < limit and self.process.poll() is None:
-            time.sleep(POLL_S)
-
     def interrupt(self) -> None:
         """One SIGINT, to the tool's own process and nothing else."""
         self.size_at_signal = _size(self.grow)
@@ -203,16 +190,6 @@ class Attempt:
     def close(self) -> None:
         self._stdout.close()
         self._stderr.close()
-
-    @property
-    def killed_by_the_signal(self) -> bool:
-        """Did the SIGINT kill the tool, rather than being handled by it?
-
-        That happens when it arrived before the tool installed its handler,
-        which says nothing either way about the behavior under test.
-        """
-        return (self.process is not None and self.sent_at is not None
-                and (self.process.returncode or 0) < 0)
 
     def stop_whatever_is_left(self) -> str:
         """Take down anything still in the tool's group; say what was there.
@@ -258,7 +235,7 @@ class Attempt:
             return True
         return True
 
-    def problems(self, *, expect_status: int, capture_file: str) -> list[str]:
+    def problems(self, *, expect_status: int, teardown_says: str) -> list[str]:
         found = []
         status = self.process.returncode
         if status is None:
@@ -270,33 +247,32 @@ class Attempt:
             found.append(f"it exited {status}, not {expect_status}")
         if self.group_left():
             found.append("a process was left behind in the group it ran in")
-        if capture_file == "absent":
-            if self.grow.exists():
-                found.append(f"{self.grow.name} was created ({_size(self.grow)} "
-                             "bytes), by a run that never opened a board")
-        elif capture_file == "either" and not self.grow.exists():
-            # The signal landed before the files were created, which is one
-            # of the two windows this attempt could have hit.
-            pass
-        else:
-            time.sleep(SETTLE_AFTER_EXIT_S)
-            after = _size(self.grow)
-            if after < 0:
-                found.append(f"{self.grow.name} is gone")
-            elif after != self.final_size:
-                found.append(f"{self.grow.name} grew from {self.final_size} to "
-                             f"{after} bytes after the tool exited, so the "
-                             "capture was still running")
+        time.sleep(SETTLE_AFTER_EXIT_S)
+        after = _size(self.grow)
+        if after < 0:
+            found.append(f"{self.grow.name} is gone")
+        elif after != self.final_size:
+            found.append(f"{self.grow.name} grew from {self.final_size} to "
+                         f"{after} bytes after the tool exited, so the "
+                         "capture was still running")
         diagnostics = _diagnostics_on_stdout(self.stdout_path)
         if diagnostics:
             found.append(f"{diagnostics[0]!r} is on standard output; progress "
                          "and diagnostics go to standard error")
-        if _size(self.stderr_path) <= 0:
-            # Every one of these tools says what it is doing and what it
-            # stopped; a run that said nothing anywhere has not shown that
-            # its progress goes to standard error.
-            found.append("it printed nothing on standard error, where its "
-                         "progress and its teardown belong")
+        if teardown_says:
+            # Only where the tool says something unconditionally: of the four
+            # the cases run, ubertooth-dump prints a line per record and
+            # ubertooth-specan prints "Ubertooth stopped", while
+            # ubertooth-btle and ubertooth-rx print on their error and note
+            # paths only, so a clean run of those two says nothing at all.
+            text = ""
+            if self.stderr_path.exists():
+                text = self.stderr_path.read_text(encoding="utf-8",
+                                                  errors="replace")
+            if re.search(teardown_says, text) is None:
+                found.append(f"nothing matching {teardown_says!r} is on "
+                             "standard error, where this tool's progress and "
+                             "its teardown belong")
         return found
 
     def report(self) -> None:
@@ -314,35 +290,30 @@ class Attempt:
                 self.out(f"  {stream}| {line}")
 
 
-def _run_once(argv, grow, options, out,
-              attempt_number) -> tuple[Attempt, str, list[str]]:
+def _run_once(argv, grow, options, out) -> tuple[Attempt, str, list[str]]:
     """(the attempt, '' or what went wrong before the signal, the problems).
 
     The verdict is reached before anything the attempt left behind is taken
     down, so a process it left is a problem and not something this tidied
     away before looking.
     """
-    attempt = Attempt(argv, grow, out, attempt_number)
+    attempt = Attempt(argv, grow, out)
     _LIVE.append(attempt)
     attempt.start()
     reason, problems = "", []
     try:
-        if options.when == "growing":
-            reason = attempt.wait_until_growing(
-                options.min_bytes, options.settle, options.ready_deadline)
-        else:
-            attempt.wait_before_signal(options.delay)
-            if attempt.process.poll() is not None:
-                reason = (f"the tool exited {attempt.process.returncode} "
-                          f"within {options.delay:g}s, before the SIGINT")
+        reason = attempt.wait_until_growing(
+            options.min_bytes, options.settle, options.ready_deadline)
         if reason:
             return attempt, reason, []
         attempt.interrupt()
         reason = attempt.wait_for_exit(options.exit_deadline)
+        if reason:
+            # Nothing to report about an exit that has not happened.
+            return attempt, reason, []
         attempt.report()
-        if not reason:
-            problems = attempt.problems(expect_status=options.expect_status,
-                                        capture_file=options.capture_file)
+        problems = attempt.problems(expect_status=options.expect_status,
+                                    teardown_says=options.teardown_says)
         return attempt, reason, problems
     finally:
         left = attempt.stop_whatever_is_left()
@@ -355,38 +326,24 @@ def _run_once(argv, grow, options, out,
 
 def interrupt(argv, options, out=print) -> int:
     grow = Path(options.grow)
-    for index in range(1, options.attempts + 1):
-        delay = options.delay * index
-        if options.attempts > 1:
-            out(f"Interrupt attempt {index} of {options.attempts}, "
-                f"{delay:.3f}s in")
-        shown = options
-        shown.delay = delay
-        attempt, reason, problems = _run_once(argv, grow, shown, out, index)
-        if reason:
-            out(f"Interrupt problem: {reason}")
-            return 1
-        # The one outcome that says nothing either way: the signal arrived
-        # before the tool had installed its handler, so it was killed by it.
-        # Nothing else is retried, so a real failure cannot be retried away.
-        if attempt.killed_by_the_signal and index < options.attempts:
-            out(f"Interrupt retry: the SIGINT arrived before the handler was "
-                f"installed and killed the tool (signal "
-                f"{-attempt.process.returncode}); keeping "
-                f"{attempt.stdout_path.name} and {attempt.stderr_path.name}")
-            # Keep this attempt's capture under its own name.
-            if grow.exists() and not grow.is_dir():
-                grow.replace(Path(f"{grow}.{index}"))
-            continue
-        if problems:
-            out("Interrupt problem: " + "; ".join(problems))
-            return 1
-        out(f"Interrupt done: one SIGINT ended the run in {attempt.waited_s:.2f}s "
-            f"with status {attempt.process.returncode}, nothing left behind, "
-            + ("no capture file created" if not grow.exists()
-               else f"{attempt.final_size} byte(s) captured and no more"))
-        return 0
-    return 1  # pragma: no cover - the loop always returns
+    if grow.exists():
+        # A case always names a file its own run writes. One already there
+        # would satisfy the growth wait before the tool had done anything,
+        # and the signal would go in before the tool could handle it.
+        out(f"Interrupt problem: {grow} is already there, so nothing it holds "
+            "would be this run's")
+        return 1
+    attempt, reason, problems = _run_once(argv, grow, options, out)
+    if reason:
+        out(f"Interrupt problem: {reason}")
+        return 1
+    if problems:
+        out("Interrupt problem: " + "; ".join(problems))
+        return 1
+    out(f"Interrupt done: one SIGINT ended the run in {attempt.waited_s:.2f}s "
+        f"with status {attempt.process.returncode}, nothing left behind, "
+        f"{attempt.final_size} byte(s) captured and no more")
+    return 0
 
 
 def _catch_our_own_stop() -> None:
@@ -411,7 +368,6 @@ def main(raw=None) -> int:
     parser = argparse.ArgumentParser(prog="captureinterrupt.py")
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("interrupt", help="interrupt a capture with one SIGINT")
-    run.add_argument("--when", choices=("growing", "early"), required=True)
     run.add_argument("--grow", required=True,
                      help="the capture file the tool writes; the tool's own "
                           "streams are saved beside it")
@@ -420,13 +376,10 @@ def main(raw=None) -> int:
     run.add_argument("--ready-deadline", type=float, default=20.0)
     run.add_argument("--exit-deadline", type=float, default=5.0)
     run.add_argument("--expect-status", type=int, default=0)
-    run.add_argument("--capture-file", choices=("kept", "absent", "either"),
-                     default="kept",
-                     help="kept: it must be there and have stopped growing; "
-                          "absent: it must never have been created; either: "
-                          "whichever happened, and it must have stopped")
-    run.add_argument("--attempts", type=int, default=1)
-    run.add_argument("--delay", type=float, default=0.005)
+    run.add_argument("--teardown-says", default="",
+                     help="a pattern this tool prints on standard error "
+                          "unconditionally, so a quiet or misdirected "
+                          "teardown is caught")
     run.add_argument("tool", nargs=argparse.REMAINDER)
     options = parser.parse_args(raw)
     tool = list(options.tool)
@@ -434,8 +387,6 @@ def main(raw=None) -> int:
         tool = tool[1:]
     if not tool:
         parser.error("name the tool to run after --")
-    if options.attempts < 1:
-        parser.error("--attempts must be 1 or more")
     _catch_our_own_stop()
     return interrupt(tool, options)
 

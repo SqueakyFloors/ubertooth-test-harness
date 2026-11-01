@@ -812,12 +812,13 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # fork 166b4f91 with a 3 s duration.
     "Board state between runs": _default(Estimate(15.5, per_duration=1)),
     "Raw receive replay": _profiles(Estimate(0.9), Estimate(3.9)),
-    # ESTIMATE_PENDING_HW: two cases and 31 commands in smoke, four and 60
+    # ESTIMATE_PENDING_HW: two cases and 35 commands in smoke, three and 52
     # comprehensive. Each case establishes idle, reads three settings, runs a
     # capture for its settling time plus the SIGINT teardown, reads the file
-    # it was left with, asks the board, and restores. Calibrated from the run
-    # record once this has run on the bench.
-    "Interrupting a capture": _profiles(Estimate(22.0), Estimate(45.0)),
+    # it was left with, reads the board's channel and squelch, asks for its
+    # identity, and restores. Calibrated from the run record once this has
+    # run on the bench.
+    "Interrupting a capture": _profiles(Estimate(22.0), Estimate(34.0)),
     "Refused command lines": _profiles(Estimate(10.0), Estimate(20.7)),
     # No hardware: 6 cases and 39 commands in smoke, 16 and 112
     # comprehensive, all of them short (preflight is not counted, as it is in
