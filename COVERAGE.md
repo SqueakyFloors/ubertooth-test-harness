@@ -3,7 +3,13 @@
 This file tracks which Ubertooth host command-line tools and options the
 [Ubertooth test harness](https://github.com/SqueakyFloors/ubertooth-test-harness)
 exercises, so we can pick the next tests to write. Update it in the same PR as any test
-that changes coverage. Options come from each
+that changes coverage. This file is per option; the other half of the picture
+is per fork pull request, in
+[`coverage/closed-pr-audit.jsonl`](coverage/closed-pr-audit.jsonl), which
+records for every closed Ubertooth and libbtbb PR whether a test here would
+notice the behavior it fixed breaking again. See
+[`docs/coverage-audit.md`](docs/coverage-audit.md) for how to read it and how to
+run the audit again. Options come from each
 tool's `getopt` string and usage text on this fork's `main`. Coverage comes
 from the harness catalog (`ubertooth_harness/catalog.py`,
 `ubertooth_harness/transitions.py`, `ubertooth_harness/util_cases.py`,

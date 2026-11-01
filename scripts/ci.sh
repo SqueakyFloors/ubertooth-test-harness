@@ -42,12 +42,14 @@ step() { printf '\n=== ci: %s ===\n' "$1"; }
 # Bluetooth piconet roles are central and peripheral, never the older words
 # (AGENTS.md). Only the external names this project does not own are allowed,
 # each written here as it appears in the tree: libbtbb's and git's `master`
-# branch, and ESP-IDF's two SPP role constants. A line is judged on its text
-# with every allowed form deleted, so the path is never read as content and a
-# second occurrence on the same line still fails. AGENTS.md and this file are
-# skipped, because the rule and the check have to name the words they forbid.
+# branch, ESP-IDF's two SPP role constants, and one Ubertooth fork pull request
+# title quoted in coverage/closed-pr-audit.jsonl, which names that branch too.
+# A line is judged on its text with every allowed form deleted, so the path is
+# never read as content and a second occurrence on the same line still fails.
+# AGENTS.md and this file are skipped, because the rule and the check have to
+# name the words they forbid.
 ROLE_TERMS='master|slave'
-ROLE_TERMS_ALLOW='`master` branch|"branch:master"|libbtbb-ref master|LIBBTBB_BRANCH = "master"|ESP_SPP_ROLE_MASTER,|ESP_SPP_ROLE_SLAVE,'
+ROLE_TERMS_ALLOW='`master` branch|"branch:master"|libbtbb-ref master|LIBBTBB_BRANCH = "master"|ESP_SPP_ROLE_MASTER,|ESP_SPP_ROLE_SLAVE,|pin to the current master'
 
 check_role_terms() {
     step "Bluetooth role terms"
