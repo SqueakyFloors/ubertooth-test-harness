@@ -348,7 +348,7 @@ so each is recorded with where its sources come from and its SHA-256.
 |---|---|---|---|---|
 | `kgv.dfu` | the known-good Ubertooth firmware that `Flash reliability` alternates against the run's own build | `2020-12-R1` | upstream Ubertooth release `2020-12-R1` | `e3fcb486c6e0ce7cc991bf6439f6dbc0156ed1229c2b95ebfd02198f9675bb11` |
 | `zephyr.hex` | the nRF52840 DK role firmware | `utdk-1.3.0` | this repository, `firmware/nrf52840dk` at that version ([the change that built this image](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/236)) | `0f976c591195ee363307ec51f6c836d07ba3be40d6465c85cd6dec3398fbf288` |
-| `esp32-classic-peer.bin` | the ESP32 Classic peer firmware | `utesp-1.3.0` | this repository at `9530765`, which is where `firmware/esp32-classic-peer` carries that version | `4893b30dea47896dd7b0e5cd174ee9e633a89362e5fe4505caed4c364f5c55f2` |
+| `esp32-classic-peer.bin` | the ESP32 Classic peer firmware | `utesp-1.4.0` | this repository at `6c9a4ea`, which is where `firmware/esp32-classic-peer` carries that version | `5bbe35d332c8ca68485382b074f0436c0ae6a0ec3174cef76b1d21f418c1c45b` |
 
 The KGV is the one the repository pins: the plan carries its revision and its
 hash ([`testplans/slow.yaml`](../testplans/slow.yaml),
