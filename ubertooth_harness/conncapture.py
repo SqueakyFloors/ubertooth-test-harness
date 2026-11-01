@@ -370,16 +370,28 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
             result.problems.append(
                 f"none of the {len(recorded)} recorded connection information "
                 f"option(s) is a CONNECT_IND from {central} to {peripheral}")
-        else:
+        elif not any(found in ours for found in ours_recorded):
+            # The addresses are the pair's and the rest is not what went
+            # over the air, so a reader of this file would follow the
+            # connection with the wrong numbers. Name them.
+            option = ours_recorded[0]
             for name, found, expected in (
-                ("connection interval", ours_recorded[0].interval, interval_units),
-                ("peripheral latency", ours_recorded[0].latency, latency),
-                ("supervision timeout", ours_recorded[0].timeout, timeout_units),
+                ("connection interval", option.interval, interval_units),
+                ("peripheral latency", option.latency, latency),
+                ("supervision timeout", option.timeout, timeout_units),
+                ("channel map", option.channel_map, ALL_DATA_CHANNELS),
+                ("access address", option.access_address, ours[0].access_address),
+                ("CRC init", option.crc_init, ours[0].crc_init),
+                ("hop increment", option.hop, ours[0].hop),
             ):
                 if found != expected:
                     result.problems.append(
                         f"the recorded connection information's {name} is "
                         f"{found}, not {expected}")
+            if not result.problems:
+                result.problems.append(
+                    "the recorded connection information is not any CONNECT_IND "
+                    "the capture decoded")
     return header, result
 
 

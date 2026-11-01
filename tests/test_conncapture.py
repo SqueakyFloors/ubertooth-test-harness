@@ -275,6 +275,18 @@ class ConnectionInfoOptionTests(unittest.TestCase):
              f"not {INTERVAL_UNITS}"],
             result.problems)
 
+    def test_an_option_the_capture_never_decoded_fails(self):
+        # Every field the case compares is right and the addresses are the
+        # pair's, but the access address, CRC init and hop belong to no
+        # CONNECT_IND in the file: a reader would follow nothing.
+        pdu = connect_ind(data=lldata(access=0x11223344, crc_init=0x123456,
+                                      hop=9))[-37:-3]
+        _header, result = self.check(pcapng_with_option(self.records, pdu))
+        text = "\n".join(result.problems)
+        self.assertIn("access address is 287454020", text)
+        self.assertIn("CRC init is 1193046", text)
+        self.assertIn("hop increment is 9", text)
+
 
 class MainTests(unittest.TestCase):
     def run_main(self, records, *options):
