@@ -898,6 +898,119 @@ range, so they check that the tool runs and reports nothing malformed. The
 dump cases check record structure and rate, not that the symbols mean
 anything.
 
+## Board state between runs
+
+**What it does.** Kills a running capture outright, so the board is left in
+the mode that capture started, and then requires the next run on the same
+board to be clean anyway: to say what it found, stop it, capture only its own
+data, and leave a board that answers every read.
+
+**Theory of operation.** A tool that exits normally, or is stopped with
+SIGTERM, sends STOP on the way out, so the board it leaves is idle. A terminal
+or an SSH session that disappears does not: the tool dies where it stands and
+the board keeps streaming into its endpoint. The test makes that state on
+purpose. [`killedcapture.py`](../ubertooth_harness/killedcapture.py) starts the
+capture tool as its own child with nothing in between -- no shell, no
+`timeout` -- waits until the capture file has grown, and sends that process
+SIGKILL, which cannot be caught. What it then requires before the case goes on
+is that the wait for the tool returned `-SIGKILL`: it died of the signal where
+it stood, rather than ending some other way, and its exit status has been
+read, so it is out of the process table rather than sitting there with its
+device still open. The tool runs in a session of its own, which is what lets
+the module take it and anything it started down together on a failure or when
+the harness stops the step; that session also puts it outside the group the
+harness signals, so those signals are caught and passed on rather than leaving
+a capture streaming, and its own output goes to a file rather than to the
+step's streams, which an orphan would hold open. The file the killed tool wrote is hashed at the kill and
+checked again at the end of the case, so the evidence is kept rather than
+quietly rewritten by the next run.
+
+Both tools used produce data with nothing on the air -- `ubertooth-specan`
+about 16 kB a second, `ubertooth-dump` about 2000 records a second -- so the
+dump's own contents are the evidence and no peer is needed. The sweep is the
+mode left behind and the dump is the capture that has to cope with it, which
+is the order that works: see the known limits below. A dump's 68-byte records
+carry the firmware's packet type, so a record left from the sweep fails by
+type, since the firmware types a sweep's records SPECAN. A record of a mode
+that writes basic-rate records would pass that and fails instead by its clock,
+which restarts at mode entry
+([`rxdump.py`](../ubertooth_harness/rxdump.py), `--max-stale`): no mode in
+this test writes those, so that half is the "zero stale records" the issue
+asks for rather than the leak this pairing can produce.
+
+The dump states its modulation, LE, before it asks for its mode, and a mode
+start puts the modulation back to basic rate. So the radio ending up in LE is
+what says a setting stated for this capture survived the mode start on a board
+that was left in another mode; it is read afterwards from the CC2400 MDMCTRL
+register, which keeps what the last mode programmed.
+
+The warning the second command has to print comes from libubertooth's
+`ubertooth_bulk_init()`: it reads the mode the board is in, stops it, and
+waits until the board reports that it has left it, because the stop request
+only asks and the mode's loop can hand the endpoint another packet in the
+meantime. The case requires that warning, requires it on stderr rather than
+among the records on stdout, and forbids the second one the same code prints
+when the wait runs out. Together those say the board was in a mode, the
+capture found it, and the board reported leaving it inside the wait.
+
+**Hardware and arguments.** One `Ubertooth`, selected by full serial.
+Guarded. A required `duration:`, which bounds the dump. No RF peer,
+no firmware write, and nothing is transmitted.
+
+**Expected outcome.** One case: a symbol dump after a killed spectrum sweep.
+It resets the board and reads back the documented boot defaults (2441 MHz, PA
+level 7, squelch -120, LEDs off), kills the sweep, runs the dump, checks the
+dump's records and the modulation the radio ended up in, confirms the killed
+capture is byte for byte what the kill left, and then reads firmware version,
+serial, channel, PA level, and squelch, each once: a read that needs a second
+try fails the case. Cleanup stops the board, resets it,
+requires the documented boot defaults again, and then puts back every setting
+the case recorded; this is the one test that leaves a board in a mode on
+purpose, so it hands the next test a board it has seen boot. A self-reset the
+firmware records while this runs is reported by the usual watchdog read
+between cases, and the guard boards are checked as in every guarded test.
+
+**Known limits.** Whether the killed tool left a process of its own behind is
+not checked, and cannot be after the fact: the tool's pid is also its process
+group's id, and once the tool has been reaped that id is free to be given to
+the next process that starts a session of its own, which the harness does for
+every step, so a question about the group could be answered by somebody else's
+process. The host tools are single processes, so there is nothing of theirs to
+miss; a tool that did start one would need the process table read by name. A
+failure, or the harness stopping the step, does take the whole group down,
+which is when it matters and when the group is certainly this run's.
+
+The case rests on the host leaving the board alone when the
+killed process's handle closes. On a host or kernel that reset the device
+there instead, the board would be idle, the warning the case requires would
+never print, and the case would fail for a reason that has nothing to do with
+the behavior it is about. Only Linux has been checked (the mode was still
+running in 3 tries of 3); check a macOS host before putting this test in
+[`mac.yaml`](../testplans/mac.yaml).
+
+The order of the two captures is not free. A board left in a spectrum sweep
+answers the mode read libubertooth makes at a capture start, so the warning is
+reliable. A board left in a symbol dump does not always: nothing is draining
+its endpoint, and the control read can stall, in which case libubertooth
+cannot tell what the board is doing and says nothing, which is what the fork
+chose for that case. Measured on the lab host: the board was still in `rx
+symbols` in 3 of 3 tries after a killed dump, so the mode is there, but one
+run of the dump-then-sweep order got the warning and another did not. That
+order is therefore not a test, and only the sweep-then-dump order is used. The clock half of the record check sees a leftover
+basic-rate record only when its clock is ahead of the new stream's first one,
+so a short previous stream can go unseen there; the packet type is what
+catches a record of the sweep, whatever its clock. A pass does not separate a
+build that waits for the board
+to leave the mode from one that warns and starts anyway. The only difference
+between them is a packet or so of the previous mode reaching the new capture,
+which is what the record and sample checks look for, so a run where nothing
+happens to leak cannot tell them apart; the fork pins the wait itself in its
+own unit tests. It kills a capture on purpose, which is the state the test is
+about, and it is the one test here that does so; a board that comes out of it
+wedged is a real finding, not a flake, and on a switchable port a power cycle
+recovers it. Nothing here is checked about captured content: the dump is judged
+on record structure, packet type, and clock, never on what the symbols mean.
+
 ## Raw receive replay
 
 **What it does.** Decodes a synthetic capture file with `ubertooth-rx -i`,

@@ -1,6 +1,15 @@
 plan: Ubertooth reliability
 suites:
   slow:
+    # The one test that kills a capture outright, so it runs before the tests
+    # that write firmware: it is the test most likely to find a board in a
+    # state nothing else here makes, and its own cleanup hands the next test a
+    # board it has seen boot.
+    - Board state between runs:
+        hosts: each
+        Ubertooth: default
+        duration: 3s
+
     # Writes and reads back the selected board's firmware, so it comes after
     # every test that needs the resolved firmware (with Flash reliability).
     # Both fail at fork 6fee30c on fork #267 (-d -r exits 1 after a good

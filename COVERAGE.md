@@ -50,6 +50,12 @@ Harness-wide checks that use the CLIs:
   `ubertooth-util -v`, `-V`, `-C`, `-a`, `-z`, `-d`, and then
   `ubertooth-btle -k`. The `ubertooth-btle -k` read is skipped unless
   the board's firmware API is at least the host API.
+- **Board state between runs** (`slow` plan): the only test that kills a
+  capture instead of stopping it. `killedcapture.py` SIGKILLs `ubertooth-dump`
+  or `ubertooth-specan` while it is streaming, so no STOP reaches the board,
+  and the other tool then has to report the mode it found, stop and wait for
+  it, capture only its own data, and leave a board that answers `-v`, `-s`,
+  `-C`, `-a`, `-z`, `-d`, and `ubertooth-debug -r 0x03` on the first try.
 - **Flash reliability** (`slow` and `mac` plans): repeated `ubertooth-dfu -U <serial> -d <image> -r`.
   Each flash is verified with `ubertooth-util -v`.
 - **DFU images** (smoke in the `slow` and `mac` plans, comprehensive in the
@@ -211,7 +217,7 @@ The RSSI value is the CC2400 RSSI register, dBm + 54 (specan-ui adds -54). Spect
 
 Stdout carries only the samples: `Ubertooth stopped`, errors and notes on stdout fail every sweep (fork `fcadf34`, [ubertooth#326](https://github.com/SqueakyFloors/ubertooth/issues/326)). Text output to a stream that takes no data (exit 1 after the closing flush) and `-d -` into a closed pipe (SIGPIPE, 141): Not covered.
 
-Combinations: `-l` > `-u` rejected: Covered (Argument validation). `-g` vs `-G` output shape: Covered. Every reported frequency falls between `-l` and `-u`: Covered, also after a range change. Stopping a run resets the board (LEDs off, 2441 MHz, squelch -120, PA kept): Covered (Spectrum analyzer, comprehensive; [ubertooth#191](https://github.com/SqueakyFloors/ubertooth/issues/191), fixed in `aa4f620`).
+Combinations: `-l` > `-u` rejected: Covered (Argument validation). `-g` vs `-G` output shape: Covered. Every reported frequency falls between `-l` and `-u`: Covered, also after a range change. Stopping a run resets the board (LEDs off, 2441 MHz, squelch -120, PA kept): Covered (Spectrum analyzer, comprehensive; [ubertooth#191](https://github.com/SqueakyFloors/ubertooth/issues/191), fixed in `aa4f620`). A sweep is what Board state between runs leaves a board in, by killing it; a sweep started on a board another killed capture left streaming is Not covered, because a board left in a symbol dump does not reliably answer the mode read libubertooth makes at a capture start (see that test's known limits).
 
 ## ubertooth-specan-ui (Python, GUI)
 
@@ -258,7 +264,7 @@ Combinations: `-u` without `-l` rejected: Covered (Argument validation, smoke; R
 | `-d <file>` | write to a file | Covered | Raw receive (smoke): whole 68-byte records (host time, usb_pkt_rx), at least 50 per second (`rxdump.py`). Refused command lines (no Ubertooth, smoke): a stray word, `-h`, or `-U` without its value after `-d` creates no file and leaves an existing one unchanged; `-d` twice with `-h` (comprehensive). Failed capture files (no Ubertooth): a run stopped at the board lookup creates no file, with nothing on stdout and exit 1 rather than a libusb return value (`-d <seeded>`), and the seeded destination is not truncated |
 | `-U<0-7>` | select device | Covered | Raw receive by serial, guard board unchanged |
 
-Combinations: `-c` with `-l`: last one wins. Covered (Raw receive, comprehensive). Stale packets across a mode change ([ubertooth#318](https://github.com/SqueakyFloors/ubertooth/issues/318)): Covered (Raw receive, comprehensive): five rounds of a bounded `dump -d` after a bounded `btle -n -A37` and a `btle -n -A37 -q` after that dump; no dump record may predate the dump (clk100ns restarts at mode entry; no LE records) and no `-q` packet may be off RF channel 0. Failed on every iteration at 89d9197 (two records from the previous dump); passes since fork `9e31dd5` (#437) and `ed30131` (#479), checked on the lab host at `699960b`. Output size over a bounded run: Covered (record count). Output to stdout: Not covered (it would log raw symbols).
+Combinations: `-c` with `-l`: last one wins. Covered (Raw receive, comprehensive). Stale packets across a mode change ([ubertooth#318](https://github.com/SqueakyFloors/ubertooth/issues/318)): Covered (Raw receive, comprehensive): five rounds of a bounded `dump -d` after a bounded `btle -n -A37` and a `btle -n -A37 -q` after that dump; no dump record may predate the dump (clk100ns restarts at mode entry; no LE records) and no `-q` packet may be off RF channel 0. Failed on every iteration at 89d9197 (two records from the previous dump); passes since fork `9e31dd5` (#437) and `ed30131` (#479), checked on the lab host at `699960b`. Output size over a bounded run: Covered (record count). Output to stdout: Not covered (it would log raw symbols). A dump started on a board a killed capture left streaming: Covered (Board state between runs): it must report `warning: the board is still in mode 4 from an earlier run` on stderr, not print the one that says the board never stopped, and write at least 50 records a second, every one of them its own. `-l` on that dump is the modulation stated before the mode request: the mode start resets it to basic rate, so MDMCTRL reading 0x0040 afterwards is what says the setting survived (fork `d4aca18`, [ubertooth#972](https://github.com/SqueakyFloors/ubertooth/issues/972)). A leftover record of the sweep is caught by its packet type (`--types br,keep-alive`, since the firmware types a sweep's records SPECAN); `rxdump.py --max-stale 0` is the general check on top of that, for a basic-rate record carried over from before the stream started, which this pairing cannot produce but another mode could. The warning and the wait behind it are fork `e657807` ([ubertooth#438](https://github.com/SqueakyFloors/ubertooth/issues/438)).
 
 ## ubertooth-tx
 

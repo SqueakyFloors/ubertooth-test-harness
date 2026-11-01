@@ -1,0 +1,272 @@
+"""Cases for `Board state between runs`: what a killed capture leaves behind.
+
+A tool that exits normally, or is stopped with SIGTERM, sends STOP on the way
+out and leaves the board idle. A terminal or an SSH session that disappears
+does not: the tool dies where it stands and the board keeps running the mode
+it was in, with packets of that mode still in its endpoint. These cases make
+that state on purpose -- killedcapture.py SIGKILLs the capture tool itself --
+and then require the next run on the same board to be clean anyway.
+
+What makes the answer knowable without an RF peer: both tools used here
+produce data with nothing on the air (`ubertooth-dump` about 2000 records a
+second, `ubertooth-specan` about 16 kB a second), so each capture's own
+contents are the evidence, and each leaves a mode the other does not use.
+
+- `ubertooth-dump` writes 68-byte records carrying the firmware's packet type,
+  so a record left from the spectrum sweep before it (type SPECAN) fails by
+  type, and a record from before the stream started fails by its clock, which
+  restarts at mode entry (rxdump.stale_records(), and
+  SqueakyFloors/ubertooth#318).
+- `ubertooth-dump -l` states its modulation before it asks for its mode, and a
+  mode start puts the modulation back to basic rate, so the radio ending up in
+  LE is what says a setting stated for this capture survived its mode start on
+  a board left in another mode. It is read from the CC2400 MDMCTRL register,
+  which keeps what the last mode programmed.
+
+The warning the second command must print comes from libubertooth's
+ubertooth_bulk_init() (fork e657807, SqueakyFloors/ubertooth#438): it reads
+the mode the board is in, stops it, and waits until the board says it has
+left it, because UBERTOOTH_STOP only asks and the mode's loop can hand the
+endpoint another packet in the meantime. The step requires the first warning
+and forbids the second ("it has not stopped after N ms"), which the same code
+prints when the wait runs out.
+
+What that pair of checks shows is that the board was in a mode, that the
+capture found it, and that the board reported leaving it within the wait. It
+does not separate a build that waits from one that warns and starts anyway:
+the only difference between those two is a packet or so of the previous mode
+in the new capture, which is the leak the record checks below look for, and a
+run where nothing happens to leak cannot tell them apart.
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+from ubertooth_harness import killedcapture, rxdump
+from ubertooth_harness.patterns import FIRMWARE_PATTERN, serial_pattern
+from ubertooth_harness.stateful import (
+    Observation,
+    StateCase,
+    Step,
+    nothing_on_stdout,
+)
+from ubertooth_harness.receive_cases import DUMP_MIN_RECORDS_PER_S, _path, seconds_arg
+from ubertooth_harness.transitions import (
+    BOOT_DEFAULT_CHANNEL,
+    CHANNEL,
+    LEDS,
+    MODE_RESET_SETTINGS,
+    PA_BOOT_DEFAULT,
+    PA_LEVEL,
+    RESET_TIMEOUT_S,
+    RESTORED_SETTINGS,
+    SQUELCH,
+    _identity,
+    _read_originals,
+    _serial,
+    _stop,
+    _util,
+)
+
+TEST_NAME = "Board state between runs"
+
+# The firmware mode (ubertooth_interface.h) ubertooth-specan puts the board
+# in, which is what the warning below names.
+MODE_SPECAN = 4
+
+# The band the sweep states before it asks for its mode. Five frequencies is
+# enough for the checker to require every one of them, and narrow enough that
+# a sweep covers the range many times over in a few seconds.
+SWEEP_LOW = 2440
+SWEEP_HIGH = 2444
+
+# The CC2400 MDMCTRL register, read as the modulation the radio is set to:
+# 0x0040 is 250 kHz deviation (LE), 0x0029 is 160 kHz (basic rate). The
+# register keeps the value after the mode stops, which is what makes it
+# readable afterwards (receive_cases.py reads it the same way).
+_MDMCTRL_VALUE = r"%MDMCTRL = 0x(?P<value>[0-9A-Fa-f]{4})"
+MDMCTRL_LE = "0040"
+
+# How long the kill step may take: killedcapture.py waits up to its own
+# --max-wait for the capture to produce data, then up to its reap window, and
+# on a path that reports a problem it waits once more while taking the capture
+# down. The harness's own deadline has to be past all of that, or it would
+# replace the reason with "command timed out".
+_KILL_TIMEOUT_S = (killedcapture.MAX_WAIT_S + 2 * killedcapture.REAP_WAIT_S
+                   + 10.0)
+
+# What the capture gets on top of its own duration: the board may spend up to
+# the fork's own 1000 ms wait leaving the mode this case left it in before the
+# capture starts, and the record floor below is counted from the duration.
+MODE_STOP_ALLOWANCE_S = 2.0
+
+_KILLER = str(Path(killedcapture.__file__).resolve())
+_DUMP_CHECKER = str(Path(rxdump.__file__).resolve())
+
+# The two warnings ubertooth_bulk_init() can print, by their fixed wording.
+_STILL_IN_MODE = "the board is still in mode {mode} from an earlier run"
+_NOT_STOPPED = "it has not stopped after"
+
+
+def _reset_to_defaults(serial: str, prefix: str, suffix: str,
+                       where: str) -> tuple[Step, ...]:
+    """Reset the board and require every documented boot default.
+
+    Used twice in each case, at both ends: once as the state the case starts
+    from, and once in the cleanup, which is where the issue asks for it,
+    because this is the test that leaves a board in a mode on purpose.
+    """
+    return (
+        Step(f"{prefix}reset", f"Full reset {where}",
+             _util(serial, "-r"), timeout_s=RESET_TIMEOUT_S, mutates=True,
+             output_patterns=(r"Resetting ubertooth device",),
+             output_check=nothing_on_stdout),
+    ) + tuple(
+        setting.verify(serial, f"{prefix}verify-{setting.key}{suffix}",
+                       f"{setting.key} is the boot default {where}",
+                       f"{setting.key} {where}", setting.after_mode_stop)
+        for setting in MODE_RESET_SETTINGS
+    ) + (
+        PA_LEVEL.verify(serial, f"{prefix}verify-pa-level{suffix}",
+                        f"pa-level is the boot default {where}",
+                        f"pa-level {where}", PA_BOOT_DEFAULT),
+    )
+
+
+def _kill_step(tool_argv, capture: str, record: str) -> Step:
+    """Run a capture and SIGKILL the tool process itself."""
+    def argv(context):
+        return (
+            sys.executable, _KILLER, "kill",
+            "--capture", _path(capture)(context),
+            "--record", _path(record)(context),
+            "--",
+        ) + tuple(item(context) if callable(item) else item for item in tool_argv)
+
+    return Step(
+        "kill-capture",
+        f"SIGKILL {tool_argv[0]} while it is streaming",
+        argv,
+        timeout_s=_KILL_TIMEOUT_S,
+        mutates=True,
+        # The board is left in its mode with no STOP sent, so the kill must be
+        # of the tool itself and the process must be gone, zombie included.
+        output_patterns=(r"SIGKILL reaped as signal 9;",),
+        observe=Observation("killed capture", r"Killed capture: (?P<value>\S+) pid \d+",
+                            Path(tool_argv[0]).name),
+    )
+
+
+def _second_capture(serial: str, dump: str, seconds: int) -> Step:
+    """The dump, started on the board the killed sweep left in its mode."""
+    still_in_mode = _STILL_IN_MODE.format(mode=MODE_SPECAN)
+
+    def argv(context):
+        # -l: the modulation is stated before the mode request, and a mode
+        # start puts it back to basic rate, so the board keeping LE is what
+        # says the setting stated for this capture survived (fork d4aca18).
+        return ("ubertooth-dump", "-U", serial, "-l", "-d", _path(dump)(context))
+
+    return Step(
+        "second-capture",
+        "Dump symbols in LE modulation on the board left sweeping",
+        argv,
+        timeout_s=float(seconds) + MODE_STOP_ALLOWANCE_S,
+        mutates=True, continuous=True,
+        output_patterns=(
+            rf"warning: {still_in_mode}; stopping it first",
+        ),
+        # The board has to have reported leaving the mode inside the wait:
+        # this is the line printed when the wait ran out instead.
+        forbidden_patterns=(rf"warning: {_NOT_STOPPED} \d+ ms",),
+        # The dump writes its data to a file, so it asks for nothing on stdout
+        # and nothing may arrive there. With the warning required in either
+        # stream, that is how the case says it was printed on stderr.
+        output_check=nothing_on_stdout,
+    )
+
+
+def _evidence_steps(serial: str, capture: str, record: str) -> tuple[Step, ...]:
+    """The killed capture is still exactly what the killed tool left, and the
+    board answers every read on the first try."""
+    return (
+        Step("verify-killed-capture-kept",
+             "The killed capture is unchanged since the kill",
+             lambda context: (sys.executable, _KILLER, "verify",
+                              "--capture", _path(capture)(context),
+                              "--record", _path(record)(context)),
+             output_patterns=(rf"Killed capture evidence: {re.escape(capture)} "
+                              r"unchanged, \d+ bytes, SHA-256 [0-9a-f]{64}",)),
+        Step("read-firmware-after-kill", "Firmware version answers",
+             _util(serial, "-v"), output_patterns=(FIRMWARE_PATTERN,)),
+        Step("read-serial-after-kill", "Device serial answers",
+             _util(serial, "-s"), output_patterns=(serial_pattern(serial),)),
+        CHANNEL.verify(serial, "read-channel-after-kill", "Channel answers",
+                       "channel after the kill", BOOT_DEFAULT_CHANNEL),
+        PA_LEVEL.verify(serial, "read-pa-level-after-kill", "PA level answers",
+                        "pa-level after the kill", PA_BOOT_DEFAULT),
+        SQUELCH.verify(serial, "read-squelch-after-kill", "Squelch answers",
+                       "squelch after the kill", SQUELCH.after_mode_stop),
+        LEDS.verify(serial, "read-leds-after-kill", "LEDs answer",
+                    "leds after the kill", LEDS.after_mode_stop),
+    )
+
+
+def _cleanup(serial: str) -> tuple[Step, ...]:
+    """Stop, reset, check the documented defaults, and put back what the case
+    recorded, so the next test is handed a board seen to boot."""
+    steps = [_stop(serial, "cleanup-stop", "Return to idle")]
+    steps += _reset_to_defaults(serial, "cleanup-", "", "after the cleanup reset")
+    for setting in RESTORED_SETTINGS:
+        steps.extend(setting.restore(serial))
+    steps.append(_identity(serial))
+    return tuple(steps)
+
+
+def _killed_specan_case(serial: str, seconds: int) -> StateCase:
+    """The one case: a symbol dump after a killed spectrum sweep."""
+    records = DUMP_MIN_RECORDS_PER_S * seconds
+    capture, record = "killed-specan.bin", "killed-specan.json"
+    dump = "after-killed-specan.bin"
+    sweep = ("ubertooth-specan", "-U", serial, "-l", str(SWEEP_LOW),
+             "-u", str(SWEEP_HIGH), "-d", _path(capture))
+    return StateCase(
+        "killed-specan-then-dump",
+        "A symbol dump after a killed spectrum sweep",
+        (_stop(serial, "establish-idle", "Establish idle before reading"),)
+        + _read_originals(serial, RESTORED_SETTINGS)
+        + _reset_to_defaults(serial, "", "-at-boot", "at boot defaults")
+        + (Step("verify-firmware-at-boot", "Firmware answers after the reset",
+                _util(serial, "-v"), output_patterns=(FIRMWARE_PATTERN,)),
+           _kill_step(sweep, capture, record),
+           _second_capture(serial, dump, seconds),
+           _stop(serial, "stop-second-capture", "Return the board to idle"),
+           Step("verify-second-capture",
+                "The dump holds only its own basic-rate-typed records",
+                lambda context: (sys.executable, _DUMP_CHECKER, _path(dump)(context),
+                                 "full", "--min-records", str(records),
+                                 "--types", "br,keep-alive", "--max-stale", "0"),
+                output_patterns=(r"Receive dump: \d+ full records, 0 stale \(0 LE\)",)),
+           Step("verify-modulation-survived",
+                "MDMCTRL shows the LE modulation the capture stated",
+                ("ubertooth-debug", "-U", serial, "-r", "0x03", "-v0"),
+                observe=Observation("modulation after the capture",
+                                    _MDMCTRL_VALUE, MDMCTRL_LE)))
+        + _evidence_steps(serial, capture, record),
+        _cleanup(serial),
+        expected_state=(
+            f"the dump holds at least {records} records of its own, none left "
+            "from the sweep, and the LE modulation it stated before asking for "
+            "its mode is the one the radio ended up in; the board answers "
+            "every read; the killed sweep's file is kept as it was; channel, "
+            "PA level, squelch, and LEDs restored"),
+        capture_dir=True,
+    )
+
+
+def board_state_cases(arguments, _resources, resource_identities):
+    serial = _serial(resource_identities, TEST_NAME)
+    return (_killed_specan_case(serial, seconds_arg(arguments)),)
