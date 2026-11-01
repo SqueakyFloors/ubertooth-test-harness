@@ -41,7 +41,7 @@ PEER_BY_ID = ("/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_"
 # else, so its ready case is what proves the board runs this
 # (firmware/nrf52840dk/src/roles.h and firmware/esp32-classic-peer/main/peer.h;
 # tests/test_targets.py keeps them in step with those sources).
-DK_FIRMWARE = "utdk-1.2.1"
+DK_FIRMWARE = "utdk-1.3.0"
 PEER_FIRMWARE = "utesp-1.3.0"
 
 

@@ -17,7 +17,7 @@ the new one, so a board can be handed from one test to another without
 reflashing. The boot role is the advertiser, so a board that was reset or
 power-cycled is in a known state.
 
-Firmware version: `utdk-1.2.1` (`UTDK_FW_VERSION` in `src/roles.h`; the
+Firmware version: `utdk-1.3.0` (`UTDK_FW_VERSION` in `src/roles.h`; the
 harness pins the same string in `ubertooth_harness/nrfdk.py` and flashes a
 board that reports anything else).
 
@@ -124,7 +124,7 @@ The shell is on uart0, which is the J-Link's first virtual COM port (VCOM0;
 115200 baud, 8N1, no flow control. It prints no prompt, no echo and no
 colors. Send one command line ended by CR; the board answers with zero or
 more data lines, then exactly one line `OK` or `ERR <reason>`. Any other line
-(the boot banner `*** Booting nRF Connect SDK ...`, `utdk: utdk-1.2.1 ready`)
+(the boot banner `*** Booting nRF Connect SDK ...`, `utdk: utdk-1.3.0 ready`)
 is not a response.
 
 | Command | Answer |
@@ -142,6 +142,7 @@ is not a response.
 | `conn peer <address>` | the peripheral the central connects to |
 | `conn interval <ms>` | connection interval, 8-4000 ms (default 30) |
 | `conn chmap <37\|38\|39\|all>` | the peripheral's advertising channels (default 37) |
+| `conn datamap <all\|0,12,36>` | central only: change the live connection's data channel map (two channels or more) |
 | `conn dle <on\|off>` | ask for a 251-byte data length (default on) |
 | `conn payload <bytes>` | bytes per write, 1-244 (default 244) |
 | `conn period <ms>` | time between writes, 10-10000 ms (default 100) |
@@ -154,7 +155,9 @@ is not a response.
 
 A setting changed while advertising restarts advertising with it. A `conn`
 setting may only change while the connection role is stopped, so the
-parameters a capture shows are the ones that were asked for. Bad values
+parameters a capture shows are the ones that were asked for; `conn update`
+and `conn datamap` are the two that act on the link while it is up, and both
+need one. Bad values
 answer `ERR` and change nothing. `adv` or `conn` alone, or with an unknown
 subcommand, answers `ERR`; a `conn` command while the role is the advertiser
 answers `ERR` and says which `role` command to run. A command with the wrong
@@ -166,7 +169,7 @@ instead; `nrfdk.py` treats both as a refusal.
 for example a central with a live connection:
 
 ```json
-{"role":"central","fw":"utdk-1.2.1","bt":true,"address":"C0:7D:CD:95:52:86","address_type":"random static","adv":false,"running":false,"type":"nonconn","chmap":"all","interval_ms":100,"payload":"","counter":0,"starts":0,"connections":0,"last_err":0,"conn_on":true,"connected":true,"peer":"C1:92:EC:E7:71:BC","conn_interval_ms":30,"update_ms":60,"dle":true,"interval_units":48,"latency":0,"timeout_units":400,"tx_octets":251,"rx_octets":251,"mtu":247,"phy":"1M","payload_len":244,"period_ms":100,"cycle_ms":4000,"autoupdate_ms":60,"writes":74,"write_errors":4,"received":0,"updates":3,"connects":3,"disconnects":2,"conn_err":0}
+{"role":"central","fw":"utdk-1.3.0","bt":true,"address":"C0:7D:CD:95:52:86","address_type":"random static","adv":false,"running":false,"type":"nonconn","chmap":"all","interval_ms":100,"payload":"","counter":0,"starts":0,"connections":0,"last_err":0,"conn_on":true,"connected":true,"peer":"C1:92:EC:E7:71:BC","conn_interval_ms":30,"update_ms":60,"dle":true,"interval_units":48,"latency":0,"timeout_units":400,"tx_octets":251,"rx_octets":251,"mtu":247,"phy":"1M","payload_len":244,"period_ms":100,"conn_chmap":"37","data_map":"ffffffff1f","data_map_used":37,"data_map_sets":0,"cycle_ms":4000,"autoupdate_ms":60,"writes":74,"write_errors":4,"received":0,"updates":3,"connects":3,"disconnects":2,"conn_err":0}
 ```
 
 - `address`: the identity address, a static random address derived from
@@ -189,6 +192,16 @@ for example a central with a live connection:
 - `tx_octets` and `rx_octets`: the negotiated data length, 251 with the
   extension and 27 without; `mtu`: the ATT MTU after the exchange; `phy`:
   `1M`, the only PHY built in.
+- `data_map`: the channel classification this board last gave its
+  controller, as ten hex digits in the order a CONNECT_IND and an
+  `LL_CHANNEL_MAP_IND` carry it (bit b of byte i is channel 8i + b), so a
+  capture's map lines up with it field for field. It is what the central
+  asked for, not a map read back from the link: the controller may drop
+  channels of its own as well, so a recovered map can be narrower.
+  `data_map_used`: how many of the 37 channels the classification leaves in
+  use; `data_map_sets`: how many `conn datamap` requests the controller has
+  taken since boot, which is how the driver tells a real change from an
+  echo. Putting the channels back on leaving the role does not count.
 - `writes` and `write_errors` count the central's writes (a write can be
   refused when buffers are full as a link is coming down); `received` is
   the bytes the peripheral's characteristic got; `updates`, `connects`
@@ -213,6 +226,34 @@ peripheral advertises on one channel (`conn chmap`, 37 by default): that is
 what puts the CONNECT_IND on the channel a receiver is listening to. With all
 three channels the connection still works, but a single-channel receiver sees
 the CONNECT_IND only when it happens to land on its channel.
+
+### Changing the channel map of a live connection
+
+`conn datamap <all|0,12,36>` narrows the data channels the connection may use
+while it is up. The central hands the controller a channel classification,
+and the controller carries it to every link where it is the central as an
+`LL_CHANNEL_MAP_IND`, so the connection moves to the new map at a connection
+event both ends agree on and a sniffer following it has to follow the change.
+That is the one thing the roles could not do before: `conn chmap` is the
+peripheral's *advertising* channels, and the map in the CONNECT_IND used to
+hold for the life of the link.
+
+A channel map has to leave at least two channels used: the Bluetooth Core
+specification puts the minimum number of used channels at 2 (Vol 6 Part B,
+4.5.8.1), and the controller here refuses a one-channel map (`-EINVAL`,
+measured on the bench), so the firmware refuses one first and says why. Two channels is therefore the most
+demanding map a test can ask for, and the smallest divisor the remapping can
+be given. A channel above 36 is refused as well.
+
+Two classifications have to be at least a second apart (Bluetooth Core, HCI
+LE Set Host Channel Classification), so a second `conn datamap` sooner than
+that answers `ERR` with how long ago the last one was, rather than being
+dropped by the controller without a word. The second runs from every command
+that reached the controller, including one it refused. The classification belongs to the
+controller and outlives the link that carried it, so leaving the role (`conn
+defaults`, `role <name>`, `nrfdk.py idle`) puts all 37 channels back, waiting
+out that second if it has to; otherwise the next test's CONNECT_IND would
+carry the narrowed map.
 
 With `conn cycle <ms>` the central drops the link after that long and
 connects again a moment later, and the peripheral advertises again by itself.

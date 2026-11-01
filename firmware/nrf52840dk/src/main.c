@@ -125,6 +125,7 @@ SHELL_CMD_ARG_REGISTER(status, NULL, "Print one JSON status line", cmd_status, 1
 static int cmd_role(const struct shell *sh, size_t argc, char **argv)
 {
 	enum utdk_role wanted;
+	int err;
 
 	ARG_UNUSED(argc);
 	if (strcmp(argv[1], "advertiser") == 0) {
@@ -139,9 +140,13 @@ static int cmd_role(const struct shell *sh, size_t argc, char **argv)
 	/* Leave both roles idle first, so the board is in a known state
 	 * whichever role it was in, then take the new one.
 	 */
-	conn_leave();
+	err = conn_leave();
 	adv_leave();
 	active_role = wanted;
+	if (err) {
+		return utdk_err(sh, "the controller kept the connection's channel "
+				"map (%d); the board is not idle", err);
+	}
 	return utdk_ok(sh);
 }
 
