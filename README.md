@@ -1893,17 +1893,17 @@ The rule reads the shapes in that note and nothing else on the page, since
 the note is the only place a report publishes one. In a shape, masked is the
 whole shape of a serial the run names, at every occurrence and wherever it
 sits, including written against a word of its own as a serial reaches a
-line, and a piece of such a shape carrying four or more hex letters, read
-inside a run of hex letters and `N` and needing that run's own `N` to tell a
-shape from an ordinary run of hex. Every other shape is left to read.
+line, and a piece of such a shape that carries an `N` and four or more of
+the characters the serial itself held, since a piece is all the rule has to
+go on there. Every other shape is left to read.
 
 The costs are the width rule's, and fall inside that note. A short value
 whose own shape a known serial's shape holds reads `<serial>` too, so a
 `[M]` line can show two masks where one device was named. A piece a cut left
-with no `N` of its own is left to read, like any piece of a serial narrower
-than 8 hex digits. And a serial with one character of its own (31 digits and
-a letter) keeps its shape, because masking `Na` would take that letter out
-of every other shape in the note.
+with no `N` in it is a run of the serial's own characters, left to read like
+any piece of a serial narrower than 8 hex digits. And a serial with one
+character of its own (31 digits and a letter) keeps its shape, because
+masking `Na` would take that letter out of every other shape in the note.
 
 What the option does not mask is anything that is not a serial the run
 names, and a transcript holds more than those: the decimal serial of a

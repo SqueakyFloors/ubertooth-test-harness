@@ -678,7 +678,8 @@ class ReportTests(unittest.TestCase):
     def test_a_shape_no_run_of_hex_letters_can_hold_is_masked_too(self):
         # An ESP32 peer's bridge serial is whatever string the bridge
         # reports, of any letters, digits and _.:+- (resources.py), so its
-        # shape can hold characters no run of hex letters and N carries.
+        # shape can hold characters no run of hex letters and N carries,
+        # whole or as a cut left it.
         from ubertooth_harness.report import _redact
 
         serial = "esp32-peer_1a2b"
@@ -693,6 +694,21 @@ class ReportTests(unittest.TestCase):
             shape_note(f"usb-{REDACTED}-if00", 3),
             _redact(shape_note(f"usb-{shape}-if00", 3), {serial}),
         )
+        self.assertEqual(
+            shape_note(REDACTED), _redact(shape_note(shape[:10]), {serial}))
+
+    def test_output_that_quotes_the_note_is_not_read_as_one(self):
+        # The note's lines are the harness's own, stamped and tagged as it
+        # writes them. A command that prints the same text is output, and
+        # output is left as the command printed it.
+        from ubertooth_harness.report import _redact
+
+        serial = "1ab23cd45ef67ab89cd01ef23ab45cd6"
+        quoted = (
+            f"00:00:09.000 [O] log says: [M]   3 x [E] {line_shape(serial)}\n"
+        )
+
+        self.assertEqual(quoted, _redact(quoted, {serial}))
 
     def test_a_serial_or_shape_in_another_case_is_masked(self):
         # A tool prints in the case it likes, and the registry holds one.

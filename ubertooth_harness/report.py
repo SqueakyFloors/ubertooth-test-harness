@@ -1360,35 +1360,33 @@ def _mask_cut_serials(text: str, serials: Sequence[str]) -> str:
 #
 # What a cut left of a shape is masked as a piece. The 200-character shape
 # limit cuts a shape, and an output cap can cut the line a shape was counted
-# from, so either end of one can arrive on its own. A piece is read inside a
-# run of hex letters and N, where a serial shapes when its own characters
-# are hex, and it needs four hex letters: the letters are what names the
-# board and a piece is all the rule has to go on. Fewer than that (`NabN`,
-# the shape of `1ab2`) sits in the shape of too much ordinary output to
-# mask, and a run of hex letters with no N of its own is left to
-# _mask_cut_serials and its width rule, for the same reason: `cafe` and
-# `dead` are words a tool prints.
-_SHAPE_MIN_LETTERS = 4
+# from, so either end of one can arrive on its own. A piece needs an N of
+# its own and four characters the serial held, because those characters are
+# what names the board and a piece is all the rule has to go on: fewer
+# (`NabN`, the shape of `1ab2`) sits in the shape of too much ordinary
+# output to mask, and a piece with no N in it is a run of the serial's own
+# characters, left to _mask_cut_serials and its width rule for the same
+# reason: `cafe` and `dead` are words a tool prints.
 _SHAPE_MIN_OWN_CHARS = 2
-_SHAPE_TOKEN = re.compile(
-    r"(?<![0-9A-Fa-fN])[A-Fa-fN]*N[A-Fa-fN]*(?![0-9A-Fa-fN])"
-)
+_PIECE_MIN_OWN_CHARS = 4
 # One line of the `[M]` note that lists the shapes of the lines the record
-# limits left out: `[M]   3 x [E] <shape>`. The head is taken as it is and
-# the shape is what the rules read.
+# limits left out: `00:00:09.000 [M]   3 x [E] <shape>`. Anchored on the
+# elapsed time the transcript stamps every line with, so a command's own
+# output cannot read as a note of the harness's. The head is taken as it is
+# and the shape is what the rules read.
 _SHAPE_NOTE_LINE = re.compile(
-    r"(?m)^(?P<head>.*?\[M\]\s+\d+ x \[[^\]]*\] )(?P<shape>.*)$"
+    r"(?m)^(?P<head>\d\d:\d\d:\d\d\.\d\d\d \[M\]\s+\d+ x \[[^\]]*\] )"
+    r"(?P<shape>.*)$"
 )
-_SHAPE_LETTER = re.compile(r"[A-Fa-f]")
 # The runs line_shape replaced, counted in the serial rather than in its
 # shape, because a serial may hold an N of its own.
 _DIGIT_RUN = re.compile(r"\d+")
 
 
-def _shape_letters(token: str) -> int:
-    """Hex letters in a shape token, which is what names the board (the N
-    standing where a run of digits was says nothing about which board)."""
-    return len(_SHAPE_LETTER.findall(token))
+def _own_chars(shape: str) -> int:
+    """Characters of a shape a serial held, rather than an N standing where
+    a run of its digits was: what the shape says about which board."""
+    return len(shape) - shape.count("N")
 
 
 def _shape_pieces(shapes: Iterable[str]) -> tuple[set[str], int]:
@@ -1405,7 +1403,7 @@ def _shape_pieces(shapes: Iterable[str]) -> tuple[set[str], int]:
     return pieces, max((len(shape) for shape in shapes), default=0)
 
 
-def _mask_one_shape(shape: str, shapes: Sequence[str], pieces: set[str],
+def _mask_one_shape(shape: str, known: Sequence[str], pieces: set[str],
                     longest: int) -> str:
     """One published shape, with every known shape and piece of one in it
     masked.
@@ -1414,38 +1412,36 @@ def _mask_one_shape(shape: str, shapes: Sequence[str], pieces: set[str],
     character could otherwise swallow the start of a shape that repeats
     itself and leave a tail too narrow to mask.
     """
-    for known in shapes:
-        shape = _mask_everywhere(shape, known)
-    return _SHAPE_TOKEN.sub(
-        lambda match: _mask_shape_pieces(match.group(0), pieces, longest),
-        shape,
-    )
+    for one in known:
+        shape = _mask_everywhere(shape, one)
+    return _mask_shape_pieces(shape, pieces, longest)
 
 
-def _mask_shape_pieces(token: str, pieces: set[str], longest: int) -> str:
-    """``token`` with every piece of a known serial's shape masked.
+def _mask_shape_pieces(shape: str, pieces: set[str], longest: int) -> str:
+    """``shape`` with every piece of a known serial's shape masked.
 
     Read from the left, taking the longest piece the known shapes hold at
     each character: what a shape holds is a shape, so masking it is right,
     and a piece that starts later is shorter. Where no piece wide enough
     starts at this character, the character is kept and the next one tried.
     """
-    lowered = token.lower()
+    lowered = shape.lower()
     out = []
     index = 0
-    while index < len(token):
+    while index < len(shape):
         end = index
         # Every prefix of a piece of a shape is a piece of that shape, so
         # the longest one is reached by growing until there is no longer a
         # piece there.
-        while (end < min(len(token), index + longest)
+        while (end < min(len(shape), index + longest)
                and lowered[index:end + 1] in pieces):
             end += 1
-        if _shape_letters(lowered[index:end]) >= _SHAPE_MIN_LETTERS:
+        piece = shape[index:end]
+        if "N" in piece and _own_chars(piece) >= _PIECE_MIN_OWN_CHARS:
             out.append(REDACTED)
             index = end
         else:
-            out.append(token[index])
+            out.append(shape[index])
             index += 1
     return "".join(out)
 
@@ -1517,7 +1513,7 @@ def _mask_serial_shapes(text: str, serials: Sequence[str]) -> str:
 
     def mask(match: re.Match) -> str:
         return match.group("head") + _mask_one_shape(
-            match.group("shape"), known, pieces, longest
+            match.group("shape"), known, pieces, longest,
         )
 
     return _SHAPE_NOTE_LINE.sub(mask, text)
@@ -1542,7 +1538,8 @@ def _redact(text: str, serials: Iterable[str]) -> str:
             # too, which costs a reader nothing. In either case, because a
             # tool may print in the case it likes and the token rule above
             # reaches only a serial standing on its own.
-            text = re.sub(re.escape(serial), REDACTED, text, flags=re.IGNORECASE)
+            text = re.sub(re.escape(serial), lambda _match: REDACTED, text,
+                          flags=re.IGNORECASE)
     # Before the cut rule, so a shape whose letters happen to run 8 wide is
     # masked as one shape and not in pieces with its N between them.
     text = _mask_serial_shapes(text, serials)
@@ -1573,7 +1570,8 @@ def _as_a_section(text: str) -> str:
     lines = []
     fence = 0
     for line in text.split("\n"):
-        ticks = len(line) - len(line.lstrip("`"))
+        bare = line.strip()
+        ticks = len(bare) - len(bare.lstrip("`"))
         if fence:
             if ticks >= fence:
                 fence = 0
