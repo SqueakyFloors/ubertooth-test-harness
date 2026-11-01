@@ -806,7 +806,13 @@ class NamedTestSequencer:
                 )
                 mutated = mutated or (ran and step.mutates)
                 if failure:
-                    if (window is not None and window[0] <= index < window[1]
+                    # Only the last step of the group decides: it is the one
+                    # that judges what arrived. A failure in the steps that
+                    # set the attempt up (a mode that would not stop, a
+                    # device that stopped answering) ends the case, because
+                    # running it again cannot help and a later attempt
+                    # would hide it.
+                    if (window is not None and index == window[1] - 1
                             and attempt < case.attempts and not canceled
                             and not token.is_cancelled()):
                         attempt += 1

@@ -317,13 +317,16 @@ class StateCase:
     # leaves the case out before the run, as not applicable. A case that
     # needs the firmware build lists "test_build" in artifacts too.
     needs: Needs = NO_NEEDS
-    # The IDs of a contiguous run of steps that a failure runs again, from
-    # the first of them, up to ``attempts`` times in all. It is for a case
-    # whose outcome depends on what arrives over the air, where the devices
-    # keep making the traffic and a second try costs only the capture
-    # window; the steps in the group must therefore be repeatable, and each
-    # try must leave the board as the first one found it. A failure anywhere
-    # else, and a cancellation, end the case as they always did.
+    # The IDs of a contiguous run of steps that are run again, from the
+    # first of them, when the LAST of them fails: up to ``attempts`` times
+    # in all. It is for a case whose outcome depends on what arrives over
+    # the air, where the devices keep making the traffic and a second try
+    # costs only the capture window; the steps in the group must therefore
+    # be repeatable, and each try must leave the board as the first one
+    # found it. A failure in the earlier steps of the group, a failure
+    # anywhere else, and a cancellation end the case as they always did,
+    # because running those again cannot help and a later attempt would
+    # hide them.
     retry_steps: tuple[str, ...] = ()
     attempts: int = 1
     state_changing: bool = field(default=True, init=False)
@@ -351,6 +354,17 @@ class StateCase:
                 raise StateCaseError(
                     f"{self.case_id}: retry_steps must name steps that run one "
                     "after the other, in their order")
+            retried = {step.step_id: step for step in self.steps
+                       if step.step_id in self.retry_steps}
+            recorded = [step_id for step_id, step in retried.items()
+                        if step.observe is not None]
+            if recorded:
+                # A later attempt would overwrite what an earlier one
+                # recorded, or the case would carry a value from an attempt
+                # it threw away.
+                raise StateCaseError(
+                    f"{self.case_id}: a retried step cannot record an "
+                    f"observation ({', '.join(recorded)})")
         identifiers = [step.step_id for step in self.steps + self.cleanup]
         if len(set(identifiers)) != len(identifiers):
             raise StateCaseError(f"{self.case_id}: duplicate step ID")
@@ -363,7 +377,7 @@ class StateCase:
             raise StateCaseError(f"{self.case_id}: duplicate observation key")
 
     def retry_window(self) -> tuple[int, int] | None:
-        """Step indices [first, last + 1) a failure runs again, or None."""
+        """Step indices [first, last + 1) the last step's failure runs again."""
         if not self.retry_steps:
             return None
         identifiers = [step.step_id for step in self.steps]

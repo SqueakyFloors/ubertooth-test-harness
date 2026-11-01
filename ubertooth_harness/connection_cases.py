@@ -219,6 +219,11 @@ def _central_did_the_work(update_ms: int):
     or that never asked for the connection parameter update, or that had a
     different interval accepted: the capture checks the CONNECT_IND, which is
     written before any update.
+
+    The counters it reads run from ``conn start``, so on a second capture
+    attempt they cover the whole run rather than that one capture window.
+    That is the floor this check is for: a DK that is connecting, writing,
+    and having its updates accepted while the case runs.
     """
     def check(stdout) -> str:
         match = search_lines(stdout, _TRAFFIC)
@@ -292,7 +297,7 @@ def _capture_case(serial, central, peripheral, seconds, *, case_id, name,
                                    capture_file(context)),
              timeout_s=float(seconds), mutates=True, continuous=True),
         _stop(serial),
-        Step("central-report", "What the central did while the capture ran",
+        Step("central-report", "What the central did while the case ran",
              _dk(central, "status"), timeout_s=DK_TIMEOUT_S,
              output_patterns=(r"(?m)^role: central$",),
              output_check=_central_did_the_work(update_ms)),

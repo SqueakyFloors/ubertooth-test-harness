@@ -421,6 +421,25 @@ class RetriedStepTests(unittest.TestCase):
         case_finished = self.finished(events, "check_finished", stage="transition")
         self.assertEqual(2, case_finished[-1].details["attempts"])
 
+    def test_a_failure_before_the_last_step_of_the_group_is_not_retried(self):
+        # The capture is in the group, but a mode that would not start is a
+        # tool or board failure: running it again cannot help, and a later
+        # attempt passing would hide it.
+        executor = AttemptExecutor(passing_attempt=1)
+        case = self.case()
+        case = replace(
+            case,
+            steps=case.steps[:1]
+            + (replace(case.steps[1], output_patterns=(r"never printed",)),)
+            + case.steps[2:],
+        )
+        summary, _events, _report = self.run_case(case, executor)
+
+        self.assertFalse(summary.passed)
+        self.assertIn("Capture", summary.failure_reason)
+        self.assertEqual(
+            1, len([c for c in executor.commands if c[0] == "capture"]))
+
     def test_a_failure_outside_the_retried_steps_is_not_retried(self):
         executor = AttemptExecutor(passing_attempt=1)
         case = self.case(retry_steps=("check-capture",), attempts=3)

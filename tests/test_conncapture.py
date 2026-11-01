@@ -60,7 +60,7 @@ def connect_ind_body(record):
     return record[advcapture.LE_PHDR_LEN:advcapture.LE_PHDR_LEN + 6 + 34]
 
 
-def pcapng_with_option(records, *option_pdus,
+def pcapng_with_option(records, *option_pdus, value_length=8 + 34,
                        code=conncapture.CONNECTION_INFO_OPTION):
     """PCAPNG whose interface block carries libbtbb's connection info options.
 
@@ -69,7 +69,7 @@ def pcapng_with_option(records, *option_pdus,
     """
     option = b""
     for option_pdu in option_pdus:
-        option += (struct.pack("<HH", code, 8 + 34) + struct.pack("<Q", 7)
+        option += (struct.pack("<HH", code, value_length) + struct.pack("<Q", 7)
                    + option_pdu)
         option += b"\x00" * (-len(option) % 4)
     body = struct.pack("<HHI", 256, 0, 65535) + option
@@ -194,12 +194,12 @@ class CheckTests(unittest.TestCase):
 
 
 class ConnectionInfoOptionTests(unittest.TestCase):
-    """libbtbb records one option per CONNECT_IND it decodes, and the
-    parameters in it are what a reader follows the connection with."""
+    """libbtbb records one option per CONNECT_IND it decodes, and the option
+    a reader follows the connection with must be one of this capture's."""
 
     def setUp(self):
         self.record = connect_ind()
-        self.body = connect_ind_body(self.record)
+        self.pdu = connect_ind_body(self.record)[6:6 + 34]
         self.records = [self.record] + [data_packet(251)] * 3
 
     def check(self, data):
@@ -208,84 +208,72 @@ class ConnectionInfoOptionTests(unittest.TestCase):
             interval_units=INTERVAL_UNITS, latency=0,
             timeout_units=TIMEOUT_UNITS, check_connection_info=True)
 
-    def classify(self, *option_pdus):
-        data = pcapng_with_option([self.record], *option_pdus)
-        return conncapture.classify_connection_info(
-            conncapture.connection_info_options(data), [self.body])
+    def test_the_recorded_pdu_passes(self):
+        _header, result = self.check(
+            pcapng_with_option(self.records, self.pdu))
+        self.assertEqual([], result.problems)
+        self.assertEqual(1, result.connection_info_options)
+        self.assertIn("as the capture decoded it", result.connection_info)
 
-    def test_the_recorded_pdu_is_recognized(self):
-        self.assertEqual(conncapture.CORRECT, self.classify(self.body[6:6 + 34]))
-
-    def test_the_old_six_byte_shift_is_recognized(self):
-        self.assertEqual(conncapture.SHIFTED, self.classify(self.body[:34]))
-
-    def test_another_device_s_connect_ind_is_recognized(self):
-        other = connect_ind_body(connect_ind(initiator=OTHER))
-        self.assertEqual(conncapture.ANOTHER, self.classify(other[6:6 + 34]))
-
-    def test_pcap_and_pcapng_without_the_option_report_absent(self):
+    def test_pcap_and_pcapng_without_the_option_report_none(self):
         for data in (pcap([self.record]), pcapng([self.record])):
             self.assertEqual([], conncapture.connection_info_options(data))
-        self.assertEqual(conncapture.ABSENT,
-                         conncapture.classify_connection_info([], [self.body]))
+        _header, result = self.check(pcapng(self.records))
+        self.assertEqual(conncapture.NO_OPTION, result.connection_info)
+        self.assertIn("carries no connection information option",
+                      result.problems[0])
 
     def test_every_recorded_option_is_read_not_only_the_first(self):
         # A capture with other devices in range holds their CONNECT_INDs
         # too, and the pair's own may be any of the options.
         other = connect_ind_body(connect_ind(initiator=OTHER))[6:6 + 34]
-        data = pcapng_with_option(self.records, other, other,
-                                  self.body[6:6 + 34])
+        data = pcapng_with_option(self.records, other, other, self.pdu)
         self.assertEqual(3, len(conncapture.connection_info_options(data)))
         _header, result = self.check(data)
         self.assertEqual([], result.problems)
-        self.assertEqual((conncapture.CORRECT, 3),
-                         (result.connection_info, result.connection_info_options))
+        self.assertEqual(3, result.connection_info_options)
 
-    def test_a_capture_holding_only_another_device_s_option_fails(self):
+    def test_an_option_whose_length_does_not_cover_the_pdu_is_not_read(self):
+        # The bytes after a short option belong to the next option, not to
+        # this one, so a reader would find no PDU there either.
+        data = pcapng_with_option(self.records, self.pdu, value_length=0)
+        self.assertEqual([], conncapture.connection_info_options(data))
+
+    def test_only_another_device_s_option_fails(self):
         other = connect_ind_body(connect_ind(initiator=OTHER))[6:6 + 34]
         _header, result = self.check(pcapng_with_option(self.records, other))
         self.assertEqual(
             [f"none of the 1 recorded connection information option(s) is a "
-             f"CONNECT_IND from {CENTRAL} to {PERIPHERAL}"],
+             f"CONNECT_IND this capture decoded from {CENTRAL} to {PERIPHERAL}"],
             result.problems)
         # Never another device's address, only that there was one.
         self.assertNotIn(OTHER, "\n".join(result.problems))
 
-    def test_a_missing_option_fails_because_a_reader_needs_it(self):
-        _header, result = self.check(pcapng(self.records))
-        self.assertEqual(conncapture.ABSENT, result.connection_info)
-        self.assertIn("carries no connection information option",
-                      result.problems[0])
-
-    def test_the_six_byte_shift_fails_as_another_device_s_bytes(self):
+    def test_the_six_byte_shift_fails(self):
         # What libbtbb#21 recorded: the 34 bytes from the access address on,
         # which read as a CONNECT_IND between two addresses nothing has.
         _header, result = self.check(
-            pcapng_with_option(self.records, self.body[:34]))
-        self.assertEqual(conncapture.SHIFTED, result.connection_info)
-        self.assertIn("is a CONNECT_IND from", result.problems[0])
+            pcapng_with_option(self.records, connect_ind_body(self.record)[:34]))
+        self.assertIn("is a CONNECT_IND this capture decoded", result.problems[0])
 
-    def test_wrong_parameters_in_the_recorded_option_are_named(self):
-        # The addresses are the pair's, the parameters are not: the option
-        # would send a reader to the wrong interval.
+    def test_wrong_parameters_in_the_pair_s_option_are_named(self):
+        # The addresses are the pair's and the parameters are not: the
+        # option would send a reader to the wrong interval.
         pdu = connect_ind(data=lldata(interval=48))[-37:-3]
         _header, result = self.check(pcapng_with_option(self.records, pdu))
-        self.assertEqual(
-            ["the recorded connection information's connection interval is 48, "
-             f"not {INTERVAL_UNITS}"],
-            result.problems)
+        self.assertIn("connection interval 48, not 24", result.problems[0])
 
-    def test_an_option_the_capture_never_decoded_fails(self):
-        # Every field the case compares is right and the addresses are the
-        # pair's, but the access address, CRC init and hop belong to no
+    def test_an_option_the_capture_never_decoded_is_named_field_by_field(self):
+        # Every parameter the case expects is right and the addresses are
+        # the pair's, but the access address, CRC init and hop belong to no
         # CONNECT_IND in the file: a reader would follow nothing.
         pdu = connect_ind(data=lldata(access=0x11223344, crc_init=0x123456,
                                       hop=9))[-37:-3]
         _header, result = self.check(pcapng_with_option(self.records, pdu))
-        text = "\n".join(result.problems)
-        self.assertIn("access address is 287454020", text)
-        self.assertIn("CRC init is 1193046", text)
-        self.assertIn("hop increment is 9", text)
+        text = result.problems[0]
+        self.assertIn("access address 287454020 belongs to no CONNECT_IND", text)
+        self.assertIn("CRC init 1193046 belongs to no CONNECT_IND", text)
+        self.assertIn("hop increment 9 belongs to no CONNECT_IND", text)
 
 
 class MainTests(unittest.TestCase):
@@ -313,7 +301,7 @@ class MainTests(unittest.TestCase):
         self.assertIn(f"access address: {ACCESS:08x} crc init {CRC_INIT:06x}\n", output)
         self.assertIn("data packets: 2 (2 with a correct CRC, 2 of 28 bytes or more, "
                       "longest 251)\n", output)
-        self.assertIn("connection info option: absent\n", output)
+        self.assertIn("connection info option: none recorded\n", output)
         self.assertTrue(output.endswith("capture checks passed\n"))
         self.assertNotIn(OTHER, output)
 

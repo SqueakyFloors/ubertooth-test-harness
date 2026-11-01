@@ -1292,10 +1292,9 @@ appear on the connection's access address with at least one decoding with a
 correct CRC, at least one packet is longer than 27 bytes, and the central
 reports that it connected, wrote, and had its update accepted at the interval
 it was told to ask for. The connection-information case also requires that
-one of the options libbtbb recorded in the PCAPNG is a CONNECT_IND between
-the two addresses and carries the interval, latency, and supervision timeout
-that went over the air, which are the parameters a reader takes from the file
-to follow the connection in it.
+one of the options libbtbb recorded in the PCAPNG is a CONNECT_IND this
+capture decoded from the pair, byte for byte: those 34 bytes are what a
+reader takes from the file to follow the connection in it.
 
 A capture that does not hold all of that is taken again, up to three captures
 in all, because the pair keeps making and remaking the link and another
@@ -1316,9 +1315,12 @@ which is why the duration is bounded; whether the end of the followed
 connection triggers it is not established. The PCAPNG connection-information
 option libbtbb records for a CONNECT_IND used to be copied 6 bytes early
 ([libbtbb#21](https://github.com/SqueakyFloors/libbtbb/issues/21), fixed);
-one comprehensive case now checks it for real, and it reads every option in
-the file rather than the first, because libbtbb records one for every
-CONNECT_IND it decodes and another device in range gets one too.
+one comprehensive case now checks it for real: one of the recorded options
+must be, byte for byte, a CONNECT_IND this capture decoded from the pair. It
+reads every option in the file rather than the first, because libbtbb records
+one for every CONNECT_IND it decodes and another device in range gets one
+too, and when none matches it names each field of the pair's own option that
+differs.
 
 ## Capture known Classic device
 
