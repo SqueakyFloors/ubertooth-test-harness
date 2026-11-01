@@ -14,6 +14,11 @@ serial. Run as a script by the Classic cases::
                                  [--period MS] [--payload BYTES]
                                  [--min-writes N] [--timeout S]
                                  -- COMMAND [ARGUMENT ...]
+    python esp32peer.py audio    --acceptor PATH --initiator PATH
+                                 [--type ev3|2ev3|default]
+                                 [--min-frames N] [--min-packets N]
+                                 [--timeout S]
+                                 -- COMMAND [ARGUMENT ...]
 
 **Opening the bridge resets the board.** DTR and RTS are wired to the chip's
 EN and IO0 pins on these dev boards, and the kernel asserts both when the
@@ -21,12 +26,20 @@ first process opens the port, whatever pyserial then asks for. So anything
 the board was told in an earlier invocation is gone, and a two-board session
 cannot be built out of several commands the way the DK's is.
 
-``stream`` is the answer to that: it holds both ports open for one whole
-session. It brings the Serial Port Profile link up, runs ``COMMAND`` while
-the pair streams, stops the pair, and reports what the two boards did. The
-command it runs is the thing under test (``ubertooth-rx ...``), so its
-standard output is passed straight through; this module's own report goes on
-standard error, as ``key: value`` lines for the cases' patterns.
+``stream`` and ``audio`` are the answer to that: each holds both ports open
+for one whole session, brings a link up between the two boards, runs
+``COMMAND`` while it carries traffic, takes it down, and reports what the two
+boards did. The command they run is the thing under test
+(``ubertooth-rx ...``), so its standard output is passed straight through;
+this module's own report goes on standard error, as ``key: value`` lines for
+the cases' patterns.
+
+``stream`` carries data over the Serial Port Profile, in the polled slots an
+ACL link uses. ``audio`` carries voice over a synchronous (eSCO) link, in
+reserved slots, which is a different thing on the air and in a decoder.
+``--type ev3`` asks for a link whose packets carry their payload at the basic
+rate, which a basic-rate decoder can read; the stack's own choice, 2-EV3,
+carries it as EDR.
 
 The initiator pages, so it is the piconet central and its LAP is the one on
 the air. ``central LAP`` and ``central UAP`` name it, which is what
@@ -34,10 +47,11 @@ the air. ``central LAP`` and ``central UAP`` name it, which is what
 
 Every command fails closed: a port that cannot be opened, a board that does
 not answer, an ``ERR`` reply, firmware of another version, an address that is
-not the registered one, a link that did not come up or did not stay up, or a
-pair that sent nothing prints ``error: <why>`` on stderr and exits 1. Exit
-status 2 is a usage error. Otherwise ``stream`` exits with the status of the
-command it ran.
+not the registered one, a link that did not come up or did not stay up, a
+link of a packet type other than the one asked for, or a pair that sent
+nothing prints ``error: <why>`` on stderr and exits 1. Exit status 2 is a
+usage error. Otherwise ``stream`` and ``audio`` exit with the status of the
+command they ran.
 """
 
 from __future__ import annotations
@@ -73,9 +87,17 @@ from ubertooth_harness import targets  # noqa: E402
 # not targets.PEER_FIRMWARE, the version this tree builds: a firmware PR
 # bumps that, and boards on an older 1.x image must stay usable.
 MINIMUM_FIRMWARE = "utesp-1.0.0"
+# The audio link's commands and its status fields came later than the rest of
+# the shell, and the packet-type choice later still, so an audio session asks
+# for a newer image than the other commands do. A board on an older 1.x image
+# answers every other command as before.
+MINIMUM_AUDIO_FIRMWARE = "utesp-1.4.0"
 BAUD = 115200
 ROLES = ("acceptor", "initiator")
 BOOT_ROLE = "acceptor"
+# The commands that hold both boards for one session and run a command inside
+# it; the rest take one board and no command.
+SESSIONS = ("stream", "audio")
 # What the firmware's status reports after a reset, from its README: the
 # acceptor role with its server listening and discoverable, no link, nothing
 # streaming, the default stream settings, and every counter zero. The
@@ -95,7 +117,30 @@ PAYLOAD_MIN, PAYLOAD_MAX = 8, 512
 DEFAULT_PERIOD_MS = 20
 DEFAULT_PAYLOAD = 200
 
+# The synchronous packet type the next audio link asks for. `default` leaves
+# the stack's own table to choose, which picks 2-EV3.
+SCO_TYPES = ("default", "ev3", "2ev3")
+DEFAULT_SCO_TYPE = "default"
+# What `sco_pkt_type` reads once a link of each asked-for type is up, so a
+# link that settled on something else is caught. `default` is left out: two
+# types could carry its packet length, so there is nothing to insist on.
+SCO_TYPE_ON_LINK = {"ev3": "ev3", "2ev3": "2-ev3"}
+# What `status` reports while an audio link is up.
+SCO_UP = "on"
+# One Bluetooth slot, which is what sco_interval and sco_retrans_window count.
+SLOT_US = 625
+
 COMMAND_TIMEOUT_S = 5.0
+# The audio commands block the shell while the controller works, and the
+# firmware's README gives the worst case of each: about 32 s for `sco start`
+# on the initiator, which starts the profile, pages, brings the service level
+# connection up, opens the link, and tidies up after a failure; about 10 s for
+# `sco stop`; about 18 s for `role`, which stops the audio link, then the SPP
+# side, then starts the server again. Each is rounded up so a slow worst case
+# reads the firmware's own `ERR` rather than timing out here.
+SCO_START_TIMEOUT_S = 40.0
+SCO_STOP_TIMEOUT_S = 15.0
+ROLE_TIMEOUT_S = 25.0
 # Opening the port resets the board; it then has to boot and start Bluetooth
 # before the shell answers. About 1.5 s on the bench, with room to spare.
 BOOT_TIMEOUT_S = 20.0
@@ -135,6 +180,34 @@ _STATUS_KEYS = {
     "remote": str, "stream": bool, "period_ms": int, "payload_len": int,
     "counter": int, "writes": int, "write_errors": int, "rx_bytes": int,
     "connects": int, "disconnects": int, "last_err": int,
+}
+
+# The audio link's status fields, which only an image with the audio link
+# reports, so they are checked in the audio session rather than in every
+# command (firmware README, "What `status` reports").
+_AUDIO_STATUS_KEYS = {
+    "sco": str, "sco_profile": str, "sco_codec": str, "sco_handle": int,
+    "sco_frame_len": int, "sco_tx_frames": int, "sco_tx_errors": int,
+    "sco_rx_frames": int, "sco_rx_bad": int, "sco_type": str,
+    "sco_link": str, "sco_pkt_type": str, "sco_tx_len": int,
+    "sco_rx_len": int, "sco_interval": int, "sco_retrans_window": int,
+    "sco_types_supported": str,
+}
+
+# What those fields read after a reset. A board whose audio profile is still
+# running refuses the next case's `role` and `defaults`, so a release has to
+# leave the profile away, not merely the link down.
+AUDIO_BOOT_STATE = {
+    "sco": "off", "sco_profile": "none", "sco_codec": "none",
+    "sco_handle": 0, "sco_frame_len": 0, "sco_tx_frames": 0,
+    "sco_tx_errors": 0, "sco_rx_frames": 0, "sco_rx_bad": 0,
+    "sco_type": DEFAULT_SCO_TYPE, "sco_link": "none", "sco_pkt_type": "none",
+}
+
+# The controller's own packet counters, which `sco stats` answers with.
+_SCO_STATS_KEYS = {
+    "rx_total": int, "rx_correct": int, "rx_err": int, "rx_none": int,
+    "rx_lost": int, "tx_total": int, "tx_discarded": int,
 }
 
 
@@ -212,6 +285,14 @@ def payload_bytes(value) -> int:
     if not PAYLOAD_MIN <= number <= PAYLOAD_MAX:
         raise PeerError(f"stream payload must be {PAYLOAD_MIN}-{PAYLOAD_MAX} bytes")
     return number
+
+
+def packet_type(value) -> str:
+    name = str(value).strip().lower()
+    if name not in SCO_TYPES:
+        raise PeerError("the audio packet type must be one of "
+                        + ", ".join(SCO_TYPES) + f", got {value!r}")
+    return name
 
 
 # --------------------------------------------------------------------------
@@ -309,6 +390,14 @@ class Shell:
                 return parse_status(line, self.label)
         raise PeerError(f"{self.label}: status printed no JSON line")
 
+    def sco_stats(self, timeout: float = COMMAND_TIMEOUT_S) -> dict:
+        """The controller's own (e)SCO packet counters, as one JSON line."""
+        lines = self.command("sco stats", timeout)
+        for line in reversed(lines):
+            if line.startswith("{"):
+                return parse_sco_stats(line, self.label)
+        raise PeerError(f"{self.label}: 'sco stats' printed no JSON line")
+
     def wait_ready(self, timeout: float = BOOT_TIMEOUT_S) -> None:
         """Wait for the boot notice the firmware sends once Bluetooth is up."""
         for line in self._lines(self.clock() + timeout):
@@ -360,6 +449,21 @@ def parse_status(line: str, label: str = "peer") -> dict:
     return status
 
 
+def parse_sco_stats(line: str, label: str = "peer") -> dict:
+    try:
+        stats = json.loads(line)
+    except ValueError as error:
+        raise PeerError(f"{label}: 'sco stats' is not JSON: "
+                        f"{line[:80]!r}") from error
+    if not isinstance(stats, dict):
+        raise PeerError(f"{label}: 'sco stats' is not a JSON object")
+    for key, kind in _SCO_STATS_KEYS.items():
+        value = stats.get(key)
+        if not isinstance(value, kind) or isinstance(value, bool):
+            raise PeerError(f"{label}: 'sco stats' has no valid '{key}'")
+    return stats
+
+
 def check_status(status: dict, label: str, address: str | None = None) -> dict:
     """The board runs usable firmware, Bluetooth is up, at ``address``."""
     check_firmware(status["fw"], label)
@@ -372,6 +476,21 @@ def check_status(status: dict, label: str, address: str | None = None) -> dict:
     if (status["lap"], status["uap"]) != (lap, uap):
         raise PeerError(f"{label} reports LAP {status['lap']} UAP {status['uap']}, "
                         f"which do not belong to {status['address']}")
+    return status
+
+
+def check_audio_status(status: dict, label: str) -> dict:
+    """The board's image can drive an audio link and reports what it is doing.
+
+    The version is the first thing checked, so a board on an older 1.x image
+    is told what it needs rather than being reported field by field.
+    """
+    check_firmware(status["fw"], label, MINIMUM_AUDIO_FIRMWARE)
+    for key, kind in _AUDIO_STATUS_KEYS.items():
+        value = status.get(key)
+        if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
+            raise PeerError(f"{label}: status has no valid '{key}', so this image "
+                            "cannot be driven through an audio link")
     return status
 
 
@@ -391,6 +510,36 @@ def _report_traffic(out, label: str, status: dict) -> None:
           f"{status['write_errors']} received {status['rx_bytes']} bytes "
           f"connects {status['connects']} disconnects {status['disconnects']}",
           file=out)
+
+
+def _report_link(out, status: dict) -> None:
+    """The audio link's parameters, as both boards' controllers settled on them.
+
+    `sco_interval` and `sco_retrans_window` count Bluetooth slots, so the
+    interval is given in milliseconds as well: that is the packet rate on the
+    air, which is what a capture is read against.
+    """
+    print(f"audio link: {status['sco_link']} {status['sco_pkt_type']} "
+          f"codec {status['sco_codec']}", file=out)
+    print(f"audio packets: {status['sco_tx_len']} bytes every "
+          f"{status['sco_interval']} slots "
+          f"({status['sco_interval'] * SLOT_US / 1000:.2f} ms), "
+          f"retransmission window {status['sco_retrans_window']} slots",
+          file=out)
+    print(f"audio frames: {status['sco_frame_len']} bytes over HCI", file=out)
+
+
+def _report_audio_traffic(out, label: str, status: dict, stats: dict) -> None:
+    # The frames are the firmware's own, counted on each side of the link;
+    # the packets are the controller's, which is the number a capture of the
+    # air is checked against.
+    print(f"{label} audio frames: sent {status['sco_tx_frames']} refused "
+          f"{status['sco_tx_errors']} received {status['sco_rx_frames']} "
+          f"damaged {status['sco_rx_bad']}", file=out)
+    print(f"{label} audio packets: sent {stats['tx_total']} discarded "
+          f"{stats['tx_discarded']} received {stats['rx_total']} good "
+          f"{stats['rx_correct']} errors {stats['rx_err']} missing "
+          f"{stats['rx_none']} lost {stats['rx_lost']}", file=out)
 
 
 # --------------------------------------------------------------------------
@@ -468,8 +617,15 @@ def reset(peer: Peer, out=None) -> dict:
         status = check_status(shell.status(), peer.label, peer.address)
     finally:
         shell.close()
+    expected = dict(BOOT_STATE)
+    # An image that has the audio link reports its state too, and that has to
+    # be back at boot as well: a profile left running makes the next case's
+    # `role` and `defaults` refuse. An older image reports none of these
+    # fields and is checked on the rest.
+    expected.update({key: value for key, value in AUDIO_BOOT_STATE.items()
+                     if key in status})
     wrong = [f"{key} {status[key]!r}, not {value!r}"
-             for key, value in BOOT_STATE.items() if status[key] != value]
+             for key, value in expected.items() if status[key] != value]
     if wrong:
         raise PeerError(f"{peer.label} is not in its boot state after a reset: "
                         + ", ".join(wrong))
@@ -516,6 +672,21 @@ def stream(acceptor: Peer, initiator: Peer, command: Sequence[str], *,
     out = out or sys.stderr
     period = period_ms(period)
     payload = payload_bytes(payload)
+    return _session(
+        acceptor, initiator,
+        lambda acceptor_shell, initiator_shell: _stream(
+            acceptor, acceptor_shell, initiator, initiator_shell, command,
+            period=period, payload=payload, min_writes=min_writes,
+            min_seconds=min_seconds, timeout=timeout, out=out,
+            settle_s=settle_s))
+
+
+def _session(acceptor: Peer, initiator: Peer, run):
+    """Hold both bridges open for one whole session, which resets both boards.
+
+    Opening a bridge resets its board, so a session cannot be built out of
+    several invocations: everything it does happens between these two opens.
+    """
     if acceptor.device == initiator.device:
         raise PeerError("the acceptor and the initiator are the same bridge; a "
                         "Classic link needs two boards")
@@ -523,14 +694,31 @@ def stream(acceptor: Peer, initiator: Peer, command: Sequence[str], *,
     try:
         initiator_shell = initiator.open()
         try:
-            return _stream(acceptor, acceptor_shell, initiator, initiator_shell,
-                           command, period=period, payload=payload,
-                           min_writes=min_writes, min_seconds=min_seconds,
-                           timeout=timeout, out=out, settle_s=settle_s)
+            return run(acceptor_shell, initiator_shell)
         finally:
             initiator_shell.close()
     finally:
         acceptor_shell.close()
+
+
+def _introduce(acceptor, acceptor_shell, initiator, initiator_shell,
+               out) -> tuple[dict, dict]:
+    """Read both boards, report who they are, and name the piconet's central."""
+    acceptor_shell.wait_ready()
+    initiator_shell.wait_ready()
+    acceptor_status = check_status(acceptor_shell.status(), acceptor.label,
+                                  acceptor.address)
+    initiator_status = check_status(initiator_shell.status(), initiator.label,
+                                   initiator.address)
+    if acceptor_status["address"] == initiator_status["address"]:
+        raise PeerError("both bridges lead to one board: they report the same "
+                        f"BD_ADDR {acceptor_status['address']}")
+    _report(out, acceptor.label, acceptor_status)
+    _report(out, initiator.label, initiator_status)
+    # The initiator pages, so it is the central and its LAP is on the air.
+    print(f"central LAP: {initiator_status['lap']}", file=out)
+    print(f"central UAP: {initiator_status['uap']}", file=out)
+    return acceptor_status, initiator_status
 
 
 def _release(shell: Shell) -> None:
@@ -548,20 +736,8 @@ def _release(shell: Shell) -> None:
 def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
             period, payload, min_writes, min_seconds, timeout, out,
             settle_s) -> int:
-    acceptor_shell.wait_ready()
-    initiator_shell.wait_ready()
-    acceptor_status = check_status(acceptor_shell.status(), acceptor.label,
-                                  acceptor.address)
-    initiator_status = check_status(initiator_shell.status(), initiator.label,
-                                   initiator.address)
-    if acceptor_status["address"] == initiator_status["address"]:
-        raise PeerError("both bridges lead to one board: they report the same "
-                        f"BD_ADDR {acceptor_status['address']}")
-    _report(out, acceptor.label, acceptor_status)
-    _report(out, initiator.label, initiator_status)
-    # The initiator pages, so it is the central and its LAP is on the air.
-    print(f"central LAP: {initiator_status['lap']}", file=out)
-    print(f"central UAP: {initiator_status['uap']}", file=out)
+    acceptor_status, _ = _introduce(acceptor, acceptor_shell, initiator,
+                                    initiator_shell, out)
     print(f"stream: {payload} bytes every {period} ms", file=out)
     try:
         initiator_shell.command("role initiator")
@@ -609,6 +785,139 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
     return status
 
 
+def audio(acceptor: Peer, initiator: Peer, command: Sequence[str], *,
+          sco_type: str = DEFAULT_SCO_TYPE, min_frames: int = 1,
+          min_packets: int = 1, min_seconds: float = 0.0,
+          timeout: float = 300.0, out=None,
+          settle_s: float = SETTLE_S) -> int:
+    """Hold a synchronous (eSCO) audio link up between the pair while ``command``
+    runs.
+
+    A synchronous link carries voice in reserved slots rather than the polled
+    slots an ACL link uses, so it is a different thing on the air from what
+    ``stream`` makes. ``sco_type`` asks for the packet type: ``ev3`` for a
+    link a basic-rate decoder can read, ``2ev3`` for the EDR type the stack
+    picks by itself, or ``default`` to leave the choice to the stack.
+
+    Both ports are opened first, which resets both boards, so the pair starts
+    from the firmware's boot state however an earlier case left it.
+    """
+    out = out or sys.stderr
+    wanted = packet_type(sco_type)
+    return _session(
+        acceptor, initiator,
+        lambda acceptor_shell, initiator_shell: _audio(
+            acceptor, acceptor_shell, initiator, initiator_shell, command,
+            sco_type=wanted, min_frames=min_frames, min_packets=min_packets,
+            min_seconds=min_seconds, timeout=timeout, out=out,
+            settle_s=settle_s))
+
+
+def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
+           sco_type, min_frames, min_packets, min_seconds, timeout, out,
+           settle_s) -> int:
+    acceptor_status, initiator_status = _introduce(
+        acceptor, acceptor_shell, initiator, initiator_shell, out)
+    # Both images are checked before anything is started, so a board on an
+    # older 1.x image is reported rather than refusing a command halfway
+    # through bringing a link up.
+    check_audio_status(acceptor_status, acceptor.label)
+    check_audio_status(initiator_status, initiator.label)
+    print(f"audio type asked for: {sco_type}", file=out)
+    try:
+        # The initiator runs the audio gateway, which pages, so it is the
+        # central here as it is for a stream. `role` stops the audio profile
+        # and puts the packet type back, so it goes first.
+        initiator_shell.command("role initiator", ROLE_TIMEOUT_S)
+        if sco_type != DEFAULT_SCO_TYPE:
+            # Each board states the types it allows and the link uses one
+            # both allowed, so both are told. The accepting board's choice
+            # reaches its controller when the far end pages, with no command
+            # in flight, so it has to be set before either profile starts.
+            acceptor_shell.command(f"sco type {sco_type}")
+            initiator_shell.command(f"sco type {sco_type}")
+        # The acceptor's hands-free profile has to be listening before the
+        # gateway pages it.
+        acceptor_shell.command("sco start", SCO_START_TIMEOUT_S)
+        initiator_shell.command(f"spp peer {acceptor_status['address']}")
+        initiator_shell.command("sco start", SCO_START_TIMEOUT_S)
+        linked = check_audio_status(initiator_shell.status(), initiator.label)
+        far = check_audio_status(acceptor_shell.status(), acceptor.label)
+        _check_link(linked, far, acceptor.label, initiator.label, sco_type)
+        print(f"audio link: up to {acceptor_status['address']} at "
+              f"{time.strftime('%H:%M:%SZ', time.gmtime())}", file=out)
+        _report_link(out, linked)
+        time.sleep(settle_s)
+        print("command: " + " ".join(command), file=out)
+        out.flush()
+        status, seconds = _run_command(command, timeout)
+        print(f"command exit: {status} after {seconds:.1f} s", file=out)
+        # Read the counters while the link is still up: the controller's own
+        # are a live link's, and `sco stop` ends it.
+        after_initiator = check_audio_status(initiator_shell.status(),
+                                            initiator.label)
+        after_acceptor = check_audio_status(acceptor_shell.status(),
+                                           acceptor.label)
+        initiator_stats = initiator_shell.sco_stats()
+        acceptor_stats = acceptor_shell.sco_stats()
+        initiator_shell.command("sco stop", SCO_STOP_TIMEOUT_S)
+    finally:
+        _release(initiator_shell)
+        _release(acceptor_shell)
+    _report_audio_traffic(out, initiator.label, after_initiator, initiator_stats)
+    _report_audio_traffic(out, acceptor.label, after_acceptor, acceptor_stats)
+    problems = []
+    for label, after in ((initiator.label, after_initiator),
+                         (acceptor.label, after_acceptor)):
+        if after["sco"] != SCO_UP:
+            problems.append(f"the {label} reports the audio link {after['sco']}, "
+                            "not up, after the command ran")
+    # Each side answers every frame it receives with one of its own, so both
+    # ends having received frames is what shows the link carried audio.
+    for label, after in ((initiator.label, after_initiator),
+                         (acceptor.label, after_acceptor)):
+        if after["sco_rx_frames"] < min_frames:
+            problems.append(f"the {label} received {after['sco_rx_frames']} "
+                            f"frames, fewer than the {min_frames} this test needs")
+    # The controller's packet count is what a capture of the air is checked
+    # against, so a link that was up but carried nothing is caught here.
+    for label, stats in ((initiator.label, initiator_stats),
+                         (acceptor.label, acceptor_stats)):
+        if stats["tx_total"] < min_packets:
+            problems.append(f"the {label}'s controller sent {stats['tx_total']} "
+                            f"packets, fewer than the {min_packets} this test "
+                            "needs")
+    if seconds < min_seconds:
+        problems.append(f"{command[0]} ran {seconds:.1f} s, less than the "
+                        f"{min_seconds:g} s this test needs: it stopped early")
+    if problems:
+        raise PeerError("the pair did not carry audio: " + "; ".join(problems))
+    print("pair carried audio: yes", file=out)
+    return status
+
+
+def _check_link(linked: dict, far: dict, acceptor_label: str,
+                initiator_label: str, sco_type: str) -> None:
+    """Both ends have the link up, and it is of the type that was asked for."""
+    for label, status in ((initiator_label, linked), (acceptor_label, far)):
+        if status["sco"] != SCO_UP:
+            raise PeerError(
+                f"the audio link is not up after 'sco start': the {label} "
+                f"reports sco {status['sco']} (profile {status['sco_profile']})")
+    if linked["sco_handle"] == 0:
+        raise PeerError(f"the {initiator_label} reports the audio link up with "
+                        "no connection handle")
+    on_link = SCO_TYPE_ON_LINK.get(sco_type)
+    if on_link is not None and linked["sco_pkt_type"] != on_link:
+        # A type both boards were told to ask for, and only that type, so a
+        # link of another type means the request did not reach the air; a
+        # decode test reading basic-rate payloads would silently get EDR.
+        raise PeerError(
+            f"the audio link uses {linked['sco_pkt_type']}, not the {on_link} "
+            f"both boards asked for ({linked['sco_tx_len']} bytes every "
+            f"{linked['sco_interval']} slots)")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="esp32peer.py",
                                      description=__doc__.splitlines()[0])
@@ -624,25 +933,37 @@ def main(argv: Sequence[str] | None = None) -> int:
                          help="the board's registry alias; with it, every line "
                               "to and from its shell is written to stderr "
                               "marked with that alias")
-    pair = sub.add_parser("stream")
-    pair.add_argument("--acceptor", required=True, help="the listening board's bridge")
-    pair.add_argument("--initiator", required=True,
+    # Both two-board sessions name the pair the same way; each adds the
+    # options of the traffic it makes.
+    both = argparse.ArgumentParser(add_help=False)
+    both.add_argument("--acceptor", required=True, help="the listening board's bridge")
+    both.add_argument("--initiator", required=True,
                       help="the paging board's bridge; it is the piconet central")
-    pair.add_argument("--acceptor-address", help="the acceptor's registered BD_ADDR")
-    pair.add_argument("--initiator-address", help="the initiator's registered BD_ADDR")
+    both.add_argument("--acceptor-address", help="the acceptor's registered BD_ADDR")
+    both.add_argument("--initiator-address", help="the initiator's registered BD_ADDR")
+    both.add_argument("--acceptor-alias", default="",
+                      help="the acceptor's registry alias, for the transcript")
+    both.add_argument("--initiator-alias", default="",
+                      help="the initiator's registry alias, for the transcript")
+    both.add_argument("--min-seconds", type=float, default=0.0,
+                      help="seconds the command must run for, so a capture "
+                           "that stopped early is not taken for a pass")
+    both.add_argument("--timeout", type=float, default=300.0,
+                      help="seconds the command may take")
+    pair = sub.add_parser("stream", parents=[both])
     pair.add_argument("--period", type=int, default=DEFAULT_PERIOD_MS, help="ms")
     pair.add_argument("--payload", type=int, default=DEFAULT_PAYLOAD, help="bytes")
     pair.add_argument("--min-writes", type=int, default=1,
                       help="writes the initiator must report afterwards")
-    pair.add_argument("--acceptor-alias", default="",
-                      help="the acceptor's registry alias, for the transcript")
-    pair.add_argument("--initiator-alias", default="",
-                      help="the initiator's registry alias, for the transcript")
-    pair.add_argument("--min-seconds", type=float, default=0.0,
-                      help="seconds the command must run for, so a capture "
-                           "that stopped early is not taken for a pass")
-    pair.add_argument("--timeout", type=float, default=300.0,
-                      help="seconds the command may take")
+    voice = sub.add_parser("audio", parents=[both])
+    voice.add_argument("--type", dest="sco_type", default=DEFAULT_SCO_TYPE,
+                       choices=SCO_TYPES,
+                       help="the synchronous packet type the link asks for; "
+                            "ev3 carries its payload at the basic rate")
+    voice.add_argument("--min-frames", type=int, default=1,
+                       help="frames each board must report receiving")
+    voice.add_argument("--min-packets", type=int, default=1,
+                       help="packets each controller must report sending")
     # Everything after the first -- is the command to run, untouched: its own
     # options (-U, -t, -z) must not be read as this script's.
     options = list(sys.argv[1:] if argv is None else argv)
@@ -651,20 +972,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         split = options.index("--")
         options, command = options[:split], options[split + 1:]
     args = parser.parse_args(options)
-    if args.command == "stream" and not command:
-        parser.error("stream needs the command to run after --")
-    if args.command != "stream" and command:
+    if args.command in SESSIONS and not command:
+        parser.error(f"{args.command} needs the command to run after --")
+    if args.command not in SESSIONS and command:
         parser.error(f"{args.command} takes no command after --")
     try:
-        if args.command == "stream":
-            return stream(
-                Peer(args.acceptor, "acceptor", args.acceptor_address,
-                     args.acceptor_alias),
-                Peer(args.initiator, "initiator", args.initiator_address,
-                     args.initiator_alias),
-                command, period=args.period, payload=args.payload,
-                min_writes=args.min_writes, min_seconds=args.min_seconds,
-                timeout=args.timeout)
+        if args.command in SESSIONS:
+            acceptor = Peer(args.acceptor, "acceptor", args.acceptor_address,
+                            args.acceptor_alias)
+            initiator = Peer(args.initiator, "initiator",
+                             args.initiator_address, args.initiator_alias)
+            if args.command == "audio":
+                return audio(acceptor, initiator, command,
+                             sco_type=args.sco_type,
+                             min_frames=args.min_frames,
+                             min_packets=args.min_packets,
+                             min_seconds=args.min_seconds,
+                             timeout=args.timeout)
+            return stream(acceptor, initiator, command, period=args.period,
+                          payload=args.payload, min_writes=args.min_writes,
+                          min_seconds=args.min_seconds, timeout=args.timeout)
         peer = Peer(args.device, args.role, args.address, args.alias)
         if args.command == "identify":
             identify(peer)

@@ -23,6 +23,16 @@ def _pair(**options):
     return acceptor, initiator
 
 
+def _audio_pair(acceptor_class=FakePeerFirmware, initiator_class=FakePeerFirmware,
+                **options):
+    """A pair whose images have the audio link, which a later image added."""
+    version = esp32peer.MINIMUM_AUDIO_FIRMWARE
+    acceptor = acceptor_class(ACCEPTOR_ADDRESS, version=version, **options)
+    initiator = initiator_class(INITIATOR_ADDRESS, version=version, **options)
+    acceptor.link(initiator)
+    return acceptor, initiator
+
+
 def _peers(acceptor, initiator):
     open_one = opener({ACCEPTOR: acceptor, INITIATOR: initiator})
     return (esp32peer.Peer(ACCEPTOR, "acceptor", ACCEPTOR_ADDRESS,
@@ -383,6 +393,218 @@ class StreamTests(unittest.TestCase):
                              timeout=0.5, settle_s=0.0, min_writes=1)
 
 
+class AudioTests(unittest.TestCase):
+    """The eSCO session: a voice link of a chosen packet type, and its counters."""
+
+    def _audio(self, command=TRUE, pair=None, **options):
+        acceptor_firmware, initiator_firmware = pair or _audio_pair()
+        acceptor, initiator = _peers(acceptor_firmware, initiator_firmware)
+        report = io.StringIO()
+        status = esp32peer.audio(acceptor, initiator, command, out=report,
+                                settle_s=0.0, **options)
+        return status, report.getvalue(), acceptor_firmware, initiator_firmware
+
+    def test_the_link_comes_up_the_command_runs_and_both_boards_are_released(self):
+        status, report, acceptor, initiator = self._audio(min_frames=10,
+                                                          min_packets=10)
+        self.assertEqual(0, status)
+        self.assertIn("central LAP: e9c5ba", report)
+        self.assertIn("central UAP: 0d", report)
+        self.assertIn(f"audio link: up to {ACCEPTOR_ADDRESS}", report)
+        self.assertIn("command exit: 0", report)
+        self.assertIn("pair carried audio: yes", report)
+        self.assertIn("initiator audio frames: sent 50 refused 0 received 50 "
+                      "damaged 0", report)
+        self.assertIn("acceptor audio packets: sent 50 discarded 0 received 50 "
+                      "good 50 errors 0 missing 0 lost 0", report)
+        # The initiator runs the gateway, which pages, so it is the central.
+        self.assertIn("role initiator", initiator.commands)
+        self.assertIn(f"spp peer {ACCEPTOR_ADDRESS}", initiator.commands)
+        self.assertIn("sco start", acceptor.commands)
+        # Both left in the firmware's boot state: one reset for the open, one
+        # for the release.
+        self.assertEqual(2, acceptor.resets)
+        self.assertEqual(2, initiator.resets)
+        self.assertEqual("off", acceptor.sco)
+        self.assertEqual("none", initiator.sco_profile)
+
+    def test_the_stacks_own_choice_is_a_2_ev3_link(self):
+        _status, report, _acceptor, initiator = self._audio()
+        self.assertIn("audio type asked for: default", report)
+        self.assertIn("audio link: esco 2-ev3 codec cvsd", report)
+        self.assertIn("audio packets: 60 bytes every 12 slots (7.50 ms), "
+                      "retransmission window 2 slots", report)
+        self.assertIn("audio frames: 120 bytes over HCI", report)
+        # Nothing was asked for, so nothing was set.
+        self.assertNotIn("sco type default", initiator.commands)
+
+    def test_ev3_is_asked_for_on_both_boards_before_either_profile_starts(self):
+        _status, report, acceptor, initiator = self._audio(sco_type="ev3")
+        self.assertIn("audio type asked for: ev3", report)
+        self.assertIn("audio link: esco ev3 codec cvsd", report)
+        self.assertIn("audio packets: 30 bytes every 6 slots (3.75 ms), "
+                      "retransmission window 4 slots", report)
+        # The accepting board's choice reaches its controller when the far end
+        # pages, so it has to be set before any profile is running.
+        for firmware in (acceptor, initiator):
+            self.assertLess(firmware.commands.index("sco type ev3"),
+                            firmware.commands.index("sco start"))
+        # `role` puts the packet type back, so it comes before the choice.
+        self.assertLess(initiator.commands.index("role initiator"),
+                        initiator.commands.index("sco type ev3"))
+
+    def test_a_type_only_one_board_asked_for_does_not_open_a_link(self):
+        # The link uses a type both boards allowed, and `default` does not
+        # allow plain EV3, so this is the failure a one-sided choice gives.
+        acceptor, initiator = _audio_pair()
+        acceptor.refuse["sco type ev3"] = "test: this board kept the default"
+        with self.assertRaisesRegex(esp32peer.PeerError,
+                                    "'sco type ev3' refused"):
+            self._audio(pair=(acceptor, initiator), sco_type="ev3")
+
+    def test_a_link_of_another_type_than_the_one_asked_for_fails(self):
+        class Stubborn(FakePeerFirmware):
+            def _sco_up(self, kind):  # the choice did not reach the air
+                super()._sco_up("2ev3")
+
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            r"the audio link uses 2-ev3, not the ev3 both boards asked for "
+            r"\(60 bytes every 12 slots\)"
+        ):
+            self._audio(pair=_audio_pair(initiator_class=Stubborn),
+                        sco_type="ev3")
+
+    def test_a_packet_type_that_is_not_one_of_the_three_is_refused(self):
+        for value in ("", "EV4", "3ev3", "ev3 2ev3"):
+            with self.subTest(value), self.assertRaisesRegex(
+                esp32peer.PeerError, "audio packet type must be one of"
+            ):
+                esp32peer.audio(*_peers(*_audio_pair()), TRUE, sco_type=value,
+                                out=io.StringIO())
+
+    def test_an_image_without_the_audio_link_is_told_what_it_needs(self):
+        acceptor, initiator = _audio_pair()
+        initiator.version = "utesp-1.3.0"
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "initiator runs utesp-1.3.0, and the harness needs utesp-1.4.0"
+        ):
+            self._audio(pair=(acceptor, initiator))
+        # It failed before anything was started on either board.
+        self.assertNotIn("sco start", acceptor.commands)
+
+    def test_an_image_whose_status_lacks_an_audio_field_names_it(self):
+        class Partial(FakePeerFirmware):
+            def _audio_status(self):
+                status = super()._audio_status()
+                del status["sco_interval"]
+                return status
+
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "acceptor: status has no valid 'sco_interval', so this image "
+            "cannot be driven through an audio link"
+        ):
+            self._audio(pair=_audio_pair(acceptor_class=Partial))
+
+    def test_an_acceptor_that_is_not_listening_is_reported(self):
+        acceptor, initiator = _audio_pair()
+        acceptor.refuse["sco start"] = "audio link unavailable: test"
+        with self.assertRaisesRegex(esp32peer.PeerError, "'sco start' refused"):
+            self._audio(pair=(acceptor, initiator))
+        # The initiator is still left in its boot state.
+        self.assertEqual(esp32peer.BOOT_ROLE, initiator.role)
+        self.assertEqual(2, initiator.resets)
+
+    def test_a_link_that_did_not_come_up_is_reported(self):
+        acceptor = FakePeerFirmware(ACCEPTOR_ADDRESS,
+                                    version=esp32peer.MINIMUM_AUDIO_FIRMWARE)
+        initiator = FakePeerFirmware(INITIATOR_ADDRESS,
+                                     version=esp32peer.MINIMUM_AUDIO_FIRMWARE)
+        # Not linked to each other, so the page gets no answer.
+        with self.assertRaisesRegex(esp32peer.PeerError,
+                                    "refused: service level connect timed out"):
+            self._audio(pair=(acceptor, initiator))
+
+    def test_a_link_that_reports_up_with_no_handle_is_caught(self):
+        class Handleless(FakePeerFirmware):
+            def _sco_up(self, kind):
+                super()._sco_up(kind)
+                self.sco_handle = 0
+
+        with self.assertRaisesRegex(esp32peer.PeerError,
+                                    "audio link up with no connection handle"):
+            self._audio(pair=_audio_pair(initiator_class=Handleless))
+
+    def test_a_link_that_carried_too_few_frames_fails(self):
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "the acceptor received 50 frames, fewer than the 500 this test needs"
+        ):
+            self._audio(min_frames=500)
+
+    def test_a_controller_that_sent_too_few_packets_fails(self):
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "controller sent 50 packets, fewer than the 5000 this test needs"
+        ):
+            self._audio(min_packets=5000)
+
+    def test_a_command_that_stopped_early_fails(self):
+        with self.assertRaisesRegex(esp32peer.PeerError, "it stopped early"):
+            self._audio(min_seconds=30)
+
+    def test_the_counters_are_read_while_the_link_is_still_up(self):
+        # The controller's counters belong to a live link, and `sco stop` ends
+        # it, so a run whose numbers were read afterwards would read zero.
+        _status, _report, _acceptor, initiator = self._audio(min_frames=10)
+        self.assertLess(initiator.commands.index("sco stats"),
+                        initiator.commands.index("sco stop"))
+
+    def test_counters_that_are_not_json_are_reported(self):
+        for line, reason in (("not json", "'sco stats' is not JSON"),
+                             ("[1, 2]", "'sco stats' is not a JSON object"),
+                             ('{"tx_total": 4}',
+                              "'sco stats' has no valid 'rx_total'")):
+            with self.subTest(line), self.assertRaisesRegex(
+                esp32peer.PeerError, reason
+            ):
+                esp32peer.parse_sco_stats(line, "acceptor")
+
+    def test_a_reset_that_left_the_audio_profile_running_is_reported(self):
+        # A board whose profile is still running refuses the next case's
+        # `role` and `defaults`, so a release has to leave it away.
+        class Stale(FakePeerFirmware):
+            def boot(self):
+                lines = super().boot()
+                self.sco_profile = "ag"
+                self.sco = "ready"
+                return lines
+
+        acceptor, initiator = _audio_pair(acceptor_class=Stale)
+        peer, _ = _peers(acceptor, initiator)
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "not in its boot state after a reset: sco 'ready', not 'off', "
+            "sco_profile 'ag', not 'none'"
+        ):
+            esp32peer.reset(peer, io.StringIO())
+
+    def test_the_commands_output_is_not_touched(self):
+        script = "import sys; sys.stdout.write('systime=1 ch= 1\\n')"
+        acceptor_firmware, initiator_firmware = _audio_pair()
+        acceptor, initiator = _peers(acceptor_firmware, initiator_firmware)
+        report = io.StringIO()
+        with _captured_stdout() as captured:
+            esp32peer.audio(acceptor, initiator, (sys.executable, "-c", script),
+                            out=report, settle_s=0.0)
+            written = captured()
+        self.assertEqual("systime=1 ch= 1\n", written)
+        self.assertNotIn("audio link", written)
+        self.assertIn("audio link: esco", report.getvalue())
+
+
 class MainTests(unittest.TestCase):
     """The command line: everything after -- belongs to the command."""
 
@@ -418,6 +640,35 @@ class MainTests(unittest.TestCase):
         self.assertEqual(1, result.returncode)
         self.assertNotIn("Traceback", result.stderr)
         self.assertIn("error: /dev/absent-peer does not exist", result.stderr)
+
+    def test_audio_without_a_command_is_a_usage_error(self):
+        with _captured_stderr() as captured:
+            with self.assertRaises(SystemExit) as raised:
+                esp32peer.main(["audio", "--acceptor", ACCEPTOR,
+                                "--initiator", INITIATOR])
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("audio needs the command to run after --", captured())
+
+    def test_a_packet_type_the_firmware_has_no_name_for_is_a_usage_error(self):
+        with _captured_stderr() as captured:
+            with self.assertRaises(SystemExit) as raised:
+                esp32peer.main(["audio", "--acceptor", ACCEPTOR,
+                                "--initiator", INITIATOR, "--type", "ev4",
+                                "--", "true"])
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("--type", captured())
+
+    def test_audio_reaches_the_boards_with_the_commands_own_options_intact(self):
+        # -U and -t belong to ubertooth-rx; a missing bridge then ends it with
+        # an error, not a usage error.
+        with _captured_stderr() as captured:
+            code = esp32peer.main([
+                "audio", "--acceptor", "/dev/absent-a",
+                "--initiator", "/dev/absent-b", "--type", "ev3",
+                "--min-frames", "100", "--min-packets", "100", "--",
+                "ubertooth-rx", "-U", "f" * 32, "-t", "5"])
+        self.assertEqual(1, code)
+        self.assertIn("error: /dev/absent-a does not exist", captured())
 
     def test_a_command_after_an_identify_is_refused(self):
         with _captured_stderr():

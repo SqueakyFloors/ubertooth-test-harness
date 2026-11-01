@@ -116,19 +116,48 @@ answers into the run's transcript.
 
 Two ESP32-WROOM-32E boards (ESP32-D0WD-V3, 4 MB flash) are the Classic
 Bluetooth pair, the BR/EDR answer to the DKs. They hold a Serial Port Profile
-link and push data across it, so `ubertooth-rx`, `ubertooth-rx -l`/`-u`,
-`ubertooth-follow`, and `ubertooth-btbr` have BR/EDR traffic from a known
-address on demand, with no third-party device in the capture.
+link and push data across it, and they hold a synchronous (eSCO) voice link,
+so `ubertooth-rx`, `ubertooth-rx -l`/`-u`, `ubertooth-follow`, and
+`ubertooth-btbr` have BR/EDR traffic from a known address on demand, with no
+third-party device in the capture.
 
 One image holds both roles:
 
 | Role | What it does |
 |---|---|
-| `acceptor` (the boot role) | discoverable and connectable, with an SPP server listening |
-| `initiator` | looks the peer's SPP channel up over SDP, connects, and streams a counted payload |
+| `acceptor` (the boot role) | discoverable and connectable, with an SPP server listening; for an audio link, the hands-free unit, which waits to be paged |
+| `initiator` | looks the peer's SPP channel up over SDP, connects, and streams a counted payload; for an audio link, the audio gateway, which pages |
 
 The link is opened with no security, so it needs no pairing and a capture holds
 only the SDP lookup, the connection, and the data.
+
+#### The audio link
+
+A synchronous link carries voice in reserved slots rather than the polled slots
+an ACL link uses, so it looks different on the air and a decoder handles it
+separately. The pair opens one over the Hands-Free Profile, which is the only
+way ESP-IDF gives an application a synchronous link, and the gateway pages, so
+the initiator is still the piconet's leader and its LAP is still the one on the
+air.
+
+The packet type is chosen, on both boards, because a link uses a type both of
+them allowed:
+
+| Type | What the link carries |
+|---|---|
+| EV3 | the payload at the basic rate, which a basic-rate decoder can read: 30 bytes every 6 slots, with a 4-slot retransmission window |
+| 2-EV3 | the same payload as EDR, which the stack asks for by itself: 60 bytes every 12 slots |
+
+An EV3 link halves the payload per packet and halves the interval to carry the
+same 64 kbit/s, so it is about twice the packet rate and the busiest traffic
+the pair can make. What a capture reads from either is the packet types, the
+timing, and the count: the audio pattern the firmware sends does not reach the
+air as it was sent, because the controller codes the samples to CVSD on the
+way out.
+
+A board reports what the link settled on, and its own and its controller's
+counters, from `utesp-1.4.0` onwards, which is the image the audio session
+asks for; every other command works on any 1.x image.
 
 Registered with the bridge serial and the BD_ADDR its `status` reports (the
 factory MAC plus two in the last byte, so it too is fixed per board). Those
@@ -164,7 +193,8 @@ the run record. A peer is leased like a board, under `esp32-<bridge serial>`.
 
 By hand, [`scripts/lab/peer`](../scripts/lab/README.md) names the boards by
 their registry aliases, holds them, and runs that module, which is how a
-capture against the pair is taken outside a run.
+capture against the pair is taken outside a run: `peer stream` for the data
+link and `peer audio` for the voice link.
 
 ### Acroname USBHub3+
 
@@ -273,7 +303,7 @@ nothing in the harness can catch it.
 |---|---|---|---|---|
 | Ubertooth One | the [fork's](https://github.com/SqueakyFloors/ubertooth) `firmware/bluetooth_rxtx` | the resolved commit under test | `arm-none-eabi-gcc` | `ubertooth-dfu` |
 | nRF52840 DK | [`firmware/nrf52840dk`](../firmware/nrf52840dk/README.md) | `utdk-1.3.0` | nRF Connect SDK v3.4.1 and its toolchain bundle | `nrfutil device program` |
-| ESP32 peer | [`firmware/esp32-classic-peer`](../firmware/esp32-classic-peer/README.md) | `utesp-1.3.0` | ESP-IDF v5.5.6 | `esptool`, through `idf.py flash` |
+| ESP32 peer | [`firmware/esp32-classic-peer`](../firmware/esp32-classic-peer/README.md) | `utesp-1.4.0` | ESP-IDF v5.5.6 | `esptool`, through `idf.py flash` |
 
 Each firmware README holds the full build and flash procedure, the pinned
 toolchain versions, and the shell command reference. Images are built outside
@@ -637,6 +667,11 @@ Two protocol facts that look like harness or tool faults and are not:
 - **A survey's UAP is a guess** and is often wrong when few packets have been
   heard. Take the UAP from the board's `status` or the registry and pass it
   with `-u`, rather than trusting a short survey.
+- **An audio link's packets carry their type in the header, which needs no
+  clock.** `ubertooth-rx` has not been seen to settle on this pair's clock from
+  a voice link, with or without the data stream alongside, so a follow-mode
+  capture of one is not something to count on yet; the packet type, the timing,
+  and the count are read from the records a capture writes without it.
 
 ## A worked bench layout
 

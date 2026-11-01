@@ -20,6 +20,30 @@ BOOT_LOG = (
 )
 
 
+# What a link of each packet type settles on, as both were measured on the
+# bench (firmware README, "What the link settled on"). An EV3 packet carries
+# half the payload of a 2-EV3, so the interval halves to keep the same rate.
+LINKS = {
+    "ev3": {"sco_pkt_type": "ev3", "sco_tx_len": 30, "sco_rx_len": 30,
+            "sco_interval": 6, "sco_retrans_window": 4, "sco_frame_len": 60},
+    "2ev3": {"sco_pkt_type": "2-ev3", "sco_tx_len": 60, "sco_rx_len": 60,
+             "sco_interval": 12, "sco_retrans_window": 2,
+             "sco_frame_len": 120},
+}
+
+
+def negotiated_type(mine, theirs):
+    """The type a link between two boards uses, or None if there is none.
+
+    Each board states the types it allows and the link uses one both allowed,
+    so two boards naming different types have nothing in common. `default`
+    allows what the stack's table does, which is 2-EV3.
+    """
+    allowed = [{esp32peer.DEFAULT_SCO_TYPE: "2ev3"}.get(asked, asked)
+               for asked in (mine, theirs)]
+    return allowed[0] if allowed[0] == allowed[1] else None
+
+
 class FakePeerFirmware:
     def __init__(self, address="C8:85:41:2A:1B:2A",
                  version=esp32peer.MINIMUM_FIRMWARE, start_failure=""):
@@ -34,6 +58,12 @@ class FakePeerFirmware:
         # writes this board reports per `stream on`; the bench numbers are
         # much larger, so a test asks for small floors.
         self.writes_per_stream = 100
+        # Frames, and controller packets, one audio link stands for; the
+        # bench numbers are in the thousands.
+        self.frames_per_link = 50
+        # The packet types these controllers support, as the firmware reports
+        # them: HV1, HV3, EV3, EV4, and EV5, and no bit forbidding an EDR type.
+        self.sco_types_supported = "003d"
         self.peer_firmware = None
         self.defaults()
 
@@ -53,6 +83,32 @@ class FakePeerFirmware:
         self.rx_bytes = 0
         self.connects = 0
         self.disconnects = 0
+        self.sco_profile = "none"
+        self.sco_type = esp32peer.DEFAULT_SCO_TYPE
+        self.sco_tx_frames = 0
+        self.sco_tx_errors = 0
+        self.sco_rx_frames = 0
+        self.sco_rx_bad = 0
+        self.sco_packets = 0
+        self._audio_link_down()
+
+    def _audio_link_down(self):
+        """Everything the audio link itself sets, with the counters left alone."""
+        self.sco = "ready" if self.sco_profile != "none" else "off"
+        self.sco_link = "none"
+        self.sco_pkt_type = "none"
+        self.sco_codec = "none"
+        self.sco_handle = 0
+        self.sco_frame_len = 0
+        self.sco_tx_len = 0
+        self.sco_rx_len = 0
+        self.sco_interval = 0
+        self.sco_retrans_window = 0
+
+    def has_audio(self) -> bool:
+        """Whether this image has the audio link at all, as its version says."""
+        return (esp32peer.version_parts(self.version)
+                >= esp32peer.version_parts(esp32peer.MINIMUM_AUDIO_FIRMWARE))
 
     def link(self, other: "FakePeerFirmware") -> None:
         """Let `spp start` on this board connect to ``other``."""
@@ -70,9 +126,35 @@ class FakePeerFirmware:
                                f"{self.start_failure}"]
         return [*BOOT_LOG, f"utesp: {self.version} ready"]
 
+    def sco_stats(self) -> dict:
+        """The controller's own packet counters, as `sco stats` answers."""
+        return {"rx_total": self.sco_packets, "rx_correct": self.sco_packets,
+                "rx_err": 0, "rx_none": 0, "rx_lost": 0,
+                "tx_total": self.sco_packets, "tx_discarded": 0}
+
     def status(self) -> dict:
         lap, uap = esp32peer.address_parts(self.address)
         nap = "".join(self.address.split(":")[:2]).lower()
+        if self.has_audio():
+            return {**self._spp_status(lap, uap, nap), **self._audio_status()}
+        return self._spp_status(lap, uap, nap)
+
+    def _audio_status(self) -> dict:
+        return {
+            "sco": self.sco, "sco_profile": self.sco_profile,
+            "sco_codec": self.sco_codec, "sco_handle": self.sco_handle,
+            "sco_frame_len": self.sco_frame_len,
+            "sco_tx_frames": self.sco_tx_frames,
+            "sco_tx_errors": self.sco_tx_errors,
+            "sco_rx_frames": self.sco_rx_frames, "sco_rx_bad": self.sco_rx_bad,
+            "sco_type": self.sco_type, "sco_link": self.sco_link,
+            "sco_pkt_type": self.sco_pkt_type, "sco_tx_len": self.sco_tx_len,
+            "sco_rx_len": self.sco_rx_len, "sco_interval": self.sco_interval,
+            "sco_retrans_window": self.sco_retrans_window,
+            "sco_types_supported": self.sco_types_supported,
+        }
+
+    def _spp_status(self, lap, uap, nap) -> dict:
         return {
             "role": self.role, "fw": self.version, "bt": not self.start_failure,
             "address": self.address, "lap": lap, "uap": uap, "nap": nap,
@@ -106,6 +188,10 @@ class FakePeerFirmware:
             return self._spp(words[1:])
         if words[:1] == ["stream"]:
             return self._stream(words[1:])
+        if words[:1] == ["sco"]:
+            if not self.has_audio():
+                return ["ERR unknown command 'sco'"]
+            return self._sco(words[1:])
         if words == ["defaults"]:
             self.defaults()
             return ["OK"]
@@ -116,6 +202,10 @@ class FakePeerFirmware:
             return ["ERR role must be acceptor or initiator"]
         self.stream = False
         self._drop()
+        # The audio link belongs to a role, so a role change takes it and the
+        # profile down and puts the packet type back.
+        self._sco_stop()
+        self.sco_type = esp32peer.DEFAULT_SCO_TYPE
         self.role = wanted
         self.spp_server = wanted == esp32peer.BOOT_ROLE
         return ["OK"]
@@ -190,6 +280,76 @@ class FakePeerFirmware:
             self.payload = int(args[0])
             return ["OK"]
         return [f"ERR unknown stream command '{command}'"]
+
+    # -- the audio link -----------------------------------------------------
+
+    def _sco(self, words):
+        if not words:
+            return ["ERR usage: sco <start|stop|stats|type>"]
+        command, args = words[0], words[1:]
+        if command == "type" and args:
+            if args[0] not in esp32peer.SCO_TYPES:
+                return ["ERR packet type must be ev3, 2ev3 or default"]
+            if self.sco_profile != "none":
+                return ['ERR stop the audio profile with "sco stop" before '
+                        "choosing a packet type"]
+            self.sco_type = args[0]
+            return ["OK"]
+        if command == "start":
+            return self._sco_start()
+        if command == "stop":
+            self._sco_stop()
+            return ["OK"]
+        if command == "stats":
+            return [json.dumps(self.sco_stats(), separators=(",", ":")), "OK"]
+        return [f"ERR unknown sco command '{command}'"]
+
+    def _sco_start(self):
+        if self.role == esp32peer.BOOT_ROLE:
+            # The hands-free unit starts its profile and waits to be paged.
+            self.sco_profile = "hf"
+            if self.sco == "off":
+                self.sco = "ready"
+            return ["OK"]
+        self.sco_profile = "ag"
+        far = self.peer_firmware
+        if not self.peer or far is None or far.address != self.peer:
+            self.sco_profile = "none"
+            self._audio_link_down()
+            return ["ERR service level connect timed out"]
+        if far.sco_profile != "hf":
+            # Nothing is listening for an audio link on the far board.
+            self.sco_profile = "none"
+            self._audio_link_down()
+            return ["ERR audio connect timed out"]
+        kind = negotiated_type(self.sco_type, far.sco_type)
+        if kind is None:
+            self.sco_profile = "none"
+            self._audio_link_down()
+            return ["ERR the controller did not open a synchronous link"]
+        self._sco_up(kind)
+        far._sco_up(kind)
+        return [f"utesp: sco connected, {LINKS[kind]['sco_pkt_type']}", "OK"]
+
+    def _sco_up(self, kind):
+        self.sco = "on"
+        self.sco_link = "esco"
+        self.sco_codec = "cvsd"
+        self.sco_handle = 129
+        for field, value in LINKS[kind].items():
+            setattr(self, field, value)
+        # One link stands for the whole run's audio: each side answers every
+        # frame it receives with one of its own, so both counters move.
+        self.sco_tx_frames += self.frames_per_link
+        self.sco_rx_frames += self.frames_per_link
+        self.sco_packets += self.frames_per_link
+
+    def _sco_stop(self):
+        far = self.peer_firmware
+        if self.sco == "on" and far is not None and far.sco == "on":
+            far._audio_link_down()
+        self.sco_profile = "none"
+        self._audio_link_down()
 
 
 class FakePeerPort:
