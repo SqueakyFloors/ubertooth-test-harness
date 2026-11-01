@@ -39,12 +39,12 @@ The checks:
   ``--after-update-ms`` or more after its own CONNECT_IND, which is long
   enough that the central's parameter update has taken effect. The last
   connection in the file is left out of that one, because the capture
-  window, not the follow, is what ends it; ``--max-quiet-ms`` is what keeps
-  that exemption honest, and it asks two things of the file: that no more
-  than that long passed between the pair's last good packet and the last
-  record of any kind (a board whose follow died goes back to hunting and
-  keeps recording advertising packets), and that the records span all but
-  that long of the ``--capture-ms`` window the capture was given. With
+  window, not the follow, is what ends it. Two checks keep that exemption
+  honest, and each reads only the file's own clock: ``--max-quiet-ms``, how
+  long the capture may go on recording after the pair's last good packet (a
+  board whose follow died goes back to hunting and keeps recording
+  advertising packets), and ``--min-span-ms``, how long the records must
+  span, which the caller works out from the window it gave the capture. With
   ``--require-announced``, no packet may be on an access address that no
   CONNECT_IND in the capture handed out: in a follow the board writes the
   address it synchronized on into each record, so such a packet is a
@@ -330,8 +330,8 @@ class Result:
     span_ms: int | None = None
     # The first record's time, which every other time is reported against.
     start_micros: int | None = None
-    # How long before the end of the capture window the last packet with a
-    # correct CRC arrived. None where it was not asked for.
+    # How long the capture went on recording after the pair's last packet
+    # with a correct CRC. None where it was not asked for.
     quiet_ms: int | None = None
     connection_info: str = "not looked for"
     connection_info_options: int = 0
@@ -347,8 +347,8 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
           min_connections: int = 0, min_connection_packets: int = 0,
           after_update_ms: int | None = None,
           require_announced: bool = False,
-          capture_ms: int | None = None,
-          max_quiet_ms: int | None = None) -> tuple[str, Result]:
+          max_quiet_ms: int | None = None,
+          min_span_ms: int | None = None) -> tuple[str, Result]:
     result = Result()
     try:
         file_format, link_type, timed = read_timed_records(data)
@@ -483,15 +483,16 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
     # file announces would look the same as a window that ended: that
     # connection is the one the post-update check has to excuse, because the
     # window, not the follow, usually ends it.
+    # Both of these are measured on the file's own clock only. The window's
+    # start is not in the file: the first record arrives some unknown time
+    # after the command did, so nothing here works the window's end out from
+    # it.
     if max_quiet_ms is not None:
         latest = max((item.last_valid_micros for item in result.connections
                       if item.last_valid_micros is not None), default=None)
-        # Measured against the last record in the file, not against the
-        # window's end: the file says when the capture stopped writing, while
-        # the end of the window can only be guessed from the first record,
-        # which arrives some unknown time after the command started. A board
-        # whose follow died goes back to hunting and writes advertising
-        # packets, so records keep coming after the last one of ours.
+        # A board whose follow died goes back to hunting and writes
+        # advertising packets, so records keep coming after the last one of
+        # the pair's.
         if times and latest is not None:
             result.quiet_ms = (max(times) - latest) // 1000
             if result.quiet_ms > max_quiet_ms:
@@ -500,17 +501,16 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
                     "after the last packet with a correct CRC of the pair's "
                     f"connections, more than {max_quiet_ms} ms, so the follow "
                     "stopped before the capture did")
-        # ...and the capture has to have been recording for its whole window,
-        # or it stopped hearing everything rather than just our connections.
-        # The window's own length is the only thing the file cannot say, so
-        # the caller passes it; a first record that arrives late costs the
-        # same tolerance.
-        if capture_ms is not None and result.span_ms is not None:
-            if result.span_ms < capture_ms - max_quiet_ms:
-                result.problems.append(
-                    f"the capture holds {result.span_ms} ms of records of a "
-                    f"{capture_ms} ms window, so it stopped recording more "
-                    f"than {max_quiet_ms} ms before the window ran out")
+    # ...and the records have to cover most of the window, or the capture
+    # stopped hearing everything rather than just the pair's connections.
+    if min_span_ms is not None:
+        if result.span_ms is None or result.span_ms < min_span_ms:
+            held = (f"{result.span_ms} ms" if result.span_ms is not None
+                    else "no timed records")
+            result.problems.append(
+                f"the capture holds {held} of records, less than "
+                f"{min_span_ms} ms, so it stopped recording well before its "
+                "window ran out")
     if require_announced and result.unannounced:
         result.problems.append(
             "packet(s) on an access address no CONNECT_IND in this capture "
@@ -597,12 +597,13 @@ def main(argv=None) -> int:
     parser.add_argument("--require-announced", action="store_true",
                         help="refuse a packet on an access address no CONNECT_IND "
                              "in the capture handed out")
-    parser.add_argument("--capture-ms", type=int,
-                        help="how long the capture was asked to run, which "
-                             "--max-quiet-ms is measured against")
     parser.add_argument("--max-quiet-ms", type=int,
-                        help="how long before the end of that window the last "
-                             "packet with a correct CRC may arrive")
+                        help="how long the capture may go on recording after "
+                             "the pair's last packet with a correct CRC")
+    parser.add_argument("--min-span-ms", type=int,
+                        help="how long the file's records must span, which the "
+                             "caller works out from the window it gave the "
+                             "capture")
     args = parser.parse_args(argv)
     try:
         with open(args.file, "rb") as stream:
@@ -621,7 +622,7 @@ def main(argv=None) -> int:
         min_connection_packets=args.min_connection_packets,
         after_update_ms=args.after_update_ms,
         require_announced=args.require_announced,
-        capture_ms=args.capture_ms, max_quiet_ms=args.max_quiet_ms,
+        max_quiet_ms=args.max_quiet_ms, min_span_ms=args.min_span_ms,
     )
     span = "unknown" if result.span_ms is None else f"{result.span_ms / 1000:.1f}s"
     print(f"capture: {header}, {result.records} records, span {span}")

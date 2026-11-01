@@ -156,14 +156,20 @@ MIN_CONNECTION_PACKETS = 3
 # few connection events after that, so 2 s is past it either way. A packet
 # that late with a correct CRC is a follow that survived the update.
 AFTER_UPDATE_MS = 2000
-# How long before the end of the window the capture's last good packet may
-# arrive. The last connection in a capture cannot be asked for a packet past
-# the update, because the window is what ends it, so something has to say
-# that the window is what ended the capture's traffic too, and not a follow
-# that died. One of the central's cycles is generous: during a connection the
-# central writes every WRITE_PERIOD_MS, and a reconnection costs a fraction
-# of a second.
-MAX_QUIET_MS = CYCLE_MS
+# The last connection in a capture cannot be asked for a packet past the
+# update, because the window is what ends it. So two other things have to
+# say that the window is what ended the capture's traffic too, and not a
+# follow that died.
+#
+# How long the capture may go on recording after the last packet it heard of
+# the pair. Two of the central's cycles: the Ubertooth is not expected to
+# catch every reconnection (MIN_CONNECTIONS says so), and missing the last
+# one costs a whole connection's worth of silence.
+MAX_QUIET_MS = 2 * CYCLE_MS
+# How much of its window the capture's records must span. A board hunting on
+# one advertising channel records something within a cycle of starting, and
+# the pair itself advertises at every reconnection.
+SPAN_ALLOWANCE_MS = CYCLE_MS
 # What the board must read right after the capture: back in idle mode, so
 # nothing of the follow is left running.
 IDLE_AFTER_CAPTURE = r"(?m)^Now in idle mode\b"
@@ -442,8 +448,8 @@ def _follow_end_case(serial, central, peripheral, seconds, *, interval_ms,
                 "--min-connections", str(MIN_CONNECTIONS),
                 "--min-connection-packets", str(MIN_CONNECTION_PACKETS),
                 "--after-update-ms", str(AFTER_UPDATE_MS),
-                "--capture-ms", str(int(seconds) * 1000),
                 "--max-quiet-ms", str(MAX_QUIET_MS),
+                "--min-span-ms", str(int(seconds) * 1000 - SPAN_ALLOWANCE_MS),
                 "--require-announced"]
 
     steps = (

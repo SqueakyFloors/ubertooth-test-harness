@@ -335,7 +335,7 @@ class RepeatedConnectionTests(unittest.TestCase):
         times = [0, 4_000_000, 5_200_000, 6_400_000, 12_000_000, 18_000_000]
         data = pcapng(records, times=times, tsresol=9)
         _header, result = self.check(data, after_update_ms=2000,
-                                     capture_ms=18000, max_quiet_ms=5000)
+                                     max_quiet_ms=5000)
         self.assertEqual(11600, result.quiet_ms)
         self.assertEqual(
             ["the capture went on recording for 11600 ms after the last packet "
@@ -350,11 +350,11 @@ class RepeatedConnectionTests(unittest.TestCase):
         _header, result = self.check(
             pcapng(records, times=times, tsresol=9), min_connections=2,
             min_connection_packets=2, after_update_ms=2000,
-            capture_ms=18000, max_quiet_ms=5000)
+            max_quiet_ms=5000, min_span_ms=13000)
         self.assertEqual(0, result.quiet_ms)
         self.assertEqual(
-            ["the capture holds 9200 ms of records of a 18000 ms window, so it "
-             "stopped recording more than 5000 ms before the window ran out"],
+            ["the capture holds 9200 ms of records, less than 13000 ms, so it "
+             "stopped recording well before its window ran out"],
             result.problems)
 
     def test_a_capture_recorded_to_the_end_of_its_window_passes(self):
@@ -362,7 +362,7 @@ class RepeatedConnectionTests(unittest.TestCase):
         _header, result = self.check(
             pcapng(records, times=times, tsresol=9), min_connections=2,
             min_connection_packets=2, after_update_ms=2000,
-            capture_ms=10000, max_quiet_ms=5000)
+            max_quiet_ms=5000, min_span_ms=5000)
         self.assertEqual([], result.problems)
         self.assertEqual(0, result.quiet_ms)
 
@@ -375,7 +375,7 @@ class RepeatedConnectionTests(unittest.TestCase):
         _header, result = self.check(
             pcapng(records, times=times, tsresol=9), min_connections=2,
             min_connection_packets=2, after_update_ms=2000,
-            capture_ms=14000, max_quiet_ms=5000)
+            max_quiet_ms=5000, min_span_ms=9000)
         self.assertEqual([], result.problems)
 
     def test_one_connection_alone_shows_nothing_about_the_update(self):

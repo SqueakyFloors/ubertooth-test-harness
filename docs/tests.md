@@ -1445,14 +1445,16 @@ capture can show:
   pass on the first connection's evidence. The last connection in the file is
   left out of that, because the capture window, not the follow, is usually
   what ends it. What keeps that exemption honest is a pair of checks on the
-  file's own clock, both with one tolerance of a single cycle. A board whose
-  follow died goes back to hunting and keeps recording advertising packets,
-  so the last record of any kind may not come much after the pair's last
-  good packet; and the records have to span all but that tolerance of the
-  window the capture was given, or the capture stopped hearing everything
-  rather than just our connections. Neither reads the window's start out of
-  the file, because the first record arrives some unknown time after the
-  command did.
+  file's own clock. A board whose follow died goes back to hunting and keeps
+  recording advertising packets, so the capture may go on recording for no
+  more than two of the central's cycles after the last packet it heard of the
+  pair -- two, because the Ubertooth is not expected to catch every
+  reconnection, and missing the last one costs a whole connection's worth of
+  silence. And the records have to span all but one cycle of the window the
+  capture was given, or the capture stopped hearing everything rather than
+  just the pair's connections. Neither reads the window's start out of the
+  file, because the first record arrives some unknown time after the command
+  did.
 
 The DKs are then asked what they did, which is the only place the number of
 cycles can be read: a window the central spent on one long connection reports
@@ -1483,10 +1485,10 @@ parameters the central was told to ask for, at least two distinct connections
 appear with at least three packets each on their own access addresses, no
 packet is on an unannounced access address, every connection but the last carries a
 packet with a correct CRC 2 s or more after its own CONNECT_IND, the capture
-records nothing for more than 5 s after the pair's last good packet and spans
-all but 5 s of its window, the central reports at least three connects and two
-disconnects, and the board reads back idle with an unchanged self-reset
-count. Cleanup leaves both DKs idle in the advertiser
+records nothing for more than 10 s after the pair's last good packet and its
+records span all but 5 s of its window, the central reports at least three
+connects and two disconnects, and the board reads back idle with an unchanged
+self-reset count. Cleanup leaves both DKs idle in the advertiser
 role and restores the Ubertooth's channel, squelch, and LEDs.
 
 **Known limits.** Like the single-connection cases, the counts are floors a
@@ -1500,6 +1502,14 @@ several reconnections used to die partway through
 ([ubertooth#505](https://github.com/SqueakyFloors/ubertooth/issues/505),
 fixed), which is why the single-connection test still keeps its window inside
 one connection.
+
+The two checks above have tolerances of their own, so between them they
+allow a narrow worst case: a capture that stopped recording near the end of
+its permitted span, with the pair's last good packet near the start of the
+permitted quiet time, hides a longer dead follow than either tolerance
+suggests. Reaching it needs the board to stop recording anything in a
+particular few seconds, and a failed capture is taken again, so the shape is
+unlikely rather than impossible.
 
 Two things the checks cannot separate. A connection's packets look
 unexplained whether the board followed a connection it never announced or
