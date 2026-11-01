@@ -1026,6 +1026,10 @@ const char *bt_defaults(void)
     if ((err = bt_spp_stop()) != NULL) {
         return err;
     }
+    /* The audio link is down after sco_stop(), so this cannot be refused. */
+    if ((err = sco_set_type("default")) != NULL) {
+        return err;
+    }
     LOCK();
     st.role = PEER_ROLE_ACCEPTOR;
     st.period_ms = STREAM_PERIOD_MS_DEFAULT;
@@ -1113,7 +1117,10 @@ void bt_status_json(char *out, size_t len)
                  "\"sco\":\"%s\",\"sco_profile\":\"%s\",\"sco_codec\":\"%s\","
                  "\"sco_handle\":%u,\"sco_frame_len\":%u,\"sco_tx_frames\":%" PRIu32 ","
                  "\"sco_tx_errors\":%" PRIu32 ",\"sco_rx_frames\":%" PRIu32 ","
-                 "\"sco_rx_bad\":%" PRIu32 ",%s}",
+                 "\"sco_rx_bad\":%" PRIu32 ",\"sco_type\":\"%s\",\"sco_link\":\"%s\","
+                 "\"sco_pkt_type\":\"%s\",\"sco_tx_len\":%u,\"sco_rx_len\":%u,"
+                 "\"sco_interval\":%u,\"sco_retrans_window\":%u,"
+                 "\"sco_types_supported\":\"%04x\",%s}",
                  st.role == PEER_ROLE_ACCEPTOR ? "acceptor" : "initiator", UTESP_FW_VERSION,
                  st.started ? "true" : "false", self, a[3], a[4], a[5], a[2], a[0], a[1],
                  st.name, st.discoverable ? "true" : "false", st.server_on ? "true" : "false",
@@ -1123,7 +1130,8 @@ void bt_status_json(char *out, size_t len)
                  st.writes, st.write_errors, st.rx_bytes, st.connects, st.disconnects,
                  st.last_err, sco.state, sco.profile, sco.codec, sco.handle,
                  sco.frame_len, sco.tx_frames, sco.tx_errors, sco.rx_frames, sco.rx_bad,
-                 afh_fields);
+                 sco.type, sco.link, sco.pkt_type, sco.tx_len, sco.rx_len,
+                 sco.interval, sco.retrans, sco.supported, afh_fields);
     UNLOCK();
 
     /* Truncated JSON would be a line a driver silently mis-parses. Say so

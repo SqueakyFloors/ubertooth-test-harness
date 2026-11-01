@@ -22,11 +22,11 @@
  * against it. A fallback timeout sends anyway if nothing arrives, so a
  * dropped cue cannot leave a live link silent.
  *
- * What the controller negotiated for the link - SCO or eSCO, the packet
- * type, the interval and the retransmission window - is not reported by any
- * ESP-IDF API; see the README for where it stops inside the stack. The
- * codec, the frame size, and the controller's own packet counters are
- * reported, and those are what a test can check. */
+ * Which packet type the link uses decides whether its payload is on the air
+ * at the basic rate or as EDR, so "sco type" chooses it and the status line
+ * reports what the controller settled on. Neither goes through an ESP-IDF
+ * API, which offers none: the hooks are in utesp_sco_type.c, built into
+ * ESP-IDF's own Bluetooth component. */
 
 #include "peer.h"
 
@@ -40,6 +40,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "utesp_sco_type.h"
 
 /* How long a blocking shell command waits for the controller. Bringing the
  * service level connection up pages the peer and then exchanges a dozen AT
@@ -94,6 +95,11 @@ static struct {
     struct pkt_stats stats;
     bool stats_ok;
     esp_hf_prof_state_t prof_state;
+    /* What the controller settled on, read once as the link came up: these
+     * parameters are fixed for the life of a link, and reading them from
+     * the event that reports it keeps the read on a Bluetooth task. */
+    bool link_known;
+    struct utesp_sco_link link;
 } sc;
 
 static SemaphoreHandle_t sc_lock;
@@ -296,6 +302,55 @@ static void hf_frame_in(esp_hf_sync_conn_hdl_t hdl, esp_hf_audio_buff_t *buf, bo
     frame_in(buf, bad, PEER_ROLE_ACCEPTOR);
 }
 
+/* Names the packet type a live link is using.
+ *
+ * The Synchronous Connection Complete event carries the link type and the
+ * packet length but not the packet type (Core 6.0 Vol 4 Part E 7.7.35), so
+ * the length is what names it: each type has its own maximum payload, and a
+ * link negotiated for 64 kbit/s of voice is given that maximum. Where two
+ * types could carry one length, the smaller is named, so the status line
+ * reports the length and the interval beside this for a reader to check. */
+static const char *pkt_type_name(const struct utesp_sco_link *link)
+{
+    if (link->link_type == 0) { /* SCO: three fixed sizes */
+        switch (link->tx_pkt_len) {
+        case 10:
+            return "hv1";
+        case 20:
+            return "hv2";
+        case 30:
+            return "hv3";
+        default:
+            return "unknown";
+        }
+    }
+    if (link->link_type != 2 || link->tx_pkt_len == 0) {
+        return "unknown"; /* neither SCO nor eSCO, or no length to go on */
+    }
+    if (link->tx_pkt_len <= 30) {
+        return "ev3";
+    }
+    if (link->tx_pkt_len <= 60) {
+        return "2-ev3";
+    }
+    if (link->tx_pkt_len <= 90) {
+        return "3-ev3";
+    }
+    if (link->tx_pkt_len <= 120) {
+        return "ev4";
+    }
+    if (link->tx_pkt_len <= 180) {
+        return "ev5";
+    }
+    if (link->tx_pkt_len <= 360) {
+        return "2-ev5";
+    }
+    if (link->tx_pkt_len <= 540) {
+        return "3-ev5";
+    }
+    return "unknown";
+}
+
 /* Records a synchronous link coming up or going down. The state carries the
  * codec: there is a separate value for an mSBC link. */
 static void audio_changed(int state, uint16_t handle, uint16_t frame_len,
@@ -304,6 +359,8 @@ static void audio_changed(int state, uint16_t handle, uint16_t frame_len,
     bool up = (state == ESP_HF_AUDIO_STATE_CONNECTED ||
                state == ESP_HF_AUDIO_STATE_CONNECTED_MSBC);
     bool usable = up && frame_len >= 4 && frame_len <= FRAME_MAX;
+    struct utesp_sco_link link;
+    bool link_known = false;
     bool was_up;
 
     if (state == ESP_HF_AUDIO_STATE_CONNECTING) {
@@ -315,9 +372,22 @@ static void audio_changed(int state, uint16_t handle, uint16_t frame_len,
         return;
     }
 
+    /* The link's own parameters, which say what the controller settled on.
+     * Read here, before the lock, because the read reaches into the stack
+     * and this is the one moment the answer is both fresh and this link's. */
+    if (up) {
+        link_known = utesp_sco_link_read(remote, &link) == UTESP_SCO_OK;
+    }
+
     LOCK();
     was_up = sc.audio;
     sc.audio = up;
+    sc.link_known = link_known;
+    if (link_known) {
+        sc.link = link;
+    } else {
+        memset(&sc.link, 0, sizeof(sc.link));
+    }
     /* Keep the handle and the frame size only while there is a link to use
      * them on, so a status line never describes one that has gone. The size
      * is checked here, once, rather than on every frame: a link whose frame
@@ -333,9 +403,15 @@ static void audio_changed(int state, uint16_t handle, uint16_t frame_len,
     UNLOCK();
 
     /* Only a link that was up can go down, so a connect that the controller
-     * refused does not read as a disconnection nobody asked about. */
-    if (up || was_up) {
-        shell_line("utesp: sco %s", up ? "connected" : "disconnected");
+     * refused does not read as a disconnection nobody asked about. The
+     * packet type goes in the notice as well as the status line: it is the
+     * one fact a capture has to be lined up against, and a run that only
+     * reads the log still has it. */
+    if (up) {
+        shell_line("utesp: sco connected, %s", link_known ? pkt_type_name(&link)
+                                                          : "packet type unknown");
+    } else if (was_up) {
+        shell_line("utesp: sco disconnected");
     }
     if (up && !usable) {
         shell_line("utesp: sco frame size %u unusable, sending no audio", frame_len);
@@ -655,6 +731,8 @@ static const char *profile_stop(void)
     sc.handle = 0;
     sc.frame_len = 0;
     sc.quiesce = false;
+    sc.link_known = false;
+    memset(&sc.link, 0, sizeof(sc.link));
     UNLOCK();
     return NULL;
 }
@@ -721,6 +799,12 @@ const char *sco_start(enum peer_role role, const uint8_t *peer_addr)
     LOCK();
     memcpy(sc.peer, peer, ESP_BD_ADDR_LEN);
     UNLOCK();
+
+    /* The chosen packet type, handed to the gateway now the gateway exists.
+     * Done on every start, not once, so a type chosen between two starts is
+     * the one the next link asks for. The accepting board reads the choice
+     * itself, so this is the opening side's only call. */
+    utesp_sco_type_apply();
 
     /* An earlier "sco start" may have left the service level connection up
      * with only the audio link gone; then there is nothing to page for. */
@@ -808,6 +892,40 @@ const char *sco_stop(void)
     return profile_stop();
 }
 
+const char *sco_set_type(const char *name)
+{
+    enum utesp_sco_type type;
+    bool audio;
+
+    /* No check that the audio link machinery came up: this only records a
+     * choice for the next link, and "sco start" is where a board that
+     * cannot open one says so. */
+    if (!name) {
+        return "sco type takes ev3, 2ev3, or default";
+    }
+    if (strcmp(name, "ev3") == 0) {
+        type = UTESP_SCO_TYPE_EV3;
+    } else if (strcmp(name, "2ev3") == 0) {
+        type = UTESP_SCO_TYPE_2EV3;
+    } else if (strcmp(name, "default") == 0) {
+        type = UTESP_SCO_TYPE_DEFAULT;
+    } else {
+        return "sco type takes ev3, 2ev3, or default";
+    }
+
+    LOCK();
+    audio = sc.audio;
+    UNLOCK();
+    /* The choice reaches the controller only as a link is opened, so taking
+     * it under a live link would leave the status line naming one type while
+     * the air carried another. */
+    if (audio) {
+        return "stop the audio link before choosing a packet type";
+    }
+    utesp_sco_type_set(type);
+    return NULL;
+}
+
 void sco_zero_counters(void)
 {
     LOCK();
@@ -879,6 +997,8 @@ const char *sco_pkt_stats(char *out, size_t len)
 
 void sco_get(struct sco_view *out)
 {
+    bool known;
+
     LOCK();
     out->state = sc.audio ? "on" : (sc.slc ? "slc" : (sc.profile_up ? "ready" : "off"));
     out->profile = !sc.profile_up ? "none"
@@ -890,5 +1010,20 @@ void sco_get(struct sco_view *out)
     out->tx_errors = sc.tx_errors;
     out->rx_frames = sc.rx_frames;
     out->rx_bad = sc.rx_bad;
+    known = sc.audio && sc.link_known;
+    out->link = !sc.audio ? "none"
+                          : (!known ? "unknown"
+                                    : (sc.link.link_type == 0 ? "sco" : "esco"));
+    out->pkt_type = !sc.audio ? "none" : (known ? pkt_type_name(&sc.link) : "unknown");
+    out->tx_len = known ? sc.link.tx_pkt_len : 0;
+    out->rx_len = known ? sc.link.rx_pkt_len : 0;
+    out->interval = known ? sc.link.tx_interval : 0;
+    out->retrans = known ? sc.link.retrans_window : 0;
     UNLOCK();
+
+    /* Both of these are the module's own, not the state above: the type
+     * asked for lives with the hooks that carry it, and the supported mask
+     * is the controller's and fixed from its start. */
+    out->type = utesp_sco_type_name(utesp_sco_type_get());
+    out->supported = utesp_sco_types_supported();
 }

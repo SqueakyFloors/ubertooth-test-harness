@@ -8,7 +8,7 @@
 
 /* The harness pins this string and reflashes a board that reports anything
  * else, so it changes whenever the shell protocol or the air behavior does. */
-#define UTESP_FW_VERSION "utesp-1.3.0"
+#define UTESP_FW_VERSION "utesp-1.4.0"
 
 enum peer_role {
     PEER_ROLE_ACCEPTOR = 0, /* the boot role: wait for the other board */
@@ -69,14 +69,19 @@ const char *sco_start(enum peer_role role, const uint8_t *peer_addr);
 /* Drops the audio link and takes the profile away again. */
 const char *sco_stop(void);
 
+/* Chooses the packet type the next audio link asks for: "ev3", "2ev3", or
+ * "default". Refused while a link is up, because it is the opening of a link
+ * that carries the choice to the controller. */
+const char *sco_set_type(const char *name);
+
 /* The controller's own (e)SCO packet counters, as one JSON object. */
 const char *sco_pkt_stats(char *out, size_t len);
 
 /* Zeroes the frame counters, for "defaults". */
 void sco_zero_counters(void);
 
-/* What the status line reports about the audio link. The three strings are
- * fixed literals, so they need no copying. */
+/* What the status line reports about the audio link. The strings are fixed
+ * literals, so they need no copying. */
 struct sco_view {
     const char *state;   /* off, ready, slc, on */
     const char *profile; /* none, ag, hf */
@@ -84,6 +89,15 @@ struct sco_view {
     unsigned handle;
     unsigned frame_len;
     uint32_t tx_frames, tx_errors, rx_frames, rx_bad;
+    /* The packet type asked for, and what the controller settled on. */
+    const char *type;      /* default, ev3, 2ev3 */
+    const char *link;      /* none, sco, esco, unknown */
+    const char *pkt_type;  /* none, ev3, 2-ev3, hv3, ..., unknown */
+    unsigned tx_len;       /* bytes per packet, this board sending */
+    unsigned rx_len;       /* bytes per packet, this board receiving */
+    unsigned interval;     /* Tesco, in slots of 625 microseconds */
+    unsigned retrans;      /* the retransmission window, in the same slots */
+    unsigned supported;    /* the controller's own packet-type mask */
 };
 
 void sco_get(struct sco_view *out);

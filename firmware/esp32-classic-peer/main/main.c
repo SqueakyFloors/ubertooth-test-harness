@@ -26,8 +26,8 @@
 #define SHELL_RX_BUF   1024
 #define SHELL_TX_BUF   2048
 #define SHELL_LINE_MAX 160 /* longest command line accepted */
-#define SHELL_OUT_MAX  1024 /* longest answer line, set by the status JSON,
-                             * whose longest possible form is 891 bytes:
+#define SHELL_OUT_MAX  1200 /* longest answer line, set by the status JSON,
+                             * whose longest possible form is 1070 bytes:
                              * every number at its widest, the longest name,
                              * and the longest channel map reason */
 #define SHELL_WORDS    8
@@ -117,6 +117,7 @@ static void cmd_help(void)
         "sco start                     open the synchronous audio link",
         "sco stop                      drop it and stop the profile",
         "sco stats                     the controller's packet counters",
+        "sco type <ev3|2ev3|default>   the packet type the next link asks for",
         "clock                         the native and piconet clocks",
         "afh <20 hex digits>           hop over this channel map",
         "afh off                       hop over every channel again",
@@ -206,8 +207,10 @@ static void run(int argc, char **argv)
                 shell_line("%s", json);
             }
             answer(err);
+        } else if (argc == 3 && strcmp(argv[1], "type") == 0) {
+            answer(sco_set_type(argv[2]));
         } else {
-            answer("sco takes start, stop, or stats");
+            answer("sco takes start, stop, stats, or type <ev3|2ev3|default>");
         }
         return;
     }
