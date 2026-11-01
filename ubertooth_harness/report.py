@@ -1375,9 +1375,22 @@ _PIECE_MIN_OWN_CHARS = 4
 # output cannot read as a note of the harness's. The head is taken as it is
 # and the shape is what the rules read.
 _SHAPE_NOTE_LINE = re.compile(
-    r"(?m)^(?P<head>\d\d:\d\d:\d\d\.\d\d\d \[M\]\s+\d+ x \[[^\]]*\] )"
+    r"(?m)^(?P<head>\d{2,}:\d\d:\d\d\.\d\d\d \[M\]\s+\d+ x \[[^\]]*\] )"
     r"(?P<shape>.*)$"
 )
+# Case folded for comparison: a tool prints a serial in the case it likes,
+# so the letters of a shape are matched in either. Only the ASCII letters a
+# serial can hold are folded, and not the `N` line_shape leaves where a run
+# of digits was, which is always upper case: that keeps the placeholder
+# apart from a letter the serial itself held, and keeps the folded text the
+# same length as the text, so a position in one is a position in the other.
+# (Lower-casing the whole string is not length preserving: `İ` grows.)
+_FOLD = str.maketrans("ABCDEFGHIJKLMOPQRSTUVWXYZ",
+                      "abcdefghijklmopqrstuvwxyz")
+
+
+def _fold(text: str) -> str:
+    return text.translate(_FOLD)
 # The runs line_shape replaced, counted in the serial rather than in its
 # shape, because a serial may hold an N of its own.
 _DIGIT_RUN = re.compile(r"\d+")
@@ -1425,7 +1438,7 @@ def _mask_shape_pieces(shape: str, pieces: set[str], longest: int) -> str:
     and a piece that starts later is shorter. Where no piece wide enough
     starts at this character, the character is kept and the next one tried.
     """
-    lowered = shape.lower()
+    folded = _fold(shape)
     out = []
     index = 0
     while index < len(shape):
@@ -1434,7 +1447,7 @@ def _mask_shape_pieces(shape: str, pieces: set[str], longest: int) -> str:
         # the longest one is reached by growing until there is no longer a
         # piece there.
         while (end < min(len(shape), index + longest)
-               and lowered[index:end + 1] in pieces):
+               and folded[index:end + 1] in pieces):
             end += 1
         piece = shape[index:end]
         if "N" in piece and _own_chars(piece) >= _PIECE_MIN_OWN_CHARS:
@@ -1454,23 +1467,16 @@ def _mask_everywhere(text: str, wanted: str) -> str:
     inside itself, and a search that resumed after each match would leave
     the tail of the second occurrence to read.
     """
-    # Searched with a pattern rather than in a lower-cased copy of the page,
-    # so the positions are positions in the page: lower-casing is not length
-    # preserving for every character (`İ` grows), and a page holding one
-    # would have every mask after it land a character late.
-    pattern = re.compile(re.escape(wanted), re.IGNORECASE)
+    folded, needle = _fold(text), _fold(wanted)
     found = []
-    at = 0
-    while True:
-        match = pattern.search(text, at)
-        if match is None:
-            break
-        start, stop = match.span()
+    at = folded.find(needle)
+    while at >= 0:
+        start, stop = at, at + len(needle)
         if found and start <= found[-1][1]:
             found[-1] = (found[-1][0], max(found[-1][1], stop))
         else:
             found.append((start, stop))
-        at = start + 1
+        at = folded.find(needle, at + 1)
     if not found:
         return text
     out, end = [], 0
@@ -1509,7 +1515,7 @@ def _mask_serial_shapes(text: str, serials: Sequence[str]) -> str:
         return text
     # Longest first, since the shape of one serial can hold another's.
     known = sorted(shapes, key=len, reverse=True)
-    pieces, longest = _shape_pieces({shape.lower() for shape in shapes})
+    pieces, longest = _shape_pieces({_fold(shape) for shape in shapes})
 
     def mask(match: re.Match) -> str:
         return match.group("head") + _mask_one_shape(

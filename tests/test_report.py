@@ -612,14 +612,17 @@ class ReportTests(unittest.TestCase):
         )
 
     def test_a_character_that_grows_in_lower_case_does_not_shift_a_mask(self):
-        # A shape is searched with a pattern, not in a lower-cased copy of
-        # it: `İ` is one character that lower-cases to two, so a position
-        # taken from such a copy would land late, cutting the shape up and
-        # publishing part of it.
+        # Shapes are compared folded, not lower-cased: `İ` is one character
+        # that lower-cases to two, so a position taken from a lower-cased
+        # copy would land late, cutting the shape up and publishing part of
+        # it. Folding leaves every character that is not an ASCII letter
+        # alone, so a position in the folded shape is a position in it.
         from ubertooth_harness.report import _redact
 
         serial = "esp32-peer_1a2b"
         shape = line_shape(serial)
+        hex_serial = "1ab23cd45ef67ab89cd01ef23ab45cd6"
+        piece = line_shape(hex_serial)[:15]
 
         for before in ("", "İ ", "İ" * 14 + " "):
             self.assertEqual(
@@ -627,6 +630,43 @@ class ReportTests(unittest.TestCase):
                 _redact(shape_note(f"{before}peer {shape} ready", 3), {serial}),
                 before,
             )
+            # The same for a piece a cut left, which is read by position.
+            self.assertEqual(
+                shape_note(f"{before}board {REDACTED} idle"),
+                _redact(shape_note(f"{before}board {piece} idle"),
+                        {hex_serial}),
+                before,
+            )
+
+    def test_the_note_of_a_run_past_99_hours_is_masked(self):
+        # The elapsed time a transcript line carries widens past 99 hours,
+        # and the note's lines are found by it.
+        from ubertooth_harness.report import _redact
+
+        serial = "1ab23cd45ef67ab89cd01ef23ab45cd6"
+        shape = line_shape(serial)
+        line = f"100:00:09.000 [M]   3 x [E] board {shape} idle\n"
+
+        self.assertEqual(
+            f"100:00:09.000 [M]   3 x [E] board {REDACTED} idle\n",
+            _redact(line, {serial}),
+        )
+
+    def test_a_lower_case_n_in_a_shape_is_not_the_digit_placeholder(self):
+        # line_shape writes the placeholder in upper case, so a lower-case
+        # `n` is a letter the output held. Folding keeps them apart: the
+        # shape of a serial is matched in either case except there.
+        from ubertooth_harness.report import _redact
+
+        serial = "a1b2c3d4"
+
+        self.assertEqual("aNbNcNdN", line_shape(serial))
+        self.assertEqual(
+            shape_note("anbncndn"), _redact(shape_note("anbncndn"), {serial}))
+        # The shape itself is masked, in either case of its own letters.
+        for shape in ("aNbNcNdN", "ANBNCNDN"):
+            self.assertEqual(
+                shape_note(REDACTED), _redact(shape_note(shape), {serial}))
 
     def test_a_shape_that_repeats_itself_is_masked_whole(self):
         # A whole shape is masked before the pieces of one, so a word that
