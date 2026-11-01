@@ -720,11 +720,6 @@
       ["Finished", timeElement(run.finished_at)],
     ];
     if (run.reason) fields.push(["Reason", run.reason]);
-    if (live.queued.length) {
-      // What the run waited behind before it started, one line each.
-      fields.push(["Queued behind", el("div", { className: "queued" },
-        ...live.queued.map((text) => el("p", { className: "reason", text })))]);
-    }
     $("live-summary").replaceChildren(...fields.flatMap(([term, value]) =>
       [el("dt", { text: term }), el("dd", {}, value)]));
     $("cancel-button").hidden = run.status !== "running";
@@ -747,6 +742,13 @@
             : `; watchdog ${board.state}`),
       }),
       board.warning ? el("span", { className: "reason", text: ` — ${board.warning}` }) : null)));
+
+    // Devices that were free while this run waited for its turn, and the
+    // command that had the turn: why a run can start late with the bench
+    // looking idle. Hidden unless the run waited behind somebody.
+    $("live-queued").hidden = live.queued.length === 0;
+    $("queued").replaceChildren(
+      ...live.queued.map((text) => el("li", { text })));
 
     $("checklist").replaceChildren(...live.items.map((item) => {
       const shown = itemStatus(item, run);

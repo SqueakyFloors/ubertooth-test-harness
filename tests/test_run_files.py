@@ -327,10 +327,12 @@ class WebAssetTests(unittest.TestCase):
     def test_the_panel_sits_beside_the_log_tail_only_when_a_file_is_open(self):
         self.assertIn('id="live-file"', self.html)
         self.assertIn('id="file-view"', self.html)
-        # Without a file the log tail keeps the whole wide row.
-        self.assertIn('"overview checklist" "log log" "file file"', self.css)
+        # Without a file the log tail keeps the whole wide row. (The row
+        # between is what the run waited behind, hidden unless it did; #234.)
+        self.assertIn(
+            '"overview checklist" "queued queued" "log log" "file file"', self.css)
         self.assertIn('.live-showing-file', self.css)
-        self.assertIn('"overview checklist" "log file"', self.css)
+        self.assertIn('"overview checklist" "queued queued" "log file"', self.css)
         self.assertIn("live-showing-file", self.js)
 
     def test_a_saved_file_is_black_on_white_in_a_fixed_width_font(self):

@@ -227,9 +227,6 @@ code { overflow-wrap: anywhere; }
 }
 .summary dt { color: var(--muted); font-size: 0.85rem; font-weight: 500; }
 .summary dd { margin: 0; overflow-wrap: anywhere; }
-/* One line per device this run waited behind, in the run's summary. */
-.queued p { margin: 0 0 0.25rem; font-size: 0.85rem; }
-.queued p:last-child { margin-bottom: 0; }
 
 /* ----- targets ---------------------------------------------------------- */
 
@@ -309,20 +306,21 @@ button.primary:disabled:hover { background: var(--primary); }
 .live {
   display: grid; gap: var(--gap);
   grid-template-columns: minmax(0, 1fr);
-  grid-template-areas: "overview" "checklist" "log" "file";
+  grid-template-areas: "overview" "checklist" "queued" "log" "file";
 }
 .live-overview { grid-area: overview; display: grid; gap: 0.9rem; align-content: start; }
 .live-checklist { grid-area: checklist; min-width: 0; }
+.live-queued { grid-area: queued; min-width: 0; }
 .live-log { grid-area: log; min-width: 0; }
 .live-file { grid-area: file; min-width: 0; }
 @media (min-width: 60rem) {
   .live {
     grid-template-columns: minmax(15rem, 19rem) minmax(0, 1fr);
-    grid-template-areas: "overview checklist" "log log" "file file";
+    grid-template-areas: "overview checklist" "queued queued" "log log" "file file";
   }
   /* With a file open the two share the wide row, the file on the right. */
   .live-showing-file {
-    grid-template-areas: "overview checklist" "log file";
+    grid-template-areas: "overview checklist" "queued queued" "log file";
   }
 }
 
@@ -336,6 +334,16 @@ button.primary:disabled:hover { background: var(--primary); }
 }
 .live-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; }
 .live-actions .hint { margin: 0; }
+
+/* One line per device that was free while this run waited for its turn.
+   Its own row of the live view, not the narrow summary column: each line
+   names a command, a set of devices and what is in their way. */
+.live-queued h3 { margin: 0 0 0.4rem; font-size: 0.95rem; }
+.queued { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.3rem; }
+.queued li {
+  font-size: 0.85rem; padding: 0.3rem 0.55rem; border-radius: var(--radius-small);
+  border-left: 3px solid var(--line); background: var(--surface-2);
+}
 
 /* Per board: the times the firmware's watchdog reset it during this run. */
 .live-boards h3 { margin: 0 0 0.4rem; font-size: 0.95rem; }

@@ -1067,11 +1067,15 @@ class QueueCliTests(QueueFixture):
             "status": "warning", "details": details,
         }])
         self.assertIn("[M] UT_0 is free but queued for flash-run", transcript)
-        # And the browser live view shows the same line.
-        js = (Path(__file__).resolve().parents[1] / "ubertooth_harness" / "web"
-              / "app.js").read_text(encoding="utf-8")
+        # And the browser live view shows the same line, in a row of its own.
+        web = Path(__file__).resolve().parents[1] / "ubertooth_harness" / "web"
+        js = (web / "app.js").read_text(encoding="utf-8")
         self.assertIn('kind === "lease_queued"', js)
-        self.assertIn('"Queued behind"', js)
+        self.assertIn('$("live-queued").hidden = live.queued.length === 0;', js)
+        self.assertIn(
+            'Queued behind another command',
+            (web / "index.html").read_text(encoding="utf-8"),
+        )
 
     def test_a_lease_that_has_to_wait_its_turn_says_so(self):
         with leases.acquire([A], holder("holder"), directory=self.dir):
