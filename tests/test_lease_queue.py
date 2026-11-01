@@ -921,6 +921,46 @@ class QueuedReportTests(QueueFixture):
         self._gives_way(rounds_before_release=2, name=self.waited(120), notes=notes)
         self.assertEqual([], notes)
 
+    def test_the_stretch_counted_is_the_one_the_resource_was_free(self):
+        """Held time must not buy the line the free stretch has to earn.
+
+        UT_0 is held by somebody else for most of the wait while the
+        command ahead is stuck at UT_1. Nothing is reported until UT_0 has
+        been free and queued for as long as a line takes, so a board that
+        comes free for one round after a long busy stretch is not reported
+        as a bench standing still.
+        """
+        name = self.waited(300)
+        self.hold_ticket(A, name, self.wanting(A, B, wait_s=600.0))
+        self.hold_ticket(B, name, self.wanting(A, B, wait_s=600.0))
+        stuck = self.hold_lease(B, self.live_holder(owner="stuck"))
+        busy = self.hold_lease(A, self.live_holder(owner="busy"))
+        notes, counted = [], []
+
+        def sleep(_seconds):
+            counted.append(len(counted) + 1)
+            if len(counted) == 30:
+                os.close(self.raw.pop())  # UT_0 comes free, 30 rounds in
+                os.unlink(busy)
+            if len(counted) == 31:
+                self.assertEqual([], notes, "reported after one free round")
+            if len(counted) == 60:
+                os.close(self.raw.pop())
+                os.unlink(stuck)
+                os.close(self.raw.pop())
+                os.close(self.raw.pop())
+                os.unlink(self.ticket_dir(A) / name)
+                os.unlink(self.ticket_dir(B) / name)
+
+        with leases.acquire(
+            [A], holder("newcomer"), directory=self.dir, wait_s=600,
+            clock=lambda: 0.0, sleep=sleep, note=notes.append,
+        ) as taken:
+            self.assertEqual([A], [lease.board for lease in taken.leases])
+        self.assertEqual(1, len(notes), notes)
+        self.assertAlmostEqual(
+            30 * leases._POLL_S, taken.queued[0]["gave_way_s"], places=2)
+
     def test_a_resource_freed_during_the_wait_is_still_reported(self):
         """The case #234 is about: a short run frees a board mid-wait.
 
@@ -959,10 +999,10 @@ class QueuedReportTests(QueueFixture):
         self.assertEqual(1, len(notes), notes)
         self.assertIn("UT_0 is free but queued for waiting-agent", notes[0])
         self.assertEqual(["UT_0"], [item["resource"] for item in taken.queued])
-        # Every round this command gave way at UT_0 counts, and the record
-        # is up to date to the last of them.
+        # Only the rounds UT_0 was free and queued count: the four rounds
+        # the short run still held it explain themselves.
         self.assertAlmostEqual(
-            40 * leases._POLL_S, taken.queued[0]["gave_way_s"], places=2)
+            36 * leases._POLL_S, taken.queued[0]["gave_way_s"], places=2)
 
     def test_a_run_keeps_what_it_waited_behind_as_its_own_history(self):
         """The record outlives the wait, and says so.
@@ -1061,6 +1101,54 @@ class QueuedReportTests(QueueFixture):
         details = dict(record, message=leases.describe_queued_resource(record, past=True))
         # What a publisher does with it: over the limit this raises.
         self.assertEqual(details, events._validated_details(details))
+
+    def test_a_record_names_every_lease_in_the_way(self):
+        # A reader told to clear one lock must not find another behind it,
+        # so the record carries every resource the waiter cannot take.
+        name = self.waited(300)
+        self.hold_ticket(A, name, self.wanting(A, B, leases.HOST_LOCK, wait_s=600.0))
+        self.hold_lease(B, self.live_holder(owner="stuck"))
+        self.hold_lease(leases.HOST_LOCK, self.live_holder(owner="power"))
+        queued = leases.board_states([A], directory=self.dir)[0]["queued_for"]
+        self.assertEqual(["UT_1", "host lock"],
+                         [item["resource"] for item in queued["blocked_by"]])
+        line = leases.describe_queued_resource(queued)
+        self.assertIn("still waiting for UT_1, held by stuck", line)
+        self.assertIn("host lock, held by power", line)
+
+    def test_a_set_longer_than_a_line_says_how_much_is_left_out(self):
+        crowded = self.live_holder(waiting_for=[
+            {"key": f"{number:032x}", "resource": f"UT_{number}"}
+            for number in range(leases._MAX_QUEUED_SET + 5)
+        ])
+        record = leases.queued_record(A, self.waited(60), crowded, [])
+        self.assertEqual(leases._MAX_QUEUED_SET, len(record["waiting_for"]))
+        self.assertEqual(5, record["waiting_for_more"])
+        self.assertIn("and 5 more", leases.describe_queued(record))
+
+    def test_the_record_of_a_wait_that_is_over_makes_room_for_one_that_is_not(self):
+        # A command keeps a bounded number of records; when they are full,
+        # a wait that has ended gives way to the one happening now.
+        records, live, reported = {}, {}, set()
+        for number in range(leases._MAX_QUEUED_RECORDS):
+            marker = (f"{number:032x}", "old-ticket")
+            leases._keep_queued_record(
+                records, marker, live, {"resource": f"UT_{number}"}, reported,
+                lambda _line: None)
+        self.assertEqual(leases._MAX_QUEUED_RECORDS, len(records))
+        now = (B.key, "now-ticket")
+        live[now] = 1.0  # the pair this command is giving way at right now
+        leases._keep_queued_record(
+            records, now, live, {"resource": "UT_1"}, reported, lambda _line: None)
+        self.assertIn(now, records)
+        self.assertEqual(leases._MAX_QUEUED_RECORDS, len(records))
+        # With nothing left to drop, the newest is left out rather than a
+        # record of a wait this command is still in.
+        live.update({pair: 1.0 for pair in records})
+        leases._keep_queued_record(
+            records, (A.key, "another"), live, {"resource": "UT_0"}, reported,
+            lambda _line: None)
+        self.assertEqual(leases._MAX_QUEUED_RECORDS, len(records))
 
     def test_a_deadline_that_is_not_a_number_of_seconds_says_nothing(self):
         # JSON carries infinities, and a ticket is another command's file.
@@ -1218,6 +1306,51 @@ class QueueCliTests(QueueFixture):
             'Queued behind another command',
             (web / "index.html").read_text(encoding="utf-8"),
         )
+
+    def test_a_manifest_carries_the_records_the_report_reads(self):
+        """The run record's own key, and the path a run without --build takes.
+
+        Such a run has no publisher until the sequencer starts, which emits
+        the records from the manifest; a report then reads them back out of
+        it. So the field has to survive being frozen into a manifest and
+        read as the report's row names it.
+        """
+        from ubertooth_harness.manifest import (
+            SourceRevision,
+            build_run_manifest,
+            json_value,
+        )
+        from ubertooth_harness.planner import TestInvocation
+        from ubertooth_harness.report import _queued_rows
+
+        record = leases.queued_record(
+            A, self.waited(252), self.wanting(A, B, wait_s=600.0, owner="flash-run"),
+            [{"resource": "UT_1", "key": B.key, "lease": "foreign",
+              "why": "it was taken on another-host, not on this host",
+              "takeover": False, "holder": {"owner": "elsewhere"}}],
+            gave_way_s=243.5,
+        )
+        plan = self.root / "plan.yaml"
+        plan.write_text("plan\n")
+        manifest = build_run_manifest(
+            run_id="queued-run", plan_name="named", suite="fast", host="Host_Local",
+            plan_path=plan, hardware_path=self.hardware,
+            sources=(SourceRevision("Ubertooth", "/source", "https://host.invalid/u.git",
+                                    "ref", "a" * 40, "test"),),
+            invocations=(TestInvocation(
+                "invocation-001", "Host CLI surface", "Host_Local", {}, {}, {}),),
+            lease_queue_waits=(record,),
+        )
+        carried = manifest.to_dict()["lease_queue_waits"]
+        self.assertEqual(["UT_0"], [item["resource"] for item in carried])
+        # What the sequencer emits for such a run, from the frozen record.
+        message = leases.describe_queued_resource(json_value(record), past=True)
+        self.assertIn("UT_0 was free and queued for flash-run", message)
+        self.assertIn("This command gave way for 4m03s", message)
+        # And what a report reads back out of the manifest.
+        rows = dict(_queued_rows(manifest.to_dict()))
+        self.assertIn("UT_0 was free and queued for flash-run",
+                      rows["Queued behind another command"])
 
     def test_a_lease_that_has_to_wait_its_turn_says_so(self):
         with leases.acquire([A], holder("holder"), directory=self.dir):

@@ -1132,6 +1132,7 @@ def queued_record(
     """
     wait_s = ticket.get("wait_s")
     waited = ticket_waited_s(name, now_ns=now_ns)
+    wanted = waiting_resources(ticket, board)
     return {
         "resource": board.alias,
         "key": board.key,
@@ -1143,12 +1144,14 @@ def queued_record(
         # harness adds nothing of its own, and above all no lock file path.
         "command": _recorded_holder(ticket),
         # Bounded well below the per-event limit a run record has (see
-        # events.py): this is a line for a person, and a set longer than
-        # this says nothing more about why a resource is queued.
+        # events.py): this is a line for a person. What is left out is
+        # counted, so the line never reads as the whole set when it is not.
         "waiting_for": [
             {"key": resource.key, "resource": resource.alias}
-            for resource in waiting_resources(ticket, board)[:_MAX_QUEUED_SET]
+            for resource in wanted[:_MAX_QUEUED_SET]
         ],
+        "waiting_for_more": max(0, len(wanted) - _MAX_QUEUED_SET),
+        "blocked_by_more": max(0, len(blocking) - _MAX_QUEUED_SET),
         "waited_s": None if waited is None else round(waited, 1),
         # A ticket of an earlier harness records no deadline; the message
         # then says so rather than making one up. So does a record whose
@@ -1159,7 +1162,7 @@ def queued_record(
             and math.isfinite(wait_s)
             else None
         ),
-        "blocked_by": [dict(item) for item in blocking],
+        "blocked_by": [dict(item) for item in blocking[:_MAX_QUEUED_SET]],
         # How long the command making this record has given way here,
         # counted in poll rounds like every other stretch in acquire(). A
         # listing gives way to nobody, so it leaves this at zero.
@@ -1178,6 +1181,9 @@ def _lease_form(kind: str, why: str, takeover) -> str:
     """
     if not kind or kind == "live":
         return ""
+    # The reason names the host a foreign lease was taken on, read from
+    # that lease's own file: bounded here, so every caller is.
+    why = _printable(why, _RECORDED_HOLDER_CHARS)
     if takeover:
         return (f" (the command that took it is gone: {why}; the next command "
                 "that wants it takes it over)")
@@ -1205,6 +1211,11 @@ def _listed(items: Iterable) -> str:
     return ", ".join(names[:-1]) + f", and {names[-1]}"
 
 
+def _and_more(count) -> str:
+    """', and 48 more' for the entries a record leaves out, or nothing."""
+    return f", and {count} more" if isinstance(count, int) and count > 0 else ""
+
+
 def describe_queued(record: Mapping, *, past: bool = False) -> str:
     """Why a free resource cannot be used, without naming it (see #234).
 
@@ -1217,6 +1228,7 @@ def describe_queued(record: Mapping, *, past: bool = False) -> str:
         item.get("resource") or item.get("key") or ""
         for item in record.get("waiting_for") or []
     )
+    requested += _and_more(record.get("waiting_for_more"))
     waited = describe_seconds(record.get("waited_s"))
     bound = record.get("wait_s")
     if bound is None:
@@ -1224,10 +1236,12 @@ def describe_queued(record: Mapping, *, past: bool = False) -> str:
     elif bound <= 0:
         deadline = "the second it has with no --wait-for-boards"
     else:
-        deadline = f"the {describe_seconds(bound)} it asked to wait"
+        # The effective one: a wait shorter than the grace every command
+        # has is that grace (see acquire()).
+        deadline = f"the {describe_seconds(max(bound, _BUSY_GRACE_S))} it asked to wait"
     blocked = "; ".join(
         describe_blocking(item) for item in record.get("blocked_by") or []
-    )
+    ) + _and_more(record.get("blocked_by_more"))
     gave_way = describe_seconds(record.get("gave_way_s"))
     return (
         f"queued for {describe_holder(record.get('command') or {})}: it "
@@ -1438,41 +1452,72 @@ def takeover_record(board: Board, path: Path, reason: str, dead: Mapping) -> dic
     }
 
 
-def _queued_wait(
-    root: Path, board: Board, name: str, ticket: Mapping,
-    external_template: str | None, in_the_way, *, gave_way_s: float = 0.0,
-) -> dict | None:
-    """The record of giving way at a resource that is free (see #234).
+def _free_now(root: Path, board: Board, external_template: str | None) -> bool:
+    """Whether nothing holds this resource: a lease here, or the lab's file.
 
-    ``in_the_way`` is what the round already read from _blocking(): the
-    first resource of that command's set a running command holds, with its
-    lease. One entry, not the whole set, because this runs on every poll
-    round of every command that waits; a listing, which runs once, reports
-    the whole set (blocking_resources).
-
-    None when there is nothing to explain: nothing is in the way, the
-    resource is held after all (here, or by the lab's own lock file, which a
-    listing reads the same way), or the command ahead wants only this one
-    resource, so giving way to it is bounded and over in half a second.
+    One lock probe, and a second where a lab's own lock files are in use.
+    A command giving way pays it once a round for each resource it is
+    reporting on, which is what keeps "free and queued" an honest measure
+    of the stretch being reported rather than of the whole wait. Anything
+    that cannot be read counts as held, as everywhere else.
     """
-    if in_the_way is None or len(waiting_resources(ticket, board)) < 2:
-        return None
     if _held(root / f"{board.key}.lock"):
-        return None
+        return False
     if board.key != HOST_LOCK.key and external_template:
         lab = external_lock_path(external_template, board)
         try:
             # As every other read of a lab file: a path that is a FIFO must
             # not make this wait, and anything unreadable is not free.
             if _probe(lab, flags=os.O_RDONLY | os.O_NONBLOCK, regular_only=True):
-                return None
+                return False
         except OSError:
-            return None
-    resource, kind, why, holder = in_the_way
-    return queued_record(
-        board, name, ticket, [_blocking_entry(resource, kind, why, holder)],
-        gave_way_s=gave_way_s,
-    )
+            return False
+    return True
+
+
+def _queued_wait(
+    root: Path, board: Board, name: str, ticket: Mapping, *, gave_way_s: float = 0.0,
+) -> dict | None:
+    """The record of giving way at a free resource (see #234), or None.
+
+    None when the command ahead wants only this one resource, so giving way
+    to it is bounded and over in half a second, or when nothing it asked
+    for is held any more. Every resource in the way is read, as a listing
+    does: a reader told to clear one lock must not find another behind it.
+    This is only reached for a stretch that has already lasted
+    _QUEUED_REPORT_S, not on every poll round of every wait.
+    """
+    if len(waiting_resources(ticket, board)) < 2:
+        return None
+    blocking = blocking_resources(root, ticket, board)
+    if not blocking:
+        return None
+    return queued_record(board, name, ticket, blocking, gave_way_s=gave_way_s)
+
+
+def _keep_queued_record(
+    records: dict, marker: tuple[str, str], live: Mapping, record: Mapping | None,
+    reported: set, note: Callable[[str], None],
+) -> None:
+    """Keep this record of a free resource kept queued, and say it once.
+
+    A command keeps one record per (resource, waiter) for its own run
+    record, bounded by _MAX_QUEUED_RECORDS. When that is full, a record of
+    a wait that is over (its marker is no longer one this command is
+    giving way at, ``live``) makes room for the one happening now, which is
+    what a reader needs most; otherwise the new one is left out.
+    """
+    if record is None:
+        return
+    if marker not in records and len(records) >= _MAX_QUEUED_RECORDS:
+        stale = next((pair for pair in records if pair not in live), None)
+        if stale is None:
+            return
+        records.pop(stale)
+    records[marker] = record
+    if marker not in reported:
+        reported.add(marker)
+        note(describe_queued_resource(record))
 
 
 def describe_takeover(record: Mapping) -> str:
@@ -1609,19 +1654,21 @@ def acquire(
                     # both move while a command waits, so a record written
                     # once at the start would say neither. It is said on
                     # standard error the first time only.
-                    given[marker] = given.get(marker, 0.0) + _POLL_S
-                    if (given[marker] >= _QUEUED_REPORT_S
-                            and (marker in queued_waits
-                                 or len(queued_waits) < _MAX_QUEUED_RECORDS)):
-                        record = _queued_wait(
-                            root, board, ticket, other, external_template,
-                            in_the_way, gave_way_s=given[marker],
-                        )
-                        if record is not None:
-                            queued_waits[marker] = record
-                            if marker not in reported:
-                                reported.add(marker)
-                                note(describe_queued_resource(record))
+                    if not _free_now(root, board, external_template):
+                        # Somebody is using this resource, which explains
+                        # itself; the stretch that is worth reporting is
+                        # the one where it is free and still nobody's, so
+                        # it starts when the resource comes free.
+                        given.pop(marker, None)
+                    else:
+                        given[marker] = given.get(marker, 0.0) + _POLL_S
+                        if given[marker] >= _QUEUED_REPORT_S:
+                            _keep_queued_record(
+                                queued_waits, marker, given,
+                                _queued_wait(root, board, ticket, other,
+                                             gave_way_s=given[marker]),
+                                reported, note,
+                            )
                 else:
                     # Giving way to a command that could take everything it
                     # asked for right now, and has not, is the one case
