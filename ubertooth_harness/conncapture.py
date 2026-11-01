@@ -8,7 +8,8 @@ Run as a script by the Capture known BLE connection cases::
          --min-data-length N --long-packets N]
         [--check-connection-info]
         [--min-connections N --min-connection-packets N
-         --after-update-ms MS --require-announced]
+         --after-update-ms MS --capture-ms MS --max-quiet-ms MS
+         --require-announced]
 
 FILE is PCAP or PCAPNG as ``ubertooth-btle -q`` and ``-r`` write it; the
 records are read by advcapture.py.
@@ -38,7 +39,12 @@ The checks:
   ``--after-update-ms`` or more after its own CONNECT_IND, which is long
   enough that the central's parameter update has taken effect. The last
   connection in the file is left out of that one, because the capture
-  window, not the follow, is what ends it. With
+  window, not the follow, is what ends it; ``--max-quiet-ms`` is what keeps
+  that exemption honest, and it asks two things of the file: that no more
+  than that long passed between the pair's last good packet and the last
+  record of any kind (a board whose follow died goes back to hunting and
+  keeps recording advertising packets), and that the records span all but
+  that long of the ``--capture-ms`` window the capture was given. With
   ``--require-announced``, no packet may be on an access address that no
   CONNECT_IND in the capture handed out: in a follow the board writes the
   address it synchronized on into each record, so such a packet is a
@@ -477,18 +483,34 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
     # file announces would look the same as a window that ended: that
     # connection is the one the post-update check has to excuse, because the
     # window, not the follow, usually ends it.
-    if max_quiet_ms is not None and capture_ms is not None:
+    if max_quiet_ms is not None:
         latest = max((item.last_valid_micros for item in result.connections
                       if item.last_valid_micros is not None), default=None)
-        if result.start_micros is not None and latest is not None:
-            result.quiet_ms = (
-                result.start_micros + capture_ms * 1000 - latest) // 1000
+        # Measured against the last record in the file, not against the
+        # window's end: the file says when the capture stopped writing, while
+        # the end of the window can only be guessed from the first record,
+        # which arrives some unknown time after the command started. A board
+        # whose follow died goes back to hunting and writes advertising
+        # packets, so records keep coming after the last one of ours.
+        if times and latest is not None:
+            result.quiet_ms = (max(times) - latest) // 1000
             if result.quiet_ms > max_quiet_ms:
                 result.problems.append(
-                    f"the last packet with a correct CRC arrived "
-                    f"{result.quiet_ms} ms before the end of the {capture_ms} ms "
-                    f"window, more than {max_quiet_ms} ms, so the capture "
-                    "stopped hearing the connections before its window ran out")
+                    f"the capture went on recording for {result.quiet_ms} ms "
+                    "after the last packet with a correct CRC of the pair's "
+                    f"connections, more than {max_quiet_ms} ms, so the follow "
+                    "stopped before the capture did")
+        # ...and the capture has to have been recording for its whole window,
+        # or it stopped hearing everything rather than just our connections.
+        # The window's own length is the only thing the file cannot say, so
+        # the caller passes it; a first record that arrives late costs the
+        # same tolerance.
+        if capture_ms is not None and result.span_ms is not None:
+            if result.span_ms < capture_ms - max_quiet_ms:
+                result.problems.append(
+                    f"the capture holds {result.span_ms} ms of records of a "
+                    f"{capture_ms} ms window, so it stopped recording more "
+                    f"than {max_quiet_ms} ms before the window ran out")
     if require_announced and result.unannounced:
         result.problems.append(
             "packet(s) on an access address no CONNECT_IND in this capture "

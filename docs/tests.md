@@ -1444,11 +1444,15 @@ capture can show:
   show one, so a follow that died on the second connection's update cannot
   pass on the first connection's evidence. The last connection in the file is
   left out of that, because the capture window, not the follow, is usually
-  what ends it -- and what keeps that exemption honest is a separate check:
-  the capture's last packet with a correct CRC must arrive within one of the
-  central's cycles of the end of the window it was given. A follow that died
-  during the last connection the file announces leaves the same shape as a
-  window that ended, except that the capture falls silent early.
+  what ends it. What keeps that exemption honest is a pair of checks on the
+  file's own clock, both with one tolerance of a single cycle. A board whose
+  follow died goes back to hunting and keeps recording advertising packets,
+  so the last record of any kind may not come much after the pair's last
+  good packet; and the records have to span all but that tolerance of the
+  window the capture was given, or the capture stopped hearing everything
+  rather than just our connections. Neither reads the window's start out of
+  the file, because the first record arrives some unknown time after the
+  command did.
 
 The DKs are then asked what they did, which is the only place the number of
 cycles can be read: a window the central spent on one long connection reports
@@ -1479,9 +1483,10 @@ parameters the central was told to ask for, at least two distinct connections
 appear with at least three packets each on their own access addresses, no
 packet is on an unannounced access address, every connection but the last carries a
 packet with a correct CRC 2 s or more after its own CONNECT_IND, the capture
-is still hearing the pair within 5 s of the end of its window, the central
-reports at least three connects and two disconnects, and the board reads back
-idle with an unchanged self-reset count. Cleanup leaves both DKs idle in the advertiser
+records nothing for more than 5 s after the pair's last good packet and spans
+all but 5 s of its window, the central reports at least three connects and two
+disconnects, and the board reads back idle with an unchanged self-reset
+count. Cleanup leaves both DKs idle in the advertiser
 role and restores the Ubertooth's channel, squelch, and LEDs.
 
 **Known limits.** Like the single-connection cases, the counts are floors a

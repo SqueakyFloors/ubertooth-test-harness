@@ -219,6 +219,17 @@ def second_connect_ind():
     return connect_ind(data=lldata(access=SECOND_ACCESS, crc_init=SECOND_CRC_INIT))
 
 
+def advertising_record():
+    """What a board records once it is hunting again: an advertising packet."""
+    pdu = _address(OTHER) + bytes([2, 0x01, 0x06])
+    header = bytes([0x0 | 1 << 6, len(pdu)])
+    crc = advcapture.crc24(header + pdu).to_bytes(3, "little")
+    phdr = (bytes([0, 0xC0, 0x9C, 0])
+            + struct.pack("<I", advcapture.ADV_ACCESS_ADDRESS) + b"\x00\x00")
+    return (phdr + struct.pack("<I", advcapture.ADV_ACCESS_ADDRESS) + header
+            + pdu + crc)
+
+
 class RepeatedConnectionTests(unittest.TestCase):
     """A capture across several of the pair's connections: each one's own
     packets, when they arrived, and nothing the file does not announce."""
@@ -313,31 +324,59 @@ class RepeatedConnectionTests(unittest.TestCase):
             after_update_ms=2000)
         self.assertEqual([], result.problems)
 
-    def test_a_capture_that_went_quiet_long_before_its_window_ended_fails(self):
-        """What keeps the exemption above honest: a follow that died during
-        the last connection the file announces leaves the same shape as a
-        window that ended, except that the capture falls silent early."""
+    def test_a_follow_that_stopped_before_the_capture_did_fails(self):
+        """What keeps the exemption above honest. A board whose follow died
+        goes back to hunting and keeps recording advertising packets, so a
+        long run of records after the pair's last packet is the follow
+        stopping, not the window ending."""
         records = [connect_ind(), data_packet(251), second_connect_ind(),
-                   data_packet(251, access=SECOND_ACCESS, crc_init=SECOND_CRC_INIT)]
-        times = [0, 4_000_000, 5_200_000, 6_400_000]
+                   data_packet(251, access=SECOND_ACCESS, crc_init=SECOND_CRC_INIT),
+                   advertising_record(), advertising_record()]
+        times = [0, 4_000_000, 5_200_000, 6_400_000, 12_000_000, 18_000_000]
         data = pcapng(records, times=times, tsresol=9)
         _header, result = self.check(data, after_update_ms=2000,
                                      capture_ms=18000, max_quiet_ms=5000)
         self.assertEqual(11600, result.quiet_ms)
         self.assertEqual(
-            ["the last packet with a correct CRC arrived 11600 ms before the "
-             "end of the 18000 ms window, more than 5000 ms, so the capture "
-             "stopped hearing the connections before its window ran out"],
+            ["the capture went on recording for 11600 ms after the last packet "
+             "with a correct CRC of the pair's connections, more than 5000 ms, "
+             "so the follow stopped before the capture did"],
             result.problems)
 
-    def test_a_capture_heard_to_the_end_of_its_window_passes(self):
+    def test_a_capture_that_stopped_recording_early_fails(self):
+        """The other half: a capture whose records stop long before its
+        window does heard nothing at all, our connections included."""
+        records, times = self.two_cycles()
+        _header, result = self.check(
+            pcapng(records, times=times, tsresol=9), min_connections=2,
+            min_connection_packets=2, after_update_ms=2000,
+            capture_ms=18000, max_quiet_ms=5000)
+        self.assertEqual(0, result.quiet_ms)
+        self.assertEqual(
+            ["the capture holds 9200 ms of records of a 18000 ms window, so it "
+             "stopped recording more than 5000 ms before the window ran out"],
+            result.problems)
+
+    def test_a_capture_recorded_to_the_end_of_its_window_passes(self):
         records, times = self.two_cycles()
         _header, result = self.check(
             pcapng(records, times=times, tsresol=9), min_connections=2,
             min_connection_packets=2, after_update_ms=2000,
             capture_ms=10000, max_quiet_ms=5000)
         self.assertEqual([], result.problems)
-        self.assertEqual(800, result.quiet_ms)
+        self.assertEqual(0, result.quiet_ms)
+
+    def test_a_late_first_record_does_not_fail_a_good_capture(self):
+        """The window's start is not in the file: the first record arrives
+        some unknown time after the command did, and that cannot be read as
+        the capture having stopped early."""
+        records, times = self.two_cycles()
+        times = [when + 4_000_000 for when in times]
+        _header, result = self.check(
+            pcapng(records, times=times, tsresol=9), min_connections=2,
+            min_connection_packets=2, after_update_ms=2000,
+            capture_ms=14000, max_quiet_ms=5000)
+        self.assertEqual([], result.problems)
 
     def test_one_connection_alone_shows_nothing_about_the_update(self):
         # Nothing in the file ended inside it, so there is no connection the
