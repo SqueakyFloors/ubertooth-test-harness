@@ -370,7 +370,7 @@ run_firmware_dk() {
         base=$1
         label=$2
         step "the image against $label"
-        for file in src/roles.h NCS_VERSION chan-sel-1.conf chan-sel-1.overlay; do
+        for file in src/roles.h NCS_VERSION; do
             if [ ! -f "$base/$file" ]; then
                 echo "error: $base holds no $file, so it is not a copy of" \
                      "$DK_FIRMWARE to compare against" >&2
@@ -404,7 +404,9 @@ run_firmware_dk() {
         # The algorithm 1 image is not compared: that would need a second
         # pair of builds for an image only one test uses. Its two extra files
         # are compared instead, so a change confined to them still asks for
-        # the bump that reflashes a board carrying that image.
+        # the bump that reflashes a board carrying that image. A base from
+        # before those files existed does not reach here, because adding them
+        # came with a version bump, which returns above.
         for file in chan-sel-1.conf chan-sel-1.overlay; do
             if ! cmp -s "$repo/$DK_FIRMWARE/$file" "$base/$file"; then
                 echo "error: $file differs from $label while UTDK_FW_VERSION is" \
