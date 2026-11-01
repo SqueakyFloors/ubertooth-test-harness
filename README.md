@@ -157,8 +157,9 @@ checked, the APIs and protocols the harness depends on, host setup, the known
 limits of a crowded USB host, and a worked bench layout. Read it to set up a
 bench, or to judge what a result was measured on. The by-hand helpers that go
 with it are in [`scripts/lab/`](scripts/lab/README.md): `hold` holds devices
-by serial for one command, and `hub-port` switches a hub port to recover one
-that has stopped answering.
+by serial for one command, `peer` drives the Classic Bluetooth peers by
+registry alias, and `hub-port` switches a hub port to recover a device that has
+stopped answering.
 
 `hardware.yaml` is the ignored local resource registry; copy
 [`hardware.example.yaml`](hardware.example.yaml) to start. Register every macOS/Linux computer as a
@@ -674,7 +675,7 @@ python -m ubertooth_harness run-suite \
 | `Multi-board selection` | needs two or more registered boards on the host (a one-board host skips it): `-U all -s` and `-s` without `-U` list every registered board and only those, each line labelled with the board's index in it (`Serial No (0): <serial>`, fork #610); `-N` counts them; each `-U<index>` opens the board the listing names at that index | adds `-U all -bvps` and `-bvps` without `-U` (four lines per board), `-U all -V` and `-V` without `-U` (the host tools' two lines, the version and the libbtbb path, then each board's `Firmware version (<index>)` and `Firmware build (<index>)`, since `-V` ends the command and reports every board itself, fork f898fe5), `-C` without `-U` refused; `-U<n>` past the last board is refused with `no Ubertooth at index` (fork #188, fixed in 0c7e9c0) |
 | `Two-device range test` | no `coverage` argument; `range` plan; two registered boards on one host (`sender`, `responder`; the same board in both roles is refused), `allow RF transmission: true`: both boards reset (so neither has an old result) and set to 2410 MHz, `-e` on the responder, which must then answer USB with its RX LED on and still be at 2410 MHz before `-n` on the sender (so a failure tells a wedged repeater from a wedged sender), then the sender's `-m` is read until a result appears (10 s deadline) and must give request and reply PA levels at most `maximum PA level` (0-7, default 7; both suites of the `range` plan set 3) and copy numbers 0-15; a mismatch fails, naming the field that differs; the sender is idle afterwards (LEDs off, back to 2441 MHz: the idle reset ran); the responder still answers USB with its RX LED on, keeps no result, and `-S` stops it (LEDs off, back to 2441 MHz); channel, PA, squelch, LEDs and CRC of both boards restored, other registered boards guarded. Passes on fork main since fork #601 (fork #26, #483), about 9 runs in 10 on a bench pair; the rest fail with `mismatch on byte 0` (fork #677) | no comprehensive profile |
 | `Capture known BLE advertiser` | `ble` plan; an Ubertooth and an nRF52840 DK with the `advertiser` role on one host (see [BLE test devices](#ble-test-devices-nrf52840-dk)): the DK is flashed with `firmware/nrf52840dk` when it reports another version, and must report its registered address; for each of channels 37, 38 and 39 the DK advertises (`ADV_NONCONN_IND`, `interval`, `payload` tag) on that channel only and `ubertooth-btle -n -A<channel> -q` captures for `duration`: at least a fifth of its advertising events and no more than its interval allows, every one on that channel's RF channel, CRC right, from its address, with the harness payload (magic, channel map, tag) and a counter between the DK's counters before and after; `-n -A37` while it advertises on 38 holds none of its packets; `-f -A37 -r` (PCAPNG) holds them too; the DK is stopped and returned to its boot settings, the Ubertooth's channel, squelch and LEDs restored, other registered boards guarded | adds every listen/advertise channel pair that must hold nothing, `-f -A38`/`-A39`, `ADV_IND` (which is scannable, so the advertiser's own scan responses to scanners nearby are counted and only their channel is checked), advertising on all three channels, a 1000 ms interval (packet bound), and no tag |
-| `Capture known BLE connection` | `ble` plan, `connection` suite; an Ubertooth and two nRF52840 DKs, one with the `central` role and one with the `peripheral` role, on one host (see [BLE test devices](#ble-test-devices-nrf52840-dk)): both DKs are flashed with `firmware/nrf52840dk` when they report another version and must report their registered addresses; the peripheral advertises connectable, the central connects at `interval` with a 251-byte data length, writes 244 bytes every 100 ms, asks for `update` once connected, and remakes the link every 4 s; `ubertooth-btle -f -r` captures for `duration` and the capture must hold one CONNECT_IND between the two addresses with exactly that interval, latency 0 and a 4 s supervision timeout, a hop increment of 5-16, every data channel in the channel map, at least five packets on the connection's access address with correct CRCs, and at least one longer than the 27 bytes a link without Data Length Extension allows; both DKs are left idle in the advertiser role, the Ubertooth's channel, squelch and LEDs restored, other registered boards guarded | adds the same with `-q` (PCAP) and a case pinning the wrong connection information libbtbb records in a PCAPNG ([libbtbb#21](https://github.com/SqueakyFloors/libbtbb/issues/21)), which fails when that is fixed |
+| `Capture known BLE connection` | `ble` plan, `connection` suite; an Ubertooth and two nRF52840 DKs, one with the `central` role and one with the `peripheral` role, on one host (see [BLE test devices](#ble-test-devices-nrf52840-dk)): both DKs are flashed with `firmware/nrf52840dk` when they report another version and must report their registered addresses; the peripheral advertises connectable, the central connects at `interval` with a 251-byte data length, writes 244 bytes every 50 ms, asks for `update` once connected, and remakes the link every 5 s; `ubertooth-btle -f -r` captures for `duration` and the capture must hold one CONNECT_IND between the two addresses with exactly that interval, latency 0 and a 4 s supervision timeout, a hop increment of 5-16, every data channel in the channel map, at least five packets on the connection's access address, of which at least one decodes with a correct CRC, and at least one longer than the 27 bytes a link without Data Length Extension allows; a capture that misses any of that is taken again, up to three captures; both DKs are left idle in the advertiser role, the Ubertooth's channel, squelch and LEDs restored, other registered boards guarded | adds the same with `-q` (PCAP) and a case that reads the connection information libbtbb records in a PCAPNG: one of the recorded options must be, byte for byte, a CONNECT_IND this capture decoded from the two addresses, so the parameters a reader follows the connection with are the ones that went over the air ([libbtbb#21](https://github.com/SqueakyFloors/libbtbb/issues/21) had them copied 6 bytes early) |
 | `Capture known Classic device` | `classic` plan; an Ubertooth and two ESP32 Classic peers with the `acceptor` and `initiator` roles on one host (see [Classic test devices](#classic-test-devices-esp32-classic-peers)): both peers must already run `firmware/esp32-classic-peer`, which mandatory preflight checks by asking each one to identify itself; `esp32peer.py stream` then brings a Serial Port Profile link up between them, streams 200 bytes every 20 ms, and runs `ubertooth-rx` for `duration` while it holds. `ubertooth-rx -z` must list the piconet central's LAP in its survey results, and a run with no target must report at least ten packet lines carrying that LAP; the central is whichever peer pages, so its LAP is the initiator's. Afterwards the pair must report a link that never went down and at least fifty writes, both peers are reset to the firmware's boot state, the Ubertooth's channel, squelch and LEDs are restored, and other registered boards are guarded | adds `-z -r` (PCAPNG with link type 255) and the same survey with the peers' roles swapped, which must list the other board's LAP and not the first one's |
 | `Follow Classic Bluetooth piconet` | `classic` plan; the same two peers and the same bring-up: `ubertooth-rx -l <central LAP> -u <central UAP>` must report at least ten packet lines and none of another LAP (libbtbb is asked for one access code), and `-l`/`-u` for the peer that is *not* the central must report no packet at all | adds `-l` without `-u` (the UAP is recovered from the air) and `-l -u -q` (PCAP with link type 255) |
 | `DFU images` | writes the selected board's firmware; slow plan (not fast): `-d <test image> -r`, then `-u -r` reads back the image padded with 0xff; `-s` on the image without its suffix gives the build's `.dfu` | `firmware` plan (not release): adds `-s` refusing a `.dfu`; seven bad images (wrong CRC, truncated, no suffix, text, no `UFD`, wrong vendor, wrong product) refused before a device is opened (fork #198, #199, fixed in e8edd15), the board still in its application with the same flash (read back); `-s` refuses a suffixed `.bin` and accepts a read-only one (fork #200, fixed in 9d710fe). At 6fee30c `-d <image> -r` exits 1 after a good flash (fork #267, fixed in 89d9197), so the write cases fail there |
@@ -749,7 +750,19 @@ overall pass. Event schema version 1 is pre-release
 and has no stable consumers yet; field changes before the controller lands do
 not bump it.
 
-A state-changing case stops at its first failed step. The parent test moves on
+A state-changing case stops at its first failed step, unless the case declares
+a group of steps to run again (`StateCase.retry_steps` and `attempts`): a
+failure inside that group starts the group over, up to that many attempts, and
+only the last attempt's failure ends the case. It is for a case whose outcome
+depends on what arrives over the air, where the devices keep making the
+traffic and another try costs only the capture window; the steps in the group
+have to be repeatable and leave the board as the first attempt found it. From
+the second attempt on, each step's `step_finished` event carries its `attempt`
+and the saved output of its command is kept separately, and the case's
+`check_finished` event carries the `attempts` it took. A cancellation, and a
+failure anywhere else in the case, end it as they always did.
+
+The parent test moves on
 to the next case only when that case's cleanup verified the device restored;
 otherwise the test stops. Cleanup runs with its own hard-timeout commands even
 after cancellation or an internal error such as a failed event write, during
@@ -1419,6 +1432,18 @@ keeps coming back cannot make a command spin. A board whose lease could not
 be taken over (another command was taking one over at that moment) is
 reported with the same explanation the host lock gets below.
 
+A `run-suite` that took a lease over carries that into its run record: a
+`lease_takeover` record in run.jsonl (the board, the record of the holder
+that was gone, why it was read as gone, and the lock file), a line in the
+transcript, and a "Leases taken over" row in report.md once the run reaches
+its manifest (a run that fails in its build has the record and the
+transcript line). Since a takeover does
+not promise the board was idle, that is what to look at when a later result
+in the run looks odd — and a run started by a deployed runner leaves no
+other trace, because the line on standard error goes to the runner's own
+log. `lease` keeps that line and records nothing else: it is a person at a
+terminal. (`boards` never takes a lease over at all.)
+
 The host lock is never taken over. It is the only thing that keeps USB power
 changes and firmware writes on a host from overlapping, and what still holds
 its file could be a firmware write in flight — a process that left the
@@ -1464,6 +1489,24 @@ error: UT_0 is queued: agent #14, run 2026-10-31-ble, lease: ubertooth-util
 is still waiting for it; use --wait-for-boards MINUTES to wait for your turn
 ```
 
+A run that wants several boards (and the host lock) is served the same way,
+and that takes one thing more: boards are taken all or nothing, so such a run
+needs every one of them free in the same attempt, and with short leases
+arriving on different boards each can be free in its turn and never all at
+once. So each ticket records the whole set its command is waiting for, and a
+command gives way to an older ticket for as long as anything in that set is
+held, without the bound below. The boards that are free stay free while the
+run waits for the one that is not, until it can take them all; the error a
+newcomer gets says which board that is:
+
+```
+error: UT_1 is queued after waiting 5s: agent #3, run 2026-10-31-flash,
+run-suite release / comprehensive, pid 8120, since ... UTC asked for it first
+and is still waiting for it; that command is waiting for UT_0 too, which is
+held by agent #14, run 2026-10-31-ble, pid 7781, since ... UTC; use
+--wait-for-boards MINUTES to wait for your turn
+```
+
 A ticket is a file named after its number, locked while its command waits and
 removed when it stops waiting. It is locked and written before it appears
 under its queue name, so a ticket counts only while its command is really
@@ -1476,29 +1519,41 @@ UT_0         held  agent #14, run 2026-10-31-ble, pid 7781 (for 0h04m11s)
              queue: 2 commands are waiting for it
 ```
 
-Giving way is bounded in one case: a board that is *free*, and that the
-command could therefore have taken. After half a second of that — two poll
-rounds, enough for a waiter that is really waiting to notice the board was
-released — a command competes for the board as it did before the queue,
-once for each command ahead of it; a command with no
+Giving way is bounded in one case: the command ahead could take everything it
+asked for right now — all of it is free — and has not. After half a second of
+that — two poll rounds, enough for a waiter that is really waiting to notice a
+board was released — a command competes for the board as it did before the
+queue, once for each command ahead of it; a command with no
 `--wait-for-boards` has a whole second before it gives up, so it too ends up
 competing rather than failing (and, if the board is taken again just before
 that second is up, failing with `is queued` where it used to say `is in
-use`). The bound is per stretch of giving way: it starts again whenever the
-board is held, or the command ahead in the queue changes, so a long wait
-never turns into a licence to jump the queue. Giving way to a board somebody
-is using is never bounded: nothing in the harness can be stuck on a lock that
-is held, so the waiters simply take their turns.
+use`). Where the command ahead is waiting for something it cannot have yet,
+there is no such stretch: a command with no `--wait-for-boards` then fails
+with `is queued` after its second rather than competing. The bound is per
+stretch of giving way, and per board: it starts again whenever one of
+those boards is held, or the command ahead in the queue changes, so a long
+wait never turns into a license to jump the queue. Giving way to a command
+that is waiting for a board somebody is using is never bounded: nothing in
+the harness can be stuck on a lock that is held, so the waiters simply take
+their turns.
 
-That bound is what keeps the queue from becoming a new way to wait forever.
-A command can be ahead in the queue and unable to take the board for reasons
-the queue cannot see or help: a wrapper outside the harness holding a board's
-own lock file while it waits for the lease (the order below), or simply a run
-that is still blocked on the host lock. Its neighbors give it a clear run at
-the board and then carry on. So the queue is not a reservation: a command
-that needs several boards can still miss its turn when each comes free on
-its own and never all at once
-([#225](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/225)).
+That bound is what keeps the queue from becoming a new way to wait forever. A
+command can be ahead in the queue, with everything it asked for free, and
+still not take it, for a reason the queue can neither see nor help: a wrapper
+outside the harness holding a board's own lock file while it waits for the
+lease (the order below). Its neighbors give it a clear run at the board and
+then carry on. A command gives way at each board in its own right, so waiting
+the command ahead at one board out never lets it take a board another command
+has been waiting longer for; within one board's queue it is the command that
+has waited longest that gets the turn, as before. The host lock is the other
+thing a waiter can be held up by with no way through, since it is never taken
+over (above): one that no running command holds counts as free here, so a
+lock a person has to clear does not hold the whole bench in the queue.
+
+What a multi-board run costs the others, in exchange: while it waits for the
+last board it needs, a command that wants one of the boards already free
+waits too, and one that asked to wait for nothing fails with `is queued`.
+That lasts as long as the run's own `--wait-for-boards`.
 
 ### The host lock
 
@@ -1751,7 +1806,8 @@ flash reliability run, compiler output, and long packet listings out of
 run.jsonl: on a release run that cut run.jsonl from 48 MB to about 20 MB, and the dump stderr records
 from 15 MB to 1 MB. Through
 the runner service the `output/` files stay in the runner's run directory;
-only run.jsonl records reach the controller.
+only run.jsonl records reach the controller, which asks that runner for a
+page when the GUI opens one (`GET /api/runs/{run_id}/file` below).
 
 ### Checks read the output files
 
@@ -1831,7 +1887,7 @@ GUI both show what it says:
 - a **Known targets** section gives the whole line per test, for example
   `Run against known target: nRF52840 DK advertiser DK_Linux0
   (J-Link 000123456789, /dev/serial/by-id/usb-SEGGER_J-Link_000123456789-if00),
-  requires firmware utdk-1.2.1, BLE address C0:00:00:00:00:01`, and a test
+  requires firmware utdk-1.3.0, BLE address C0:00:00:00:00:01`, and a test
   with no known target says `No known target: the harness drove no device for
   this test`, which the GUI shortens to `no known target`;
 - the transcript carries the same line as an `[M]` record where the test
@@ -2106,8 +2162,9 @@ run.jsonl, so the controller deduplicates by `(run_id, sequence)`. SIGINT,
 SIGTERM, or SIGHUP stops the runner after cancelling and waiting for an
 active run.
 
-Messages are JSON objects with `"version": 3` and a `type` (version 2 added
-the run's `commit`, version 3 its `flash_build`; a runner or controller of
+Messages are JSON objects with `"version": 4` and a `type` (version 2 added
+the run's `commit`, version 3 its `flash_build`, version 4 the `run_file`
+request and its answers; a runner or controller of
 another version is refused); each type has an
 exact field set, and anything else (unknown version or type, a missing or
 extra field, a wrong value) gets `protocol_error` and is not acted on. The
@@ -2249,7 +2306,18 @@ word and symbol (colour only reinforces it).
   one [learned on that target](#learned-durations) once its own runs have
   measured it. Build and preflight time are not included: the countdown
   starts with the first test. Otherwise the view shows elapsed time and says
-  why. The view is linkable as `/ui/#run=<run_id>`.
+  why. Under each test is a line of links, one per file that test saved (the
+  build's and preflight's are listed under the checklist), with the stream,
+  the size and the number of checks that read it in the link's tooltip and
+  the failure color on a file a check came out against; opening one shows a
+  bounded page of it in a panel beside the log tail, black on white in a
+  fixed-width font so a saved file is never mistaken for the live stream,
+  with the recorded size, line count and SHA-256 above it and which bytes
+  are shown below. A run a target runner carried out keeps those files in
+  that runner's own run directory, so the controller asks the runner for the
+  page; while the runner is not connected the file is listed as `name (on
+  the target)` and is not a link. The view is linkable as
+  `/ui/#run=<run_id>`, and `/ui/#run=<run_id>&file=<path>` opens that file.
 - **History:** every run, newest first, with started/finished times, ref,
   plan/suite, target and status, a link to its `report.md`, and for a run
   that did not pass a failure summary (each failed phase or test with its
@@ -2275,9 +2343,11 @@ Endpoints (JSON unless noted; `GET /` lists them):
 | `GET /api/runs[?target=HOST]` | runs, newest first |
 | `GET /api/runs/{run_id}` | status, every event, the failure summary (`failures`), `invocations` (from the run's manifest, every planned invocation on the target with `invocation_id`, `test_name`, `estimated_s`, `catalog_estimated_s`, `estimate_source`, `estimate_samples` and `estimate_scaled`; null before the manifest record), and `stages`: the run's build and preflight estimates where its host has learned them |
 | `GET /api/runs/{run_id}/report.md` | the run's report (Markdown) |
+| `GET /api/runs/{run_id}/files` | the output files the run recorded, each with its path, stream, size, line count, SHA-256, where it came from (`owner`), the checks that read it, and `readable`: whether this host holds the file itself |
+| `GET /api/runs/{run_id}/file?path=&offset=&limit=` | one bounded page of a saved output file, with what the run recorded about it and where the page sits in it. Only a path that run's own `run.jsonl` records is served, and only from inside the run directory, with no symbolic link followed; a page is 64 KiB by default and 1 MiB at most. A file that stayed on the target is asked of that run's runner (256 KiB at most, since the page travels in one protocol message, and `page_bytes` says what a page was); 503 while that runner is not connected, 504 if it does not answer in time, 400 or 404 for a path that may not be served, naming the path only |
 | `POST /api/runs/{run_id}/cancel` | `{"reason": ""}`; 202 once the runner accepts |
 | `WS /ws/live[?run_id=ID]` | browser stream: a `snapshot`, then `target` and `run` updates, plus that run's `event` records; a browser 1000 updates behind is closed with 1013 `live stream overflowed` (reconnect for a new snapshot) |
-| `WS /ws/runner` | target runner protocol v3 |
+| `WS /ws/runner` | target runner protocol v4 |
 
 Every request and WebSocket handshake must carry `Host: 127.0.0.1:PORT` or
 `localhost:PORT` and, if it has an `Origin`, that same origin (runner
@@ -2343,7 +2413,7 @@ manifest record); a malformed or out-of-place message is counted on the
 target and ignored, and a first message that is not a valid `register`
 closes the connection. A target is `offline` after three heartbeat intervals
 without a valid message, and runs cannot be started on it: only a message that
-decodes as protocol v3 resets the offline timer, and malformed messages do
+decodes as protocol v4 resets the offline timer, and malformed messages do
 not. The controller allows one
 outstanding start request per target and refuses a target whose runner reports
 an active run. Each run is a flat directory `<results dir>/<run_id>/` with
@@ -2445,8 +2515,8 @@ anyway.
 
 The runner protocol has no version negotiation: the controller and runner
 must speak the same version: protocol v2 (which added the listed commit to
-`run`) and v3 (which added `flash_build`) are each a hard break from the
-version before. An older runner is refused at `register` (the
+`run`), v3 (which added `flash_build`) and v4 (which added the `run_file`
+request and its answers) are each a hard break from the version before. An older runner is refused at `register` (the
 controller closes the connection, code 1008), and since it did register it
 reconnects after the shortest backoff (0.5 s) and is refused again,
 indefinitely; its log shows `registered with ...` then `controller connection

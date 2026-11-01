@@ -20,7 +20,7 @@
  * when a board reports anything else, so bump it with every change to the
  * firmware's behavior or protocol.
  */
-#define UTDK_FW_VERSION "utdk-1.2.1"
+#define UTDK_FW_VERSION "utdk-1.3.0"
 
 /* Payload magic and format: see README.md, "Advertising payload". */
 #define UTDK_COMPANY_ID 0xFFFF
@@ -76,6 +76,11 @@ void adv_leave(void);
 /* Central and peripheral roles (connection.c). */
 int conn_init(void);
 void conn_status(char *buf, size_t len);
-void conn_leave(void);
+/* Returns the error from putting the controller's channel classification
+ * back (0 when there was nothing to put back or it was taken): the
+ * classification outlives the link, so a board that kept a narrowed one
+ * must not be reported as idle.
+ */
+int conn_leave(void);
 
 #endif /* UTDK_ROLES_H_ */

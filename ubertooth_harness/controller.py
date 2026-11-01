@@ -24,7 +24,7 @@ commit listed for that ref, and the runner runs exactly that commit, so a
 stale or differently configured runner checkout cannot substitute another
 one; the commit is recorded in ``run.json``.
 
-Target runners connect to ``/ws/runner`` and speak protocol v3
+Target runners connect to ``/ws/runner`` and speak protocol v4
 (``ubertooth_harness/protocol.py``), decoded strictly. Each run is stored as a
 flat directory ``<results dir>/<run_id>/`` holding ``run.json`` (the
 controller's record), ``run.jsonl`` (the runner's events appended as received,
@@ -68,6 +68,7 @@ from ubertooth_harness.runfiles import (
     read_output_page,
 )
 from ubertooth_harness.protocol import (
+    MAX_FILE_PAGE_BYTES,
     MAX_RUNNER_MESSAGE_BYTES,
     PROTOCOL_VERSION,
     ProtocolError,
@@ -89,6 +90,10 @@ DEFAULT_REPLY_TIMEOUT_S = 10.0
 DEFAULT_LATE_REPLY_GRACE_S = 60.0
 DEFAULT_MONITOR_INTERVAL_S = 1.0
 LIVE_QUEUE_LIMIT = 1000
+# File page requests outstanding to one target. A reader pages through a file
+# one request at a time, so this is generous; it bounds what any process that
+# reaches the loopback API can make the controller hold open.
+MAX_PENDING_FILES_PER_TARGET = 8
 # Environment variables that would suggest a bind override. None is honoured;
 # their presence refuses startup so nobody believes they took effect.
 BIND_OVERRIDE_VARIABLES = (
@@ -376,6 +381,8 @@ class Controller:
         self._send_locks: dict[Link, asyncio.Lock] = {}
         self._pending_runs: dict[str, _Pending] = {}
         self._pending_cancels: dict[str, _Pending] = {}
+        # run_file requests awaiting a runner's page or refusal.
+        self._pending_files: dict[str, _Pending] = {}
         self._subscribers: set[_Subscriber] = set()
         self._load_runs()
 
@@ -742,14 +749,20 @@ class Controller:
             await self.learn(run)
 
     def _fail_pending(self, host: str, reason: str) -> None:
-        for table in (self._pending_runs, self._pending_cancels):
+        for table in (
+            self._pending_runs, self._pending_cancels, self._pending_files
+        ):
             for key, pending in list(table.items()):
                 if pending.host == host:
                     del table[key]
                     pending.fail(ControllerError(reason, 503))
 
     def expire_pending(self) -> None:
-        """Drop requests nobody waits for once their grace period has passed."""
+        """Drop requests nobody waits for once their grace period has passed.
+
+        Not the file requests: each of those is dropped as its caller leaves,
+        because a page nobody waits for is of no use to anyone.
+        """
         now = self.clock()
         for table in (self._pending_runs, self._pending_cancels):
             for key, pending in list(table.items()):
@@ -894,6 +907,45 @@ class Controller:
             self._publish_run(run)
             self.log(f"run {run.run_id} on {target.host}: {run.status}")
             await self.learn(run)
+        elif kind in ("run_file_page", "run_file_refused"):
+            request_id = message["request_id"]
+            pending = self._pending_files.get(request_id)
+            if pending is None:
+                # Its caller gave up (504) and the request was dropped, since
+                # a page nobody waits for is of no use to anyone. Answering
+                # late is not a fault of the runner's, so it is not counted
+                # as one; it is simply discarded.
+                self.log(f"discarded a late {kind} from {target.host}")
+                return
+            if pending.host != target.host:
+                raise _Violation(f"{kind} for unknown file request {request_id}")
+            asked = pending.fields or {}
+            if message["run_id"] != asked.get("run_id"):
+                raise _Violation(
+                    f"{kind} names run {message['run_id']}, not the "
+                    f"{asked.get('run_id')} that was asked for"
+                )
+            if kind == "run_file_page":
+                page = message["page"]
+                # The page must name the file and the place that were asked
+                # for, so an answer cannot be paired with another request.
+                # An offset past the end comes back clamped to the end,
+                # exactly as a read here clamps it, which is why the size the
+                # answer reports is part of the comparison. What the page
+                # says about itself beyond that is the runner's to report.
+                # Checked before the request is taken off the pending list,
+                # so a refused answer leaves it there for the right one.
+                at = min(asked.get("offset", 0), page["file_bytes"])
+                if page["path"] != asked.get("path") or page["offset"] != at:
+                    raise _Violation(
+                        "run_file_page answers another file or another place "
+                        "in it than was asked for"
+                    )
+            del self._pending_files[request_id]
+            if kind == "run_file_page":
+                pending.resolve(message["page"])
+            else:
+                pending.fail(ControllerError(message["reason"], message["status"]))
         elif kind == "protocol_error":
             target.last_runner_protocol_error = message["reason"]
             self.log(f"{target.host} rejected a controller message: {message['reason']}")
@@ -1155,6 +1207,135 @@ class Controller:
             raise ControllerError(f"unknown run {run_id!r}", 404)
         return run
 
+    async def read_run_file(
+        self, run: Run, path: str, offset: int = 0, limit: int = PAGE_BYTES
+    ) -> dict:
+        """One page of a run's saved output file, from here or from its runner.
+
+        A run the controller carried out itself has its files in its own run
+        directory. For a run a target runner carried out, only run.jsonl
+        reaches the controller and the ``output/`` files stay in the runner's
+        run directory, so the page is asked of that runner.
+        """
+        try:
+            return await asyncio.to_thread(
+                read_output_page, self._own_run_directory(run), path, offset, limit
+            )
+        except OutputFileError as error:
+            # Only a file the run recorded and this host does not have is
+            # asked of the runner. Anything else (a path the run never
+            # recorded, a bad offset or limit, a path that may not be opened)
+            # is already answered, and reaching out would not change it.
+            if not error.on_target:
+                raise ControllerError(error.detail, error.status) from None
+        except ControllerError:
+            raise
+        except Exception as error:  # noqa: BLE001 - a stored record is data
+            raise self._unreadable_log(run, error) from None
+        return await self._fetch_run_file(run, path, offset, limit)
+
+    async def saved_files(self, run: Run) -> list[dict]:
+        """The files the run recorded, each marked readable on this host.
+
+        Read from the run's own run.jsonl a line at a time, so a soak's log
+        is not parsed into memory to list a few files.
+        """
+        try:
+            return await asyncio.to_thread(listing, self._own_run_directory(run))
+        except ControllerError:
+            raise
+        except Exception as error:  # noqa: BLE001 - a stored record is data
+            raise self._unreadable_log(run, error) from None
+
+    def _own_run_directory(self, run: Run) -> Path:
+        """``run``'s directory in this controller's own results store.
+
+        No symbolic link is followed here either, as none is for a file
+        inside a run directory: a link in the results store would serve
+        whatever it points at, which is what reading only the files a run
+        recorded is meant to prevent.
+        """
+        directory = run.directory
+        if directory.parent != self.results_dir or directory.is_symlink():
+            raise ControllerError(
+                f"run {run.run_id} has no directory in this results store", 404
+            )
+        return directory
+
+    def _unreadable_log(self, run: Run, error: Exception) -> ControllerError:
+        """A stored run.jsonl that gave neither a file list nor a page.
+
+        A record is ordinary data, so a line that is JSON but holds, say, a
+        size that is not a number stops a list or a page being built from it.
+        That is a refusal naming the run, not a server failure; the log line
+        carries the detail, and the answer carries no path on this host.
+        """
+        self.log(
+            f"run {run.run_id}: its saved output files cannot be read from "
+            f"{RUN_LOG} ({type(error).__name__}: {error})"
+        )
+        return ControllerError(
+            f"run {run.run_id} has a record its saved output files cannot be "
+            f"read from ({type(error).__name__})", 404,
+        )
+
+    async def _fetch_run_file(
+        self, run: Run, path: str, offset: int, limit: int
+    ) -> dict:
+        target = self.targets.get(run.target)
+        link = self._links.get(run.target)
+        if target is None or link is None or not target.online:
+            raise ControllerError(
+                f"{path!r} is in the run directory of target {run.target}, "
+                "which is not connected; it can be read again once that "
+                "target's runner is back", 503,
+            )
+        # Every entry counts, awaited or not: each one is a request this
+        # controller sent and is holding an answer for. Unlike a run request,
+        # a file request is dropped as soon as its caller leaves (below), so
+        # the count is what is really outstanding.
+        outstanding = sum(
+            1 for pending in self._pending_files.values()
+            if pending.host == run.target
+        )
+        if outstanding >= MAX_PENDING_FILES_PER_TARGET:
+            raise ControllerError(
+                f"{outstanding} file requests to {run.target} are already "
+                "waiting for an answer; try again", 503,
+            )
+        request_id = uuid.uuid4().hex
+        fields = dict(
+            run_id=run.run_id, path=path, offset=max(offset, 0),
+            # The protocol carries a smaller page than a local read may ask
+            # for, because the page travels as JSON in one message. The
+            # answer says how many bytes a page is, so a reader pages on.
+            limit=min(max(limit, 1), MAX_FILE_PAGE_BYTES),
+        )
+        try:
+            text = encode_controller_message("run_file", request_id=request_id, **fields)
+        except ProtocolError as error:
+            raise ControllerError(str(error), 400) from None
+        pending = _Pending(
+            run.target, asyncio.get_running_loop().create_future(), fields
+        )
+        self._pending_files[request_id] = pending
+        try:
+            try:
+                await self._send(link, text)
+            except Exception as error:
+                raise ControllerError(
+                    f"cannot reach target {run.target}: {error}", 503
+                ) from None
+            return await self._await_reply(pending)
+        finally:
+            # Dropped as soon as its caller is gone, whether it was answered,
+            # timed out, or cancelled: a page that arrives after the caller
+            # left can do nothing for anyone, where a late run_accepted still
+            # has a run to create. This is also what keeps the count above
+            # honest, so one cancelled caller cannot hold a slot.
+            if self._pending_files.get(request_id) is pending:
+                del self._pending_files[request_id]
+
 
 # ----- HTTP / WebSocket layer ----------------------------------------------
 
@@ -1316,11 +1497,12 @@ ENDPOINTS = {
     "GET /api/runs/{run_id}/files": "the output files the run saved, with the checks that read each",
     "GET /api/runs/{run_id}/file": (
         "one page of a saved output file: ?path=<a path the run recorded>"
-        "&offset=<bytes>&limit=<bytes>"
+        "&offset=<bytes>&limit=<bytes>; a file that stayed on the target is "
+        "asked of its runner, 503 while that runner is away"
     ),
     "POST /api/runs/{run_id}/cancel": "cancel an active run: {reason}",
     "WS /ws/live": "live target and run updates (?run_id=ID adds that run's events)",
-    "WS /ws/runner": "target runner protocol v3",
+    "WS /ws/runner": "target runner protocol v4",
 }
 
 
@@ -1457,20 +1639,14 @@ def create_app(controller: Controller):
 
     @app.get("/api/runs/{run_id}/files")
     async def get_run_files(run_id: str):
-        run = controller.get_run(run_id)
-        # Read from run.jsonl a line at a time (runfiles.saved_in), so a
-        # soak's log is not parsed into memory to list a few files.
-        return {"files": await asyncio.to_thread(listing, run.directory)}
+        return {"files": await controller.saved_files(controller.get_run(run_id))}
 
     @app.get("/api/runs/{run_id}/file")
     async def get_run_file(run_id: str, path: str, offset: int = 0, limit: int = PAGE_BYTES):
         run = controller.get_run(run_id)
-        try:
-            return await asyncio.to_thread(
-                read_output_page, run.directory, path, offset, limit
-            )
-        except OutputFileError as error:
-            raise ControllerError(error.detail, error.status) from error
+        # From the controller's own run directory, or from the runner that
+        # carried the run out when the file stayed on that target.
+        return await controller.read_run_file(run, path, offset, limit)
 
     @app.post("/api/runs/{run_id}/cancel", status_code=202)
     async def cancel_run(run_id: str, request: CancelRequest):

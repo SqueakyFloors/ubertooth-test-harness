@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""Drive the ESP32 Classic peers by registry alias, holding them while it runs.
+
+    peer status   <peer>
+    peer identify <peer>
+    peer reset    <peer>
+    peer stream   <acceptor> <initiator> [options] -- <command> [arg...]
+
+A peer is named the way every bench helper names a device: a registry alias, a
+full bridge serial, or an unambiguous prefix of one. This looks up what
+``ubertooth_harness/esp32peer.py`` needs -- the bridge's stable by-id path and
+the board's registered BD_ADDR -- holds the devices, and runs it.
+
+That division is the whole script. ``esp32peer.py`` does the work: it opens the
+bridges, checks the firmware and the address, brings the Serial Port Profile
+link up, streams a counted payload while your command runs, stops the pair,
+reports what the two boards did, and fails closed. ``scripts/lab/hold`` does
+the locking. Neither is reimplemented here.
+
+``stream`` is how a capture is taken, because opening a bridge resets the
+board: one invocation has to be one session, so the command under test runs
+*inside* it. The initiator pages, so it is the piconet central and its LAP is
+the one on the air; ``esp32peer.py`` prints ``central LAP`` and ``central UAP``
+on standard error, which is what ``ubertooth-rx -l`` and ``-u`` take. To
+capture with a particular board's LAP on the air, name that board as the
+initiator.
+
+Hold the Ubertooth in the same set with ``--with``, so the capture and the
+peers are one lock group:
+
+    peer stream ESP32_Linux0 ESP32_Linux1 --with UT_Linux1 -- \\
+        ubertooth-rx -U <serial> -z -t 30
+
+Inside an outer ``hold`` that already has these devices, pass ``--no-hold``;
+holding them twice would wait for a lock this process already has.
+
+Nothing about a bench is built in: the registry and the lock settings come from
+options or the same environment variables ``hold`` reads.
+
+Exit status is the delegate's, or 2 for a usage or registry error.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+# See the note in `hold`: run as a script, neither the harness package nor the
+# helpers beside this file are importable without this.
+_HERE = Path(__file__).resolve().parent
+sys.path[:0] = [str(_HERE), str(_HERE.parents[1])]
+
+try:
+    from ubertooth_harness import esp32peer, leases
+    from ubertooth_harness.resources import FileResourceRegistry, RegistryError
+
+    from _bench import PEER_TYPE, resolve
+except ImportError:  # run from outside the harness environment
+    sys.exit(
+        "peer: run this from the harness environment "
+        "(python3 bootstrap.py, then .venv/bin/python scripts/lab/peer ...)"
+    )
+
+HARDWARE_ENV = "UBERTOOTH_HARNESS_HARDWARE"
+HOLD = _HERE / "hold"
+ESP32PEER = Path(esp32peer.__file__).resolve()
+ONE_PEER = ("status", "identify", "reset")
+HELP_FLAGS = ("-h", "--help")
+
+
+def _usage(message: str) -> int:
+    print(f"peer: {message}", file=sys.stderr)
+    return 2
+
+
+def peer_device(resource) -> str:
+    """The bridge's port: the registry's own path, or the one its serial gives."""
+    named = str(resource.identity.get("serial device", "") or "").strip()
+    return named or esp32peer.default_device(resource.identity.get("bridge serial", ""))
+
+
+def require_peer(resource):
+    if resource.type != PEER_TYPE:
+        raise RegistryError(
+            f"{resource.alias} is a {resource.type}, not an {PEER_TYPE}"
+        )
+    return resource
+
+
+def esp32peer_argv(args, peers: dict, command) -> list[str]:
+    """The `esp32peer.py` command line, with what the registry knows filled in."""
+    argv = [sys.executable, str(ESP32PEER), args.command]
+    if args.command in ONE_PEER:
+        one = peers["peer"]
+        argv += [
+            "--device", peer_device(one),
+            "--address", one.identity["BD_ADDR"],
+            "--alias", one.alias,
+        ]
+        # The role only names the board in the report; the registry knows which
+        # roles it can take, and a single-board command takes neither.
+        return argv
+    for role in ("acceptor", "initiator"):
+        board = peers[role]
+        argv += [
+            f"--{role}", peer_device(board),
+            f"--{role}-address", board.identity["BD_ADDR"],
+            f"--{role}-alias", board.alias,
+        ]
+    for name, value in (
+        ("--period", args.period), ("--payload", args.payload),
+        ("--min-writes", args.min_writes), ("--min-seconds", args.min_seconds),
+        ("--timeout", args.timeout),
+    ):
+        if value is not None:
+            argv += [name, str(value)]
+    return argv + ["--"] + list(command)
+
+
+def hold_argv(args, aliases, inner) -> list[str]:
+    """`hold` around the delegate, so one lock group covers the whole session."""
+    argv = [sys.executable, str(HOLD), "--hardware", str(args.hardware)]
+    if args.external_board_lock is not None:
+        argv += ["--external-board-lock", args.external_board_lock]
+    if args.lease_dir is not None:
+        argv += ["--lease-dir", str(args.lease_dir)]
+    if args.owner:
+        argv += ["--owner", args.owner]
+    if args.wait_for_boards is not None:
+        argv += ["--wait-for-boards", str(args.wait_for_boards)]
+    return argv + [",".join(aliases), "--"] + list(inner)
+
+
+def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
+    if "--" in argv:
+        split = argv.index("--")
+        before, command = argv[:split], argv[split + 1:]
+    elif any(flag in argv for flag in HELP_FLAGS):
+        # No `--`, so nothing here belongs to a command being wrapped, and a
+        # help flag can only be a request for this script's help.
+        before, command = argv, []  # argparse prints it and exits 0
+    elif argv[:1] and argv[0] in ONE_PEER:
+        before, command = argv, []  # these take no command
+    else:
+        raise SystemExit(_usage(
+            "usage: peer status|identify|reset <peer>, or "
+            "peer stream <acceptor> <initiator> [options] -- <command> "
+            "('peer stream -h' lists the options)"
+        ))
+    parser = argparse.ArgumentParser(
+        prog="peer", add_help=True,
+        description="Drive the ESP32 Classic peers by registry alias.",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+    shared = argparse.ArgumentParser(add_help=False)
+    shared.add_argument(
+        "--hardware", type=Path, default=os.environ.get(HARDWARE_ENV) or None,
+        help=f"resource registry (default ${HARDWARE_ENV})",
+    )
+    shared.add_argument(
+        "--external-board-lock", metavar="TEMPLATE", default=None,
+        help=f"the bench's own per-device lock files (default ${leases.EXTERNAL_LOCK_ENV})",
+    )
+    shared.add_argument("--lease-dir", type=Path, default=None,
+                        help=f"harness lease directory (default ${leases.LEASE_DIR_ENV})")
+    shared.add_argument("--owner", default=None,
+                        help=f"how you are named to another holder (default ${leases.OWNER_ENV})")
+    shared.add_argument("--wait-for-boards", type=float, default=None, metavar="MINUTES",
+                        help="how long to wait for a busy device; hold's default "
+                             "applies when this is left out")
+    shared.add_argument("--no-hold", action="store_true",
+                        help="the devices are already held by an outer hold")
+    for name in ONE_PEER:
+        one = sub.add_parser(name, parents=[shared], help=f"{name} one peer")
+        one.add_argument("peer", help="alias, bridge serial, or an unambiguous prefix")
+    stream = sub.add_parser(
+        "stream", parents=[shared],
+        help="bring the pair's link up and run a command while it streams",
+    )
+    stream.add_argument("acceptor", help="the listening board")
+    stream.add_argument("initiator", help="the paging board; it is the piconet central")
+    stream.add_argument("--with", dest="also", default="",
+                        help="comma-separated extra devices to hold, for example "
+                             "the Ubertooth doing the capture")
+    stream.add_argument("--period", type=int, default=None, metavar="MS")
+    stream.add_argument("--payload", type=int, default=None, metavar="BYTES")
+    stream.add_argument("--min-writes", type=int, default=None, metavar="N")
+    stream.add_argument("--min-seconds", type=float, default=None, metavar="S")
+    stream.add_argument("--timeout", type=float, default=None, metavar="S")
+
+    args = parser.parse_args(before)
+    if args.command == "stream" and not command:
+        raise SystemExit(_usage("stream needs the command to run after --"))
+    if args.command in ONE_PEER and command:
+        raise SystemExit(_usage(f"{args.command} takes no command after --"))
+    if args.hardware is None:
+        raise SystemExit(_usage(
+            f"no registry; pass --hardware or set ${HARDWARE_ENV}"
+        ))
+    if args.wait_for_boards is not None and args.wait_for_boards < 0:
+        raise SystemExit(_usage("--wait-for-boards cannot be negative"))
+    if getattr(args, "also", "") and args.no_hold:
+        # Resolving --with and then not holding it would drop a lock the user
+        # asked for, silently.
+        raise SystemExit(_usage("--with holds devices, so it cannot go with --no-hold"))
+    return args, command
+
+
+def main(argv: list[str] | None = None) -> int:
+    args, command = parse_args(list(sys.argv[1:] if argv is None else argv))
+    try:
+        registry = FileResourceRegistry.load(args.hardware)
+        if args.command in ONE_PEER:
+            peers = {"peer": require_peer(resolve(registry, args.peer))}
+            extra = []
+        else:
+            peers = {
+                "acceptor": require_peer(resolve(registry, args.acceptor)),
+                "initiator": require_peer(resolve(registry, args.initiator)),
+            }
+            if peers["acceptor"].alias == peers["initiator"].alias:
+                raise RegistryError(
+                    f"{peers['acceptor'].alias} cannot be both peers; a link "
+                    "needs two boards"
+                )
+            extra = [
+                resolve(registry, name)
+                for name in (args.also.split(",") if args.also else [])
+            ]
+        inner = esp32peer_argv(args, peers, command)
+    except (RegistryError, esp32peer.PeerError) as error:
+        return _usage(f"error: {error}")
+
+    if args.no_hold:
+        # exit_status, as the hold path gives: a delegate killed by a signal
+        # must read the same either way.
+        return leases.exit_status(subprocess.call(inner))
+    aliases = [resource.alias for resource in list(peers.values()) + extra]
+    return subprocess.call(hold_argv(args, aliases, inner))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

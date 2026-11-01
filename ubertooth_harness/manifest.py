@@ -409,6 +409,9 @@ class RunManifest:
     build: Mapping = MappingProxyType({})
     # Board leases this run held (see leases.py); empty for older records.
     leases: tuple = ()
+    # Leases of commands that were gone and this run took over to get those
+    # (leases.takeover_record); empty when it took none, as in most runs.
+    lease_takeovers: tuple = ()
 
     @staticmethod
     def hash_file(path: Path | str) -> str:
@@ -467,6 +470,8 @@ class RunManifest:
             "environment": _plain(self.environment),
             "build": _plain(self.build),
             **({"leases": [_plain(item) for item in self.leases]} if self.leases else {}),
+            **({"lease_takeovers": [_plain(item) for item in self.lease_takeovers]}
+               if self.lease_takeovers else {}),
         }
 
     def write_atomic(self, path: Path | str) -> None:
@@ -495,6 +500,7 @@ def build_run_manifest(
     environment: Mapping | None = None,
     build: Mapping | None = None,
     leases: Sequence[Mapping] = (),
+    lease_takeovers: Sequence[Mapping] = (),
 ) -> RunManifest:
     if not sources:
         raise ManifestError("at least one resolved source is required")
@@ -527,4 +533,5 @@ def build_run_manifest(
         ),
         build=_frozen(build or {}),
         leases=tuple(_frozen(item) for item in leases),
+        lease_takeovers=tuple(_frozen(item) for item in lease_takeovers),
     )
