@@ -1463,15 +1463,23 @@ def _mask_everywhere(text: str, wanted: str) -> str:
     inside itself, and a search that resumed after each match would leave
     the tail of the second occurrence to read.
     """
+    # Searched with a pattern rather than in a lower-cased copy of the page,
+    # so the positions are positions in the page: lower-casing is not length
+    # preserving for every character (`İ` grows), and a page holding one
+    # would have every mask after it land a character late.
+    pattern = re.compile(re.escape(wanted), re.IGNORECASE)
     found = []
-    lowered, needle = text.lower(), wanted.lower()
-    at = lowered.find(needle)
-    while at >= 0:
-        if found and at <= found[-1][1]:
-            found[-1] = (found[-1][0], max(found[-1][1], at + len(needle)))
+    at = 0
+    while True:
+        match = pattern.search(text, at)
+        if match is None:
+            break
+        start, stop = match.span()
+        if found and start <= found[-1][1]:
+            found[-1] = (found[-1][0], max(found[-1][1], stop))
         else:
-            found.append((at, at + len(needle)))
-        at = lowered.find(needle, at + 1)
+            found.append((start, stop))
+        at = start + 1
     if not found:
         return text
     out, end = [], 0
@@ -1562,20 +1570,36 @@ def _redact(text: str, serials: Iterable[str]) -> str:
 
 # A heading of a run's own page, to move down a level when the page becomes
 # a section of a report covering several runs. Every heading at once, so a
-# section keeps the subsections under it. A line of a transcript cannot be
-# read as a heading: each one starts with its elapsed time.
-_RUN_HEADING = re.compile(r"(?m)^(#{2,5}) ")
+# section keeps its subsections under it.
+_RUN_HEADING = re.compile(r"#{2,5} ")
 
 
 def _as_a_section(text: str) -> str:
     """One run's page as a section of a report covering several.
 
-    Its title becomes the section heading and everything it wrote moves a
+    Its title becomes the section heading and every heading it wrote moves a
     level down, so a reader scrolling through two transcripts can see which
     run each belongs to.
+
+    Lines inside a fenced block are left as they are: they are what a
+    command printed and what a board answered, quoted, and a reader may copy
+    them out (the watchdog's issue body carries `ubertooth-util -w` verbatim).
+    A fence closes on a line of at least as many backticks as opened it, so
+    the transcript's ``` inside the issue body's ```` does not end it.
     """
-    text = _RUN_HEADING.sub(r"#\1 ", text)
-    return text.replace("# Ubertooth test run", "## Run", 1)
+    lines = []
+    fence = 0
+    for line in text.split("\n"):
+        ticks = len(line) - len(line.lstrip("`"))
+        if fence:
+            if ticks >= fence:
+                fence = 0
+        elif ticks >= 3:
+            fence = ticks
+        elif _RUN_HEADING.match(line):
+            line = "#" + line
+        lines.append(line)
+    return "\n".join(lines).replace("# Ubertooth test run", "## Run", 1)
 
 
 def render_run(events: Sequence[Mapping], *, redact_serials: bool = False, transcript: bool = True) -> str:

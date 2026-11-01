@@ -607,6 +607,23 @@ class ReportTests(unittest.TestCase):
             _redact(f"  1 x [E] x {shape} y {shape} z\n", {serial}),
         )
 
+    def test_a_character_that_grows_in_lower_case_does_not_shift_a_mask(self):
+        # The page is searched with a pattern, not in a lower-cased copy of
+        # itself: `İ` is one character that lower-cases to two, so positions
+        # taken from such a copy would land late, cutting the page up and
+        # publishing more of the shape with every one of them.
+        from ubertooth_harness.report import _redact
+
+        serial = "esp32-peer_1a2b"
+        shape = line_shape(serial)
+
+        for before in ("", "İ ", "İ" * 14 + "\n"):
+            self.assertEqual(
+                f"{before}  3 x [E] peer {REDACTED} ready\n",
+                _redact(f"{before}  3 x [E] peer {shape} ready\n", {serial}),
+                before,
+            )
+
     def test_a_shape_that_repeats_itself_is_masked_whole(self):
         # A whole shape is masked before the pieces of one, so a word that
         # happens to read as more of a shape that repeats itself cannot
@@ -1086,17 +1103,23 @@ class ReportTests(unittest.TestCase):
     def test_a_runs_subsections_move_down_with_their_section(self):
         # Everything a run wrote moves a level, so a section that has
         # subsections (the watchdog's issue to file, a file's checks) keeps
-        # them under it rather than beside it.
+        # them under it rather than beside it. What a command printed and
+        # what a board answered stay as they are: a fenced block is quoted
+        # output, and a reader may copy it out.
         from ubertooth_harness.report import _as_a_section
 
         page = (
             "# Ubertooth test run `run-a`\n\n## Watchdog\n\n"
-            "### Issue to file on the fork\n\n````text\nTitle: a reset\n````\n"
+            "### Issue to file on the fork\n\n"
+            "````text\nTitle: a reset\n\n## the board printed this\n"
+            "```text\n### and this\n```\n````\n"
         )
 
         self.assertEqual(
             "## Run `run-a`\n\n### Watchdog\n\n"
-            "#### Issue to file on the fork\n\n````text\nTitle: a reset\n````\n",
+            "#### Issue to file on the fork\n\n"
+            "````text\nTitle: a reset\n\n## the board printed this\n"
+            "```text\n### and this\n```\n````\n",
             _as_a_section(page),
         )
 
