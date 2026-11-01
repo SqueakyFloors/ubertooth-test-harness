@@ -32,7 +32,7 @@ receiver a few tens of centimeters from the piconet reads enough energy from
 the channels beside the kept block to decode packets there, so a recovered
 map is wider than the one in force, by about eight channels of skirt on this
 bench. ``afhmap.py`` therefore judges two measures with documented
-tolerances: every channel in force must be found, and the share of the
+tolerances: almost every channel in force must be found, and the share of the
 channels out of force that are marked used must stay under a ceiling. An
 attenuated or more distant receiver sharpens the edge, which is why the plan
 may place this test on one.
@@ -115,16 +115,17 @@ MIN_FOUND_SHARE = 0.90
 # three-minute run 21 of 41 (51%). The ceiling is what separates a recovery
 # from a tool marking everything used, not a measure of the skirt.
 MAX_STRAY_SHARE = 0.70
-# The detection phase's map is not held to that, and 1.0 is how the checker
-# is told to report the share without judging it. Two things make its map
-# wider than -r's, both by design: it fills a single channel gap between two
-# channels it has seen, and it never removes a channel once seen, so its map
-# is an upper bound that grows with the capture. The bench's own -t 60 map
-# marked 29 of 41 channels out of force used, 71%, which is already past the
-# -r ceiling, and a longer window marks more. So the -r cases are where
-# selectivity is measured, and this case measures that the detection phase
-# finds the channels in use at all.
-DETECTION_MAX_STRAY_SHARE = 1.0
+# The detection phase gets a looser ceiling of its own. Two things make its
+# map wider than -r's, both by design: it fills a single channel gap between
+# two channels it has seen, and it never removes a channel once seen, so its
+# map is an upper bound. Two runs bracket it: 29 of 41 channels out of force
+# (71%) on an earlier -t 60 run of issue #193's bench session, and 13 of 41
+# (32%) on this test's own -t 120 run, so how wide it comes out depends on
+# the bench and the window rather than on the window alone. 90% clears both
+# and still fails a -t map that marks the whole band used, which is what a
+# recovery that stopped discriminating would look like. Selectivity proper
+# stays the -r cases' measure.
+DETECTION_MAX_STRAY_SHARE = 0.90
 # Channels that must be out of force for the stray share to be judged at
 # all. A map that keeps nearly the whole band leaves too few for a share to
 # mean anything; both maps here leave 39 or more.
@@ -135,6 +136,11 @@ MIN_DROPPED_CHANNELS = afhmap.DEFAULT_MIN_DROPPED_CHANNELS
 # detection-phase case gets its -t window plus this, so the map is printed
 # before the interrupt arrives.
 DETECT_GRACE_S = 5.0
+# What the AFH session adds to the pair's bring-up, so a session where every
+# command times out still ends in esp32peer.py's own message rather than in
+# the harness calling the step hung: the channel map and its read-back, and
+# the three reads of the link's map.
+AFH_SETUP_S = PAIR_SETUP_S + 5 * esp32peer.COMMAND_TIMEOUT_S
 
 _ESP32PEER = str(Path(esp32peer.__file__).resolve())
 _AFHMAP = str(Path(afhmap.__file__).resolve())
@@ -275,7 +281,7 @@ def _map_case(serial, acceptor, initiator, seconds, *, case_id, name, wanted,
              f"The pair holds the piconet to {wanted} while {tool_line}",
              _afh_argv(acceptor, initiator, serial, lap, uap, seconds, wanted,
                        options, interrupt_after),
-             timeout_s=PAIR_SETUP_S + interrupt_after + EXIT_SLACK_S,
+             timeout_s=AFH_SETUP_S + interrupt_after + EXIT_SLACK_S,
              mutates=True,
              output_patterns=_pair_patterns(acceptor, initiator)
              + _map_patterns(wanted)
@@ -306,9 +312,9 @@ def afh_map_cases(arguments, resources, resource_identities):
     def case(**options):
         return _map_case(serial, acceptor, initiator, seconds, **options)
 
-    recovered = (f"the recovered map holds every channel the link was hopping "
-                 f"over, and at most {MAX_STRAY_SHARE:.0%} of the channels out "
-                 f"of force")
+    recovered = (f"the recovered map holds at least {MIN_FOUND_SHARE:.0%} of the "
+                 f"channels the link was hopping over, and at most "
+                 f"{MAX_STRAY_SHARE:.0%} of the channels out of force")
     def every_second(**options):
         return case(options=("-r",), tool_pattern=R_LINE,
                     interrupt_after=float(seconds),
@@ -345,8 +351,9 @@ def afh_map_cases(arguments, resources, resource_identities):
             interrupt_after=seconds + DETECT_GRACE_S,
             tool_line=f"ubertooth-afh -e {AC_ERRORS} -t {seconds} detects the map",
             max_stray_share=DETECTION_MAX_STRAY_SHARE,
-            expected_state=f"an AFH map line after about {seconds} s; every "
-                           "channel the link was hopping over in the map it "
-                           "printed, with the stray channels reported and not "
-                           "judged"))
+            expected_state=f"an AFH map line after about {seconds} s; "
+                           f"{MIN_FOUND_SHARE:.0%} of the channels the link was "
+                           "hopping over in the map it printed, and at most "
+                           f"{DETECTION_MAX_STRAY_SHARE:.0%} of the channels out "
+                           "of force"))
     return tuple(cases)

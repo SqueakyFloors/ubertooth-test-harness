@@ -30,14 +30,16 @@ What is judged, and the tolerance each has:
 - **found:** the share of in-force channels the recovered map marks used.
   The tool has to hear a packet on a channel to find it, and it hears one
   only when its sweep and the piconet's hop land together, so this is the
-  measure of the recovery working at all. The default demands all of them;
-  a plan may allow a share below 1 for a short capture.
+  measure of the recovery working at all. The default demands all of them,
+  and a caller measuring a window too short to meet every channel passes a
+  share below 1.
 - **stray:** the share of the channels NOT in force that the recovered map
   marks used. A receiver close to the piconet reads some energy from the
   channels next to the kept block, and those neighbors decode often enough
   to be marked used, so this cannot be held to zero on this bench; an
   attenuated or distant receiver brings it down. The ceiling is a documented
-  tolerance, not a tight bound.
+  tolerance, not a tight bound, and ``--max-stray-share 1.0`` says to report
+  the share without judging it at all.
 
 The stray share is left unjudged, and said to be, when fewer than
 ``--min-dropped-channels`` channels are out of force: a map that keeps nearly

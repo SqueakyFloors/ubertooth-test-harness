@@ -194,17 +194,17 @@ class CaseTests(unittest.TestCase):
         self.assertEqual((f"{CAPTURES}/afh-maps-1.txt",) * 2, names[0])
         self.assertEqual((f"{CAPTURES}/afh-maps-2.txt",) * 2, names[1])
 
-    def test_the_detection_case_reports_the_stray_share_without_judging_it(self):
+    def test_the_detection_case_gets_a_looser_stray_ceiling(self):
         # Its map fills single channel gaps and never drops a channel, so it
         # is an upper bound; the -r cases are where selectivity is measured.
         detection = cases("comprehensive")[-1]
         argv = list(steps(detection)["judge-map"].resolve_argv(CONTEXT))
         self.assertEqual(str(DETECTION_MAX_STRAY_SHARE),
                          argv[argv.index("--max-stray-share") + 1])
-        self.assertEqual(1.0, DETECTION_MAX_STRAY_SHARE)
-        patterns = steps(detection)["judge-map"].output_patterns
-        self.assertTrue(any("not judged" in pattern for pattern in patterns))
-        # The two -r cases still are judged.
+        self.assertGreater(DETECTION_MAX_STRAY_SHARE, MAX_STRAY_SHARE)
+        # Loose, not absent: a -t map marking the whole band used still fails.
+        self.assertLess(DETECTION_MAX_STRAY_SHARE, 1.0)
+        # The two -r cases keep the tighter one.
         for case in cases():
             with self.subTest(case.case_id):
                 argv = list(steps(case)["judge-map"].resolve_argv(CONTEXT))

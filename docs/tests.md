@@ -1985,6 +1985,7 @@ none of these checks needs it to, because a packet line is printed for every
 access code that matched and a record's header decodes without a clock of the
 piconet. Whether the clock recovery should manage it is the fork's question,
 not this test's.
+
 ## Recover AFH map
 
 **What it does.** The same two peers hold a piconet whose Adaptive Frequency
@@ -2062,11 +2063,13 @@ force with its three readings, the recovered map, the channels found and
 missing, the stray channels, and a line per minute of the capture showing what
 the map had grown to by then. Comprehensive runs 3, adding the tool's other
 path: `-t <duration>` detects the map for that long and prints it as
-`AFH map: 0x...`. That map is held to the found measure alone, and its stray
-share is reported and not judged: the detection phase fills a single channel
-gap between two channels it has seen, and never drops a channel once seen, so
-its map is an upper bound that grows with the capture. Selectivity is what the
-two `-r` cases measure.
+`AFH map: 0x...`. That map gets a looser stray ceiling of its own, 90%: the
+detection phase fills a single channel gap between two channels it has seen,
+and never drops a channel once seen, so its map is an upper bound. Two runs
+bracket how wide: 71% of the channels out of force on an earlier `-t 60` run
+of the bench session that measured the peers' maps, and 32% on this test's own
+`-t 120` run. 90% clears both and still fails a map that marks the whole band
+used. Selectivity proper is what the two `-r` cases measure.
 
 A capture and its comparison are one retried group, run up to twice: whether
 a channel was heard depends on where the sweep and the hop sequence met, and

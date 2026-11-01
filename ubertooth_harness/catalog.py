@@ -25,7 +25,7 @@ from ubertooth_harness.patterns import (
 from ubertooth_harness.resources import ESP32_CLASSIC_PEER
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
-    afh_cases, advertiser_cases, boardstate_cases, capture_failure_cases,
+    advertiser_cases, afh_cases, boardstate_cases, capture_failure_cases,
     classic_cases, connection_cases, dfu_cases, dfu_host_cases,
     interrupt_cases, python_cases, receive_cases,
     refusal_cases, tool_cases, transitions, tshark_cases, util_cases,

@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import tempfile
+from unittest import mock
 import unittest
 from pathlib import Path
 
@@ -704,14 +705,29 @@ class ChannelMapTests(unittest.TestCase):
         self.assertRegex(report, r"(?m)^command exit: 0 after [0-9.]+ s$")
 
     def test_a_command_that_ignores_the_interrupt_is_not_left_running(self):
+        # The interrupt is the planned end of the capture, so the command
+        # gets its own grace from there; one that will not stop is killed and
+        # the reason says it was the stopping that failed, not the window.
         deaf = (sys.executable, "-c",
                 "import signal, time\n"
                 "signal.signal(signal.SIGINT, signal.SIG_IGN)\n"
                 "time.sleep(60)\n")
         with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(
-            esp32peer.PeerError, "did not finish within"
+            esp32peer.PeerError,
+            f"did not stop within {esp32peer.INTERRUPT_TIMEOUT_S:g}s of the "
+            "interrupt"
         ):
-            self._stream(directory, command=deaf, timeout=1.0)
+            self._stream(directory, command=deaf, timeout=120.0)
+
+    def test_a_command_that_overruns_its_own_deadline_says_so(self):
+        # No interrupt asked for: the deadline is the whole command's, and
+        # the reason names it.
+        quiet = (sys.executable, "-c", "import time; time.sleep(60)")
+        report = io.StringIO()
+        with _captured_stdout(), self.assertRaisesRegex(
+            esp32peer.PeerError, "did not finish within 1s"
+        ):
+            esp32peer._run_command_watched(quiet, timeout=1.0, out=report)
 
     def test_a_sample_that_fails_mid_capture_does_not_leave_the_tool_running(self):
         # A link that drops under the capture makes the middle read fail. A
@@ -727,17 +743,26 @@ class ChannelMapTests(unittest.TestCase):
         def fails(_elapsed):
             raise esp32peer.PeerError("the controller does not know this link")
 
+        started = []
+        real_popen = subprocess.Popen
+
+        def record(*args, **options):
+            child_process = real_popen(*args, **options)
+            started.append(child_process)
+            return child_process
+
         report = io.StringIO()
-        with _captured_stdout(), self.assertRaisesRegex(
+        with mock.patch.object(esp32peer.subprocess, "Popen", record), \
+                _captured_stdout(), self.assertRaisesRegex(
             esp32peer.PeerError, "does not know this link"
         ):
             esp32peer._run_command_watched(
                 child, timeout=30.0, interrupt_after=10.0, sample_at=0.3,
                 sample=fails, out=report)
         self.assertTrue(marker.exists())  # it really started
-        # Nothing of ours is left behind: the command was interrupted and
-        # reaped, so this process has no live child.
-        self.assertEqual([], [p for p in subprocess._active if p.poll() is None])
+        # The command was stopped and reaped before the error went up.
+        (ran,) = started
+        self.assertIsNotNone(ran.poll())
 
     def test_a_map_report_without_a_map_is_a_usage_error(self):
         acceptor_firmware, initiator_firmware = _pair()

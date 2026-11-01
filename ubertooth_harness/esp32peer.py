@@ -663,8 +663,10 @@ def _stop_child(child, grace: float = INTERRUPT_TIMEOUT_S) -> None:
     """End the command, interrupt first, kill if it will not go.
 
     SIGINT rather than a kill, for the reason _run_command gives: a capture
-    tool stops its board and closes its files on it. Nothing here raises,
-    because every caller is already reporting something that went wrong.
+    tool stops its board and closes its files on it. Every caller is already
+    reporting something that went wrong, so this reports nothing of its own;
+    a command that survives both signals leaves its own error for the caller
+    rather than a second one from here.
     """
     if child.poll() is not None:
         return
@@ -672,8 +674,11 @@ def _stop_child(child, grace: float = INTERRUPT_TIMEOUT_S) -> None:
         child.send_signal(signal.SIGINT)
         child.wait(timeout=grace)
     except subprocess.TimeoutExpired:
-        child.kill()
-        child.wait()
+        try:
+            child.kill()
+            child.wait(timeout=grace)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
     except OSError:
         pass
 
@@ -738,9 +743,14 @@ def _run_command_watched(command: Sequence[str], *, timeout: float,
             drained()
             raise
         if overran:
+            interrupted = (interrupt_after is not None
+                           and time.monotonic() - started >= interrupt_after)
             _stop_child(child)
             drained()
-            raise PeerError(f"{command[0]} did not finish within {timeout:g}s")
+            raise PeerError(
+                f"{command[0]} did not stop within {INTERRUPT_TIMEOUT_S:g}s of "
+                "the interrupt that ended its capture" if interrupted else
+                f"{command[0]} did not finish within {timeout:g}s")
         status = child.wait()
         drained()
         return status, time.monotonic() - started
@@ -771,11 +781,13 @@ def _watch(child, out, *, started: float, timeout: float,
             print(f"command interrupted after {now - started:.1f} s", file=out)
             out.flush()
             child.send_signal(signal.SIGINT)
-            # From the interrupt, the command gets the same grace as an
-            # overrunning one: long enough to stop its board and close its
-            # files, not long enough to hold the boards for a run that is
-            # already over.
-            deadline = min(deadline, time.monotonic() + INTERRUPT_TIMEOUT_S)
+            # The interrupt is the planned end of the capture, so from here
+            # the command has a grace of its own: long enough to stop its
+            # board and close its files, not long enough to hold the boards
+            # for a run that is already over. It replaces the deadline rather
+            # than being capped by it, because the whole-command deadline is
+            # about the window and this is about stopping.
+            deadline = time.monotonic() + INTERRUPT_TIMEOUT_S
             continue
         if now >= deadline:
             return True
