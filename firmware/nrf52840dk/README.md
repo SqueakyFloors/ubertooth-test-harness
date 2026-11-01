@@ -142,7 +142,7 @@ is not a response.
 | `conn peer <address>` | the peripheral the central connects to |
 | `conn interval <ms>` | connection interval, 8-4000 ms (default 30) |
 | `conn chmap <37\|38\|39\|all>` | the peripheral's advertising channels (default 37) |
-| `conn datamap <all\|0,12,36>` | central only: change the live connection's data channel map |
+| `conn datamap <all\|0,12,36>` | central only: change the live connection's data channel map (two channels or more) |
 | `conn dle <on\|off>` | ask for a 251-byte data length (default on) |
 | `conn payload <bytes>` | bytes per write, 1-244 (default 244) |
 | `conn period <ms>` | time between writes, 10-10000 ms (default 100) |
@@ -233,10 +233,12 @@ That is the one thing the roles could not do before: `conn chmap` is the
 peripheral's *advertising* channels, and the map in the CONNECT_IND used to
 hold for the life of the link.
 
-A map of one channel is the most demanding one, because the remapping divides
-by the number of channels in use, so one channel is the smallest divisor a
-conformant device can present. A map with no channel in it is refused, as is
-a channel above 36.
+A channel map has to leave at least two channels used: the Bluetooth Core
+specification requires it of the HCI command this uses, and the controller
+here refuses a one-channel map (`-EINVAL`, measured on the bench), so the
+firmware refuses one first and says why. Two channels is therefore the most
+demanding map a test can ask for, and the smallest divisor the remapping can
+be given. A channel above 36 is refused as well.
 
 Two classifications have to be at least a second apart (Bluetooth Core, HCI
 LE Set Host Channel Classification), so a second `conn datamap` sooner than

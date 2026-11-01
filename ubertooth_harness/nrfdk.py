@@ -114,8 +114,11 @@ _CONNECTION_KEYS = {
 # and so gets flashed instead of refused.
 _DATA_MAP_KEYS = {"data_map": str, "data_map_used": int, "data_map_sets": int}
 ROLES = ("advertiser", "central", "peripheral")
-# The data channels a connection hops over, 0 to 36.
+# The data channels a connection hops over, 0 to 36, of which a channel map
+# has to leave at least two used (Bluetooth Core, HCI LE Set Host Channel
+# Classification; the controller on the bench refuses one channel).
 DATA_CHANNELS = 37
+DATA_CHANNELS_MIN = 2
 DATA_MAP_BYTES = 5
 DATA_MAP_ALL = "ffffffff1f"
 # Two channel classifications must be at least a second apart (Bluetooth
@@ -441,8 +444,8 @@ def data_map(channels: str) -> str:
 
     Ten hex digits, the five bytes a CONNECT_IND and an LL_CHANNEL_MAP_IND
     carry, least significant byte first: bit b of byte i is channel 8i + b.
-    Refuses a list with no channel in it, a channel the air does not have,
-    and anything that is not a list.
+    Refuses a list of fewer than two channels, a channel the air does not
+    have, and anything that is not a list.
     """
     if channels == "all":
         return DATA_MAP_ALL
@@ -457,6 +460,10 @@ def data_map(channels: str) -> str:
         if number >= DATA_CHANNELS:
             raise NrfDkError(f"channel {number} is not a data channel "
                              f"(0-{DATA_CHANNELS - 1})")
+    if len(set(numbers)) < DATA_CHANNELS_MIN:
+        raise NrfDkError(
+            f"a channel map has to leave at least {DATA_CHANNELS_MIN} data "
+            f"channels used (got {channels!r})")
     bits = 0
     for number in numbers:
         bits |= 1 << number

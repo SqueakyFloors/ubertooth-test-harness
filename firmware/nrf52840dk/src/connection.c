@@ -63,6 +63,13 @@
  */
 #define DATA_CHANNELS 37
 #define DATA_MAP_BYTES 5
+/* A connection's channel map has to leave at least two channels used
+ * (Bluetooth Core, HCI LE Set Host Channel Classification: at least two
+ * channels shall be marked unknown). The controller here refuses a
+ * one-channel map with -EINVAL, measured on the bench, so the firmware
+ * refuses it first and says why.
+ */
+#define DATA_CHANNELS_MIN 2
 /* Two channel classifications must be at least a second apart (Bluetooth
  * Core, HCI LE Set Host Channel Classification), so a second one sooner is
  * refused rather than quietly dropped by the controller.
@@ -175,8 +182,7 @@ static uint8_t data_map_used(const uint8_t *map)
 }
 
 /* "all", or a list of data channels such as "0,12,36", into a channel map.
- * A map with no channel in it is refused: the connection has to have
- * somewhere to go.
+ * A map that leaves fewer than DATA_CHANNELS_MIN channels used is refused.
  */
 static int parse_data_map(const char *text, uint8_t *map)
 {
@@ -208,7 +214,7 @@ static int parse_data_map(const char *text, uint8_t *map)
 			return -EINVAL;
 		}
 	}
-	return data_map_used(map) > 0 ? 0 : -EINVAL;
+	return data_map_used(map) >= DATA_CHANNELS_MIN ? 0 : -EINVAL;
 }
 
 /* Put all 37 channels back, waiting out the gap the controller needs.
@@ -1174,9 +1180,9 @@ static int cmd_datamap(const struct shell *sh, size_t argc, char **argv)
 				"channel map");
 	}
 	if (parse_data_map(argv[1], map) != 0) {
-		return utdk_err(sh, "channel map must be 'all' or a list of data "
-				"channels 0-%d, for example 0,12,36",
-				DATA_CHANNELS - 1);
+		return utdk_err(sh, "channel map must be 'all' or a list of at "
+				"least %d data channels 0-%d, for example 0,12,36",
+				DATA_CHANNELS_MIN, DATA_CHANNELS - 1);
 	}
 	k_mutex_lock(&lock, K_FOREVER);
 	connected = cn.conn != NULL;

@@ -574,13 +574,13 @@ class RoleTests(unittest.TestCase):
         self.assertIn("channel map: 0110000010 (3 of 37 channels, set 1 time(s))",
                       out)
 
-    def test_datamap_takes_one_channel_and_all(self):
+    def test_datamap_takes_the_smallest_map_and_all(self):
         board = Board()
         self.run_quiet(nrfdk.central, board.dk, "C1:92:EC:E7:71:BC", 30)
 
-        # Channel 17 is bit 1 of byte 2.
-        status, _out = self.run_quiet(nrfdk.datamap, board.dk, "17")
-        self.assertEqual((1, "0000020000"),
+        # Channels 17 and 18 are bits 1 and 2 of byte 2.
+        status, _out = self.run_quiet(nrfdk.datamap, board.dk, "17,18")
+        self.assertEqual((2, "0000060000"),
                          (status["data_map_used"], status["data_map"]))
 
         status, _out = self.run_quiet(nrfdk.datamap, board.dk, "all")
@@ -589,7 +589,10 @@ class RoleTests(unittest.TestCase):
 
     def test_a_map_the_air_has_no_room_for_is_refused_before_the_board(self):
         board = Board()
-        for channels in ("", "37", "0,", "0,,1", "all,1", "-1", "0x3", "00"):
+        for channels in ("", "37", "0,", "0,,1", "all,1", "-1", "0x3", "00",
+                         # Fewer than two channels: the spec needs two, and
+                         # the controller refuses one.
+                         "20", "7,7"):
             with self.subTest(channels):
                 with self.assertRaises(nrfdk.NrfDkError):
                     nrfdk.datamap(board.dk, channels)
