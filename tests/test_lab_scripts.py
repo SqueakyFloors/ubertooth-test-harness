@@ -18,6 +18,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+import unittest.mock
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 
@@ -931,12 +932,34 @@ class PeerArguments(Bench):
         self.assertEqual(2, caught.exception.code)
         self.assertIn("takes no command", err.getvalue())
 
-    def test_no_hold_runs_the_delegate_directly(self):
+    def run_peer(self, argv):
+        """main() with the delegate replaced: what it would run, and its status."""
+        seen = []
+
+        def call(command, **kwargs):
+            seen.append(list(command))
+            return 7  # a status that is neither success nor a usage error
+
+        with unittest.mock.patch.object(peer.subprocess, "call", call):
+            status = peer.main(argv)
+        return status, (seen[0] if seen else [])
+
+    def test_no_hold_runs_the_delegate_directly_and_passes_its_status_on(self):
         """Inside an outer hold, holding again would wait for its own lock."""
-        args, command = peer.parse_args([
+        status, argv = self.run_peer([
             "status", "ESP0", "--hardware", str(self.registry), "--no-hold",
         ])
-        self.assertTrue(args.no_hold)
+        self.assertEqual(7, status)
+        self.assertEqual(str(peer.ESP32PEER), argv[1])
+        self.assertNotIn(str(HOLD), argv)
+
+    def test_without_no_hold_it_runs_the_delegate_inside_hold(self):
+        status, argv = self.run_peer([
+            "status", "ESP0", "--hardware", str(self.registry),
+        ])
+        self.assertEqual(7, status)
+        self.assertEqual(str(HOLD), argv[1])
+        self.assertIn(str(peer.ESP32PEER), argv)
 
     def test_it_delegates_to_the_harness_module_not_a_copy(self):
         from ubertooth_harness import esp32peer as module
