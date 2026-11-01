@@ -1,9 +1,9 @@
 # Bench helper scripts
 
 The by-hand tools a bench needs beside the harness itself: holding a device
-while you run something on it, and switching a hub port to recover one that
-has stopped answering. A harness run needs neither; these are for the manual
-work around it.
+while you run something on it, driving the Classic Bluetooth peers, and
+switching a hub port to recover a device that has stopped answering. A harness
+run needs none of them; these are for the manual work around it.
 
 Nothing about a bench is built in. Every script takes its registry, lock
 paths, and labels from options or the environment, so the same script serves
@@ -67,6 +67,59 @@ script was written against. It does not reach further than that: a
 so a bench script holding the plain name alone can still overlap a run on a DK
 or a peer. The way to be sure is for the bench's scripts to take their devices
 through `hold`, which is what this script is for.
+
+## `peer`
+
+Drives the ESP32 Classic Bluetooth peers by registry alias, holding them while
+it runs:
+
+```sh
+.venv/bin/python scripts/lab/peer status   ESP32_Linux0
+.venv/bin/python scripts/lab/peer identify ESP32_Linux0
+.venv/bin/python scripts/lab/peer reset    ESP32_Linux0
+```
+
+It looks up what [`ubertooth_harness/esp32peer.py`](../../ubertooth_harness/esp32peer.py)
+needs — the bridge's stable `by-id` path and the board's registered `BD_ADDR` —
+wraps the call in `hold`, and runs it. The module does the work: it opens the
+bridges, checks the firmware and the address, brings the Serial Port Profile
+link up, stops the pair, reports what both boards did, and fails closed.
+
+**Opening a bridge resets the board**, so one invocation has to be one session
+and the command under test runs *inside* it. That is what `stream` is for:
+
+```sh
+.venv/bin/python scripts/lab/peer stream ESP32_Linux0 ESP32_Linux1 \
+    --with UT_Linux1 -- ubertooth-rx -U <serial> -z -t 30
+```
+
+`--with` puts the Ubertooth in the same lock group, so the capture and the
+peers are held together. `esp32peer.py` prints `central LAP` and `central UAP`
+on standard error, which is what `ubertooth-rx -l` and `-u` take.
+
+**The initiator pages, so it is the piconet central and its LAP is the one on
+the air.** To capture a particular board's LAP, name that board as the
+initiator; swapping the two arguments swaps which LAP a survey sees:
+
+```sh
+# ESP32_Linux1 pages, so its LAP is on the air
+peer stream ESP32_Linux0 ESP32_Linux1 --with UT_Linux1 -- \
+    ubertooth-rx -U <serial> -l <ESP32_Linux1's LAP> -u <its UAP> -t 25
+
+# the other way round, so the other LAP is
+peer stream ESP32_Linux1 ESP32_Linux0 --with UT_Linux1 -- \
+    ubertooth-rx -U <serial> -l <ESP32_Linux0's LAP> -u <its UAP> -t 25
+```
+
+`--period`, `--payload`, `--min-writes`, `--min-seconds`, and `--timeout` are
+passed through; left out, the module's own defaults apply.
+
+Inside an outer `hold` that already has these devices, add `--no-hold`: holding
+them twice would wait for a lock this process already holds.
+
+There is no audio (eSCO) session here. The firmware has one, but
+`esp32peer.py` does not drive it yet, so there is nothing to wrap; it belongs
+in the module when a test needs it.
 
 ## `hub-port`
 

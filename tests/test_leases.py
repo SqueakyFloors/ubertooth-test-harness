@@ -14,8 +14,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from ubertooth_harness import leases
+from ubertooth_harness import cli, leases
 from ubertooth_harness.cli import main
+from ubertooth_harness.manifest import ManifestError
+from ubertooth_harness.report import _Run, _setup_rows
 from ubertooth_harness.resources import FileResourceRegistry
 from ubertooth_harness.topology import PowerIsolationAction
 
@@ -276,6 +278,56 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
         self.assertIn(f"pid {record['pid']}", self.notes[0])
         self.assertIn("process group", self.notes[0])
 
+    def test_a_takeover_is_recorded_with_the_leases_it_was_taken_for(self):
+        """The record a run carries into run.jsonl and its report (#224).
+
+        A takeover does not promise the board was idle, so a reader of an odd
+        result later in the run needs to know one happened, and standard
+        error is not where a deployed runner's reader looks.
+        """
+        record = dead_holder()
+        path = self.hold(A, record)
+        held = self.take()
+        self.addCleanup(held.release)
+        self.assertEqual(1, len(held.takeovers), held.takeovers)
+        taken = held.takeovers[0]
+        self.assertEqual("UT_0", taken["resource"])
+        self.assertEqual(A.key, taken["key"])
+        self.assertEqual(str(path), taken["lock"])
+        self.assertEqual("gone-agent", taken["holder"]["owner"])
+        self.assertEqual(record["pid"], taken["holder"]["pid"])
+        self.assertIn(f"pid {record['pid']}", taken["reason"])
+        self.assertRegex(taken["taken_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}$")
+        # The line on standard error is that record, said once.
+        self.assertEqual([leases.describe_takeover(taken)], self.notes)
+
+    def test_a_record_a_run_could_not_carry_is_cut_down(self):
+        """A lock file is another command's: a run record has a size limit.
+
+        Its holder record may hold anything at all (a hand-written file, a
+        wrapper's own fields, a long command line), and an event that
+        exceeds the limit would end the run it was meant to explain.
+        """
+        self.hold(A, dict(
+            dead_holder(purpose="lease: " + "x" * 40_000, pgid=int("9" * 4_000)),
+            notes=["something else entirely"] * 1000,
+        ))
+        held = self.take()
+        self.addCleanup(held.release)
+        taken = held.takeovers[0]
+        self.assertNotIn("notes", taken["holder"])
+        self.assertEqual(200, len(taken["holder"]["purpose"]))
+        self.assertTrue(taken["holder"]["purpose"].endswith("..."))
+        # A number can be as long as the file; a small one is itself.
+        self.assertEqual(200, len(taken["holder"]["pgid"]))
+        self.assertIsInstance(taken["holder"]["pid"], int)
+        self.assertLess(len(json.dumps(taken)), 2048)
+
+    def test_a_lease_nobody_had_to_be_taken_over_for_records_nothing(self):
+        held = self.take()
+        self.addCleanup(held.release)
+        self.assertEqual([], held.takeovers)
+
     def test_a_takeover_says_when_the_session_is_still_running(self):
         # The lease process is gone but its process group is not, which is
         # what an orphaned capture looks like: the board is freed, and the
@@ -393,6 +445,25 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
                        note=note).release()
         self.assertEqual(1, len(taken))
         leases.acquire([A, B], holder("agent-3"), directory=self.dir).release()
+
+    def test_a_device_taken_over_twice_is_recorded_once(self):
+        # A stale lease that comes back is reported each time it is taken
+        # over, and the run record names the device once: one device this
+        # run had to take over, however many lock files it went through.
+        self.hold(A, dead_holder())
+        again = []
+
+        def note(message):
+            self.notes.append(message)
+            if not again:
+                again.append(self.hold(A, dead_holder()))
+
+        held = leases.acquire(
+            [A], holder("agent-2"), directory=self.dir, wait_s=10, note=note,
+        )
+        self.addCleanup(held.release)
+        self.assertEqual(2, len(self.notes), self.notes)
+        self.assertEqual(["UT_0"], [item["resource"] for item in held.takeovers])
 
     def test_a_lease_file_that_keeps_coming_back_cannot_make_a_loop(self):
         # Every round sleeps or reaches the deadline, so a stale lease that
@@ -680,6 +751,150 @@ class LeaseCliTests(RawHoldMixin, unittest.TestCase):
         self.assertIn("UT_0 is in use", err)
         self.assertIn("other-agent", err)
         self.assertFalse((output / "blocked").exists())
+
+    def test_a_run_that_takes_over_a_lease_records_it(self):
+        """#224: the one place a reader of the run can see it happened."""
+        from tests.test_cli import FlashDeviceExecutor, make_source
+
+        source, short = make_source(self.root)
+        kgv = self.root / "kgv.dfu"
+        kgv.write_bytes(b"kgv")
+        test = self.root / "test.dfu"
+        test.write_bytes(b"test")
+        plan = self.root / "plan.yaml"
+        plan.write_text(textwrap.dedent(f"""\
+            plan: takeover cli
+            suites:
+              slow:
+                - Flash reliability:
+                    hosts: each
+                    platforms: [{PLATFORM}]
+                    Ubertooth: default
+                    flashes: 2
+                    image sequence: [test build, KGV]
+                    KGV sha256: {hashlib.sha256(b"kgv").hexdigest()}
+                    KGV revision: 2020-12-R1
+            """))
+        executor = FlashDeviceExecutor(
+            f"git-{short}",
+            {str(test.resolve()): f"git-{short}", str(kgv.resolve()): "2020-12-R1"},
+            A.key, B.key,
+        )
+        output = self.root / "runs"
+        gone = dead_holder()
+        self.hold_raw(self.lease_dir, A, gone)
+        with mock.patch("ubertooth_harness.cli.SubprocessCommandExecutor",
+                        return_value=executor):
+            code, _out, err = self._main(
+                "run-suite", "--plan", str(plan), "--suite", "slow",
+                "--hardware", str(self.hardware), "--host", "Host_Local",
+                "--ubertooth-source", str(source), "--ubertooth-ref", "HEAD",
+                "--artifact", f"test build={test}", "--artifact", f"KGV={kgv}",
+                "--run-id", "took-over", "--output", str(output),
+                "--lease-dir", str(self.lease_dir),
+            )
+        self.assertEqual(0, code, err)
+        self.assertIn("UT_0 was held by a lease that no longer holds it", err)
+        run_dir = output / "took-over"
+        events = [json.loads(line)
+                  for line in (run_dir / "run.jsonl").read_text().splitlines()]
+        taken_over = [e for e in events if e["event_type"] == "lease_takeover"]
+        self.assertEqual(1, len(taken_over), [e["event_type"] for e in events])
+        self.assertEqual("warning", taken_over[0]["status"])
+        details = taken_over[0]["details"]
+        self.assertEqual("UT_0", details["resource"])
+        self.assertEqual(gone["pid"], details["holder"]["pid"])
+        self.assertEqual("gone-agent", details["holder"]["owner"])
+        self.assertIn(f"pid {gone['pid']}", details["reason"])
+        # In the manifest too, with the leases it was taken for.
+        manifest = next(e for e in events if e["event_type"] == "manifest")
+        self.assertEqual(
+            ["UT_0"],
+            [item["resource"]
+             for item in manifest["details"]["manifest"]["lease_takeovers"]],
+        )
+        report = (run_dir / "report.md").read_text()
+        self.assertIn("| Leases taken over | UT_0 at ", report)
+        self.assertIn("gone-agent", report)
+        self.assertIn("a takeover does not promise the device was idle", report)
+        self.assertIn("[M] UT_0 was held by a lease that no longer holds it", report)
+
+    def test_a_run_that_fails_before_its_manifest_still_records_a_takeover(self):
+        """The record must not wait for the manifest: a build can fail first.
+
+        A run that builds writes its first records before the build, and a
+        flash before preflight is where a board that was just taken over
+        would fail — which is exactly when a reader needs to know.
+        """
+        from tests.test_cli import make_source
+
+        source, _short = make_source(self.root)
+        kgv = self.root / "early-kgv.dfu"
+        kgv.write_bytes(b"kgv")
+        test = self.root / "early-test.dfu"
+        test.write_bytes(b"test")
+        plan = self.root / "early.yaml"
+        plan.write_text(textwrap.dedent(f"""\
+            plan: takeover cli
+            suites:
+              slow:
+                - Flash reliability:
+                    hosts: each
+                    platforms: [{PLATFORM}]
+                    Ubertooth: default
+                    flashes: 2
+                    image sequence: [test build, KGV]
+                    KGV sha256: {hashlib.sha256(b"kgv").hexdigest()}
+                    KGV revision: 2020-12-R1
+            """))
+        output = self.root / "runs"
+        self.hold_raw(self.lease_dir, A, dead_holder())
+        with mock.patch.object(cli, "_prepare_run",
+                               side_effect=ManifestError("artifact vanished")):
+            code, _out, _err = self._main(
+                "run-suite", "--plan", str(plan), "--suite", "slow",
+                "--hardware", str(self.hardware), "--host", "Host_Local",
+                "--ubertooth-source", str(source), "--ubertooth-ref", "HEAD",
+                "--libbtbb-source", str(source), "--libbtbb-ref", "HEAD",
+                "--artifact", f"test build={test}", "--artifact", f"KGV={kgv}",
+                "--run-id", "failed-early", "--output", str(output),
+                "--lease-dir", str(self.lease_dir),
+            )
+        self.assertEqual(2, code)
+        events = [json.loads(line) for line
+                  in (output / "failed-early" / "run.jsonl").read_text().splitlines()]
+        types = [event["event_type"] for event in events]
+        self.assertNotIn("manifest", types)  # the run never got that far
+        self.assertEqual(1, types.count("lease_takeover"), types)
+        self.assertEqual("UT_0", events[types.index("lease_takeover")]
+                         ["details"]["resource"])
+        self.assertEqual("failed", events[-1]["status"])
+
+    def _report_rows(self, **manifest):
+        return dict(_setup_rows(_Run([{
+            "run_id": "r", "event_type": "manifest",
+            "timestamp": "2026-01-01T00:00:00.000",
+            "details": {"manifest": {
+                "leases": [{"resource": "UT_0", "key": A.key,
+                            "acquired_at": "2026-01-01T00:00:00.000"}],
+                **manifest,
+            }},
+        }])))
+
+    def test_the_report_names_a_taken_over_lease_beside_the_leases(self):
+        taken_over = leases.takeover_record(
+            A, self.lease_dir / f"{A.key}.lock", "its process (pid 7) is gone",
+            {"owner": "gone-agent", "pid": 7},
+        )
+        rows = self._report_rows(lease_takeovers=[taken_over])
+        self.assertTrue(rows["Board leases"].startswith("UT_0 since "))
+        self.assertIn(f"UT_0 at {taken_over['taken_at']} from gone-agent, pid 7: "
+                      "its process (pid 7) is gone", rows["Leases taken over"])
+        self.assertIn(str(self.lease_dir / f"{A.key}.lock"), rows["Leases taken over"])
+        # A run that took nothing over says nothing, and an older record
+        # (from before this was recorded at all) reads the same way.
+        self.assertNotIn("Leases taken over", self._report_rows(lease_takeovers=[]))
+        self.assertNotIn("Leases taken over", self._report_rows())
 
     def test_boards_lists_free_and_held_boards(self):
         with leases.acquire([B], holder("agent-7"), directory=self.lease_dir):

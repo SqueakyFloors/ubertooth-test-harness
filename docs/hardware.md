@@ -162,6 +162,10 @@ the harness flashes a peer, so the driver asks for `utesp-1.0.0` or a later
 1.x image rather than an exact version, and each board's own version goes in
 the run record. A peer is leased like a board, under `esp32-<bridge serial>`.
 
+By hand, [`scripts/lab/peer`](../scripts/lab/README.md) names the boards by
+their registry aliases, holds them, and runs that module, which is how a
+capture against the pair is taken outside a run.
+
 ### Acroname USBHub3+
 
 The power controller worth having. Eight downstream ports (0 to 7), each with
@@ -268,8 +272,8 @@ nothing in the harness can catch it.
 | Device | Source | Version | Built with | Flashed with |
 |---|---|---|---|---|
 | Ubertooth One | the [fork's](https://github.com/SqueakyFloors/ubertooth) `firmware/bluetooth_rxtx` | the resolved commit under test | `arm-none-eabi-gcc` | `ubertooth-dfu` |
-| nRF52840 DK | [`firmware/nrf52840dk`](../firmware/nrf52840dk/README.md) | `utdk-1.2.1` | nRF Connect SDK v3.4.1 and its toolchain bundle | `nrfutil device program` |
-| ESP32 peer | [`firmware/esp32-classic-peer`](../firmware/esp32-classic-peer/README.md) | `utesp-1.0.0` | ESP-IDF v5.5.6 | `esptool`, through `idf.py flash` |
+| nRF52840 DK | [`firmware/nrf52840dk`](../firmware/nrf52840dk/README.md) | `utdk-1.3.0` | nRF Connect SDK v3.4.1 and its toolchain bundle | `nrfutil device program` |
+| ESP32 peer | [`firmware/esp32-classic-peer`](../firmware/esp32-classic-peer/README.md) | `utesp-1.3.0` | ESP-IDF v5.5.6 | `esptool`, through `idf.py flash` |
 
 Each firmware README holds the full build and flash procedure, the pinned
 toolchain versions, and the shell command reference. Images are built outside
@@ -320,13 +324,13 @@ again immediately before each write.
 An Ubertooth's firmware is built per run and hashed into that run's manifest,
 so it needs no record here: the run says what it flashed. The other three
 images are built or fetched once and flashed for as long as they are current,
-so each is recorded with the commit its sources come from and its SHA-256.
+so each is recorded with where its sources come from and its SHA-256.
 
 | Image | What it is | Version | Source | SHA-256 |
 |---|---|---|---|---|
 | `kgv.dfu` | the known-good Ubertooth firmware that `Flash reliability` alternates against the run's own build | `2020-12-R1` | upstream Ubertooth release `2020-12-R1` | `e3fcb486c6e0ce7cc991bf6439f6dbc0156ed1229c2b95ebfd02198f9675bb11` |
-| `zephyr.hex` | the nRF52840 DK role firmware | `utdk-1.2.1` | this repository at `94b2d85`, which is where `firmware/nrf52840dk` carries that version | `88c9479f792e3480c1362a74577fe387d89d342efde5b0a1e2d107098097c1ed` |
-| `esp32-classic-peer.bin` | the ESP32 Classic peer firmware | `utesp-1.0.0` | this repository at `1d3a049`, which is where `firmware/esp32-classic-peer` carries that version | `6ff85eb6d7069b8663ac78af7836b99af25f3a72b6b34f4f55881145c62266c0` |
+| `zephyr.hex` | the nRF52840 DK role firmware | `utdk-1.3.0` | this repository, `firmware/nrf52840dk` at that version ([the change that built this image](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/236)) | `0f976c591195ee363307ec51f6c836d07ba3be40d6465c85cd6dec3398fbf288` |
+| `esp32-classic-peer.bin` | the ESP32 Classic peer firmware | `utesp-1.3.0` | this repository at `9530765`, which is where `firmware/esp32-classic-peer` carries that version | `4893b30dea47896dd7b0e5cd174ee9e633a89362e5fe4505caed4c364f5c55f2` |
 
 The KGV is the one the repository pins: the plan carries its revision and its
 hash ([`testplans/slow.yaml`](../testplans/slow.yaml),
@@ -475,7 +479,9 @@ anything that switches USB power or writes firmware also takes the host lock.
 A device lease left behind by a session that is gone (a dropped connection, a
 batch kill) is taken over by the next command that wants the device, which
 says so and what is left of that command's process group, so a leftover
-command still on the device can be found. The host lock is never taken over,
+command still on the device can be found; a run also records the takeover in
+its run record and report, because it does not promise the device was idle.
+The host lock is never taken over,
 because a firmware write may still be running; its error says what to look
 for. Commands waiting for a device are served in the order they arrived, so a
 run that wants several devices is not left behind by short leases on one of

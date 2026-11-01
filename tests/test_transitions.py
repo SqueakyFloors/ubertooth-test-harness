@@ -769,6 +769,29 @@ class CoverageGenerationTests(unittest.TestCase):
         with self.assertRaisesRegex(StateCaseError, "value"):
             Observation("crc", r"CRC: (verify)")
 
+    def test_retried_steps_must_name_steps_that_run_together(self):
+        clean = Step("clean", "Clean", ("tool",))
+        steps = (Step("one", "One", ("tool",)), Step("two", "Two", ("tool",)),
+                 Step("three", "Three", ("tool",)))
+
+        def case(**options):
+            return StateCase("case", "Case", steps, (clean,), **options)
+
+        self.assertEqual((1, 3), case(retry_steps=("two", "three"),
+                                      attempts=2).retry_window())
+        self.assertIsNone(case().retry_window())
+        for options, reason in (
+            ({"retry_steps": ("two",)}, "go together"),
+            ({"attempts": 2}, "go together"),
+            ({"retry_steps": ("two",), "attempts": 0}, "1 or more"),
+            ({"retry_steps": ("four",), "attempts": 2}, "names no step"),
+            ({"retry_steps": ("one", "three"), "attempts": 2},
+             "one after the other"),
+        ):
+            with self.subTest(**options):
+                with self.assertRaisesRegex(StateCaseError, reason):
+                    case(**options)
+
     def test_optional_arguments_are_attached_and_device_selected_by_serial(self):
         for test_name in TRANSITION_TESTS + ("Ubertooth util conflicts", "BLE mode conflicts"):
             _args, cases = cases_for(test_name, "comprehensive")
