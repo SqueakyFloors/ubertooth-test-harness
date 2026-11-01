@@ -29,6 +29,14 @@ suites:
         coverage: smoke
         duration: 25s
 
+    - Classic capture record fields:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        coverage: smoke
+        duration: 25s
+
   classic-comprehensive:
     - Capture known Classic device:
         hosts: [Host_Linux]
@@ -39,6 +47,16 @@ suites:
         duration: 25s
 
     - Follow Classic Bluetooth piconet:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        coverage: comprehensive
+        duration: 25s
+
+    # The comprehensive profile adds the audio link, which needs the peers
+    # on utesp-1.4.0 or a later 1.x image, and a survey.
+    - Classic capture record fields:
         hosts: [Host_Linux]
         Ubertooth: default
         acceptor: default

@@ -967,6 +967,81 @@ when the name is absent. That is a run-time skip because only the built
 library can tell. The test says nothing about what the tools do once a command
 line is accepted.
 
+## Failed capture files
+
+**What it does.** Drives each capture-output path into a controlled failure and
+requires that nothing a user would later read as a capture is left behind, and
+that what the run did decode is kept as a file a reader can open.
+
+**Theory of operation.** An empty capture file is worse than no file: a user
+cannot tell it apart from a capture that ran and caught nothing. Every tool
+creates its capture files once the board is open and usable, so a run refused
+before that leaves none; `ubertooth-rx` and `ubertooth-follow` go further,
+doing every step that can fail first and taking the files back again if the
+run fails after creating them. The line they are kept from is the first whole
+record a replay read, whatever the decoder made of it, because from there the
+file holds evidence. Two ways in make all of that checkable with no board at
+all. `UBERTOOTH_TEST_NO_DEVICES=1` lets a command
+line be accepted and then stopped at the board lookup, which is the setup
+failure. `ubertooth-rx -i <fixture>` replays a synthetic file
+([`rxreplay.py`](../ubertooth_harness/rxreplay.py)) with no board and no USB,
+and is the one path on which a capture file is really created, written to, and
+then judged: the `partial` fixture is one record cut short, so the run fails
+with its files created and nothing in them yet; the `truncated` fixture holds
+whole records and then a cut-short one, so the same failure arrives after real
+packets; and the `skipped` fixture holds one whole record the decoder skips
+and then a cut-short one, which is the line itself: a record was read and no
+packet came of it, and the files still stay. Each case states its whole directory before the command
+and again afterwards (`dfuimage.py state`), so a temporary file, a truncated
+destination, or a file removed that should have stayed fails the case; a file
+a case does leave stays in the run directory under the name of the attempt
+that wrote it.
+
+**Hardware and arguments.** No board role. `hosts:` and `coverage:`.
+
+**Expected outcome.** Smoke runs 6 cases: `ubertooth-rx -r -q -d`,
+`ubertooth-btle -n -r -q`, and `ubertooth-dump -d` stopped at the board lookup
+(exit 1, the error on stderr, nothing on stdout, and no new file created; the
+`rx` and `btle` cases give one of their options the seeded file, so they also
+require that a destination the user already had is not truncated); a replay that reads no
+whole record taking back all three files it created; a replay that reads
+records and then meets a cut-short one keeping all three, the two captures
+readable and the dump compared with the fixture records it came from, byte
+for byte; and a PCAPNG destination in a directory that
+is not there, reported as `error: <file>: No such file or directory` with
+nothing created. Comprehensive runs 16, adding the same lookup case for
+`ubertooth-btle -c`, which is its own create call, and one for
+`ubertooth-dump -d` on the seeded destination, which has only the one capture
+option to give it; the same missing directory
+for a PCAP destination; a replay whose one whole record the decoder skips,
+which keeps its files all the same, with the two captures holding no packet
+and the dump empty; a capture bound for standard output whose
+failure must stay on standard error; a read error before any record; a
+destination that is an existing directory; a destination in a read-only
+directory; and the two paths a user arranged rather than a file the run may
+remove, a symbolic link, which must still be there and still name its target,
+and `/dev/null`. The last two cases are skipped when the run is root, where a
+wrong removal would succeed in silence. No case expects
+`warning: cannot remove`, so a run that reached for a path it should have left
+alone fails.
+
+**Known limits.** Only the host side. A writer that fails *while* writing its
+header, which is what libbtbb
+[#117](https://github.com/SqueakyFloors/libbtbb/pull/117) and
+[#119](https://github.com/SqueakyFloors/libbtbb/pull/119) take the file away
+for, needs a destination that opens and then refuses a write; nothing here
+produces one, so the removal is checked on the create and decode failures
+instead. `ubertooth-follow`'s own discard
+([ubertooth#1000](https://github.com/SqueakyFloors/ubertooth/pull/1000)) is
+not covered: the tool is built only with BlueZ, and it has no replay path, so
+reaching its capture files needs the HCI adapter the bench does not have.
+`ubertooth-btle` and `ubertooth-dump` appear only in their lookup cases,
+because neither takes a capture file back: for them the test states the
+ordering, not a removal. `ubertooth-specan -d` with no board
+is checked by Refused command lines (`specan-d-unopenable`) and the `-d`
+writer in a missing directory by Raw receive replay
+(`replay-dump-unopenable`), so neither is repeated here.
+
 ## Util mode refusals
 
 **What it does.** Refuses `ubertooth-util` command lines that combine the ISP
@@ -1430,6 +1505,164 @@ than a proof. `ubertooth-follow` is a different tool and still untested: it
 reads the clock and the AFH map from a local BlueZ controller, which the bench
 has no adapter for
 ([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)).
+
+## Classic capture record fields
+
+**What it does.** The same two peers hold the same link, and this test reads
+what is *inside* the BR/EDR capture files `ubertooth-rx` writes: every field
+of every record, decoded from the bytes, rather than the packet lines the tool
+prints. What it asserts over the air is the records' addresses, headers,
+power fields, packet types and flags, and their agreement with each other;
+the payload checks it carries do not fire on this bench's traffic, for the
+reason under known limits.
+
+**Theory of operation.** The two Classic tests above count packet lines and
+check a LAP. That leaves most of a capture unchecked: another packet's header,
+a stale clock, a reference address that belongs to nothing, or a flag that
+claims a check nobody made would all pass. The record is a documented layout
+(`LINKTYPE_BLUETOOTH_BREDR_BB`, the pseudo-header both of libbtbb's BR/EDR
+writers build), so it can be decoded and held to what it says about itself.
+
+Three of the checks need nothing known about the bench, because they tie a
+record's fields to each other:
+
+- the payload's own length field, with the packet type's header size and CRC,
+  must come to exactly as many payload bytes as the record holds;
+- the header's HEC, run backwards, must give the reference upper address part
+  (UAP) the record carries, in every record that says the HEC passed and
+  carries a reference UAP to compare it with;
+- the payload's CRC, recomputed with that UAP, must match the one carried in
+  the payload, in every record that says the CRC passed.
+
+The last two need the record to carry a reference UAP, which the record's own
+flag says. libbtbb records what it checked whether or not it had an address to
+record, so a record can report a passing HEC with no reference UAP beside it;
+those two checks skip such a record rather than guessing at the UAP, and the
+followed cases require a floor of records that do carry both.
+
+A record that mixed one packet's header with another's metadata fails all
+three. The rest are flag-to-field agreements of the same kind, for each flag that
+describes a field the record carries: the noise flag is set exactly when the
+noise figure is below the signal, the payload flag exactly when the record
+holds payload bytes, the two reference flags exactly when the reference fields
+hold an address, a valid check is never one that was not made, and the
+transport and rate nibbles say what a receive-only basic-rate capture knows
+and nothing more. Two flags are read and reported but not constrained, because
+this writer never sets either: a decrypted payload and an aliased channel. On top of those, the bench
+contributes what it knows: the piconet's LAP, the reference LAP and UAP the
+capture was given, and, in a PCAPNG, the address `ubertooth-rx -l` records
+once in an interface option. That address is only as much as the tool knows:
+the LAP and, with `-u`, the UAP, with the non-significant address part zero
+and marked invalid, so those are the fields compared.
+
+The role-swapped case is what keeps the address checks honest. Which board is
+the piconet central is decided by which one pages, so binding the pair the
+other way round moves the LAP and the reference address in every record to the
+other board; a decoder reading a constant, or a tool writing whatever it had
+lying around, passes one case and fails the other.
+
+The audio case puts a synchronous (eSCO) link on the air instead of the data
+stream, at `sco type ev3`, so its payload is on the air at the basic rate the
+Ubertooth receives; the records must then name `HV3/EV3/3-EV3` packets. That
+is the one check here with no equivalent in the other Classic tests, because
+voice packets never appear in a capture of the SPP stream. It is held to the
+same floors as a stream capture, which the bench measured for it too: 394
+records with 112 passing headers against 285 with 59 for the stream.
+
+One thing a record does not carry is a clock, so this test asserts nothing
+about one; see the known limits.
+
+The decoder is `ubertooth_harness/bredrrecord.py`, run as an ordinary logged
+command per capture file. It prints counts, ranges, flag tallies and packet
+type names, and never a payload byte, so no traffic of the piconet reaches the
+run record. Its two reverse computations, the HEC and the CRC, are checked in
+the unit tests against the forward pair in `rxreplay.py`, which are written
+from the Bluetooth Core specification for building synthetic packets, so an
+error in either shows up instead of agreeing with itself.
+
+**Hardware and arguments.** As `Capture known Classic device`: one `Ubertooth`
+and two ESP32 Classic peers as `acceptor` and `initiator`, `coverage:`, a
+required `duration:`, Linux only. The comprehensive profile's audio case needs
+the peers on `utesp-1.4.0` or a later 1.x image, which is where `sco type`
+arrived; preflight reports the version either way, and the case fails naming
+it on anything older.
+
+**Expected outcome.** Smoke runs 2 cases. `-l <central LAP> -u <central UAP>`
+with both `-q` and `-r`, after which each file must hold at least ten records,
+all of the central's LAP, all carrying that LAP and UAP as the reference
+address, all internally consistent, at least five with a header whose HEC
+passed and ten carrying the reference UAP, and the PCAPNG must name the
+central's LAP and UAP, with a full UAP mask, as the address it was following; then the same with the roles swapped,
+where every record must carry the other board's LAP instead.
+Comprehensive runs 4, adding the EV3 audio link, whose records must include at
+least one `HV3/EV3/3-EV3` packet, and a survey (`-z -r`), whose records must
+include at least one carrying a UAP the survey recovered for itself. Each case
+keeps its capture files in the run directory. The cleanup is the same as the
+other two Classic tests: both peers reset to their boot state, the Ubertooth's
+channel, squelch, and LEDs restored.
+
+**Known limits.** The packet floors are floors, for the same reason as the
+other Classic tests: how much of a piconet a sweeping receiver hears varies
+widely between runs.
+
+The payload length and CRC checks need a link whose payloads are not
+encrypted, which this pair's are not — they pair with nobody. A capture of an
+encrypted piconet would decode neither, and `--no-payload-checks` is there for
+one; no catalog case uses it.
+
+**The payload checks do not fire on the bench's own traffic.** Measured over
+four 25-second captures, no record carried a payload at all: `ubertooth-rx`
+kept re-seeding its CLK1-27 candidates and never entered follow mode, so it
+decoded headers but no payloads. So no case puts a floor on records with a
+payload, and the payload length and CRC checks are there for the capture that
+does settle a clock — they are exercised deterministically by the unit tests
+and by replaying the synthetic fixture, where a DH1 payload's length field and
+CRC both have to agree. Whether the clock recovery should settle on this pair
+is the fork's question.
+
+A malformed record cannot be produced on purpose here. A well-behaved peer
+will not send a payload header that disagrees with its own packet, or a
+header whose HEC names another piconet, so what this test proves is that the
+fields agree on real traffic, not that the decoder rejects a bad record. The
+rejections are covered where they can be made deterministic: in the unit tests
+here, which build records field by field and check each failure is named, and
+in the forks' own tests, which drive libbtbb and the callbacks with crafted
+input.
+
+The survey case cannot assert whose records it reads. A survey is given no
+address, so it records every piconet in range, and the bench hears ambient
+traffic now and then; its checks are therefore the internal ones plus a count
+of records carrying a recovered UAP. It is also the one case where most
+records have no decoded header: once the survey has settled a piconet's UAP
+it stops reading headers for it, so those records carry an empty header with
+the HEC flags clear, and the HEC and CRC checks pass over them. A 25-second
+survey on the bench recorded 235 packets, 182 carrying a recovered UAP and
+one a header that had been checked, which is why the header floor belongs to
+the followed cases and not this one.
+
+**Nothing here asserts a clock.** The issue asked for clock and clock-offset
+consistency, and there is nothing to assert it against. A BR/EDR record has no
+clock field; `ubertooth-rx` never writes the interface option libbtbb has for a
+piconet's clock; and the two figures it prints beside each packet are already
+masked into range before they are printed (the clock with `CLKN_MASK`, the
+offset modulo the slot), so a bound on either could not fail. What the record
+reader does instead is report the timestamps — how many, over what span, and
+the largest step backwards — so a run record carries them for a person to
+read.
+
+The flag rules assume this fork's libbtbb, the one the harness pins. It clears
+the HEC and CRC answers for a clock trial it abandons, and drops the payload
+with them; a libbtbb without those clears can write an honest record that
+these checks call inconsistent. A run against another `--libbtbb-ref` should
+expect that.
+
+An EV3 capture's packet *names* are read from the records, not from the tool's
+packet lines, which carry no packet type. `ubertooth-rx` does not settle on
+this pair's clock from audio traffic, so it never enters follow mode on it;
+none of these checks needs it to, because a packet line is printed for every
+access code that matched and a record's header decodes without a clock of the
+piconet. Whether the clock recovery should manage it is the fork's question,
+not this test's.
 
 ## Classic btbr console
 

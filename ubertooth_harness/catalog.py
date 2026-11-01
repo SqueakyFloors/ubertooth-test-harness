@@ -25,9 +25,9 @@ from ubertooth_harness.patterns import (
 from ubertooth_harness.resources import ESP32_CLASSIC_PEER
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
-    advertiser_cases, btbr_cases, classic_cases, connection_cases, dfu_cases,
-    dfu_host_cases,
-    python_cases, receive_cases, refusal_cases, tool_cases, transitions,
+    advertiser_cases, btbr_cases, capture_failure_cases, classic_cases,
+    connection_cases, dfu_cases, dfu_host_cases, python_cases,
+    receive_cases, refusal_cases, tool_cases, transitions,
     tshark_cases, util_cases, util_refusal_cases,
 )
 
@@ -799,6 +799,12 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     ),
     "Raw receive replay": _profiles(Estimate(0.9), Estimate(3.9)),
     "Refused command lines": _profiles(Estimate(10.0), Estimate(20.7)),
+    # No hardware: 6 cases and 39 commands in smoke, 16 and 112
+    # comprehensive, all of them short (preflight is not counted, as it is in
+    # no estimate). The lightest run of them on the macOS host cost 0.135 s a
+    # command; the same runs with that host busy took two to six times
+    # longer, which is why an estimate is a countdown, never a timeout.
+    "Failed capture files": _profiles(Estimate(5.3), Estimate(15.1)),
     "Util mode refusals": _profiles(Estimate(1.9), Estimate(3.0)),
     "DFU image checks": _profiles(Estimate(8.7), Estimate(37.4)),
     "Python tools": _profiles(Estimate(0.5), Estimate(7.7)),
@@ -845,6 +851,12 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "Follow Classic Bluetooth piconet": _profiles(
         Estimate(40.0, per_duration=2), Estimate(80.0, per_duration=4)
     ),
+    # ESTIMATE_PENDING_HW: two capture cases in smoke, four comprehensive,
+    # each with the same bring-up as the two tests above and a record check
+    # per capture file afterwards.
+    "Classic capture record fields": _profiles(
+        Estimate(45.0, per_duration=2), Estimate(95.0, per_duration=4)
+    ),
     # Per flash-and-session cycle, measured on the lab bench: two firmware
     # writes of about 4 s, the version reads, the peer reset, and a console
     # session whose radio checks end as soon as their answer arrives.
@@ -864,6 +876,7 @@ RF_DEFAULTS: Mapping[str, Mapping[str, PlacementRequirement]] = MappingProxyType
     name: MappingProxyType({"Ubertooth": NORMAL_LINK})
     for name in (
         "Classic Bluetooth receive",
+        "Classic capture record fields",
         "Raw receive",
         "BLE extcap capture",
         "BLE extcap in tshark",
@@ -1106,6 +1119,19 @@ def builtin_catalog() -> TestCatalog:
             continue_on_case_failure=True,
         ),
         TestDefinition(
+            "Failed capture files",
+            "A capture that fails leaves no misleading file: a run stopped at "
+            "the board lookup creates none, a replay that reads no whole record "
+            "takes back the ones it created, a destination it cannot create is "
+            "named with its reason, and a capture that did decode packets is "
+            "kept as a file a reader can open, with no Ubertooth "
+            "(UBERTOOTH_TEST_NO_DEVICES=1 and ubertooth-rx -i)",
+            MappingProxyType({"hosts": HOSTS, "coverage": COVERAGE}),
+            MappingProxyType({}),
+            command_builder=capture_failure_cases.capture_failure_cases,
+            continue_on_case_failure=True,
+        ),
+        TestDefinition(
             "Util mode refusals",
             "ubertooth-util refuses -i with any other mode, -z with -i, and "
             "the removed -f, before any board lookup, with no Ubertooth "
@@ -1260,6 +1286,26 @@ def builtin_catalog() -> TestCatalog:
                 "acceptor": ESP32_CLASSIC_PEER, "initiator": ESP32_CLASSIC_PEER,
             }),
             command_builder=classic_cases.follow_classic_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+        ),
+        TestDefinition(
+            "Classic capture record fields",
+            "Decode the BR/EDR records ubertooth-rx writes while two "
+            "registered ESP32 Classic peers hold a link: every record carries "
+            "this piconet's LAP and reference address, and its own payload "
+            "length, HEC, and CRC agree with the header beside them",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH,
+                "acceptor": ArgumentRule(_selector, default="default"),
+                "initiator": ArgumentRule(_selector, default="default"),
+                "coverage": COVERAGE, "duration": DURATION,
+            }),
+            MappingProxyType({
+                "Ubertooth": "Ubertooth",
+                "acceptor": ESP32_CLASSIC_PEER, "initiator": ESP32_CLASSIC_PEER,
+            }),
+            command_builder=classic_cases.record_fields_cases,
             continue_on_case_failure=True,
             guards_other_ubertooths=True,
         ),
