@@ -960,10 +960,10 @@ def _run_leased(
             "run_started", "running",
             run_started_details(plan.name, args.suite, args.host, sources),
         )
-        # Before the build, which may be where the run fails: a run that
-        # took a device over says so whatever happens next.
-        _record_lease_takeovers(publisher, leases)
         try:
+            # Before the build, which may be where the run fails: a run that
+            # took a device over says so whatever happens next.
+            _record_lease_takeovers(publisher, leases)
             _record_libbtbb_pin(publisher, sources)
         except BaseException as error:
             _finish_failed_run(publisher, run_dir, str(error) or type(error).__name__)

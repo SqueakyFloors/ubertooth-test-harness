@@ -1420,7 +1420,11 @@ def acquire(
                     # everything. Every round sleeps or reaches the deadline, so
                     # a lease file that keeps coming back cannot make this spin.
                     record = takeover_record(board, path, why, dead)
-                    takeovers.append(record)
+                    if not any(item["key"] == board.key for item in takeovers):
+                        # Said on standard error every time, and recorded once
+                        # per device: a lease file that keeps coming back is
+                        # one device this run took over, however often.
+                        takeovers.append(record)
                     note(describe_takeover(record))
             if clock() >= deadline:
                 waited = f" after waiting {wait_s:g}s" if wait_s else ""

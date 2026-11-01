@@ -1421,8 +1421,10 @@ reported with the same explanation the host lock gets below.
 
 A `run-suite` that took a lease over carries that into its run record: a
 `lease_takeover` record in run.jsonl (the board, the record of the holder
-that was gone, why it was read as gone, and the lock file), a "Leases taken
-over" row in report.md, and a line in the transcript. Since a takeover does
+that was gone, why it was read as gone, and the lock file), a line in the
+transcript, and a "Leases taken over" row in report.md once the run reaches
+its manifest (a run that fails in its build has the record and the
+transcript line). Since a takeover does
 not promise the board was idle, that is what to look at when a later result
 in the run looks odd — and a run started by a deployed runner leaves no
 other trace, because the line on standard error goes to the runner's own

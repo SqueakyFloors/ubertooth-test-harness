@@ -446,6 +446,25 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
         self.assertEqual(1, len(taken))
         leases.acquire([A, B], holder("agent-3"), directory=self.dir).release()
 
+    def test_a_device_taken_over_twice_is_recorded_once(self):
+        # A stale lease that comes back is reported each time it is taken
+        # over, and the run record names the device once: one device this
+        # run had to take over, however many lock files it went through.
+        self.hold(A, dead_holder())
+        again = []
+
+        def note(message):
+            self.notes.append(message)
+            if not again:
+                again.append(self.hold(A, dead_holder()))
+
+        held = leases.acquire(
+            [A], holder("agent-2"), directory=self.dir, wait_s=10, note=note,
+        )
+        self.addCleanup(held.release)
+        self.assertEqual(2, len(self.notes), self.notes)
+        self.assertEqual(["UT_0"], [item["resource"] for item in held.takeovers])
+
     def test_a_lease_file_that_keeps_coming_back_cannot_make_a_loop(self):
         # Every round sleeps or reaches the deadline, so a stale lease that
         # is replaced as soon as it is taken over costs poll rounds and ends
