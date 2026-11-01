@@ -351,11 +351,12 @@ A stray word with no file option, `-h stray`, a bare `-`, and `-- -x` are refuse
 ## ubertooth-btbr (Python)
 
 Needs the separate `btbr` firmware image, which no other tool runs.
-`Classic btbr console` (`btbr` suite of the `classic` plan, and last in the
-`release` plan) writes that image to the board, drives one console session
-against a registered ESP32 Classic peer, and writes `bluetooth_rxtx` back in
-its cleanup. Linux only, and the run must carry both images
-(`--build --with-firmware`).
+`Classic btbr console` (the `btbr` suite of the `classic` plan, which a
+release runs alongside the `release` plan) writes that image to the board,
+drives one console session against a registered ESP32 Classic peer, and
+writes `bluetooth_rxtx` back in its cleanup. Linux only, and the run must
+carry both images and the Python tools
+(`--build --with-firmware --with-python`).
 
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|

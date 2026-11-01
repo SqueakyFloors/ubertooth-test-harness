@@ -40,6 +40,21 @@ _FIRMWARE_HINTS = {
     "linux": "sudo apt install gcc-arm-none-eabi make",
 }
 
+# The firmware directories a --with-firmware build makes a .dfu from. The
+# application image is what every other test needs on its board; `btbr` is
+# the image ubertooth-btbr needs and nothing else runs, so a board is set up
+# for one or the other (host/doc/ubertooth-btbr.md, FIRMWARE). Building both
+# here is what lets a test flash btbr and put the application back from
+# artifacts of the same commit.
+APPLICATION_IMAGE = "bluetooth_rxtx"
+BTBR_IMAGE = "btbr"
+FIRMWARE_IMAGES = (APPLICATION_IMAGE, BTBR_IMAGE)
+# Run-manifest artifact names of the two images, as a plan and --artifact
+# write them. "test build" is the application image every other test needs;
+# plan.image_label() turns either into the label a case asks for.
+TEST_BUILD_ARTIFACT = "test build"
+BTBR_BUILD_ARTIFACT = "btbr build"
+
 
 @dataclass(frozen=True)
 class BuildCommand:
@@ -68,6 +83,12 @@ class BuildPlan:
     commands: tuple[BuildCommand, ...]
     # Interpreter the Python tools are built for (ENABLE_PYTHON=ON), or None.
     python: str | None = None
+    # The firmware directories this plan makes a .dfu from, when it builds
+    # firmware at all. A run that asked for --with-firmware builds both; a
+    # run that only needs to flash its boards builds the application image
+    # alone, so a plan that never touches the alternate one does not depend
+    # on it building.
+    firmware_images: tuple[str, ...] = FIRMWARE_IMAGES
 
     @property
     def bin_dir(self) -> Path:
@@ -144,20 +165,6 @@ BUILT_TOOLS = (
 PYTHON_TOOLS = ("ubertooth-specan-ui", "ubertooth-btbr")
 BUILD_DEADLINE_S = 3600.0
 
-# The firmware directories a --with-firmware build makes a .dfu from. The
-# application image is what every other test needs on its board; `btbr` is
-# the image ubertooth-btbr needs and nothing else runs, so a board is set up
-# for one or the other (host/doc/ubertooth-btbr.md, FIRMWARE). Building both
-# here is what lets a test flash btbr and put the application back from
-# artifacts of the same commit.
-APPLICATION_IMAGE = "bluetooth_rxtx"
-BTBR_IMAGE = "btbr"
-FIRMWARE_IMAGES = (APPLICATION_IMAGE, BTBR_IMAGE)
-# Run-manifest artifact names of the two images, as a plan and --artifact
-# write them. "test build" is the application image every other test needs;
-# plan.image_label() turns either into the label a case asks for.
-TEST_BUILD_ARTIFACT = "test build"
-BTBR_BUILD_ARTIFACT = "btbr build"
 
 
 def required_tools(plan: BuildPlan) -> tuple[str, ...]:
@@ -222,6 +229,7 @@ def plan_build(
     extra_include_dir: str | None = None,
     jobs: int | None = None,
     python: str | None = None,
+    firmware_images: Sequence[str] = FIRMWARE_IMAGES,
 ) -> BuildPlan:
     if platform not in ("macos", "linux"):
         raise BuildError(f"unsupported build platform: {platform}")
@@ -332,7 +340,7 @@ def plan_build(
         ),
     ]
     if with_firmware:
-        for image in FIRMWARE_IMAGES:
+        for image in firmware_images:
             # The application image keeps the step ID it has always had, so
             # a transcript of an older run reads the same.
             step_id = (
@@ -359,7 +367,7 @@ def plan_build(
     )
     return BuildPlan(
         work, prefix, platform, ubertooth, libbtbb, with_firmware,
-        host_flags, tuple(commands), python,
+        host_flags, tuple(commands), python, tuple(firmware_images),
     )
 
 
@@ -731,7 +739,7 @@ class Builder:
         if plan.with_firmware:
             artifacts += [
                 FileIdentity.from_path(f"built {image}.dfu", plan.image(image))
-                for image in FIRMWARE_IMAGES
+                for image in plan.firmware_images
             ]
         return tuple(artifacts)
 

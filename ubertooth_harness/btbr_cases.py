@@ -186,9 +186,11 @@ def _console_step(serial: str, peer, *, no_answer: bool) -> Step:
             rf"(?m)^check page-peer-name: LMP_NAME_RES carried "
             rf"'{peer['name']}'$",
             r"(?m)^check lmp-unhandled: .*, each named once$",
-            r"(?m)^check streams: \d+ capture lines on stdout, ",
+            r"(?m)^check streams: \d+ capture records on stdout, nothing "
+            r"else, and none on stderr$",
             r"(?m)^session exit: 0 after \d+\.\d s$",
-            rf"(?m)^checks: {checks} passed of {checks}, 0 failed$",
+            rf"(?m)^checks: {checks} passed of {checks}, 0 failed, "
+            rf"0 not run$",
         ),
         forbidden_patterns=(r"(?m)^check \S+: FAILED: ",
                             r"(?m)^session: FAILED: "),

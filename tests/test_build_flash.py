@@ -16,7 +16,14 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from ubertooth_harness.build import BuildPlan, BuildResult
+from ubertooth_harness.build import (
+    APPLICATION_IMAGE,
+    BTBR_BUILD_ARTIFACT,
+    FIRMWARE_IMAGES,
+    TEST_BUILD_ARTIFACT,
+    BuildPlan,
+    BuildResult,
+)
 from ubertooth_harness.cancellation import CancellationToken
 from ubertooth_harness.cli import main
 from ubertooth_harness.events import RUN_LOG, open_run_publisher
@@ -168,6 +175,12 @@ class BuildFlasherTests(unittest.TestCase):
             boards, self.image, "git-new", self.publisher, output_dir=self.run_dir,
             **kwargs,
         )
+
+    def artifact_names(self):
+        """The names the run's manifest recorded its build artifacts under."""
+        manifest = next(e for e in self.events() if e["event_type"] == "manifest")
+        return [item["name"]
+                for item in manifest["details"]["manifest"]["artifacts"]]
 
     def events(self):
         return load_events(self.run_dir / RUN_LOG)
@@ -392,6 +405,7 @@ class RunSuiteFlashTests(unittest.TestCase):
         self.lease_dir = self.root / "leases"
         self.output = self.root / "runs"
         self.builds = []
+        self.built_images = []
 
     def tearDown(self):
         self.directory.cleanup()
@@ -404,18 +418,21 @@ class RunSuiteFlashTests(unittest.TestCase):
         )
         return path
 
-    def fake_build(self, sources, work_dir, with_firmware, publisher, with_python=None, *, run_dir):
+    def fake_build(self, sources, work_dir, with_firmware, publisher, with_python=None, *,
+                   run_dir, firmware_images=FIRMWARE_IMAGES):
         self.builds.append(with_firmware)
+        self.built_images.append(tuple(firmware_images))
         by_name = {source.name: source for source in sources}
         plan = BuildPlan(
             work_dir=work_dir, prefix=work_dir / "prefix", platform=self.platform,
             ubertooth=by_name["Ubertooth"], libbtbb=by_name["libbtbb"],
             with_firmware=with_firmware, host_cmake_flags=(), commands=(),
+            firmware_images=tuple(firmware_images),
         )
         if with_firmware:
-            for image in (plan.firmware_image, plan.btbr_image):
-                image.parent.mkdir(parents=True, exist_ok=True)
-                image.write_bytes(b"built firmware")
+            for image in firmware_images:
+                plan.image(image).parent.mkdir(parents=True, exist_ok=True)
+                plan.image(image).write_bytes(b"built firmware")
         publisher.emit("build_started", "running", {})
         publisher.emit("build_finished", "passed", {"reason": ""})
         return BuildResult(plan, {}, f"libubertooth 1.1 ({self.revision})", ())
@@ -440,6 +457,12 @@ class RunSuiteFlashTests(unittest.TestCase):
         self.stderr = stderr.getvalue()
         return code
 
+    def artifact_names(self):
+        """The names the run's manifest recorded its build artifacts under."""
+        manifest = next(e for e in self.events() if e["event_type"] == "manifest")
+        return [item["name"]
+                for item in manifest["details"]["manifest"]["artifacts"]]
+
     def events(self):
         return load_events(self.output / "flash-run" / RUN_LOG)
 
@@ -461,6 +484,26 @@ class RunSuiteFlashTests(unittest.TestCase):
         self.assertEqual(OLD, executor.revisions[SERIAL_B])
         types = [e["event_type"] for e in self.events()]
         self.assertLess(types.index("build_finished"), types.index("build_flash_started"))
+        # Only the image it writes. The alternate `btbr` image is built when a
+        # run asks for --with-firmware, so a plan that never runs it does not
+        # fail because that image did not build.
+        self.assertEqual([(APPLICATION_IMAGE,)], self.built_images)
+        self.assertNotIn(BTBR_BUILD_ARTIFACT, self.artifact_names())
+
+    def test_with_firmware_builds_and_records_both_images(self):
+        executor = FakeBoards(self.revision, {SERIAL_A: OLD, SERIAL_B: OLD},
+                              lease_dir=self.lease_dir)
+        self.assertEqual(0, self.run_suite(executor, "--with-firmware"),
+                         self.stderr)
+        self.assertEqual([FIRMWARE_IMAGES], self.built_images)
+        names = self.artifact_names()
+        self.assertIn(TEST_BUILD_ARTIFACT, names)
+        self.assertIn(BTBR_BUILD_ARTIFACT, names)
+
+    def test_the_flash_finishes_before_the_manifest_and_preflight(self):
+        executor = FakeBoards(self.revision, {SERIAL_A: OLD, SERIAL_B: OLD}, lease_dir=self.lease_dir)
+        self.assertEqual(0, self.run_suite(executor), self.stderr)
+        types = [e["event_type"] for e in self.events()]
         self.assertLess(types.index("build_flash_finished"), types.index("manifest"))
         self.assertLess(types.index("build_flash_finished"), types.index("preflight_started"))
         # The host lock and the board's lease were held while writing; the

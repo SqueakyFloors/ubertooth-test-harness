@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import unittest
 import unittest.mock
 
+from tests import fake_btbr
 from tests.fake_btbr import PEER_ADDRESS, PEER_NAME, write_fake_btbr
 from ubertooth_harness import btbrconsole
 from ubertooth_harness.pytools import PYTHON_TOOLS_ENV, SKIP_EXIT
@@ -82,7 +83,7 @@ class SessionTests(unittest.TestCase):
             f"check page-peer-name: LMP_NAME_RES carried '{PEER_NAME}'",
             "check page-idle: 'Paging done'",
             "check lmp-unhandled: 0x20 refused, each named once",
-            "check streams: ",
+            "check streams: 7 capture records on stdout, nothing else",
             "session exit: 0 after ",
         ):
             self.assertIn(line, report)
@@ -91,8 +92,8 @@ class SessionTests(unittest.TestCase):
         # discoverable device in range, and those addresses and names must not
         # reach the run record. Nothing is written to standard output at all.
         self.assertEqual("", captured)
-        self.assertNotIn("[TV] UN75J6300", report)
-        self.assertNotIn("f877b844d1b9", report)
+        self.assertNotIn(fake_btbr.OTHER_NAME, report)
+        self.assertNotIn(fake_btbr.OTHER_ADDRESS, report)
         # What it does report of the capture is the record it matched for the
         # registered peer, which is the bench's own device.
         self.assertIn(f"  record: 09:11:00 RX FHS: FHS: bdaddr="
@@ -117,7 +118,32 @@ class SessionTests(unittest.TestCase):
         status, _captured, report = self.run_session(faults=("no-usb",))
         self.assertEqual(1, status)
         self.assertIn("printed no 'USB connected' line", report)
-        self.assertIn("a board carrying bluetooth_rxtx fails here", report)
+        # With nothing said, the firmware is named as the likely cause.
+        self.assertIn("a board carrying bluetooth_rxtx fails this way", report)
+
+    def test_the_tools_own_reason_for_not_starting_is_reported(self):
+        status, _captured, report = self.run_session(faults=("says-why",))
+        self.assertEqual(1, status)
+        self.assertIn("the tool said: error: Ubertooth 0123 is in use by "
+                      "another program (libusb -6)", report)
+        self.assertNotIn("a board carrying bluetooth_rxtx fails this way",
+                         report)
+
+    def test_an_interpreter_without_libusb1_skips_rather_than_failing(self):
+        # Nothing on the bench is wrong and the run cannot decide the case.
+        status, captured, report = self.run_session(faults=("no-libusb1",))
+        self.assertEqual(SKIP_EXIT, status)
+        self.assertIn("SKIP: the interpreter ubertooth-btbr runs has no "
+                      "libusb1 package", captured)
+        self.assertIn("session: not run: ", report)
+
+    def test_the_startup_lines_may_arrive_in_any_order(self):
+        # `EIR updated` is a firmware line the receive thread ferries up, and
+        # the tool prints the intro milliseconds later, so which lands first
+        # is a race rather than a fault.
+        status, _captured, report = self.run_session(faults=("late-eir",))
+        self.assertEqual(0, status, report)
+        self.assertIn("checks: 11 passed of 11, 0 failed, 0 not run", report)
 
     def test_a_missing_prompt_fails_the_session(self):
         status, _captured, report = self.run_session(faults=("no-prompt",))
@@ -139,7 +165,7 @@ class SessionTests(unittest.TestCase):
              "an unhandled LMP opcode was reported more than once: 0x20 3 times"),
             ("quiet-lmp",
              "no LMP request with no handler was reported at all"),
-            ("capture-on-stderr", "a capture line is on stderr"),
+            ("capture-on-stderr", "a capture record is on stderr"),
             ("stuck-idle", "idle did not reach"),
             ("bad-exit", "the session exited 1 after"),
         ):
@@ -188,6 +214,28 @@ class CheckListTests(unittest.TestCase):
                            comprehensive.index("page"))
         self.assertLess(comprehensive.index("page-no-answer"),
                         comprehensive.index("streams"))
+
+    def test_every_check_is_in_the_budget(self):
+        # A check with no entry would be left outside the step's deadline, so
+        # the budget is asked for each one by name; an unknown name raises,
+        # which is what keeps a stale entry from passing for a real one.
+        windows = {"inquiry": 1.0, "page": 1.0, "hold": 1.0, "no_answer": 1.0}
+        for label, _check in btbrconsole.checks(True):
+            with self.subTest(label):
+                self.assertGreaterEqual(
+                    btbrconsole._check_seconds(label, **windows), 0.0)
+        with self.assertRaises(KeyError):
+            btbrconsole._check_seconds("not-a-check", **windows)
+
+    def test_the_fake_names_no_real_device(self):
+        # This repository must not hold captured device traffic, so the
+        # second device an inquiry hears is made up too.
+        for value in (fake_btbr.OTHER_ADDRESS, fake_btbr.OTHER_NAME,
+                      fake_btbr.PEER_ADDRESS, fake_btbr.PEER_NAME):
+            with self.subTest(value):
+                self.assertNotIn("UN75", value)
+        self.assertTrue(fake_btbr.OTHER_ADDRESS.startswith("02"),
+                        "a locally administered address belongs to nobody")
 
     def test_no_check_sends_an_address_shorter_than_six_bytes(self):
         # The tool takes one today and acts on a different address (fork

@@ -123,6 +123,12 @@ POLL_S = 0.05
 # floods the stream, so the driver reports instead of filling the run record.
 MAX_STREAM_CHARS = 2_000_000
 
+# The one reason for not starting that the run cannot do anything about and
+# the bench is not at fault for: the interpreter the tools were built for has
+# no libusb1 package, so no session can open a board at all
+# (host/doc/ubertooth-btbr.md, DIAGNOSTICS).
+NO_LIBUSB1 = "No module named 'usb1'"
+
 # What the tool prints, measured at fork b2cd6c68 and documented in
 # host/doc/ubertooth-btbr.md.
 NO_SUCH_COMMAND = "error: no such command '{word}'"
@@ -138,6 +144,8 @@ HELP_ONE = ("inquiry", "inquiry: Discover nearby devices")
 # Not anchored at the start of a line: the prompt has no newline of its own,
 # so the first answer after it lands on the end of the prompt.
 SET_BDADDR = r"(?m)Set bdaddr (?P<address>[0-9a-f]+) -> sw [0-9a-f]+$"
+# The firmware prints that address with %llx, so an address with a leading
+# zero byte comes back shorter than twelve digits: it is compared as a number.
 # Paging, in the order the firmware reports it.
 PAGING_STARTED = "Paging started"
 PAGING_CONNECTED = "Central started"
@@ -147,10 +155,12 @@ PAGING_TIMEOUT = "paging timeout"
 PAGING_DONE = "Paging done"
 INQUIRY_STARTED = "Starting BTCtlInquiryCmd"
 INQUIRY_DONE = "Inquiry done"
-# An LMP request with no handler: one line per opcode, not per packet.
+# An LMP request with no handler: one line per opcode, not per packet. The
+# opcode is `0x<hex>`, or `<opcode>/<extended opcode>` for an escape opcode,
+# and the line ends in `, refused` only where there was something to refuse: a
+# PDU that expects no answer is just reported (host/python/ubtbr/ubtbr/lmp.py).
 LMP_UNHANDLED = re.compile(
-    r"(?m)^warning: LMP opcode (?P<opcode>0x[0-9a-f]+) is not handled "
-    r"in state \d+, refused$")
+    r"(?m)^warning: LMP opcode (?P<opcode>\S+) is not handled in state \d+")
 
 # An inquiry response is an FHS packet carrying the responder's address, and
 # its Extended Inquiry Response follows as fields of its own.
@@ -168,9 +178,10 @@ NAME_BYTES_CHECKED = 10
 # newline of its own, so a record printed right after one does not start a
 # line, and that is the likeliest place for a stray record to appear.
 CAPTURE_LINE = re.compile(r"(?m)\d\d:\d\d:\d\d [A-Z0-9]")
-PROGRESS_LINE = re.compile(
-    r"(?m)^(?:bt> |State |Starting BTCtl|Send idle|Paging |Inquiry |"
-    r"Connection |Central started|Rx thread)")
+# Every line of the capture stream must be a record, so anything else there is
+# named whatever it is: an error, a warning, a note, the prompt, the intro, or
+# a line of what `?` printed.
+NOT_A_RECORD = re.compile(r"(?m)^(?!\d\d:\d\d:\d\d [A-Z0-9])(?P<line>.+)$")
 
 # A word that is no command and no address, and three addresses that are not
 # ones. Nothing on the bench answers to any of them and none reaches the
@@ -180,9 +191,12 @@ PROGRESS_LINE = re.compile(
 BAD_WORD = "wibble"
 BAD_ADDRESSES = ("", "zzz", "11:22:33:44:55:66:77")
 # The address to set the board to, and the one to page for the no-answer
-# check: neither belongs to anything on the bench.
+# check. Neither belongs to anything on the bench, and neither is
+# `11:22:33:44:55:66`, which the tool gives the board itself at startup
+# (host/doc/ubertooth-btbr.md, DESCRIPTION): paging that would depend on the
+# set-address check having run first.
 TEST_ADDRESS = "22:33:44:55:66:77"
-NO_DEVICE_ADDRESS = "11:22:33:44:55:66"
+NO_DEVICE_ADDRESS = "02:00:00:00:00:01"
 
 
 class ConsoleError(RuntimeError):
@@ -511,8 +525,8 @@ def check_set_address(session: Session) -> str:
     match, took = console.wait(re.compile(SET_BDADDR), REPLY_TIMEOUT_S, since=mark)
     if match is None:
         return f"bdaddr {TEST_ADDRESS} did not report the address it set"
-    if match["address"] != wanted:
-        return (f"bdaddr {TEST_ADDRESS} set {match['address']}, not {wanted}")
+    if int(match["address"], 16) != int(wanted, 16):
+        return f"bdaddr {TEST_ADDRESS} set {match['address']}, not {wanted}"
     session.report(f"check set-address: {TEST_ADDRESS} set in {took:.1f} s, "
                    f"sync word derived")
     return ""
@@ -537,10 +551,14 @@ def check_inquiry(session: Session) -> str:
                 f"{session.inquiry_seconds:g}s; it heard {heard} other "
                 "device(s)")
     # The response's Extended Inquiry Response follows it as fields of their
-    # own, so the name arrives just after the address.
+    # own, so the name usually arrives just after the address. What is left of
+    # the inquiry window is given to it all the same: the inquiry is still
+    # running, the peer answers again every few seconds, and one lost packet
+    # should not cost a case two firmware writes.
+    left = max(REPLY_TIMEOUT_S, session.inquiry_seconds - took)
     named, _ = console.wait(
         re.compile(rf"COMPLETE_LOCAL_NAME: '{re.escape(session.peer_name)}'"),
-        REPLY_TIMEOUT_S, stream="stdout", since=found.end())
+        left, stream="stdout", since=found.end())
     captured = console.text("stdout")[out_mark:]
     if named is None:
         names = len(EIR_NAME.findall(captured))
@@ -656,16 +674,29 @@ def check_page_no_answer(session: Session) -> str:
 
 
 def check_streams(session: Session) -> str:
-    """The capture is on standard output and the progress on standard error."""
+    """The capture is on standard output and the progress on standard error.
+
+    This is the last check, so it is also where an overflowed stream is
+    caught: the two checks before it read the text rather than waiting on it,
+    and a stream that overflowed during the connection hold would have left
+    them deciding on text that stopped part way.
+    """
+    for stream in session.console.streams.values():
+        if stream.overflowed:
+            return (f"the session's {stream.name} passed {MAX_STREAM_CHARS} "
+                    "characters, so what it printed after that is lost")
     stray_capture = CAPTURE_LINE.search(session.console.text())
     if stray_capture:
-        return f"a capture line is on stderr: {stray_capture[0]!r}"
-    stray_progress = PROGRESS_LINE.search(session.console.text("stdout"))
-    if stray_progress:
-        return f"a progress line is on stdout: {stray_progress[0]!r}"
+        return f"a capture record is on stderr: {stray_capture[0]!r}"
+    # Not an allowlist of what may not be there: anything that is not a
+    # record is named, whatever it is.
+    stray = NOT_A_RECORD.search(session.console.text("stdout"))
+    if stray:
+        return (f"a line that is not a capture record is on stdout: "
+                f"{stray['line'][:120]!r}")
     captured = len(CAPTURE_LINE.findall(session.console.text("stdout")))
-    session.report(f"check streams: {captured} capture lines on stdout, "
-                   "no progress line among them")
+    session.report(f"check streams: {captured} capture records on stdout, "
+                   "nothing else, and none on stderr")
     return ""
 
 
@@ -694,8 +725,9 @@ NO_ANSWER_CHECK = ("page-no-answer", check_page_no_answer)
 # step deadline from worst_case_seconds() below, so a check that fails ends in
 # this module's own reason rather than in the harness killing the step: the
 # difference between a diagnosis and a timeout. Each count is the waits in the
-# check's own code, so a check that grows a wait has to grow its entry here;
-# tests/test_btbrconsole.py counts the waits and compares.
+# check's own code. tests/test_btbrconsole.py checks that every check has an
+# entry and that no entry is left behind by one that went away, which is the
+# drift that would otherwise leave a new check outside the budget.
 def _check_seconds(label: str, *, inquiry: float, page: float, hold: float,
                    no_answer: float) -> float:
     reply, idle = REPLY_TIMEOUT_S, IDLE_TIMEOUT_S
@@ -711,9 +743,9 @@ def _check_seconds(label: str, *, inquiry: float, page: float, hold: float,
         # The refusal, the prompt, and the look for a paging line.
         "page-no-address": 2 * reply,
         "set-address": reply,
-        # The start, the peer's response, its name, then idle: the stop line
-        # and the prompt after it.
-        "inquiry": 2 * reply + inquiry + idle + reply,
+        # The start, the peer's response, then what is left of the inquiry
+        # window for its name, then idle: the stop line and the prompt.
+        "inquiry": reply + 2 * inquiry + idle + reply,
         # The start, the page, ready, LMP complete, the name on the air, the
         # hold, then idle.
         "page": 5 * reply + page + hold + idle + reply,
@@ -813,6 +845,17 @@ def run_session(arguments, out, err, environment) -> int:
                 failures.append(f"{label}: {reason}")
                 report(f"check {label}: FAILED: {reason}")
     except ConsoleError as error:
+        if NO_LIBUSB1 in console.text():
+            # Nothing here can decide the session, and nothing on the bench is
+            # wrong: the interpreter the tools were built for cannot open a
+            # board. The case is skipped with that as its reason.
+            report(f"session: not run: {error}")
+            _end(console, report, [])
+            out.write(f"SKIP: the interpreter {TOOL} runs has no libusb1 "
+                      "package, so no session can open a board; install it "
+                      'with "pip install libusb1"\n')
+            out.flush()
+            return SKIP_EXIT
         failures.append(str(error))
         report(f"session: FAILED: {error}")
     status = _end(console, report, failures)
@@ -832,28 +875,51 @@ def run_session(arguments, out, err, environment) -> int:
 def _start(console: Console, report) -> None:
     """Wait for the startup the `btbr` image answers, then for the prompt.
 
-    Only the first line gets the long window: it is the one a board on the
-    wrong image never answers, and the two after it are printed in the same
-    breath.
+    The lines are not required in order. Two of them come from the host tool
+    and `EIR updated` is a firmware line the receive thread ferries up, with
+    only milliseconds between it and the intro, so which lands first is a
+    race and not something to fail a board over. Only the first wait gets the
+    long window: by the time one line has arrived the others are there or
+    coming.
     """
     reached = 0
-    for needle, window in ((USB_CONNECTED, START_TIMEOUT_S),
-                           (EIR_UPDATED, REPLY_TIMEOUT_S),
-                           (INTRO, REPLY_TIMEOUT_S)):
-        match, _ = console.wait(needle, window, since=reached)
+    window = START_TIMEOUT_S
+    for needle in (USB_CONNECTED, EIR_UPDATED, INTRO):
+        match, _ = console.wait(needle, window)
         if match is None:
             raise ConsoleError(
-                f"{TOOL} printed no {needle!r} line within {window:g}s; "
-                "a board carrying bluetooth_rxtx fails here")
-        reached = match.end()
+                f"{TOOL} printed no {needle!r} line within {window:g}s"
+                + _why_not_started(console))
+        reached = max(reached, match.end())
+        window = REPLY_TIMEOUT_S
     prompt, _ = console.wait(PROMPT, REPLY_TIMEOUT_S, since=reached)
     if prompt is None:
         raise ConsoleError(f"the {INTRO!r} line arrived but the prompt did not")
     report(f"prompt: up after {_now() - console.started:.1f} s")
 
 
+def _why_not_started(console: Console) -> str:
+    """The tool's own reason for not starting, where it gave one.
+
+    A session that never reaches its prompt usually said why in one `error: `
+    line, and that line is worth far more than a guess: a board carrying
+    `bluetooth_rxtx` times the first write out and says so, a board in use by
+    another program says that, and a `--with-python` interpreter without the
+    `libusb1` package says that. Without a line, the firmware is the likeliest
+    cause and is named as likely rather than as fact.
+    """
+    said = re.findall(r"(?m)^(?:error|note): .*$", console.text())
+    if said:
+        return "; the tool said: " + "; ".join(said[:3])
+    return "; a board carrying bluetooth_rxtx fails this way"
+
+
 def _end(console: Console, report, failures: list[str]) -> int:
     """End the session and report how it went; never raise."""
+    if console.process is None:
+        # It never started, so there is no exit status and no duration.
+        report("session exit: not started")
+        return 1
     try:
         status = console.end()
     except ConsoleError as error:

@@ -73,6 +73,21 @@ def _platforms(value):
     return normalized
 
 
+# Flash-and-session cycles `Classic btbr console` will run. Each writes the
+# board's firmware twice, so the ceiling is what the `btbr-long` suite needs
+# with room above it, not a limit of the code.
+MAX_BTBR_SESSIONS = 20
+
+
+def _btbr_sessions(value):
+    count = _positive_integer(value)
+    if count > MAX_BTBR_SESSIONS:
+        raise CatalogError(
+            f"sessions must be 1-{MAX_BTBR_SESSIONS} (got {count}): each one "
+            "writes the board's firmware twice")
+    return count
+
+
 def _positive_integer(value):
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise CatalogError("must be a positive integer")
@@ -1258,9 +1273,11 @@ def builtin_catalog() -> TestCatalog:
             MappingProxyType({
                 "hosts": HOSTS, "Ubertooth": UBERTOOTH,
                 "acceptor": ArgumentRule(_selector, default="default"),
-                # Flash-and-session cycles, for a long suite; one by default,
-                # because each costs two firmware writes.
-                "sessions": ArgumentRule(_positive_integer, default=1),
+                # Flash-and-session cycles, for a long suite; one by
+                # default, because each costs two firmware writes. Bounded,
+                # for the same reason: a plan asking for a hundred would
+                # write the board's flash two hundred times.
+                "sessions": ArgumentRule(_btbr_sessions, default=1),
                 # The board transmits: an inquiry train, a page train, and
                 # then a live connection it holds as the piconet central.
                 "allow RF transmission": ArgumentRule(_required_true,

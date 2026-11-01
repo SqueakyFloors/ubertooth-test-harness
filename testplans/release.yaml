@@ -123,15 +123,11 @@ suites:
         hosts: each
         coverage: comprehensive
 
-    # Last, and only here: it writes the board's firmware, so mandatory
-    # preflight refuses any test after it on the same board. It is the only
-    # release coverage of `ubertooth-btbr` and of the `btbr` image, neither of
-    # which any other test touches, and of the alternate-image identity
-    # check. It needs the Linux bench with a registered ESP32 Classic peer,
-    # and a run carrying both firmware images (`--build --with-firmware`).
-    - Classic btbr console:
-        hosts: [Host_Linux]
-        Ubertooth: default
-        acceptor: default
-        allow RF transmission: true
-        coverage: smoke
+    # `Classic btbr console` is deliberately not here, although it is the only
+    # coverage of `ubertooth-btbr` and of the `btbr` firmware image. Every
+    # test in this plan runs on any host, and that one needs a Linux host with
+    # a registered ESP32 Classic peer: naming one host alias here would make
+    # the whole plan refuse to compile against a registry without it. It lives
+    # in the `btbr` suite of `testplans/classic.yaml` with the other
+    # peer tests, and a release runs that suite as well (README, "Before a
+    # release").

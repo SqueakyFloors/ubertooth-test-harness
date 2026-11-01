@@ -65,9 +65,19 @@ suites:
   # so it is the only test in this suite: a test after it would run on an
   # image this one put there, which mandatory preflight refuses. One
   # flash-and-session cycle, about a minute, and the cleanup always writes
-  # `bluetooth_rxtx` back. The run has to carry both images: build it with
-  # `run-suite --build --with-firmware`, or pass
-  # `--artifact "btbr build=PATH" --artifact "test build=PATH"`.
+  # `bluetooth_rxtx` back.
+  #
+  # The run has to carry both firmware images and the Python tools, because
+  # `ubertooth-btbr` is one of them: `run-suite --build --with-firmware
+  # --with-python`. Passing the images by hand works too
+  # (`--artifact "btbr build=PATH" --artifact "test build=PATH"`), but the
+  # tool still needs `--with-python`, and without either the case is left out
+  # as not applicable rather than failing.
+  #
+  # This suite is release coverage as well: it is the only test of
+  # `ubertooth-btbr` and of the `btbr` image, and `testplans/release.yaml`
+  # cannot hold it, because every test there runs anywhere and this one needs
+  # a Linux target with a registered peer. Run it alongside the release plan.
   btbr:
     - Classic btbr console:
         hosts: [Host_Linux]

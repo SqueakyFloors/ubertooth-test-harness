@@ -1521,12 +1521,13 @@ tool takes today and acts on as a different address
 case for it would pin that rather than check it. Encryption is not reachable:
 `btbr` does not implement it.
 
-The unhandled-opcode check leans on the peer: these controllers ask for power
-control about four times a second for the life of the link and this link layer
-has no handler for it, so a connection held for the hold always brings one.
-The check requires one to have arrived, because a check that decided nothing
-should not read as a pass; a peer firmware that stopped asking would therefore
-fail it, and the reason says so.
+The unhandled-opcode check leans on the peer. Measured on the bench on
+2026-11-01: with the link up, the peer sent `LMP_DECR_POWER_REQ` about four
+times a second for the whole connection, this link layer refused each one, and
+the tool named the opcode in exactly one `warning:` line. So a connection held
+for the hold brings one, and the check requires that, because a check that
+decided nothing should not read as a pass; a peer firmware that stopped asking
+would fail it, and the reason says why.
 
 ## CLI usage smoke
 

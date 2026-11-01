@@ -1,12 +1,13 @@
 """A stand-in for `ubertooth-btbr`'s console, for btbrconsole.py tests.
 
 The real tool opens a prompt on a board carrying the `btbr` firmware image.
-This writes a script that answers the same lines on the same streams --
-capture records on standard output, the prompt and the progress on standard
-error -- measured from a session at fork b2cd6c68 on the lab bench
-(docs/tests.md, "Classic btbr console"). ``faults`` makes it misbehave one way
-at a time, so each check in btbrconsole.py can be shown to fail for its own
-reason.
+This writes a script that answers the same lines on the same streams: capture
+records on standard output, the prompt and the progress on standard error.
+The wording of each line is the tool's, read from its sources and its man
+page; every address and device name here is made up, including the second
+device an inquiry hears, which stands in for whatever else is in range of a
+bench. ``faults`` makes the fake misbehave one way at a time, so each check in
+btbrconsole.py can be shown to fail for its own reason.
 """
 
 from __future__ import annotations
@@ -16,9 +17,15 @@ from pathlib import Path
 
 from tests.executables import write_executable
 
-# The peer the fake answers for, matching the registry's ESP32_Linux0.
+# The peer the fake answers for: a made-up address in the range the ESP32
+# boards use, and the name the peer firmware would build from it.
 PEER_ADDRESS = "C8:85:41:2A:1B:2A"
 PEER_NAME = "UT-ESP32-2A1B2A"
+# A second device an inquiry hears, so a test can show that the driver counts
+# the others without naming them. Made up: a locally administered address and
+# a name that is nobody's product.
+OTHER_ADDRESS = "020000000002"
+OTHER_NAME = "Example Device"
 
 # One fault per run, named in the ``faults`` list:
 #   no-usb              the startup line the btbr image answers never comes
@@ -37,6 +44,9 @@ PEER_NAME = "UT-ESP32-2A1B2A"
 #   bad-exit            the session exits non-zero
 #   never-exits         the session ignores `exit`
 #   quiet-lmp           the connection brings no unhandled LMP request
+#   says-why            it cannot open the board and says so in one error line
+#   no-libusb1          the interpreter has no libusb1 package
+#   late-eir            the firmware's EIR line lands after the intro
 
 _SCRIPT = '''#!/usr/bin/env python3
 """A fake ubertooth-btbr console. See tests/fake_btbr.py."""
@@ -46,7 +56,8 @@ CONFIG = json.loads(os.environ["FAKE_BTBR_CONFIG"])
 FAULTS = set(CONFIG["faults"])
 PEER = CONFIG["peer"].replace(":", "").lower()
 NAME = CONFIG["name"]
-OTHER = "f877b844d1b9"
+OTHER = CONFIG["other"]
+OTHER_NAME = CONFIG["other_name"]
 
 def err(text):
     sys.stderr.write(text + "\\n")
@@ -71,14 +82,26 @@ def response(address, name):
 HELP = ["EOF", "discoverable", "help", "inquiry", "l2ping", "page",
         "bdaddr", "exit", "idle", "inquiry_scan", "monitor", "page_scan"]
 
+if "says-why" in FAULTS:
+    err("error: Ubertooth 0123 is in use by another program (libusb -6)")
+    sys.exit(1)
+if "no-libusb1" in FAULTS:
+    err("error: could not start the session: No module named 'usb1'")
+    err('note: a session needs the Python libusb1 package, which ships the '
+        'usb1 module; install it with "pip install libusb1"')
+    sys.exit(1)
 err("Rx thread started")
 if "no-usb" not in FAULTS:
     err("USB connected")
 err("Send idle")
 err("State STANDBY -> STANDBY")
 err("Set bdaddr 112233445566 -> sw b11155996c38a7bd")
-err("EIR updated")
+if "late-eir" not in FAULTS:
+    err("EIR updated")
 err("Type ? to list commands")
+if "late-eir" in FAULTS:
+    # The firmware line the receive thread ferries up, after the intro.
+    err("EIR updated")
 prompt()
 
 running = None
@@ -175,13 +198,13 @@ while True:
         err("State STANDBY -> INQUIRY")
         running = "inquiry"
         if "silent-inquiry" in FAULTS:
-            response(OTHER, "[TV] UN75J6300")
+            response(OTHER, OTHER_NAME)
         elif "unnamed-peer" in FAULTS:
             out("RX FHS: FHS: bdaddr=%s parity=2c43c0d1b cls=1f00 "
                 "ltaddr=0 clk=4706" % PEER)
         else:
             response(PEER, NAME)
-            response(OTHER, "[TV] UN75J6300")
+            response(OTHER, OTHER_NAME)
         err("Inquiry state Ready")
         continue
     err("error: no such command '%s'" % word)
@@ -201,5 +224,6 @@ def write_fake_btbr(directory, *, faults=(), peer=PEER_ADDRESS,
     write_executable(directory / "ubertooth-btbr", _SCRIPT)
     return {
         "FAKE_BTBR_CONFIG": json.dumps(
-            {"faults": list(faults), "peer": peer, "name": name}),
+            {"faults": list(faults), "peer": peer, "name": name,
+             "other": OTHER_ADDRESS, "other_name": OTHER_NAME}),
     }

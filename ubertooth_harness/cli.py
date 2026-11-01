@@ -13,7 +13,10 @@ import subprocess
 import sys
 
 from ubertooth_harness.build import (
+    APPLICATION_IMAGE,
     BTBR_BUILD_ARTIFACT,
+    BTBR_IMAGE,
+    FIRMWARE_IMAGES,
     TEST_BUILD_ARTIFACT,
     BuildError,
     Builder,
@@ -174,7 +177,8 @@ def _signals_cancel(token: CancellationToken):
 
 
 def _build(
-    sources, work_dir: Path, with_firmware: bool, publisher, with_python=None, *, run_dir: Path
+    sources, work_dir: Path, with_firmware: bool, publisher, with_python=None, *,
+    run_dir: Path, firmware_images=FIRMWARE_IMAGES,
 ):
     """Build resolved sources into work_dir, recording into the run's publisher
     (long command output goes to run_dir's output/)."""
@@ -188,6 +192,7 @@ def _build(
         libbtbb=by_name["libbtbb"],
         work_dir=work_dir,
         platform=platform,
+        firmware_images=firmware_images,
         with_firmware=with_firmware,
         extra_include_dir=homebrew_include_dir(probe) if platform == "macos" else None,
         python=python,
@@ -692,6 +697,7 @@ def _prepare_run(
         built = _build(
             sources, run_dir / "build", args.with_firmware, publisher, args.with_python,
             run_dir=run_dir,
+            firmware_images=getattr(args, "firmware_images", FIRMWARE_IMAGES),
         )
         artifacts = artifacts + built.artifacts
         names = {item.name for item in artifacts}
@@ -700,7 +706,9 @@ def _prepare_run(
             artifacts += (
                 FileIdentity.from_path(TEST_BUILD_ARTIFACT, built.plan.firmware_image),
             )
-        if built.plan.with_firmware and BTBR_BUILD_ARTIFACT not in names:
+        if (built.plan.with_firmware
+                and BTBR_IMAGE in built.plan.firmware_images
+                and BTBR_BUILD_ARTIFACT not in names):
             # The alternate image a case flashes to run ubertooth-btbr, from
             # the same commit as the application image beside it.
             artifacts += (
@@ -867,7 +875,11 @@ def _run_suite(args: argparse.Namespace) -> int:
             for alias in PreflightPolicy(registry, catalog).boards_needing_firmware(invocations)
         )
     if args.flash_boards and not args.with_firmware:
+        # Flashing needs the firmware build, but only the image it writes:
+        # a plan that never runs the alternate one must not fail because
+        # that one did not build.
         args.with_firmware = True
+        args.firmware_images = (APPLICATION_IMAGE,)
         if not args.dry_run and "arm-none-eabi-gcc" in missing_tools(
             _detected_platform(), True
         ):

@@ -1,11 +1,15 @@
 """`Classic btbr console`: the case, the two firmware images, and the catalog."""
 
+import io
 from pathlib import Path
 import re
 import tempfile
+from types import SimpleNamespace
 import unittest
 
+from tests.fake_btbr import PEER_ADDRESS, PEER_NAME, write_fake_btbr
 from ubertooth_harness import btbr_cases, btbrconsole, esp32peer
+from ubertooth_harness.pytools import PYTHON_TOOLS_ENV
 from ubertooth_harness.btbr_cases import btbr_console_cases
 from ubertooth_harness.build import (
     APPLICATION_IMAGE,
@@ -26,6 +30,23 @@ from ubertooth_harness.stateful import (
 )
 
 SERIAL = "0123456789abcdef0123456789abcdef"
+
+
+def fake_session_report(*, faults=(), no_answer=False) -> str:
+    """One console session against the fake, and the report it printed."""
+    with tempfile.TemporaryDirectory() as directory:
+        tools = Path(directory) / "bin"
+        environment = {"PATH": "/usr/bin:/bin",
+                       PYTHON_TOOLS_ENV: str(tools),
+                       **write_fake_btbr(tools, faults=faults)}
+        out, err = io.StringIO(), io.StringIO()
+        btbrconsole.run_session(
+            SimpleNamespace(
+                serial=SERIAL, peer=PEER_ADDRESS, peer_name=PEER_NAME,
+                inquiry_seconds=2.0, page_seconds=2.0, hold_seconds=0.05,
+                no_answer_seconds=2.0, no_answer=no_answer),
+            out, err, environment)
+        return err.getvalue()
 UBERTOOTH = SourceRevision(
     "Ubertooth", "/repos/ubertooth", "https://example.invalid/ubertooth.git",
     "main", "a" * 40, "aaaaaaa",
@@ -34,8 +55,6 @@ LIBBTBB = SourceRevision(
     "libbtbb", "/repos/libbtbb", "https://example.invalid/libbtbb.git",
     "main", "b" * 40, "bbbbbbb",
 )
-PEER_ADDRESS = "C8:85:41:2A:1B:2A"
-PEER_NAME = "UT-ESP32-2A1B2A"
 RESOURCES = {"Ubertooth": "UT_Linux0", "acceptor": "ESP32_Linux0"}
 
 
@@ -196,35 +215,30 @@ class CaseTests(unittest.TestCase):
         self.assertIn("--no-answer", " ".join(step.resolve_argv({})))
         self.assertIn("12 checks", step.name)
 
-    def test_the_patterns_accept_a_passing_report_and_reject_a_failing_one(self):
+    def test_the_cases_patterns_match_a_real_session_report(self):
+        """The case's patterns are matched against what the driver prints.
+
+        Not against a report written here: a fixture of its own would agree
+        with whatever the patterns say, which is how the `checks:` line and
+        the pattern that reads it drifted apart once already. The driver is
+        run against tests/fake_btbr.py, a stand-in console, and its own
+        report is what the patterns have to match.
+        """
+        for coverage, no_answer in (("smoke", False), ("comprehensive", True)):
+            report = fake_session_report(no_answer=no_answer)
+            (case,) = cases(coverage)
+            step = case.steps[-1]
+            with self.subTest(coverage):
+                for pattern in step.output_patterns:
+                    self.assertRegex(report, pattern, pattern)
+                for pattern in step.forbidden_patterns:
+                    self.assertIsNone(re.search(pattern, report), pattern)
+
+    def test_a_failed_check_trips_the_forbidden_patterns(self):
+        report = fake_session_report(faults=("quiet-lmp",))
         (case,) = cases()
         step = case.steps[-1]
-        passing = "\n".join((
-            f"peer address: {PEER_ADDRESS}",
-            "prompt: up after 1.9 s",
-            "check help: 10 commands listed in 0.1 s",
-            "check inquiry: peer c885412a1b2a answered after 2.1 s, name "
-            f"'{PEER_NAME}', 2 device(s) heard in all",
-            f"check page: connected to {PEER_ADDRESS} in 6.6 s, lt_addr=1, "
-            "LMP setup complete",
-            f"check page-peer-name: LMP_NAME_RES carried '{PEER_NAME}'",
-            "check lmp-unhandled: 0x20 refused, each named once",
-            "check streams: 181 capture lines on stdout, no progress line "
-            "among them",
-            "session exit: 0 after 41.2 s",
-            "checks: 11 passed of 11, 0 failed",
-        ))
-        for pattern in step.output_patterns:
-            with self.subTest(pattern):
-                self.assertRegex(passing, pattern)
-        for pattern in step.forbidden_patterns:
-            with self.subTest(f"forbidden {pattern}"):
-                self.assertIsNone(re.search(pattern, passing))
-        failing = passing.replace(
-            "check lmp-unhandled: 0x20 refused, each named once",
-            "check lmp-unhandled: FAILED: an unhandled LMP opcode was "
-            "reported more than once: 0x20 7 times")
-        self.assertTrue(any(re.search(pattern, failing)
+        self.assertTrue(any(re.search(pattern, report)
                             for pattern in step.forbidden_patterns))
 
     def test_repeated_sessions_are_separate_cases_with_their_own_flash(self):
