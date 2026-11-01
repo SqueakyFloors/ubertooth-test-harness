@@ -133,8 +133,9 @@ MIN_SURVEY_UAP_RECORDS = 1
 # decoded at the piconet's clock and its HEC gave the piconet's UAP, which
 # is what makes the header and reference-UAP checks bite; how many of a
 # capture's records manage it depends on what the sweep heard, so this is a
-# floor rather than a share.
-MIN_HEC_VALID_RECORDS = 1
+# floor rather than a share. Four 25-second captures on the bench gave 59 of
+# 285, 26 of 109, and 112 of 394 for a followed piconet.
+MIN_HEC_VALID_RECORDS = 5
 
 _ESP32PEER = str(Path(esp32peer.__file__).resolve())
 _CAPTURE_CHECKER = str(Path(capturefile.__file__).resolve())
@@ -550,7 +551,7 @@ def _record_step(step_id, name, file_name, checks) -> Step:
     )
 
 
-def _record_checks(central=None, *, minimum=MIN_PACKETS, following=None,
+def _record_checks(central=None, *, minimum=MIN_PACKETS, following=False,
                    extra=()) -> tuple[str, ...]:
     """What the records of a capture must hold.
 
@@ -559,19 +560,27 @@ def _record_checks(central=None, *, minimum=MIN_PACKETS, following=None,
     address. Without one, the capture is a survey: it records whatever is in
     range, and the caller says what to look for instead.
     """
-    # A record whose header carries another packet's bits, or none, cannot
-    # pass its HEC, so this is the floor that makes the header checks bite.
-    checks = ("--min-packets", str(minimum),
-              "--min-hec-valid", str(MIN_HEC_VALID_RECORDS))
+    checks = ("--min-packets", str(minimum),)
     if central is not None:
-        checks += ("--lap", central["lap"],
+        # A record whose header carries another packet's bits, or none,
+        # cannot pass its HEC, so this is the floor that makes the header
+        # checks bite. Only a followed capture gets it: the decoder reads a
+        # header when it is working on one piconet's clock, and a survey,
+        # which is working on every piconet it hears, decoded one header in
+        # 235 records on the bench.
+        checks += ("--min-hec-valid", str(MIN_HEC_VALID_RECORDS),
+                   "--lap", central["lap"],
                    "--reference-lap", central["lap"],
                    "--reference-uap", central["uap"])
-    if following is not None:
+    if following:
         # ubertooth-rx -l records the address it was told to follow once, in
-        # a PCAPNG interface option. With -u as well, the mask says the
-        # whole UAP was known.
-        checks += ("--following", following, "--following-uap-mask", "ff")
+        # a PCAPNG interface option. It knows the LAP and, with -u, the UAP,
+        # and says in the option's own mask that the whole UAP was known;
+        # the peer's non-significant address part it never learns, so the
+        # option carries a zero NAP marked invalid.
+        checks += ("--following-lap", central["lap"],
+                   "--following-uap", central["uap"],
+                   "--following-uap-mask", "ff")
     return checks + tuple(extra)
 
 
@@ -609,7 +618,7 @@ def record_fields_cases(arguments, resources, resource_identities):
                              "and it names the address followed",
                              "records.pcapng",
                              _record_checks(initiator,
-                                            following=initiator["address"])),
+                                            following=True)),
             )),
         # Which board is the central is decided by which one pages, so the
         # LAP and the reference address in the records follow the roles
@@ -627,7 +636,7 @@ def record_fields_cases(arguments, resources, resource_identities):
                 "verify-pcapng",
                 f"The records hold LAP {acceptor['lap']}",
                 "swapped.pcapng",
-                _record_checks(acceptor, following=acceptor["address"])),)),
+                _record_checks(acceptor, following=True)),)),
     ]
     if arguments["coverage"] == "comprehensive":
         cases.append(capture(
@@ -649,7 +658,7 @@ def record_fields_cases(arguments, resources, resource_identities):
                              f"The records name {AUDIO_TYPE_NAME} packets",
                              "audio.pcapng",
                              _record_checks(
-                                 initiator, following=initiator["address"],
+                                 initiator, following=True,
                                  extra=("--require-types", AUDIO_TYPE_NAME))),
             )))
         cases.append(capture(

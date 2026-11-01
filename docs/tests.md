@@ -1539,7 +1539,9 @@ not made, and the transport and rate nibbles say what a receive-only
 basic-rate capture knows and nothing more. On top of those, the bench
 contributes what it knows: the piconet's LAP, the reference LAP and UAP the
 capture was given, and, in a PCAPNG, the address `ubertooth-rx -l` records
-once in an interface option.
+once in an interface option. That address is only as much as the tool knows:
+the LAP and, with `-u`, the UAP, with the non-significant address part zero
+and marked invalid, so those are the fields compared.
 
 The role-swapped case is what keeps the address checks honest. Which board is
 the piconet central is decided by which one pages, so binding the pair the
@@ -1571,9 +1573,10 @@ it on anything older.
 **Expected outcome.** Smoke runs 2 cases. `-l <central LAP> -u <central UAP>`
 with both `-q` and `-r`, after which each file must hold at least ten records,
 all of the central's LAP, all carrying that LAP and UAP as the reference
-address, all internally consistent, and the PCAPNG must name the central's
-BD_ADDR with a full UAP mask as the address followed; then the same with the
-roles swapped, where every record must carry the other board's LAP instead.
+address, all internally consistent, at least five with a header whose HEC
+passed, and the PCAPNG must name the central's LAP and UAP, with a full UAP
+mask, as the address it was following; then the same with the roles swapped,
+where every record must carry the other board's LAP instead.
 Comprehensive runs 4, adding the EV3 audio link, whose records must include at
 least one `HV3/EV3/3-EV3` packet, and a survey (`-z -r`), whose records must
 include at least one carrying a UAP the survey recovered for itself. Each case
@@ -1589,6 +1592,16 @@ The payload length and CRC checks need a link whose payloads are not
 encrypted, which this pair's are not — they pair with nobody. A capture of an
 encrypted piconet would decode neither, and `--no-payload-checks` is there for
 one; no catalog case uses it.
+
+**The payload checks do not fire on the bench's own traffic.** Measured over
+four 25-second captures, no record carried a payload at all: `ubertooth-rx`
+kept re-seeding its CLK1-27 candidates and never entered follow mode, so it
+decoded headers but no payloads. So no case puts a floor on records with a
+payload, and the payload length and CRC checks are there for the capture that
+does settle a clock — they are exercised deterministically by the unit tests
+and by replaying the synthetic fixture, where a DH1 payload's length field and
+CRC both have to agree. Whether the clock recovery should settle on this pair
+is the fork's question.
 
 A malformed record cannot be produced on purpose here. A well-behaved peer
 will not send a payload header that disagrees with its own packet, or a

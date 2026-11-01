@@ -305,12 +305,14 @@ class RecordFieldCaseTests(unittest.TestCase):
                              checks[checks.index("--min-packets") + 1])
             self.assertIn(r"BR/EDR record problem:",
                           steps[step_id].forbidden_patterns)
-        # Only the PCAPNG carries the address the capture was following.
+        # Only the PCAPNG carries the address the capture was following, and
+        # the tool knows its LAP and UAP but never its NAP.
         pcapng = list(steps["verify-pcapng"].resolve_argv({CAPTURE_DIR_KEY: "/x"}))
-        self.assertEqual(INITIATOR_ADDRESS, pcapng[pcapng.index("--following") + 1])
+        self.assertEqual(CENTRAL_LAP, pcapng[pcapng.index("--following-lap") + 1])
+        self.assertEqual(CENTRAL_UAP, pcapng[pcapng.index("--following-uap") + 1])
         self.assertEqual("ff", pcapng[pcapng.index("--following-uap-mask") + 1])
         self.assertNotIn(
-            "--following",
+            "--following-lap",
             list(steps["verify-pcap"].resolve_argv({CAPTURE_DIR_KEY: "/x"})))
 
     def test_the_swapped_case_follows_the_other_board(self):
@@ -324,7 +326,8 @@ class RecordFieldCaseTests(unittest.TestCase):
                          argv[argv.index("--") + 6:argv.index("-r")])
         checks = list(steps["verify-pcapng"].resolve_argv({CAPTURE_DIR_KEY: "/x"}))
         self.assertEqual(OTHER_LAP, checks[checks.index("--lap") + 1])
-        self.assertEqual(ACCEPTOR_ADDRESS, checks[checks.index("--following") + 1])
+        self.assertEqual(OTHER_LAP, checks[checks.index("--following-lap") + 1])
+        self.assertEqual(OTHER_UAP, checks[checks.index("--following-uap") + 1])
 
     def test_the_audio_case_drives_the_pairs_audio_mode(self):
         case = self.cases("comprehensive")["audio-fields"]
@@ -355,7 +358,7 @@ class RecordFieldCaseTests(unittest.TestCase):
         # A survey records whatever is in range under no reference LAP, so
         # the LAP and the reference address are not asked for.
         for absent in ("--lap", "--reference-lap", "--reference-uap",
-                       "--following"):
+                       "--min-hec-valid", "--following-lap"):
             self.assertNotIn(absent, checks)
         self.assertIn("--min-reference-uap", checks)
 

@@ -146,6 +146,13 @@ MOD_GFSK = 0
 # (PCAPNG_BREDR_OPTION_BD_ADDR), and the length of its value.
 OPTION_BD_ADDR = 0xD340
 _BD_ADDR_LEN = 8
+# How far a record's timestamp may fall before the one before it. The host
+# builds each one from the capture clock the board reports, and two packets
+# decoded out of one 400 microsecond bank of symbols can land microseconds
+# apart in either order: a 25-second bench capture of 285 records had one
+# step of 225 us backwards. A step larger than a 625 us slot is not that,
+# and is what a mishandled clock rollover looks like.
+MAX_BACKWARDS_NS = 625_000
 # More records than any test of ours captures; a file with this many is not
 # read into memory.
 _MAX_RECORDS = 200_000
@@ -488,10 +495,11 @@ def problems(found: list[Record], *, lap: int | None = None,
     stamped = [record.timestamp_ns for record in found
                if record.timestamp_ns is not None]
     backwards = sum(1 for before, after in zip(stamped, stamped[1:])
-                    if after < before)
+                    if before - after > MAX_BACKWARDS_NS)
     if backwards:
-        failures.append(f"{backwards} records are stamped earlier than the one "
-                        "before them")
+        failures.append(f"{backwards} records are stamped more than "
+                        f"{MAX_BACKWARDS_NS // 1000} us before the one before "
+                        "them")
     return failures
 
 
@@ -537,8 +545,17 @@ def _counted(counter: Counter) -> str:
 
 
 def _address(parts: dict) -> str:
-    return (f"{parts['nap'] >> 8:02X}:{parts['nap'] & 0xFF:02X}:"
-            f"{parts['uap']:02X}:{parts['lap'] >> 16:02X}:"
+    """The recorded address, with the parts it does not claim to know as ``??``.
+
+    ``ubertooth-rx -l`` knows a LAP and, with ``-u``, a UAP; it has no idea
+    of the non-significant address part, so it records a zero NAP and says
+    so in the option's own fields. This prints what the option claims, in
+    the form ``ubertooth-rx -z`` prints a surveyed address.
+    """
+    nap = (f"{parts['nap'] >> 8:02X}:{parts['nap'] & 0xFF:02X}"
+           if parts["nap_valid"] else "??:??")
+    uap = f"{parts['uap']:02X}" if parts["uap_mask"] == 0xFF else "??"
+    return (f"{nap}:{uap}:{parts['lap'] >> 16:02X}:"
             f"{(parts['lap'] >> 8) & 0xFF:02X}:{parts['lap'] & 0xFF:02X}")
 
 
@@ -571,8 +588,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="the reference LAP every record must carry")
     parser.add_argument("--reference-uap", type=_uap,
                         help="the reference UAP every record must carry")
-    parser.add_argument("--following", type=str,
-                        help="the BD_ADDR the pcapng interface option must name")
+    parser.add_argument("--following-lap", type=_lap,
+                        help="the LAP the pcapng interface option must name "
+                             "as the address this capture was following")
+    parser.add_argument("--following-uap", type=_uap,
+                        help="the UAP that option must name")
     parser.add_argument("--following-uap-mask", type=_uap,
                         help="the UAP mask that option must carry")
     parser.add_argument("--min-packets", type=int, default=0)
@@ -627,21 +647,19 @@ def main(argv: list[str] | None = None) -> int:
         min_crc_valid=args.min_crc_valid, min_channels=args.min_channels,
         types=types, require_types=require_types,
         payload_checks=not args.no_payload_checks)
-    if args.following is not None:
-        wanted = args.following.strip().upper()
+    wanted = (("LAP", "lap", args.following_lap),
+              ("UAP", "uap", args.following_uap),
+              ("UAP mask", "uap_mask", args.following_uap_mask))
+    for label, key, value in wanted:
+        if value is None:
+            continue
         if following is None:
             failures.append("the capture records no address it was following, "
-                            f"expected {wanted}")
-        elif _address(following) != wanted:
-            failures.append(f"the capture was following {_address(following)}, "
-                            f"not {wanted}")
-    if args.following_uap_mask is not None:
-        if following is None:
-            failures.append("the capture records no address it was following, "
-                            "so it carries no UAP mask")
-        elif following["uap_mask"] != args.following_uap_mask:
-            failures.append(f"a UAP mask of {following['uap_mask']:02x}, not "
-                            f"{args.following_uap_mask:02x}")
+                            f"so it names no {label}")
+        elif following[key] != value:
+            failures.append(f"the capture was following {label} "
+                            f"{following[key]:0{2 if key != 'lap' else 6}x}, "
+                            f"not {value:0{2 if key != 'lap' else 6}x}")
     for failure in failures[:_MAX_PROBLEMS]:
         print(f"BR/EDR record problem: {failure}")
     if len(failures) > _MAX_PROBLEMS:

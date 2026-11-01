@@ -324,13 +324,24 @@ class Consistency(unittest.TestCase):
         self.assertIn("records on 1 channels",
                       " ".join(bredrrecord.problems(one, min_channels=2)))
 
-    def test_records_stamped_out_of_order_are_a_problem(self):
-        pair = [bredrrecord.Record(index, when, 39, -50, -80, 0, 0, 0, 0, LAP,
+    def stamped(self, *times):
+        return [bredrrecord.Record(index, when, 39, -50, -80, 0, 0, 0, 0, LAP,
                                    LAP | (UAP << 24), bt_header(POLL),
                                    GOOD_FLAGS, b"")
-                for index, when in ((0, 2000), (1, 1000))]
-        self.assertIn("stamped earlier",
-                      " ".join(bredrrecord.problems(pair)))
+                for index, when in enumerate(times)]
+
+    def test_a_record_stamped_well_before_the_one_before_it_is_a_problem(self):
+        step = bredrrecord.MAX_BACKWARDS_NS
+        self.assertIn("625 us before the one before",
+                      " ".join(bredrrecord.problems(
+                          self.stamped(10 * step, 10 * step - step - 1))))
+
+    def test_a_record_stamped_slightly_early_is_not(self):
+        # Two packets decoded out of one bank of symbols can land
+        # microseconds apart in either order.
+        step = bredrrecord.MAX_BACKWARDS_NS
+        self.assertEqual([], bredrrecord.problems(
+            self.stamped(10 * step, 10 * step - step, 11 * step)))
 
 
 class CommandLine(unittest.TestCase):
@@ -357,14 +368,17 @@ class CommandLine(unittest.TestCase):
                                      "--min-with-payload", "1",
                                      "--min-channels", "2",
                                      "--require-types", "DH1/2-DH1",
-                                     "--following", "00:00:0D:E9:C5:BA",
+                                     "--following-lap", "e9c5ba",
+                                     "--following-uap", "0d",
                                      "--following-uap-mask", "ff")
         self.assertEqual(0, code, output)
         self.assertIn("BR/EDR records: 2 in follow.pcapng", output)
         self.assertIn("BR/EDR LAPs: e9c5ba (2)", output)
         self.assertIn("DH1/2-DH1 (1)", output)
         self.assertIn("BR/EDR channels: 2 distinct, 7 to 39", output)
-        self.assertIn("BR/EDR following: 00:00:0D:E9:C5:BA, UAP mask ff, "
+        # ubertooth-rx knows the LAP and the UAP and never the NAP, so the
+        # parts the option does not claim are printed as ??.
+        self.assertIn("BR/EDR following: ??:??:0D:E9:C5:BA, UAP mask ff, "
                       "NAP invalid", output)
         self.assertNotIn("problem", output)
 
@@ -382,11 +396,17 @@ class CommandLine(unittest.TestCase):
         code, output = self.run_main(path, "--lap", "123456")
         self.assertEqual(1, code)
         self.assertIn("BR/EDR record problem:", output)
-        code, output = self.run_main(path, "--following", "00:00:0D:11:22:33")
+        code, output = self.run_main(path, "--following-lap", "112233")
         self.assertEqual(1, code)
-        self.assertIn("was following 00:00:0D:E9:C5:BA", output)
+        self.assertIn("was following LAP e9c5ba, not 112233", output)
+        code, output = self.run_main(path, "--following-uap", "11")
+        self.assertEqual(1, code)
+        self.assertIn("was following UAP 0d, not 11", output)
+        code, output = self.run_main(path, "--following-uap-mask", "00")
+        self.assertEqual(1, code)
+        self.assertIn("was following UAP mask ff, not 00", output)
         plain = self.write("plain.pcapng", pcapng([record()]))
-        code, output = self.run_main(plain, "--following", "00:00:0D:E9:C5:BA")
+        code, output = self.run_main(plain, "--following-lap", "e9c5ba")
         self.assertEqual(1, code)
         self.assertIn("records no address it was following", output)
 
