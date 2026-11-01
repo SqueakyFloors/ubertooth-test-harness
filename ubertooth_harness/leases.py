@@ -1111,15 +1111,9 @@ def _recorded_holder(holder: Mapping) -> dict:
         if field not in holder:
             continue
         value = holder[field]
-        if isinstance(value, bool) or isinstance(value, (int, float)) or value is None:
-            record[field] = value
-            continue
-        text = "".join(
-            character if character.isprintable() else " " for character in str(value)
-        ).strip()
         record[field] = (
-            text[:_RECORDED_HOLDER_CHARS - 3] + "..."
-            if len(text) > _RECORDED_HOLDER_CHARS else text
+            value if value is None or isinstance(value, (bool, int, float))
+            else _printable(value, _RECORDED_HOLDER_CHARS)
         )
     return record
 
