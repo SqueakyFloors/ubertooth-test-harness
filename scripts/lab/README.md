@@ -135,13 +135,23 @@ link uses a type both of them allowed:
 | `2ev3` | 2-EV3: the same payload as EDR, which is what the stack asks for by itself |
 | `default` | whatever the stack's own table picks, which is 2-EV3 |
 
-A link that comes up as another type than the one asked for fails rather than
-being reported as a pass, so a decode test cannot quietly get EDR. The session
-reports the type, the packet length, the interval in slots and milliseconds,
-the retransmission window, the firmware's frame counters from both boards, and
-the controllers' own packet counters, which is the number a capture of the air
-is checked against. `--min-frames` and `--min-packets` are the floors those
-must reach; `--min-seconds` and `--timeout` work as they do for `stream`.
+A link that is not eSCO, or that comes up as another packet type than the one
+asked for, fails rather than being reported as a pass, so a decode test cannot
+quietly get EDR or a plain SCO link. Both boards are read for this, because
+each works out what its link is from what its own controller told it.
+
+The session reports the type, the packet length, the interval in slots and
+milliseconds, the retransmission window, the packet types each controller
+supports, the firmware's frame counters from both boards, and the controllers'
+own packet counters, which is the number a capture of the air is compared
+with. `--min-frames` and `--min-packets` are the floors those must reach;
+`--min-seconds` and `--timeout` work as they do for `stream`.
+
+A counter read the firmware refuses — it refuses one with no link up, and for
+the rest of a boot after a request of its own went unanswered — is reported as
+not counted, with the reason, rather than ending the session: a link that
+dropped during the capture is named in its own words, with the frame counters
+still there to read.
 
 An EV3 link is the busiest traffic this pair can make: half the payload per
 packet, half the interval, so about twice the packet rate of the 2-EV3 the

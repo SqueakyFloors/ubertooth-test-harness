@@ -125,8 +125,10 @@ DEFAULT_SCO_TYPE = "default"
 # link that settled on something else is caught. `default` is left out: two
 # types could carry its packet length, so there is nothing to insist on.
 SCO_TYPE_ON_LINK = {"ev3": "ev3", "2ev3": "2-ev3"}
-# What `status` reports while an audio link is up.
+# What `status` reports while an audio link is up, and the kind of link this
+# session carries voice over: both EV3 and 2-EV3 are eSCO packet types.
 SCO_UP = "on"
+ESCO = "esco"
 # One Bluetooth slot, which is what sco_interval and sco_retrans_window count.
 SLOT_US = 625
 
@@ -206,6 +208,8 @@ AUDIO_BOOT_STATE = {
     "sco_handle": 0, "sco_frame_len": 0, "sco_tx_frames": 0,
     "sco_tx_errors": 0, "sco_rx_frames": 0, "sco_rx_bad": 0,
     "sco_type": DEFAULT_SCO_TYPE, "sco_link": "none", "sco_pkt_type": "none",
+    "sco_tx_len": 0, "sco_rx_len": 0, "sco_interval": 0,
+    "sco_retrans_window": 0,
 }
 
 # The controller's own packet counters, which `sco stats` answers with.
@@ -517,11 +521,12 @@ def _report_traffic(out, label: str, status: dict) -> None:
 
 
 def _report_link(out, status: dict) -> None:
-    """The audio link's parameters, as both boards' controllers settled on them.
+    """The audio link's parameters, as the controllers settled on them.
 
     `sco_interval` and `sco_retrans_window` count Bluetooth slots, so the
-    interval is given in milliseconds as well: that is the packet rate on the
-    air, which is what a capture is read against.
+    interval is given in milliseconds too. One packet per interval is the
+    floor of what a capture sees, not the rate: a retransmission window puts
+    more on the air when a packet has to be sent again.
     """
     print(f"audio link: {status['sco_link']} {status['sco_pkt_type']} "
           f"codec {status['sco_codec']}", file=out)
@@ -829,10 +834,18 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
     check_audio_status(acceptor_status, acceptor.label)
     check_audio_status(initiator_status, initiator.label)
     print(f"audio type asked for: {sco_type}", file=out)
+    # The mask each controller supports, in the firmware's own bit order. The
+    # controller masks a request against it, so a board whose controller lacks
+    # the type asked for refuses the link at `sco start`: the mask is reported
+    # here so that refusal can be read rather than puzzled over.
+    print(f"audio types supported: {initiator.label} "
+          f"{initiator_status['sco_types_supported']}, {acceptor.label} "
+          f"{acceptor_status['sco_types_supported']}", file=out)
     try:
         # The initiator runs the audio gateway, which pages, so it is the
-        # central here as it is for a stream. `role` stops the audio profile
-        # and puts the packet type back, so it goes first.
+        # central here as it is for a stream. `role` stops the audio profile,
+        # and `sco type` is refused while a profile is running, so the role
+        # goes first and the choice after it.
         initiator_shell.command("role initiator", ROLE_TIMEOUT_S)
         if sco_type != DEFAULT_SCO_TYPE:
             # Each board states the types it allows and the link uses one
@@ -860,14 +873,15 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         status, seconds = _run_command(command, timeout)
         print(f"command exit: {status} after {seconds:.1f} s", file=out)
         # Read the counters while the link is still up: the controller's own
-        # are a live link's, and `sco stop` ends it.
+        # belong to a live link, and `sco stop` ends it.
         after_initiator = check_audio_status(initiator_shell.status(),
                                             initiator.label)
         after_acceptor = check_audio_status(acceptor_shell.status(),
                                            acceptor.label)
-        initiator_stats = initiator_shell.sco_stats()
-        acceptor_stats = acceptor_shell.sco_stats()
-        initiator_shell.command("sco stop", SCO_STOP_TIMEOUT_S)
+        initiator_stats = _packet_counters(initiator_shell, initiator.label, out)
+        acceptor_stats = _packet_counters(acceptor_shell, acceptor.label, out)
+        if after_initiator["sco"] == SCO_UP:
+            initiator_shell.command("sco stop", SCO_STOP_TIMEOUT_S)
     finally:
         _release(initiator_shell)
         _release(acceptor_shell)
@@ -886,8 +900,9 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         if after["sco_rx_frames"] < min_frames:
             problems.append(f"the {label} received {after['sco_rx_frames']} "
                             f"frames, fewer than the {min_frames} this test needs")
-    # The controller's packet count is what a capture of the air is checked
-    # against, so a link that was up but carried nothing is caught here.
+    # The controller's packet count is the number a capture of the air is
+    # compared with, so a run whose capture found far fewer packets than this
+    # has something to answer for.
     for label, stats in ((initiator.label, initiator_stats),
                          (acceptor.label, acceptor_stats)):
         if stats["tx_total"] < min_packets:
@@ -901,6 +916,23 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         raise PeerError("the pair did not carry audio: " + "; ".join(problems))
     print("pair carried audio: yes", file=out)
     return status
+
+
+def _packet_counters(shell: Shell, label: str, out) -> dict:
+    """The controller's packet counters, or zeros with the reason said aloud.
+
+    The firmware refuses `sco stats` when no link is up, and for the rest of
+    the boot once a counter request has gone unanswered. Either refusal is a
+    fact about the run, not a reason to abandon it: the frame counters and the
+    checks below them say more about what happened than this does, and the
+    most likely cause, a link that dropped during the command, has a message
+    of its own.
+    """
+    try:
+        return shell.sco_stats()
+    except PeerError as error:
+        print(f"{label} audio packets: not counted ({error})", file=out)
+        return {key: 0 for key in _SCO_STATS_KEYS}
 
 
 def _wait_for_link(shell: Shell, label: str,
@@ -930,15 +962,26 @@ def _check_link(linked: dict, far: dict, acceptor_label: str,
     if linked["sco_handle"] == 0:
         raise PeerError(f"the {initiator_label} reports the audio link up with "
                         "no connection handle")
-    on_link = SCO_TYPE_ON_LINK.get(sco_type)
-    if on_link is not None and linked["sco_pkt_type"] != on_link:
-        # A type both boards were told to ask for, and only that type, so a
-        # link of another type means the request did not reach the air; a
-        # decode test reading basic-rate payloads would silently get EDR.
-        raise PeerError(
-            f"the audio link uses {linked['sco_pkt_type']}, not the {on_link} "
-            f"both boards asked for ({linked['sco_tx_len']} bytes every "
-            f"{linked['sco_interval']} slots)")
+    # Both ends are checked, not only the board that paged: each works its
+    # link type and packet type out from what its own controller told it.
+    for label, status in ((initiator_label, linked), (acceptor_label, far)):
+        if status["sco_link"] != ESCO:
+            # Every name this session goes by says eSCO, and an EV3 or 2-EV3
+            # packet type is an eSCO one. A plain SCO link reported as a pass
+            # would put something else on the air than the test asked for.
+            raise PeerError(
+                f"the {label} reports a {status['sco_link']} link, not {ESCO}: "
+                f"this session carries voice over an {ESCO} link")
+        on_link = SCO_TYPE_ON_LINK.get(sco_type)
+        if on_link is not None and status["sco_pkt_type"] != on_link:
+            # A type both boards were told to ask for, and only that type, so
+            # a link of another type means the request did not reach the air;
+            # a decode test reading basic-rate payloads would get EDR.
+            raise PeerError(
+                f"the {label} reports an audio link using "
+                f"{status['sco_pkt_type']}, not the {on_link} both boards "
+                f"asked for ({status['sco_tx_len']} bytes every "
+                f"{status['sco_interval']} slots)")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

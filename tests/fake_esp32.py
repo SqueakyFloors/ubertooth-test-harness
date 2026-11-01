@@ -90,6 +90,9 @@ class FakePeerFirmware:
         self.sco_rx_frames = 0
         self.sco_rx_bad = 0
         self.sco_packets = 0
+        # Set once a counter request has gone unanswered, which the firmware
+        # does not undo short of a reset.
+        self.stats_dead = False
         self._audio_link_down()
 
     def _audio_link_down(self):
@@ -203,9 +206,9 @@ class FakePeerFirmware:
         self.stream = False
         self._drop()
         # The audio link belongs to a role, so a role change takes it and the
-        # profile down and puts the packet type back.
+        # profile down. It leaves the packet type alone: only `defaults` and a
+        # reset put that back.
         self._sco_stop()
-        self.sco_type = esp32peer.DEFAULT_SCO_TYPE
         self.role = wanted
         self.spp_server = wanted == esp32peer.BOOT_ROLE
         return ["OK"]
@@ -284,12 +287,20 @@ class FakePeerFirmware:
     # -- the audio link -----------------------------------------------------
 
     def _sco(self, words):
-        if not words:
-            return ["ERR usage: sco <start|stop|stats|type>"]
+        # The firmware's shell takes each of these with an exact word count
+        # (main.c), so an extra word is not a command it knows.
+        if words == ["type"] or (words[:1] == ["type"] and len(words) != 2):
+            return ["ERR sco type takes ev3, 2ev3, or default"]
+        if len(words) != (2 if words[:1] == ["type"] else 1):
+            return ["ERR sco takes start, stop, stats, or "
+                    "type <ev3|2ev3|default>"]
         command, args = words[0], words[1:]
-        if command == "type" and args:
+        if command == "type":
             if args[0] not in esp32peer.SCO_TYPES:
-                return ["ERR packet type must be ev3, 2ev3 or default"]
+                return ["ERR sco type takes ev3, 2ev3, or default"]
+            # Refused while the profile runs, not merely while a link is up:
+            # the choice reaches the controller as a link appears, and on the
+            # accepting board that happens with no command in flight.
             if self.sco_profile != "none":
                 return ['ERR stop the audio profile with "sco stop" before '
                         "choosing a packet type"]
@@ -301,10 +312,24 @@ class FakePeerFirmware:
             self._sco_stop()
             return ["OK"]
         if command == "stats":
-            return [json.dumps(self.sco_stats(), separators=(",", ":")), "OK"]
-        return [f"ERR unknown sco command '{command}'"]
+            return self._sco_stats_lines()
+        return ["ERR sco takes start, stop, stats, or "
+                "type <ev3|2ev3|default>"]
+
+    def _sco_stats_lines(self):
+        # The counters belong to a live link, and a request that went
+        # unanswered once is refused for the rest of the boot.
+        if self.sco != "on":
+            return ["ERR no audio link to count packets on"]
+        if self.stats_dead:
+            return ["ERR a packet-counter request went unanswered; reset the "
+                    "board"]
+        return [json.dumps(self.sco_stats(), separators=(",", ":")), "OK"]
 
     def _sco_start(self):
+        if self.sco == "on":
+            # A second start cannot be allowed to drop the link it asks for.
+            return ["ERR the audio link is already up"]
         if self.role == esp32peer.BOOT_ROLE:
             # The hands-free unit starts its profile and waits to be paged.
             self.sco_profile = "hf"
@@ -312,8 +337,12 @@ class FakePeerFirmware:
                 self.sco = "ready"
             return ["OK"]
         self.sco_profile = "ag"
+        if not self.peer:
+            self.sco_profile = "none"
+            self._audio_link_down()
+            return ['ERR set the peer address first with "spp peer"']
         far = self.peer_firmware
-        if not self.peer or far is None or far.address != self.peer:
+        if far is None or far.address != self.peer:
             self.sco_profile = "none"
             self._audio_link_down()
             return ["ERR service level connect timed out"]
