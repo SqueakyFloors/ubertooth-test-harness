@@ -71,7 +71,7 @@ SERIAL = "0" * 31 + "f"
 
 def gone(pid):
     """Is this pid absent from the process table, a process nobody has waited
-    for included? What killedcapture.group_gone() answers for a whole group."""
+    for included?"""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -112,8 +112,7 @@ class KilledCaptureTests(unittest.TestCase):
     def test_the_tool_itself_is_killed_reaped_and_gone(self):
         code, line = self.kill(STREAMER)
         self.assertEqual(0, code, line)
-        self.assertIn("SIGKILL reaped as signal 9, nothing left in its "
-                      "process group", line)
+        self.assertIn("SIGKILL reaped as signal 9;", line)
         self.assertIn("ubertooth-dump pid ", line)
         self.assertRegex(line, r"streamed \d+ bytes in \d+\.\d s")
 
@@ -150,20 +149,25 @@ class KilledCaptureTests(unittest.TestCase):
         self.assertIn("wrote 0 bytes in 0.5 s", line)
         self.assertIn("less than the 1024", line)
 
-    def test_a_process_the_tool_left_behind_is_reported_and_killed(self):
+    def test_a_child_of_a_tool_that_ran_to_the_kill_is_not_noticed(self):
+        """The limit, pinned so it is not mistaken for a check.
+
+        Once the tool has been reaped its pid, which is also its process
+        group's id, is free to be given to the next process that starts a
+        session of its own, so asking about the group afterwards could be
+        answered by somebody else. The tools this runs are single processes,
+        so there is nothing of theirs to miss; a tool that did fork would
+        need the process table read by name.
+        """
         code, line = self.kill(SPAWNER)
         helper = int(self.helper_pid())
         self.addCleanup(self.reap, helper)
-        self.assertEqual(1, code)
-        self.assertIn("still had something in it", line)
-        self.assertIn("may still own the device", line)
-        self.assertFalse(self.record.exists())
-        # Reported is not enough: it must not hold the device through the rest
-        # of the case.
-        self.assertTrue(self.gone(helper), "the process left behind is still running")
+        self.assertEqual(0, code, line)
+        self.assertFalse(self.gone(helper, tries=4),
+                         "the helper was expected to outlive the kill here")
 
-    def gone(self, pid):
-        for _ in range(200):
+    def gone(self, pid, tries=200):
+        for _ in range(tries):
             if gone(pid):
                 return True
             time.sleep(0.05)
@@ -261,20 +265,11 @@ class ProcessCheckTests(unittest.TestCase):
         with os.fdopen(read_fd, "rb") as closed_at_exit:
             self.assertEqual(b"", closed_at_exit.read())
         self.assertFalse(gone(child.pid))
-        self.assertFalse(killedcapture.group_gone(child.pid))
         child.wait(timeout=30)
         self.assertTrue(gone(child.pid))
-        self.assertTrue(killedcapture.group_gone(child.pid))
 
-    def test_this_process_and_its_group_are_there(self):
+    def test_this_process_is_there(self):
         self.assertFalse(gone(os.getpid()))
-        self.assertFalse(killedcapture.group_gone(os.getpgid(0)))
-
-    def test_a_group_nothing_is_left_in_is_gone(self):
-        process = subprocess.Popen(["/bin/sh", "-c", "exit 0"], start_new_session=True)
-        pgid = os.getpgid(process.pid)
-        process.wait(timeout=30)
-        self.assertTrue(killedcapture.group_gone(pgid))
 
 
 if __name__ == "__main__":

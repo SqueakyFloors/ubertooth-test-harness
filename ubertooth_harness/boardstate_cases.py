@@ -17,11 +17,11 @@ contents are the evidence, and each leaves a mode the other does not use.
   type, and a record from before the stream started fails by its clock, which
   restarts at mode entry (rxdump.stale_records(), and
   SqueakyFloors/ubertooth#318).
-- `ubertooth-specan -l -u` states the band to sweep before it asks for its
-  mode, and writes the frequency of every sample, so a sample outside that
-  band, or one more byte than whole samples, says either that the stated range
-  was lost at mode start or that a record of the previous mode is still in the
-  stream.
+- `ubertooth-dump -l` states its modulation before it asks for its mode, and a
+  mode start puts the modulation back to basic rate, so the radio ending up in
+  LE is what says a setting stated for this capture survived its mode start on
+  a board left in another mode. It is read from the CC2400 MDMCTRL register,
+  which keeps what the last mode programmed.
 
 The warning the second command must print comes from libubertooth's
 ubertooth_bulk_init() (fork e657807, SqueakyFloors/ubertooth#438): it reads
@@ -45,7 +45,7 @@ import re
 import sys
 from pathlib import Path
 
-from ubertooth_harness import killedcapture, rxdump, specandump
+from ubertooth_harness import killedcapture, rxdump
 from ubertooth_harness.patterns import FIRMWARE_PATTERN, serial_pattern
 from ubertooth_harness.stateful import (
     Observation,
@@ -91,12 +91,20 @@ _MDMCTRL_VALUE = r"%MDMCTRL = 0x(?P<value>[0-9A-Fa-f]{4})"
 MDMCTRL_LE = "0040"
 
 # How long the kill step may take: killedcapture.py waits up to its own
-# --max-wait for the capture to produce data, then up to its reap window.
-_KILL_TIMEOUT_S = killedcapture.MAX_WAIT_S + killedcapture.REAP_WAIT_S + 10.0
+# --max-wait for the capture to produce data, then up to its reap window, and
+# on a path that reports a problem it waits once more while taking the capture
+# down. The harness's own deadline has to be past all of that, or it would
+# replace the reason with "command timed out".
+_KILL_TIMEOUT_S = (killedcapture.MAX_WAIT_S + 2 * killedcapture.REAP_WAIT_S
+                   + 10.0)
+
+# What the capture gets on top of its own duration: the board may spend up to
+# the fork's own 1000 ms wait leaving the mode this case left it in before the
+# capture starts, and the record floor below is counted from the duration.
+MODE_STOP_ALLOWANCE_S = 2.0
 
 _KILLER = str(Path(killedcapture.__file__).resolve())
 _DUMP_CHECKER = str(Path(rxdump.__file__).resolve())
-_SPECAN_CHECKER = str(Path(specandump.__file__).resolve())
 
 # The two warnings ubertooth_bulk_init() can print, by their fixed wording.
 _STILL_IN_MODE = "the board is still in mode {mode} from an earlier run"
@@ -146,9 +154,7 @@ def _kill_step(tool_argv, capture: str, record: str) -> Step:
         mutates=True,
         # The board is left in its mode with no STOP sent, so the kill must be
         # of the tool itself and the process must be gone, zombie included.
-        output_patterns=(
-            r"SIGKILL reaped as signal 9, nothing left in its process group",
-        ),
+        output_patterns=(r"SIGKILL reaped as signal 9;",),
         observe=Observation("killed capture", r"Killed capture: (?P<value>\S+) pid \d+",
                             Path(tool_argv[0]).name),
     )
@@ -163,7 +169,8 @@ def _second_capture(step_id: str, name: str, tool_argv, seconds: int, mode: int)
 
     return Step(
         step_id, name, argv,
-        timeout_s=float(seconds), mutates=True, continuous=True,
+        timeout_s=float(seconds) + MODE_STOP_ALLOWANCE_S,
+        mutates=True, continuous=True,
         output_patterns=(
             rf"warning: {still_in_mode}; stopping it first",
         ),

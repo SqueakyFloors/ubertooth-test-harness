@@ -47,8 +47,6 @@ class BoardStateUbertooth(ToolUbertooth):
     afterwards).
     """
 
-    MODES = {"ubertooth-specan": boardstate_cases.MODE_SPECAN}
-
     def __init__(self, *args, bugs=(), records=200, **kwargs):
         super().__init__(*args, **kwargs)
         # MDMCTRL, which keeps whatever the last mode programmed.
@@ -109,11 +107,11 @@ class BoardStateUbertooth(ToolUbertooth):
         # No STOP was sent, so the board keeps running the mode the tool
         # started and the next capture start is the one that has to stop it.
         self.mode = tool
-        self.left_in_mode = self.MODES[tool]
+        self.left_in_mode = boardstate_cases.MODE_SPECAN
         return self._result(command, 0, (
             f"Killed capture: {tool} pid 31337 streamed {KILLED_BYTES} bytes "
-            "in 1.2 s, SIGKILL reaped as signal 9, nothing left in its "
-            "process group\n"
+            "in 1.2 s, SIGKILL reaped as signal 9; its own output in "
+            f"{capture.name}.out\n"
         ), "", on_output)
 
     def _previous_mode(self):
@@ -162,27 +160,6 @@ class BoardStateUbertooth(ToolUbertooth):
         Path(opts[opts.index("-d") + 1]).write_bytes(bytes(data))
         self._overwrite_evidence()
         self.mode = "dump"
-        self._leave(True)
-        return self._result(command, 124, stdout, stderr + "HARD TIMEOUT\n",
-                            on_output, timed_out=True)
-
-    # ubertooth-specan ----------------------------------------------------
-    def _specan(self, command, on_output, cwd=Path.cwd()):
-        opts = list(command[3:])
-        low = int(opts[opts.index("-l") + 1])
-        high = int(opts[opts.index("-u") + 1])
-        stdout, stderr = self._previous_mode()
-        data = bytearray()
-        if "foreign-records" in self.bugs:
-            # A record of the dump before it, in the stream the samples are
-            # read from: it shifts every sample after it.
-            data += bytes(10)
-        for _ in range(3):
-            for frequency in range(low, high + 1):
-                data += bytes([frequency >> 8, frequency & 0xFF, 0xD3])
-        Path(opts[opts.index("-d") + 1]).write_bytes(bytes(data))
-        self._overwrite_evidence()
-        self.mode = "specan"
         self._leave(True)
         return self._result(command, 124, stdout, stderr + "HARD TIMEOUT\n",
                             on_output, timed_out=True)
@@ -244,7 +221,7 @@ class CaseGenerationTests(unittest.TestCase):
             self.assertIn("--", argv)
             tool = argv[argv.index("--") + 1]
             self.assertIn(tool, ("ubertooth-specan", "ubertooth-dump"))
-            self.assertIn("nothing left in its process group",
+            self.assertIn("SIGKILL reaped as signal 9",
                           " ".join(step.output_patterns))
 
     def test_the_second_capture_is_the_other_tool_and_names_the_mode_left(self):
@@ -317,7 +294,7 @@ class CaseOutcomeTests(unittest.TestCase):
         summary, events = run(BoardStateUbertooth(**kwargs))
         return summary, failed_names(events)
 
-    def test_a_clean_run_passes_both_cases(self):
+    def test_a_clean_run_passes(self):
         summary, failed = self.run_with()
         self.assertEqual([], failed)
         self.assertEqual("passed", summary.status)

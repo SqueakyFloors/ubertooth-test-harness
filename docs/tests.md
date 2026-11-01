@@ -912,17 +912,16 @@ the board keeps streaming into its endpoint. The test makes that state on
 purpose. [`killedcapture.py`](../ubertooth_harness/killedcapture.py) starts the
 capture tool as its own child with nothing in between -- no shell, no
 `timeout` -- waits until the capture file has grown, and sends that process
-SIGKILL, which cannot be caught. It then requires two facts before the case
-goes on: the wait returned `-SIGKILL`, so the tool died of the signal where it
-stood, and signal 0 to the tool's process group then fails. The tool runs in a
-session of its own, which makes it the leader of a group holding it and
-anything it starts, and a process whose exit status nobody has read is still
-in its group, so that one answer says both that the tool is gone and that it
-left nothing behind. It is asked at all because a process that is still there
-still owns its open device. That session also puts the tool outside the group
-the harness signals when a step runs out of time or an operator stops a run,
-so the module catches those signals and passes them on rather than leaving a
-capture streaming. The file the killed tool wrote is hashed at the kill and
+SIGKILL, which cannot be caught. What it then requires before the case goes on
+is that the wait for the tool returned `-SIGKILL`: it died of the signal where
+it stood, rather than ending some other way, and its exit status has been
+read, so it is out of the process table rather than sitting there with its
+device still open. The tool runs in a session of its own, which is what lets
+the module take it and anything it started down together on a failure or when
+the harness stops the step; that session also puts it outside the group the
+harness signals, so those signals are caught and passed on rather than leaving
+a capture streaming, and its own output goes to a file rather than to the
+step's streams, which an orphan would hold open. The file the killed tool wrote is hashed at the kill and
 checked again at the end of the case, so the evidence is kept rather than
 quietly rewritten by the next run.
 
@@ -968,7 +967,17 @@ purpose, so it hands the next test a board it has seen boot. A self-reset the
 firmware records while this runs is reported by the usual watchdog read
 between cases, and the guard boards are checked as in every guarded test.
 
-**Known limits.** The case rests on the host leaving the board alone when the
+**Known limits.** Whether the killed tool left a process of its own behind is
+not checked, and cannot be after the fact: the tool's pid is also its process
+group's id, and once the tool has been reaped that id is free to be given to
+the next process that starts a session of its own, which the harness does for
+every step, so a question about the group could be answered by somebody else's
+process. The host tools are single processes, so there is nothing of theirs to
+miss; a tool that did start one would need the process table read by name. A
+failure, or the harness stopping the step, does take the whole group down,
+which is when it matters and when the group is certainly this run's.
+
+The case rests on the host leaving the board alone when the
 killed process's handle closes. On a host or kernel that reset the device
 there instead, the board would be idle, the warning the case requires would
 never print, and the case would fail for a reason that has nothing to do with
