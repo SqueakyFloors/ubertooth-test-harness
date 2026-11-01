@@ -18,6 +18,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+import unittest.mock
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 
@@ -29,10 +30,12 @@ LAB = REPO / "scripts" / "lab"
 HOLD = LAB / "hold"
 HUB_PORT = LAB / "hub-port"
 RULES = LAB / "99-acroname.rules"
+PEER = LAB / "peer"
 
 UT_SERIAL = "0123456789abcdef0123456789abcdef"
 UT2_SERIAL = "fedcba9876543210fedcba9876543210"
 BRIDGE = "a1b2c3d400000000a1b2c3d400000000"
+BRIDGE2 = "d4c3b2a111111111d4c3b2a111111111"
 JLINK = "000123456789"
 
 REGISTRY = textwrap.dedent(
@@ -74,6 +77,13 @@ REGISTRY = textwrap.dedent(
         identity:
           bridge serial: {BRIDGE}
           BD_ADDR: "00:11:22:33:44:55"
+      ESP1:
+        type: ESP32 Classic peer
+        attached to: Host_Linux
+        roles: [acceptor, initiator]
+        identity:
+          bridge serial: {BRIDGE2}
+          BD_ADDR: "00:11:22:33:44:66"
       Hub0:
         type: USB power controller
         attached to: Host_Linux
@@ -104,6 +114,7 @@ def load(path: Path):
 sys.path.insert(0, str(LAB))  # the scripts import _bench from beside themselves
 hold = load(HOLD)
 hub_port = load(HUB_PORT)
+peer = load(PEER)
 
 
 @dataclass
@@ -813,9 +824,183 @@ class HubPortSwitches(Bench):
         self.assertNotIn("--wait-for-boards", err)
 
 
+class PeerArguments(Bench):
+    """scripts/lab/peer: it translates names, and delegates everything else."""
+
+    def test_the_bridge_path_comes_from_the_serial_or_the_registry(self):
+        registry = self.load_registry()
+        self.assertIn(BRIDGE, peer.peer_device(registry.get("ESP0")))
+        self.assertTrue(peer.peer_device(registry.get("ESP0")).startswith("/dev/serial/by-id/"))
+        # The fixture is dedented, so the indentation is taken from the line
+        # itself rather than assumed.
+        named = re.sub(
+            rf"( *)bridge serial: {BRIDGE}",
+            lambda m: f"{m.group(0)}\n{m.group(1)}serial device: /dev/serial/by-id/chosen",
+            REGISTRY, count=1,
+        )
+        self.assertIn("serial device", named)
+        self.registry.write_text(named, encoding="utf-8")
+        self.assertEqual(
+            "/dev/serial/by-id/chosen", peer.peer_device(self.load_registry().get("ESP0"))
+        )
+
+    def test_a_resource_that_is_not_a_peer_is_refused(self):
+        from ubertooth_harness.resources import RegistryError
+
+        with self.assertRaises(RegistryError) as caught:
+            peer.require_peer(self.load_registry().get("UT0"))
+        self.assertIn("not an ESP32 Classic peer", str(caught.exception))
+
+    def test_one_peer_command_passes_the_device_address_and_alias(self):
+        args, command = peer.parse_args(
+            ["status", "ESP0", "--hardware", str(self.registry)]
+        )
+        argv = peer.esp32peer_argv(
+            args, {"peer": self.load_registry().get("ESP0")}, command
+        )
+        self.assertEqual("status", argv[2])
+        pairs = dict(zip(argv, argv[1:]))
+        self.assertIn(BRIDGE, pairs["--device"])
+        self.assertEqual("00:11:22:33:44:55", pairs["--address"])
+        self.assertEqual("ESP0", pairs["--alias"])
+        self.assertNotIn("--", argv[3:])
+
+    def test_stream_passes_both_roles_and_the_command_after_a_separator(self):
+        args, command = peer.parse_args([
+            "stream", "ESP0", "ESP1", "--hardware", str(self.registry),
+            "--period", "10", "--payload", "300", "--min-writes", "50",
+            "--", "ubertooth-rx", "-z", "-t", "30",
+        ])
+        registry = self.load_registry()
+        argv = peer.esp32peer_argv(
+            args, {"acceptor": registry.get("ESP0"), "initiator": registry.get("ESP1")},
+            command,
+        )
+        self.assertEqual("stream", argv[2])
+        pairs = dict(zip(argv, argv[1:]))
+        # The first positional is the acceptor and the second the initiator.
+        # That mapping decides which LAP is on the air, so a swap must fail.
+        self.assertEqual("00:11:22:33:44:55", pairs["--acceptor-address"])
+        self.assertEqual("00:11:22:33:44:66", pairs["--initiator-address"])
+        self.assertEqual("ESP0", pairs["--acceptor-alias"])
+        self.assertEqual("ESP1", pairs["--initiator-alias"])
+        self.assertIn(BRIDGE, pairs["--acceptor"])
+        self.assertIn(BRIDGE2, pairs["--initiator"])
+        # Each value with its own option, so swapping two values fails.
+        self.assertEqual("10", pairs["--period"])
+        self.assertEqual("300", pairs["--payload"])
+        self.assertEqual("50", pairs["--min-writes"])
+        self.assertEqual(["--", "ubertooth-rx", "-z", "-t", "30"], argv[-5:])
+
+    def test_an_option_not_given_is_left_to_the_delegate(self):
+        args, command = peer.parse_args(
+            ["stream", "ESP0", "ESP1", "--hardware", str(self.registry), "--", "true"]
+        )
+        registry = self.load_registry()
+        argv = peer.esp32peer_argv(
+            args, {"acceptor": registry.get("ESP0"), "initiator": registry.get("ESP1")},
+            command,
+        )
+        for absent in ("--period", "--payload", "--min-writes", "--min-seconds", "--timeout"):
+            self.assertNotIn(absent, argv)
+
+    def test_the_hold_it_wraps_itself_in_names_every_device(self):
+        args, command = peer.parse_args([
+            "stream", "ESP0", "ESP1", "--hardware", str(self.registry),
+            "--with", "UT0", "--external-board-lock", self.template,
+            "--lease-dir", str(self.leases), "--owner", "alice", "--", "true",
+        ])
+        argv = peer.hold_argv(args, ["ESP0", "ESP1", "UT0"], ["inner"])
+        self.assertEqual(str(HOLD), argv[1])
+        # Not forwarded unless asked for, so hold owns the default.
+        self.assertNotIn("--wait-for-boards", argv)
+        self.assertIn("ESP0,ESP1,UT0", argv)
+        self.assertIn(self.template, argv)
+        self.assertIn("alice", argv)
+        self.assertEqual(["--", "inner"], argv[-2:])
+
+    def test_one_board_cannot_be_both_peers(self):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            status = peer.main(
+                ["stream", "ESP0", "ESP0", "--hardware", str(self.registry),
+                 "--", "true"]
+            )
+        self.assertEqual(2, status)
+        self.assertIn("cannot be both peers", err.getvalue())
+
+    def test_stream_without_a_command_is_a_usage_error(self):
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as caught, redirect_stderr(err):
+            peer.parse_args(["stream", "ESP0", "ESP1", "--hardware", str(self.registry)])
+        self.assertEqual(2, caught.exception.code)
+
+    def test_a_single_peer_command_takes_no_command(self):
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as caught, redirect_stderr(err):
+            peer.parse_args(
+                ["status", "ESP0", "--hardware", str(self.registry), "--", "true"]
+            )
+        self.assertEqual(2, caught.exception.code)
+        self.assertIn("takes no command", err.getvalue())
+
+    def run_peer(self, argv):
+        """main() with the delegate replaced: what it would run, and its status."""
+        seen = []
+
+        def call(command, **kwargs):
+            seen.append(list(command))
+            return 7  # a status that is neither success nor a usage error
+
+        with unittest.mock.patch.object(peer.subprocess, "call", call):
+            status = peer.main(argv)
+        return status, (seen[0] if seen else [])
+
+    def test_no_hold_runs_the_delegate_directly_and_passes_its_status_on(self):
+        """Inside an outer hold, holding again would wait for its own lock."""
+        status, argv = self.run_peer([
+            "status", "ESP0", "--hardware", str(self.registry), "--no-hold",
+        ])
+        self.assertEqual(7, status)
+        self.assertEqual(str(peer.ESP32PEER), argv[1])
+        self.assertNotIn(str(HOLD), argv)
+
+    def test_with_cannot_go_with_no_hold(self):
+        """Resolving --with and then not holding it would drop a lock silently."""
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as caught, redirect_stderr(err):
+            peer.parse_args([
+                "stream", "ESP0", "ESP1", "--hardware", str(self.registry),
+                "--with", "UT0", "--no-hold", "--", "true",
+            ])
+        self.assertEqual(2, caught.exception.code)
+        self.assertIn("--no-hold", err.getvalue())
+
+    def test_a_signal_killed_delegate_reads_the_same_either_way(self):
+        """128+N, as the hold path gives, not subprocess's raw negative."""
+        with unittest.mock.patch.object(peer.subprocess, "call", lambda *a, **k: -15):
+            status = peer.main(
+                ["status", "ESP0", "--hardware", str(self.registry), "--no-hold"]
+            )
+        self.assertEqual(143, status)
+
+    def test_without_no_hold_it_runs_the_delegate_inside_hold(self):
+        status, argv = self.run_peer([
+            "status", "ESP0", "--hardware", str(self.registry),
+        ])
+        self.assertEqual(7, status)
+        self.assertEqual(str(HOLD), argv[1])
+        self.assertIn(str(peer.ESP32PEER), argv)
+
+    def test_it_delegates_to_the_harness_module_not_a_copy(self):
+        from ubertooth_harness import esp32peer as module
+
+        self.assertEqual(Path(module.__file__).resolve(), peer.ESP32PEER)
+
+
 class LabFiles(unittest.TestCase):
     def test_both_scripts_are_executable_and_compile(self):
-        for path in (HOLD, HUB_PORT):  # _bench.py is imported, not run
+        for path in (HOLD, HUB_PORT, PEER):  # _bench.py is imported, not run
             with self.subTest(script=path.name):
                 self.assertTrue(os.access(path, os.X_OK), f"{path.name} is not executable")
                 # compile() rather than py_compile, which would write bytecode
@@ -828,7 +1013,7 @@ class LabFiles(unittest.TestCase):
         No PYTHONPATH and a working directory that is not the checkout, which
         is what a user has.
         """
-        for path in (HOLD, HUB_PORT):
+        for path in (HOLD, HUB_PORT, PEER):
             with self.subTest(script=path.name):
                 environment = dict(os.environ)
                 environment.pop("PYTHONPATH", None)
@@ -914,7 +1099,8 @@ class LabFiles(unittest.TestCase):
             r"|\b0x[0-9a-f]{8}\b",           # a hub's BrainStem serial
             re.IGNORECASE,
         )
-        for path in (HOLD, HUB_PORT, RULES, LAB / "_bench.py", LAB / "README.md"):
+        for path in (HOLD, HUB_PORT, PEER, RULES, LAB / "_bench.py",
+                     LAB / "README.md"):
             with self.subTest(file=path.name):
                 for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
                     self.assertIsNone(
