@@ -264,7 +264,9 @@ def _pcapng_packet(path, stream, endian, block_type, offset, length,
     if length < 32:
         raise CaptureFileError(f"{path}: short pcapng packet block")
     high, low, captured = struct.unpack(endian + "III", block[12:24])
-    if 28 + captured > length:
+    # The captured bytes have to end before the block's own trailing length,
+    # or what follows them would be read as frame data.
+    if 28 + captured + 4 > length:
         raise CaptureFileError(f"{path}: pcapng packet longer than its block")
     return (_nanoseconds((high << 32) | low, resolution),
             block[28:28 + captured])

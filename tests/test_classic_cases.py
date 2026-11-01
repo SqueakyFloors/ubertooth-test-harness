@@ -303,6 +303,8 @@ class RecordFieldCaseTests(unittest.TestCase):
                              checks[checks.index("--reference-uap") + 1])
             self.assertEqual(str(MIN_PACKETS),
                              checks[checks.index("--min-packets") + 1])
+            self.assertIn("--min-reference-uap", checks)
+            self.assertIn("--min-hec-valid", checks)
             self.assertIn(r"BR/EDR record problem:",
                           steps[step_id].forbidden_patterns)
         # Only the PCAPNG carries the address the capture was following, and
@@ -361,6 +363,27 @@ class RecordFieldCaseTests(unittest.TestCase):
                        "--min-hec-valid", "--following-lap"):
             self.assertNotIn(absent, checks)
         self.assertIn("--min-reference-uap", checks)
+
+    def test_the_capture_step_checks_the_clock_beside_each_packet(self):
+        from ubertooth_harness.receive_cases import (
+            CLK100NS_PER_SLOT,
+            CLKN_TICKS,
+            clock_check,
+        )
+
+        check = clock_check()
+        good = ("systime=1793525441 ch=76 LAP=e9c5ba err=0 clkn=75132 "
+                "clk_offset=2104 s=-36 n=-46 snr=10")
+        self.assertEqual("", check(good))
+        self.assertIn("past the", check(good.replace(
+            "clkn=75132", f"clkn={CLKN_TICKS}")))
+        self.assertIn("into its slot", check(good.replace(
+            "clk_offset=2104", f"clk_offset={CLK100NS_PER_SLOT}")))
+        # The followed cases compose it with the packet-line count.
+        step = self.steps(self.cases()["follow-fields"])["stream-and-receive"]
+        self.assertIn("into its slot", step.output_check(
+            packets(CENTRAL_LAP, MIN_PACKETS)
+            + good.replace("clk_offset=2104", "clk_offset=99999") + "\n"))
 
     def test_the_steps_patterns_match_what_the_driver_really_prints(self):
         """Each pattern against the driver's own report, not a copy of it.

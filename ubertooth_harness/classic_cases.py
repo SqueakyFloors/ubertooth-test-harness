@@ -52,6 +52,7 @@ from ubertooth_harness.receive_cases import (
     EXIT_SLACK_S,
     PACKET_LINE,
     SURVEY_LINE,
+    clock_check,
     packet_check,
     seconds_arg,
 )
@@ -117,10 +118,11 @@ PEER_TIMEOUT_S = esp32peer.BOOT_TIMEOUT_S + 4 * esp32peer.COMMAND_TIMEOUT_S
 # receives, so its packets decode; the 2-EV3 link the stack would choose
 # carries the same payload as enhanced rate.
 AUDIO_TYPE = "ev3"
-# How the boards name that type back, which is the specification's spelling
-# rather than the command line's: `2ev3` on the way in is `2-ev3` on the way
-# out (firmware/esp32-classic-peer/README.md, `sco_pkt_type`).
-AUDIO_PACKET_TYPE = AUDIO_TYPE.replace("2ev3", "2-ev3")
+# How the boards name each type back, which is the specification's spelling
+# rather than the command line's (firmware/esp32-classic-peer/README.md,
+# `sco_pkt_type`).
+REPORTED_AUDIO_TYPES = {"ev3": "ev3", "2ev3": "2-ev3"}
+AUDIO_PACKET_TYPE = REPORTED_AUDIO_TYPES[AUDIO_TYPE]
 # What libbtbb names an EV3 packet. The four header bits cannot tell an EV3
 # from an HV3 or a 3-EV3, so this one name covers all three
 # (bredrrecord.TYPE_NAMES).
@@ -137,6 +139,11 @@ MIN_AUDIO_FRAMES = 100
 # the sweep happened to hear. A 25-second survey on the bench recorded 235
 # packets and 182 of them carried a recovered UAP.
 MIN_SURVEY_UAP_RECORDS = 10
+# Records of a followed capture that must carry the piconet's UAP as their
+# reference address. Every record of the bench's three followed captures
+# carried it (285, 109 and 394 of them), so this has room for a capture that
+# loses the clock partway and records none for a while.
+MIN_REFERENCE_UAP_RECORDS = 10
 # Records whose header HEC must have passed. A header only passes when it
 # decoded at the piconet's clock and its HEC gave the piconet's UAP, which
 # is what makes the header and reference-UAP checks bite; how many of a
@@ -582,7 +589,12 @@ def _record_checks(central=None, *, minimum=MIN_PACKETS, following=False,
         checks += ("--min-hec-valid", str(MIN_HEC_VALID_RECORDS),
                    "--lap", central["lap"],
                    "--reference-lap", central["lap"],
-                   "--reference-uap", central["uap"])
+                   # Every record that carries a reference UAP must carry
+                   # this one, and this many must carry it: a capture that
+                   # gives a clock up has no UAP to record until it derives
+                   # one again, which is an honest record, not a wrong one.
+                   "--reference-uap", central["uap"],
+                   "--min-reference-uap", str(MIN_REFERENCE_UAP_RECORDS))
     if following:
         # ubertooth-rx -l records the address it was told to follow once, in
         # a PCAPNG interface option. It knows the LAP and, with -u, the UAP,
@@ -612,7 +624,10 @@ def record_fields_cases(arguments, resources, resource_identities):
             name=f"Every record of a -l {central} -u {central_uap} capture "
                  "holds this piconet's fields, in both formats",
             options=follow,
-            check=piconet_packets(central, MIN_PACKETS, only=True),
+            # The records carry no clock, so the clock the tool recovered is
+            # checked where it does appear: beside each packet it printed.
+            check=_all(piconet_packets(central, MIN_PACKETS, only=True),
+                       clock_check()),
             expected_state=(
                 f"the pcap and the pcapng each hold {MIN_PACKETS}+ records of "
                 f"LAP {central} with reference LAP {central} and reference UAP "
@@ -639,7 +654,8 @@ def record_fields_cases(arguments, resources, resource_identities):
             name=f"With the roles swapped the records hold LAP "
                  f"{acceptor['lap']}, not {central}",
             options=("-l", acceptor["lap"], "-u", acceptor["uap"]),
-            check=piconet_packets(acceptor["lap"], MIN_PACKETS, only=True),
+            check=_all(piconet_packets(acceptor["lap"], MIN_PACKETS, only=True),
+                       clock_check()),
             expected_state=(f"the pcapng holds {MIN_PACKETS}+ records, all of "
                             f"LAP {acceptor['lap']} and none of {central}"),
             files=(("-r", "swapped.pcapng"),),

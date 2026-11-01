@@ -304,6 +304,16 @@ class Consistency(unittest.TestCase):
                       " ".join(bredrrecord.problems(one, lap=0x123456)))
         self.assertIn("reference UAP is not",
                       " ".join(bredrrecord.problems(one, reference_uap=0x11)))
+        # A record that carries no reference UAP is not held to one: a
+        # capture that gives a clock up records none until it has another.
+        none = [bredrrecord.Record(0, 0, 39, -50, -80, 0, 0, 0, 0, LAP,
+                                   LAP | (bredrrecord.UAP_ANY << 24),
+                                   bt_header(POLL),
+                                   GOOD_FLAGS & ~bredrrecord.REFUAP_VALID, b"")]
+        self.assertEqual([], bredrrecord.problems(none, reference_uap=UAP))
+        self.assertIn("carry a reference UAP",
+                      " ".join(bredrrecord.problems(none, reference_uap=UAP,
+                                                    min_reference_uap=1)))
         self.assertIn("another packet type",
                       " ".join(bredrrecord.problems(one, types=("DH1/2-DH1",))))
         self.assertIn("no DH1/2-DH1 record",

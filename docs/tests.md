@@ -1511,7 +1511,10 @@ has no adapter for
 **What it does.** The same two peers hold the same link, and this test reads
 what is *inside* the BR/EDR capture files `ubertooth-rx` writes: every field
 of every record, decoded from the bytes, rather than the packet lines the tool
-prints.
+prints. What it asserts over the air is the records' addresses, headers,
+power fields, packet types and flags, and their agreement with each other;
+the payload checks it carries do not fire on this bench's traffic, for the
+reason under known limits.
 
 **Theory of operation.** The two Classic tests above count packet lines and
 check a LAP. That leaves most of a capture unchecked: another packet's header,
@@ -1560,7 +1563,16 @@ The audio case puts a synchronous (eSCO) link on the air instead of the data
 stream, at `sco type ev3`, so its payload is on the air at the basic rate the
 Ubertooth receives; the records must then name `HV3/EV3/3-EV3` packets. That
 is the one check here with no equivalent in the other Classic tests, because
-voice packets never appear in a capture of the SPP stream.
+voice packets never appear in a capture of the SPP stream. It is held to the
+same floors as a stream capture, which the bench measured for it too: 394
+records with 112 passing headers against 285 with 59 for the stream.
+
+One thing a record does not carry is a clock, so there is nothing binary to
+check the clock against. The tool prints the clock it recovered and the
+packet's offset within its slot beside every packet, and the followed cases
+check those: a CLKN inside the 28-bit counter, and an offset inside the
+625 microsecond slot it is measured in. A rollover counted twice, or an offset
+taken from the wrong edge, shows up there and nowhere in the file.
 
 The decoder is `ubertooth_harness/bredrrecord.py`, run as an ordinary logged
 command per capture file. It prints counts, ranges, flag tallies and packet
@@ -1581,7 +1593,8 @@ it on anything older.
 with both `-q` and `-r`, after which each file must hold at least ten records,
 all of the central's LAP, all carrying that LAP and UAP as the reference
 address, all internally consistent, at least five with a header whose HEC
-passed, and the PCAPNG must name the central's LAP and UAP, with a full UAP
+passed and ten carrying the reference UAP, every printed clock and slot offset
+in range, and the PCAPNG must name the central's LAP and UAP, with a full UAP
 mask, as the address it was following; then the same with the roles swapped,
 where every record must carry the other board's LAP instead.
 Comprehensive runs 4, adding the EV3 audio link, whose records must include at

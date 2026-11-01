@@ -6,9 +6,11 @@ logged command. It imports only the standard library and
 structure, so the only thing decoded here is what a BR/EDR record means.
 
 It prints a few summary lines and then either nothing, and exits 0, or one
-``BR/EDR record problem:`` line per problem, and exits 1. Numbers, flags and
-packet type names are reported; captured payload bytes never are, so no
-traffic of the piconet reaches the run record.
+``BR/EDR record problem:`` line per problem, and exits 1. What it reports is
+counts, ranges, flag tallies, packet type names, and the header fields each
+packet carries; of a payload it reports only its length, and the two CRC
+bytes where a CRC did not check out. So no captured traffic reaches the run
+record.
 
     BR/EDR records: 137 in follow.pcap
     BR/EDR LAPs: e9c5ba (137)
@@ -459,13 +461,21 @@ def problems(found: list[Record], *, lap: int | None = None,
                             f"{wrong[0].lap:06x} in record {wrong[0].index}, "
                             f"expected {lap:06x}")
     if reference_lap is not None:
+        # The reference LAP is the address the capture was told to follow,
+        # which it keeps for the whole run, so every record carries it.
         wrong = [record for record in found if record.ref_lap != reference_lap]
         if wrong:
             failures.append(f"{len(wrong)} records whose reference LAP is not "
                             f"{reference_lap:06x}, the first "
                             f"{wrong[0].ref_lap:06x} in record {wrong[0].index}")
     if reference_uap is not None:
-        wrong = [record for record in found if record.ref_uap != reference_uap]
+        # Only the records that carry one. A capture that follows a piconet
+        # and then gives the clock up has no UAP to record until it derives
+        # one again, and that is an honest record rather than a wrong one;
+        # ``min_reference_uap`` is how a caller asks for records that do
+        # carry it.
+        wrong = [record for record in found
+                 if record.has(REFUAP_VALID) and record.ref_uap != reference_uap]
         if wrong:
             failures.append(f"{len(wrong)} records whose reference UAP is not "
                             f"{reference_uap:02x}, the first "

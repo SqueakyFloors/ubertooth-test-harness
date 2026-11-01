@@ -715,7 +715,7 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         # back to the firmware's default.
         if packet_type != "default":
             acceptor_shell.command(f"sco type {packet_type}")
-        acceptor_shell.command("sco start")
+        acceptor_shell.command("sco start", AUDIO_CONNECT_TIMEOUT_S)
         initiator_shell.command("role initiator")
         initiator_shell.command(f"spp peer {acceptor_status['address']}")
         if packet_type != "default":
@@ -725,9 +725,20 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         # The audio link is the Hands-Free Profile's, not the Serial Port
         # Profile's, so `remote` stays empty here: whose link it is, is
         # fixed by the address the initiator was given to page.
+        #
+        # The settle comes first: the far end learns of the link through a
+        # callback of its own, so reading it the instant `sco start` returns
+        # can catch it before it has caught up. It is read again after
+        # another settle if it has not.
+        time.sleep(settle_s)
         linked = initiator_shell.status()
-        for peer_status, peer in ((linked, initiator),
-                                  (acceptor_shell.status(), acceptor)):
+        for peer_status, peer, shell in ((linked, initiator, initiator_shell),
+                                         (None, acceptor, acceptor_shell)):
+            if peer_status is None:
+                peer_status = shell.status()
+                if _audio_field(peer_status, "sco", str, peer.label) != AUDIO_ON:
+                    time.sleep(settle_s)
+                    peer_status = shell.status()
             if _audio_field(peer_status, "sco", str, peer.label) != AUDIO_ON:
                 raise PeerError(
                     f"the {peer.label}'s audio link to "
@@ -739,7 +750,6 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
               f"every {_audio_field(linked, 'sco_interval', int, initiator.label)} "
               f"slots, up to {acceptor_status['address']} at "
               f"{time.strftime('%H:%M:%SZ', time.gmtime())}", file=out)
-        time.sleep(settle_s)
         print("command: " + " ".join(command), file=out)
         out.flush()
         status, seconds = _run_command(command, timeout)
@@ -763,6 +773,14 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         if sent < min_frames:
             problems.append(f"the {peer.label} sent {sent} audio frames, fewer "
                             f"than the {min_frames} this test needs")
+        # This counter is the Serial Port Profile's, and an audio session
+        # brings no SPP link up, so it is normally zero either way; what
+        # says the audio link held is both ends reading `on` afterwards and
+        # the frames they counted.
+        if peer_status["disconnects"]:
+            problems.append(f"the {peer.label}'s link went down "
+                            f"{peer_status['disconnects']} time(s) while the "
+                            "command ran")
     if seconds < min_seconds:
         problems.append(f"{command[0]} ran {seconds:.1f} s, less than the "
                         f"{min_seconds:g} s this test needs: it stopped early")
