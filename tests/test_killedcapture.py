@@ -152,10 +152,10 @@ class KilledCaptureTests(unittest.TestCase):
 
     def test_a_process_the_tool_left_behind_is_reported_and_killed(self):
         code, line = self.kill(SPAWNER)
-        helper = int((self.root / "capture.bin.helper").read_text(encoding="utf-8"))
+        helper = int(self.helper_pid())
         self.addCleanup(self.reap, helper)
         self.assertEqual(1, code)
-        self.assertIn("was not empty", line)
+        self.assertIn("still had something in it", line)
         self.assertIn("may still own the device", line)
         self.assertFalse(self.record.exists())
         # Reported is not enough: it must not hold the device through the rest
@@ -172,13 +172,23 @@ class KilledCaptureTests(unittest.TestCase):
     def test_a_tool_that_produces_nothing_leaves_nothing_running(self):
         # The failure path kills the group too: the SPAWNER writes its helper's
         # pid before it writes any capture data, so this run gives up on the
-        # data and still has a process to clean up.
-        code, line = self.kill(SPAWNER, min_bytes=1 << 30, max_wait=1.0)
-        helper = int((self.root / "capture.bin.helper").read_text(encoding="utf-8"))
-        self.addCleanup(self.reap, helper)
+        # data and still has a process to clean up. The wait is generous
+        # because the only thing being timed out here is the data.
+        code, line = self.kill(SPAWNER, min_bytes=1 << 30, max_wait=10.0)
         self.assertEqual(1, code)
         self.assertIn("less than the", line)
+        helper = int(self.helper_pid())
+        self.addCleanup(self.reap, helper)
         self.assertTrue(self.gone(helper), "the process left behind is still running")
+
+    def helper_pid(self):
+        """The pid the fake tool wrote, once it has."""
+        path = self.root / "capture.bin.helper"
+        for _ in range(400):
+            if path.exists():
+                return path.read_text(encoding="utf-8")
+            time.sleep(0.05)
+        raise AssertionError("the fake tool never recorded its helper's pid")
 
     def reap(self, pid):
         try:
@@ -215,13 +225,7 @@ class KilledCaptureTests(unittest.TestCase):
         child = subprocess.Popen(
             [sys.executable, killedcapture.__file__] + argv,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-        helper = self.root / "capture.bin.helper"
-        for _ in range(400):
-            if helper.exists():
-                break
-            time.sleep(0.05)
-        self.assertTrue(helper.exists(), "the fake tool never started")
-        left = int(helper.read_text(encoding="utf-8"))
+        left = int(self.helper_pid())
         self.addCleanup(self.reap, left)
         child.terminate()
         child.wait(timeout=30)

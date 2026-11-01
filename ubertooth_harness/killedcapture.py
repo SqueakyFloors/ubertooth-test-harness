@@ -80,6 +80,9 @@ REAP_WAIT_S = 10.0
 # of seconds to end before it stops being polite. Taking the group down is the
 # part that matters there; waiting for the status is not.
 SIGNAL_WAIT_S = 0.5
+# How long the tool's process group may take to disappear after the tool has
+# been reaped. It is normally gone already; this is for a loaded machine.
+GROUP_WAIT_S = 5.0
 
 
 def digest(path: Path) -> tuple[int, str]:
@@ -94,7 +97,7 @@ def digest(path: Path) -> tuple[int, str]:
 
 
 def group_gone(pgid: int) -> bool:
-    """Is there nothing left in this process group?
+    """Is there nothing left in this process group at this instant?
 
     A process whose exit status nobody has read yet is still in its group, so
     this answers for the tool and for anything it started at once.
@@ -107,6 +110,24 @@ def group_gone(pgid: int) -> bool:
         # Something is there; this process may not signal it.
         return False
     return False
+
+
+def wait_for_group_gone(pgid: int, max_wait_s: float = GROUP_WAIT_S) -> bool:
+    """The same question, given a moment to settle.
+
+    A wait that has returned the killed tool's status does not mean the
+    kernel has finished taking its process group apart, and on a loaded
+    machine that takes long enough to see. A process the tool really left
+    behind does not go away while this waits, so giving the answer a moment
+    costs nothing and is the difference between a check and a race.
+    """
+    deadline = time.monotonic() + max_wait_s
+    while True:
+        if group_gone(pgid):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(POLL_S)
 
 
 def clear_group(process, pgid: int, *, wait_s: float = REAP_WAIT_S) -> None:
@@ -229,12 +250,12 @@ def _kill(process, pgid, tool, argv, capture, record, min_bytes, max_wait_s,
     # The wait above is the reap, and an unreaped process keeps its group, so
     # this one check covers the tool and anything it started: a tool that was
     # somehow not reaped would still be in its group, and so would a child.
-    if not group_gone(pgid):
+    if not wait_for_group_gone(pgid):
         clear_group(process, pgid)
         raise RuntimeError(
-            f"process group {pgid} was not empty after the kill: {tool} left "
-            "something behind that may still own the device (it has been "
-            "killed)"
+            f"process group {pgid} still had something in it {GROUP_WAIT_S:g} s "
+            f"after the kill: {tool} left something behind that may still own "
+            "the device (it has been killed)"
         )
     size, checksum = digest(capture)
     record.write_text(json.dumps({
