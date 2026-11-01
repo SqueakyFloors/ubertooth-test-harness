@@ -122,3 +122,15 @@ suites:
     - Raw receive replay:
         hosts: each
         coverage: comprehensive
+
+    # Last, and only here: it writes the board's firmware, so mandatory
+    # preflight refuses any test after it on the same board. It is the only
+    # release coverage of `ubertooth-btbr` and of the `btbr` image, neither of
+    # which any other test touches, and of the alternate-image identity
+    # check. It needs the Linux bench with a registered ESP32 Classic peer,
+    # and a run carrying both firmware images (`--build --with-firmware`).
+    - Classic btbr console:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        coverage: smoke

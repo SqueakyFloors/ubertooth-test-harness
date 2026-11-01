@@ -25,7 +25,8 @@ from ubertooth_harness.patterns import (
 from ubertooth_harness.resources import ESP32_CLASSIC_PEER
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
-    advertiser_cases, classic_cases, connection_cases, dfu_cases, dfu_host_cases,
+    advertiser_cases, btbr_cases, classic_cases, connection_cases, dfu_cases,
+    dfu_host_cases,
     python_cases, receive_cases, refusal_cases, tool_cases, transitions,
     tshark_cases, util_cases, util_refusal_cases,
 )
@@ -829,6 +830,15 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "Follow Classic Bluetooth piconet": _profiles(
         Estimate(40.0, per_duration=2), Estimate(80.0, per_duration=4)
     ),
+    # Per flash-and-session cycle, measured on the lab bench: two firmware
+    # writes of about 4 s, the version reads, the peer reset, and a console
+    # session whose radio checks end as soon as their answer arrives.
+    # Comprehensive adds the page nothing answers, which costs the firmware's
+    # whole 45 s page attempt.
+    "Classic btbr console": _profiles(
+        Estimate(0, per_count=("sessions", 60.0)),
+        Estimate(0, per_count=("sessions", 115.0)),
+    ),
 })
 
 
@@ -844,6 +854,7 @@ RF_DEFAULTS: Mapping[str, Mapping[str, PlacementRequirement]] = MappingProxyType
         "BLE extcap in tshark",
         "Capture known BLE advertiser",
         "Capture known BLE connection",
+        "Classic btbr console",
     )
 })
 
@@ -1236,6 +1247,33 @@ def builtin_catalog() -> TestCatalog:
             command_builder=classic_cases.follow_classic_cases,
             continue_on_case_failure=True,
             guards_other_ubertooths=True,
+        ),
+        TestDefinition(
+            "Classic btbr console",
+            "ubertooth-btbr on the separate btbr firmware image: the board "
+            "reports that image by name, the prompt answers its refusals, an "
+            "inquiry hears a registered ESP32 Classic peer by address and by "
+            "name, a page connects to it and completes the LMP exchange, and "
+            "the cleanup always writes the application image back",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH,
+                "acceptor": ArgumentRule(_selector, default="default"),
+                # Flash-and-session cycles, for a long suite; one by default,
+                # because each costs two firmware writes.
+                "sessions": ArgumentRule(_positive_integer, default=1),
+                "coverage": COVERAGE,
+            }),
+            MappingProxyType({
+                "Ubertooth": "Ubertooth", "acceptor": ESP32_CLASSIC_PEER,
+            }),
+            command_builder=btbr_cases.btbr_console_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+            # Every case writes the board's firmware and ends with the
+            # application image written back and read, so the test must be
+            # the last one on its board.
+            establishes_firmware=True,
+            writes_firmware=True,
         ),
         TestDefinition(
             "CLI usage smoke",

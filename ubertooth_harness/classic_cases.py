@@ -141,7 +141,14 @@ def _peer(resource_identities: Mapping, role: str, test_name: str,
                 f"{test_name}: the {role}'s registered {key} is {written}, but "
                 f"its BD_ADDR {address} gives {derived}")
     return {"serial": serial, "address": address, "device": device,
-            "lap": lap, "uap": uap, "alias": resources.get(role, "")}
+            "lap": lap, "uap": uap, "alias": resources.get(role, ""),
+            # The name the board's Extended Inquiry Response and its answer to
+            # an LMP name request carry; it holds the board's own LAP, so it
+            # identifies the board on the air. Optional in a registry, and
+            # only the btbr console cases read it.
+            "name": str(identity.get("name", "")).strip(),
+            # The address as the btbr capture writes it, with no separators.
+            "bdaddr": address.replace(":", "").lower()}
 
 
 def _pair(resource_identities: Mapping, test_name: str,

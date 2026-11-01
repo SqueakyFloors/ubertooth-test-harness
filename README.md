@@ -678,6 +678,7 @@ python -m ubertooth_harness run-suite \
 | `Capture known BLE connection` | `ble` plan, `connection` suite; an Ubertooth and two nRF52840 DKs, one with the `central` role and one with the `peripheral` role, on one host (see [BLE test devices](#ble-test-devices-nrf52840-dk)): both DKs are flashed with `firmware/nrf52840dk` when they report another version and must report their registered addresses; the peripheral advertises connectable, the central connects at `interval` with a 251-byte data length, writes 244 bytes every 50 ms, asks for `update` once connected, and remakes the link every 5 s; `ubertooth-btle -f -r` captures for `duration` and the capture must hold one CONNECT_IND between the two addresses with exactly that interval, latency 0 and a 4 s supervision timeout, a hop increment of 5-16, every data channel in the channel map, at least five packets on the connection's access address, of which at least one decodes with a correct CRC, and at least one longer than the 27 bytes a link without Data Length Extension allows; a capture that misses any of that is taken again, up to three captures; both DKs are left idle in the advertiser role, the Ubertooth's channel, squelch and LEDs restored, other registered boards guarded | adds the same with `-q` (PCAP) and a case that reads the connection information libbtbb records in a PCAPNG: one of the recorded options must be, byte for byte, a CONNECT_IND this capture decoded from the two addresses, so the parameters a reader follows the connection with are the ones that went over the air ([libbtbb#21](https://github.com/SqueakyFloors/libbtbb/issues/21) had them copied 6 bytes early) |
 | `Capture known Classic device` | `classic` plan; an Ubertooth and two ESP32 Classic peers with the `acceptor` and `initiator` roles on one host (see [Classic test devices](#classic-test-devices-esp32-classic-peers)): both peers must already run `firmware/esp32-classic-peer`, which mandatory preflight checks by asking each one to identify itself; `esp32peer.py stream` then brings a Serial Port Profile link up between them, streams 200 bytes every 20 ms, and runs `ubertooth-rx` for `duration` while it holds. `ubertooth-rx -z` must list the piconet central's LAP in its survey results, and a run with no target must report at least ten packet lines carrying that LAP; the central is whichever peer pages, so its LAP is the initiator's. Afterwards the pair must report a link that never went down and at least fifty writes, both peers are reset to the firmware's boot state, the Ubertooth's channel, squelch and LEDs are restored, and other registered boards are guarded | adds `-z -r` (PCAPNG with link type 255) and the same survey with the peers' roles swapped, which must list the other board's LAP and not the first one's |
 | `Follow Classic Bluetooth piconet` | `classic` plan; the same two peers and the same bring-up: `ubertooth-rx -l <central LAP> -u <central UAP>` must report at least ten packet lines and none of another LAP (libbtbb is asked for one access code), and `-l`/`-u` for the peer that is *not* the central must report no packet at all | adds `-l` without `-u` (the UAP is recovered from the air) and `-l -u -q` (PCAP with link type 255) |
+| `Classic btbr console` | writes the selected board's firmware; `classic` plan (`btbr` suite) and last in the `release` plan; an Ubertooth and one ESP32 Classic peer with the `acceptor` role on one host, and a run carrying both firmware images (`--build --with-firmware`). The run's `btbr` image is written and the board must report `btbr` and that revision by name (`bluetooth_rxtx` is a mismatch, and so is the revision alone), the peer is reset to its discoverable boot state, and one `ubertooth-btbr` session then decides eleven checks down one prompt: the startup the `btbr` image answers and the prompt, `?` and `? inquiry`, a word that is no command, `?` on one, three addresses that are not ones and `page` with no address (each one `error:` line with the prompt up), `bdaddr` taking an address, an inquiry hearing the peer by BD_ADDR and by the name in its Extended Inquiry Response, a page reaching `LMP setup complete` with the peer's `LMP_NAME_RES` on the air, `idle` after each, an LMP request with no handler named once per opcode, and the capture on standard output with the progress on standard error. The cleanup always writes `bluetooth_rxtx` back, reads it, and resets the peer | adds paging an address nothing answers: `paging timeout` after the firmware's whole attempt, with no connection. `sessions: <n>` repeats the whole flash-and-session cycle (the `btbr-long` suite runs five) |
 | `DFU images` | writes the selected board's firmware; slow plan (not fast): `-d <test image> -r`, then `-u -r` reads back the image padded with 0xff; `-s` on the image without its suffix gives the build's `.dfu` | `firmware` plan (not release): adds `-s` refusing a `.dfu`; seven bad images (wrong CRC, truncated, no suffix, text, no `UFD`, wrong vendor, wrong product) refused before a device is opened (fork #198, #199, fixed in e8edd15), the board still in its application with the same flash (read back); `-s` refuses a suffixed `.bin` and accepts a read-only one (fork #200, fixed in 9d710fe). At 6fee30c `-d <image> -r` exits 1 after a good flash (fork #267, fixed in 89d9197), so the write cases fail there |
 | `BLE mode conflicts` | no `coverage` argument; release plan | every combination of `ubertooth-btle -f -n -p` must be rejected before sniffing |
 | `Ubertooth util conflicts` | no `coverage` argument; requires `allow RF transmission: true`; release plan | every pair of `-q -n -e -t -x -I` must be rejected with the fork's `error: options ... cannot be combined` before a mode starts |
@@ -1047,9 +1048,13 @@ its packages are used). The installed `ubertooth-specan-ui` and
 `ubertooth-btbr` must name that interpreter on their first line, and the
 manifest records its path and version. specan-ui itself needs numpy, qtpy, and
 a Qt binding (PyQt5/6 or PySide2/6) in that interpreter. `--with-firmware`
-also builds `bluetooth_rxtx.dfu` with the built `ubertooth-dfu`; the image is
-hashed into the manifest (a run that flashes its boards builds it even
-without the option). The built `ubertooth-util -V` must report both resolved
+also builds two firmware images with the built `ubertooth-dfu`:
+`bluetooth_rxtx.dfu`, the application image every other test needs on its
+board, and `btbr.dfu`, the alternate image `ubertooth-btbr` needs and nothing
+else runs. Both are hashed into the manifest, as the artifacts `test build`
+and `btbr build`, so `Classic btbr console` writes the alternate image and
+puts the application image back from the same commit (a run that flashes its
+boards builds them even without the option). The built `ubertooth-util -V` must report both resolved
 revisions on its `Host tools version:` line, without a modified-source `*`.
 
 The manifest records the toolchain (CMake, C compiler, pkg-config, libusb,
@@ -1157,7 +1162,8 @@ entries:
   Ubertooth, always selected by serial. The firmware version must be the
   application image (`bluetooth_rxtx`) built from the resolved commit, or the
   bare revision older firmware prints; a board left on another image, such as
-  `btbr`, is a mismatch.
+  `btbr`, is a mismatch, and the reason names the image it found, because that
+  board runs none of the other tools.
 
 Checks are deduplicated by host/resource and emit normal check/command events.
 Any mismatch prevents the first `test_started` event. This local slice verifies
@@ -1337,6 +1343,14 @@ follow cases over a five-minute capture each, which is what shows that a
 receive run and the pair's link hold up for minutes rather than seconds. The
 sampling soak, `Classic Bluetooth receive soak`, is still a backlog entry;
 sampling is what it waits for, not traffic.
+
+One peer on its own is also a device an Ubertooth can discover and connect to,
+because the boot role is discoverable and connectable. That is what the same
+plan's `btbr` suite uses: `Classic btbr console` writes the alternate `btbr`
+firmware image and pages the peer from the board. It is a suite of its own
+because it writes the board's firmware, so no test may follow it on that
+board; `btbr-comprehensive` adds the page nothing answers, and `btbr-long`
+repeats the flash-and-session cycle five times.
 
 Because the comprehensive coverage exchanges the two roles, both peers a plan
 binds must declare both: the registry's role list is what a plan picks a board

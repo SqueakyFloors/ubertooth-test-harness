@@ -126,9 +126,15 @@ resources:
       # Replace with the serial in the bridge's by-id path.
       bridge serial: "0123456789abcdef0123456789abcdef"
       BD_ADDR: "C8:00:00:00:00:01"
-      # Optional, and checked against the address: the LAP, UAP and device
-      # name the board's own `status` reports.
+      # Optional, and checked against the address: the LAP and UAP the
+      # board's own `status` reports.
       LAP: "000001"
+      # The name its `status` reports, which is also what it answers an
+      # inquiry and an LMP name request with. It is not settable: the
+      # firmware builds it from the board's own LAP. `Classic btbr console`
+      # needs it, and checks it against the board after a reset; the other
+      # Classic tests do not read it.
+      name: UT-ESP32-000001
 
   ESP32_Linux1:
     type: ESP32 Classic peer
@@ -137,6 +143,7 @@ resources:
     identity:
       bridge serial: "fedcba9876543210fedcba9876543210"
       BD_ADDR: "C8:00:00:00:00:02"
+      name: UT-ESP32-000002
 
   # StarTech managed hub: switched through its built-in FTDI management
   # controller, which sits on downstream port 4; only ports 1-3 are DUT ports.

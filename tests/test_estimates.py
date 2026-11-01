@@ -63,11 +63,18 @@ class EstimateTests(unittest.TestCase):
         self.assertLessEqual(set(ESTIMATES), set(self.catalog.names))
 
     def test_comprehensive_takes_longer_than_smoke(self):
+        def cost(estimate):
+            # One invocation's worth: the fixed part plus each rate the
+            # estimate scales by, so a test whose cost is all in a per-count
+            # rate (one flash-and-session cycle) is compared too.
+            rate = estimate.per_count[1] if estimate.per_count else 0.0
+            return estimate.fixed_s + estimate.per_duration + rate
+
         for name, profiles in ESTIMATES.items():
             if "smoke" in profiles:
                 with self.subTest(name):
-                    self.assertLess(profiles["smoke"].fixed_s,
-                                    profiles["comprehensive"].fixed_s)
+                    self.assertLess(cost(profiles["smoke"]),
+                                    cost(profiles["comprehensive"]))
 
     def test_coverage_selects_the_profile(self):
         definition = self.catalog.get("Argument validation")
@@ -147,10 +154,11 @@ class EstimateTests(unittest.TestCase):
                     self.assertGreater(suite["estimated_s"], 0)
 
     def test_release_estimate_is_the_calibration_run(self):
-        # The release plan run at fork 7bb07c9 took 621.0 s of test time.
+        # The release plan run at fork 7bb07c9 took 621.0 s of test time, plus
+        # the 60 s `Classic btbr console` adds (one flash-and-session cycle).
         plans = {plan["name"]: plan for plan in list_plans(REPOSITORY / "testplans")}
         (suite,) = plans["release"]["suites"]
-        self.assertAlmostEqual(621.0, suite["estimated_s"], delta=1.0)
+        self.assertAlmostEqual(681.0, suite["estimated_s"], delta=1.0)
 
 
 def manifest_event(invocations):

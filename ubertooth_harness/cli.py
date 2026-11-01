@@ -13,6 +13,8 @@ import subprocess
 import sys
 
 from ubertooth_harness.build import (
+    BTBR_BUILD_ARTIFACT,
+    TEST_BUILD_ARTIFACT,
     BuildError,
     Builder,
     homebrew_include_dir,
@@ -691,9 +693,17 @@ def _prepare_run(
         )
         artifacts = artifacts + built.artifacts
         names = {item.name for item in artifacts}
-        if built.plan.with_firmware and "test build" not in names:
+        if built.plan.with_firmware and TEST_BUILD_ARTIFACT not in names:
             # The firmware just built is the plan's test image.
-            artifacts += (FileIdentity.from_path("test build", built.plan.firmware_image),)
+            artifacts += (
+                FileIdentity.from_path(TEST_BUILD_ARTIFACT, built.plan.firmware_image),
+            )
+        if built.plan.with_firmware and BTBR_BUILD_ARTIFACT not in names:
+            # The alternate image a case flashes to run ubertooth-btbr, from
+            # the same commit as the application image beside it.
+            artifacts += (
+                FileIdentity.from_path(BTBR_BUILD_ARTIFACT, built.plan.btbr_image),
+            )
         # Every test command runs the tools just built, not installed ones.
         executor = SubprocessCommandExecutor(_test_environment(sources, built.plan))
         _flash_build(args, sources, built, executor, publisher, run_dir, leases)

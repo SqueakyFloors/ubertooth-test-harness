@@ -60,3 +60,37 @@ suites:
         initiator: default
         coverage: smoke
         duration: 5m
+
+  # The alternate firmware image, end to end. It writes the board's firmware,
+  # so it is the only test in this suite: a test after it would run on an
+  # image this one put there, which mandatory preflight refuses. One
+  # flash-and-session cycle, about a minute, and the cleanup always writes
+  # `bluetooth_rxtx` back. The run has to carry both images: build it with
+  # `run-suite --build --with-firmware`, or pass
+  # `--artifact "btbr build=PATH" --artifact "test build=PATH"`.
+  btbr:
+    - Classic btbr console:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        coverage: smoke
+
+  # Comprehensive adds the page nothing answers, which costs the firmware's
+  # whole 45 s page attempt.
+  btbr-comprehensive:
+    - Classic btbr console:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        coverage: comprehensive
+
+  # The repetition suite: five flash-and-session cycles, about five minutes,
+  # so a flash that only works the first time or a page that only connects
+  # once shows up. Ten firmware writes, so it holds the board throughout.
+  btbr-long:
+    - Classic btbr console:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        coverage: smoke
+        sessions: 5

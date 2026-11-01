@@ -13,6 +13,7 @@ from ubertooth_harness.manifest import ManifestError, RunManifest
 from ubertooth_harness.planner import TestInvocation
 from ubertooth_harness import esp32peer, nrfdk
 from ubertooth_harness.patterns import (
+    APPLICATION_IMAGE,
     FIRMWARE_VERSION_RE,
     HOST_VERSION_TIMEOUT_S,
     compile_info_pattern,
@@ -44,7 +45,7 @@ class PreflightError(ValueError):
 # before `(API:`, not the first word after the label.
 _FIRMWARE_REVISION = {
     "Firmware version": FIRMWARE_VERSION_RE,
-    "Firmware compile info": re.compile(r"\bubertooth\s+(\S+)\s+\("),
+    "Firmware compile info": re.compile(r"\bubertooth\s+(?P<revision>\S+)\s+\("),
 }
 # Fixes for a board whose firmware is not the run's revision, by run kind.
 FLASH_FIX = "flash it with this build (the default when building)"
@@ -109,10 +110,22 @@ class PreflightCheck:
                 # all. That case falls through to the identity mismatch below,
                 # which names what was expected.
                 if match and not same_revision(self.expected_revision,
-                                               match.group(1)):
+                                               match["revision"]):
                     return (
-                        f"{self.name}: {target} runs {match.group(1)}, the tools "
+                        f"{self.name}: {target} runs {match['revision']}, the tools "
                         f"are {self.expected_revision}: {self.fix or FLASH_FIX}"
+                    )
+                # The revision is this run's, so what the check turned down is
+                # the image: a board left on `btbr`, or on a bench image, runs
+                # none of the tools the other tests call. Say which image it
+                # is carrying, because "identity mismatch" against a board
+                # reporting the right commit reads like a harness fault.
+                image = match.groupdict().get("image") if match else None
+                if image and image != APPLICATION_IMAGE:
+                    return (
+                        f"{self.name}: {target} runs the {image} image at "
+                        f"{match['revision']}, not {APPLICATION_IMAGE}, which "
+                        f"the other tools need: {self.fix or FLASH_FIX}"
                     )
                 # Name the pattern: the reason line is often all an operator
                 # sees, and "mismatch" alone does not say what was expected.

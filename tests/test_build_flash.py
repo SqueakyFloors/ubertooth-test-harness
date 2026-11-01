@@ -413,8 +413,9 @@ class RunSuiteFlashTests(unittest.TestCase):
             with_firmware=with_firmware, host_cmake_flags=(), commands=(),
         )
         if with_firmware:
-            plan.firmware_image.parent.mkdir(parents=True)
-            plan.firmware_image.write_bytes(b"built firmware")
+            for image in (plan.firmware_image, plan.btbr_image):
+                image.parent.mkdir(parents=True, exist_ok=True)
+                image.write_bytes(b"built firmware")
         publisher.emit("build_started", "running", {})
         publisher.emit("build_finished", "passed", {"reason": ""})
         return BuildResult(plan, {}, f"libubertooth 1.1 ({self.revision})", ())

@@ -1431,6 +1431,82 @@ reads the clock and the AFH map from a local BlueZ controller, which the bench
 has no adapter for
 ([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)).
 
+## Classic btbr console
+
+**What it does.** Writes the `btbr` firmware image to the board, checks the
+board reports that image, drives one `ubertooth-btbr` console session against
+a registered ESP32 Classic peer, and always writes the application image back.
+It is the only test that puts a firmware image other than `bluetooth_rxtx` on
+a board, and the only one that runs `ubertooth-btbr`.
+
+**Theory of operation.** `ubertooth-btbr` needs the separate `btbr` image and
+nothing else runs it, so a board is set up for one tool or for all the others.
+Three things make the answers knowable in advance.
+
+The image identity: `ubertooth-util -v` names the image the firmware was built
+from ahead of the revision, so the board must report `btbr` and the run's
+revision after the write and `bluetooth_rxtx` and the same revision after the
+restore. Reading the revision alone would pass a board on either image, and
+the application-image check every other board gets would turn this board down.
+
+The peer: the ESP32 Classic peer is discoverable and connectable from boot
+(see [`hardware.md`](hardware.md)), its BD_ADDR is in the registry, and its
+name carries its own LAP. So an inquiry has to hear it, the address in the
+response and the name in the Extended Inquiry Response are both known, and a
+page has to reach a device that is in page scan. The peer answers the central's
+LMP name request with that same name, which says on the air which device
+replied rather than that something did.
+
+The prompt: a word that is no command, `?` on a word that is no command, and
+an address that is empty, not hex, or too long are each one `error:` line with
+the prompt left up, and none of them reaches the radio. That is the half of
+malformed input a shared bench can produce safely.
+
+The session is driven by
+[`btbrconsole.py`](../ubertooth_harness/btbrconsole.py), which starts the tool
+once, runs every check down the same prompt, and reports one line per check:
+the board has to be flashed before the session and restored after it, so a
+second session would cost two more firmware writes.
+
+**Hardware and arguments.** One `Ubertooth` and one ESP32 Classic peer as
+`acceptor`; `coverage:`, and `sessions:` (default 1) for how many
+flash-and-session cycles to run. Linux only: the peer is reached through
+`/dev/serial/by-id`. Other registered Ubertooths on the host are guarded. The
+default RF placement is an ordinary link, so the planner keeps it off an
+attenuated board. The run must carry both firmware images: `run-suite --build
+--with-firmware` builds and records them, or pass `--artifact "btbr
+build=PATH"` and `--artifact "test build=PATH"`.
+
+**Expected outcome.** One case per session. Smoke decides 11 checks in the
+session — the prompt, `?`, `? <command>`, the three refusals, `page` with no
+address, `bdaddr`, the inquiry, the page and the LMP exchange, `idle` after
+each, the once-per-opcode report of an LMP request with no handler, and the
+split between the capture on standard output and the progress on standard
+error. Comprehensive adds a twelfth: paging an address nothing answers must end
+in `paging timeout` with no connection. A run that built no Python tools skips
+the session step with a reason rather than failing. The cleanup always writes
+the application image back, reads it, and resets the peer; a cleanup failure
+fails the case, so the board cannot be left on `btbr` quietly.
+
+Measured on the lab bench at fork `b2cd6c68`: each firmware write took 4 s,
+the prompt came up in about 2 s, an inquiry heard the peer in about 2 s, a page
+connected in about 7 s, and a page nothing answers reported its timeout after
+the firmware's whole attempt of about 45 s. The catalog estimate is 60 s per
+session for smoke and 115 s for comprehensive.
+
+**Known limits.** A pass says the image runs, the prompt answers, and the
+board can run an inquiry and hold a connection with one peer. It says nothing
+about `inquiry_scan`, `page_scan`, `discoverable`, `l2ping`, or `monitor`:
+answering an inquiry or a page needs something on the bench to make one, and
+`monitor` is a race against a real peripheral that often takes several
+attempts. The refusals leave out an address shorter than six bytes, which the
+tool takes today and acts on as a different address
+([ubertooth#1075](https://github.com/SqueakyFloors/ubertooth/issues/1075)); a
+case for it would pin that rather than check it. The unhandled-opcode check
+asserts only that no opcode is reported twice, because which requests a peer
+sends belongs to the peer. Encryption is not reachable: `btbr` does not
+implement it.
+
 ## CLI usage smoke
 
 **What it does.** Nothing yet: a catalog entry for exercising host tool usage
