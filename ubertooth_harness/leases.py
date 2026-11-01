@@ -484,7 +484,8 @@ def _process_exists(pid) -> bool | None:
         return False
     except PermissionError:
         return True
-    except OSError:
+    except (OSError, OverflowError):
+        # OverflowError: a record can name a number no pid could be.
         return None
     return True
 
@@ -499,7 +500,7 @@ def _group_exists(pgid) -> bool | None:
         return False
     except PermissionError:
         return True
-    except OSError:
+    except (OSError, OverflowError):
         return None
     return True
 
@@ -1111,8 +1112,11 @@ def _recorded_holder(holder: Mapping) -> dict:
         if field not in holder:
             continue
         value = holder[field]
+        # A number in such a file can be as long as the file: one that reads
+        # like a number is carried as itself, a longer one as its text.
+        plain = value is None or isinstance(value, (bool, int, float))
         record[field] = (
-            value if value is None or isinstance(value, (bool, int, float))
+            value if plain and len(str(value)) <= _RECORDED_HOLDER_CHARS
             else _printable(value, _RECORDED_HOLDER_CHARS)
         )
     return record

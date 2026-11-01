@@ -309,7 +309,7 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
         exceeds the limit would end the run it was meant to explain.
         """
         self.hold(A, dict(
-            dead_holder(purpose="lease: " + "x" * 40_000),
+            dead_holder(purpose="lease: " + "x" * 40_000, pgid=int("9" * 4_000)),
             notes=["something else entirely"] * 1000,
         ))
         held = self.take()
@@ -318,6 +318,9 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
         self.assertNotIn("notes", taken["holder"])
         self.assertEqual(200, len(taken["holder"]["purpose"]))
         self.assertTrue(taken["holder"]["purpose"].endswith("..."))
+        # A number can be as long as the file; a small one is itself.
+        self.assertEqual(200, len(taken["holder"]["pgid"]))
+        self.assertIsInstance(taken["holder"]["pid"], int)
         self.assertLess(len(json.dumps(taken)), 2048)
 
     def test_a_lease_nobody_had_to_be_taken_over_for_records_nothing(self):
