@@ -1540,8 +1540,10 @@ def _free_now(root: Path, board: Board, external_template: str | None) -> bool:
     One lock probe, and a second where a lab's own lock files are in use.
     A command giving way pays it once a round for each resource it is
     reporting on, which is what keeps "free and queued" an honest measure
-    of the stretch being reported rather than of the whole wait. Anything
-    that cannot be read counts as held, as everywhere else.
+    of the stretch being reported rather than of the whole wait. A lab file
+    that cannot be read counts as held, as everywhere else; a lease file
+    that cannot be read counts as free, as _held() does, which costs this
+    report and nothing else.
     """
     if _held(root / f"{board.key}.lock"):
         return False
@@ -1741,7 +1743,11 @@ def acquire(
                         # it starts when the resource comes free.
                         given.pop(marker, None)
                     else:
-                        given[marker] = given.get(marker, 0.0) + _POLL_S
+                        # The rounds it has been free and queued, counted
+                        # as the time between them: the first one has
+                        # lasted no time yet, so this is what has elapsed,
+                        # not how often it has been looked at.
+                        given[marker] = given.get(marker, -_POLL_S) + _POLL_S
                         kept = queued_waits.get(marker)
                         # Made once the stretch is worth a line, then kept
                         # up to date, but no more often than that: reading
