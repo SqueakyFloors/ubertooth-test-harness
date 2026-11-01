@@ -47,6 +47,14 @@
   in the lab. See "Public text" in `.kiro/steering/branch-and-review.md`.
 - Keep `COVERAGE.md` current: a PR that adds or changes test coverage of a
   CLI option updates its rows in the same PR.
+- Coverage audits update `coverage/closed-pr-audit.jsonl` incrementally; never
+  re-audit from scratch. A pass assesses only the closed fork PRs absent from
+  the ledger, then re-evaluates the rows already classified `gap` or `partial`
+  against the harness as it now stands, leaving `covered`, `not-needed`, and
+  `closed-unmerged` rows alone. Read each PR at its merge commit, keep the file
+  sorted by repository then PR number, and set `audited_at` and
+  `audited_against_harness_commit` on every row you write. `docs/coverage-audit.md`
+  has the field meanings and the procedure.
 - Keep `docs/hardware.md` current: a PR that changes the bench hardware, any
   device's firmware, or a helper script under `scripts/lab/` updates it in the
   same PR. That covers a new or retired device type, a firmware version or
