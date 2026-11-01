@@ -117,7 +117,7 @@ resources:
   #
   # Both boards run one image that holds both roles, so both may declare
   # both: a case decides which one pages, and the one that pages is the
-  # piconet master whose LAP is on the air.
+  # piconet central whose LAP is on the air.
   ESP32_Linux0:
     type: ESP32 Classic peer
     attached to: Host_Linux

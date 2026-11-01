@@ -28,8 +28,8 @@ command it runs is the thing under test (``ubertooth-rx ...``), so its
 standard output is passed straight through; this module's own report goes on
 standard error, as ``key: value`` lines for the cases' patterns.
 
-The initiator pages, so it is the piconet master and its LAP is the one on
-the air. ``master LAP`` and ``master UAP`` name it, which is what
+The initiator pages, so it is the piconet central and its LAP is the one on
+the air. ``central LAP`` and ``central UAP`` name it, which is what
 ``ubertooth-rx -l`` and ``-u`` take.
 
 Every command fails closed: a port that cannot be opened, a board that does
@@ -69,7 +69,10 @@ from ubertooth_harness import targets  # noqa: E402
 # flashes a peer: a board carrying a later 1.x image, which has these
 # commands and more, must not fail a run. A different major version, or an
 # older one, does.
-MINIMUM_FIRMWARE = targets.PEER_FIRMWARE
+# The oldest image whose shell has every command this driver sends. It is
+# not targets.PEER_FIRMWARE, the version this tree builds: a firmware PR
+# bumps that, and boards on an older 1.x image must stay usable.
+MINIMUM_FIRMWARE = "utesp-1.0.0"
 BAUD = 115200
 ROLES = ("acceptor", "initiator")
 BOOT_ROLE = "acceptor"
@@ -556,9 +559,9 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
                         f"BD_ADDR {acceptor_status['address']}")
     _report(out, acceptor.label, acceptor_status)
     _report(out, initiator.label, initiator_status)
-    # The initiator pages, so it is the master and its LAP is on the air.
-    print(f"master LAP: {initiator_status['lap']}", file=out)
-    print(f"master UAP: {initiator_status['uap']}", file=out)
+    # The initiator pages, so it is the central and its LAP is on the air.
+    print(f"central LAP: {initiator_status['lap']}", file=out)
+    print(f"central UAP: {initiator_status['uap']}", file=out)
     print(f"stream: {payload} bytes every {period} ms", file=out)
     try:
         initiator_shell.command("role initiator")
@@ -624,7 +627,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     pair = sub.add_parser("stream")
     pair.add_argument("--acceptor", required=True, help="the listening board's bridge")
     pair.add_argument("--initiator", required=True,
-                      help="the paging board's bridge; it is the piconet master")
+                      help="the paging board's bridge; it is the piconet central")
     pair.add_argument("--acceptor-address", help="the acceptor's registered BD_ADDR")
     pair.add_argument("--initiator-address", help="the initiator's registered BD_ADDR")
     pair.add_argument("--period", type=int, default=DEFAULT_PERIOD_MS, help="ms")

@@ -874,7 +874,7 @@ on RTS leaves the board in the firmware's boot state, which is what every
 Classic case's cleanup does.
 
 One consequence is worth stating because it decides what a case can assert:
-in a Classic piconet the LAP on the air is the **master's**, and the master
+in a Classic piconet the LAP on the air is the **central's**, and the central
 is whichever board paged. The initiator pages, so the initiator's LAP and UAP
 are what `ubertooth-rx -l` and `-u` take, and exchanging the two role
 bindings moves the piconet to the other board's address.

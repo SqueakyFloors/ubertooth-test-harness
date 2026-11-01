@@ -23,13 +23,17 @@ from ubertooth_harness.manifest import SourceRevision
 from ubertooth_harness.report import load_events, render_run
 
 
+# libbtbb's default branch: that repository's name for it, not ours to
+# rename, and what a ref that is a branch name looks like here.
+LIBBTBB_BRANCH = "master"
+
 UBERTOOTH = SourceRevision(
     "Ubertooth", "/repos/ubertooth", "https://example.invalid/ubertooth.git",
     "main", "a" * 40, "aaaaaaa",
 )
 LIBBTBB = SourceRevision(
     "libbtbb", "/repos/libbtbb", "https://example.invalid/libbtbb.git",
-    "master", "b" * 40, "bbbbbbb",
+    LIBBTBB_BRANCH, "b" * 40, "bbbbbbb",
 )
 
 
