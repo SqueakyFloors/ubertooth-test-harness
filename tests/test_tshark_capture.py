@@ -148,6 +148,7 @@ class BudgetTests(unittest.TestCase):
         driver = (pytools.TOOL_TIMEOUT_S               # git show of the plugin
                   + tsharkcapture.VERSION_TIMEOUT_S    # tshark --version
                   + tsharkcapture.VERSION_TIMEOUT_S    # tshark -G folders
+                  + tsharkcapture.START_WAIT_S         # the plugin's listing
                   + tsharkcapture.START_WAIT_S         # tshark -D
                   + tsharkcapture.EXIT_WAIT_S          # past the window
                   + tsharkcapture.STOP_WAIT_S          # past the SIGTERM
@@ -240,6 +241,106 @@ class FixtureTests(unittest.TestCase):
                 code = fake_extcap.main(argv)
             self.assertEqual(0, code, argv)
             self.assertIn(expected, out.getvalue())
+
+
+class ListingTests(unittest.TestCase):
+    """What the plugin's own --extcap-interfaces answers (harness issue #237).
+
+    The plugin lists the boards it could open and exits 1 all the same when
+    another one could not, and tshark keeps nothing of a listing that failed.
+    These checks decide whether that is the bench or the plugin, and they run
+    with no tshark: each ends before tshark would be started.
+    """
+
+    def listing(self, held=(), **environment):
+        lines = []
+        environment.setdefault("FAKE_EXTCAP_SERIAL", SERIAL)
+        with mock.patch.dict(os.environ, environment):
+            code = tsharkcapture.capture(
+                INTERFACE, 3.0, ADDRESS, held=held,
+                program=tsharkcapture.Program(interpreter=sys.executable,
+                                              script=Path(FAKE).read_bytes()),
+                out=lines.append)
+        return code, "\n".join(lines)
+
+    def test_a_board_another_program_holds_is_a_skip_not_a_failure(self):
+        # The board under test was listed, so the listing is right and only
+        # the capture cannot be had on this host.
+        code, out = self.listing(FAKE_EXTCAP_BUSY="2")
+
+        self.assertEqual(pytools.SKIP_EXIT, code, out)
+        self.assertIn("SKIP: " + tsharkcapture.boards_in_use(2), out)
+        self.assertNotIn("FAIL:", out)
+        # Nothing was started, so no capture window was spent on it.
+        self.assertNotIn("tshark command:", out)
+
+    def test_the_board_under_test_going_missing_is_a_failure(self):
+        code, out = self.listing(FAKE_EXTCAP_SERIAL="0badc0de")
+
+        self.assertEqual(1, code, out)
+        self.assertIn(f"--extcap-interfaces does not list {INTERFACE}", out)
+        self.assertNotIn("tshark command:", out)
+
+    def test_a_held_board_that_is_not_listed_fails_even_on_a_busy_host(self):
+        # The run leases every registered board, so one of those missing from
+        # the listing is a regression and must not be skipped past.
+        held = "ubertoothc0ffee01"
+        code, out = self.listing(held=(held,), FAKE_EXTCAP_BUSY="1")
+
+        self.assertEqual(1, code, out)
+        self.assertIn(f"does not list {held}, which this run holds", out)
+
+    def test_a_listing_that_fails_for_another_reason_is_a_failure(self):
+        code, out = self.listing(FAKE_EXTCAP_LISTING_ERROR="libusb_init failed")
+
+        self.assertEqual(1, code, out)
+        self.assertIn("for something other than a board another program holds", out)
+
+    def test_a_second_failure_beside_a_busy_board_is_not_skipped_past(self):
+        # A diagnosis with no "error: " prefix, which is how libubertooth
+        # writes some of its failures, is still a second thing going wrong.
+        code, out = self.listing(FAKE_EXTCAP_BUSY="1",
+                                 FAKE_EXTCAP_LISTING_BARE="libusb_open failed (-3)")
+
+        self.assertEqual(1, code, out)
+        self.assertIn("for something other than a board another program holds", out)
+
+    def test_a_listing_that_fails_without_saying_why_is_a_failure(self):
+        code, out = self.listing(FAKE_EXTCAP_LISTING_STATUS="1")
+
+        self.assertEqual(1, code, out)
+        self.assertIn("exited 1 without saying why", out)
+
+    def test_a_busy_board_with_another_exit_status_is_a_failure(self):
+        # A partial listing exits 1. Exit 2 is the plugin's setup error, and a
+        # negative status is a signal: neither is this bench's contention,
+        # whatever else the listing reported.
+        code, out = self.listing(FAKE_EXTCAP_BUSY="1",
+                                 FAKE_EXTCAP_LISTING_STATUS="2")
+
+        self.assertEqual(1, code, out)
+        self.assertIn("exited 2, where a board another program holds gives 1", out)
+
+    def test_a_listing_that_reports_a_failure_and_exits_0_is_a_failure(self):
+        # The other half of the fork's rule: a partial listing exits 1. A 0
+        # here would let Wireshark take a listing that is missing a board.
+        code, out = self.listing(FAKE_EXTCAP_BUSY="1",
+                                 FAKE_EXTCAP_LISTING_STATUS="0")
+
+        self.assertEqual(1, code, out)
+        self.assertIn("exited 0 having reported 1 failure(s)", out)
+
+    def test_a_program_that_cannot_be_run_is_reported(self):
+        lines = []
+        failures = []
+        with mock.patch.object(tsharkcapture, "START_WAIT_S", 0.5):
+            in_use = tsharkcapture.check_listing(
+                Path("/nonexistent/btle-extcap"), dict(os.environ), (INTERFACE,),
+                failures, lines.append)
+
+        self.assertEqual(0, in_use)
+        self.assertTrue(any("did not answer within 0.5s" in failure
+                            for failure in failures), failures)
 
 
 @unittest.skipUnless(HAVE_TSHARK, "tshark is not installed")
@@ -396,15 +497,27 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(1, code, out)
         self.assertIn("tshark -D did not answer within 1s", out)
 
-    def test_an_interface_the_program_does_not_offer_is_reported(self):
-        lines = []
-        with mock.patch.dict(os.environ, {"FAKE_EXTCAP_SERIAL": "0badc0de"}):
-            code = tsharkcapture.capture(
-                INTERFACE, 3.0, ADDRESS,
-                program=tsharkcapture.Program(interpreter=sys.executable,
-                                              script=Path(FAKE).read_bytes()),
-                out=lines.append)
+    def test_tshark_not_listing_the_interface_is_still_reported(self):
+        # A board can be taken between the plugin's listing and tshark's own
+        # copy of the same call, and tshark then has no interface to capture
+        # on. The plugin's answer is stood in for here, because the two calls
+        # run the same program and cannot disagree in one run.
+        with mock.patch.object(tsharkcapture, "check_listing", return_value=0):
+            code, out = self.capture(seconds=3.0,
+                                     environment={"FAKE_EXTCAP_SERIAL": "0badc0de"})
 
-        out = "\n".join(lines)
         self.assertEqual(1, code, out)
         self.assertIn(f"tshark -D does not list {INTERFACE}", out)
+
+    def test_every_other_board_on_the_host_is_listed_and_the_capture_runs(self):
+        # A host with three boards, all openable: the listing exits 0 and the
+        # capture goes ahead as on a host with one.
+        others = ("ubertoothc0ffee01", "ubertoothc0ffee02")
+        code, out = self.capture(
+            held=others,
+            environment={"FAKE_EXTCAP_SERIAL": ",".join(
+                [SERIAL] + [name.removeprefix("ubertooth") for name in others])})
+
+        self.assertEqual(0, code, out)
+        self.assertIn("the listing offered 3 interface(s), exit 0", out)
+        self.assertIn("tshark checks passed", out)

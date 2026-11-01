@@ -1181,11 +1181,26 @@ a host without it runs none of them (not applicable, named in `--dry-run`)
 rather than flashing the DK to find out; the version that read the records is
 recorded in the run manifest.
 
+**A host with more than one board.** The plugin lists the boards it could open
+and still exits 1 when another one could not, and Wireshark and tshark throw
+away the output of a listing call that failed. So one Ubertooth held by
+something outside the run leaves tshark with no interface to capture on, and
+the harness cannot stop a program it does not control from opening a board it
+does not hold. Each case therefore asks the plugin for the listing itself,
+before tshark's own copy of the same call, and is given every board the run
+holds: each of them must be named in the listing, and the exit status must
+match what the listing reported. A listing regression fails there on any host,
+busy or not. Only when that check passes and the boards another program holds
+are ones this run never had does the case skip, saying how many they were; the
+run leases the board under test and every other registered board on the host,
+so a board it does hold and cannot open is a failure, not a skip.
+
 **Expected outcome.** Smoke runs 2 cases: the DK is confirmed to run the
-pinned firmware at its registered address, then `tshark -i ubertooth<serial>`
-captures for the duration and at least one row carries the DK's address as an
-ADV_NONCONN_IND, with tshark exiting 0 and no process left behind.
-Comprehensive runs 4, adding a capture filter, which Wireshark passes on as
+pinned firmware at its registered address, then the plugin's listing names
+every board the run holds and `tshark -i ubertooth<serial>` captures for the
+duration, with at least one row carrying the DK's address as an
+ADV_NONCONN_IND, tshark exiting 0 and no process left behind. Comprehensive
+runs 4, adding a capture filter, which Wireshark passes on as
 `--extcap-capture-filter` and the plugin cannot apply: its warning must reach
 tshark (which relays what the plugin wrote) and the capture must run anyway;
 and a capture stopped with SIGINT halfway, which must exit 0 with the rows
