@@ -426,7 +426,7 @@ class AudioTests(unittest.TestCase):
         # The counters count from when the link came up, so what is reported
         # is the difference across the command: two reads of each board
         # inside the window, at 50 frames a read in the fake.
-        self.assertIn("initiator audio frames while the command ran: sent 100 "
+        self.assertIn("initiator audio frames while the command ran: took 100 "
                       "refused 2 received 96 damaged 6", report)
         # No two of the fake's counters are equal, so this pins each field to
         # its own label rather than agreeing with a transposition.
@@ -621,7 +621,7 @@ class AudioTests(unittest.TestCase):
         ):
             esp32peer.audio(acceptor, initiator, TRUE, out=report, settle_s=0.0)
         written = report.getvalue()
-        self.assertIn("initiator audio frames while the command ran: sent 50",
+        self.assertIn("initiator audio frames while the command ran: took 50",
                       written)
         self.assertIn("initiator audio packets: not counted", written)
         self.assertIn("no audio link to count packets on", written)
@@ -823,7 +823,7 @@ class AudioTests(unittest.TestCase):
             esp32peer.audio(acceptor_peer, initiator_peer, TRUE, out=report,
                             settle_s=0.0, min_frames=10)
         # The counters the run exists to produce are reported even so.
-        self.assertIn("initiator audio frames while the command ran: sent 100",
+        self.assertIn("initiator audio frames while the command ran: took 100",
                       report.getvalue())
 
     def test_counters_that_time_out_are_not_passed_off_as_not_counted(self):

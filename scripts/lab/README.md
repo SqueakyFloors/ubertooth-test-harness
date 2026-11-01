@@ -154,9 +154,10 @@ from the types the board allowed and the length the link uses.
 
 ### What it reports, and what the floors mean
 
-First the link: the type, the packet length, the interval in slots and
-milliseconds, the retransmission window, and the packet types each
-controller supports. Then, **counted across the command rather than since the
+First the two boards and the packet types their controllers support, before
+anything is started. Then the link, once it is up: the type, the packet
+length, the interval in slots and milliseconds, and the retransmission
+window. Then, after the command, **counted across it rather than since the
 link came up**, each board's own frame counters and its controller's packet
 counters.
 
@@ -170,10 +171,14 @@ so allow a second or two of traffic either side, not milliseconds.
 `--min-frames` and `--min-packets` are the floors those differences must
 reach, on both boards, so a link that fell silent part way through does not
 pass on what it carried at first. Set them from the rate the link reports,
-not to the last packet. The controller's packet count is the number to hold a
-capture against, bearing in mind that a receiver reads a fraction of what the
-air carries: the bench's EV3 measurement is 18800 packets at the controller
-against 2891 read from the air.
+not to the last packet. An EV3 link on the bench runs at about 268 packets a
+second each way, so a 30-second capture window is a floor in the thousands,
+not the tens of thousands a longer link totals.
+
+The controller's packet count is the number to hold a capture against,
+bearing in mind that a receiver reads a fraction of what the air carries: the
+bench's 70-second EV3 link gave 18800 packets at the controller against 2891
+read from the air.
 
 `--min-seconds` and `--timeout` work as they do for `stream`.
 
@@ -200,7 +205,10 @@ An EV3 link is the busiest traffic this pair can make: half the payload per
 packet, half the interval, so about twice the packet rate of the 2-EV3 the
 stack picks by itself. The audio pattern itself is not readable from a
 capture, because the controller codes the samples to CVSD before they reach
-the air; what a capture gets is the link's packet types, timing, and count
+the air — the session reports the codec the link settled on, and this
+firmware's build offers nothing but CVSD, so a board reporting another one is
+not the image these notes describe. What a capture gets is the link's packet
+types, timing, and count
 ([`firmware/esp32-classic-peer/README.md`](../../firmware/esp32-classic-peer/README.md),
 "The audio link").
 

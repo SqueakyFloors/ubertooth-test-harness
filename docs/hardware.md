@@ -671,7 +671,7 @@ plan.
 
 ### Reading a Classic capture of the peer pair
 
-Two protocol facts that look like harness or tool faults and are not:
+Three protocol facts that look like harness or tool faults and are not:
 
 - **The LAP on the air is the initiator's**, because it pages and the piconet
   takes its address and clock from it. `-l <the acceptor's LAP>` sees nothing

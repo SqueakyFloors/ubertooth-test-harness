@@ -49,7 +49,10 @@ Every command fails closed: a port that cannot be opened, a board that does
 not answer, an ``ERR`` reply, firmware of another version, an address that is
 not the registered one, a link that did not come up or did not stay up, a
 link of a packet type other than the one asked for, or a pair that sent
-nothing prints ``error: <why>`` on stderr and exits 1. Exit status 2 is a
+nothing prints ``error: <why>`` on stderr and exits 1. ``audio`` also fails
+when a board cannot be put back in its boot state, because the next session
+would find its audio profile running; ``stream``, whose cases already rely on
+what it passes and fails on, reports that instead. Exit status 2 is a
 usage error. Otherwise ``stream`` and ``audio`` exit with the status of the
 command they ran.
 """
@@ -131,6 +134,8 @@ SCO_UP = "on"
 ESCO = "esco"
 # The notice a board sends the moment an audio link goes down.
 SCO_DISCONNECTED = "sco disconnected"
+# What a board reports when it cannot work out what its link is carrying.
+UNKNOWN_TYPE = "unknown"
 # One Bluetooth slot, which is what sco_interval and sco_retrans_window count.
 SLOT_US = 625
 
@@ -632,7 +637,9 @@ def _report_audio_traffic(out, label: str, before: "_Counts",
     packets are its controller's, which is the number a capture of the air is
     compared with.
     """
-    print(f"{label} audio frames while the command ran: sent "
+    # "took", not "sent": the firmware counts the frames its stack accepted,
+    # and whether they reached the air is the controller's count below.
+    print(f"{label} audio frames while the command ran: took "
           f"{_grew(before, after, 'sco_tx_frames')} refused "
           f"{_grew(before, after, 'sco_tx_errors')} received "
           f"{_grew(before, after, 'sco_rx_frames')} damaged "
@@ -894,8 +901,14 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         after_initiator = initiator_shell.status()
         after_acceptor = acceptor_shell.status()
     finally:
-        _release(initiator_shell, initiator.label, out)
-        _release(acceptor_shell, acceptor.label, out)
+        # The second board is released whatever happens to the first. Unlike
+        # an audio session, a board left behind is reported here and does not
+        # fail the run: what a stream passes and fails on is already in use
+        # by the cases.
+        try:
+            _release(initiator_shell, initiator.label, out)
+        finally:
+            _release(acceptor_shell, acceptor.label, out)
     _report_traffic(out, initiator.label, after_initiator)
     _report_traffic(out, acceptor.label, after_acceptor)
     problems = []
@@ -1245,6 +1258,14 @@ def _check_link(linked: dict, far: dict, acceptor_label: str,
             raise PeerError(
                 f"the {label} reports a {status['sco_link']} link, not {ESCO}: "
                 f"this session carries voice over an {ESCO} link")
+        if status["sco_pkt_type"] == UNKNOWN_TYPE or status["sco_tx_len"] == 0:
+            # The board could not work out what the link is carrying, which
+            # is all a `default` run has to go on. Reporting `unknown` and a
+            # zero packet length as a pass would prove nothing.
+            raise PeerError(
+                f"the {label} cannot say what its audio link carries "
+                f"(packet type {status['sco_pkt_type']}, "
+                f"{status['sco_tx_len']} bytes a packet)")
         on_link = SCO_TYPE_ON_LINK.get(sco_type)
         if on_link is not None and status["sco_pkt_type"] != on_link:
             # A type both boards were told to ask for, and only that type, so

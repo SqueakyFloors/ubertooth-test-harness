@@ -200,7 +200,10 @@ class FakePeerFirmware:
         Each of these advances at its own rate, so no two of them are equal
         and neither are any two of their differences: a driver that reads or
         reports one field as another is caught rather than agreeing with
-        itself. The firmware's own measured sample is uneven in the same way.
+        itself. A real controller's categories add up (its measured sample
+        has received good plus received missing equal to received total);
+        these deliberately do not, which is stricter here and matters
+        nowhere, because nothing in the driver adds them.
         """
         return dict(self.packets)
 
