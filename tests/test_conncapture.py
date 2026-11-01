@@ -87,9 +87,17 @@ def _block(block_type, body):
     return struct.pack("<II", block_type, length) + body + struct.pack("<I", length)
 
 
+def connect_inds(records):
+    """Every CONNECT_IND in the records, as check() reads them: only the
+    packets whose CRC is right, so a corrupted one cannot pass for the
+    connection the harness asked for."""
+    return [conncapture.ConnectInd.parse(body[6:6 + 34])
+            for body in conncapture.connect_ind_bodies(records)]
+
+
 class ConnectIndTests(unittest.TestCase):
     def test_fields_are_read_from_the_pdu(self):
-        found = conncapture.connect_inds([connect_ind()])
+        found = connect_inds([connect_ind()])
         self.assertEqual(1, len(found))
         self.assertEqual(
             (CENTRAL, PERIPHERAL, ACCESS, CRC_INIT, INTERVAL_UNITS, 0, TIMEOUT_UNITS,
@@ -101,13 +109,13 @@ class ConnectIndTests(unittest.TestCase):
         )
 
     def test_other_packets_are_not_connect_inds(self):
-        self.assertEqual([], conncapture.connect_inds([data_packet()]))
-        self.assertEqual([], conncapture.connect_inds([b"short"]))
+        self.assertEqual([], connect_inds([data_packet()]))
+        self.assertEqual([], connect_inds([b"short"]))
 
     def test_a_corrupted_connect_ind_is_not_read(self):
         # Its parameters are what the checks compare, so a flipped bit in
         # them must not pass for the connection that was asked for.
-        self.assertEqual([], conncapture.connect_inds([connect_ind(corrupt=True)]))
+        self.assertEqual([], connect_inds([connect_ind(corrupt=True)]))
 
 
 class CheckTests(unittest.TestCase):

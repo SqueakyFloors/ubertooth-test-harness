@@ -813,7 +813,7 @@ class NamedTestSequencer:
                     # running it again cannot help and a later attempt
                     # would hide it.
                     if (window is not None and index == window[1] - 1
-                            and attempt < case.attempts and not canceled
+                            and ran and attempt < case.attempts and not canceled
                             and not token.is_cancelled()):
                         attempt += 1
                         context[ATTEMPT_KEY] = str(attempt)

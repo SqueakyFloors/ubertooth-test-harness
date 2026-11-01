@@ -168,17 +168,6 @@ def connect_ind_bodies(records, central: str | None = None,
     return bodies
 
 
-def connect_inds(records) -> list[ConnectInd]:
-    """Every CONNECT_IND in the records, in capture order.
-
-    Only packets whose CRC is right, so a corrupted one cannot pass for the
-    connection the harness asked for: its parameters are exactly what the
-    checks compare, and a flipped bit in them must not look like a pass.
-    """
-    return [ConnectInd.parse(body[6:6 + CONNECT_IND_LEN])
-            for body in connect_ind_bodies(records)]
-
-
 def data_packets(records, access_address: int, crc_init: int) -> list[tuple[int, bool]]:
     """(payload length, CRC is right) of each packet on this access address.
 
@@ -232,13 +221,14 @@ def connection_info_options(data: bytes) -> list[bytes]:
                 code, option_length = struct.unpack("<HH", body[at:at + 4])
                 if code == 0:  # end of options
                     break
+                end = at + 4 + 4 * ((option_length + 3) // 4)
+                if end > len(body):
+                    break  # the option claims more than the block holds
                 start = at + 4 + CONNECTION_INFO_NS_LEN
-                pdu = body[start:start + CONNECT_IND_LEN]
                 if (code == CONNECTION_INFO_OPTION
-                        and len(pdu) == CONNECT_IND_LEN
                         and option_length >= CONNECTION_INFO_NS_LEN + CONNECT_IND_LEN):
-                    found.append(bytes(pdu))
-                at += 4 + 4 * ((option_length + 3) // 4)
+                    found.append(bytes(body[start:start + CONNECT_IND_LEN]))
+                at = end
         offset += length
     return found
 
