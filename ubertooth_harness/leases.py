@@ -997,11 +997,21 @@ def waiting_resources(ticket: Mapping, board: Board) -> list[Board]:
 
 
 def _printable(value, limit: int = 60) -> str:
-    """A string from another command's file, safe to put in one line of output."""
+    """A string from another command's file, safe to put in one line of output.
+
+    The limit is characters and bytes alike: a record of such a string goes
+    into a run record, whose limit is in bytes, and one printable character
+    can be four of them.
+    """
     text = "".join(
         character if character.isprintable() else " " for character in str(value or "")
     ).strip()
-    return text[:limit - 3] + "..." if len(text) > limit else text
+    if len(text) > limit:
+        text = text[:limit - 3] + "..."
+    if len(text.encode()) > limit:
+        # On a character boundary: a half-written character is not text.
+        text = text.encode()[:limit - 3].decode(errors="ignore") + "..."
+    return text
 
 
 def _blocking(root: Path, ticket: Mapping, board: Board):
@@ -1165,17 +1175,29 @@ def queued_record(
         # A ticket of an earlier harness records no deadline; the message
         # then says so rather than making one up. So does a record whose
         # deadline is not a number of seconds (JSON carries infinities).
-        "wait_s": (
-            float(wait_s)
-            if _plain_number(wait_s) and not isinstance(wait_s, bool)
-            else None
-        ),
+        "wait_s": _seconds_or_none(wait_s),
         "blocked_by": [dict(item) for item in blocking[:_MAX_QUEUED_SET]],
         # How long the command making this record has given way here,
         # counted in poll rounds like every other stretch in acquire(). A
         # listing gives way to nobody, so it leaves this at zero.
         "gave_way_s": round(gave_way_s, 2),
     })
+
+
+def _seconds_or_none(value) -> float | None:
+    """A number of seconds from another command's file, or None.
+
+    None for anything that is not one, including a bool, an infinity, and
+    an integer literal too large to be a float at all: JSON has no bound on
+    one, and a record of it must not raise where it is only being carried.
+    """
+    if isinstance(value, bool) or not _plain_number(value):
+        return None
+    try:
+        seconds = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return seconds if math.isfinite(seconds) else None
 
 
 def _fit_queued_record(record: dict) -> dict:
@@ -1186,15 +1208,17 @@ def _fit_queued_record(record: dict) -> dict:
     ticket and from the lock files it is waiting for, and the line is
     carried with the record. So the entries are dropped from the end, the
     resources in the way first, until the whole thing fits, and what went
-    is counted like any other entry left out. A record whose one entry each
-    is still too big would fail a run rather than shrink, which is why the
-    per-field bounds are what they are.
+    is counted like any other entry left out. Every entry may go: a line
+    that says only that a resource somebody holds is in the way is worth
+    more than a record that fails the run it belongs to. What is left is
+    bounded by the per-field bounds, in bytes as well as characters
+    (_printable), so it fits whatever the files it came from hold.
     """
     while _queued_bytes(record) > _MAX_QUEUED_BYTES:
-        if len(record["blocked_by"]) > 1:
+        if record["blocked_by"]:
             record["blocked_by"].pop()
             record["blocked_by_more"] += 1
-        elif len(record["waiting_for"]) > 1:
+        elif record["waiting_for"]:
             record["waiting_for"].pop()
             record["waiting_for_more"] += 1
         else:

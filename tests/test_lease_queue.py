@@ -1116,6 +1116,26 @@ class QueuedReportTests(QueueFixture):
         self.assertEqual(details, events._validated_details(details))
         self.assertLessEqual(leases._queued_bytes(record), leases._MAX_QUEUED_BYTES)
 
+    def test_a_record_fits_whatever_those_files_hold(self):
+        # The bounds are in bytes as well as characters: one printable
+        # character can be four bytes, and a record goes into a run record
+        # whose limit is in bytes.
+        wide = "\U0001f600" * 500  # four bytes each
+        crowded = self.live_holder(
+            purpose=wide, user=wide, hostname=wide,
+            waiting_for=[{"key": f"{number:032x}", "resource": wide}
+                         for number in range(leases._MAX_WAITING_FOR)],
+            wait_s=600.0,
+        )
+        record = leases.queued_record(
+            A, self.waited(300), crowded,
+            [leases._blocking_entry(
+                leases.Board(wide, f"{number:032x}"), "foreign", wide, crowded)
+             for number in range(leases._MAX_WAITING_FOR)],
+        )
+        details = dict(record, message=leases.describe_queued_resource(record, past=True))
+        self.assertEqual(details, events._validated_details(details))
+
     def test_a_record_carries_no_number_json_cannot_write(self):
         # json.loads accepts NaN and the infinities, so a lock file can
         # hold one; writing it back out would be JSON only Python reads.
@@ -1175,7 +1195,8 @@ class QueuedReportTests(QueueFixture):
 
     def test_a_deadline_that_is_not_a_number_of_seconds_says_nothing(self):
         # JSON carries infinities, and a ticket is another command's file.
-        for value in (float("inf"), float("-inf"), float("nan"), True, "soon", None):
+        for value in (float("inf"), float("-inf"), float("nan"), True, "soon", None,
+                      int("1" + "0" * 400)):  # larger than any float
             with self.subTest(wait_s=value):
                 record = leases.queued_record(
                     A, self.waited(60), self.wanting(A, B, wait_s=value), [])
