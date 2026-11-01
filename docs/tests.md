@@ -1285,12 +1285,17 @@ DK firmware, so the run holds the host lock.
 **Expected outcome.** Smoke runs 2 cases: both DKs confirmed on the pinned
 firmware at their registered addresses, and `ubertooth-btle -f -r` holding the
 pair's CONNECT_IND and long packets. Comprehensive runs 4, adding the same
-into PCAP and one case that pins a known libbtbb defect. A capture case passes
+into PCAP and one that reads the connection information recorded in the
+PCAPNG. A capture case passes
 when the CONNECT_IND carries the parameters asked for, at least five packets
 appear on the connection's access address with at least one decoding with a
 correct CRC, at least one packet is longer than 27 bytes, and the central
 reports that it connected, wrote, and had its update accepted at the interval
-it was told to ask for.
+it was told to ask for. The connection-information case also requires that
+one of the options libbtbb recorded in the PCAPNG is a CONNECT_IND between
+the two addresses and carries the interval, latency, and supervision timeout
+that went over the air, which are the parameters a reader takes from the file
+to follow the connection in it.
 
 A capture that does not hold all of that is taken again, up to three captures
 in all, because the pair keeps making and remaking the link and another
@@ -1309,13 +1314,11 @@ spanning several reconnections has been seen to die partway through
 ([ubertooth#505](https://github.com/SqueakyFloors/ubertooth/issues/505)),
 which is why the duration is bounded; whether the end of the followed
 connection triggers it is not established. The PCAPNG connection-information
-option libbtbb writes for a CONNECT_IND is copied 6 bytes early
-([libbtbb#21](https://github.com/SqueakyFloors/libbtbb/issues/21)); one
-comprehensive case pins that, so it fails when libbtbb is fixed and the case
-can become a real check. That comparison is made only against a CONNECT_IND
-whose connection the capture went on to decode: in a capture holding nothing
-of the connection, 34 bytes can match a CONNECT_IND's by chance, and that
-would be read as libbtbb having been fixed.
+option libbtbb records for a CONNECT_IND used to be copied 6 bytes early
+([libbtbb#21](https://github.com/SqueakyFloors/libbtbb/issues/21), fixed);
+one comprehensive case now checks it for real, and it reads every option in
+the file rather than the first, because libbtbb records one for every
+CONNECT_IND it decodes and another device in range gets one too.
 
 ## Capture known Classic device
 

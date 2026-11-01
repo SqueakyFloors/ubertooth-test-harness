@@ -102,7 +102,7 @@ class CaseTests(unittest.TestCase):
             [case.case_id for case in known_connection_cases(arguments(), {}, IDENTITIES)])
         self.assertEqual(
             ["pair-ready", "follow-pcapng", "follow-pcap",
-             "pcapng-connection-option-libbtbb-21"],
+             "pcapng-connection-option"],
             [case.case_id for case in known_connection_cases(
                 arguments("comprehensive"), {}, IDENTITIES)])
 
@@ -177,14 +177,14 @@ class CaseTests(unittest.TestCase):
         for name in ("Capture known BLE advertiser", "Capture known BLE connection"):
             self.assertTrue(catalog.get(name).writes_firmware, name)
 
-    def test_the_libbtbb_case_asks_for_the_option_check(self):
+    def test_the_connection_option_case_asks_for_that_check(self):
         cases = {case.case_id: case for case in known_connection_cases(
             arguments("comprehensive"), {}, IDENTITIES)}
-        case = cases["pcapng-connection-option-libbtbb-21"]
+        case = cases["pcapng-connection-option"]
         steps = {step.step_id: step for step in case.steps}
         argv = steps["check-capture"].resolve_argv({CAPTURE_DIR_KEY: "/c"})
-        self.assertEqual("--connection-info-option", argv[-1])
-        self.assertIn("libbtbb#21", case.name)
+        self.assertEqual("--check-connection-info", argv[-1])
+        self.assertIn("connection information", case.name)
 
     def test_each_capture_case_takes_the_capture_again(self):
         cases = known_connection_cases(arguments("comprehensive"), {}, IDENTITIES)

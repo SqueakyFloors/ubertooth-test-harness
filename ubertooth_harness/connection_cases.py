@@ -26,10 +26,10 @@ How much of a followed connection arrives intact varies from capture to
 capture, so a capture case that misses it takes another capture, up to
 CAPTURE_ATTEMPTS in all, and the run records which attempt passed.
 
-The pcapng connection-information option libbtbb writes for a CONNECT_IND is
-known to be wrong (SqueakyFloors/libbtbb#21: it is copied 6 bytes early, so
-every parameter in it belongs to another field). One case pins that, so it
-fails when libbtbb is fixed and the case can be turned into a real check.
+One case checks the pcapng connection-information option libbtbb records
+for a CONNECT_IND: the parameters a reader takes from the file to follow the
+connection in it. Until SqueakyFloors/libbtbb#21 was fixed they were copied
+6 bytes early, so every one of them belonged to another field.
 
 Every case's cleanup leaves both DKs idle in the advertiser role with their
 boot settings, and restores the Ubertooth's channel, squelch, and LEDs.
@@ -244,7 +244,7 @@ def _central_did_the_work(update_ms: int):
 
 def _capture_case(serial, central, peripheral, seconds, *, case_id, name,
                   interval_ms, update_ms, capture=("-r", "capture.pcapng"),
-                  option_check=False):
+                  connection_info=False):
     """One followed connection: the pair runs, ubertooth-btle -f captures it."""
     option, file_name = capture
     interval_units = nrfdk.conn_units(interval_ms)
@@ -262,8 +262,8 @@ def _capture_case(serial, central, peripheral, seconds, *, case_id, name,
                 "--min-valid-packets", str(MIN_VALID_PACKETS),
                 "--min-data-length", str(LONG_PACKET_BYTES),
                 "--long-packets", str(MIN_LONG_PACKETS)]
-        if option_check:
-            argv.append("--connection-info-option")
+        if connection_info:
+            argv.append("--check-connection-info")
         return argv
 
     steps = (
@@ -339,8 +339,8 @@ def known_connection_cases(arguments, resources, resource_identities):
             capture=("-q", "capture.pcap")))
         cases.append(_capture_case(
             serial, central, peripheral, seconds,
-            case_id="pcapng-connection-option-libbtbb-21",
-            name="PCAPNG connection information is still copied 6 bytes early "
-                 "(expected failure, libbtbb#21)",
-            interval_ms=interval, update_ms=update, option_check=True))
+            case_id="pcapng-connection-option",
+            name="PCAPNG connection information holds the pair's CONNECT_IND "
+                 "and its parameters",
+            interval_ms=interval, update_ms=update, connection_info=True))
     return tuple(cases)

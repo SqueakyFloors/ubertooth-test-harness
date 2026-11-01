@@ -6,7 +6,7 @@ Run as a script by the Capture known BLE connection cases::
         --interval-units N --latency N --timeout-units N
         [--min-data-packets N --min-valid-packets N
          --min-data-length N --long-packets N]
-        [--connection-info-option]
+        [--check-connection-info]
 
 FILE is PCAP or PCAPNG as ``ubertooth-btle -q`` and ``-r`` write it; the
 records are read by advcapture.py.
@@ -28,17 +28,15 @@ The checks:
 - at least ``--long-packets`` of those data packets at least
   ``--min-data-length`` bytes long, which is what Data Length Extension is
   for: without it the link layer would cap the payload at 27 bytes;
-- with ``--connection-info-option``, that libbtbb recorded a connection
-  information option in the PCAPNG and that it is still not the
-  CONNECT_IND's own bytes (SqueakyFloors/libbtbb#21 copies them 6 bytes
-  early; on the bench they are neither the PDU nor that shift, so the check
-  pins what can be seen rather than the exact wrong layout). That is the
-  opposite of a wish: it fails, and can become a real check, once libbtbb
-  records the right bytes -- and it also fails if the option disappears.
-  The comparison is made against a CONNECT_IND whose connection the capture
-  went on to decode; a capture that holds nothing of the connection is
-  reported as such instead, because 34 bytes compared against a CONNECT_IND
-  the capture did not follow can match by chance (#149).
+- with ``--check-connection-info``, that libbtbb recorded a connection
+  information option in the PCAPNG for this pair's CONNECT_IND, and that
+  reading it as a CONNECT_IND gives the two addresses and the parameters
+  that went over the air. Those are the parameters a reader takes from the
+  file to follow the connection in it, and until libbtbb#21 was fixed they
+  were copied 6 bytes early, so every one of them belonged to another
+  field. libbtbb records one option per CONNECT_IND it decodes, so a
+  capture with other devices in range holds theirs as well: the option this
+  checks is the one carrying our pair's addresses, not the first recorded.
 
 Only the two DKs' own addresses and counts are printed, never another
 device's address or data. Each failure is a ``FAIL:`` line and exit status
@@ -208,55 +206,64 @@ def data_packets(records, access_address: int, crc_init: int) -> list[tuple[int,
 ABSENT = "absent"
 CORRECT = "the CONNECT_IND's own bytes"
 SHIFTED = "shifted by 6 bytes (libbtbb#21)"
-# No CONNECT_IND of this pair whose connection the capture went on to
-# decode, so there is nothing to compare the recorded option against.
-UNJUDGED = "not compared: the capture decoded none of the connection"
+# Options were recorded, but none of them is this pair's CONNECT_IND: every
+# CONNECT_IND the capture decoded gets one, including other devices'.
+ANOTHER = "another device's CONNECT_IND, not this pair's"
 
 
-def connection_info_option(data: bytes) -> bytes | None:
-    """The 34 PDU bytes libbtbb records in the PCAPNG's interface option.
+def connection_info_options(data: bytes) -> list[bytes]:
+    """The 34 PDU bytes of each connection information option in the PCAPNG.
 
-    None when the file is not PCAPNG or carries no such option. The option's
-    own length field is not trusted: libbtbb sets it to the whole option's
-    size including the header, so the payload is read by position.
+    libbtbb records one for every CONNECT_IND it decodes, which in a capture
+    with other devices in range includes theirs, so there may be several and
+    the pair's own may be any of them. Empty when the file is not PCAPNG or
+    carries no such option. Each option's payload is read by position (8
+    bytes of timestamp, then the PDU); its length field only says where the
+    next option starts.
     """
+    found = []
     if len(data) < 12 or struct.unpack("<I", data[:4])[0] != _PCAPNG_SHB:
-        return None
+        return found
     offset = 0
     while offset + 12 <= len(data):
         block_type, length = struct.unpack("<II", data[offset:offset + 8])
         if length < 12 or length % 4 or offset + length > len(data):
-            return None
+            return found
         if block_type == _PCAPNG_IDB:
             body = data[offset + 8:offset + length - 4]
             at = _PCAPNG_IDB_HEADER - 8  # options start after the fixed fields
             while at + 4 <= len(body):
                 code, option_length = struct.unpack("<HH", body[at:at + 4])
+                if code == 0:  # end of options
+                    break
                 if code == CONNECTION_INFO_OPTION:
                     start = at + 4 + CONNECTION_INFO_NS_LEN
                     pdu = body[start:start + CONNECT_IND_LEN]
-                    return bytes(pdu) if len(pdu) == CONNECT_IND_LEN else None
-                if code == 0:  # end of options
-                    break
+                    if len(pdu) == CONNECT_IND_LEN:
+                        found.append(bytes(pdu))
                 at += 4 + 4 * ((option_length + 3) // 4)
         offset += length
-    return None
+    return found
 
 
-def classify_connection_info(option: bytes | None, connect_ind_body: bytes) -> str:
-    """How libbtbb's recorded option relates to the CONNECT_IND on the air.
+def classify_connection_info(options, connect_ind_bodies) -> str:
+    """How libbtbb's recorded options relate to the pair's CONNECT_INDs.
 
-    ``connect_ind_body`` is the packet from its access address on, as the
-    capture record holds it: access address (4), PDU header (2), then the 34
-    bytes of LLData the option is meant to carry.
+    Each body is a packet from its access address on, as the capture record
+    holds it: access address (4), PDU header (2), then the 34 bytes of
+    LLData the option carries.
     """
-    if option is None:
+    options = list(options)
+    if not options:
         return ABSENT
-    if option == connect_ind_body[6:6 + CONNECT_IND_LEN]:
+    bodies = list(connect_ind_bodies)
+    if any(option == body[6:6 + CONNECT_IND_LEN]
+           for option in options for body in bodies):
         return CORRECT
-    if option == connect_ind_body[0:CONNECT_IND_LEN]:
+    if any(option == body[0:CONNECT_IND_LEN]
+           for option in options for body in bodies):
         return SHIFTED
-    return "neither the PDU nor the 6-byte shift"
+    return ANOTHER
 
 
 @dataclass
@@ -269,6 +276,7 @@ class Result:
     longest: int = 0
     connection: ConnectInd | None = None
     connection_info: str = "not looked for"
+    connection_info_options: int = 0
     problems: list = field(default_factory=list)
 
 
@@ -277,7 +285,7 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
           min_valid_packets: int = 0,
           min_data_length: int = DEFAULT_DATA_LENGTH + 1,
           long_packets: int = 0,
-          connection_info_wrong: bool = False) -> tuple[str, Result]:
+          check_connection_info: bool = False) -> tuple[str, Result]:
     result = Result()
     try:
         file_format, link_type, records = read_records(data)
@@ -321,17 +329,9 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
                   f"every data channel ({ALL_DATA_CHANNELS:#011x})"] = True
     result.problems.extend(wrong)
     packets = []
-    # The CONNECT_INDs whose connection the capture went on to decode: at
-    # least one packet on the access address that CONNECT_IND handed out,
-    # with the CRC its CRC init gives. That is what makes a comparison with
-    # libbtbb's recorded option mean something.
-    followed = []
-    for connection, body in zip(ours, our_bodies):
-        found = data_packets(records, connection.access_address,
-                             connection.crc_init)
-        packets += found
-        if any(crc_ok for _length, crc_ok in found):
-            followed.append(body)
+    for connection in ours:
+        packets += data_packets(records, connection.access_address,
+                                connection.crc_init)
     valid = [length for length, crc_ok in packets if crc_ok]
     result.data_packets = len(packets)
     result.valid_packets = len(valid)
@@ -349,33 +349,37 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
         result.problems.append(
             f"{result.long_packets} packet(s) of {min_data_length} bytes or more, "
             f"fewer than {long_packets} (longest {result.longest})")
-    if followed:
-        result.connection_info = classify_connection_info(
-            connection_info_option(data), followed[0])
-    else:
-        result.connection_info = UNJUDGED
-    if connection_info_wrong:
-        # The case exists to catch the fix: once libbtbb records the right
-        # bytes, this is where someone turns it into a real check. An option
-        # that is missing altogether is a separate regression, so it fails
-        # here too rather than passing as "still wrong".
-        if result.connection_info == UNJUDGED:
-            # A thin capture must not be read either way: with nothing of
-            # the connection decoded, 34 bytes that happen to match a
-            # CONNECT_IND's would say "libbtbb#21 is fixed" at random (#149).
+    options = connection_info_options(data)
+    result.connection_info = classify_connection_info(options, our_bodies)
+    if check_connection_info:
+        # The option carries the same 34 bytes as the packet, so reading it
+        # as a CONNECT_IND compares the parameters a reader takes from the
+        # file with the ones that went over the air. A pair of addresses
+        # that is not ours means the option belongs to another device's
+        # connection, or holds the wrong bytes.
+        recorded = [ConnectInd.parse(option) for option in options]
+        result.connection_info_options = len(recorded)
+        ours_recorded = [found for found in recorded
+                         if found.initiator == central
+                         and found.advertiser == peripheral]
+        if not recorded:
             result.problems.append(
-                "none of the connection the CONNECT_IND set up was decoded, so "
-                "libbtbb's recorded option cannot be compared with it")
-        elif result.connection_info == CORRECT:
+                "the PCAPNG carries no connection information option, so a "
+                "reader cannot follow the connections in it")
+        elif not ours_recorded:
             result.problems.append(
-                "the PCAPNG connection information option now holds the "
-                "CONNECT_IND's own bytes, so libbtbb#21 is fixed: check the "
-                "parameters here instead of pinning the bug")
-        elif result.connection_info == ABSENT:
-            result.problems.append(
-                "the PCAPNG carries no connection information option at all; "
-                "libbtbb#21 is about its contents being wrong, not about it "
-                "being missing")
+                f"none of the {len(recorded)} recorded connection information "
+                f"option(s) is a CONNECT_IND from {central} to {peripheral}")
+        else:
+            for name, found, expected in (
+                ("connection interval", ours_recorded[0].interval, interval_units),
+                ("peripheral latency", ours_recorded[0].latency, latency),
+                ("supervision timeout", ours_recorded[0].timeout, timeout_units),
+            ):
+                if found != expected:
+                    result.problems.append(
+                        f"the recorded connection information's {name} is "
+                        f"{found}, not {expected}")
     return header, result
 
 
@@ -392,8 +396,9 @@ def main(argv=None) -> int:
     parser.add_argument("--min-valid-packets", type=int, default=0)
     parser.add_argument("--min-data-length", type=int, default=DEFAULT_DATA_LENGTH + 1)
     parser.add_argument("--long-packets", type=int, default=0)
-    parser.add_argument("--connection-info-option", action="store_true",
-                        help="require libbtbb's recorded option to still not be the CONNECT_IND's bytes")
+    parser.add_argument("--check-connection-info", action="store_true",
+                        help="require the recorded connection information option to "
+                             "hold this pair's CONNECT_IND and its parameters")
     args = parser.parse_args(argv)
     try:
         with open(args.file, "rb") as stream:
@@ -407,7 +412,7 @@ def main(argv=None) -> int:
         timeout_units=args.timeout_units, min_data_packets=args.min_data_packets,
         min_valid_packets=args.min_valid_packets,
         min_data_length=args.min_data_length, long_packets=args.long_packets,
-        connection_info_wrong=args.connection_info_option,
+        check_connection_info=args.check_connection_info,
     )
     print(f"capture: {header}, {result.records} records")
     print(f"connect_ind: {result.connect_inds}")
@@ -422,7 +427,9 @@ def main(argv=None) -> int:
     print(f"data packets: {result.data_packets} ({result.valid_packets} with a "
           f"correct CRC, {result.long_packets} of {args.min_data_length} bytes or "
           f"more, longest {result.longest})")
-    print(f"connection info option: {result.connection_info}")
+    print(f"connection info option: {result.connection_info}"
+          + (f" ({result.connection_info_options} recorded)"
+             if result.connection_info_options else ""))
     for problem in result.problems:
         print(f"FAIL: {problem}")
     if result.problems:
