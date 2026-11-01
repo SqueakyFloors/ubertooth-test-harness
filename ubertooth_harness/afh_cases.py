@@ -172,6 +172,19 @@ def _map_patterns(wanted: str) -> tuple[str, ...]:
     )
 
 
+def _found_pattern() -> str:
+    """The found line, as strictly as the tolerance allows.
+
+    The checker's exit status already carries the verdict; this is the line a
+    reader (and `ubertooth-harness validate`) sees. With every in-force
+    channel demanded, the two counts have to be the same number, which the
+    pattern can say; with a share below one they need not be.
+    """
+    if MIN_FOUND_SHARE >= 1.0:
+        return r"(?m)^in-force channels found: (\d+) of \1 \(100%\)$"
+    return r"(?m)^in-force channels found: \d+ of \d+ \(\d+%\)$"
+
+
 def _judge_step(wanted: str) -> Step:
     """Compare the recovered map with the one the link was hopping over."""
     return Step(
@@ -189,7 +202,7 @@ def _judge_step(wanted: str) -> Step:
             rf"(?m)^requested map: {wanted} used \d+ ",
             r"(?m)^in-force map: [0-9a-f]{20} used \d+ ",
             r"(?m)^recovered map: [0-9a-f]{20} used \d+ ",
-            r"(?m)^in-force channels found: (\d+) of \1 \(100%\)$",
+            _found_pattern(),
             r"(?m)^afh recovery: ok$",
         ),
     )
