@@ -162,6 +162,10 @@ the harness flashes a peer, so the driver asks for `utesp-1.0.0` or a later
 1.x image rather than an exact version, and each board's own version goes in
 the run record. A peer is leased like a board, under `esp32-<bridge serial>`.
 
+By hand, [`scripts/lab/peer`](../scripts/lab/README.md) names the boards by
+their registry aliases, holds them, and runs that module, which is how a
+capture against the pair is taken outside a run.
+
 ### Acroname USBHub3+
 
 The power controller worth having. Eight downstream ports (0 to 7), each with
@@ -269,7 +273,7 @@ nothing in the harness can catch it.
 |---|---|---|---|---|
 | Ubertooth One | the [fork's](https://github.com/SqueakyFloors/ubertooth) `firmware/bluetooth_rxtx` | the resolved commit under test | `arm-none-eabi-gcc` | `ubertooth-dfu` |
 | nRF52840 DK | [`firmware/nrf52840dk`](../firmware/nrf52840dk/README.md) | `utdk-1.3.0` | nRF Connect SDK v3.4.1 and its toolchain bundle | `nrfutil device program` |
-| ESP32 peer | [`firmware/esp32-classic-peer`](../firmware/esp32-classic-peer/README.md) | `utesp-1.0.0` | ESP-IDF v5.5.6 | `esptool`, through `idf.py flash` |
+| ESP32 peer | [`firmware/esp32-classic-peer`](../firmware/esp32-classic-peer/README.md) | `utesp-1.3.0` | ESP-IDF v5.5.6 | `esptool`, through `idf.py flash` |
 
 Each firmware README holds the full build and flash procedure, the pinned
 toolchain versions, and the shell command reference. Images are built outside
@@ -326,7 +330,7 @@ so each is recorded with where its sources come from and its SHA-256.
 |---|---|---|---|---|
 | `kgv.dfu` | the known-good Ubertooth firmware that `Flash reliability` alternates against the run's own build | `2020-12-R1` | upstream Ubertooth release `2020-12-R1` | `e3fcb486c6e0ce7cc991bf6439f6dbc0156ed1229c2b95ebfd02198f9675bb11` |
 | `zephyr.hex` | the nRF52840 DK role firmware | `utdk-1.3.0` | this repository, `firmware/nrf52840dk` at that version ([the change that built this image](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/236)) | `0f976c591195ee363307ec51f6c836d07ba3be40d6465c85cd6dec3398fbf288` |
-| `esp32-classic-peer.bin` | the ESP32 Classic peer firmware | `utesp-1.0.0` | this repository at `1d3a049`, which is where `firmware/esp32-classic-peer` carries that version | `6ff85eb6d7069b8663ac78af7836b99af25f3a72b6b34f4f55881145c62266c0` |
+| `esp32-classic-peer.bin` | the ESP32 Classic peer firmware | `utesp-1.3.0` | this repository at `9530765`, which is where `firmware/esp32-classic-peer` carries that version | `4893b30dea47896dd7b0e5cd174ee9e633a89362e5fe4505caed4c364f5c55f2` |
 
 The KGV is the one the repository pins: the plan carries its revision and its
 hash ([`testplans/slow.yaml`](../testplans/slow.yaml),

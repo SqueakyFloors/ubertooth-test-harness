@@ -14,8 +14,9 @@ harness leases this script resolves the names and runs
 ``ubertooth-harness lease``, so the locks, their order, the all-or-nothing
 attempt, the wait, the holder reporting, and the automatic host lock for a
 command line that names ``ubertooth-dfu`` are the harness's, not a second
-implementation. A type the harness does not lease yet gets its lock here, by
-the same key the harness will use when it does.
+implementation. When a device needs a lock the harness does
+not take -- the bench's older lock name -- every lock is taken here instead,
+in one attempt in the harness's own order.
 
 Nothing about a bench is built in: the registry, the lab's own per-device lock
 files, the lease directory, the owner label, and the wait all come from
@@ -53,7 +54,7 @@ try:
     from ubertooth_harness.cli import _writes_firmware as writes_firmware
     from ubertooth_harness.resources import FileResourceRegistry, RegistryError
 
-    from _bench import bench_lock_board, board, lock_key
+    from _bench import bench_lock_board, board, lock_key, resolve
 except ImportError:  # run from outside the harness environment
     sys.exit(
         "hold: run this from the harness environment "
@@ -61,69 +62,6 @@ except ImportError:  # run from outside the harness environment
     )
 
 HARDWARE_ENV = "UBERTOOTH_HARNESS_HARDWARE"
-# The shortest prefix of a serial this will match. Bench notes name a board by
-# its first four hex digits, and an ambiguous prefix is refused below, so a
-# short name can never quietly select the wrong device.
-MIN_PREFIX = 4
-
-
-def _identity_values(resource) -> list[str]:
-    """The serials of a resource, as a bench note or a tool would print them.
-
-    Serials only. A radio address is also in the identity, and it is not a
-    device name: matching it would accept `hold <a BLE address>`, which no
-    document promises and which reads as a mistake.
-    """
-    values = []
-    for key, value in resource.identity.items():
-        text = str(value or "").strip()
-        if not text or "serial" not in key or key == "serial device":
-            continue
-        values.append(text)
-        if text.isdigit():
-            values.append(text.lstrip("0"))  # nrfutil's form of a J-Link serial
-    return values
-
-
-def resolve(registry, name: str):
-    """The one resource a name selects, or an error naming what it matched."""
-    if not name:
-        raise RegistryError("empty device name")
-    if name in registry.resources:
-        return registry.resources[name]
-    wanted = name.strip().lower()
-    exact = [
-        resource for resource in registry.resources.values()
-        if any(value.lower() == wanted for value in _identity_values(resource))
-    ]
-    if len(exact) == 1:
-        return exact[0]
-    if len(exact) > 1:
-        raise RegistryError(
-            f"'{name}' is the serial of " + _and(exact) + "; name one alias"
-        )
-    if len(wanted) < MIN_PREFIX:
-        raise RegistryError(
-            f"'{name}' is no alias or serial in the registry, and is too short "
-            f"to be a prefix of one (at least {MIN_PREFIX} characters)"
-        )
-    matches = [
-        resource for resource in registry.resources.values()
-        if any(value.lower().startswith(wanted) for value in _identity_values(resource))
-    ]
-    if not matches:
-        raise RegistryError(f"'{name}' is no alias, serial, or serial prefix in the registry")
-    if len(matches) > 1:
-        raise RegistryError(
-            f"'{name}' is the start of the serial of " + _and(matches)
-            + "; give more of the serial, or an alias"
-        )
-    return matches[0]
-
-
-def _and(resources) -> str:
-    aliases = sorted(resource.alias for resource in resources)
-    return ", ".join(aliases[:-1]) + " and " + aliases[-1]
 
 
 HELP_FLAGS = ("-h", "--help")

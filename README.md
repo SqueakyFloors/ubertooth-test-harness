@@ -157,8 +157,9 @@ checked, the APIs and protocols the harness depends on, host setup, the known
 limits of a crowded USB host, and a worked bench layout. Read it to set up a
 bench, or to judge what a result was measured on. The by-hand helpers that go
 with it are in [`scripts/lab/`](scripts/lab/README.md): `hold` holds devices
-by serial for one command, and `hub-port` switches a hub port to recover one
-that has stopped answering.
+by serial for one command, `peer` drives the Classic Bluetooth peers by
+registry alias, and `hub-port` switches a hub port to recover a device that has
+stopped answering.
 
 `hardware.yaml` is the ignored local resource registry; copy
 [`hardware.example.yaml`](hardware.example.yaml) to start. Register every macOS/Linux computer as a
