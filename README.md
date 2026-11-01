@@ -1555,6 +1555,55 @@ last board it needs, a command that wants one of the boards already free
 waits too, and one that asked to wait for nothing fails with `is queued`.
 That lasts as long as the run's own `--wait-for-boards`.
 
+### Why a board can be free and still nobody's
+
+Usually the wait above is seconds, because what holds the last board is a run
+that ends. It is the whole of `--wait-for-boards` when the lease in the way
+never comes back on its own: a board held by a command that is running but
+stuck, or one whose lease was recorded on another host or holds no record at
+all, which the harness never takes over. The bound stays the waiting
+command's own deadline
+([#234](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/234)) —
+capping it instead would hand the bench back to short leases and starve the
+multi-board run again — and what the others get is the reason, in words.
+`boards` prints it under a free board:
+
+```
+UT_0         free
+             queue: 1 command is waiting for it
+             queued for flash-run, run 2026-10-31-flash, run-suite release /
+             comprehensive, pid 8120, since ... UTC: it asked for UT_0 and
+             UT_1, has waited 4m12s of the 10m00s it asked to wait, and is
+             still waiting for UT_1, held by elsewhere, pid 7781, since ...
+             UTC (that lease is left alone: it was taken on another-host, not
+             on this host; it stays held until somebody clears it)
+```
+
+A person reads which command has the turn, everything it asked for, how long
+it has waited of what it asked to wait, and the board in its way — with what
+that board's lease records, which is what says whether the board comes back
+on its own (its command is gone, so the next command that wants it takes it
+over) or whether somebody has to clear it (another host's record, or none).
+In `--json` it is `queued_for`. Each line is read from the waiting command's
+own ticket every time, so it is gone the moment that command stops waiting,
+and a ticket whose command died leaves nothing behind. No lock file path
+appears in any of it: the lease directory is private, and the resource and
+the command are what a reader needs.
+
+A command that is giving way says the same thing itself, once that board has
+been free and queued for more than two seconds, so two commands sorting
+themselves out are not reported as a bench standing still (`boards`, which
+answers a person asking why nothing is running, shows it as soon as it is
+true). That makes a `lease` that sits there explain itself on standard error,
+and `run-suite` carries it into its run record: a `lease_queued` record in
+run.jsonl, a line in the transcript, a "Queued behind another command" row in
+report.md, and the same line in the browser's live view. A run whose first
+test started ten minutes late has to be able to say why. Those read in the
+past tense ("UT_0 was free and queued for ..."), because the run has its
+boards by the time anybody reads them, and each says how long the run gave
+way at that board while it was free; the record is kept up to date while the
+wait lasts, so it is that stretch, not its first moment.
+
 ### The host lock
 
 Every harness command that switches USB power or writes firmware also holds
@@ -2282,7 +2331,11 @@ word and symbol (colour only reinforces it).
   plus symbol), under each test the [known target](#known-targets) it ran
   against or a line saying it had none, the current stage (building,
   preflight, tests), elapsed time,
-  a Cancel button, and the last 200 log lines in a scrolling console panel. A countdown is shown only when
+  a Cancel button, a "Queued behind another command" line for each device the
+  run waited behind before it started (see
+  [Why a board can be free and still nobody's](#why-a-board-can-be-free-and-still-nobodys),
+  shown only when it waited behind somebody), and the last 200 log lines in a
+  scrolling console panel. A countdown is shown only when
   every test in the suite has an estimate. Every implemented test has a
   catalog estimate (`ESTIMATES` in `ubertooth_harness/catalog.py`) for each
   coverage profile: fixed seconds, plus a multiple of its `duration` argument

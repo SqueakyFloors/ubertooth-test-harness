@@ -309,6 +309,26 @@ def _record_lease_takeovers(publisher, leases) -> None:
         publisher.emit("lease_takeover", "warning", dict(taken_over))
 
 
+def _record_lease_queued(publisher, leases) -> None:
+    """Record the free devices this run gave way at before it started (#234).
+
+    A run that wants several devices waits for the last of them, and an
+    older command doing the same keeps the rest queued meanwhile: that is
+    why such a run can sit for minutes with devices visibly free, and why a
+    reader of a late run needs it. The message is carried with the record,
+    so the browser view shows the same line as the report.
+    """
+    if leases is None:
+        return
+    for queued in leases.queued:
+        publisher.emit("lease_queued", "warning", dict(
+            queued,
+            # Past tense: by the time the run records this, it has its
+            # devices and the wait it describes is over.
+            message=board_leases.describe_queued_resource(queued, past=True),
+        ))
+
+
 def _build_command(args: argparse.Namespace) -> int:
     sources = _resolve_sources(args)
     if Path(args.output).exists():
@@ -690,6 +710,7 @@ def _prepare_run(
         build=built.to_manifest() if built else None,
         leases=leases.to_manifest() if leases is not None else (),
         lease_takeovers=leases.takeovers if leases is not None else (),
+        lease_queue_waits=leases.queued if leases is not None else (),
     )
     if not args.build:
         fix = BUILD_AND_FLASH_FIX
@@ -965,6 +986,7 @@ def _run_leased(
             # Before the build, which may be where the run fails: a run that
             # took a device over says so whatever happens next.
             _record_lease_takeovers(publisher, leases)
+            _record_lease_queued(publisher, leases)
             _record_libbtbb_pin(publisher, sources)
         except BaseException as error:
             _finish_failed_run(publisher, run_dir, str(error) or type(error).__name__)
@@ -1113,6 +1135,11 @@ def _boards_command(args: argparse.Namespace) -> int:
             # Commands queued for it: a free board with a queue is somebody
             # else's next, and a held one shows how deep the queue is.
             print(f"{'':<12} queue: {board_leases.describe_waiting(state['waiting'])}")
+        if state.get("queued_for"):
+            # A free board nobody can take: the command whose turn it is
+            # wants several and cannot have them all yet, so this is why
+            # the bench looks idle and what has to be cleared (#234).
+            print(f"{'':<12} {board_leases.describe_queued(state['queued_for'])}")
         if external.get("error"):
             print(f"{'':<12} warning: cannot read external lock: {external['error']}")
     return 0

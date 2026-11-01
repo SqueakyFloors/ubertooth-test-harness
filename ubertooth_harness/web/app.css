@@ -334,6 +334,22 @@ button.primary:disabled:hover { background: var(--primary); }
 .live-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; }
 .live-actions .hint { margin: 0; }
 
+/* One line per device that was free while this run waited for its turn.
+   Above the log tail, in the wide row rather than the narrow summary
+   column: each line names a command, a set of devices and what is in their
+   way. It takes no row of its own, so a run that waited behind nobody
+   leaves no gap. */
+.live-queued { margin-bottom: 0.9rem; }
+.live-queued h3 { margin: 0 0 0.4rem; font-size: 0.95rem; }
+.queued { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.3rem; }
+.queued li {
+  font-size: 0.85rem; padding: 0.3rem 0.55rem; border-radius: var(--radius-small);
+  border-left: 3px solid var(--line); background: var(--surface-2);
+  /* A line carries run IDs, serials and another command's own words: long
+     unbroken tokens wrap rather than widen the column. */
+  overflow-wrap: anywhere;
+}
+
 /* Per board: the times the firmware's watchdog reset it during this run. */
 .live-boards h3 { margin: 0 0 0.4rem; font-size: 0.95rem; }
 .boards { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.2rem; }

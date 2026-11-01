@@ -104,6 +104,10 @@
               aria-live="polite" aria-relevant="additions text"></ol>
         </div>
         <div class="live-log">
+          <div id="live-queued" class="live-queued" hidden>
+            <h3 id="queued-heading">Queued behind another command</h3>
+            <ul id="queued" class="queued" aria-labelledby="queued-heading"></ul>
+          </div>
           <h3 id="log-heading">Log tail</h3>
           <pre id="log" class="log" tabindex="0" aria-labelledby="log-heading"></pre>
         </div>
