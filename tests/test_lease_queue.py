@@ -1136,6 +1136,24 @@ class QueuedReportTests(QueueFixture):
         details = dict(record, message=leases.describe_queued_resource(record, past=True))
         self.assertEqual(details, events._validated_details(details))
 
+    def test_a_lock_file_longer_than_a_record_is_read_as_none(self):
+        """A file this reads often must not be loaded whole.
+
+        A lease or ticket file belongs to another command and may hold
+        anything; a listing reads one per device and a waiting command one
+        per resource of every ticket ahead of it. So only the first
+        _HOLDER_BYTES are read, and a longer file reads as no record,
+        which is what an unreadable one has always read as.
+        """
+        path = self.hold_lease(B, self.live_holder(owner="stuck"))
+        self.assertEqual("stuck", leases.read_holder(path)["owner"])
+        os.pwrite(self.raw[-1], b" " * (leases._HOLDER_BYTES + 1), 0)
+        self.assertEqual({}, leases.read_holder(path))
+        # And the board still reads as held, by a holder nobody can name.
+        state = leases.board_states([B], directory=self.dir)[0]
+        self.assertTrue(state["held"])
+        self.assertEqual({}, state["holder"])
+
     def test_a_record_carries_no_number_json_cannot_write(self):
         # json.loads accepts NaN and the infinities, so a lock file can
         # hold one; writing it back out would be JSON only Python reads.

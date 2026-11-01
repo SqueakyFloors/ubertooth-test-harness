@@ -250,8 +250,10 @@ _MAX_QUEUED_RECORDS = 16
 # How long a command gives way at a free resource before it is worth a line
 # on standard error and a row in a run's report: longer than the moment two
 # commands take to sort themselves out, short enough that anything a person
-# would notice is reported. Nothing is read about the situation until then,
-# so the ordinary moment of giving way costs no lock probe either.
+# would notice is reported. Until then a round costs one lock probe for
+# the resource itself (_free_now) and nothing else: what is in the way,
+# which is a probe for every resource that command asked for, is read
+# only for a stretch that has lasted, and then no more often than this.
 _QUEUED_REPORT_S = 2.0
 # How many of a waiter's resources one such record names. A record goes
 # into a run record, which has a per-event size limit (see events.py), and
@@ -271,6 +273,13 @@ _RECORDED_HOLDER_FIELDS = (
     "owner", "run_id", "purpose", "pid", "pgid", "user", "hostname", "acquired_at",
 )
 _RECORDED_HOLDER_CHARS = 200
+# How much of a lock or ticket file is read as a holder record (see
+# read_holder): far more than anything that is one, including a ticket
+# naming every resource the queue reads and a wrapper's own long fields
+# (what a run record keeps of those is cut down separately), and still
+# bounded, because the file is another command's and is read on every
+# poll round of every wait.
+_HOLDER_BYTES = 256 * 1024
 
 
 class LeaseError(RuntimeError):
@@ -503,10 +512,22 @@ def holder_info(*, run_id: str | None, owner: str | None, purpose: str) -> dict:
 
 
 def read_holder(path: Path) -> dict:
+    """The holder record in a lock or ticket file, or {} if it has none.
+
+    Only the first _HOLDER_BYTES are read: the records the harness writes
+    are a few hundred bytes, a file longer than that is not one, and the
+    file belongs to another command, which may have put anything in it.
+    A listing reads one per device, and a command waiting reads one per
+    resource of every ticket ahead of it, so this is read often.
+    """
     try:
-        text = path.read_text(encoding="utf-8")
-        data = json.loads(text) if text.strip() else {}
-        return data if isinstance(data, dict) else {}
+        with path.open("rb") as stream:
+            data = stream.read(_HOLDER_BYTES + 1)
+        if len(data) > _HOLDER_BYTES:
+            return {}
+        text = data.decode("utf-8")
+        record = json.loads(text) if text.strip() else {}
+        return record if isinstance(record, dict) else {}
     except (OSError, ValueError):
         return {}
 
@@ -1309,17 +1330,24 @@ def describe_queued(record: Mapping, *, past: bool = False) -> str:
         deadline = f"the {describe_seconds(max(bound, _BUSY_GRACE_S))} it asked to wait"
     # "also", not a comma or a semicolon: each entry is a clause of its own
     # and may carry a parenthesis with punctuation inside it.
-    blocked = "; also ".join(
-        describe_blocking(item) for item in record.get("blocked_by") or []
-    ) + _and_more(record.get("blocked_by_more"))
+    in_the_way = [describe_blocking(item) for item in record.get("blocked_by") or []]
+    left = record.get("blocked_by_more")
+    counted = isinstance(left, int) and left > 0
+    if in_the_way:
+        blocked = "; also ".join(in_the_way) + _and_more(left)
+    elif counted:
+        # A record shrunk until it fit kept none of them: the count is all
+        # there is to say, and the sentence still has to read as one.
+        blocked = f"{left} resources somebody holds"
+    else:
+        blocked = "a resource somebody holds"
     gave_way = describe_seconds(record.get("gave_way_s"))
     return (
         f"queued for {describe_holder(record.get('command') or {})}: it "
         f"{'had asked' if past else 'asked'} for {requested or 'several resources'}"
         + (f", {'had' if past else 'has'} waited {waited} of {deadline}"
            if waited else f" (of {deadline})")
-        + f", and {'was' if past else 'is'} still waiting for "
-        + (blocked or "a resource somebody holds")
+        + f", and {'was' if past else 'is'} still waiting for {blocked}"
         # Only a command that gave way has this; a listing says nothing here.
         + (f". This command {'gave' if past else 'has given'} way for {gave_way}"
            if record.get("gave_way_s") else "")
