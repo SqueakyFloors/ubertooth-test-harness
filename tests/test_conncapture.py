@@ -420,9 +420,10 @@ class RepeatedConnectionTests(unittest.TestCase):
         self.assertEqual(0, status, text)
         self.assertIn("span 9.2s", text)
         self.assertIn("connections: 2", text)
-        self.assertIn(f"connection 2: access address {SECOND_ACCESS:08x} at "
-                      "5200 ms, 2 packet(s), 2 with a correct CRC, last "
-                      "correct CRC 4000 ms after its CONNECT_IND", text)
+        self.assertIn(f"connection 2: access address {SECOND_ACCESS:08x} "
+                      "5200 ms into the capture, 2 packet(s), 2 with a "
+                      "correct CRC, last correct CRC 4000 ms after its "
+                      "CONNECT_IND", text)
         self.assertIn("unannounced access addresses: none", text)
 
 

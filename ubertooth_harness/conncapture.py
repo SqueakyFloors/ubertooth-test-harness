@@ -322,6 +322,8 @@ class Result:
     # capture handed out.
     unannounced: dict = field(default_factory=dict)
     span_ms: int | None = None
+    # The first record's time, which every other time is reported against.
+    start_micros: int | None = None
     # How long before the end of the capture window the last packet with a
     # correct CRC arrived. None where it was not asked for.
     quiet_ms: int | None = None
@@ -354,6 +356,7 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
         return header, result
     result.records = len(timed)
     times = [record.micros for record in timed if record.micros is not None]
+    result.start_micros = min(times) if times else None
     result.span_ms = (max(times) - min(times)) // 1000 if times else None
     central = central.upper()
     peripheral = peripheral.upper()
@@ -477,8 +480,9 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
     if max_quiet_ms is not None and capture_ms is not None:
         latest = max((item.last_valid_micros for item in result.connections
                       if item.last_valid_micros is not None), default=None)
-        if times and latest is not None:
-            result.quiet_ms = (min(times) + capture_ms * 1000 - latest) // 1000
+        if result.start_micros is not None and latest is not None:
+            result.quiet_ms = (
+                result.start_micros + capture_ms * 1000 - latest) // 1000
             if result.quiet_ms > max_quiet_ms:
                 result.problems.append(
                     f"the last packet with a correct CRC arrived "
@@ -601,14 +605,13 @@ def main(argv=None) -> int:
     print(f"capture: {header}, {result.records} records, span {span}")
     print(f"connect_ind: {result.connect_inds}")
     print(f"connections: {len(result.connections)}")
-    start = min((item.micros for item in result.connections
-                 if item.micros is not None), default=None)
+    start = result.start_micros
     for index, item in enumerate(result.connections, start=1):
         after = ("no timed packet" if item.last_valid_after_ms is None
                  else f"last correct CRC {item.last_valid_after_ms} ms after its "
                       "CONNECT_IND")
         at = ("" if item.micros is None or start is None
-              else f" at {(item.micros - start) / 1000:.0f} ms")
+              else f" {(item.micros - start) // 1000} ms into the capture")
         print(f"connection {index}: access address {item.access_address:08x}"
               f"{at}, {item.packets} packet(s), {item.valid} with a correct "
               f"CRC, {after}")
