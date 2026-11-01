@@ -25,10 +25,10 @@ returned -SIGKILL, so the tool died of the signal where it stood rather than
 ending some other way. And signal 0 to the tool's process group then fails
 with ESRCH, so nothing of the run is left: the tool is started in a session of
 its own, which makes it the leader of a group that holds it and anything it
-starts, and a process nobody has waited for keeps its group alive, so the one
-check covers a child left behind and a tool that was somehow not reaped. A
-process that is still there still owns its open device, which is why this is
-checked at all rather than taken for granted.
+starts, and a process whose exit status nobody has read is still in its group,
+so the one check covers a child left behind and a tool that was somehow not
+reaped. A process that is still there still owns its open device, which is why
+this is checked at all rather than taken for granted.
 
 Checking the group rather than searching the process table by name is exact
 and cheap: it asks about this run's processes only, so another capture of the
@@ -85,9 +85,14 @@ def digest(path: Path) -> tuple[int, str]:
     return size, sha.hexdigest()
 
 
-def _absent(send) -> bool:
+def group_gone(pgid: int) -> bool:
+    """Is there nothing left in this process group?
+
+    A process whose exit status nobody has read yet is still in its group, so
+    this answers for the tool and for anything it started at once.
+    """
     try:
-        send()
+        os.killpg(pgid, 0)
     except ProcessLookupError:
         return True
     except PermissionError:
@@ -96,35 +101,28 @@ def _absent(send) -> bool:
     return False
 
 
-def pid_gone(pid: int) -> bool:
-    """Is this pid absent from the process table, a process nobody has waited
-    for included?
-
-    Signal 0 to a process whose exit status nobody has read yet succeeds, so
-    this is false until the child has been waited for as well as killed. The
-    group check below covers the same ground for a whole run; this is for
-    asking about one process.
-    """
-    return _absent(lambda: os.kill(pid, 0))
-
-
-def group_gone(pgid: int) -> bool:
-    """Is there nothing left in this process group?"""
-    return _absent(lambda: os.killpg(pgid, 0))
-
-
-def clear_group(process, pgid: int) -> None:
+def clear_group(process, pgid: int, *, force: bool = False) -> None:
     """Leave nothing of this run behind, whatever its outcome.
 
     The whole process group, not just the tool: a child it started would
     otherwise keep the device while the rest of the case ran against it.
 
-    Nothing is signalled once the group is empty, because a group id is free
-    to be used again then, and a group that still has a member is still ours.
+    The group is signalled while the tool's own exit status has not been read
+    here, because until then the tool is a member of the group, so the group
+    exists and is this run's. Once it has been read the group may have
+    emptied, and an empty group's id is free to be used again, so signalling
+    it could in principle reach somebody else's processes; the one path that
+    gets there with nothing known about the group -- a tool that ended by
+    itself -- leaves it alone and reports what happened.
+
+    ``force`` is for the caller that has just seen the group alive: the id
+    cannot have been handed on while a member of ours was in it, and a process
+    holding the board through the rest of the case is the worse outcome by far.
+
     Best effort throughout: this runs on paths that are already reporting a
     problem, and the problem is what the caller reports.
     """
-    if not group_gone(pgid):
+    if force or process.returncode is None:
         try:
             os.killpg(pgid, signal.SIGKILL)
         except OSError:
@@ -173,18 +171,23 @@ def kill(argv, capture: Path, record: Path, min_bytes: int, max_wait_s: float) -
     # signal below reaches the process that holds the board. Its own session,
     # which makes it the leader of a process group of its own: the group is
     # its pid, it holds anything the tool starts, and nothing else is in it.
-    process = subprocess.Popen(argv, start_new_session=True)
-    pgid = process.pid
     # However this ends -- a check that does not hold, a read error, the
-    # harness's own deadline, a Ctrl-C -- nothing of the tool's may be left
-    # streaming into the next step: the case's cleanup needs the board back,
-    # and the board is not this process's to leave running.
-    with _stopped_on_signal(process, pgid):
+    # harness's own deadline, a Ctrl-C -- no process of the tool's may be left
+    # running into the next step. The mode it leaves the board in is the
+    # case's cleanup to undo, and that always runs; a tool still streaming
+    # with nobody waiting for it is not.
+    #
+    # The handlers go on before the tool is started, so there is no window
+    # between the two in which a signal would leave it running.
+    running = {}
+    with _stopped_on_signal(running):
+        process = subprocess.Popen(argv, start_new_session=True)
+        running["process"], running["pgid"] = process, process.pid
         try:
-            return _kill(process, pgid, tool, argv, capture, record, min_bytes,
-                         max_wait_s, started)
+            return _kill(process, process.pid, tool, argv, capture, record,
+                         min_bytes, max_wait_s, started)
         except BaseException:
-            clear_group(process, pgid)
+            clear_group(process, process.pid)
             raise
 
 
@@ -209,9 +212,11 @@ def _kill(process, pgid, tool, argv, capture, record, min_bytes, max_wait_s,
     # this one check covers the tool and anything it started: a tool that was
     # somehow not reaped would still be in its group, and so would a child.
     if not group_gone(pgid):
+        clear_group(process, pgid, force=True)
         raise RuntimeError(
             f"process group {pgid} was not empty after the kill: {tool} left "
-            "something behind that may still own the device"
+            "something behind that may still own the device (it has been "
+            "killed)"
         )
     size, checksum = digest(capture)
     record.write_text(json.dumps({
@@ -229,7 +234,7 @@ def _kill(process, pgid, tool, argv, capture, record, min_bytes, max_wait_s,
 
 
 @contextlib.contextmanager
-def _stopped_on_signal(process, pgid):
+def _stopped_on_signal(running):
     """Take the capture down if this process is signalled.
 
     The tool runs in a session of its own, which is what makes the group check
@@ -237,13 +242,19 @@ def _stopped_on_signal(process, pgid):
     signals when a step runs out of time or the operator stops a run. So the
     signals the harness sends are caught here and passed on to the tool,
     instead of leaving it streaming with nobody waiting for it.
+
+    ``running`` is filled in by the caller once the tool is started, so the
+    handlers can go on before that and have nothing to do until then.
     """
     taken = {}
 
     def stop(number, _frame):
-        clear_group(process, pgid)
-        # The default behavior for the signal, now there is nothing to lose:
-        # the caller sees the run end the way it asked for.
+        if running:
+            clear_group(running["process"], running["pgid"])
+        # Then what the signal would have done, now there is nothing to lose:
+        # the caller sees the run end the way it asked for. For SIGINT that
+        # is Python's own handler, which raises KeyboardInterrupt, and main()
+        # turns that into the usual one-line problem report.
         signal.signal(number, taken.get(number, signal.SIG_DFL))
         os.kill(os.getpid(), number)
 
@@ -300,6 +311,11 @@ def main(argv: list[str] | None = None) -> int:
                         args.max_wait)
         else:
             line = verify(args.capture, args.record)
+    except KeyboardInterrupt:
+        # Ctrl-C, or SIGINT from the harness: the capture has been taken down
+        # by the handler above, so this is a report rather than a traceback.
+        print("Killed capture problem: stopped by SIGINT")
+        return 130
     except (OSError, RuntimeError, ValueError, KeyError) as error:
         print(f"Killed capture problem: {error}")
         return 1

@@ -57,6 +57,16 @@ with open(path, "ab", buffering=0) as handle:
 SERIAL = "0" * 31 + "f"
 
 
+def gone(pid):
+    """Is this pid absent from the process table, a process nobody has waited
+    for included? What killedcapture.group_gone() answers for a whole group."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
 def run(argv):
     """(exit status, the one line it printed)."""
     out = io.StringIO()
@@ -133,7 +143,7 @@ class KilledCaptureTests(unittest.TestCase):
 
     def gone(self, pid):
         for _ in range(200):
-            if killedcapture.pid_gone(pid):
+            if gone(pid):
                 return True
             time.sleep(0.05)
         return False
@@ -155,7 +165,7 @@ class KilledCaptureTests(unittest.TestCase):
         except ProcessLookupError:
             return
         for _ in range(200):
-            if killedcapture.pid_gone(pid):
+            if gone(pid):
                 return
             time.sleep(0.05)
 
@@ -225,14 +235,14 @@ class ProcessCheckTests(unittest.TestCase):
         os.close(write_fd)
         with os.fdopen(read_fd, "rb") as closed_at_exit:
             self.assertEqual(b"", closed_at_exit.read())
-        self.assertFalse(killedcapture.pid_gone(child.pid))
+        self.assertFalse(gone(child.pid))
         self.assertFalse(killedcapture.group_gone(child.pid))
         child.wait(timeout=30)
-        self.assertTrue(killedcapture.pid_gone(child.pid))
+        self.assertTrue(gone(child.pid))
         self.assertTrue(killedcapture.group_gone(child.pid))
 
     def test_this_process_and_its_group_are_there(self):
-        self.assertFalse(killedcapture.pid_gone(os.getpid()))
+        self.assertFalse(gone(os.getpid()))
         self.assertFalse(killedcapture.group_gone(os.getpgid(0)))
 
     def test_a_group_nothing_is_left_in_is_gone(self):

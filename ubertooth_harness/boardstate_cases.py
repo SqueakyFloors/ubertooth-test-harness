@@ -46,17 +46,14 @@ import sys
 from pathlib import Path
 
 from ubertooth_harness import killedcapture, rxdump, specandump
-from ubertooth_harness.outputfiles import text_lines
 from ubertooth_harness.patterns import FIRMWARE_PATTERN, serial_pattern
 from ubertooth_harness.stateful import (
-    CAPTURE_DIR_KEY,
     Observation,
     StateCase,
     Step,
     nothing_on_stdout,
-    require,
 )
-from ubertooth_harness.receive_cases import DUMP_MIN_RECORDS_PER_S, seconds_arg
+from ubertooth_harness.receive_cases import DUMP_MIN_RECORDS_PER_S, _path, seconds_arg
 from ubertooth_harness.transitions import (
     BOOT_DEFAULT_CHANNEL,
     CHANNEL,
@@ -103,28 +100,6 @@ _SPECAN_CHECKER = str(Path(specandump.__file__).resolve())
 # The two warnings ubertooth_bulk_init() can print, by their fixed wording.
 _STILL_IN_MODE = "the board is still in mode {mode} from an earlier run"
 _NOT_STOPPED = "it has not stopped after"
-
-
-def _path(name):
-    def path(context):
-        return str(Path(require(context, CAPTURE_DIR_KEY)) / name)
-    return path
-
-
-def _warnings_off_stdout(*texts):
-    """A Step.output_check: these warnings belong on stderr, not stdout.
-
-    Together with an output_patterns entry for the same wording, which is
-    searched in both streams, this is how the case says the warning was
-    printed on stderr.
-    """
-    def check(output) -> str:
-        for line in text_lines(output):
-            for text in texts:
-                if text in line:
-                    return f"{text!r} is on stdout; warnings go to stderr"
-        return ""
-    return check
 
 
 def _boot_defaults(serial: str) -> tuple[Step, ...]:
@@ -190,7 +165,10 @@ def _second_capture(step_id: str, name: str, tool_argv, seconds: int, mode: int)
         # The board has to have reported leaving the mode inside the wait:
         # this is the line printed when the wait ran out instead.
         forbidden_patterns=(rf"warning: {_NOT_STOPPED} \d+ ms",),
-        output_check=_warnings_off_stdout(still_in_mode, _NOT_STOPPED),
+        # Both captures write their data to a file, so they ask for nothing on
+        # stdout and nothing may arrive there. With the warning required in
+        # either stream, that is how the case says it was printed on stderr.
+        output_check=nothing_on_stdout,
     )
 
 

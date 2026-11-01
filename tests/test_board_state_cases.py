@@ -261,8 +261,11 @@ class CaseGenerationTests(unittest.TestCase):
         step = next(s for s in self.dump.steps if s.step_id == "second-capture")
         warning = (f"warning: the board is still in mode "
                    f"{boardstate_cases.MODE_SPECAN} from an earlier run\n")
-        self.assertIn("warnings go to stderr", step.output_check([warning]))
-        self.assertEqual("", step.output_check(["rx block timestamp 1\n"]))
+        # Both captures write to a file, so stdout carries nothing at all:
+        # the warning there is a failure, and with the pattern above requiring
+        # it in either stream, that is how the case says it was on stderr.
+        self.assertIn("progress goes to stderr", step.output_check([warning]))
+        self.assertEqual("", step.output_check([]))
 
     def test_the_dump_check_allows_no_stale_and_no_foreign_record(self):
         step = next(s for s in self.dump.steps if s.step_id == "verify-second-capture")

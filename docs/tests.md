@@ -912,14 +912,19 @@ the board keeps streaming into its endpoint. The test makes that state on
 purpose. [`killedcapture.py`](../ubertooth_harness/killedcapture.py) starts the
 capture tool as its own child with nothing in between -- no shell, no
 `timeout` -- waits until the capture file has grown, and sends that process
-SIGKILL, which cannot be caught. It then requires three separate facts before
-the case goes on: the wait returned, what it returned is `-SIGKILL`, and
-signal 0 to the pid fails, because a process whose exit status has been read
-can still be there and still own its device. The tool runs in a session of its
-own, so signal 0 to its process group afterwards says whether it left anything
-behind. The file the killed tool wrote is hashed at that moment and checked
-again at the end of the case, so the evidence is kept rather than quietly
-rewritten by the next run.
+SIGKILL, which cannot be caught. It then requires two facts before the case
+goes on: the wait returned `-SIGKILL`, so the tool died of the signal where it
+stood, and signal 0 to the tool's process group then fails. The tool runs in a
+session of its own, which makes it the leader of a group holding it and
+anything it starts, and a process whose exit status nobody has read is still
+in its group, so that one answer says both that the tool is gone and that it
+left nothing behind. It is asked at all because a process that is still there
+still owns its open device. That session also puts the tool outside the group
+the harness signals when a step runs out of time or an operator stops a run,
+so the module catches those signals and passes them on rather than leaving a
+capture streaming. The file the killed tool wrote is hashed at the kill and
+checked again at the end of the case, so the evidence is kept rather than
+quietly rewritten by the next run.
 
 The two tools used produce data with nothing on the air -- `ubertooth-dump`
 about 2000 records a second, `ubertooth-specan` about 16 kB a second -- so
@@ -964,7 +969,12 @@ purpose, so it hands the next test a board it has seen boot. A self-reset the
 firmware records while this runs is reported by the usual watchdog read
 between cases, and the guard boards are checked as in every guarded test.
 
-**Known limits.** The clock half of the record check sees a leftover
+**Known limits.** The case rests on the host leaving the board alone when the
+killed process's handle closes. On a host or kernel that reset the device
+there instead, the board would be idle, the warning the case requires would
+never print, and the case would fail for a reason that has nothing to do with
+the behavior it is about; the Linux lab host does not (the mode was still
+running both times). The clock half of the record check sees a leftover
 basic-rate record only when its clock is ahead of the new stream's first one,
 so a short previous stream can go unseen there; the packet type is what
 catches a record of the sweep, whatever its clock. A pass does not separate a
