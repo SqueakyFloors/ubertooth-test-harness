@@ -604,27 +604,136 @@ class AudioTests(unittest.TestCase):
                       "reset: sco 'ready', not 'off', sco_profile 'ag', not "
                       "'none'", report)
 
-    def test_a_reset_checks_only_the_audio_fields_an_image_reports(self):
-        # An image between the audio link and the packet-type choice has some
-        # of these fields and not others; a reset is checked on what it has.
-        class Older(FakePeerFirmware):
-            """The audio link, without the fields utesp-1.4.0 added."""
+    def test_a_link_that_came_back_during_the_command_is_not_one_link(self):
+        # The frame counters carry over a new link, so the floors would pass
+        # on the traffic of two links; a new link has a new handle.
+        class Flapping(FakePeerFirmware):
+            """Its link goes down and comes back once the counters are read."""
+
+            flapped = False
+
+            def handle(self, line):
+                answer = super().handle(line)
+                if line == "sco stats" and not self.flapped:
+                    self.flapped = True
+                    far = self.peer_firmware
+                    self._sco_stop()
+                    self.sco_profile = "ag"
+                    self._sco_up("2ev3")
+                    far._sco_up("2ev3")
+                    self.sco_handle = 130  # a new link, a new handle
+                return answer
+
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            r"the initiator's audio link went down and came back while the "
+            r"command ran \(handle 129, then 130\)"
+        ):
+            self._audio(pair=_audio_pair(initiator_class=Flapping),
+                        min_frames=10)
+
+    def test_counters_that_went_backwards_are_not_read_as_a_delta(self):
+        class Rewound(FakePeerFirmware):
+            """Its controller's count starts again, as a new link's would."""
+
+            rewound = False
+
+            def handle(self, line):
+                answer = super().handle(line)
+                if line == "sco stats" and not self.rewound:
+                    self.rewound = True
+                    self.sco_packets = 0
+                return answer
+
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "the initiator's counters went backwards while the command ran"
+        ):
+            self._audio(pair=_audio_pair(initiator_class=Rewound),
+                        min_frames=10)
+
+    def test_what_the_boards_said_while_the_command_ran_is_reported(self):
+        # Nothing is in flight during a capture, so the board's own notice is
+        # the only word on a link that went down; a later command would clear
+        # it from the buffer unread.
+        class Dropping(FakePeerFirmware):
+            dropped = False
+
+            def handle(self, line):
+                answer = super().handle(line)
+                if line == "sco stats" and not self.dropped:
+                    self.dropped = True
+                    self._sco_stop()
+                return answer
+
+        acceptor_firmware, initiator_firmware = _audio_pair(
+            initiator_class=Dropping)
+        acceptor, initiator = _peers(acceptor_firmware, initiator_firmware)
+        report = io.StringIO()
+        with self.assertRaises(esp32peer.PeerError):
+            esp32peer.audio(acceptor, initiator, TRUE, out=report, settle_s=0.0)
+        self.assertIn("initiator said: utesp: sco disconnected",
+                      report.getvalue())
+
+    def test_a_refused_stop_is_reported_after_the_counters_not_instead(self):
+        acceptor, initiator = _audio_pair()
+        initiator.refuse["sco stop"] = "the audio link would not close"
+        report = io.StringIO()
+        acceptor_peer, initiator_peer = _peers(acceptor, initiator)
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "the audio link would not stop: initiator: 'sco stop' refused"
+        ):
+            esp32peer.audio(acceptor_peer, initiator_peer, TRUE, out=report,
+                            settle_s=0.0, min_frames=10)
+        # The counters the run exists to produce are reported even so.
+        self.assertIn("initiator audio frames while the command ran: sent 100",
+                      report.getvalue())
+
+    def test_counters_that_time_out_are_not_passed_off_as_not_counted(self):
+        # Only the board's own refusal waives the packet floor; a silence is
+        # the bridge or the driver being lost.
+        acceptor, initiator = _audio_pair()
+        initiator.silent_for.add("sco stats")
+        with self.assertRaisesRegex(esp32peer.PeerError,
+                                    "no answer to 'sco stats'"):
+            self._audio(pair=(acceptor, initiator))
+
+    def test_a_board_that_did_not_take_the_type_it_was_told_is_caught(self):
+        class Forgetful(FakePeerFirmware):
+            """Reports the choice it had before being told another."""
 
             def _audio_status(self):
                 status = super()._audio_status()
-                for key in ("sco_type", "sco_link", "sco_pkt_type",
-                            "sco_tx_len", "sco_rx_len", "sco_interval",
-                            "sco_retrans_window", "sco_types_supported"):
-                    del status[key]
+                status["sco_type"] = esp32peer.DEFAULT_SCO_TYPE
                 return status
 
-        acceptor, initiator = _audio_pair(acceptor_class=Older)
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "the initiator says it asks for default links, not the ev3 it was "
+            "told to"
+        ):
+            self._audio(pair=_audio_pair(initiator_class=Forgetful),
+                        sco_type="ev3")
+
+    def test_a_reset_checks_only_the_audio_fields_an_image_reports(self):
+        # An image between the audio link and the packet-type choice has some
+        # of these fields and not others; a reset is checked on what it has.
+        acceptor = FakePeerFirmware(ACCEPTOR_ADDRESS, version="utesp-1.3.0")
+        initiator = FakePeerFirmware(INITIATOR_ADDRESS,
+                                     version=esp32peer.MINIMUM_AUDIO_FIRMWARE)
+        acceptor.link(initiator)
         peer, _ = _peers(acceptor, initiator)
         esp32peer.reset(peer, io.StringIO())  # the fields it has are at boot
-        # An audio session still needs the ones it does not have.
-        with self.assertRaisesRegex(esp32peer.PeerError,
-                                    "status has no valid 'sco_type'"):
+        # An audio session still refuses it, on the version, before it starts
+        # anything: the fields it lacks are the ones that report what a link
+        # settled on.
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "acceptor runs utesp-1.3.0, and the harness needs utesp-1.4.0"
+        ):
             self._audio(pair=(acceptor, initiator))
+        self.assertNotIn("sco start", acceptor.commands)
 
     def test_counters_refused_for_the_rest_of_the_boot_do_not_end_the_session(self):
         # The firmware refuses them for the rest of a boot once a request has

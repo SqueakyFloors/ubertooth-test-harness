@@ -223,6 +223,15 @@ class PeerError(RuntimeError):
     """The peer, its bridge, or the pair did not do what was asked."""
 
 
+class PeerRefused(PeerError):
+    """The board answered a command with ``ERR``, and why.
+
+    Its own answer, as against a silence, a timeout, or something it said
+    that could not be read: a caller that can carry on without what it asked
+    for can tell the board's refusal from a bridge or a driver that is lost.
+    """
+
+
 def version_parts(version: str, label: str = "peer") -> tuple[int, int, int]:
     match = _VERSION.fullmatch(str(version).strip())
     if match is None:
@@ -385,7 +394,7 @@ class Shell:
             if line == "OK":
                 return data
             if line.startswith("ERR"):
-                raise PeerError(
+                raise PeerRefused(
                     f"{self.label}: '{text}' refused: {line[3:].strip() or 'ERR'}")
             data.append(line)
         raise PeerError(f"{self.label}: no answer to '{text}' within {timeout:g}s"
@@ -397,6 +406,23 @@ class Shell:
             if line.startswith("{"):
                 return parse_status(line, self.label)
         raise PeerError(f"{self.label}: status printed no JSON line")
+
+    def drain_notices(self) -> list[str]:
+        """Read what the board said by itself and return the new notices.
+
+        A command clears the input buffer before it writes, so a notice that
+        arrived while nothing was being asked would be thrown away. The one
+        that matters here is `utesp: sco disconnected`, which the board sends
+        the moment a link goes down: during a capture, which is the whole
+        point of the session, no command is in flight to carry it.
+        """
+        seen = len(self.notices)
+        for line in self._lines(self.clock()):  # whatever has already arrived
+            if line and self.log is not None:
+                self.log(targets.RECEIVED, line)
+            if _NOTICE.match(line):
+                self._note(line)
+        return self.notices[seen:]
 
     def sco_stats(self, timeout: float = COMMAND_TIMEOUT_S) -> dict:
         """The controller's own (e)SCO packet counters, as one JSON line."""
@@ -907,12 +933,23 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         out.flush()
         status, seconds = _run_command(command, timeout)
         print(f"command exit: {status} after {seconds:.1f} s", file=out)
-        # Read them again while the link is still up: the controller's own
-        # belong to a live link, and `sco stop` ends it.
+        # What the boards said while the command ran, before the next command
+        # clears it: `utesp: sco disconnected` is how a link that went down
+        # announces itself.
+        said = {initiator.label: initiator_shell.drain_notices(),
+                acceptor.label: acceptor_shell.drain_notices()}
+        # Read the counters again while the link is still up: the
+        # controller's own belong to a live link, and `sco stop` ends it.
         after_initiator = _read_counts(initiator_shell, initiator.label)
         after_acceptor = _read_counts(acceptor_shell, acceptor.label)
+        stopped = ""
         if after_initiator.status["sco"] == SCO_UP:
-            initiator_shell.command("sco stop", SCO_STOP_TIMEOUT_S)
+            try:
+                initiator_shell.command("sco stop", SCO_STOP_TIMEOUT_S)
+            except PeerError as error:
+                # Reported with everything else rather than thrown here: the
+                # counters are already in hand and are the run's result.
+                stopped = str(error)
     finally:
         _release(initiator_shell, initiator.label, out)
         _release(acceptor_shell, acceptor.label, out)
@@ -920,8 +957,27 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
              (acceptor.label, before_acceptor, after_acceptor))
     for label, before, after in sides:
         _report_audio_traffic(out, label, before, after)
+        for notice in said.get(label, ()):
+            print(f"{label} said: {notice}", file=out)
     problems, notes = [], []
+    if stopped:
+        problems.append(f"the audio link would not stop: {stopped}")
     for label, before, after in sides:
+        # A link that went down and came back carries its frame counters
+        # over, so the floors below would pass on the traffic of two links.
+        # A new link has a new handle, and the controller's counters start
+        # again with it, which is what a count going backwards means.
+        if after.status["sco_handle"] != before.status["sco_handle"]:
+            problems.append(
+                f"the {label}'s audio link went down and came back while the "
+                f"command ran (handle {before.status['sco_handle']}, then "
+                f"{after.status['sco_handle']})")
+        elif _grew(before, after, "sco_rx_frames") < 0 or (
+                before.stats is not None and after.stats is not None
+                and after.stats["tx_total"] < before.stats["tx_total"]):
+            problems.append(f"the {label}'s counters went backwards while the "
+                            "command ran, so this is not the link they were "
+                            "first read from")
         if after.status["sco"] != SCO_UP:
             problems.append(f"the {label} reports the audio link "
                             f"{after.status['sco']}, not up, after the command "
@@ -988,7 +1044,10 @@ def _read_counts(shell: Shell, label: str) -> _Counts:
     status = check_audio_status(shell.status(), label)
     try:
         return _Counts(status, shell.sco_stats())
-    except PeerError as error:
+    except PeerRefused as error:
+        # Only the board's own refusal is carried on from. A silence, a
+        # timeout, or an answer that cannot be read is the bridge or the
+        # driver being lost, which no floor should be waived for.
         return _Counts(status, None, str(error))
 
 
@@ -1025,6 +1084,13 @@ def _check_link(linked: dict, far: dict, acceptor_label: str,
     # told it, and the accepting board's `sco start` answers before its link
     # exists, so its own view is the only sign it really has one.
     for label, status in ((initiator_label, linked), (acceptor_label, far)):
+        if status["sco_type"] != sco_type:
+            # What the board says it will ask for, against what it was told.
+            # With `default` that is the only thing to check: the choice is
+            # the stack's, so no particular type on the link is promised.
+            raise PeerError(
+                f"the {label} says it asks for {status['sco_type']} links, not "
+                f"the {sco_type} it was told to")
         if status["sco_handle"] == 0 or status["sco_frame_len"] == 0:
             raise PeerError(
                 f"the {label} reports the audio link up with no connection "

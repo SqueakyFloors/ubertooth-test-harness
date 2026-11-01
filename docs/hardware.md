@@ -155,9 +155,10 @@ timing, and the count: the audio pattern the firmware sends does not reach the
 air as it was sent, because the controller codes the samples to CVSD on the
 way out.
 
-A board reports what the link settled on, and its own and its controller's
-counters, from `utesp-1.4.0` onwards, which is the image the audio session
-asks for; every other command works on any 1.x image.
+A board has carried the link, and counted its frames, since `utesp-1.1.0`. The
+packet-type choice, and the fields that report what a link settled on, came
+with `utesp-1.4.0`, which is the image the audio session asks for; every other
+command works on any 1.x image.
 
 Registered with the bridge serial and the BD_ADDR its `status` reports (the
 factory MAC plus two in the last byte, so it too is fixed per board). Those

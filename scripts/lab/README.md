@@ -175,8 +175,12 @@ the air; what a capture gets is the link's packet types, timing, and count
 
 The audio link needs a newer peer image than the other commands, `utesp-1.4.0`
 or a later 1.x, because that is where the packet-type choice and the fields
-that report what the link settled on arrived. A board on an older image is
-told so and nothing is started on either board.
+that report what the link settled on arrived; the link itself and its frame
+counters are older. A board on an older image is told so, and nothing is
+started on either board.
+
+The firmware's own notices from the session are passed on as `said:` lines,
+which is where a link that went down during the capture announces itself.
 
 Inside an outer `hold` that already has these devices, add `--no-hold`: holding
 them twice would wait for a lock this process already holds.
