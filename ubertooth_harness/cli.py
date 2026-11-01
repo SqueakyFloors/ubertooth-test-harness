@@ -438,7 +438,8 @@ def _parser() -> argparse.ArgumentParser:
     report.add_argument("--title", help="report title")
     report.add_argument(
         "--redact-serials", action="store_true",
-        help="replace device serial numbers with <serial>",
+        help="replace device serial numbers with <serial>, and include each "
+        "run's transcript, masked the same way",
     )
 
     runner = subparsers.add_parser(

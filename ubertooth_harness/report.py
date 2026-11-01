@@ -30,6 +30,7 @@ from ubertooth_harness.rawlog import (
     Chunk,
     CommandCapture,
     format_command_record,
+    line_shape,
 )
 from ubertooth_harness.rf import describe as describe_placement
 from ubertooth_harness.watchdog import wait_counts
@@ -1330,6 +1331,62 @@ def _mask_cut_serials(text: str, serials: Sequence[str]) -> str:
     return _HEX_RUN.sub(mask, text)
 
 
+# A line the record limits left out of run.jsonl is counted by its shape
+# (rawlog.line_shape), and the shapes are listed in the `[M]` note as
+# `3 x [E] <shape>`. A shape is not the line, so masking a serial does not
+# mask it (#220): line_shape replaces every run of digits with N, so a line
+# that named a board arrives with the serial's digits gone and its hex
+# letters and their positions intact, which is enough to pick one board out
+# of a small bench.
+#
+# What is masked is a token of a shape that a serial's own shape holds. The
+# token is a run of hex letters and N bounded by something that is neither,
+# so the rule reads a shape the way _mask_cut_serials reads a run of hex: a
+# piece glued to letters of its own is one longer value no serial's shape
+# holds, and is left to read. A token the 200-character shape limit cut is a
+# piece of the serial's shape and is masked like the whole.
+#
+# A token must carry an N, since a serial with no digits in it has its own
+# characters as its shape and is masked as a serial; and this many hex
+# letters, because the letters are what names the board. Fewer than that
+# (`NabN`, the shape of `1ab2`) sits in the shape of too much ordinary
+# output to mask.
+_SHAPE_MIN_LETTERS = 4
+_SHAPE_TOKEN = re.compile(
+    r"(?<![0-9A-Za-z])[A-Fa-fN]*N[A-Fa-fN]*(?![0-9A-Za-z])"
+)
+_SHAPE_LETTER = re.compile(r"[A-Fa-f]")
+
+
+def _shape_letters(token: str) -> int:
+    """Hex letters in a shape token, which is what names the board (the N
+    standing where a run of digits was says nothing about which board)."""
+    return len(_SHAPE_LETTER.findall(token))
+
+
+def _mask_serial_shapes(text: str, serials: Sequence[str]) -> str:
+    """Mask a line shape that the shape of a known serial appears in."""
+    shapes = set()
+    for serial in serials:
+        shape = line_shape(serial).lower()
+        # No digits in it, so the shape is the serial itself, already masked.
+        if shape == serial.lower():
+            continue
+        if _shape_letters(shape) >= _SHAPE_MIN_LETTERS:
+            shapes.add(shape)
+    if not shapes:
+        return text
+
+    def mask(match: re.Match) -> str:
+        token = match.group(0).lower()
+        if (_shape_letters(token) >= _SHAPE_MIN_LETTERS
+                and any(token in shape for shape in shapes)):
+            return REDACTED
+        return match.group(0)
+
+    return _SHAPE_TOKEN.sub(mask, text)
+
+
 def _redact(text: str, serials: Iterable[str]) -> str:
     # Read once: the rules below each walk the serials.
     serials = sorted(serials, key=len, reverse=True)
@@ -1348,6 +1405,9 @@ def _redact(text: str, serials: Iterable[str]) -> str:
             # it. A serial this long inside a longer number would be masked
             # too, which costs a reader nothing.
             text = text.replace(serial, REDACTED)
+    # Before the cut rule, so a shape whose letters happen to run 8 wide is
+    # masked as one shape and not in pieces with its N between them.
+    text = _mask_serial_shapes(text, serials)
     # Last, so a whole serial is masked as one and only the pieces a cut left
     # behind reach this rule.
     return _mask_cut_serials(text, serials)
@@ -1368,7 +1428,14 @@ def render_run(events: Sequence[Mapping], *, redact_serials: bool = False, trans
 
 
 def render_runs(paths: Sequence[Path | str], *, redact_serials: bool = False, title: str | None = None) -> str:
-    """One report covering several runs (for example macOS and Linux)."""
+    """One report covering several runs (for example macOS and Linux).
+
+    Each run's setup and results, and, when the serials are masked, its
+    transcript as well: ``--redact-serials`` means the whole report masked
+    (#221), and the transcript is most of what a report is worth to a
+    reader. Without masking the page stays a summary, because each run's own
+    ``report.md`` already carries its transcript with its serials in it.
+    """
     runs = []
     for path in paths:
         path = Path(path)
@@ -1380,7 +1447,11 @@ def render_runs(paths: Sequence[Path | str], *, redact_serials: bool = False, ti
         lines.append(f"| `{run.run_id}` | {_cell(host)} | {_cell(run.status)} |")
     text = "\n".join(lines) + "\n"
     for run in runs:
-        text += "\n" + render_run(run.events, transcript=False).replace("# Ubertooth test run", "## Run", 1)
+        # Not masked per run: the whole page is masked below, with every
+        # run's serials, so a board that two runs used is masked in both.
+        text += "\n" + render_run(
+            run.events, transcript=redact_serials,
+        ).replace("# Ubertooth test run", "## Run", 1)
     serials = set().union(*(run.serials() for run in runs)) if runs else set()
     return _redact(text, serials) if redact_serials else text
 

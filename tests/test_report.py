@@ -12,6 +12,7 @@ from ubertooth_harness.rawlog import (
     RECORD_PIECE_CHARS,
     CappedOutput,
     CommandOutputFiles,
+    line_shape,
     record_bytes,
 )
 from ubertooth_harness.report import (
@@ -519,6 +520,61 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(f"[O] found {piece}\n",
                              _redact(f"[O] found {piece}\n", ()), piece)
 
+    def test_a_line_shape_a_serials_shape_holds_is_masked(self):
+        # #220: the lines the record limits left out of run.jsonl are counted
+        # by shape, and a shape is not the line, so masking the serial leaves
+        # the shape as it is. A serial with its digits spread through it
+        # leaves hex letters and their positions, which name the board.
+        from ubertooth_harness.report import _redact
+
+        serial = "1ab23cd45ef67ab89cd01ef23ab45cd6"
+        shape = line_shape(serial)
+
+        self.assertEqual("NabNcdNefNabNcdNefNabNcdN", shape)  # no 8-wide run
+        self.assertEqual(
+            f"  3 x [E] board {REDACTED} is idle\n",
+            _redact(f"  3 x [E] board {shape} is idle\n", {serial}),
+        )
+        # The shape itself is held to 200 characters, so a long line's shape
+        # can be cut inside the serial's; what the cut leaves is masked too.
+        self.assertEqual(
+            f"  1 x [E] {REDACTED}\n",
+            _redact(f"  1 x [E] {shape[:12]}\n", {serial}),
+        )
+
+    def test_a_line_shape_no_serials_shape_holds_is_left_to_read(self):
+        # What the shape rule leaves readable, which is what the shapes are
+        # in the report for.
+        from ubertooth_harness.report import _redact
+
+        serial = "1ab23cd45ef67ab89cd01ef23ab45cd6"
+        kept = (
+            "  7 x [E] rx block timestamp N * N nanoseconds\n"
+            "  4 x [O] Serial No: N\n"           # a numeric serial's own shape
+            "  2 x [E] systime=N ch=N LAP=N err=N\n"
+            "  1 x [E] Nab is idle\n"            # too few letters to name a board
+            "  1 x [E] deadbeef cafe\n"          # no shape token in it at all
+        )
+
+        self.assertEqual(kept, _redact(kept, {serial, "001050210121"}))
+
+    def test_the_shape_summary_of_left_out_output_is_masked(self):
+        # End to end: a command whose output passed the record limits leaves
+        # the lines between the head and the tail counted by shape, and the
+        # [M] note lists them.
+        serial = "1ab23cd45ef67ab89cd01ef23ab45cd6"
+        shape = line_shape(serial)
+        line = f"board {serial} is idle\n"
+        events = [ubertooth_manifest(serial)] + capped_events(line * 4000)
+
+        plain = render_run(events)
+        report = render_run(events, redact_serials=True)
+
+        self.assertIn(f"x [E] board {shape} is idle", plain)
+        self.assertNotIn(shape, report)
+        self.assertIn(f"x [E] board {REDACTED} is idle", report)
+        self.assertNotIn(serial, report)
+
     def test_the_padded_width_is_the_one_a_dk_port_name_carries(self):
         # _SERIAL_PADDED_DIGITS restates the padding in targets.DK_BY_ID;
         # this keeps the two in step.
@@ -837,7 +893,27 @@ class ReportTests(unittest.TestCase):
             self.assertTrue(report.startswith("# Release validation"))
             self.assertIn("| `mac-run` | Host_Mac | passed |", report)
             self.assertIn("| `linux-run` | Host_Linux | passed |", report)
+            # Unmasked, the page stays a summary: each run's own report.md
+            # carries its transcript with its serials in it.
             self.assertNotIn("## Transcript", report)
+
+    def test_a_redacted_report_carries_each_runs_transcript(self):
+        # #221: --redact-serials means the whole report, masked, and the
+        # transcript is most of what a report is worth to a reader. It is
+        # also where the serials the rules work hardest on appear: in a
+        # command line, in a device path, in a board's answer.
+        with tempfile.TemporaryDirectory() as directory:
+            mac = Path(directory) / "mac-run"
+            linux = Path(directory) / "linux-run"
+            write_run(mac, host="Host_Mac")
+            write_run(linux, host="Host_Linux")
+
+            report = render_runs([mac, linux], redact_serials=True)
+
+            self.assertEqual(2, report.count("## Transcript"))
+            self.assertIn(f"[C] ubertooth-util -U {REDACTED} -s", report)
+            self.assertIn(f"[O] Serial No: {REDACTED}", report)
+            self.assertNotIn(SERIAL, report)
 
     def test_records_are_valid_json_lines(self):
         with tempfile.TemporaryDirectory() as directory:

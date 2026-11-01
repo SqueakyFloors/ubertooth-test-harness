@@ -1853,9 +1853,14 @@ python -m ubertooth_harness report runs/<mac-run-id> runs/<linux-run-id> \
   --title "Ubertooth 2026-11-R1 validation" --output validation.md
 ```
 
-`report` writes one page summarizing each run's setup and results, for example
-macOS and Linux runs for a release; each run's own report.md keeps its full
-transcript. Serial numbers are shown; `--redact-serials` replaces them with
+`report` writes one page covering several runs, for example the macOS and
+Linux runs of a release. It summarizes each run's setup and results; with
+`--redact-serials` it carries each run's transcript as well, so the option
+means the whole report, masked. Without the option the page stays a summary,
+because each run's own `report.md` already keeps its full transcript with its
+serials in it.
+
+Serial numbers are shown; `--redact-serials` replaces them with
 `<serial>`: an Ubertooth's serial, a DK's J-Link serial, and an ESP32 peer's
 bridge serial. A numeric serial is masked in each width the run writes it, as
 registered and as the number the tools take, so a DK's J-Link serial does not
@@ -1873,8 +1878,19 @@ carrying both letters and digits, which is a serial and little else. Left to
 read are a whole git SHA or digest, a narrower piece, and a long run of
 digits or of letters alone (a counter, a bit string, a field of zeros) that
 no serial the run names holds. The cost of the width rule is that a SHA an
-output cap cut that short reads as `<serial>` too. Redaction is this page
-only: a run's own `report.md`, which carries the transcript, is always
+output cap cut that short reads as `<serial>` too.
+
+The lines an output cap left out of run.jsonl are counted by shape in the
+`[M]` note (`3 x [E] <shape>`), and a shape is not the line: every run of
+digits in it reads `N`, so a line that named a board would arrive with the
+serial's digits gone and its hex letters and their positions intact, which
+is enough to pick one board out of a small bench. So a shape that the shape
+of a serial the run names appears in is masked as well, whole or as the
+200-character shape limit cut it. The shapes keep their point: masked is a
+run of hex letters and `N` that holds four or more of those letters and
+sits in a known serial's shape, and every other shape is left to read.
+
+Redaction is the `report` page only: a run's own `report.md` is always
 written with its serials.
 
 ## Flash reliability
