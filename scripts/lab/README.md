@@ -141,17 +141,29 @@ quietly get EDR or a plain SCO link. Both boards are read for this, because
 each works out what its link is from what its own controller told it.
 
 The session reports the type, the packet length, the interval in slots and
-milliseconds, the retransmission window, the packet types each controller
-supports, the firmware's frame counters from both boards, and the controllers'
-own packet counters, which is the number a capture of the air is compared
-with. `--min-frames` and `--min-packets` are the floors those must reach;
-`--min-seconds` and `--timeout` work as they do for `stream`.
+milliseconds, the retransmission window, and the packet types each controller
+supports. Then, **counted across the command and not since the link came up**,
+the firmware's frame counters from both boards and the controllers' own packet
+counters, which is the number a capture of the air is compared with. Bringing
+the link up and settling put frames on the air before the command starts, so a
+total would flatter the run; the difference is what the capture window saw.
+`--min-frames` and `--min-packets` are the floors those differences must
+reach, and both boards must meet them, so a link that fell silent part way
+through does not pass on what it carried at first. `--min-seconds` and
+`--timeout` work as they do for `stream`.
+
+The link is checked again after the command: one that came back as another
+packet type, or as plain SCO, fails even though it was right at the start.
 
 A counter read the firmware refuses — it refuses one with no link up, and for
 the rest of a boot after a request of its own went unanswered — is reported as
-not counted, with the reason, rather than ending the session: a link that
-dropped during the capture is named in its own words, with the frame counters
-still there to read.
+not counted, with the reason, and the packet floor is reported as not checked,
+rather than ending the session. A link that dropped during the capture is then
+named in its own words, with the frame counters still there to read.
+
+If a board cannot be put back in its boot state at the end, the session says
+so: a board whose audio profile is still running refuses the next `role` or
+`defaults`, and `reset` is the way out.
 
 An EV3 link is the busiest traffic this pair can make: half the payload per
 packet, half the interval, so about twice the packet rate of the 2-EV3 the

@@ -413,10 +413,14 @@ class AudioTests(unittest.TestCase):
         self.assertIn(f"audio link: up to {ACCEPTOR_ADDRESS}", report)
         self.assertIn("command exit: 0", report)
         self.assertIn("pair carried audio: yes", report)
-        self.assertIn("initiator audio frames: sent 50 refused 0 received 50 "
-                      "damaged 0", report)
-        self.assertIn("acceptor audio packets: sent 50 discarded 0 received 50 "
-                      "good 50 errors 0 missing 0 lost 0", report)
+        # The counters count from when the link came up, so what is reported
+        # is the difference across the command: two reads of each board
+        # inside the window, at 50 frames a read in the fake.
+        self.assertIn("initiator audio frames while the command ran: sent 100 "
+                      "refused 0 received 100 damaged 0", report)
+        self.assertIn("acceptor audio packets while the command ran: sent 100 "
+                      "discarded 0 received 100 good 100 errors 0 missing 0 "
+                      "lost 0", report)
         # The mask each controller supports, so a refused type can be read
         # rather than puzzled over.
         self.assertIn("audio types supported: initiator 003d, acceptor 003d",
@@ -514,13 +518,16 @@ class AudioTests(unittest.TestCase):
         # lost its link must not end on that refusal: the frame counters and
         # the message written for a dropped link are what the reader needs.
         class Dropping(FakePeerFirmware):
-            reads = 0
+            """Its link goes down once the counters have been read once."""
 
-            def _audio_status(self):
-                self.reads += 1
-                if self.reads > 2:  # after the introduction and the link check
+            dropped = False
+
+            def handle(self, line):
+                answer = super().handle(line)
+                if line == "sco stats" and not self.dropped:
+                    self.dropped = True
                     self._sco_stop()
-                return super()._audio_status()
+                return answer
 
         acceptor_firmware, initiator_firmware = _audio_pair(
             initiator_class=Dropping)
@@ -533,9 +540,91 @@ class AudioTests(unittest.TestCase):
         ):
             esp32peer.audio(acceptor, initiator, TRUE, out=report, settle_s=0.0)
         written = report.getvalue()
-        self.assertIn("initiator audio frames: sent 50", written)
+        self.assertIn("initiator audio frames while the command ran: sent 50",
+                      written)
         self.assertIn("initiator audio packets: not counted", written)
         self.assertIn("no audio link to count packets on", written)
+
+    def test_a_link_that_is_up_but_carries_nothing_fails(self):
+        # Counted across the command, not since the link came up: a link that
+        # carried frames at first and then stopped is not a pass.
+        acceptor, initiator = _audio_pair()
+        initiator.carrying = False
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "the initiator received 0 frames while the command ran, fewer "
+            "than the 10 this test needs"
+        ):
+            self._audio(pair=(acceptor, initiator), min_frames=10)
+
+    def test_a_link_that_came_back_as_another_type_mid_run_fails(self):
+        # The link the command ran against has to be the one it was given.
+        class Renegotiating(FakePeerFirmware):
+            def handle(self, line):
+                answer = super().handle(line)
+                if line == "sco stats" and self.sco_pkt_type == "ev3":
+                    self.sco_pkt_type = "2-ev3"  # it came back as EDR
+                return answer
+
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "after the command ran, the initiator reports an audio link using "
+            "2-ev3, not the ev3"
+        ):
+            self._audio(pair=_audio_pair(initiator_class=Renegotiating),
+                        sco_type="ev3")
+
+    def test_a_controller_without_the_type_does_not_open_a_link(self):
+        # The stack masks the request against the types the controller says
+        # it has, so a controller without EV3 refuses rather than being asked
+        # for something it cannot do.
+        acceptor, initiator = _audio_pair()
+        initiator.sco_types_supported = "0035"  # every type but EV3
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "'sco start' refused: the controller did not open a synchronous link"
+        ):
+            self._audio(pair=(acceptor, initiator), sco_type="ev3")
+
+    def test_a_board_that_could_not_be_released_is_said_aloud(self):
+        # A board whose audio profile is still running refuses the next
+        # case's `role` and `defaults`, so a session that could not put it
+        # back has to leave a sign of it in the report.
+        class Stuck(FakePeerFirmware):
+            def boot(self):
+                lines = super().boot()
+                self.sco_profile = "ag"
+                self.sco = "ready"
+                return lines
+
+        status, report, _acceptor, _initiator = self._audio(
+            pair=_audio_pair(acceptor_class=Stuck), min_frames=10)
+        self.assertEqual(0, status)
+        self.assertIn("note: the acceptor is not in its boot state after its "
+                      "reset: sco 'ready', not 'off', sco_profile 'ag', not "
+                      "'none'", report)
+
+    def test_a_reset_checks_only_the_audio_fields_an_image_reports(self):
+        # An image between the audio link and the packet-type choice has some
+        # of these fields and not others; a reset is checked on what it has.
+        class Older(FakePeerFirmware):
+            """The audio link, without the fields utesp-1.4.0 added."""
+
+            def _audio_status(self):
+                status = super()._audio_status()
+                for key in ("sco_type", "sco_link", "sco_pkt_type",
+                            "sco_tx_len", "sco_rx_len", "sco_interval",
+                            "sco_retrans_window", "sco_types_supported"):
+                    del status[key]
+                return status
+
+        acceptor, initiator = _audio_pair(acceptor_class=Older)
+        peer, _ = _peers(acceptor, initiator)
+        esp32peer.reset(peer, io.StringIO())  # the fields it has are at boot
+        # An audio session still needs the ones it does not have.
+        with self.assertRaisesRegex(esp32peer.PeerError,
+                                    "status has no valid 'sco_type'"):
+            self._audio(pair=(acceptor, initiator))
 
     def test_counters_refused_for_the_rest_of_the_boot_do_not_end_the_session(self):
         # The firmware refuses them for the rest of a boot once a request has
@@ -652,14 +741,16 @@ class AudioTests(unittest.TestCase):
     def test_a_link_that_carried_too_few_frames_fails(self):
         with self.assertRaisesRegex(
             esp32peer.PeerError,
-            "the acceptor received 50 frames, fewer than the 500 this test needs"
+            "the acceptor received 100 frames while the command ran, fewer "
+            "than the 500 this test needs"
         ):
             self._audio(min_frames=500)
 
     def test_a_controller_that_sent_too_few_packets_fails(self):
         with self.assertRaisesRegex(
             esp32peer.PeerError,
-            "controller sent 50 packets, fewer than the 5000 this test needs"
+            "controller sent 100 packets while the command ran, fewer than "
+            "the 5000 this test needs"
         ):
             self._audio(min_packets=5000)
 

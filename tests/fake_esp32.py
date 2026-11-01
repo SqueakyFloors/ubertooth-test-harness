@@ -32,6 +32,24 @@ LINKS = {
 }
 
 
+# Which bit of the controller's packet-type mask decides each type, in the
+# firmware's bit order: bits 0 to 5 ALLOW HV1, HV2, HV3, EV3, EV4, and EV5,
+# and bits 6 to 9 FORBID 2-EV3, 3-EV3, 2-EV5, and 3-EV5. So EV3 needs its bit
+# set and 2-EV3 needs its bit clear.
+SUPPORT_BIT = {"ev3": (3, True), "2ev3": (6, False)}
+
+
+def supports_type(mask: str, kind: str) -> bool:
+    """Whether a controller reporting ``mask`` supports a packet type.
+
+    The stack masks whatever is asked for against the types the controller
+    says it has, so a controller without the type refuses the link rather
+    than being asked for something it cannot do.
+    """
+    bit, wanted_set = SUPPORT_BIT[kind]
+    return bool(int(mask, 16) & (1 << bit)) is wanted_set
+
+
 def negotiated_type(mine, theirs):
     """The type a link between two boards uses, or None if there is none.
 
@@ -58,9 +76,11 @@ class FakePeerFirmware:
         # writes this board reports per `stream on`; the bench numbers are
         # much larger, so a test asks for small floors.
         self.writes_per_stream = 100
-        # Frames, and controller packets, one audio link stands for; the
-        # bench numbers are in the thousands.
-        self.frames_per_link = 50
+        # Frames, and controller packets, a live link adds per read of this
+        # board; the bench numbers are in the thousands per session.
+        self.frames_per_read = 50
+        # A live link that sends nothing has this False.
+        self.carrying = True
         # The packet types these controllers support, as the firmware reports
         # them: HV1, HV3, EV3, EV4, and EV5, and no bit forbidding an EDR type.
         self.sco_types_supported = "003d"
@@ -178,6 +198,12 @@ class FakePeerFirmware:
         self.commands.append(line)
         if self.silent:
             return []
+        # A live link carries frames the whole time it is up, so the counters
+        # move between one read and the next: a count taken across a command
+        # grows the way a board's does. `carrying` False is a link that is up
+        # and sending nothing.
+        if self.sco == "on" and self.carrying:
+            self._carry()
         if line in self.refuse:
             return [f"ERR {self.refuse[line]}"]
         words = line.split()
@@ -352,7 +378,9 @@ class FakePeerFirmware:
             self._audio_link_down()
             return ["ERR audio connect timed out"]
         kind = negotiated_type(self.sco_type, far.sco_type)
-        if kind is None:
+        if kind is None or not all(
+                supports_type(board.sco_types_supported, kind)
+                for board in (self, far)):
             self.sco_profile = "none"
             self._audio_link_down()
             return ["ERR the controller did not open a synchronous link"]
@@ -367,11 +395,17 @@ class FakePeerFirmware:
         self.sco_handle = 129
         for field, value in LINKS[kind].items():
             setattr(self, field, value)
-        # One link stands for the whole run's audio: each side answers every
-        # frame it receives with one of its own, so both counters move.
-        self.sco_tx_frames += self.frames_per_link
-        self.sco_rx_frames += self.frames_per_link
-        self.sco_packets += self.frames_per_link
+
+    def _carry(self):
+        """One read's worth of traffic on a live link.
+
+        Each side answers every frame it receives with one of its own, so
+        both frame counters move, and the controller counts a packet for
+        each.
+        """
+        self.sco_tx_frames += self.frames_per_read
+        self.sco_rx_frames += self.frames_per_read
+        self.sco_packets += self.frames_per_read
 
     def _sco_stop(self):
         far = self.peer_firmware
