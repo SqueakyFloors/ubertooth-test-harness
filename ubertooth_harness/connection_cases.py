@@ -22,6 +22,10 @@ pair runs, then checks:
 - the DKs' own view afterwards: connections made, parameter updates
   accepted, the negotiated data length and PHY.
 
+How much of a followed connection arrives intact varies from capture to
+capture, so a capture case that misses it takes another capture, up to
+CAPTURE_ATTEMPTS in all, and the run records which attempt passed.
+
 The pcapng connection-information option libbtbb writes for a CONNECT_IND is
 known to be wrong (SqueakyFloors/libbtbb#21: it is copied 6 bytes early, so
 every parameter in it belongs to another field). One case pins that, so it
@@ -43,17 +47,19 @@ from ubertooth_harness.advertiser_cases import (
     DK_TIMEOUT_S,
     ENSURE_TIMEOUT_S,
     FIRMWARE_LABEL,
-    _capture_path,
     _dk,
     _dk_idle,
 )
 from ubertooth_harness.outputfiles import search_lines
 from ubertooth_harness.receive_cases import seconds_arg
 from ubertooth_harness.stateful import (
+    ATTEMPT_KEY,
+    CAPTURE_DIR_KEY,
     StateCase,
     StateCaseError,
     Step,
     artifact_key,
+    require,
 )
 from ubertooth_harness.transitions import (
     MODE_RESET_SETTINGS,
@@ -76,8 +82,9 @@ PERIPHERAL_ROLE = "peripheral"
 # (SqueakyFloors/ubertooth#505; whether the end of the followed connection
 # is what triggers it is not established). With the central started just
 # before the capture, that means CYCLE_MS < duration < 2 * CYCLE_MS;
-# `check_arguments` enforces it. Catching the one CONNECT_IND is not yet
-# reliable: issue #149.
+# `check_arguments` enforces it. One window gives the receiver one chance
+# at the CONNECT_IND, which is why a failed capture is taken again
+# (CAPTURE_ATTEMPTS).
 CYCLE_MS = 5000
 # Bytes per write and how often: 244 bytes of ATT payload fill a 251-byte
 # link-layer packet, which only Data Length Extension allows.
@@ -100,11 +107,37 @@ MIN_DATA_PACKETS = 5
 # ...of which at least this many must decode with a correct CRC.
 MIN_VALID_PACKETS = 1
 MIN_LONG_PACKETS = 1
+# How many times a capture is taken before the case fails (#149). One
+# capture window holds one of the central's reconnections, and how much of
+# that connection the Ubertooth catches intact varies: three runs on the
+# bench on 2026-10-30 cleared the floors above twice and missed them once,
+# with 13 to 17 packets on the access address each time and none of them
+# intact in two of the three. The pair keeps making and remaking the link,
+# so another try costs only another capture window, and each try writes its
+# own capture file.
+CAPTURE_ATTEMPTS = 3
 CHECK_TIMEOUT_S = 30.0
 # Settling and status reads after the capture.
 STATUS_TIMEOUT_S = 30.0
 
 _CONNCAPTURE = str(Path(conncapture.__file__).resolve())
+
+
+def _attempt_capture_path(name: str):
+    """The capture file of the attempt that is running.
+
+    Every attempt keeps its own file (``capture-1.pcapng``,
+    ``capture-2.pcapng``), so the run directory holds the capture each
+    try checked, not only the last one.
+    """
+    stem, _, extension = name.rpartition(".")
+
+    def path(context):
+        attempt = context.get(ATTEMPT_KEY, "1")
+        directory = Path(require(context, CAPTURE_DIR_KEY))
+        return str(directory / f"{stem}-{attempt}.{extension}")
+
+    return path
 
 
 def _pair(resources: Mapping, resource_identities: Mapping) -> tuple[dict, dict]:
@@ -216,8 +249,10 @@ def _capture_case(serial, central, peripheral, seconds, *, case_id, name,
     option, file_name = capture
     interval_units = nrfdk.conn_units(interval_ms)
 
+    capture_file = _attempt_capture_path(file_name)
+
     def check(context):
-        argv = [sys.executable, _CONNCAPTURE, _capture_path(file_name)(context),
+        argv = [sys.executable, _CONNCAPTURE, capture_file(context),
                 "--central", central["address"],
                 "--peripheral", peripheral["address"],
                 "--interval-units", str(interval_units),
@@ -254,7 +289,7 @@ def _capture_case(serial, central, peripheral, seconds, *, case_id, name,
              )),
         Step("capture", f"ubertooth-btle -f -A{ADV_CHANNEL} {option} for {seconds}s",
              lambda context: _btle(serial, "-f", f"-A{ADV_CHANNEL}", option,
-                                   _capture_path(file_name)(context)),
+                                   capture_file(context)),
              timeout_s=float(seconds), mutates=True, continuous=True),
         _stop(serial),
         Step("central-report", "What the central did while the capture ran",
@@ -272,9 +307,14 @@ def _capture_case(serial, central, peripheral, seconds, *, case_id, name,
         + _cleanup(serial, MODE_RESET_SETTINGS),
         expected_state=(
             f"a CONNECT_IND at {interval_units} units with {MIN_DATA_PACKETS}+ "
-            "packets on its access address; both DKs idle; channel, squelch, and "
-            "LEDs restored"),
+            f"packets on its access address, within {CAPTURE_ATTEMPTS} captures; "
+            "both DKs idle; channel, squelch, and LEDs restored"),
         capture_dir=True,
+        # A capture that misses the connection is taken again: the capture
+        # itself, the stop that ends it, the central's report of what it did
+        # while it ran, and the check of the file it wrote.
+        retry_steps=("capture", "stop", "central-report", "check-capture"),
+        attempts=CAPTURE_ATTEMPTS,
     )
 
 

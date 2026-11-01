@@ -3,13 +3,16 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import MappingProxyType
 
+from ubertooth_harness.catalog import TestCatalog, TestDefinition
 from ubertooth_harness.events import RunEvent
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.manifest import SourceRevision, build_run_manifest
 from ubertooth_harness.planner import TestInvocation
 from ubertooth_harness.preflight import PreflightCheck
 from ubertooth_harness.sequencer import NamedTestSequencer
+from ubertooth_harness.stateful import ATTEMPT_KEY, StateCase, Step
 
 
 class CollectSink:
@@ -303,6 +306,137 @@ class SequencerTests(unittest.TestCase):
             self.assertFalse(summary.passed)
             self.assertIn("expected output", summary.failure_reason)
             self.assertEqual(1, summary.completed_preflight_checks)
+
+
+class AttemptExecutor:
+    """Answers every command, but the check only from ``passing_attempt`` on.
+
+    Stands for a capture whose outcome depends on what arrived over the air.
+    """
+
+    def __init__(self, passing_attempt):
+        self.commands = []
+        self.passing_attempt = passing_attempt
+        self.checks = 0
+
+    def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
+        command = tuple(argv)
+        self.commands.append(command)
+        if command == ("ubertooth-util", "-V"):
+            output = ("Host tools version: libubertooth 1.1 (git-test), "
+                      "libbtbb 1.0 (git-btbb)\n")
+        elif command[0] == "check":
+            self.checks += 1
+            output = ("capture ok\n" if self.checks >= self.passing_attempt
+                      else "the capture holds nothing\n")
+        else:
+            output = "ok\n"
+        if on_output:
+            on_output("stdout", output)
+        return CommandResult(command, 0, output, "", 0.01, False)
+
+
+class RetriedStepTests(unittest.TestCase):
+    """A case may take a capture again (StateCase.retry_steps)."""
+
+    def case(self, *, attempts=3, retry_steps=("capture", "check-capture")):
+        return StateCase(
+            "retried", "Retried capture",
+            (Step("prepare", "Start the peers", ("prepare",),
+                  output_patterns=(r"ok",)),
+             Step("capture", "Capture",
+                  lambda context: ("capture", context[ATTEMPT_KEY]),
+                  mutates=True),
+             Step("check-capture", "The capture holds the connection",
+                  ("check",), output_patterns=(r"capture ok",))),
+            (Step("clean", "Leave the board as it was", ("clean",)),),
+            retry_steps=retry_steps, attempts=attempts,
+        )
+
+    def run_case(self, case, executor):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog = TestCatalog([
+                TestDefinition(
+                    "Custom", "custom", MappingProxyType({}),
+                    MappingProxyType({}),
+                    command_builder=lambda *_args: (case,),
+                )
+            ])
+            invocation = TestInvocation("001-Custom", "Custom", "Host_Linux",
+                                        {}, {})
+            manifest, checks = run_contract(root, invocation)
+            sink = CollectSink()
+            summary = NamedTestSequencer(
+                executor, catalog=catalog, event_sink=sink,
+            ).run((invocation,), root, run_id="named-run", manifest=manifest,
+                  preflight_checks=checks)
+            return summary, sink.events, (root / "report.md").read_text()
+
+    @staticmethod
+    def finished(events, event_type, stage="transition"):
+        return [
+            event for event in events
+            if event.event_type == event_type
+            and event.details.get("stage", stage) == stage
+        ]
+
+    def test_a_second_capture_passes_the_case(self):
+        executor = AttemptExecutor(passing_attempt=2)
+        summary, events, report = self.run_case(self.case(), executor)
+
+        self.assertTrue(summary.passed, summary.failure_reason)
+        # The peers were started once; the capture and its check ran twice,
+        # each attempt writing its own capture.
+        self.assertEqual(
+            [("prepare",), ("capture", "1"), ("check",), ("capture", "2"),
+             ("check",), ("clean",)],
+            [command for command in executor.commands
+             if command != ("ubertooth-util", "-V")])
+        checks = [event.status for event in self.finished(events, "step_finished")
+                  if event.details["step_id"] == "check-capture"]
+        self.assertEqual(["failed", "passed"], checks)
+        case_finished = self.finished(events, "check_finished", stage="transition")
+        self.assertEqual(2, case_finished[-1].details["attempts"])
+        self.assertIn("(attempt 2)", report)
+        self.assertIn("EXIT: passed in 2 attempts", report)
+
+    def test_every_attempt_keeps_its_own_saved_output(self):
+        executor = AttemptExecutor(passing_attempt=2)
+        _summary, events, _report = self.run_case(self.case(), executor)
+
+        ids = [event.details.get("command_id")
+               for event in events if event.event_type == "command_finished"]
+        self.assertIn("001-Custom-retried-check-capture", ids)
+        self.assertIn("001-Custom-retried-check-capture-try2", ids)
+
+    def test_a_case_that_never_catches_it_fails_after_every_attempt(self):
+        executor = AttemptExecutor(passing_attempt=99)
+        summary, events, _report = self.run_case(self.case(attempts=2), executor)
+
+        self.assertFalse(summary.passed)
+        self.assertIn("The capture holds the connection", summary.failure_reason)
+        self.assertEqual(
+            2, len([c for c in executor.commands if c[0] == "capture"]))
+        case_finished = self.finished(events, "check_finished", stage="transition")
+        self.assertEqual(2, case_finished[-1].details["attempts"])
+
+    def test_a_failure_outside_the_retried_steps_is_not_retried(self):
+        executor = AttemptExecutor(passing_attempt=1)
+        case = self.case(retry_steps=("check-capture",), attempts=3)
+        # The first step's pattern is the one this executor never prints.
+        case = replace(
+            case,
+            steps=(replace(case.steps[0], output_patterns=(r"never printed",)),)
+            + case.steps[1:],
+        )
+        summary, _events, _report = self.run_case(case, executor)
+
+        self.assertFalse(summary.passed)
+        self.assertEqual(
+            [("prepare",), ("clean",)],
+            [command for command in executor.commands
+             if command != ("ubertooth-util", "-V")])
 
 
 if __name__ == "__main__":

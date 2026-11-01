@@ -749,7 +749,19 @@ overall pass. Event schema version 1 is pre-release
 and has no stable consumers yet; field changes before the controller lands do
 not bump it.
 
-A state-changing case stops at its first failed step. The parent test moves on
+A state-changing case stops at its first failed step, unless the case declares
+a group of steps to run again (`StateCase.retry_steps` and `attempts`): a
+failure inside that group starts the group over, up to that many attempts, and
+only the last attempt's failure ends the case. It is for a case whose outcome
+depends on what arrives over the air, where the devices keep making the
+traffic and another try costs only the capture window; the steps in the group
+have to be repeatable and leave the board as the first attempt found it. From
+the second attempt on, each step's `step_finished` event carries its `attempt`
+and the saved output of its command is kept separately, and the case's
+`check_finished` event carries the `attempts` it took. A cancellation, and a
+failure anywhere else in the case, end it as they always did.
+
+The parent test moves on
 to the next case only when that case's cleanup verified the device restored;
 otherwise the test stops. Cleanup runs with its own hard-timeout commands even
 after cancellation or an internal error such as a failed event write, during

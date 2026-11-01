@@ -35,6 +35,10 @@ The checks:
   pins what can be seen rather than the exact wrong layout). That is the
   opposite of a wish: it fails, and can become a real check, once libbtbb
   records the right bytes -- and it also fails if the option disappears.
+  The comparison is made against a CONNECT_IND whose connection the capture
+  went on to decode; a capture that holds nothing of the connection is
+  reported as such instead, because 34 bytes compared against a CONNECT_IND
+  the capture did not follow can match by chance (#149).
 
 Only the two DKs' own addresses and counts are printed, never another
 device's address or data. Each failure is a ``FAIL:`` line and exit status
@@ -204,6 +208,9 @@ def data_packets(records, access_address: int, crc_init: int) -> list[tuple[int,
 ABSENT = "absent"
 CORRECT = "the CONNECT_IND's own bytes"
 SHIFTED = "shifted by 6 bytes (libbtbb#21)"
+# No CONNECT_IND of this pair whose connection the capture went on to
+# decode, so there is nothing to compare the recorded option against.
+UNJUDGED = "not compared: the capture decoded none of the connection"
 
 
 def connection_info_option(data: bytes) -> bytes | None:
@@ -285,10 +292,10 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
     result.records = len(records)
     central = central.upper()
     peripheral = peripheral.upper()
-    ours = [
-        found for found in connect_inds(records)
-        if found.initiator == central and found.advertiser == peripheral
-    ]
+    # Only our pair's CONNECT_INDs, so another device in range cannot decide
+    # what the checks below are measured against.
+    our_bodies = connect_ind_bodies(records, central=central, peripheral=peripheral)
+    ours = [ConnectInd.parse(body[6:6 + CONNECT_IND_LEN]) for body in our_bodies]
     result.connect_inds = len(ours)
     if not ours:
         result.problems.append(
@@ -314,9 +321,17 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
                   f"every data channel ({ALL_DATA_CHANNELS:#011x})"] = True
     result.problems.extend(wrong)
     packets = []
-    for connection in ours:
-        packets += data_packets(records, connection.access_address,
-                                connection.crc_init)
+    # The CONNECT_INDs whose connection the capture went on to decode: at
+    # least one packet on the access address that CONNECT_IND handed out,
+    # with the CRC its CRC init gives. That is what makes a comparison with
+    # libbtbb's recorded option mean something.
+    followed = []
+    for connection, body in zip(ours, our_bodies):
+        found = data_packets(records, connection.access_address,
+                             connection.crc_init)
+        packets += found
+        if any(crc_ok for _length, crc_ok in found):
+            followed.append(body)
     valid = [length for length, crc_ok in packets if crc_ok]
     result.data_packets = len(packets)
     result.valid_packets = len(valid)
@@ -334,18 +349,24 @@ def check(data: bytes, *, central: str, peripheral: str, interval_units: int,
         result.problems.append(
             f"{result.long_packets} packet(s) of {min_data_length} bytes or more, "
             f"fewer than {long_packets} (longest {result.longest})")
-    # Only our pair's CONNECT_IND, so another device in range cannot decide
-    # what the recorded option is compared against.
-    bodies = connect_ind_bodies(records, central=central, peripheral=peripheral)
-    if bodies:
+    if followed:
         result.connection_info = classify_connection_info(
-            connection_info_option(data), bodies[0])
+            connection_info_option(data), followed[0])
+    else:
+        result.connection_info = UNJUDGED
     if connection_info_wrong:
         # The case exists to catch the fix: once libbtbb records the right
         # bytes, this is where someone turns it into a real check. An option
         # that is missing altogether is a separate regression, so it fails
         # here too rather than passing as "still wrong".
-        if result.connection_info == CORRECT:
+        if result.connection_info == UNJUDGED:
+            # A thin capture must not be read either way: with nothing of
+            # the connection decoded, 34 bytes that happen to match a
+            # CONNECT_IND's would say "libbtbb#21 is fixed" at random (#149).
+            result.problems.append(
+                "none of the connection the CONNECT_IND set up was decoded, so "
+                "libbtbb's recorded option cannot be compared with it")
+        elif result.connection_info == CORRECT:
             result.problems.append(
                 "the PCAPNG connection information option now holds the "
                 "CONNECT_IND's own bytes, so libbtbb#21 is fixed: check the "

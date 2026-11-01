@@ -1292,20 +1292,30 @@ correct CRC, at least one packet is longer than 27 bytes, and the central
 reports that it connected, wrote, and had its update accepted at the interval
 it was told to ask for.
 
+A capture that does not hold all of that is taken again, up to three captures
+in all, because the pair keeps making and remaking the link and another
+capture window is all a second try costs. Each attempt writes its own file
+(`capture-1.pcapng`, `capture-2.pcapng`) and is checked on its own, so the run
+directory keeps the capture every attempt looked at; the report says which
+attempt a step ran on and how many attempts the case took.
+
 **Known limits.** The packet counts are floors a working follow clears, not
 expected counts: of 18 packets in one followed connection measured on the
-bench, two decoded with a correct CRC, one of them a full 251 bytes. Catching
-the CONNECT_IND is not yet reliable
-([#149](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/149)),
-so the capture cases pass or fail partly at random. A capture window spanning
-several reconnections has been seen to die partway through
+bench, two decoded with a correct CRC, one of them a full 251 bytes. How much
+of the connection arrives intact varies from capture to capture, which is what
+the repeated captures are for: three single-capture runs on the bench on
+2026-10-30 cleared the floors twice and missed them once. A capture window
+spanning several reconnections has been seen to die partway through
 ([ubertooth#505](https://github.com/SqueakyFloors/ubertooth/issues/505)),
 which is why the duration is bounded; whether the end of the followed
 connection triggers it is not established. The PCAPNG connection-information
 option libbtbb writes for a CONNECT_IND is copied 6 bytes early
 ([libbtbb#21](https://github.com/SqueakyFloors/libbtbb/issues/21)); one
 comprehensive case pins that, so it fails when libbtbb is fixed and the case
-can become a real check.
+can become a real check. That comparison is made only against a CONNECT_IND
+whose connection the capture went on to decode: in a capture holding nothing
+of the connection, 34 bytes can match a CONNECT_IND's by chance, and that
+would be read as libbtbb having been fixed.
 
 ## Capture known Classic device
 

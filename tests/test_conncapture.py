@@ -214,9 +214,9 @@ class ConnectionInfoOptionTests(unittest.TestCase):
 
     def test_a_missing_option_fails_the_pin_as_a_regression(self):
         _header, result = conncapture.check(
-            pcapng([self.record]), central=CENTRAL, peripheral=PERIPHERAL,
-            interval_units=INTERVAL_UNITS, latency=0, timeout_units=TIMEOUT_UNITS,
-            connection_info_wrong=True)
+            pcapng([self.record] + [data_packet(251)] * 3), central=CENTRAL,
+            peripheral=PERIPHERAL, interval_units=INTERVAL_UNITS, latency=0,
+            timeout_units=TIMEOUT_UNITS, connection_info_wrong=True)
         self.assertEqual(conncapture.ABSENT, result.connection_info)
         self.assertIn("no connection information option at all", result.problems[0])
 
@@ -233,12 +233,31 @@ class ConnectionInfoOptionTests(unittest.TestCase):
             self.assertEqual([], result.problems)
 
     def test_the_check_fails_once_libbtbb_is_fixed(self):
-        data = pcapng_with_option([self.record], self.body[6:6 + 34])
+        data = pcapng_with_option([self.record] + [data_packet(251)] * 3,
+                                  self.body[6:6 + 34])
         _header, result = conncapture.check(
             data, central=CENTRAL, peripheral=PERIPHERAL,
             interval_units=INTERVAL_UNITS, latency=0, timeout_units=TIMEOUT_UNITS,
             connection_info_wrong=True)
         self.assertIn("libbtbb#21 is fixed", result.problems[0])
+
+    def test_a_capture_with_none_of_the_connection_is_not_judged(self):
+        # A capture that caught the CONNECT_IND and nothing of the
+        # connection says nothing about the option: 34 bytes compared
+        # against a CONNECT_IND the capture did not follow can match by
+        # chance, and that read as "libbtbb#21 is fixed" (#149).
+        for option in (self.body[6:6 + 34], self.body[:34], bytes(34)):
+            data = pcapng_with_option(
+                [self.record] + [data_packet(251, corrupt=True)] * 3, option)
+            _header, result = conncapture.check(
+                data, central=CENTRAL, peripheral=PERIPHERAL,
+                interval_units=INTERVAL_UNITS, latency=0,
+                timeout_units=TIMEOUT_UNITS, connection_info_wrong=True)
+            self.assertEqual(conncapture.UNJUDGED, result.connection_info)
+            self.assertEqual(
+                ["none of the connection the CONNECT_IND set up was decoded, so "
+                 "libbtbb's recorded option cannot be compared with it"],
+                result.problems)
 
 
 class MainTests(unittest.TestCase):

@@ -1169,7 +1169,9 @@ def _transcript(run: _Run) -> list[str]:
             line(event, f"+++ {name} +++")
         elif kind == "check_finished":
             name = details.get("check_name") or details.get("case_name") or details.get("check_id")
-            line(event, f"--- {name} EXIT: {status}{_reason(details)} ---")
+            tries = (f" in {details['attempts']} attempts"
+                     if details.get("attempts") else "")
+            line(event, f"--- {name} EXIT: {status}{tries}{_reason(details)} ---")
         elif kind == "watchdog":
             line(event, f"[M] watchdog {status} ({details.get('stage', '')}): "
                         f"{details.get('resource', '')} "
@@ -1188,6 +1190,8 @@ def _transcript(run: _Run) -> list[str]:
             line(event, f"[M] watchdog {status}: self-resets by board: {counts}")
         elif kind == "step_finished":
             text = f"[S] {details.get('stage', 'step')} {status}: {details.get('step_name', '')}"
+            if details.get("attempt"):
+                text += f" (attempt {details['attempt']})"
             if details.get("expected") is not None:
                 text += f" (expected {details.get('expected')}, observed {details.get('observed')})"
             elif details.get("observed") is not None:
