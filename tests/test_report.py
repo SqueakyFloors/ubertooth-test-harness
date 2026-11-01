@@ -715,6 +715,25 @@ class ReportTests(unittest.TestCase):
             _redact(shape_note(f"x {shape} y"), {serial}),
         )
 
+    def test_a_serial_holding_an_n_is_known_in_either_case(self):
+        # The fold leaves `N` alone to keep the placeholder apart from a
+        # letter the serial held, so a serial that holds that letter has to
+        # be known in the case the output printed it in, not only the case
+        # the registry holds.
+        from ubertooth_harness.report import _redact
+
+        for registered, printed in (("esp32n1a2b", "ESP32N1A2B"),
+                                    ("ESP32N1A2B", "esp32n1a2b"),
+                                    ("N1a2", "n1A2")):
+            shape = line_shape(printed)
+            self.assertEqual(
+                shape_note(REDACTED),
+                # What _Run.serials() collects: the registered spelling and
+                # its lower case.
+                _redact(shape_note(shape), {registered, registered.lower()}),
+                printed,
+            )
+
     def test_a_shape_no_run_of_hex_letters_can_hold_is_masked_too(self):
         # An ESP32 peer's bridge serial is whatever string the bridge
         # reports, of any letters, digits and _.:+- (resources.py), so its

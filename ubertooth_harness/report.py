@@ -1375,7 +1375,7 @@ _PIECE_MIN_OWN_CHARS = 4
 # output cannot read as a note of the harness's. The head is taken as it is
 # and the shape is what the rules read.
 _SHAPE_NOTE_LINE = re.compile(
-    r"(?m)^(?P<head>\d{2,}:\d\d:\d\d\.\d\d\d \[M\]\s+\d+ x \[[^\]]*\] )"
+    r"(?m)^(?P<head>\d{2,}:\d\d:\d\d\.\d\d\d \[M\][^\S\n]+\d+ x \[[^\]]*\] )"
     r"(?P<shape>.*)$"
 )
 # Case folded for comparison: a tool prints a serial in the case it likes,
@@ -1502,7 +1502,14 @@ def _shape_own_chars(serial: str, shape: str) -> int:
 def _mask_serial_shapes(text: str, serials: Sequence[str]) -> str:
     """Mask the shape of a line that named a board the run names."""
     shapes = set()
-    for serial in serials:
+    # Both cases of each serial, because the fold that compares shapes
+    # leaves `N` alone to keep the placeholder apart from a letter the
+    # serial held: a bridge serial may hold that letter, and then the case
+    # it was printed in is the case its shape has to be known in.
+    for serial in {
+        spelling for serial in serials
+        for spelling in (serial, serial.lower(), serial.upper())
+    }:
         shape = line_shape(serial)
         # No digits in it, so the shape is the serial itself, already masked.
         if shape == serial:
