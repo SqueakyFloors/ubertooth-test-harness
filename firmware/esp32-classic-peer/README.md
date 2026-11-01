@@ -74,7 +74,7 @@ idf.py set-target esp32
 idf.py -B /tmp/utesp-build build
 ```
 
-The image is `/tmp/utesp-build/esp32-classic-peer.bin`, about 670 KB, which
+The image is `/tmp/utesp-build/esp32-classic-peer.bin`, about 750 KB, which
 needs the large single-app partition table `sdkconfig.defaults` selects.
 `idf.py -B` keeps every build product in the build directory. The one file
 `set-target` does write here is `sdkconfig`, the resolved configuration; it
