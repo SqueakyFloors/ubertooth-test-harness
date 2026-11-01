@@ -89,8 +89,7 @@ SESSION_OPTIONS = {
     ),
     "audio": (
         ("--type", "packet_type"), ("--min-frames", "min_frames"),
-        ("--min-packets", "min_packets"), ("--min-seconds", "min_seconds"),
-        ("--timeout", "timeout"),
+        ("--min-seconds", "min_seconds"), ("--timeout", "timeout"),
     ),
 }
 HELP_FLAGS = ("-h", "--help")
@@ -222,12 +221,13 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
              "voice",
     )
     audio.add_argument("--type", dest="packet_type", default=None,
-                       choices=esp32peer.SCO_TYPES, metavar="TYPE",
-                       help="the synchronous packet type the link asks for: "
-                            + ", ".join(esp32peer.SCO_TYPES)
-                            + "; ev3 carries its payload at the basic rate")
+                       choices=esp32peer.AUDIO_TYPES, metavar="TYPE",
+                       help="the audio link's packet type: "
+                            + ", ".join(esp32peer.AUDIO_TYPES)
+                            + f" (the module's default is "
+                              f"{esp32peer.DEFAULT_AUDIO_TYPE}, whose payload "
+                              "is on the air at the basic rate)")
     audio.add_argument("--min-frames", type=int, default=None, metavar="N")
-    audio.add_argument("--min-packets", type=int, default=None, metavar="N")
 
     args = parser.parse_args(before)
     if args.command in SESSIONS and not command:

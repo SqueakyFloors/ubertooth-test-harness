@@ -895,7 +895,7 @@ class PeerArguments(Bench):
     def test_audio_passes_both_roles_the_packet_type_and_the_command(self):
         args, command = peer.parse_args([
             "audio", "ESP0", "ESP1", "--hardware", str(self.registry),
-            "--type", "ev3", "--min-frames", "1000", "--min-packets", "2000",
+            "--type", "ev3", "--min-frames", "1000",
             "--min-seconds", "25", "--", "ubertooth-rx", "-l", "e9c5ba",
         ])
         registry = self.load_registry()
@@ -909,7 +909,6 @@ class PeerArguments(Bench):
         self.assertEqual("00:11:22:33:44:66", pairs["--initiator-address"])
         self.assertEqual("ev3", pairs["--type"])
         self.assertEqual("1000", pairs["--min-frames"])
-        self.assertEqual("2000", pairs["--min-packets"])
         self.assertEqual("25.0", pairs["--min-seconds"])
         # A stream option has no meaning for an audio link, so it is not sent.
         for absent in ("--period", "--payload", "--min-writes"):
@@ -925,7 +924,7 @@ class PeerArguments(Bench):
             args, {"acceptor": registry.get("ESP0"), "initiator": registry.get("ESP1")},
             command,
         )
-        for absent in ("--type", "--min-frames", "--min-packets", "--min-seconds",
+        for absent in ("--type", "--min-frames", "--min-seconds",
                        "--timeout"):
             self.assertNotIn(absent, argv)
 

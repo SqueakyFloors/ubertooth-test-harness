@@ -130,6 +130,18 @@ AUDIO_ON = "on"
 # timing out here, and a slow one is not cut off mid-command. A link to a
 # board that is awake takes four or five seconds.
 AUDIO_CONNECT_TIMEOUT_S = 40.0
+# `role` takes an audio link and its profile down before it changes anything,
+# which the firmware's README allows about 18 seconds for, so it cannot run
+# on the ordinary command deadline once a session may have a link up.
+ROLE_TIMEOUT_S = 25.0
+# What the link has to be, and what a board reports for a link whose packet
+# type it could not work out. Both EV3 and 2-EV3 are eSCO types.
+AUDIO_ESCO = "esco"
+AUDIO_UNNAMED = "unknown"
+# What `sco_pkt_type` reads for each type a caller can ask for by name.
+# `default` is left out: the choice is the stack's, so no particular type is
+# promised, and only the link being eSCO and nameable is checked.
+AUDIO_TYPE_ON_LINK = {"ev3": "ev3", "2ev3": "2-ev3"}
 
 COMMAND_TIMEOUT_S = 5.0
 # Opening the port resets the board; it then has to boot and start Bluetooth
@@ -600,7 +612,7 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
     print(f"central UAP: {initiator_status['uap']}", file=out)
     print(f"stream: {payload} bytes every {period} ms", file=out)
     try:
-        initiator_shell.command("role initiator")
+        initiator_shell.command("role initiator", ROLE_TIMEOUT_S)
         initiator_shell.command(f"spp peer {acceptor_status['address']}")
         initiator_shell.command(f"stream period {period}")
         initiator_shell.command(f"stream payload {payload}")
@@ -660,6 +672,9 @@ def audio(acceptor: Peer, initiator: Peer, command: Sequence[str], *,
     if packet_type not in AUDIO_TYPES:
         raise PeerError("the audio packet type must be one of "
                         + ", ".join(AUDIO_TYPES))
+    # A negative floor would check nothing at all.
+    if min_frames < 0:
+        raise PeerError(f"the frame floor cannot be negative, got {min_frames!r}")
     if acceptor.device == initiator.device:
         raise PeerError("the acceptor and the initiator are the same bridge; an "
                         "audio link needs two boards")
@@ -690,6 +705,33 @@ def _require_audio_up(status: dict, peer: Peer, address: str) -> None:
     if _audio_field(status, "sco", str, peer.label) != AUDIO_ON:
         raise PeerError(f"the {peer.label}'s audio link to {address} is not up "
                         f"after 'sco start' (sco {status['sco']})")
+
+
+def _require_audio_type(status: dict, peer: Peer, packet_type: str) -> None:
+    """The link is an eSCO one, and of the type that was asked for.
+
+    Both boards are checked, because each works out what its link carries
+    from the types it allowed and the packet length its own controller
+    reported. A test that asks for ``ev3`` because it wants a basic-rate
+    payload on the air must not quietly be handed the enhanced-rate type, or
+    a link the board cannot name at all.
+    """
+    link = _audio_field(status, "sco_link", str, peer.label)
+    settled = _audio_field(status, "sco_pkt_type", str, peer.label)
+    length = _audio_field(status, "sco_tx_len", int, peer.label)
+    if link != AUDIO_ESCO:
+        raise PeerError(f"the {peer.label} reports a {link} link, not "
+                        f"{AUDIO_ESCO}: an audio session carries voice over an "
+                        f"{AUDIO_ESCO} link")
+    if settled == AUDIO_UNNAMED or length == 0:
+        raise PeerError(f"the {peer.label} cannot say what its audio link "
+                        f"carries (packet type {settled}, {length} bytes a "
+                        "packet)")
+    wanted = AUDIO_TYPE_ON_LINK.get(packet_type)
+    if wanted is not None and settled != wanted:
+        raise PeerError(f"the {peer.label} reports an audio link using "
+                        f"{settled}, not the {wanted} both boards were told to "
+                        f"ask for ({length} bytes a packet)")
 
 
 def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
@@ -725,7 +767,7 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         if packet_type != "default":
             acceptor_shell.command(f"sco type {packet_type}")
         acceptor_shell.command("sco start", AUDIO_CONNECT_TIMEOUT_S)
-        initiator_shell.command("role initiator")
+        initiator_shell.command("role initiator", ROLE_TIMEOUT_S)
         initiator_shell.command(f"spp peer {acceptor_status['address']}")
         if packet_type != "default":
             initiator_shell.command(f"sco type {packet_type}")
@@ -749,6 +791,8 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
             time.sleep(settle_s)
             far = acceptor_shell.status()
         _require_audio_up(far, acceptor, initiator_status["address"])
+        for peer_status, peer in ((linked, initiator), (far, acceptor)):
+            _require_audio_type(peer_status, peer, packet_type)
         print(f"audio link: {_audio_field(linked, 'sco_link', str, initiator.label)} "
               f"{_audio_field(linked, 'sco_pkt_type', str, initiator.label)}, "
               f"{_audio_field(linked, 'sco_tx_len', int, initiator.label)} bytes "

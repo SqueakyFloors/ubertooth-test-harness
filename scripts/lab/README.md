@@ -118,15 +118,36 @@ passed through; left out, the module's own defaults apply.
 
 `audio` is the same session with a synchronous (eSCO) voice link instead of
 the data link. A synchronous link carries its packets in reserved slots, so it
-is a different thing on the air and in a decoder. The air also carries the
-Hands-Free service level connection the link is opened through, an ACL link,
-for the whole session: a capture holds both:
+is a different thing on the air and in a decoder; the Hands-Free service level
+connection the link is opened through, an ACL link, stays up for the whole
+session, so a capture holds both:
 
 ```sh
 .venv/bin/python scripts/lab/peer audio ESP32_Linux0 ESP32_Linux1 \
     --type ev3 --with UT_Linux1 -- \
     ubertooth-rx -U <serial> -l <ESP32_Linux1's LAP> -u <its UAP> -t 30
 ```
+
+`--type` picks the packet type the link asks for, on both boards, because a
+link uses a type both of them allowed:
+
+| `--type` | What the link carries |
+|---|---|
+| `ev3` (the default) | EV3: the payload goes out at the basic rate, so a basic-rate decoder can read it |
+| `2ev3` | 2-EV3: the same payload as enhanced rate, which is what the stack asks for by itself |
+| `default` | whatever the stack's own table picks, which is 2-EV3 |
+
+A link that is not eSCO, or whose packet type is not the one asked for, fails
+rather than being reported as a pass, so a test that wants a basic-rate
+payload cannot quietly be handed the enhanced-rate type. Both boards are
+checked, because each works out what its link carries from the types it
+allowed and the packet length its own controller reported; nothing in HCI
+reports the packet type itself.
+
+`--min-frames` is how many frames each board must report, and `--min-seconds`
+and `--timeout` work as they do for `stream`. The module reports the link it
+opened, both boards' frame counters, and the type the link settled on, and
+fails when either end does not read the link as up afterwards.
 
 `ubertooth-rx` has not been seen to settle on this pair's clock from a voice
 link, so do not expect it to enter follow mode and print packet detail. What
@@ -135,91 +156,10 @@ packet's header carries its type code: that is what tells an EV3 link from a
 2-EV3 one on the air ([`docs/hardware.md`](../../docs/hardware.md), "Reading a
 Classic capture of the peer pair").
 
-`--type` picks the packet type the link asks for, on both boards, because a
-link uses a type both of them allowed:
-
-| `--type` | What the link carries |
-|---|---|
-| `ev3` | EV3: the payload goes out at the basic rate, so a basic-rate decoder can read it |
-| `2ev3` | 2-EV3: the same payload as EDR, which is what the stack asks for by itself |
-| `default` | whatever the stack's own table picks, which is 2-EV3 |
-
-A link that is not eSCO, or whose packet type is not the one asked for, fails
-rather than being reported as a pass, so a decode test cannot quietly get EDR
-or a plain SCO link. Both boards are read for it, before the command and
-again after, and both have to agree. What that proves is that the request
-reached each controller and the link settled on the length that type carries:
-nothing in HCI reports the packet type itself, so the firmware works it out
-from the types the board allowed and the length the link uses.
-
-### What it reports, and what the floors mean
-
-First the two boards and the packet types their controllers support, before
-anything is started. Then the link, once it is up: the type, the packet
-length, the interval in slots and milliseconds, and the retransmission
-window. Then, after the command, **counted across it rather than since the
-link came up**, each board's own frame counters and its controller's packet
-counters.
-
-The difference is the point. Bringing the link up and settling put frames on
-the air before the command starts, so a total would flatter the run. The
-window is bounded by the reads either side of the command rather than by the
-command itself, and those reads wait on each board's controller: a status
-read can wait on its channel map and a counter read on its packet counters,
-so allow a second or two of traffic either side, not milliseconds.
-
-`--min-frames` and `--min-packets` are the floors those differences must
-reach, on both boards, so a link that fell silent part way through does not
-pass on what it carried at first. Set them from the rate the link reports,
-not to the last packet. An EV3 link on the bench runs at about 268 packets a
-second each way, so a 30-second capture window is a floor in the thousands,
-not the tens of thousands a longer link totals.
-
-The controller's packet count is the number to hold a capture against,
-bearing in mind that a receiver reads a fraction of what the air carries: the
-bench's 70-second EV3 link gave 18800 packets at the controller against 2891
-read from the air.
-
-`--min-seconds` and `--timeout` work as they do for `stream`.
-
-### What fails a session
-
-- A link that went down during the command, even if it came straight back:
-  its counters would otherwise add two links' traffic together. The board's
-  own `utesp: sco disconnected` is what says so. Behind it are a changed
-  connection handle and a controller's count that started again, and neither
-  is certain — a controller may hand the same handle back, and the frame
-  counters run on across a new link — so the notice is the check to rely on.
-- A board that cannot be put back in its boot state, even when the capture
-  went well: a board whose audio profile is still running refuses the next
-  `role` or `defaults`. The session has already pulsed a reset at it; one
-  that stays stuck needs another, or the maintainer.
-- A counter read that times out or cannot be read, as against one the board
-  refuses. A refusal — no link up, a request of its own that went unanswered,
-  or a controller that would not give the counters — is reported as not
-  counted, with the reason, and its floor as not checked. A link that dropped
-  during the capture is then named in its own words, with the frame counters
-  still there to read.
-
-An EV3 link is the busiest traffic this pair can make: half the payload per
-packet, half the interval, so about twice the packet rate of the 2-EV3 the
-stack picks by itself. The audio pattern itself is not readable from a
-capture, because the controller codes the samples to CVSD before they reach
-the air — the session reports the codec the link settled on, and this
-firmware's build offers nothing but CVSD, so a board reporting another one is
-not the image these notes describe. What a capture gets is the link's packet
-types, timing, and count
-([`firmware/esp32-classic-peer/README.md`](../../firmware/esp32-classic-peer/README.md),
-"The audio link").
-
-The audio link needs a newer peer image than the other commands, `utesp-1.4.0`
-or a later 1.x, because that is where the packet-type choice and the fields
-that report what the link settled on arrived; the link itself and its frame
-counters are older. A board on an older image is told so, and nothing is
-started on either board.
-
-The firmware's own notices from the session are passed on as `said:` lines,
-which is where a link that went down during the capture announces itself.
+The audio link needs a newer peer image than the other commands,
+`utesp-1.4.0` or a later 1.x, because that is where the packet-type choice and
+the fields reporting what a link settled on arrived; the link itself and its
+frame counters are older. A board on an older image is told so.
 
 Inside an outer `hold` that already has these devices, add `--no-hold`: holding
 them twice would wait for a lock this process already holds.
