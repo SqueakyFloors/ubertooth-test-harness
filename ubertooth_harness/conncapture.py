@@ -638,7 +638,7 @@ def main(argv=None) -> int:
               f"{at}, {item.packets} packet(s), {item.valid} with a correct "
               f"CRC, {after}")
     if result.quiet_ms is not None:
-        print(f"quiet before the window ended: {result.quiet_ms} ms")
+        print(f"recorded after the pair's last good packet: {result.quiet_ms} ms")
     unannounced = ", ".join(f"{address:08x} x{count}" for address, count
                             in sorted(result.unannounced.items()))
     print(f"unannounced access addresses: {unannounced or 'none'}")
