@@ -34,6 +34,7 @@ STUB = textwrap.dedent('''
     p.add_argument("--note-on-stdout", action="store_true")
     p.add_argument("--exit-status", type=int, default=0)
     p.add_argument("--no-file", action="store_true")
+    p.add_argument("--quiet-stderr", action="store_true")
     a = p.parse_args()
     stop = False
     def handler(_s, _f):
@@ -42,23 +43,25 @@ STUB = textwrap.dedent('''
     if not a.ignore_sigint:
         signal.signal(signal.SIGINT, handler)
     print("note: starting" if a.note_on_stdout else "packet", flush=True)
-    print("note: entering the mode", file=sys.stderr, flush=True)
+    if not a.quiet_stderr:
+        print("note: entering the mode", file=sys.stderr, flush=True)
     if a.no_file:
         while not stop:
             time.sleep(0.005)
     else:
         with open(a.dump, "wb", buffering=0) as handle:
             while not stop:
-                handle.write(b"\\\\0" * 68)
+                handle.write(bytes(68))
                 time.sleep(0.005)
         if a.keep_writing and os.fork() == 0:
             with open(a.dump, "ab", buffering=0) as handle:
                 for _ in range(200):
-                    handle.write(b"\\\\0" * 68)
+                    handle.write(bytes(68))
                     time.sleep(0.005)
             os._exit(0)
     time.sleep(a.slow_exit)
-    print("Stopping ubertooth device", file=sys.stderr, flush=True)
+    if not a.quiet_stderr:
+        print("Stopping ubertooth device", file=sys.stderr, flush=True)
     sys.exit(a.exit_status)
 ''')
 
@@ -93,7 +96,7 @@ class HelperTests(unittest.TestCase):
         self.assertGreaterEqual(self.dump.stat().st_size, rxdump.FULL_RECORD * 5)
         # The tool's own streams are kept beside the capture.
         self.assertIn("note: entering the mode",
-                      (self.root / "dump.bin.stderr.log").read_text())
+                      (self.root / "dump.bin.1.stderr.log").read_text())
 
     def test_a_tool_killed_by_the_signal_fails(self):
         code, report = self.run_helper("--ignore-sigint")
@@ -108,7 +111,7 @@ class HelperTests(unittest.TestCase):
     def test_a_process_left_behind_and_a_file_still_growing_fail(self):
         code, report = self.run_helper("--keep-writing")
         self.assertEqual(1, code)
-        self.assertIn("left behind in the session it ran in", report)
+        self.assertIn("left behind in the group it ran in", report)
         self.assertIn("after the tool exited, so the capture was still running",
                       report)
 
@@ -123,11 +126,35 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(1, code)
         self.assertIn("it exited 2, not 0", report)
 
-    def test_a_capture_that_never_got_going_is_a_skip(self):
+    def test_a_capture_that_never_got_going_fails(self):
+        # These streams do not depend on the air, so a capture that never got
+        # going is the tool's fault and not the bench's: it must not skip.
         code, report = self.run_helper("--no-file", extra=("--ready-deadline", "1"))
-        self.assertEqual(3, code)
-        self.assertIn("SKIP: ", report)
+        self.assertEqual(1, code)
+        self.assertNotIn("SKIP", report)
         self.assertIn("so no capture was running to interrupt", report)
+
+    def test_a_tool_that_says_nothing_on_standard_error_fails(self):
+        code, report = self.run_helper("--quiet-stderr")
+        self.assertEqual(1, code)
+        self.assertIn("printed nothing on standard error", report)
+
+    def test_the_early_mode_does_not_retry_a_real_failure(self):
+        # Only a signal that beat the handler install is taken again; a wrong
+        # exit status fails on the first attempt, so six tries cannot hide it.
+        code, report = self.run_helper(
+            "--exit-status", "2", when="early",
+            extra=("--capture-file", "either", "--delay", "0.3", "--attempts", "6"))
+        self.assertEqual(1, code)
+        # The run stops at the real failure rather than trying again: the
+        # problem is the last thing it says. (An earlier attempt may have
+        # been killed before the stub installed its handler, which is the one
+        # outcome that is retried.)
+        self.assertTrue(report.rstrip().endswith("Interrupt problem: it exited 2, "
+                                                 "not 0"), report)
+        retries = report.count("Interrupt retry: ")
+        killed = report.count("killed the tool (signal 2)")
+        self.assertEqual(retries, killed, report)
 
     def test_the_early_mode_accepts_a_capture_file_or_none(self):
         for flags, extra in ((("--no-file",), ()), ((), ())):
@@ -148,6 +175,9 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(1, code)
         self.assertIn("Interrupt retry: the SIGINT arrived before the handler",
                       report)
+        # The last try decides, so a tool that is always killed fails rather
+        # than reporting a skip nobody would read.
+        self.assertNotIn("SKIP", report)
 
     def test_growing_needs_a_tool_to_run(self):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
@@ -168,8 +198,8 @@ class FakeTools:
     """Answers the board queries, and stands in for the interrupt helper.
 
     ``helper`` is what the helper step reports: "done" for a run one SIGINT
-    ended, "problem" for one it did not, "skip" for a capture that never got
-    going.
+    ended, "problem" for one it did not, "never-started" for a capture that
+    never got going, which is a failure and not a skip.
     """
 
     def __init__(self, *, helper="done"):
@@ -197,10 +227,11 @@ class FakeTools:
             # The file checkers run for real against what the fake wrote.
             return self._checker(command)
         grow = Path(command[command.index("--grow") + 1])
-        if self.helper == "skip":
-            return self._result(command, 3, "SKIP: dump.bin held 0 bytes of the "
-                                            "1360 wanted after 20s, so no capture "
-                                            "was running to interrupt\n")
+        if self.helper == "never-started":
+            return self._result(command, 1, "Interrupt problem: dump.bin held 0 "
+                                            "bytes of the 1360 wanted after 20s, "
+                                            "so no capture was running to "
+                                            "interrupt\n")
         if self.helper == "problem":
             return self._result(command, 1, "Interrupt problem: it was still "
                                             "running 5s after the SIGINT, so one "
@@ -314,7 +345,8 @@ class CaseTests(unittest.TestCase):
             self.assertTrue(case.capture_dir)
             self.assertEqual("establish-idle", case.steps[0].step_id)
             interrupt = next(s for s in case.steps if s.step_id == "interrupt")
-            self.assertEqual(3, interrupt.skip_returncode)
+            # No case here can pass by skipping.
+            self.assertIsNone(interrupt.skip_returncode)
             self.assertTrue(interrupt.mutates)
             argv = interrupt.resolve_argv(context)
             # One SIGINT, to the tool itself: no shell, no timeout wrapper.
@@ -341,18 +373,16 @@ class CaseTests(unittest.TestCase):
         self.assertFalse(summary.passed)
         self.assertEqual(2, len(failed_names(events)), failed_names(events))
 
-    def test_a_capture_that_never_got_going_skips_and_still_cleans_up(self):
-        summary, events = run(FakeTools(helper="skip"), "smoke")
-        self.assertTrue(summary.passed, failed_names(events))
-        self.assertEqual(2, summary.skipped_cases)
-        stops = [c for c in FakeTools().commands]
-        # The cleanup ran for a skipped case: the board is stopped, restored,
-        # and its identity read.
-        executor = FakeTools(helper="skip")
-        run(executor, "smoke")
+    def test_a_capture_that_never_got_going_fails_and_still_cleans_up(self):
+        executor = FakeTools(helper="never-started")
+        summary, events = run(executor, "smoke")
+        self.assertFalse(summary.passed)
+        self.assertEqual(2, len(failed_names(events)), failed_names(events))
+        self.assertEqual(0, summary.skipped_cases)
+        # The cleanup still ran in full: the board is stopped, restored, and
+        # its identity read.
         self.assertTrue(any(c[-1] == "-S" for c in executor.commands))
         self.assertTrue(any(c[-1] == "-s" for c in executor.commands))
-        self.assertFalse(stops)
 
 
 if __name__ == "__main__":

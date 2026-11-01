@@ -12,23 +12,35 @@ leave the detection phase of ``ubertooth-afh`` (fork #795), and a run killed
 instead of stopped leaves its mode running on the board for the next command
 to meet.
 
-The harness had no case for any of this: bounded modes are stopped with
-SIGTERM, and the only SIGINT it sent went to tshark. So these cases send a
-real SIGINT to the tool itself, and then ask the board.
+The harness had no case for any of this. Bounded modes are stopped with
+SIGTERM; the one place a fork tool met a SIGINT was the no-selector follow
+case, where ``timeout -s INT`` is a deadline and the expected outcome is
+status 124 with SIGKILL behind it, so nothing was asserted about handling the
+signal; and the cases that do check a SIGINT send it to tshark. So these cases
+send a real SIGINT to the tool itself, and then ask the board.
 
 How the moment is chosen. A signal sent at a fixed time proves nothing about
-what the run was doing, so each case waits for evidence first.
+what the run was doing, so the two cases that can wait for evidence do.
 ``ubertooth-dump -d`` and ``ubertooth-specan -d`` stream whether or not there
-is traffic, so the capture file growing past a floor is proof that the mode
-is running, and that is when the signal goes in. ``ubertooth-btle -n -r -q``
-writes its two capture headers as the mode starts, so the files appearing,
-plus a settling time, is the same evidence for a poll-driven capture. For the
-open window there is no file to watch: the tool is given a selector no
-attached board carries, so the run never opens a board whatever happens, and
-the outcome says which window the signal landed in -- a stopped open ends
-quietly with exit 0, an open that finished says it found no such board and
-exits 1 -- so an attempt that was too late is taken again rather than
-guessed at.
+is traffic, and each flushes what it writes, so the capture file growing past
+a floor is proof that the mode is running, and that is when the signal goes
+in. A capture that never gets there, or a tool that exits on its own first,
+fails the case: these streams do not depend on the air, so neither outcome is
+something the bench decides.
+
+``ubertooth-btle -n -r -q`` has no such proof to offer. It creates both
+capture files after the board is open and before the mode requests, and
+libbtbb sizes a PCAPNG in pages, so the file reaches its floor the moment it
+appears; what picks the moment there is the settling time, and the case rests
+on the exit and the teardown rather than on having caught a running mode.
+``docs/tests.md`` says so under its limits.
+
+The early case does not try to pick the board-open window. A lookup takes 10
+to 20 ms on the bench host (measured), so aiming inside it would mean tens of
+tries, and each try is a board lookup like any other. Instead it signals a few
+milliseconds in and requires the same of either window, which is what catches
+the regression: a signal the open threw away left the run capturing until
+something else stopped it, so it would still be running at the deadline.
 
 The signal goes to the tool's own process, once
 ([`captureinterrupt.py`](captureinterrupt.py)): not to a process group, and
@@ -57,7 +69,6 @@ from ubertooth_harness.stateful import (
 )
 from ubertooth_harness.transitions import (
     MODE_RESET_SETTINGS,
-    _CAPTURE_PATTERN,
     _cleanup,
     _read_originals,
     _serial,
@@ -80,13 +91,14 @@ EXIT_DEADLINE_S = 5.0
 READY_DEADLINE_S = 20.0
 # The capture has to be running, not merely started, before the signal.
 SETTLE_S = 1.5
-# Whole 68-byte records a dump must hold: ubertooth-dump delivers about 2000
-# a second on hardware, so this is a fraction of a second's worth and says
-# only that the stream was running and the file was closed on a record
-# boundary.
+# Whole 68-byte records a dump must hold. Raw receive takes ubertooth-dump at
+# about 2000 records a second on hardware (receive_cases.py), so this is a
+# fraction of a second's worth, and it says only that the stream was running
+# and the file was closed on a record boundary.
 DUMP_MIN_RECORDS = 20
 DUMP_MIN_BYTES = rxdump.FULL_RECORD * DUMP_MIN_RECORDS
-# ubertooth-specan writes 3-byte samples at about 16 kB/s once going.
+# ubertooth-specan writes 3-byte samples; a 3-second run on the bench gave
+# 32-50 kB, so a few thousand bytes is a fraction of a second once going.
 SPECAN_MIN_BYTES = 3000
 SPECAN_LOW, SPECAN_HIGH = 2402, 2480
 # libbtbb writes the PCAPNG section header as the capture starts; its size
@@ -97,11 +109,12 @@ HEADER_MIN_BYTES = 28
 # or wedged, does not.
 ANSWER_DEADLINE_S = 5.0
 # The early case sends its signal this many seconds in, and takes up to this
-# many tries. Measured on the Linux bench host: a board lookup that matches
-# nothing finishes in 10-20 ms, so a signal sent a few milliseconds in lands
-# either while the board is being opened or just after the mode has started,
-# and both are windows a run has to survive. An attempt whose signal beat the
-# handler install is taken again, which is what the tries are for.
+# many tries. Measured on the Linux bench host: a board lookup finishes in
+# 10-20 ms, so a signal sent a few milliseconds in lands either while the
+# board is being opened or just after the mode has started, and both are
+# windows a run has to survive. The tries are for the one outcome that says
+# nothing either way, a signal that beat the handler install and killed the
+# tool; nothing else is retried.
 EARLY_ATTEMPTS = 6
 EARLY_DELAY_S = 0.005
 
@@ -137,10 +150,6 @@ def _interrupt_step(name, tool_argv, *, grow, when="growing", min_bytes=1,
         mutates=True,
         output_patterns=(r"(?m)^Interrupt done: one SIGINT ended the run in ",),
         forbidden_patterns=(r"(?m)^Interrupt problem: ",),
-        # The helper says SKIP when the capture never got going, or when no
-        # attempt landed in the open window: the bench decided that, not the
-        # tool, so the case is skipped and the cleanup still runs in full.
-        skip_returncode=3,
     )
 
 
@@ -219,10 +228,10 @@ def interrupt_cases(arguments, _resources, resource_identities):
         # readable afterwards, which is what a teardown that closed them
         # properly leaves.
         _case(serial, "btle-interrupted",
-              "ubertooth-btle -n -r -q interrupted once the captures are open", (
+              "ubertooth-btle -n -r -q interrupted after its captures are open", (
                   _interrupt_step(
                       "One SIGINT to ubertooth-btle -n -r <dir>/le.pcapng -q "
-                      "<dir>/le.pcap, once the capture headers are written",
+                      f"<dir>/le.pcap, {SETTLE_S:g}s after its PCAPNG appears",
                       ("ubertooth-btle", "-U", serial, "-n",
                        "-r", _path("le.pcapng"), "-q", _path("le.pcap")),
                       grow="le.pcapng", min_bytes=HEADER_MIN_BYTES, settle=SETTLE_S),

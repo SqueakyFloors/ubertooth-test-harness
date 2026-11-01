@@ -1056,26 +1056,36 @@ leaves behind is what an operator meets every time. The fork's handler only
 raises a flag; the capture loop reads it on its own thread, ends the stream,
 stops the mode, closes the capture files, and exits 0. The handlers go on
 before the board is opened, so a signal arriving while one is being found is
-not thrown away. Nothing in the harness sent a fork tool a SIGINT before this:
-bounded modes are stopped with SIGTERM, and the only SIGINT it sent went to
-tshark.
+not thrown away. Nothing in the harness asserted any of that before this.
+Bounded modes are stopped with SIGTERM; the one place a fork tool met a SIGINT
+is the no-selector follow case, where `timeout -s INT` is a deadline and the
+expected outcome is status 124 with SIGKILL behind it; and the cases that do
+check a SIGINT send it to tshark.
 
 The signal has to reach the tool itself, so
 [`captureinterrupt.py`](../ubertooth_harness/captureinterrupt.py) starts it
 directly, with no shell and no `timeout` wrapper (which would be signalled
 instead), sends one SIGINT to that process's own pid, then waits for it and
-reaps it. It starts the tool in a session of its own, which is what lets it
-report whether anything was left behind.
+reaps it. It starts the tool in a process group of its own, which is what lets it
+report whether anything was left behind, and take it down afterwards: the
+group goes down on the way out of every attempt, and a SIGTERM or SIGINT to
+the helper — which is what a canceled run or a step deadline sends — takes it
+down and then re-raises, so a tool with a mode started cannot outlive its
+step. The verdict is reached before any of that, so a process the run left is
+a finding and not something the helper tidied away before looking.
 
-The moment is chosen by evidence, not by a clock. `ubertooth-dump -d` and
-`ubertooth-specan -d` stream whether or not there is traffic, so the capture
-file growing past a floor is proof that the mode is running; `ubertooth-btle
--n -r -q` writes its two capture headers as the mode starts, which is the
-same evidence for a poll-driven capture. A capture that never gets going is
-reported as a skip, because nothing was interrupted. The early case is the
-other side: it signals a few milliseconds in, which lands either while the
-board is being opened or just after the mode has started, and requires the
-same of both.
+For the two cases that can wait for evidence, the moment is chosen by it, not
+by a clock. `ubertooth-dump -d` and `ubertooth-specan -d` stream whether or
+not there is traffic, and each flushes what it writes, so the capture file
+growing past a floor is proof that the mode is running. A capture that never
+gets there, and a tool that exits on its own before the signal, both fail the
+case: these streams do not depend on the air, so neither is something the
+bench decides, and no case here can pass by skipping. The early case signals
+a few milliseconds in, which lands either while the board is being opened or
+just after the mode has started, and requires the same of both; the one
+outcome that says nothing either way, a signal that beat the handler install
+and so killed the tool, is taken again, and nothing else is retried, so a
+real failure cannot be retried away.
 
 **Hardware and arguments.** One `Ubertooth` role, no peer, no firmware write,
 no transmission, and every other registered board is read as a guard.
@@ -1092,25 +1102,31 @@ capture file read again after the exit and not grown, so no mode is still
 streaming into it; no `error:`, `warning:`, `note:` or progress line on
 standard output; the file itself readable (whole 68-byte records for the dump,
 whole 3-byte in-band samples for the sweep, a walkable PCAPNG and PCAP for the
-two LE writers); `ubertooth-util -v` answered within 5 s; and then the usual
-cleanup restoring the channel, the squelch, and the LEDs, with the identity
-read again. Each attempt's capture and the tool's own two streams are kept
-beside each other in the run directory, so a failed attempt keeps its
-evidence.
+two LE writers); something on standard error, so a tool that printed nothing
+anywhere does not pass; `ubertooth-util -v` answered within 5 s; and then the
+usual cleanup restoring the channel, the squelch, and the LEDs, with the
+identity read again. Every attempt keeps its own evidence: the tool's two
+streams go to `<capture>.<attempt>.stdout.log` and `.stderr.log`, and the
+capture of an attempt that is taken again is kept as `<capture>.<attempt>`.
 
-**Known limits.** A stop that lands inside an *unanswered* poll, which is
+**Known limits.** The `ubertooth-btle` case's moment is a settling time, not
+evidence: the tool creates both capture files after the board is open and
+before the mode requests, and libbtbb sizes a PCAPNG in pages, so the file
+reaches its floor as soon as it appears. That case therefore rests on the exit
+and the teardown, not on having caught a running mode. For the same two
+writers "the capture stopped growing" is weak, because a quiet LE capture
+would not grow in the half second after the exit either; there the no-orphan
+check is what carries it. A stop that lands inside an *unanswered* poll, which is
 where the fork drops the retries still to come
 ([ubertooth#856](https://github.com/SqueakyFloors/ubertooth/pull/856)), cannot
 be produced here: it needs a board that has stopped answering, which is the
 board-lost-mid-capture work and its hub power control
 ([#141](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/141)).
 The early case cannot say which window its signal landed in, and does not try
-to: a board lookup finishes in 10 to 20 ms on the bench host, so aiming at
-the open window alone would need tens of attempts, each sending a serial read
-to every attached board, which is known to be able to end another run's
-capture ([ubertooth#505](https://github.com/SqueakyFloors/ubertooth/issues/505)).
-Requiring the same prompt exit of both windows catches the regression either
-way. Nothing here checks a second Ctrl-C, because one is meant to be enough.
+to: a board lookup finishes in 10 to 20 ms on the bench host, so aiming at the
+open window alone would mean tens of tries. Requiring the same prompt exit of
+both windows catches the regression either way, because a signal the open
+threw away left the run capturing until something else stopped it. Nothing here checks a second Ctrl-C, because one is meant to be enough.
 
 ## Refused command lines
 

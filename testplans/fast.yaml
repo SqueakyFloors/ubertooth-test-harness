@@ -5,6 +5,12 @@ suites:
         hosts: each
 
     # No Ubertooth: ubertooth-rx -i on a synthetic fixture.
+    # One board, no peer: one real SIGINT to a running capture.
+    - Interrupting a capture:
+        hosts: each
+        Ubertooth: default
+        coverage: smoke
+
     - Raw receive replay:
         hosts: each
         coverage: smoke
