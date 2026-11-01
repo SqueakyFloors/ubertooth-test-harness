@@ -177,6 +177,30 @@ def _check_connection_duration(arguments) -> None:
             "reconnections and not two")
 
 
+# The longest capture the multi-cycle follow case takes. Three captures of
+# this plus the DK setup is a couple of minutes, which keeps the case inside
+# a short hardware session.
+_MAX_FOLLOW_END_CAPTURE_S = 30
+
+
+def _check_follow_end_duration(arguments) -> None:
+    """The capture must span several of the central's reconnections.
+
+    At least MIN_CYCLES of them, which is what the test is for, and not so
+    many that one case holds the boards for long: the capture is taken up to
+    CAPTURE_ATTEMPTS times.
+    """
+    cycle_s = connection_cases.CYCLE_MS / 1000.0
+    least = connection_cases.MIN_CYCLES * cycle_s
+    most = _MAX_FOLLOW_END_CAPTURE_S
+    seconds = receive_cases.seconds_arg(arguments)
+    if not least < seconds <= most:
+        raise CatalogError(
+            f"duration must be longer than {least:g}s, so the capture spans "
+            f"{connection_cases.MIN_CYCLES} of the central's connections, and "
+            f"at most {most:g}s, so one case does not hold the boards for long")
+
+
 def _payload_tag(value):
     # The advertiser firmware's payload tag: up to 12 bytes, or none.
     text = str(value).lower() if isinstance(value, (str, int)) else None
@@ -831,6 +855,12 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "Capture known BLE connection": _profiles(
         Estimate(30.0, per_duration=4), Estimate(60.0, per_duration=10)
     ),
+    # ESTIMATE_PENDING_HW
+    # One capture case, taken up to CAPTURE_ATTEMPTS times, plus the pair's
+    # setup and the reads after the capture.
+    "Follow a BLE connection across its end": _default(
+        Estimate(35.0, per_duration=3)
+    ),
     # Each capture case opens both ESP32 bridges, which resets both boards,
     # and waits for the link: about 13 s before its capture starts, plus the
     # board reads around it. Two capture cases in smoke, four comprehensive.
@@ -839,6 +869,12 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     ),
     "Follow Classic Bluetooth piconet": _profiles(
         Estimate(40.0, per_duration=2), Estimate(80.0, per_duration=4)
+    ),
+    # ESTIMATE_PENDING_HW: two capture cases in smoke, four comprehensive,
+    # each with the same bring-up as the two tests above and a record check
+    # per capture file afterwards.
+    "Classic capture record fields": _profiles(
+        Estimate(45.0, per_duration=2), Estimate(95.0, per_duration=4)
     ),
 })
 
@@ -850,11 +886,13 @@ RF_DEFAULTS: Mapping[str, Mapping[str, PlacementRequirement]] = MappingProxyType
     name: MappingProxyType({"Ubertooth": NORMAL_LINK})
     for name in (
         "Classic Bluetooth receive",
+        "Classic capture record fields",
         "Raw receive",
         "BLE extcap capture",
         "BLE extcap in tshark",
         "Capture known BLE advertiser",
         "Capture known BLE connection",
+        "Follow a BLE connection across its end",
     )
 })
 
@@ -1236,6 +1274,32 @@ def builtin_catalog() -> TestCatalog:
             writes_firmware=True,
         ),
         TestDefinition(
+            connection_cases.FOLLOW_END_TEST_NAME,
+            "ubertooth-btle -f follows two registered nRF52840 DKs across "
+            "several of the central's reconnections: the capture holds a "
+            "CONNECT_IND for each connection it carries packets for, and the "
+            "board is idle and answering as soon as the capture stops",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH,
+                "central": ArgumentRule(_selector, default="default"),
+                "peripheral": ArgumentRule(_selector, default="default"),
+                "duration": DURATION,
+                "interval": ArgumentRule(_connection_interval, default=30),
+                "update": ArgumentRule(_connection_interval, default=60),
+            }),
+            MappingProxyType({
+                "Ubertooth": "Ubertooth", "central": "nRF52840 DK",
+                "peripheral": "nRF52840 DK",
+            }),
+            check_arguments=_check_follow_end_duration,
+            command_builder=connection_cases.follow_end_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+            # Its first case flashes a DK when the board runs another
+            # firmware version, so the run holds the host lock.
+            writes_firmware=True,
+        ),
+        TestDefinition(
             "Capture known Classic device",
             "ubertooth-rx finds two registered ESP32 Classic peers streaming "
             "over a Serial Port Profile link: the survey lists the piconet "
@@ -1271,6 +1335,26 @@ def builtin_catalog() -> TestCatalog:
                 "acceptor": ESP32_CLASSIC_PEER, "initiator": ESP32_CLASSIC_PEER,
             }),
             command_builder=classic_cases.follow_classic_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+        ),
+        TestDefinition(
+            "Classic capture record fields",
+            "Decode the BR/EDR records ubertooth-rx writes while two "
+            "registered ESP32 Classic peers hold a link: every record carries "
+            "this piconet's LAP and reference address, and its own payload "
+            "length, HEC, and CRC agree with the header beside them",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH,
+                "acceptor": ArgumentRule(_selector, default="default"),
+                "initiator": ArgumentRule(_selector, default="default"),
+                "coverage": COVERAGE, "duration": DURATION,
+            }),
+            MappingProxyType({
+                "Ubertooth": "Ubertooth",
+                "acceptor": ESP32_CLASSIC_PEER, "initiator": ESP32_CLASSIC_PEER,
+            }),
+            command_builder=classic_cases.record_fields_cases,
             continue_on_case_failure=True,
             guards_other_ubertooths=True,
         ),

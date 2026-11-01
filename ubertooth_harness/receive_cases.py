@@ -155,8 +155,14 @@ _NOISE_AND_SNR = r"(?:n=-?\d+ snr=-?\d+|n=none snr=none)"
 # change in what ubertooth-rx prints is one edit, not two.
 PACKET_LINE = re.compile(
     rf"^systime=\d+ ch=\s*(?P<ch>\d+) LAP=(?P<lap>[0-9a-f]{{6}}) "
-    rf"err=(?P<err>\d+) clkn=\d+ clk_offset=\d+ s=-?\d+ {_NOISE_AND_SNR}$"
+    rf"err=(?P<err>\d+) clkn=(?P<clkn>\d+) clk_offset=(?P<offset>\d+) "
+    rf"s=-?\d+ {_NOISE_AND_SNR}$"
 )
+# The clock and the slot offset a packet line carries. Nothing checks their
+# range: the fork masks the clock with CLKN_MASK and takes the offset modulo
+# CLK100NS_PER_SLOT before printing either (ubertooth_callback.c), so a
+# bound would be unreachable by construction. They are captured here so a
+# check that can say something about them has them to read.
 SURVEY_LINE = re.compile(
     r"^\?\?:\?\?:(?:\?\?|[0-9A-F]{2}):"
     r"(?P<lap>[0-9A-F]{2}:[0-9A-F]{2}:[0-9A-F]{2})$"

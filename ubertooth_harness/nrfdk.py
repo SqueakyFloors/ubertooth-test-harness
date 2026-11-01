@@ -111,6 +111,7 @@ _CONNECTION_KEYS = {
     "tx_octets": int, "rx_octets": int, "mtu": int, "phy": str,
     "conn_chmap": str, "cycle_ms": int, "autoupdate_ms": int,
     "writes": int, "received": int, "updates": int, "connects": int,
+    "disconnects": int,
 }
 # The connection's data channel map, which only the central can change
 # (firmware utdk-1.3.0 and later). Kept out of _CONNECTION_KEYS so that a
@@ -548,7 +549,8 @@ def _report_connection(status: dict, out) -> None:
               f"({status['data_map_used']} of {DATA_CHANNELS} channels, set "
               f"{status['data_map_sets']} time(s))", file=out)
     print(f"traffic: writes {status['writes']} received {status['received']} bytes "
-          f"updates {status['updates']} connects {status['connects']}", file=out)
+          f"updates {status['updates']} connects {status['connects']} "
+          f"disconnects {status['disconnects']}", file=out)
 
 
 def identify(dk: Dk, out=None) -> None:
