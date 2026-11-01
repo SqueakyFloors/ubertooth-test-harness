@@ -100,14 +100,20 @@ AC_ERRORS = 0
 # them; they belong to what the test means, and docs/tests.md carries the
 # numbers.
 #
-# Every channel in force must be found: a 65 s capture at about 30 cm found
-# all 40 channels of a 40-channel map, so a capture of this length missing
-# one is a change worth failing for.
-MIN_FOUND_SHARE = 1.0
+# At least 90% of the channels in force must be found. Measured on the bench
+# over 120 s windows at about 30 cm, with -e 0: the 40-channel map's link
+# used 38 channels and the tool found 37, and the 20-channel map's used 20
+# and it found 19, each missing a different single channel; the detection
+# phase found all 38. Finding a channel means the sweep and the hop sequence
+# met on it, so the last one or two are a matter of luck in a window this
+# long: the per-minute series of the same runs went 31 of 38 after a minute
+# to 37 after two. 90% leaves room for one more than was measured (3 of 38,
+# 2 of 20) and still fails a recovery that stopped working.
+MIN_FOUND_SHARE = 0.90
 # Up to 70% of the channels out of force may be marked used by the -r cases.
-# The same bench recovered 59 channels against 38 in force after three
-# minutes: 21 of 41 out of force, 51%. The ceiling is what separates a
-# recovery from a tool marking everything used, not a measure of the skirt.
+# The same two runs marked 20 of 41 (49%) and 13 of 59 (22%), and an earlier
+# three-minute run 21 of 41 (51%). The ceiling is what separates a recovery
+# from a tool marking everything used, not a measure of the skirt.
 MAX_STRAY_SHARE = 0.70
 # The detection phase's map is not held to that, and 1.0 is how the checker
 # is told to report the share without judging it. Two things make its map

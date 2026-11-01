@@ -160,7 +160,12 @@ class CaseTests(unittest.TestCase):
         self.assertEqual(str(MIN_DROPPED_CHANNELS),
                          argv[argv.index("--min-dropped-channels") + 1])
         self.assertIn(r"(?m)^afh recovery: ok$", step.output_patterns)
-        self.assertIn(r"(?m)^in-force channels found: (\d+) of \1 \(100%\)$",
+        # The found line is asserted as strictly as the tolerance allows: the
+        # two counts have to be the same number only when every in-force
+        # channel is demanded.
+        strict = r"(?m)^in-force channels found: (\d+) of \1 \(100%\)$"
+        loose = r"(?m)^in-force channels found: \d+ of \d+ \(\d+%\)$"
+        self.assertIn(strict if MIN_FOUND_SHARE >= 1.0 else loose,
                       step.output_patterns)
 
     def test_the_capture_and_the_comparison_are_retried_together(self):

@@ -2022,8 +2022,9 @@ measurement, not the default, is the reason.
 What is left is the channel edge, which is physics rather than software. A
 receiver a few tens of centimeters from the piconet reads enough energy from
 the channels beside the kept block to decode packets there, so the recovered
-map comes out wider than the one in force: the bench measured about eight
-channels of skirt next to the block, and a thinner scattering above it. The
+map comes out wider than the one in force: the bench's 40-channel run
+recovered 57 channels against the 38 in force, the extras being the band next
+to the block and a thinner scattering above it. The
 comparison therefore judges two measures with tolerances rather than demanding
 an exact match, and a plan can ask for a sharper edge with `rf:` (an
 attenuated or more distant receiver) if a run's skirt makes it ambiguous.
@@ -2043,10 +2044,17 @@ channels 30 to 49, the twenty the spec allows at least and the firmware's own
 floor. Each one sets the map, brings the link up, runs `ubertooth-afh -e 0 -r`
 for the capture window, and then judges the recovery:
 
-- every channel the link was hopping over is in the recovered map;
+- at least 90% of the channels the link was hopping over are in the recovered
+  map. Finding a channel means the sweep and the hop sequence met on it, so
+  the last one or two of a map are a matter of luck in a window this long:
+  the bench's two 120-second runs found 37 of 38 and 19 of 20, each missing a
+  different single channel, and their per-minute series went 31 of 38 after a
+  minute to 37 after two. The floor leaves room for one more than that and
+  still fails a recovery that stopped working;
 - at most 70% of the channels out of force are marked used, which is what
-  separates a recovery from a tool marking everything used. The share is left
-  unjudged, and said to be, when fewer than ten channels are out of force.
+  separates a recovery from a tool marking everything used. The same runs
+  marked 49% and 22%. The share is left unjudged, and said to be, when fewer
+  than ten channels are out of force.
 
 The measurement is printed either way, because a run that missed a tolerance
 is still the measurement of what the tool did: the requested map, the map in
@@ -2071,8 +2079,10 @@ boot state, the Ubertooth's channel, squelch, and LEDs restored.
 **Known limits.** The tolerances are the bench's, not the tool's: the stray
 ceiling says the recovery is selective, not how selective, and a receiver
 placed differently will measure a different skirt. A pass says the tool found
-the channels in use within one capture window of this length, not that it would
-find them in a shorter one. The capture is stopped by the harness rather than
+almost all the channels in use within one capture window of this length, not
+that it found every one, and not that it would find them in a shorter window:
+the two measured runs were each one channel short of the whole map at two
+minutes and still climbing. The capture is stopped by the harness rather than
 by the tool, because `ubertooth-afh` watches for map changes until it is
 signalled; the map-change path itself is therefore not checked, only that the
 map did not change. `-m`, the removal threshold, is left at its default, so a
