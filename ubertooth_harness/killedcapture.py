@@ -218,7 +218,10 @@ def kill(argv, capture: Path, record: Path, min_bytes: int, max_wait_s: float) -
         with output.open("wb") as handle:
             process = subprocess.Popen(argv, stdout=handle, stderr=handle,
                                        start_new_session=True)
-        running["process"], running["pgid"] = process, process.pid
+        # One store, so a signal handler running in the middle of this sees
+        # either no capture or a whole one. Two would leave a window where it
+        # saw half and failed on the other half.
+        running["capture"] = process
         # A signal that arrived while the tool was being started found nothing
         # to take down and said so; now there is.
         running["start"]()
@@ -282,11 +285,12 @@ def _stopped_on_signal(running):
     signals the harness sends are caught here and passed on to the tool,
     instead of leaving it streaming with nobody waiting for it.
 
-    ``running`` is filled in by the caller once the tool is started, so the
-    handlers can go on before that. A signal in between is remembered rather
-    than acted on, and ``running["start"]()`` acts on it as soon as there is a
-    tool to take down: handling it there and then would find nothing, and the
-    tool would be left streaming with this process gone.
+    ``running["capture"]`` is set by the caller, in one store, once the tool
+    is started, so the handlers can go on before that and a signal handler can
+    never see half of it. A signal in between is remembered rather than acted
+    on, and ``running["start"]()`` acts on it as soon as there is a tool to
+    take down: handling it there and then would find nothing, and the tool
+    would be left streaming with this process gone.
     """
     taken = {}
     arrived = []
@@ -298,10 +302,13 @@ def _stopped_on_signal(running):
     running["start"] = start
 
     def stop(number, _frame):
-        if "process" not in running:
+        capture = running.get("capture")
+        if capture is None:
             arrived.append(number)
             return
-        clear_group(running["process"], running["pgid"], wait_s=SIGNAL_WAIT_S)
+        # start_new_session() made it the leader of a session and so of a
+        # process group of its own, which is its pid.
+        clear_group(capture, capture.pid, wait_s=SIGNAL_WAIT_S)
         # Then what the signal would have done, now there is nothing to lose:
         # the caller sees the run end the way it asked for. For SIGINT that
         # is Python's own handler, which raises KeyboardInterrupt, and main()
