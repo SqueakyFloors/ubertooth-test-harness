@@ -20,6 +20,8 @@ COVERAGE_PROFILES = ("smoke", "comprehensive")
 CAPTURE_DIR = "captures"
 CAPTURE_DIR_KEY = "capture dir"
 EXPECTED_REVISION_KEY = "expected firmware revision"
+# Which try of a retried group of steps is running, counting from 1.
+ATTEMPT_KEY = "attempt"
 
 
 def artifact_key(label: str) -> str:
@@ -315,6 +317,18 @@ class StateCase:
     # leaves the case out before the run, as not applicable. A case that
     # needs the firmware build lists "test_build" in artifacts too.
     needs: Needs = NO_NEEDS
+    # The IDs of a contiguous run of steps that are run again, from the
+    # first of them, when the LAST of them fails: up to ``attempts`` times
+    # in all. It is for a case whose outcome depends on what arrives over
+    # the air, where the devices keep making the traffic and a second try
+    # costs only the capture window; the steps in the group must therefore
+    # be repeatable, and each try must leave the board as the first one
+    # found it. A failure in the earlier steps of the group, a failure
+    # anywhere else, and a cancellation end the case as they always did,
+    # because running those again cannot help and a later attempt would
+    # hide them.
+    retry_steps: tuple[str, ...] = ()
+    attempts: int = 1
     state_changing: bool = field(default=True, init=False)
 
     def __post_init__(self):
@@ -322,6 +336,35 @@ class StateCase:
             raise StateCaseError(f"invalid case ID '{self.case_id}'")
         if not self.steps or not self.cleanup:
             raise StateCaseError(f"{self.case_id}: steps and cleanup are required")
+        if self.attempts < 1:
+            raise StateCaseError(f"{self.case_id}: attempts must be 1 or more")
+        if bool(self.retry_steps) != (self.attempts > 1):
+            raise StateCaseError(
+                f"{self.case_id}: retry_steps and attempts greater than 1 go "
+                "together")
+        if self.retry_steps:
+            identifiers = [step.step_id for step in self.steps]
+            if self.retry_steps[0] not in identifiers:
+                raise StateCaseError(
+                    f"{self.case_id}: retry_steps names no step "
+                    f"'{self.retry_steps[0]}'")
+            first = identifiers.index(self.retry_steps[0])
+            run = tuple(identifiers[first:first + len(self.retry_steps)])
+            if run != tuple(self.retry_steps):
+                raise StateCaseError(
+                    f"{self.case_id}: retry_steps must name steps that run one "
+                    "after the other, in their order")
+            retried = {step.step_id: step for step in self.steps
+                       if step.step_id in self.retry_steps}
+            recorded = [step_id for step_id, step in retried.items()
+                        if step.observe is not None]
+            if recorded:
+                # A later attempt would overwrite what an earlier one
+                # recorded, or the case would carry a value from an attempt
+                # it threw away.
+                raise StateCaseError(
+                    f"{self.case_id}: a retried step cannot record an "
+                    f"observation ({', '.join(recorded)})")
         identifiers = [step.step_id for step in self.steps + self.cleanup]
         if len(set(identifiers)) != len(identifiers):
             raise StateCaseError(f"{self.case_id}: duplicate step ID")
@@ -332,6 +375,14 @@ class StateCase:
         ]
         if len(set(keys)) != len(keys):
             raise StateCaseError(f"{self.case_id}: duplicate observation key")
+
+    def retry_window(self) -> tuple[int, int] | None:
+        """Step indices [first, last + 1) the last step's failure runs again."""
+        if not self.retry_steps:
+            return None
+        identifiers = [step.step_id for step in self.steps]
+        first = identifiers.index(self.retry_steps[0])
+        return first, first + len(self.retry_steps)
 
 
 def compatible_pairs(

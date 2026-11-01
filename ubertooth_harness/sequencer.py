@@ -56,6 +56,7 @@ from ubertooth_harness.flash import (
 from ubertooth_harness.plan import flash_step, image_label
 from ubertooth_harness.watchdog import MonitoredBoard, WatchdogMonitor
 from ubertooth_harness.stateful import (
+    ATTEMPT_KEY,
     CAPTURE_DIR,
     CAPTURE_DIR_KEY,
     EXPECTED_REVISION_KEY,
@@ -622,6 +623,7 @@ class NamedTestSequencer:
         owner: Mapping,
         case_id: str,
         unchanged: bool = False,
+        attempt: int = 1,
     ):
         """Run one transition or cleanup step.
 
@@ -633,6 +635,11 @@ class NamedTestSequencer:
             "step_id": step.step_id,
             "step_name": step.name,
         })
+        if attempt > 1:
+            # A step of a retried group (StateCase.retry_steps): the attempt
+            # goes into the record, and into the command ID below, so each
+            # try keeps its own saved output.
+            details["attempt"] = attempt
         try:
             argv = step.resolve_argv(context)
             if step.observe is not None:
@@ -661,7 +668,8 @@ class NamedTestSequencer:
         result = self._run_command(
             publisher,
             token,
-            command_id=f"{case_id}-{step.step_id}",
+            command_id=(f"{case_id}-{step.step_id}"
+                        + (f"-try{attempt}" if attempt > 1 else "")),
             argv=argv,
             timeout_s=step.timeout_s,
             owner=details,
@@ -765,8 +773,16 @@ class NamedTestSequencer:
         step_canceled = False
         skip_reason = ""
         mutated = False
+        # A case may declare a group of steps that a failure runs again
+        # (StateCase.retry_steps), for an outcome that depends on what
+        # arrives over the air.
+        window = case.retry_window()
+        attempt = 1
+        context[ATTEMPT_KEY] = str(attempt)
+        index = 0
         try:
-            for step in case.steps:
+            while index < len(case.steps):
+                step = case.steps[index]
                 if token.is_cancelled():
                     step_failure = f"canceled before {step.name}: {token.reason}"
                     failed_step = step.step_id
@@ -786,14 +802,28 @@ class NamedTestSequencer:
                     break
                 failure, ran, canceled, skipped = self._run_state_step(
                     publisher, token, output_dir, step, "transition",
-                    context, owner, case_id,
+                    context, owner, case_id, attempt=attempt,
                 )
                 mutated = mutated or (ran and step.mutates)
                 if failure:
+                    # Only the last step of the group decides: it is the one
+                    # that judges what arrived. A failure in the steps that
+                    # set the attempt up (a mode that would not stop, a
+                    # device that stopped answering) ends the case, because
+                    # running it again cannot help and a later attempt
+                    # would hide it.
+                    if (window is not None and index == window[1] - 1
+                            and ran and attempt < case.attempts and not canceled
+                            and not token.is_cancelled()):
+                        attempt += 1
+                        context[ATTEMPT_KEY] = str(attempt)
+                        index = window[0]
+                        continue
                     step_failure = failure
                     failed_step = step.step_id
                     step_canceled = canceled
                     break
+                index += 1
                 if skipped:
                     # A declared run-time skip (Step.skip_returncode) stands
                     # after a change: the full cleanup below still restores
@@ -852,20 +882,20 @@ class NamedTestSequencer:
             else "canceled" if step_canceled and not cleanup_failures
             else "failed"
         )
-        publisher.emit(
-            "check_finished",
-            status,
-            {
-                **owner,
-                "case_name": case.name,
-                "reason": _bounded_reason(
-                    case_failure or skip_reason,
-                    "each step reason is in its step_finished event",
-                ),
-                "failed_step": failed_step,
-                "cleanup_status": "failed" if cleanup_failures else "passed",
-            },
-        )
+        finished = {
+            **owner,
+            "case_name": case.name,
+            "reason": _bounded_reason(
+                case_failure or skip_reason,
+                "each step reason is in its step_finished event",
+            ),
+            "failed_step": failed_step,
+            "cleanup_status": "failed" if cleanup_failures else "passed",
+        }
+        if attempt > 1:
+            # How many tries the retried group took, for the report.
+            finished["attempts"] = attempt
+        publisher.emit("check_finished", status, finished)
         return StateCaseResult(
             case_failure, status, not cleanup_failures,
             verified=not cleanup_failures and not cleanup_unverified,

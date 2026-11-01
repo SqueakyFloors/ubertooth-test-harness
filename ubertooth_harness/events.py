@@ -184,6 +184,8 @@ class TerminalEventSink:
         elif event.event_type == "step_finished":
             line = f"[{details.get('stage', 'step')} {event.status}] "
             line += str(details.get("step_name", "step"))
+            if details.get("attempt"):
+                line += f" (attempt {details['attempt']})"
             if details.get("expected") is not None:
                 line += (
                     f" (expected {details.get('expected')}, "

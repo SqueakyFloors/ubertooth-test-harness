@@ -813,8 +813,12 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
         Estimate(25.0, per_duration=5), Estimate(70.0, per_duration=16)
     ),
     # ESTIMATE_PENDING_HW
+    # A capture case takes its capture up to three times
+    # (connection_cases.CAPTURE_ATTEMPTS), so the duration counts three
+    # times per capture case: one in smoke, three comprehensive. A run that
+    # catches the connection first time takes a third of this.
     "Capture known BLE connection": _profiles(
-        Estimate(30.0, per_duration=2), Estimate(60.0, per_duration=4)
+        Estimate(30.0, per_duration=4), Estimate(60.0, per_duration=10)
     ),
     # Each capture case opens both ESP32 bridges, which resets both boards,
     # and waits for the link: about 13 s before its capture starts, plus the

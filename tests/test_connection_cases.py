@@ -7,6 +7,7 @@ from ubertooth_harness.advertiser_cases import FIRMWARE_LABEL
 from ubertooth_harness.catalog import CatalogError, builtin_catalog
 from ubertooth_harness.connection_cases import (
     ADV_CHANNEL,
+    CAPTURE_ATTEMPTS,
     CYCLE_MS,
     WRITE_PERIOD_MS,
     WRITE_BYTES,
@@ -15,7 +16,12 @@ from ubertooth_harness.connection_cases import (
 from ubertooth_harness.plan import load_plan
 from ubertooth_harness.planner import PlanCompiler
 from ubertooth_harness.resources import FileResourceRegistry, RegistryError
-from ubertooth_harness.stateful import CAPTURE_DIR_KEY, StateCaseError, artifact_key
+from ubertooth_harness.stateful import (
+    ATTEMPT_KEY,
+    CAPTURE_DIR_KEY,
+    StateCaseError,
+    artifact_key,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 SERIAL = "0123456789abcdef0123456789abcdef"
@@ -96,7 +102,7 @@ class CaseTests(unittest.TestCase):
             [case.case_id for case in known_connection_cases(arguments(), {}, IDENTITIES)])
         self.assertEqual(
             ["pair-ready", "follow-pcapng", "follow-pcap",
-             "pcapng-connection-option-libbtbb-21"],
+             "pcapng-connection-option"],
             [case.case_id for case in known_connection_cases(
                 arguments("comprehensive"), {}, IDENTITIES)])
 
@@ -133,12 +139,12 @@ class CaseTests(unittest.TestCase):
             list(steps["central-start"].resolve_argv(context)[2:]))
         self.assertEqual(
             ("ubertooth-btle", "-U", SERIAL, "-f", f"-A{ADV_CHANNEL}", "-r",
-             "/run/captures/x/capture.pcapng"),
+             "/run/captures/x/capture-1.pcapng"),
             steps["capture"].resolve_argv(context))
         self.assertTrue(steps["capture"].continuous)
         self.assertEqual(8.0, steps["capture"].timeout_s)
         self.assertEqual(
-            ["/run/captures/x/capture.pcapng", "--central", CENTRAL,
+            ["/run/captures/x/capture-1.pcapng", "--central", CENTRAL,
              "--peripheral", PERIPHERAL,
              # 50 ms is 40 units of 1.25 ms.
              "--interval-units", "40", "--latency", "0",
@@ -171,21 +177,41 @@ class CaseTests(unittest.TestCase):
         for name in ("Capture known BLE advertiser", "Capture known BLE connection"):
             self.assertTrue(catalog.get(name).writes_firmware, name)
 
-    def test_the_libbtbb_case_asks_for_the_option_check(self):
+    def test_the_connection_option_case_asks_for_that_check(self):
         cases = {case.case_id: case for case in known_connection_cases(
             arguments("comprehensive"), {}, IDENTITIES)}
-        case = cases["pcapng-connection-option-libbtbb-21"]
+        case = cases["pcapng-connection-option"]
         steps = {step.step_id: step for step in case.steps}
         argv = steps["check-capture"].resolve_argv({CAPTURE_DIR_KEY: "/c"})
-        self.assertEqual("--connection-info-option", argv[-1])
-        self.assertIn("libbtbb#21", case.name)
+        self.assertEqual("--check-connection-info", argv[-1])
+        self.assertIn("connection information", case.name)
+
+    def test_each_capture_case_takes_the_capture_again(self):
+        cases = known_connection_cases(arguments("comprehensive"), {}, IDENTITIES)
+        for case in cases[1:]:
+            with self.subTest(case.case_id):
+                self.assertEqual(
+                    ("capture", "stop", "central-report", "check-capture"),
+                    case.retry_steps)
+                self.assertEqual(CAPTURE_ATTEMPTS, case.attempts)
+                # Named steps that really do run one after the other.
+                self.assertIsNotNone(case.retry_window())
+                steps = {step.step_id: step for step in case.steps}
+                # Each attempt writes, and checks, a capture of its own.
+                for attempt in ("1", "2"):
+                    context = {CAPTURE_DIR_KEY: "/c", ATTEMPT_KEY: attempt}
+                    capture = steps["capture"].resolve_argv(context)[-1]
+                    self.assertRegex(
+                        capture, rf"^/c/capture-{attempt}\.(pcap|pcapng)$")
+                    self.assertEqual(
+                        capture, steps["check-capture"].resolve_argv(context)[2])
 
     def test_the_pcap_case_uses_the_pcap_option(self):
         cases = {case.case_id: case for case in known_connection_cases(
             arguments("comprehensive"), {}, IDENTITIES)}
         steps = {step.step_id: step for step in cases["follow-pcap"].steps}
         self.assertEqual(("ubertooth-btle", "-U", SERIAL, "-f",
-                          f"-A{ADV_CHANNEL}", "-q", "/c/capture.pcap"),
+                          f"-A{ADV_CHANNEL}", "-q", "/c/capture-1.pcap"),
                          steps["capture"].resolve_argv({CAPTURE_DIR_KEY: "/c"}))
 
     def test_registered_ports_are_passed(self):
