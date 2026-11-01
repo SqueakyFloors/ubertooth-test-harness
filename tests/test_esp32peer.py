@@ -527,6 +527,38 @@ class AudioTests(unittest.TestCase):
                                     "refused: service level connect timed out"):
             self._audio(pair=(acceptor, initiator))
 
+    def test_an_acceptor_whose_stack_is_a_moment_behind_is_waited_for(self):
+        # `sco start` answers on the board that pages; the other board learns
+        # of the link from a callback of its own, which can land later.
+        class Late(FakePeerFirmware):
+            lagging = True
+
+            def _audio_status(self):
+                status = super()._audio_status()
+                if status["sco"] == "on" and self.lagging:
+                    self.lagging = False
+                    status["sco"] = "slc"  # the link, not reported yet
+                return status
+
+        status, report, _acceptor, _initiator = self._audio(
+            pair=_audio_pair(acceptor_class=Late), min_frames=10)
+        self.assertEqual(0, status)
+        self.assertIn("pair carried audio: yes", report)
+
+    def test_an_acceptor_that_never_reports_the_link_is_named(self):
+        class Deaf(FakePeerFirmware):
+            def _audio_status(self):
+                status = super()._audio_status()
+                status["sco"] = "slc"  # the link is never reported
+                return status
+
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "the acceptor reports sco slc"
+        ):
+            self._audio(pair=_audio_pair(acceptor_class=Deaf),
+                        link_timeout=0.0)
+
     def test_a_link_that_reports_up_with_no_handle_is_caught(self):
         class Handleless(FakePeerFirmware):
             def _sco_up(self, kind):

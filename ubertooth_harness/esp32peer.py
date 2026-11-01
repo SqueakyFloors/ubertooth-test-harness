@@ -141,6 +141,10 @@ COMMAND_TIMEOUT_S = 5.0
 SCO_START_TIMEOUT_S = 40.0
 SCO_STOP_TIMEOUT_S = 15.0
 ROLE_TIMEOUT_S = 25.0
+# How long the accepting board is given to report the link its controller has
+# already opened: `sco start` answers on the board that pages, and the other
+# board learns of the link from a callback of its own a moment later.
+LINK_STATE_TIMEOUT_S = 5.0
 # Opening the port resets the board; it then has to boot and start Bluetooth
 # before the shell answers. About 1.5 s on the bench, with room to spare.
 BOOT_TIMEOUT_S = 20.0
@@ -789,7 +793,8 @@ def audio(acceptor: Peer, initiator: Peer, command: Sequence[str], *,
           sco_type: str = DEFAULT_SCO_TYPE, min_frames: int = 1,
           min_packets: int = 1, min_seconds: float = 0.0,
           timeout: float = 300.0, out=None,
-          settle_s: float = SETTLE_S) -> int:
+          settle_s: float = SETTLE_S,
+          link_timeout: float = LINK_STATE_TIMEOUT_S) -> int:
     """Hold a synchronous (eSCO) audio link up between the pair while ``command``
     runs.
 
@@ -810,12 +815,12 @@ def audio(acceptor: Peer, initiator: Peer, command: Sequence[str], *,
             acceptor, acceptor_shell, initiator, initiator_shell, command,
             sco_type=wanted, min_frames=min_frames, min_packets=min_packets,
             min_seconds=min_seconds, timeout=timeout, out=out,
-            settle_s=settle_s))
+            settle_s=settle_s, link_timeout=link_timeout))
 
 
 def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
            sco_type, min_frames, min_packets, min_seconds, timeout, out,
-           settle_s) -> int:
+           settle_s, link_timeout=LINK_STATE_TIMEOUT_S) -> int:
     acceptor_status, initiator_status = _introduce(
         acceptor, acceptor_shell, initiator, initiator_shell, out)
     # Both images are checked before anything is started, so a board on an
@@ -841,8 +846,10 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         acceptor_shell.command("sco start", SCO_START_TIMEOUT_S)
         initiator_shell.command(f"spp peer {acceptor_status['address']}")
         initiator_shell.command("sco start", SCO_START_TIMEOUT_S)
+        # The initiator's `sco start` answered once the link was open, so its
+        # own view is ready; the acceptor's lags that by a callback.
         linked = check_audio_status(initiator_shell.status(), initiator.label)
-        far = check_audio_status(acceptor_shell.status(), acceptor.label)
+        far = _wait_for_link(acceptor_shell, acceptor.label, link_timeout)
         _check_link(linked, far, acceptor.label, initiator.label, sco_type)
         print(f"audio link: up to {acceptor_status['address']} at "
               f"{time.strftime('%H:%M:%SZ', time.gmtime())}", file=out)
@@ -894,6 +901,22 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         raise PeerError("the pair did not carry audio: " + "; ".join(problems))
     print("pair carried audio: yes", file=out)
     return status
+
+
+def _wait_for_link(shell: Shell, label: str,
+                   timeout: float = LINK_STATE_TIMEOUT_S) -> dict:
+    """This board's view of the audio link, once its own stack has caught up.
+
+    Read again rather than failing the first time: the board that answered the
+    page learns the link is up from a callback, which can land after the
+    paging board's command has already answered.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        status = check_audio_status(shell.status(), label)
+        if status["sco"] == SCO_UP or time.monotonic() >= deadline:
+            return status
+        time.sleep(POLL_S)
 
 
 def _check_link(linked: dict, far: dict, acceptor_label: str,
