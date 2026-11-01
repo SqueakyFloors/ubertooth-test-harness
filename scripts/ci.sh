@@ -435,6 +435,21 @@ run_firmware_dk() {
     [ -x .venv/bin/python ] || "$PYTHON" bootstrap.py
     .venv/bin/python -m ubertooth_harness.nrfdk check-image "$hex"
 
+    # The second image: the same roles on a controller without channel
+    # selection algorithm 2. It has its own Kconfig fragment and devicetree
+    # overlay, which nothing else compiles, so a change that breaks it would
+    # otherwise reach the bench before anyone noticed.
+    chansel1=$WORK/dk-chansel1
+    step "build $DK_FIRMWARE for $NCS_BOARD without channel selection algorithm 2"
+    ncs "west build -p always --no-sysbuild -b $NCS_BOARD -d $chansel1 -s $src -- \
+         -DEXTRA_CONF_FILE=chan-sel-1.conf -DEXTRA_DTC_OVERLAY_FILE=chan-sel-1.overlay"
+    step "the second image carries its own firmware version"
+    ls -l "$chansel1/zephyr/zephyr.hex"
+    .venv/bin/python -m ubertooth_harness.nrfdk check-image \
+        --version "$(.venv/bin/python -c \
+            'from ubertooth_harness import targets; print(targets.DK_FIRMWARE_CHAN_SEL_1)')" \
+        "$chansel1/zephyr/zephyr.hex"
+
     # The sources to compare the image against: a directory of them
     # (DK_BASE_SRC, which wins where both are set), or a git ref this
     # repository holds (DK_BASE_REF, which the Firmware workflow sets to the

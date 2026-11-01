@@ -337,9 +337,27 @@ def hex_bytes(path: Path) -> bytes:
 
 
 def check_image(path: Path, version: str = FIRMWARE_VERSION) -> None:
-    if version.encode() not in hex_bytes(path):
+    """The image carries this firmware version, and not another one.
+
+    One version string names one image, so a run never writes an image it
+    cannot then verify. Finding the string is not enough on its own: the
+    default version is the start of the algorithm 1 one, so an image that
+    carries ``utdk-1.4.0-chansel1`` contains ``utdk-1.4.0`` as well. Any other
+    known version the image carries is therefore a refusal.
+    """
+    data = hex_bytes(path)
+    if version.encode() not in data:
         raise NrfDkError(f"{path} does not contain firmware version {version}; "
                          "build it from firmware/nrf52840dk at this harness commit")
+    for other in FIRMWARE_VERSIONS:
+        # Only a version that contains this one can be mistaken for it: the
+        # algorithm 1 version begins with the default one, so an image
+        # carrying the longer string carries the shorter one as well.
+        if other != version and version in other and other.encode() in data:
+            raise NrfDkError(
+                f"{path} carries firmware version {other}, not {version}; build it "
+                "from firmware/nrf52840dk with the files that version needs "
+                "(see its README)")
 
 
 # --------------------------------------------------------------------------

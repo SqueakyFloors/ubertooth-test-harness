@@ -49,6 +49,28 @@ class FirmwareVersionTests(unittest.TestCase):
         self.assertIn(f'#define UTDK_FW_REPORTED UTDK_FW_VERSION "{suffix}"', header)
         self.assertIn(targets.DK_FIRMWARE_CHAN_SEL_1, nrfdk.FIRMWARE_VERSIONS)
 
+    def test_one_image_is_not_accepted_for_the_other(self):
+        # The default version is the start of the algorithm 1 one, so finding
+        # the string is not enough: an image carrying the other version is
+        # refused, or `ensure --version` would flash the wrong link layer and
+        # then pass.
+        with tempfile.TemporaryDirectory() as directory:
+            def image(text):
+                path = Path(directory) / "image.hex"
+                body = text.encode()
+                record = bytes([len(body), 0, 0, 0]) + body
+                path.write_text(
+                    ":%s%02X\n:00000001FF\n"
+                    % (record.hex().upper(), (-sum(record)) & 0xFF))
+                return path
+
+            nrfdk.check_image(image(targets.DK_FIRMWARE), targets.DK_FIRMWARE)
+            nrfdk.check_image(image(targets.DK_FIRMWARE_CHAN_SEL_1),
+                              targets.DK_FIRMWARE_CHAN_SEL_1)
+            with self.assertRaisesRegex(nrfdk.NrfDkError, "carries firmware version"):
+                nrfdk.check_image(image(targets.DK_FIRMWARE_CHAN_SEL_1),
+                                  targets.DK_FIRMWARE)
+
     def test_the_algorithm_1_image_is_built_by_the_files_its_readme_names(self):
         readme = (ROOT / "firmware" / "nrf52840dk" / "README.md").read_text()
         for name in ("chan-sel-1.conf", "chan-sel-1.overlay"):
