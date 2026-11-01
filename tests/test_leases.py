@@ -16,6 +16,7 @@ from unittest import mock
 
 from ubertooth_harness import leases
 from ubertooth_harness.cli import main
+from ubertooth_harness.report import _Run, _setup_rows
 from ubertooth_harness.resources import FileResourceRegistry
 from ubertooth_harness.topology import PowerIsolationAction
 
@@ -275,6 +276,34 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
         self.assertIn("UT_0 was held by a lease that no longer holds it", self.notes[0])
         self.assertIn(f"pid {record['pid']}", self.notes[0])
         self.assertIn("process group", self.notes[0])
+
+    def test_a_takeover_is_recorded_with_the_leases_it_was_taken_for(self):
+        """The record a run carries into run.jsonl and its report (#224).
+
+        A takeover does not promise the board was idle, so a reader of an odd
+        result later in the run needs to know one happened, and standard
+        error is not where a deployed runner's reader looks.
+        """
+        record = dead_holder()
+        path = self.hold(A, record)
+        held = self.take()
+        self.addCleanup(held.release)
+        self.assertEqual(1, len(held.takeovers), held.takeovers)
+        taken = held.takeovers[0]
+        self.assertEqual("UT_0", taken["resource"])
+        self.assertEqual(A.key, taken["key"])
+        self.assertEqual(str(path), taken["lock"])
+        self.assertEqual("gone-agent", taken["holder"]["owner"])
+        self.assertEqual(record["pid"], taken["holder"]["pid"])
+        self.assertIn(f"pid {record['pid']}", taken["reason"])
+        self.assertRegex(taken["at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}$")
+        # The line on standard error is that record, said once.
+        self.assertEqual([leases.describe_takeover(taken)], self.notes)
+
+    def test_a_lease_nobody_had_to_be_taken_over_for_records_nothing(self):
+        held = self.take()
+        self.addCleanup(held.release)
+        self.assertEqual([], held.takeovers)
 
     def test_a_takeover_says_when_the_session_is_still_running(self):
         # The lease process is gone but its process group is not, which is
@@ -680,6 +709,84 @@ class LeaseCliTests(RawHoldMixin, unittest.TestCase):
         self.assertIn("UT_0 is in use", err)
         self.assertIn("other-agent", err)
         self.assertFalse((output / "blocked").exists())
+
+    def test_a_run_that_takes_over_a_lease_records_it(self):
+        """#224: the one place a reader of the run can see it happened."""
+        from tests.test_cli import FlashDeviceExecutor, make_source
+
+        source, short = make_source(self.root)
+        kgv = self.root / "kgv.dfu"
+        kgv.write_bytes(b"kgv")
+        test = self.root / "test.dfu"
+        test.write_bytes(b"test")
+        plan = self.root / "plan.yaml"
+        plan.write_text(textwrap.dedent(f"""\
+            plan: takeover cli
+            suites:
+              slow:
+                - Flash reliability:
+                    hosts: each
+                    platforms: [{PLATFORM}]
+                    Ubertooth: default
+                    flashes: 2
+                    image sequence: [test build, KGV]
+                    KGV sha256: {hashlib.sha256(b"kgv").hexdigest()}
+                    KGV revision: 2020-12-R1
+            """))
+        executor = FlashDeviceExecutor(
+            f"git-{short}",
+            {str(test.resolve()): f"git-{short}", str(kgv.resolve()): "2020-12-R1"},
+            A.key, B.key,
+        )
+        output = self.root / "runs"
+        gone = dead_holder()
+        self.hold_raw(self.lease_dir, A, gone)
+        with mock.patch("ubertooth_harness.cli.SubprocessCommandExecutor",
+                        return_value=executor):
+            code, _out, err = self._main(
+                "run-suite", "--plan", str(plan), "--suite", "slow",
+                "--hardware", str(self.hardware), "--host", "Host_Local",
+                "--ubertooth-source", str(source), "--ubertooth-ref", "HEAD",
+                "--artifact", f"test build={test}", "--artifact", f"KGV={kgv}",
+                "--run-id", "took-over", "--output", str(output),
+                "--lease-dir", str(self.lease_dir),
+            )
+        self.assertEqual(0, code, err)
+        self.assertIn("UT_0 was held by a lease that no longer holds it", err)
+        run_dir = output / "took-over"
+        events = [json.loads(line)
+                  for line in (run_dir / "run.jsonl").read_text().splitlines()]
+        taken_over = [e for e in events if e["event_type"] == "lease_takeover"]
+        self.assertEqual(1, len(taken_over), [e["event_type"] for e in events])
+        self.assertEqual("warning", taken_over[0]["status"])
+        details = taken_over[0]["details"]
+        self.assertEqual("UT_0", details["resource"])
+        self.assertEqual(gone["pid"], details["holder"]["pid"])
+        self.assertEqual("gone-agent", details["holder"]["owner"])
+        self.assertIn(f"pid {gone['pid']}", details["reason"])
+        # In the manifest too, with the leases it was taken for.
+        manifest = next(e for e in events if e["event_type"] == "manifest")
+        self.assertEqual(
+            ["UT_0"],
+            [item["resource"]
+             for item in manifest["details"]["manifest"]["lease_takeovers"]],
+        )
+        report = (run_dir / "report.md").read_text()
+        self.assertIn("| Leases taken over | UT_0 at ", report)
+        self.assertIn("gone-agent", report)
+        self.assertIn("a takeover does not promise the device was idle", report)
+        self.assertIn("[M] UT_0 was held by a lease that no longer holds it", report)
+
+    def test_a_run_that_took_over_nothing_records_no_takeover(self):
+        rows = dict(_setup_rows(_Run([{
+            "run_id": "r", "event_type": "manifest",
+            "timestamp": "2026-01-01T00:00:00.000",
+            "details": {"manifest": {"leases": [
+                {"resource": "UT_0", "key": A.key, "acquired_at": "2026-01-01"},
+            ]}},
+        }])))
+        self.assertIn("Board leases", rows)
+        self.assertNotIn("Leases taken over", rows)
 
     def test_boards_lists_free_and_held_boards(self):
         with leases.acquire([B], holder("agent-7"), directory=self.lease_dir):

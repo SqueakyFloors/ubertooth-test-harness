@@ -19,6 +19,13 @@ is what later commands look at, and says so in one line on standard error.
 A lock the removed file's inode still carries is no longer in anyone's way.
 ``boards`` marks such a lease stale and never removes anything.
 
+Every takeover is also recorded with the leases it was taken for: the
+returned ``LeaseSet`` carries the records (see ``takeover_record``), and a
+run writes them into ``run.jsonl`` and its report. A takeover does not
+promise the board was idle, so it is what a reader needs when a later
+result in that run looks odd, and standard error is not where a deployed
+runner's reader looks.
+
 A takeover does not promise the board is idle: something holds that lock, or
 the kernel would have dropped it. What really keeps two commands off one
 board is the USB device, which only one of them can claim, so a leftover
@@ -578,8 +585,11 @@ def _note_to_stderr(message: str) -> None:
     print(f"note: {message}", file=sys.stderr)
 
 
-def _take_over_stale(path: Path, root: Path, board: Board) -> str:
-    """Free a lease whose holder is gone: why it was taken over, or ''.
+def _take_over_stale(
+    path: Path, root: Path, board: Board
+) -> tuple[str, dict]:
+    """Free a lease whose holder is gone: why it was taken over, and the
+    record of the holder that is gone. ("", {}) when nothing was taken.
 
     The lock itself cannot be taken away from whatever still holds the file
     open, so the file is removed instead: the next attempt creates a new one
@@ -591,37 +601,38 @@ def _take_over_stale(path: Path, root: Path, board: Board) -> str:
     else, or already taken over is left alone.
     """
     if not takeover_allowed(board, lease_liveness(read_holder(path))[0]):
-        return ""  # the common case, before taking the takeover lock
+        return "", {}  # the common case, before taking the takeover lock
     try:
         guard = _try_lock(root / TAKEOVER_LOCK, fcntl.LOCK_EX)
     except OSError:
         # Not worth failing a command for: the lease is left alone and the
         # board is reported busy, as it was before this file existed.
-        return ""
+        return "", {}
     if guard is None:
-        return ""  # another command is taking over a lease right now
+        return "", {}  # another command is taking over a lease right now
     try:
         before = _file_identity(path)
         if before is None:
-            return ""  # already gone
+            return "", {}  # already gone
         if not _probe(path):
-            return ""  # free now: the next attempt simply takes it
+            return "", {}  # free now: the next attempt simply takes it
         # The holder record last, and after the probe: a command that has
         # just taken this lease stamps its own record, so reading it here
         # leaves the smallest window in which this could remove a lease
         # somebody is holding. The acquirer's own check that its lock file is
         # still the board's closes what is left of that window.
-        kind, why = lease_liveness(read_holder(path))
+        dead = read_holder(path)
+        kind, why = lease_liveness(dead)
         if not takeover_allowed(board, kind):
-            return ""
+            return "", {}
         if _file_identity(path) != before:
-            return ""  # a different file by now
+            return "", {}  # a different file by now
         os.unlink(path)
     except OSError:
-        return ""
+        return "", {}
     finally:
         os.close(guard)
-    return why
+    return why, dead
 
 
 class TicketQueue:
@@ -1033,8 +1044,12 @@ def _flock_or_close(fd: int, mode: int) -> int | None:
 class LeaseSet:
     """The leases one process holds; release() (or process exit) drops them."""
 
-    def __init__(self, leases: Sequence[Lease] = ()):
+    def __init__(self, leases: Sequence[Lease] = (), takeovers: Sequence[Mapping] = ()):
         self.leases = list(leases)
+        # The leases this command took over on its way to these (see
+        # takeover_record), for the run record: a takeover does not promise
+        # the board was idle, so a reader of a later result needs it.
+        self.takeovers = [dict(record) for record in takeovers]
 
     def release(self) -> None:
         while self.leases:
@@ -1076,6 +1091,32 @@ class LeaseSet:
         self.release()
 
 
+def takeover_record(board: Board, path: Path, reason: str, dead: Mapping) -> dict:
+    """One taken-over lease, for the run record and the report.
+
+    It carries what a reader of a later result in that run needs: which
+    device, the record of the holder that was gone, why it was read as gone,
+    and the lock file, which is where to look for a leftover command.
+    """
+    return {
+        "resource": board.alias,
+        "key": board.key,
+        "lock": str(path),
+        "reason": reason,
+        "holder": dict(dead),
+        "at": datetime.datetime.now(datetime.timezone.utc)
+        .replace(tzinfo=None).isoformat(timespec="milliseconds"),
+    }
+
+
+def describe_takeover(record: Mapping) -> str:
+    """The one line a takeover is reported in, on stderr and in the report."""
+    return (
+        f"{record.get('resource')} was held by a lease that no longer holds it: "
+        f"{record.get('reason')}. Taking it over ({record.get('lock')})."
+    )
+
+
 def acquire(
     boards: Sequence[Board],
     holder: Mapping,
@@ -1095,8 +1136,10 @@ def acquire(
     too (see the module docstring for the order).
 
     A busy board lease whose holder is gone is taken over and note() is told
-    in one line (by default on standard error). Commands are served in the
-    order they arrived, through the ticket queue (see the module docstring).
+    in one line (by default on standard error); the returned LeaseSet also
+    carries a record of each takeover, for the run record. Commands are
+    served in the order they arrived, through the ticket queue (see the
+    module docstring).
     """
     if not boards and not host_lock:
         return LeaseSet()
@@ -1141,15 +1184,17 @@ def acquire(
     # stretches it. An entry goes when that command stops being ahead at
     # that resource, which is what starts its stretch again.
     yielded: dict[tuple[str, str], float] = {}
+    # Every lease this command took over on the way, carried out with the
+    # leases it ends up holding (see takeover_record).
+    takeovers: list[dict] = []
     # A place in the queue for every resource, before any lock is taken, so
     # waiters are served in the order they arrived (#202).
     queue = TicketQueue(root, [board for board, _p, _e in ordered], holder).take()
     try:
         while True:
-            # Another command asked for one of these resources earlier and
-            # is still waiting for it: taking locks now would jump the queue.
             # Every resource of this attempt's that an older command is
-            # still waiting for. This command gives way at each of them in
+            # still waiting for: taking a lock now would jump the queue.
+            # This command gives way at each of them in
             # its own right: having waited out one command ahead never lets
             # it take a resource another has been waiting longer for.
             queued, blocked = None, None
@@ -1331,22 +1376,21 @@ def acquire(
                 sleep(_POLL_S)
                 continue
             if busy is None:
-                return LeaseSet(held)
+                return LeaseSet(held, takeovers)
             LeaseSet(held).release()
             board, path, external = busy
             # A lease of this host whose holder is gone holds nothing back; an
             # external lock belongs to the lab and is never touched. Once per
             # resource, so a file that keeps coming back cannot loop here.
             if not external:
-                why = _take_over_stale(path, root, board)
+                why, dead = _take_over_stale(path, root, board)
                 if why:
                     # The next round takes the board; this one has released
                     # everything. Every round sleeps or reaches the deadline, so
                     # a lease file that keeps coming back cannot make this spin.
-                    note(
-                        f"{board.alias} was held by a lease that no longer holds it: "
-                        f"{why}. Taking it over ({path})."
-                    )
+                    record = takeover_record(board, path, why, dead)
+                    takeovers.append(record)
+                    note(describe_takeover(record))
             if clock() >= deadline:
                 waited = f" after waiting {wait_s:g}s" if wait_s else ""
                 if external:

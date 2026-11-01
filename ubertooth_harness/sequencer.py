@@ -1231,6 +1231,13 @@ class NamedTestSequencer:
             },
             max_bytes=MANIFEST_MAX_BYTES,
         )
+        for taken_over in manifest.lease_takeovers:
+            # A lease of a command that was gone, which this run took over to
+            # get its devices. It does not promise the device was idle, so it
+            # belongs in the run record and not only on this process's
+            # standard error, where a deployed runner's note never reaches
+            # the controller.
+            publisher.emit("lease_takeover", "warning", json_value(taken_over))
         publisher.emit(
             "host_capabilities",
             "passed",

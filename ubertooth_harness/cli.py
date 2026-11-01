@@ -673,6 +673,7 @@ def _prepare_run(
         artifacts=artifacts,
         build=built.to_manifest() if built else None,
         leases=leases.to_manifest() if leases is not None else (),
+        lease_takeovers=leases.takeovers if leases is not None else (),
     )
     if not args.build:
         fix = BUILD_AND_FLASH_FIX
