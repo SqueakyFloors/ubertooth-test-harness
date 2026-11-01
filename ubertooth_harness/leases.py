@@ -222,6 +222,13 @@ _UNFINISHED_AGE_S = 30.0
 # A host has a handful of devices and the host lock; every entry costs a
 # lock probe on every poll round of every command that gives way to it.
 _MAX_WAITING_FOR = 64
+# What a taken-over lease's holder record carries into a run record, and how
+# long each of its fields may be there: a lock file is another command's and
+# may hold anything, where a run record has a size limit (see events.py).
+_RECORDED_HOLDER_FIELDS = (
+    "owner", "run_id", "purpose", "pid", "pgid", "user", "hostname", "acquired_at",
+)
+_RECORDED_HOLDER_CHARS = 200
 
 
 class LeaseError(RuntimeError):
@@ -1091,6 +1098,32 @@ class LeaseSet:
         self.release()
 
 
+def _recorded_holder(holder: Mapping) -> dict:
+    """A lock file's holder record, cut down to what a run record carries.
+
+    The file belongs to another command and may hold anything at all, while
+    a run record has a size limit and a reader has a line: so only the
+    fields a person needs are kept, each one short, and anything that is not
+    a plain value is written as text.
+    """
+    record = {}
+    for field in _RECORDED_HOLDER_FIELDS:
+        if field not in holder:
+            continue
+        value = holder[field]
+        if isinstance(value, bool) or isinstance(value, (int, float)) or value is None:
+            record[field] = value
+            continue
+        text = "".join(
+            character if character.isprintable() else " " for character in str(value)
+        ).strip()
+        record[field] = (
+            text[:_RECORDED_HOLDER_CHARS - 3] + "..."
+            if len(text) > _RECORDED_HOLDER_CHARS else text
+        )
+    return record
+
+
 def takeover_record(board: Board, path: Path, reason: str, dead: Mapping) -> dict:
     """One taken-over lease, for the run record and the report.
 
@@ -1103,7 +1136,7 @@ def takeover_record(board: Board, path: Path, reason: str, dead: Mapping) -> dic
         "key": board.key,
         "lock": str(path),
         "reason": reason,
-        "holder": dict(dead),
+        "holder": _recorded_holder(dead),
         "at": datetime.datetime.now(datetime.timezone.utc)
         .replace(tzinfo=None).isoformat(timespec="milliseconds"),
     }

@@ -300,6 +300,25 @@ class StaleLeaseTests(RawHoldMixin, unittest.TestCase):
         # The line on standard error is that record, said once.
         self.assertEqual([leases.describe_takeover(taken)], self.notes)
 
+    def test_a_record_a_run_could_not_carry_is_cut_down(self):
+        """A lock file is another command's: a run record has a size limit.
+
+        Its holder record may hold anything at all (a hand-written file, a
+        wrapper's own fields, a long command line), and an event that
+        exceeds the limit would end the run it was meant to explain.
+        """
+        self.hold(A, dict(
+            dead_holder(purpose="lease: " + "x" * 40_000),
+            notes=["something else entirely"] * 1000,
+        ))
+        held = self.take()
+        self.addCleanup(held.release)
+        taken = held.takeovers[0]
+        self.assertNotIn("notes", taken["holder"])
+        self.assertEqual(200, len(taken["holder"]["purpose"]))
+        self.assertTrue(taken["holder"]["purpose"].endswith("..."))
+        self.assertLess(len(json.dumps(taken)), 2048)
+
     def test_a_lease_nobody_had_to_be_taken_over_for_records_nothing(self):
         held = self.take()
         self.addCleanup(held.release)
