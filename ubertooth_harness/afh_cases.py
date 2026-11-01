@@ -40,9 +40,10 @@ may place this test on one.
 Each case is one ``esp32peer.py stream`` session: it holds both bridges,
 sets the map, brings the link up, runs the tool for the capture window, and
 saves the tool's output beside its own JSON report of the maps. A second step
-reads the pair of files and judges the recovery, so the comparison is a
-checker a run can be re-judged with (``ubertooth-harness validate``) rather
-than a pattern.
+reads that pair of files and judges the recovery. Keeping it a step of its own
+is what puts the whole measurement in the run record as output with patterns
+over it, and leaves the two files it read in the case's directory, so the
+comparison can be run again by hand against exactly what the capture saw.
 """
 
 from __future__ import annotations

@@ -224,11 +224,18 @@ def load_peer_report(path: Path) -> PeerReport:
     for entry in raw.get("samples", ()):
         if not isinstance(entry, dict):
             raise AfhMapError("a sample in the peer report is not a JSON object")
+        at = str(entry.get("at", "?"))
+        try:
+            seconds = float(entry.get("seconds", 0.0))
+            used = int(entry.get("used") or 0)
+        except (TypeError, ValueError) as error:
+            # A field that is not a number is a damaged report, which is one
+            # of this command's failures rather than a traceback.
+            raise AfhMapError(f"the {at} sample of {path} has a bad number: "
+                              f"{error}") from error
         samples.append(Sample(
-            at=str(entry.get("at", "?")),
-            seconds=float(entry.get("seconds", 0.0)),
+            at=at, seconds=seconds, used=used,
             link=str(entry.get("link") or ""),
-            used=int(entry.get("used") or 0),
             mode=str(entry.get("mode") or ""),
             error=str(entry.get("error") or ""),
         ))

@@ -134,6 +134,15 @@ class PeerReportTests(unittest.TestCase):
             with self.assertRaisesRegex(afhmap.AfhMapError, "no link map sample"):
                 afhmap.load_peer_report(files.report)
 
+    def test_a_sample_field_that_is_not_a_number_is_refused(self):
+        report = _report()
+        report["samples"][1]["used"] = "thirty-eight"
+        with tempfile.TemporaryDirectory() as directory:
+            files = _Files(directory, report, _r_lines([IN_FORCE_CHANNELS]))
+            with self.assertRaisesRegex(afhmap.AfhMapError,
+                                        "middle sample of .* has a bad number"):
+                afhmap.load_peer_report(files.report)
+
     def test_a_report_that_is_not_json_is_refused(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "report.json"
