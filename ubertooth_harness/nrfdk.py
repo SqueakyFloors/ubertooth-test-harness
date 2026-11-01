@@ -17,6 +17,7 @@ port (VCOM0, the DK's uart0). Run as a script by the advertiser cases::
                                [--dle on|off] [--payload BYTES] [--period MS]
                                [--cycle MS] [--autoupdate MS]
     python nrfdk.py update     --jlink SERIAL --interval MS
+    python nrfdk.py datamap    --jlink SERIAL --channels all|0,12,36
     python nrfdk.py stop       --jlink SERIAL [--port PATH]
     python nrfdk.py idle       --jlink SERIAL [--port PATH]
     python nrfdk.py status     --jlink SERIAL [--port PATH]
@@ -107,7 +108,20 @@ _CONNECTION_KEYS = {
     "conn_chmap": str, "cycle_ms": int, "autoupdate_ms": int,
     "writes": int, "received": int, "updates": int, "connects": int,
 }
+# The connection's data channel map, which only the central can change
+# (firmware utdk-1.3.0 and later). Kept out of _CONNECTION_KEYS so that a
+# board still running an earlier image reports a status `ensure` can read,
+# and so gets flashed instead of refused.
+_DATA_MAP_KEYS = {"data_map": str, "data_map_used": int, "data_map_sets": int}
 ROLES = ("advertiser", "central", "peripheral")
+# The data channels a connection hops over, 0 to 36.
+DATA_CHANNELS = 37
+DATA_MAP_BYTES = 5
+DATA_MAP_ALL = "ffffffff1f"
+# Two channel classifications must be at least a second apart (Bluetooth
+# Core, HCI LE Set Host Channel Classification; the firmware refuses a
+# second one sooner).
+DATA_MAP_GAP_S = 1.0
 # Connection interval, in the firmware's range (Bluetooth Core 7.5 ms-4 s).
 CONN_INTERVAL_MIN_MS = 8
 CONN_INTERVAL_MAX_MS = 4000
@@ -422,6 +436,33 @@ def require_connection_fields(status: dict) -> dict:
     return status
 
 
+def data_map(channels: str) -> str:
+    """A channel list ("all", or "0,12,36") as the firmware reports the map.
+
+    Ten hex digits, the five bytes a CONNECT_IND and an LL_CHANNEL_MAP_IND
+    carry, least significant byte first: bit b of byte i is channel 8i + b.
+    Refuses a list with no channel in it, a channel the air does not have,
+    and anything that is not a list.
+    """
+    if channels == "all":
+        return DATA_MAP_ALL
+    numbers = []
+    for word in channels.split(","):
+        if not word.isdigit() or (len(word) > 1 and word[0] == "0"):
+            raise NrfDkError(
+                f"channel map must be 'all' or a list of data channels "
+                f"0-{DATA_CHANNELS - 1}, for example 0,12,36 (got {channels!r})")
+        numbers.append(int(word))
+    for number in numbers:
+        if number >= DATA_CHANNELS:
+            raise NrfDkError(f"channel {number} is not a data channel "
+                             f"(0-{DATA_CHANNELS - 1})")
+    bits = 0
+    for number in numbers:
+        bits |= 1 << number
+    return bits.to_bytes(DATA_MAP_BYTES, "little").hex()
+
+
 # --------------------------------------------------------------------------
 # Operations
 
@@ -491,6 +532,11 @@ def _report_connection(status: dict, out) -> None:
           f"octets mtu {status['mtu']} phy {status['phy']}", file=out)
     print(f"update: asked {status['update_ms']} ms "
           f"({conn_units(status['update_ms'])} units)", file=out)
+    if status.get("data_map") is not None:
+        # Firmware older than utdk-1.3.0 does not report the map.
+        print(f"channel map: {status['data_map']} "
+              f"({status['data_map_used']} of {DATA_CHANNELS} channels, set "
+              f"{status['data_map_sets']} time(s))", file=out)
     print(f"traffic: writes {status['writes']} received {status['received']} bytes "
           f"updates {status['updates']} connects {status['connects']}", file=out)
 
@@ -778,6 +824,37 @@ def update(dk: Dk, interval_ms: int, out=None) -> dict:
     return status
 
 
+def datamap(dk: Dk, channels: str, out=None) -> dict:
+    """Change the live connection's data channel map to ``channels``.
+
+    The central has the controller classify those channels, and the
+    controller carries the new map to the link as an LL_CHANNEL_MAP_IND, so
+    a sniffer following the connection has to follow the map change. The
+    link must be up; a map of one channel is the smallest a conformant
+    device can present.
+    """
+    wanted = data_map(channels)
+    shell = _open(dk)
+    try:
+        shell.command(f"conn datamap {channels}")
+        status = require_connection_fields(shell.status())
+    finally:
+        shell.close()
+    for key in _DATA_MAP_KEYS:
+        if key not in status:
+            raise NrfDkError(
+                f"this firmware does not report the connection's channel map; "
+                f"it needs {FIRMWARE_VERSION} (it reports {status.get('fw', '?')})")
+    if status["data_map"] != wanted:
+        raise NrfDkError(f"the connection's channel map is {status['data_map']}, "
+                         f"not the {wanted} that was asked for")
+    if not status["connected"]:
+        raise NrfDkError("the connection dropped during the channel map update")
+    _report(status, out)
+    _report_connection(status, out)
+    return status
+
+
 def status_command(dk: Dk, out=None) -> dict:
     shell = _open(dk)
     try:
@@ -798,7 +875,7 @@ def main(argv: Sequence[str] | None = None, run: Runner = run_tool) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     commands = {}
     for name in ("identify", "ensure", "advertise", "stop", "idle", "status", "role",
-                 "peripheral", "central", "update"):
+                 "peripheral", "central", "update", "datamap"):
         command = sub.add_parser(name)
         command.add_argument("--jlink", required=True, help="J-Link serial")
         command.add_argument("--port", help="VCOM0 path (default: by J-Link serial)")
@@ -834,6 +911,9 @@ def main(argv: Sequence[str] | None = None, run: Runner = run_tool) -> int:
     central_parser.add_argument("--autoupdate", type=int,
                                 help="ms interval to ask for once connected (0: none)")
     commands["update"].add_argument("--interval", required=True, type=int, help="ms")
+    commands["datamap"].add_argument(
+        "--channels", required=True,
+        help="data channels the connection may use: all, or a list such as 0,12,36")
     args = parser.parse_args(argv)
     try:
         if args.command == "check-image":
@@ -861,6 +941,8 @@ def main(argv: Sequence[str] | None = None, run: Runner = run_tool) -> int:
                     args.period, args.cycle, args.autoupdate)
         elif args.command == "update":
             update(dk, args.interval)
+        elif args.command == "datamap":
+            datamap(dk, args.channels)
         else:
             status_command(dk)
     except NrfDkError as error:

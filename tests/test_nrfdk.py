@@ -560,6 +560,68 @@ class RoleTests(unittest.TestCase):
         self.assertIn("interval 80 units (100 ms)", out)
         self.assertIn("update: asked 100 ms (80 units)\n", out)
 
+    def test_datamap_narrows_the_live_connection(self):
+        board = Board()
+        self.run_quiet(nrfdk.central, board.dk, "C1:92:EC:E7:71:BC", 30)
+
+        status, out = self.run_quiet(nrfdk.datamap, board.dk, "0,12,36")
+
+        self.assertEqual("conn datamap 0,12,36", board.firmware.commands[-2])
+        # Channels 0, 12 and 36: bit 0 of byte 0, bit 4 of byte 1, bit 4 of
+        # byte 4, in the order a CONNECT_IND carries the map.
+        self.assertEqual("0110000010", status["data_map"])
+        self.assertEqual(3, status["data_map_used"])
+        self.assertIn("channel map: 0110000010 (3 of 37 channels, set 1 time(s))",
+                      out)
+
+    def test_datamap_takes_one_channel_and_all(self):
+        board = Board()
+        self.run_quiet(nrfdk.central, board.dk, "C1:92:EC:E7:71:BC", 30)
+
+        # Channel 17 is bit 1 of byte 2.
+        status, _out = self.run_quiet(nrfdk.datamap, board.dk, "17")
+        self.assertEqual((1, "0000020000"),
+                         (status["data_map_used"], status["data_map"]))
+
+        status, _out = self.run_quiet(nrfdk.datamap, board.dk, "all")
+        self.assertEqual((37, nrfdk.DATA_MAP_ALL),
+                         (status["data_map_used"], status["data_map"]))
+
+    def test_a_map_the_air_has_no_room_for_is_refused_before_the_board(self):
+        board = Board()
+        for channels in ("", "37", "0,", "0,,1", "all,1", "-1", "0x3", "00"):
+            with self.subTest(channels):
+                with self.assertRaises(nrfdk.NrfDkError):
+                    nrfdk.datamap(board.dk, channels)
+        self.assertEqual([], board.firmware.commands)
+
+    def test_a_map_change_without_a_connection_is_refused_by_the_board(self):
+        board = Board()
+        self.run_quiet(nrfdk.role, board.dk, "central")
+
+        with self.assertRaisesRegex(nrfdk.NrfDkError, "no connection to update"):
+            self.run_quiet(nrfdk.datamap, board.dk, "0,1,2")
+
+    def test_only_the_central_changes_the_map(self):
+        board = Board()
+        self.run_quiet(nrfdk.peripheral, board.dk)
+
+        with self.assertRaisesRegex(nrfdk.NrfDkError, "only the central"):
+            self.run_quiet(nrfdk.datamap, board.dk, "0,1,2")
+
+    def test_firmware_that_does_not_report_the_map_is_named(self):
+        board = Board()
+        self.run_quiet(nrfdk.central, board.dk, "C1:92:EC:E7:71:BC", 30)
+        status = board.firmware.status
+        board.firmware.status = lambda: {
+            key: value for key, value in status().items()
+            if key not in ("data_map", "data_map_used", "data_map_sets")
+        }
+
+        with self.assertRaisesRegex(nrfdk.NrfDkError,
+                                    "does not report the connection's channel map"):
+            self.run_quiet(nrfdk.datamap, board.dk, "0,1,2")
+
     def test_leaving_a_role_forgets_the_peer(self):
         board = Board()
         self.run_quiet(nrfdk.central, board.dk, "C1:92:EC:E7:71:BC", 30)

@@ -49,6 +49,9 @@ class FakeFirmware:
         self.payload_len = 244
         self.period_ms = 100
         self.conn_chmap = "37"
+        # The firmware restores all 37 data channels when it leaves the role.
+        self.data_map = nrfdk.DATA_MAP_ALL
+        self.data_map_sets = 0
         self.cycle_ms = 0
         self.autoupdate_ms = 0
         self.writes = 0
@@ -77,7 +80,10 @@ class FakeFirmware:
             "timeout_units": self.timeout_units, "tx_octets": tx,
             "rx_octets": self.rx_octets, "mtu": self.mtu, "phy": self.phy,
             "payload_len": self.payload_len, "period_ms": self.period_ms,
-            "conn_chmap": self.conn_chmap, "cycle_ms": self.cycle_ms,
+            "conn_chmap": self.conn_chmap, "data_map": self.data_map,
+            "data_map_used": bin(int(self.data_map, 16)).count("1"),
+            "data_map_sets": self.data_map_sets,
+            "cycle_ms": self.cycle_ms,
             "autoupdate_ms": self.autoupdate_ms,
             "writes": self.writes, "write_errors": 0, "received": self.received,
             "updates": self.updates, "connects": self.connects,
@@ -131,8 +137,8 @@ class FakeFirmware:
         if self.role == "advertiser":
             return [f"ERR role is advertiser; run 'role central' or 'role peripheral'"]
         if not words:
-            return ["ERR usage: conn <peer|interval|dle|payload|period|cycle|"
-                    "autoupdate|start|stop|update|defaults>"]
+            return ["ERR usage: conn <peer|interval|dle|payload|period|chmap|"
+                    "datamap|cycle|autoupdate|start|stop|update|defaults>"]
         command, args = words[0], words[1:]
         if command == "start":
             self.conn_on = True
@@ -145,6 +151,20 @@ class FakeFirmware:
             return ["OK"]
         if command == "defaults":
             self.conn_defaults()
+            return ["OK"]
+        if command == "datamap" and args:
+            if self.role != "central":
+                return ["ERR only the central can change the connection's "
+                        "channel map"]
+            try:
+                wanted = nrfdk.data_map(args[0])
+            except nrfdk.NrfDkError:
+                return ["ERR channel map must be 'all' or a list of data "
+                        "channels 0-36, for example 0,12,36"]
+            if not self.connected:
+                return ["ERR no connection to update"]
+            self.data_map = wanted
+            self.data_map_sets += 1
             return ["OK"]
         if command == "update" and args:
             if not self.connected:

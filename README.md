@@ -1886,7 +1886,7 @@ GUI both show what it says:
 - a **Known targets** section gives the whole line per test, for example
   `Run against known target: nRF52840 DK advertiser DK_Linux0
   (J-Link 000123456789, /dev/serial/by-id/usb-SEGGER_J-Link_000123456789-if00),
-  requires firmware utdk-1.2.1, BLE address C0:00:00:00:00:01`, and a test
+  requires firmware utdk-1.3.0, BLE address C0:00:00:00:00:01`, and a test
   with no known target says `No known target: the harness drove no device for
   this test`, which the GUI shortens to `no known target`;
 - the transcript carries the same line as an `[M]` record where the test

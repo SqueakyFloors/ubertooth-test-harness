@@ -57,6 +57,17 @@
 /* How long a connection lasts when the central cycles, in ms. */
 #define CYCLE_MIN_MS 1000
 #define CYCLE_MAX_MS 600000
+/* The connection's data channel map: 37 channels, one bit each, in the five
+ * bytes a CONNECT_IND and an LL_CHANNEL_MAP_IND carry (bit b of byte i is
+ * channel 8i + b).
+ */
+#define DATA_CHANNELS 37
+#define DATA_MAP_BYTES 5
+/* Two channel classifications must be at least a second apart (Bluetooth
+ * Core, HCI LE Set Host Channel Classification), so a second one sooner is
+ * refused rather than quietly dropped by the controller.
+ */
+#define DATA_MAP_GAP_MS 1000
 /* Leaving the role waits for the link to come down: one connection event at
  * the longest interval the shell accepts, plus the terminate exchange.
  */
@@ -97,6 +108,13 @@ static struct {
 	 * CONNECT_IND where a receiver is listening.
 	 */
 	uint8_t chmap;
+	/* The data channel map the central has the controller classify, which
+	 * the controller carries to the live link as an LL_CHANNEL_MAP_IND.
+	 * All 37 channels until a test narrows it.
+	 */
+	uint8_t data_map[DATA_MAP_BYTES];
+	uint32_t data_map_sets;  /* times it was set since boot */
+	int64_t data_map_at;     /* uptime of the last set, in ms */
 	bool dle;              /* ask for 251-byte data length */
 	uint16_t payload_len;
 	uint32_t period_ms;
@@ -112,6 +130,7 @@ static struct {
 	.payload_len = PAYLOAD_DEFAULT,
 	.period_ms = PERIOD_DEFAULT_MS,
 	.chmap = UTDK_CHAN_37,
+	.data_map = { 0xFF, 0xFF, 0xFF, 0xFF, 0x1F },
 };
 
 static uint8_t payload[PAYLOAD_MAX];
@@ -132,6 +151,94 @@ static K_WORK_DEFINE(readvertise_work, readvertise);
 static bool role_is_connection(void)
 {
 	return utdk_role() == UTDK_ROLE_CENTRAL || utdk_role() == UTDK_ROLE_PERIPHERAL;
+}
+
+/* --------------------------------------------------------------------- */
+/* The connection's data channel map                                     */
+
+static void data_map_all(uint8_t *map)
+{
+	map[0] = map[1] = map[2] = map[3] = 0xFF;
+	map[4] = 0x1F; /* channels 32-36 */
+}
+
+static uint8_t data_map_used(const uint8_t *map)
+{
+	uint8_t used = 0;
+
+	for (int channel = 0; channel < DATA_CHANNELS; channel++) {
+		if (map[channel / 8] & BIT(channel % 8)) {
+			used++;
+		}
+	}
+	return used;
+}
+
+/* "all", or a list of data channels such as "0,12,36", into a channel map.
+ * A map with no channel in it is refused: the connection has to have
+ * somewhere to go.
+ */
+static int parse_data_map(const char *text, uint8_t *map)
+{
+	const char *at = text;
+
+	memset(map, 0, DATA_MAP_BYTES);
+	if (strcmp(text, "all") == 0) {
+		data_map_all(map);
+		return 0;
+	}
+	while (*at != '\0') {
+		unsigned int channel = 0;
+		int digits = 0;
+
+		while (*at >= '0' && *at <= '9') {
+			channel = channel * 10 + (unsigned int)(*at++ - '0');
+			if (++digits > 2) {
+				return -EINVAL;
+			}
+		}
+		if (digits == 0 || channel >= DATA_CHANNELS) {
+			return -EINVAL;
+		}
+		map[channel / 8] |= BIT(channel % 8);
+		if (*at == '\0') {
+			break;
+		}
+		if (*at != ',' || *++at == '\0') {
+			return -EINVAL;
+		}
+	}
+	return data_map_used(map) > 0 ? 0 : -EINVAL;
+}
+
+/* Put all 37 channels back, waiting out the gap the controller needs.
+ *
+ * The classification belongs to the controller, not to the link: it outlives
+ * the connection that carried it, and a narrowed map left behind would
+ * narrow the next test's CONNECT_IND.
+ */
+static void restore_data_map(void)
+{
+	uint8_t all[DATA_MAP_BYTES];
+	int64_t since;
+	bool narrowed;
+
+	k_mutex_lock(&lock, K_FOREVER);
+	narrowed = data_map_used(cn.data_map) != DATA_CHANNELS;
+	since = k_uptime_get() - cn.data_map_at;
+	k_mutex_unlock(&lock);
+	if (!narrowed) {
+		return;
+	}
+	if (since < DATA_MAP_GAP_MS) {
+		k_sleep(K_MSEC(DATA_MAP_GAP_MS - since));
+	}
+	data_map_all(all);
+	(void)bt_le_set_chan_map(all);
+	k_mutex_lock(&lock, K_FOREVER);
+	data_map_all(cn.data_map);
+	cn.data_map_at = k_uptime_get();
+	k_mutex_unlock(&lock);
 }
 
 /* --------------------------------------------------------------------- */
@@ -602,6 +709,9 @@ void conn_leave(void)
 	cn.cycle_ms = 0;
 	cn.autoupdate_ms = 0;
 	cn.chmap = UTDK_CHAN_37;
+	/* cn.data_map is put back by restore_data_map() below, which has to
+	 * reach the controller and cannot run with the lock held.
+	 */
 	/* Forget the peer too: leaving the role must not leave a `conn start`
 	 * able to open a link to whatever the last test connected to.
 	 */
@@ -619,6 +729,7 @@ void conn_leave(void)
 		waiting = cn.conn != NULL;
 		k_mutex_unlock(&lock);
 	}
+	restore_data_map();
 }
 
 static const char *phy_name(uint8_t phy)
@@ -652,8 +763,12 @@ static const char *conn_chmap_name(uint8_t chmap)
 void conn_status(char *buf, size_t len)
 {
 	char peer[BT_ADDR_LE_STR_LEN] = "";
+	char data_map[2 * DATA_MAP_BYTES + 1] = "";
 
 	k_mutex_lock(&lock, K_FOREVER);
+	for (int byte = 0; byte < DATA_MAP_BYTES; byte++) {
+		snprintf(&data_map[2 * byte], 3, "%02x", cn.data_map[byte]);
+	}
 	if (cn.have_peer) {
 		const uint8_t *a = cn.peer.a.val;
 
@@ -666,6 +781,7 @@ void conn_status(char *buf, size_t len)
 		 "\"interval_units\":%u,\"latency\":%u,\"timeout_units\":%u,"
 		 "\"tx_octets\":%u,\"rx_octets\":%u,\"mtu\":%u,\"phy\":\"%s\","
 		 "\"payload_len\":%u,\"period_ms\":%u,\"conn_chmap\":\"%s\","
+		 "\"data_map\":\"%s\",\"data_map_used\":%u,\"data_map_sets\":%u,"
 		 "\"cycle_ms\":%u,"
 		 "\"autoupdate_ms\":%u,\"writes\":%u,"
 		 "\"write_errors\":%u,\"received\":%u,\"updates\":%u,"
@@ -675,6 +791,7 @@ void conn_status(char *buf, size_t len)
 		 cn.interval_units, cn.latency, cn.timeout_units,
 		 cn.tx_octets, cn.rx_octets, cn.mtu, phy_name(cn.phy),
 		 cn.payload_len, cn.period_ms, conn_chmap_name(cn.chmap),
+		 data_map, data_map_used(cn.data_map), cn.data_map_sets,
 		 cn.cycle_ms, cn.autoupdate_ms,
 		 cn.writes, cn.write_errors,
 		 cn.received, cn.updates, cn.connects, cn.disconnects,
@@ -1032,6 +1149,62 @@ static int cmd_update(const struct shell *sh, size_t argc, char **argv)
 	return utdk_ok(sh);
 }
 
+/* Change the live connection's data channel map.
+ *
+ * The controller holds one channel classification and carries it to every
+ * link where it is the central, as an LL_CHANNEL_MAP_IND, so this changes
+ * the map of the connection that is up without disturbing it. A map of one
+ * channel is the smallest a conformant device can present, because the
+ * remapping divides by the number of channels in use.
+ */
+static int cmd_datamap(const struct shell *sh, size_t argc, char **argv)
+{
+	uint8_t map[DATA_MAP_BYTES];
+	int64_t since;
+	uint32_t sets;
+	bool connected;
+	int err = require_role(sh);
+
+	ARG_UNUSED(argc);
+	if (err) {
+		return err;
+	}
+	if (utdk_role() != UTDK_ROLE_CENTRAL) {
+		return utdk_err(sh, "only the central can change the connection's "
+				"channel map");
+	}
+	if (parse_data_map(argv[1], map) != 0) {
+		return utdk_err(sh, "channel map must be 'all' or a list of data "
+				"channels 0-%d, for example 0,12,36",
+				DATA_CHANNELS - 1);
+	}
+	k_mutex_lock(&lock, K_FOREVER);
+	connected = cn.conn != NULL;
+	sets = cn.data_map_sets;
+	since = k_uptime_get() - cn.data_map_at;
+	k_mutex_unlock(&lock);
+	if (!connected) {
+		return utdk_err(sh, "no connection to update");
+	}
+	if (sets > 0 && since < DATA_MAP_GAP_MS) {
+		return utdk_err(sh, "channel map updates must be %d ms apart; the "
+				"last one was %lld ms ago", DATA_MAP_GAP_MS, since);
+	}
+	err = bt_le_set_chan_map(map);
+	k_mutex_lock(&lock, K_FOREVER);
+	cn.last_err = err;
+	if (!err) {
+		memcpy(cn.data_map, map, sizeof(map));
+		cn.data_map_sets++;
+		cn.data_map_at = k_uptime_get();
+	}
+	k_mutex_unlock(&lock);
+	if (err) {
+		return utdk_err(sh, "channel map update failed (%d)", err);
+	}
+	return utdk_ok(sh);
+}
+
 static int cmd_defaults(const struct shell *sh, size_t argc, char **argv)
 {
 	int err = require_role(sh);
@@ -1056,6 +1229,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(conn_cmds,
 		      2, 0),
 	SHELL_CMD_ARG(chmap, NULL, "<37|38|39|all> The peripheral's advertising channels",
 		      cmd_chmap, 2, 0),
+	SHELL_CMD_ARG(datamap, NULL,
+		      "<all|0,12,36> Change the live connection's data channel map",
+		      cmd_datamap, 2, 0),
 	SHELL_CMD_ARG(cycle, NULL, "<ms|off> Drop and remake the link this often",
 		      cmd_cycle, 2, 0),
 	SHELL_CMD_ARG(autoupdate, NULL, "<ms|off> Interval to ask for once connected",
@@ -1073,8 +1249,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(conn_cmds,
 static int cmd_conn(const struct shell *sh, size_t argc, char **argv)
 {
 	if (argc < 2) {
-		return utdk_err(sh, "usage: conn <peer|interval|dle|payload|period|cycle|"
-				"autoupdate|start|stop|update|defaults>");
+		return utdk_err(sh, "usage: conn <peer|interval|dle|payload|period|chmap|"
+				"datamap|cycle|autoupdate|start|stop|update|defaults>");
 	}
 	return utdk_err(sh, "unknown conn command '%s'", argv[1]);
 }
