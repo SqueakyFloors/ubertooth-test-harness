@@ -1,12 +1,30 @@
-"""Serving one page of a run's saved output file, and the GUI viewer (#187)."""
+"""Serving one page of a run's saved output file, and the GUI viewer (#187).
 
+A run a target runner carried out keeps its ``output/`` files in the runner's
+own run directory, so the controller asks that runner for a page (#226): the
+protocol pair, the runner serving it under the same confinement, and the
+route forwarding it are all here.
+"""
+
+import asyncio
 import json
 from pathlib import Path
+import shutil
 import tempfile
+import threading
 import unittest
 
 from ubertooth_harness.events import RUN_LOG
 from ubertooth_harness.outputfiles import OUTPUT_DIR, OutputFile, saved_output
+from ubertooth_harness.protocol import (
+    MAX_FILE_PAGE_BYTES,
+    PROTOCOL_VERSION,
+    ProtocolError,
+    decode_controller_message,
+    decode_runner_message,
+    encode_controller_message,
+    encode_runner_message,
+)
 from ubertooth_harness.runfiles import (
     MAX_PAGE_BYTES,
     PAGE_BYTES,
@@ -15,11 +33,19 @@ from ubertooth_harness.runfiles import (
     listing,
     read_output_page,
 )
+from ubertooth_harness.controller import (
+    MAX_PENDING_FILES_PER_TARGET,
+    ControllerError,
+)
+from ubertooth_harness import runner_service
+from ubertooth_harness.runner_service import MAX_FILE_REQUESTS, RunnerService
 
-try:  # the controller tests' fixture, by whichever import path works
-    from test_controller import ControllerTestCase
+try:  # the controller and runner tests' fixtures, by whichever import path works
+    from test_controller import ControllerTestCase, FakeRunner, wait_until
+    from test_runner_service import StubController, RunnerFixture, TIMEOUT_S
 except ImportError:  # pragma: no cover - depends on how the suite is run
-    from tests.test_controller import ControllerTestCase
+    from tests.test_controller import ControllerTestCase, FakeRunner, wait_until
+    from tests.test_runner_service import StubController, RunnerFixture, TIMEOUT_S
 
 STDOUT_FILE = f"{OUTPUT_DIR}/002-command-1.stdout.log"
 STDERR_FILE = f"{OUTPUT_DIR}/002-command-1.stderr.log"
@@ -84,6 +110,25 @@ def run_events():
                                    "reason": ""}),
         event(7, "run_finished", {"failure_reason": ""}),
     ]
+
+
+def page_for(path=None, offset=0, limit=PAGE_BYTES, body=BODY, stream="stdout"):
+    """One page as ``read_output_page`` builds it, for a scripted runner."""
+    data = body.encode("utf-8")
+    chunk = data[offset:offset + limit]
+    return {
+        "path": STDOUT_FILE if path is None else path,
+        "stream": stream,
+        "bytes": len(data),
+        "lines": body.count("\n"),
+        "sha256": _sha(body),
+        "file_bytes": len(data),
+        "offset": offset,
+        "length": len(chunk),
+        "eof": offset + len(chunk) >= len(data),
+        "page_bytes": limit,
+        "text": chunk.decode("utf-8", "replace"),
+    }
 
 
 def write_run(root: Path, events=None) -> Path:
@@ -276,9 +321,16 @@ class WebAssetTests(unittest.TestCase):
         self.assertIn("openOutputFile", self.js)
         self.assertIn("/files`", self.js)
 
-    def test_a_file_that_stayed_on_the_target_is_listed_but_not_a_link(self):
-        self.assertIn("file.readable === false", self.js)
+    def test_a_file_on_the_target_is_a_link_while_its_runner_is_connected(self):
+        # It opens like any other file: the controller asks the runner for a
+        # page. Only while that runner is away is it listed and not a link.
+        self.assertIn("file.readable === false && onTarget", self.js)
         self.assertIn("(on the target)", self.js)
+        self.assertIn("function runnerConnected(", self.js)
+        self.assertIn("target.connected && target.online", self.js)
+        # And the list follows the target's status, so a link appears when
+        # its runner comes back without the page being reloaded.
+        self.assertIn('data.type === "target"', self.js)
 
     def test_the_list_follows_the_run_and_the_build_files_are_reachable(self):
         # Refreshed as commands save their output, not only on selection.
@@ -353,6 +405,448 @@ class RouteTests(ControllerTestCase):
     async def test_a_run_that_is_not_there_is_refused(self):
         status, _payload, _ = await self.http("GET", "/api/runs/absent/files")
         self.assertEqual(404, status)
+
+
+class ProtocolMessageTests(unittest.TestCase):
+    """The run_file request and its two answers (#226)."""
+
+    def request(self, **overrides):
+        fields = dict(
+            request_id="f1", run_id="run-1", path=STDOUT_FILE, offset=0,
+            limit=PAGE_BYTES,
+        )
+        fields.update(overrides)
+        return encode_controller_message("run_file", **fields)
+
+    def test_the_request_and_its_answers_round_trip(self):
+        message = decode_controller_message(self.request(offset=64, limit=128))
+        self.assertEqual(
+            ("run_file", "run-1", STDOUT_FILE, 64, 128),
+            (message["type"], message["run_id"], message["path"],
+             message["offset"], message["limit"]),
+        )
+        page = decode_runner_message(encode_runner_message(
+            "run_file_page", request_id="f1", run_id="run-1", page=page_for()))
+        self.assertEqual(BODY[:PAGE_BYTES], page["page"]["text"])
+        self.assertEqual(len(BODY.encode()), page["page"]["bytes"])
+        refused = decode_runner_message(encode_runner_message(
+            "run_file_refused", request_id="f1", run_id="run-1", status=404,
+            reason="no such file"))
+        self.assertEqual(404, refused["status"])
+
+    def test_a_request_that_could_not_name_a_recorded_file_is_rejected(self):
+        for field, value in (
+            ("path", "/etc/passwd"),
+            ("path", ""),
+            ("path", "output/x\x00.log"),
+            ("path", "o" * (1024 + 1)),
+            ("offset", -1),
+            ("offset", 1.5),
+            ("limit", 0),
+            ("limit", MAX_FILE_PAGE_BYTES + 1),
+            ("run_id", "../other"),
+        ):
+            with self.subTest(field=field, value=value):
+                with self.assertRaises(ProtocolError):
+                    self.request(**{field: value})
+
+    def test_an_answer_that_does_not_fit_the_page_shape_is_rejected(self):
+        for change in (
+            {"text": "x" * (MAX_FILE_PAGE_BYTES + 1)},
+            {"page_bytes": MAX_FILE_PAGE_BYTES + 1},
+            {"offset": -1},
+            {"eof": "yes"},
+            {"path": "/absolute.log"},
+        ):
+            with self.subTest(change=change):
+                with self.assertRaises(ProtocolError):
+                    encode_runner_message(
+                        "run_file_page", request_id="f1", run_id="run-1",
+                        page={**page_for(), **change},
+                    )
+        # A field more or less than the page carries is rejected as well.
+        for page in ({k: v for k, v in page_for().items() if k != "sha256"},
+                     {**page_for(), "extra": 1}):
+            with self.assertRaises(ProtocolError):
+                encode_runner_message(
+                    "run_file_page", request_id="f1", run_id="run-1", page=page)
+
+    def test_a_refusal_carries_only_a_status_the_route_can_answer(self):
+        for status in (200, 500, 418, True):
+            with self.subTest(status=status), self.assertRaises(ProtocolError):
+                encode_runner_message(
+                    "run_file_refused", request_id="f1", run_id="run-1",
+                    status=status, reason="no")
+
+    def test_the_version_says_the_pair_is_there(self):
+        # The protocol has no negotiation, so the pair arrives with a bump.
+        self.assertEqual(4, PROTOCOL_VERSION)
+
+
+class RunnerPageTests(unittest.IsolatedAsyncioTestCase):
+    """The runner serving a page of one of its own runs, under the same
+    confinement as the controller's route (#226)."""
+
+    RUN_ID = "run-20261031-000001"
+
+    def setUp(self):
+        self._directory = tempfile.TemporaryDirectory()
+        self.fixture = RunnerFixture(Path(self._directory.name))
+        self.run_dir = self.fixture.output / self.RUN_ID
+        self.run_dir.mkdir(parents=True)
+        write_run(self.run_dir)
+        self.logs = []
+
+    def tearDown(self):
+        self._directory.cleanup()
+
+    async def asyncSetUp(self):
+        self.stub = await StubController().__aenter__()
+        self.service = RunnerService(
+            self.fixture.config(self.stub.url), log=self.logs.append,
+        )
+        self.task = asyncio.create_task(self.service.run_forever())
+        await self.stub.next("register")
+
+    async def asyncTearDown(self):
+        self.service.request_stop()
+        await asyncio.wait_for(self.task, TIMEOUT_S)
+        await self.stub.__aexit__(None, None, None)
+
+    async def ask(self, path, *, run_id=None, offset=0, limit=PAGE_BYTES,
+                  request_id="f1"):
+        await self.stub.send(encode_controller_message(
+            "run_file", request_id=request_id,
+            run_id=self.RUN_ID if run_id is None else run_id,
+            path=path, offset=offset, limit=limit,
+        ))
+        return await self.stub.next(skip=("heartbeat",))
+
+    async def refusal(self, path, **kwargs):
+        answer = await self.ask(path, **kwargs)
+        self.assertEqual("run_file_refused", answer["type"], answer)
+        # Never says where the run directory is on the target.
+        self.assertNotIn(str(self.fixture.output), answer["reason"])
+        self.assertNotIn(str(self._directory.name), answer["reason"])
+        return answer
+
+    async def test_a_recorded_file_of_one_of_its_runs_is_served(self):
+        answer = await self.ask(STDOUT_FILE, offset=10, limit=40)
+        self.assertEqual("run_file_page", answer["type"], answer)
+        self.assertEqual(("f1", self.RUN_ID), (answer["request_id"], answer["run_id"]))
+        page = answer["page"]
+        self.assertEqual(BODY[10:50], page["text"])
+        self.assertEqual((10, 40, False), (page["offset"], page["length"], page["eof"]))
+        self.assertEqual(len(BODY.encode()), page["bytes"])
+        self.assertEqual(_sha(BODY), page["sha256"])
+
+    async def test_the_last_page_and_an_offset_past_the_end_say_so(self):
+        size = len(BODY.encode())
+        self.assertTrue((await self.ask(STDOUT_FILE, offset=size - 5))["page"]["eof"])
+        past = await self.ask(STDOUT_FILE, offset=size * 2)
+        self.assertEqual(("", True), (past["page"]["text"], past["page"]["eof"]))
+
+    async def test_a_run_this_runner_does_not_have_is_refused(self):
+        answer = await self.refusal(STDOUT_FILE, run_id="run-somebody-else")
+        self.assertEqual(404, answer["status"])
+        self.assertIn("no run", answer["reason"])
+
+    async def test_a_path_the_run_did_not_record_is_refused(self):
+        (self.run_dir / "secret.txt").write_text("secret\n")
+        for path in ("secret.txt", RUN_LOG, f"{OUTPUT_DIR}/other.log"):
+            with self.subTest(path=path):
+                answer = await self.refusal(path)
+                self.assertEqual(404, answer["status"])
+                self.assertIn("no saved output file", answer["reason"])
+
+    async def test_a_path_that_climbs_out_of_the_run_directory_is_refused(self):
+        # A path that climbs out is not one the run recorded, so it is
+        # refused before the path itself is looked at; ConfinementTests
+        # covers the check that refuses it even if a record named it.
+        (self.fixture.output / "elsewhere.txt").write_text("not yours\n")
+        for path in ("../elsewhere.txt", f"{OUTPUT_DIR}/../../elsewhere.txt", ".."):
+            with self.subTest(path=path):
+                answer = await self.refusal(path)
+                self.assertEqual(404, answer["status"])
+                self.assertIn("no saved output file", answer["reason"])
+                self.assertNotIn("not yours", answer["reason"])
+
+    async def test_a_recorded_path_that_leaves_the_run_is_refused(self):
+        # A run.jsonl record is ordinary data, so a record that names a path
+        # outside the run directory is refused by the path check rather than
+        # opened: being recorded is necessary, never sufficient.
+        (self.fixture.output / "elsewhere.txt").write_text("not yours\n")
+        climbing = "../elsewhere.txt"
+        write_run(self.run_dir, events=[event(1, "command_finished", {
+            "phase": "test", "invocation_id": "002",
+            "command_id": "002-command-1", "returncode": 0,
+            "output_files": [file_record(climbing, "stdout", "not yours\n")],
+        })])
+        answer = await self.refusal(climbing)
+        self.assertEqual(400, answer["status"])
+        self.assertIn("not a path inside the run directory", answer["reason"])
+        self.assertNotIn("not yours", answer["reason"])
+
+    async def test_an_absolute_path_never_reaches_the_run_directory(self):
+        # The schema refuses it, so the runner answers protocol_error and
+        # does not look at any file at all.
+        await self.stub.send(json.dumps({
+            "version": PROTOCOL_VERSION, "type": "run_file", "request_id": "f1",
+            "run_id": self.RUN_ID, "path": "/etc/passwd", "offset": 0,
+            "limit": PAGE_BYTES,
+        }))
+        answer = await self.stub.next(skip=("heartbeat",))
+        self.assertEqual("protocol_error", answer["type"], answer)
+        self.assertIn("path", answer["reason"])
+
+    async def test_a_symbolic_link_is_not_served_under_a_recorded_name(self):
+        served = self.run_dir / STDOUT_FILE
+        served.unlink()
+        served.symlink_to(self.run_dir / RUN_LOG)
+        answer = await self.refusal(STDOUT_FILE)
+        self.assertEqual(400, answer["status"])
+        self.assertIn("symbolic link", answer["reason"])
+
+    async def test_a_recorded_file_that_is_gone_is_refused_plainly(self):
+        (self.run_dir / STDOUT_FILE).unlink()
+        answer = await self.refusal(STDOUT_FILE)
+        self.assertEqual(404, answer["status"])
+        # It is this target's own run directory, so "on the target" would be
+        # absurd here.
+        self.assertNotIn("on the target, not here", answer["reason"])
+        self.assertIn("no longer in its run directory", answer["reason"])
+
+    async def test_more_requests_at_once_than_it_serves_are_refused_as_busy(self):
+        reading = threading.Semaphore(0)
+        finish = threading.Event()
+        real = runner_service.read_output_page
+
+        def slow(*args, **kwargs):
+            reading.release()
+            finish.wait(TIMEOUT_S)
+            return real(*args, **kwargs)
+
+        runner_service.read_output_page = slow
+        try:
+            for number in range(MAX_FILE_REQUESTS):
+                await self.stub.send(encode_controller_message(
+                    "run_file", request_id=f"f{number}", run_id=self.RUN_ID,
+                    path=STDOUT_FILE, offset=0, limit=64))
+            # Every slot is taken once each request has reached the read.
+            for _ in range(MAX_FILE_REQUESTS):
+                await asyncio.to_thread(reading.acquire, True, TIMEOUT_S)
+            answer = await self.ask(STDOUT_FILE, request_id="one-too-many")
+            self.assertEqual("run_file_refused", answer["type"], answer)
+            self.assertEqual((503, "one-too-many"),
+                             (answer["status"], answer["request_id"]))
+        finally:
+            finish.set()
+            runner_service.read_output_page = real
+        # The held requests are still answered.
+        answered = set()
+        while len(answered) < MAX_FILE_REQUESTS:
+            served = await self.stub.next("run_file_page", skip=("heartbeat",))
+            answered.add(served["request_id"])
+        self.assertEqual({f"f{n}" for n in range(MAX_FILE_REQUESTS)}, answered)
+
+
+class ForwardedFileTests(ControllerTestCase):
+    """The route asking the runner that owns the run for a page (#226)."""
+
+    RUN_ID = "run-on-target"
+
+    async def stored_run(self, run_id=RUN_ID, target="Host_A"):
+        """A run as the runner service leaves it here: run.jsonl, no files."""
+        directory = self.results / run_id
+        directory.mkdir(parents=True)
+        write_run(directory)
+        shutil.rmtree(directory / OUTPUT_DIR)
+        shutil.rmtree(directory / Path(CAPTURE_FILE).parts[0])
+        (directory / "run.json").write_text(json.dumps({
+            "run_id": run_id, "target": target, "status": "passed",
+            "ref": "main", "plan": "fast", "suite": "fast",
+            "created_at": "2026-10-30T00:00:00+00:00",
+            "finished_at": "2026-10-30T00:01:00+00:00",
+            "runner_run_directory": "/runs/" + run_id,
+        }) + "\n")
+        await self.server.stop()
+        await self.start_controller()
+        return run_id
+
+    async def get_file(self, run_id, path=STDOUT_FILE, query=""):
+        return asyncio.create_task(self.http(
+            "GET", f"/api/runs/{run_id}/file?path={path}{query}"))
+
+    async def test_the_list_marks_the_files_as_not_readable_here(self):
+        run_id = await self.stored_run()
+        status, payload, _ = await self.http("GET", f"/api/runs/{run_id}/files")
+        self.assertEqual(200, status, payload)
+        self.assertEqual([False, False, False],
+                         [file["readable"] for file in payload["files"]])
+
+    async def test_a_page_is_fetched_from_the_runner_that_has_the_file(self):
+        run_id = await self.stored_run()
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            get = await self.get_file(run_id, query="&offset=0&limit=50")
+            request = await runner.recv()
+            self.assertEqual("run_file", request["type"])
+            self.assertEqual((run_id, STDOUT_FILE, 0, 50),
+                             (request["run_id"], request["path"],
+                              request["offset"], request["limit"]))
+            await runner.send(
+                "run_file_page", request_id=request["request_id"], run_id=run_id,
+                page=page_for(STDOUT_FILE, 0, 50))
+            status, payload, _ = await get
+            self.assertEqual(200, status, payload)
+            self.assertEqual(BODY[:50], payload["text"])
+            self.assertEqual(len(BODY.encode()), payload["bytes"])
+            self.assertEqual({}, self.controller._pending_files)
+
+    async def test_a_page_larger_than_one_message_carries_is_asked_smaller(self):
+        run_id = await self.stored_run()
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            get = await self.get_file(run_id, query=f"&limit={MAX_PAGE_BYTES}")
+            request = await runner.recv()
+            self.assertEqual(MAX_FILE_PAGE_BYTES, request["limit"])
+            await runner.send(
+                "run_file_page", request_id=request["request_id"], run_id=run_id,
+                page=page_for(STDOUT_FILE, 0, MAX_FILE_PAGE_BYTES))
+            status, payload, _ = await get
+            self.assertEqual(200, status, payload)
+            # What a page is, so a reader pages on by the right step.
+            self.assertEqual(MAX_FILE_PAGE_BYTES, payload["page_bytes"])
+
+    async def test_the_runner_s_refusal_is_the_caller_s_answer(self):
+        run_id = await self.stored_run()
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            get = await self.get_file(run_id)
+            request = await runner.recv()
+            await runner.send(
+                "run_file_refused", request_id=request["request_id"],
+                run_id=run_id, status=404,
+                reason=f"{STDOUT_FILE!r} is no longer in its run directory")
+            status, payload, _ = await get
+            self.assertEqual(404, status, payload)
+            self.assertIn("no longer in its run directory", payload["detail"])
+
+    async def test_a_file_on_a_target_whose_runner_is_away_is_a_503(self):
+        run_id = await self.stored_run()
+        status, payload, _ = await self.http(
+            "GET", f"/api/runs/{run_id}/file?path={STDOUT_FILE}")
+        self.assertEqual(503, status, payload)
+        self.assertIn("Host_A", payload["detail"])
+        self.assertIn(STDOUT_FILE, payload["detail"])
+        # The reason names the path only, never a path on this host.
+        self.assertNotIn(str(self.results), payload["detail"])
+
+    async def test_a_runner_that_drops_fails_the_waiting_request(self):
+        run_id = await self.stored_run()
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            get = await self.get_file(run_id)
+            await runner.recv()
+            await runner.ws.close()
+            status, payload, _ = await get
+        self.assertEqual(503, status, payload)
+        self.assertIn("disconnected", payload["detail"])
+
+    async def test_an_answer_for_another_file_is_ignored_and_the_right_one_serves(self):
+        run_id = await self.stored_run()
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            get = await self.get_file(run_id)
+            request = await runner.recv()
+            for page in (page_for(STDERR_FILE, body="warning: busy\n"),
+                         page_for(STDOUT_FILE)):
+                await runner.send(
+                    "run_file_page", request_id=request["request_id"],
+                    run_id=run_id, page=page)
+            status, payload, _ = await get
+            self.assertEqual(200, status, payload)
+            self.assertEqual(STDOUT_FILE, payload["path"])
+            target = self.controller.targets["Host_A"]
+            self.assertEqual(1, target.protocol_errors)
+            self.assertIn("other than the one asked for", target.last_protocol_error)
+
+    async def test_an_answer_naming_another_run_is_ignored(self):
+        run_id = await self.stored_run()
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            get = await self.get_file(run_id)
+            request = await runner.recv()
+            await runner.send(
+                "run_file_refused", request_id=request["request_id"],
+                run_id="another-run", status=404, reason="no")
+            await wait_until(
+                lambda: self.controller.targets["Host_A"].protocol_errors == 1)
+            await runner.send(
+                "run_file_page", request_id=request["request_id"], run_id=run_id,
+                page=page_for(STDOUT_FILE))
+            status, payload, _ = await get
+            self.assertEqual(200, status, payload)
+
+    async def test_what_the_run_never_recorded_is_refused_without_asking(self):
+        run_id = await self.stored_run()
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            # Only a path the run's own run.jsonl records is asked of the
+            # runner, so a path the caller invents is answered here.
+            for path in (RUN_LOG, "..%2frun.json", "secret.txt",
+                         "output%2F..%2F..%2Fetc%2Fpasswd"):
+                with self.subTest(path=path):
+                    status, payload, _ = await self.http(
+                        "GET", f"/api/runs/{run_id}/file?path={path}")
+                    self.assertEqual(404, status, payload)
+                    self.assertEqual({}, self.controller._pending_files)
+            # Nothing was asked of the runner, so a page request after them
+            # is the first message it sees.
+            get = await self.get_file(run_id)
+            request = await runner.recv()
+            self.assertEqual("run_file", request["type"])
+            await runner.send(
+                "run_file_refused", request_id=request["request_id"],
+                run_id=run_id, status=404, reason="gone")
+            await get
+
+    async def test_a_bad_offset_or_limit_is_refused_without_asking(self):
+        run_id = await self.stored_run()
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            for query in ("&offset=-1", "&limit=0", "&limit=-5"):
+                with self.subTest(query=query):
+                    status, payload, _ = await self.http(
+                        "GET",
+                        f"/api/runs/{run_id}/file?path={STDOUT_FILE}{query}")
+                    self.assertEqual(400, status, payload)
+            self.assertEqual({}, self.controller._pending_files)
+
+    async def test_more_requests_than_are_held_for_one_target_are_refused(self):
+        run_id = await self.stored_run()
+        run = self.controller.get_run(run_id)
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            # Through the controller rather than HTTP: eight requests waiting
+            # at once would be eight blocked threads in the test's own pool.
+            waiting = [
+                asyncio.create_task(
+                    self.controller.read_run_file(run, STDOUT_FILE, 0, 64))
+                for _ in range(MAX_PENDING_FILES_PER_TARGET)
+            ]
+            for _ in waiting:
+                await runner.recv()
+            with self.assertRaises(ControllerError) as caught:
+                await self.controller.read_run_file(run, STDOUT_FILE, 0, 64)
+            self.assertEqual(503, caught.exception.status)
+            self.assertIn("already waiting", caught.exception.detail)
+            for request_id in list(self.controller._pending_files):
+                await runner.send(
+                    "run_file_page", request_id=request_id, run_id=run_id,
+                    page=page_for(STDOUT_FILE, 0, 64))
+            for pending in waiting:
+                self.assertEqual(BODY[:64], (await pending)["text"])
 
 
 if __name__ == "__main__":

@@ -98,7 +98,7 @@ def event(run_id, sequence, event_type="test_started", status="running", **detai
 
 
 class FakeRunner:
-    """Scripted protocol-v3 runner over a real loopback WebSocket."""
+    """Scripted protocol-v4 runner over a real loopback WebSocket."""
 
     def __init__(self, port):
         self.url = f"ws://127.0.0.1:{port}/ws/runner"
@@ -201,7 +201,7 @@ class BindTests(ControllerTestCase):
         self.assertEqual({"127.0.0.1"}, addresses)
         status, payload, _ = await self.http("GET", "/")
         self.assertEqual(200, status)
-        self.assertEqual(3, payload["protocol_version"])
+        self.assertEqual(4, payload["protocol_version"])
         self.assertEqual("127.0.0.1", payload["bind"])
         self.assertIn("POST /api/targets/{host}/runs", payload["endpoints"])
         # No CDN-backed docs pages.

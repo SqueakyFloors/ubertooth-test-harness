@@ -2,7 +2,7 @@
 
 Every message is one JSON object in one WebSocket text frame:
 
-    {"version": 3, "type": "<type>", ...fields}
+    {"version": 4, "type": "<type>", ...fields}
 
 Each type has an exact field set. Decoding is strict: a message that is not a
 JSON object, has an unknown version or type, lacks a field, carries an extra
@@ -22,14 +22,23 @@ from typing import Any, Callable, Mapping
 
 
 # Version 2 added ``commit`` to the run message (version 1 runners resolved
-# the ref name in their own checkout); version 3 added ``flash_build``.
-PROTOCOL_VERSION = 3
+# the ref name in their own checkout); version 3 added ``flash_build``;
+# version 4 added the ``run_file`` request and its two answers.
+PROTOCOL_VERSION = 4
 # Bounds what the runner accepts from the controller. Outbound events may be
 # larger (the manifest record is bounded at 1 MiB).
 MAX_INBOUND_MESSAGE_BYTES = 64 * 1024
 # Bounds what the controller accepts from a runner: one event message carries
 # one run.jsonl record, and the manifest record alone may reach 1 MiB.
 MAX_RUNNER_MESSAGE_BYTES = 4 * 1024 * 1024
+# The most bytes of a saved output file one ``run_file`` answer may carry.
+# The page travels as JSON text, where a byte that did not decode can cost
+# six characters (``\uFFFD``), so this keeps the largest answer well inside
+# MAX_RUNNER_MESSAGE_BYTES.
+MAX_FILE_PAGE_BYTES = 256 * 1024
+# What a path in a ``run_file`` request may be; the real confinement is
+# ``runfiles.confined`` on the side that opens the file.
+MAX_FILE_PATH_CHARS = 1024
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -94,6 +103,10 @@ def _non_negative_number(value) -> bool:
     )
 
 
+def _non_negative_integer(value) -> bool:
+    return _integer(value) and value >= 0
+
+
 def _boolean(value) -> bool:
     return isinstance(value, bool)
 
@@ -128,6 +141,63 @@ def _run_event(value) -> bool:
     )
 
 
+def _recorded_path(value) -> bool:
+    """A path a run recorded for one of its saved output files.
+
+    Every such path is relative to the run directory and uses forward
+    slashes. This only keeps a message that cannot name a readable file from
+    being carried at all; whether the path may be opened is decided by
+    ``runfiles.confined`` on the side that holds the run directory.
+    """
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= MAX_FILE_PATH_CHARS
+        and not value.startswith("/")
+        and "\x00" not in value
+        and "\n" not in value
+    )
+
+
+def _page_limit(value) -> bool:
+    return _integer(value) and 0 < value <= MAX_FILE_PAGE_BYTES
+
+
+def _page_text(value) -> bool:
+    # A page is at most MAX_FILE_PAGE_BYTES bytes of the file, and no byte
+    # decodes to more than one character, so this bounds the text as well.
+    return isinstance(value, str) and len(value) <= MAX_FILE_PAGE_BYTES
+
+
+# One page of a saved output file: what the run recorded about the file
+# (``runfiles.read_output_page``), then where this page sits in it.
+_FILE_PAGE_FIELDS: Mapping[str, Validator] = {
+    "path": _recorded_path,
+    "stream": _text,
+    "bytes": _non_negative_integer,
+    "lines": _non_negative_integer,
+    "sha256": _text,
+    "file_bytes": _non_negative_integer,
+    "offset": _non_negative_integer,
+    "length": _non_negative_integer,
+    "eof": _boolean,
+    "page_bytes": _page_limit,
+    "text": _page_text,
+}
+
+
+def _file_page(value) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == set(_FILE_PAGE_FIELDS)
+        and all(check(value[field]) for field, check in _FILE_PAGE_FIELDS.items())
+    )
+
+
+def _refusal_status(value) -> bool:
+    """The HTTP status the controller answers a refused file request with."""
+    return value in (400, 404, 503) and _integer(value)
+
+
 # Controller -> runner.
 CONTROLLER_MESSAGES: Mapping[str, Mapping[str, Validator]] = {
     # Start one run. ``commit`` is the commit the controller listed for
@@ -153,6 +223,18 @@ CONTROLLER_MESSAGES: Mapping[str, Mapping[str, Validator]] = {
     "cancel": {
         "run_id": _identifier,
         "reason": _text,
+    },
+    # One page of a saved output file of a run this runner carried out. The
+    # output/ files stay in the runner's own run directory, so this is how
+    # the controller's GUI opens one. ``path`` must be a path that run's own
+    # run.jsonl records; ``offset`` and ``limit`` are in bytes, so a page of
+    # a soak's output costs the same as a page of a short answer.
+    "run_file": {
+        "request_id": _identifier,
+        "run_id": _identifier,
+        "path": _recorded_path,
+        "offset": _non_negative_integer,
+        "limit": _page_limit,
     },
 }
 
@@ -213,6 +295,23 @@ RUNNER_MESSAGES: Mapping[str, Mapping[str, Validator]] = {
         "request_id": _identifier,
         "run_id": _identifier,
         "exit_code": _optional(_integer),
+        "reason": _text,
+    },
+    # The page a run_file request asked for: what the run recorded about the
+    # file, including the size it recorded, and the bytes of this page.
+    "run_file_page": {
+        "request_id": _identifier,
+        "run_id": _identifier,
+        "page": _file_page,
+    },
+    # The runner will not serve that file: it has no such run, the run
+    # recorded no such file, the path is not one it may open, or it is
+    # already answering as many requests as it serves at once. ``reason``
+    # names the path only, never where the run directory is on the target.
+    "run_file_refused": {
+        "request_id": _identifier,
+        "run_id": _identifier,
+        "status": _refusal_status,
         "reason": _text,
     },
     # The controller sent a message the runner rejected; nothing was done.

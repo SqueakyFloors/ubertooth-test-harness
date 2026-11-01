@@ -31,10 +31,14 @@ MAX_PAGE_BYTES = 1024 * 1024
 class OutputFileError(ValueError):
     """The file cannot be served from this run directory."""
 
-    def __init__(self, detail: str, status: int = 404):
+    def __init__(self, detail: str, status: int = 404, *, on_target: bool = False):
         super().__init__(detail)
         self.detail = detail
         self.status = status
+        # The run recorded this file, but it is not in this run directory.
+        # On the controller that means the run's own runner has it, so the
+        # controller asks that runner for the page instead of refusing.
+        self.on_target = on_target
 
 
 def saved_in(run_dir: Path) -> tuple:
@@ -128,7 +132,7 @@ def read_output_page(
             # files stay in the runner's run directory.
             raise OutputFileError(
                 f"{path!r} was saved on the target, not here; it is in the "
-                "target's own run directory", 404,
+                "target's own run directory", 404, on_target=True,
             ) from error
         raise
     length = min(limit, MAX_PAGE_BYTES)
