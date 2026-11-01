@@ -454,10 +454,19 @@ Two measured links, 70 seconds each, read from the boards and from the air on
 | `sco_retrans_window` | 4 slots | 2 slots |
 | `sco_frame_len` | 60 bytes | 120 bytes |
 | Controller's packet count | 18800 each way | 9392 each way |
+| Named on the air | `HV3/EV3/3-EV3` | `HV2/2-EV3` |
 
 So an EV3 link halves the packet length, halves the interval to keep the same
 64 kbit/s, and doubles the packet rate to about 268 packets a second each
 way. That makes it the busiest traffic the pair can put on the air.
+
+The last row is from an Ubertooth capture of each link, counting the packets
+whose header checksum passed: the EV3 link gave 2891 packets named
+`HV3/EV3/3-EV3` and none named `HV2/2-EV3`, and the 2-EV3 link the other way
+round. The capture was read for its packet type codes rather than followed
+packet by packet, because `ubertooth-rx` did not settle on this piconet's
+clock from this traffic; the type code is in each packet's header and does
+not need the clock.
 
 The codec is a build-time choice for the same reason:
 `CONFIG_BT_HFP_WBS_ENABLE` decides whether mSBC is offered at all, and this
