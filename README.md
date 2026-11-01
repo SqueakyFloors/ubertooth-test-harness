@@ -1891,13 +1891,19 @@ of a serial the run names appears in is masked as well, whole or as the
 whole shape of a serial the run names, wherever it sits, including written
 against a word of its own as a serial reaches a line, and a piece of such a
 shape carrying four or more hex letters, since a piece is all the rule has
-to go on there. Both are read inside a run of hex letters and `N`, never
-over the page: the `N` is what tells a shape from an ordinary run of hex,
-and a `[M]` note is the only place a report publishes shapes. Every other
+to go on there. Both are read inside a run of hex letters and `N`, not over
+the page: the `N` is what tells a shape from an ordinary run of hex, and a
+`[M]` note is the only place a report publishes shapes. A serial that does
+not shape into such a run is the exception, since there is nothing to read
+its shape inside: an ESP32 peer's bridge serial is whatever string the
+bridge reports, so a shape of it such as `espN-peer_NaNb` is masked wherever
+it appears, as long as it carries four characters of its own. Every other
 shape is left to read. The costs are the width rule's: a short value whose
 own shape a known serial's shape holds reads `<serial>` too, and a piece a
 cut left with no `N` of its own is left to read like any piece of a serial
-narrower than 8 hex digits.
+narrower than 8 hex digits. A serial with one character of its own
+(31 digits and a letter) keeps its shape, because masking `Na` would take
+that letter out of every word of the report.
 
 What the option does not mask is anything that is not a serial the run
 names, and a transcript holds more than those: the decimal serial of a

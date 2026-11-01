@@ -598,21 +598,51 @@ class ReportTests(unittest.TestCase):
             _redact(f"  1 x [E] ab{line_shape(serial)} is idle\n", {serial}),
         )
 
-    def test_a_two_character_shape_does_not_cut_up_the_report(self):
-        # A serial with one hex letter in it shapes to `Na`. The rule reads
-        # a shape inside a run of hex letters and N, never over the page, so
-        # a shape that narrow cannot take words out of the report.
+    def test_a_shape_of_one_character_does_not_cut_up_the_report(self):
+        # A serial with one character of its own shapes to `Na`, and masking
+        # that would take that letter out of every word of the report. One
+        # character is where the line is drawn: such a shape is left as it
+        # is, and the serial itself is still masked.
         from ubertooth_harness.report import _redact
 
         serial = "0000000000000000000000000000000a"
         page = (
             "  7 x [E] rx block timestamp N * N nanoseconds\n"
+            "  1 x [E] isNaN NaN Nab\n"
             "| Host | a Linux host (Linux arm64) |\n"
             "  signal -70 dBm, name: Ubertooth One\n"
         )
 
         self.assertEqual("Na", line_shape(serial))
         self.assertEqual(page, _redact(page, {serial}))
+
+    def test_a_shape_no_hex_run_can_hold_is_masked_over_the_page(self):
+        # An ESP32 peer's bridge serial is whatever string the bridge
+        # reports, of any letters, digits and _.:+- (resources.py), so its
+        # shape can hold characters no run of hex letters and N carries.
+        # There is nothing to read it inside, so it is masked wherever it
+        # sits; for that it has to say four characters' worth about the
+        # board, since nothing else bounds where it is looked for.
+        from ubertooth_harness.report import _redact
+
+        serial = "esp32-peer_1a2b"
+        shape = line_shape(serial)
+
+        self.assertEqual("espN-peer_NaNb", shape)
+        self.assertEqual(
+            f"  3 x [E] peer {REDACTED} ready\n",
+            _redact(f"  3 x [E] peer {shape} ready\n", {serial}),
+        )
+        self.assertEqual(
+            f"  3 x [E] usb-{REDACTED}-if00\n",
+            _redact(f"  3 x [E] usb-{shape}-if00\n", {serial}),
+        )
+        # Too little of its own to be looked for over a whole page: the
+        # shape of `1ano2` would otherwise cut up `nanoseconds`.
+        self.assertEqual(
+            "  7 x [E] N nanoseconds\n",
+            _redact("  7 x [E] N nanoseconds\n", {"1ano2"}),
+        )
 
     def test_a_serial_or_shape_in_another_case_is_masked(self):
         # A tool prints in the case it likes, and the registry holds one.

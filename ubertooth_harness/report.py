@@ -1350,19 +1350,34 @@ def _mask_cut_serials(text: str, serials: Sequence[str]) -> str:
 # like any other, so a cut shape is masked too.
 #
 # The run must carry an N, since a serial with no digits in it has its own
-# characters as its shape and is masked as a serial. A whole shape of a
-# serial the run names is masked however few hex letters it carries, because
-# the run naming that serial settles the question by itself, the view
-# _mask_cut_serials takes of a piece of a known serial. A piece of one needs
-# this many letters, because the letters are what names the board and a piece
-# is all the rule has to go on: fewer than that (`NabN`, the shape of `1ab2`)
-# sits in the shape of too much ordinary output to mask. A run of hex letters
-# with no N of its own is left to _mask_cut_serials and its width rule, for
-# the same reason: `cafe` and `dead` are words a tool prints.
+# characters as its shape and is masked as a serial. A whole shape is masked
+# however few hex letters it carries, because the run naming that serial
+# settles the question by itself, the view _mask_cut_serials takes of a piece
+# of a known serial; a piece of one needs four hex letters, because the
+# letters are what names the board and a piece is all the rule has to go on.
+# Fewer than that (`NabN`, the shape of `1ab2`) sits in the shape of too much
+# ordinary output to mask, and a run of hex letters with no N of its own is
+# left to _mask_cut_serials and its width rule, for the same reason: `cafe`
+# and `dead` are words a tool prints.
+#
+# Not every serial shapes into such a run. An ESP32 peer's bridge serial is
+# whatever string the bridge reports, of any letters, digits and `_.:+-`
+# (resources.py), so its shape can hold characters no run of hex letters and
+# N will ever carry, and nothing bounds where it may be looked for. Such a
+# shape is masked over the page, and for that it has to say enough about the
+# board to be worth matching ordinary text: four characters of its own,
+# counting the punctuation, where a shape read inside a run needs two. One
+# character is where the line is drawn in either case, because the shape of
+# a serial with a single letter in it (`Na`) would cut that letter out of
+# every word of the report.
 _SHAPE_MIN_LETTERS = 4
+_SHAPE_MIN_OWN_CHARS = 2
+_LOOSE_SHAPE_MIN_OWN_CHARS = 4
 _SHAPE_TOKEN = re.compile(
     r"(?<![0-9A-Fa-fN])[A-Fa-fN]*N[A-Fa-fN]*(?![0-9A-Fa-fN])"
 )
+# A shape a run of hex letters and N can hold, so one the rules read there.
+_SHAPE_IN_A_RUN = re.compile(r"[A-Fa-fN]+")
 _SHAPE_LETTER = re.compile(r"[A-Fa-f]")
 
 
@@ -1395,9 +1410,7 @@ def _mask_whole_shapes(token: str, whole: re.Pattern, pieces: set[str],
     could swallow the start of a shape that repeats itself and leave a tail
     too narrow to mask. It is masked however few hex letters it carries: the
     line it was counted from named a board the run names, and that settles
-    it. Only inside the run, never over the page: the shape of a serial with
-    one hex letter in it is two characters long (`Na`), and masking that
-    wherever it appeared would cut words out of the report.
+    it.
     """
     out = []
     at = 0
@@ -1437,18 +1450,31 @@ def _mask_shape_pieces(token: str, pieces: set[str], longest: int) -> str:
     return "".join(out)
 
 
+def _shape_own_chars(shape: str) -> int:
+    """Characters of a shape that are the serial's own, not the N standing
+    where a run of its digits was: what the shape says about the board."""
+    return len(shape) - shape.count("N")
+
+
 def _mask_serial_shapes(text: str, serials: Sequence[str]) -> str:
     """Mask the shape of a line that named a board the run names."""
-    shapes = set()
+    shapes, loose = set(), set()
     for serial in serials:
-        shape = line_shape(serial).lower()
+        shape = line_shape(serial)
         # No digits in it, so the shape is the serial itself, already masked.
-        if shape == serial.lower():
+        if shape == serial:
             continue
-        # With no hex letter in it the shape names nothing: a numeric serial
-        # shapes to a bare `N`, and masking that would mask every shape.
-        if _shape_letters(shape):
-            shapes.add(shape)
+        own = _shape_own_chars(shape)
+        if _SHAPE_IN_A_RUN.fullmatch(shape):
+            # A numeric serial shapes to a bare `N`, which names nothing.
+            if own >= _SHAPE_MIN_OWN_CHARS:
+                shapes.add(shape.lower())
+        elif own >= _LOOSE_SHAPE_MIN_OWN_CHARS:
+            loose.add(shape)
+    # A shape no run of hex letters and N can hold, masked wherever it sits.
+    # Longest first, as below.
+    for shape in sorted(loose, key=len, reverse=True):
+        text = re.sub(re.escape(shape), REDACTED, text, flags=re.IGNORECASE)
     if not shapes:
         return text
     pieces, longest = _shape_pieces(shapes)
