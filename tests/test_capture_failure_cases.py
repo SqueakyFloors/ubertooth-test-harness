@@ -58,15 +58,21 @@ def pcapng_bytes(packets):
     return out
 
 
-def dump_bytes(packets):
-    """``packets`` whole records of the shape rxdump.py accepts: a host time
-    near the file's own, a basic-rate packet type, and a real channel."""
-    now = int(time.time())
-    out = b""
-    for index in range(packets):
-        record = struct.pack(">I", now) + bytes([0, 0, 20 + index % 50])
-        out += record + b"\0" * (rxreplay.RECORD - len(record))
-    return out
+def dump_bytes(source, variant, *, shuffled=False):
+    """The fixture's own packet records, which is what ``-d`` writes.
+
+    ``shuffled`` writes the same number of valid records taken from
+    elsewhere in the fixture, which is a dump of the right size holding the
+    wrong packets.
+    """
+    path = Path(source) if source else None
+    data = path.read_bytes() if path is not None and path.is_file() else b""
+    wanted = rxreplay.packet_record_indices(variant=variant)
+    if shuffled:
+        whole = len(data) // rxreplay.RECORD
+        wanted = [(index + 1) % whole for index in wanted] if whole else []
+    return b"".join(
+        data[i * rxreplay.RECORD:(i + 1) * rxreplay.RECORD] for i in wanted)
 
 
 class FakeTools:
@@ -89,6 +95,8 @@ class FakeTools:
       back anyway.
     - ``discard-skipped-record``: a replay keeps its files only once a packet
       has been decoded, so one whose record the decoder skipped loses them.
+    - ``dump-other-records``: the ``-d`` dump holds the right number of
+      valid records, taken from elsewhere in the input.
     - ``remove-any-path``: the discard removes a symbolic link or /dev/null
       as readily as a regular file.
     - ``stale-reason``: the create failure carries the errno of an earlier
@@ -204,7 +212,8 @@ class FakeTools:
                     reason = "No such file or directory"
                 return self._result(command, status, "",
                                     f"error: {name}: {reason}\n")
-            self._create(option, name, packets)
+            self._create(option, name, packets, source,
+                         VARIANT_OF.get(Path(source).name, "full"))
             created.append((option, name))
         if not failure:
             return self._result(command, 0, "")
@@ -230,10 +239,13 @@ class FakeTools:
             return "Permission denied"
         return ""
 
-    @staticmethod
-    def _create(option, name, packets):
-        body = {"pcap": pcap_bytes, "pcapng": pcapng_bytes,
-                "dump": dump_bytes}[WRITERS[option]](packets)
+    def _create(self, option, name, packets, source=None, variant="full"):
+        writer = WRITERS[option]
+        if writer == "dump":
+            body = dump_bytes(source, variant,
+                              shuffled="dump-other-records" in self.bugs)
+        else:
+            body = (pcap_bytes if writer == "pcap" else pcapng_bytes)(packets)
         Path(name).write_bytes(body)
 
     def _discard(self, _option, name):
@@ -365,6 +377,12 @@ class CaseTests(unittest.TestCase):
 
     def test_taking_back_a_capture_that_holds_packets_fails(self):
         self._fails("discard-evidence",
+                    ("ubertooth-rx -i <whole records then a cut-short one>",))
+
+    def test_a_dump_of_the_right_size_holding_other_records_fails(self):
+        # Counting records would pass this; the dump is compared with the
+        # records it came from.
+        self._fails("dump-other-records",
                     ("ubertooth-rx -i <whole records then a cut-short one>",))
 
     def test_removing_a_path_the_user_arranged_fails(self):

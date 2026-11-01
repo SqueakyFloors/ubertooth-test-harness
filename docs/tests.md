@@ -974,12 +974,14 @@ requires that nothing a user would later read as a capture is left behind, and
 that what the run did decode is kept as a file a reader can open.
 
 **Theory of operation.** An empty capture file is worse than no file: a user
-cannot tell it apart from a capture that ran and caught nothing. So every tool
-creates its capture files only once everything that can fail has passed, and
-`ubertooth-rx` and `ubertooth-follow`, the two that can fail after creating
-them, take them back again. The line they are kept from is the first whole
+cannot tell it apart from a capture that ran and caught nothing. Every tool
+creates its capture files once the board is open and usable, so a run refused
+before that leaves none; `ubertooth-rx` and `ubertooth-follow` go further,
+doing every step that can fail first and taking the files back again if the
+run fails after creating them. The line they are kept from is the first whole
 record a replay read, whatever the decoder made of it, because from there the
-file holds evidence. Two ways in make that checkable with no board at all. `UBERTOOTH_TEST_NO_DEVICES=1` lets a command
+file holds evidence. Two ways in make all of that checkable with no board at
+all. `UBERTOOTH_TEST_NO_DEVICES=1` lets a command
 line be accepted and then stopped at the board lookup, which is the setup
 failure. `ubertooth-rx -i <fixture>` replays a synthetic file
 ([`rxreplay.py`](../ubertooth_harness/rxreplay.py)) with no board and no USB,
@@ -1002,13 +1004,15 @@ that wrote it.
 (exit 1, the error on stderr, nothing on stdout, no new file created, and the
 seeded destination one of them names not truncated); a replay that reads no
 whole record taking back all three files it created; a replay that reads
-records and then meets a cut-short one keeping all three, each readable and
-holding the packets it decoded; and a PCAPNG destination in a directory that
+records and then meets a cut-short one keeping all three, the two captures
+readable and the dump compared with the fixture records it came from, byte
+for byte; and a PCAPNG destination in a directory that
 is not there, reported as `error: <file>: No such file or directory` with
 nothing created. Comprehensive runs 15, adding the same lookup case for
 `ubertooth-btle -c`, which is its own create call; the same missing directory
 for a PCAP destination; a replay whose one whole record the decoder skips,
-which keeps its files all the same; a capture bound for standard output whose
+which keeps its files all the same, with the two captures holding no packet
+and the dump empty; a capture bound for standard output whose
 failure must stay on standard error; a read error before any record; a
 destination that is an existing directory; a destination in a read-only
 directory; and the two paths a user arranged rather than a file the run may

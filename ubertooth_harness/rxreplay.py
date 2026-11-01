@@ -23,7 +23,7 @@ command. It imports only the standard library, so it runs from any working
 directory, and prints summaries only:
 
     python rxreplay.py fixture PATH [--variant full|truncated|empty|partial]
-    python rxreplay.py dump-check DUMP FIXTURE [--lap HEX]
+    python rxreplay.py dump-check DUMP FIXTURE [--lap HEX] [--variant V]
     python rxreplay.py files DIR
     python rxreplay.py only-fixture DIR NAME --base-time T [--variant V]
 
@@ -302,9 +302,26 @@ def expected_packets(variant: str = "full", lap: int | None = None,
     return out
 
 
-def packet_record_indices(lap: int | None = None) -> list[int]:
+def fixture_records(variant: str = "full") -> list:
+    """The records a fixture of ``variant`` holds whole, in its own order."""
+    if variant == "truncated":
+        return list(RECORDS[:-1])      # the last record is cut short
+    if variant == "skipped":
+        return [RECORDS[SKIPPED_RECORD]]
+    if variant in ("empty", "partial"):
+        return []
+    return list(RECORDS)
+
+
+def packet_record_indices(lap: int | None = None,
+                          variant: str = "full") -> list[int]:
+    """Which of the fixture's own whole records the decoder makes a packet of.
+
+    The positions are into the fixture of that variant, so they are what a
+    ``-d`` dump of it should hold, in order.
+    """
     return [
-        index for index, record in enumerate(RECORDS)
+        index for index, record in enumerate(fixture_records(variant))
         if not record.decoy and (lap is None or record.lap == lap)
     ]
 
@@ -444,12 +461,14 @@ def _write_fixture(path: Path, variant: str, base_time: int) -> str:
             f"{len(data)} bytes, first systime={base_time}")
 
 
-def dump_check(dump: Path, fixture: Path, lap: int | None = None) -> str:
+def dump_check(dump: Path, fixture: Path, lap: int | None = None,
+               variant: str = "full") -> str:
     """'' when the -d output is the fixture's packet records, byte for byte."""
     data = dump.read_bytes()
     source = fixture.read_bytes()
     want = b"".join(
-        source[i * RECORD:(i + 1) * RECORD] for i in packet_record_indices(lap)
+        source[i * RECORD:(i + 1) * RECORD]
+        for i in packet_record_indices(lap, variant)
     )
     if data == want:
         return ""
@@ -490,6 +509,7 @@ def main(argv: list[str] | None = None) -> int:
     dump.add_argument("dump", type=Path)
     dump.add_argument("fixture", type=Path)
     dump.add_argument("--lap", type=lambda text: int(text, 16), default=None)
+    dump.add_argument("--variant", choices=VARIANTS, default="full")
     files = sub.add_parser("files", help="list a directory's files and sizes")
     files.add_argument("directory", type=Path)
     only = sub.add_parser("only-fixture", help="the directory holds only the fixture")
@@ -510,11 +530,12 @@ def main(argv: list[str] | None = None) -> int:
             if not path.exists():
                 print(f"Replay dump problem: {path} does not exist")
                 return 1
-        problem = dump_check(args.dump, args.fixture, args.lap)
+        problem = dump_check(args.dump, args.fixture, args.lap, args.variant)
         if problem:
             print(f"Replay dump problem: {problem}")
             return 1
-        print(f"Replay dump: {len(packet_record_indices(args.lap))} records match the fixture")
+        print(f"Replay dump: {len(packet_record_indices(args.lap, args.variant))} "
+              "records match the fixture")
         return 0
     if args.command == "only-fixture":
         problem = only_fixture(args.directory, args.name, args.base_time, args.variant)

@@ -53,7 +53,7 @@ import re
 import sys
 from pathlib import Path
 
-from ubertooth_harness import capturefile, dfuimage, refusal, rxdump, rxreplay
+from ubertooth_harness import capturefile, dfuimage, refusal, rxreplay
 from ubertooth_harness.hostneeds import tool_needs
 from ubertooth_harness.outputfiles import text_lines
 from ubertooth_harness.refusal_cases import NO_BOARD_NOTE, probe_step, tool_step
@@ -70,7 +70,6 @@ _DIRECTORY = str(Path(dfuimage.__file__).resolve())
 _REFUSAL = str(Path(refusal.__file__).resolve())
 _REPLAY = str(Path(rxreplay.__file__).resolve())
 _CAPTURE = str(Path(capturefile.__file__).resolve())
-_DUMP = str(Path(rxdump.__file__).resolve())
 _HELPER_TIMEOUT_S = 15.0
 
 # What a board lookup that found nothing prints. The status is 1 and not a
@@ -193,14 +192,23 @@ def _symlink(name, target) -> Step:
         timeout_s=_HELPER_TIMEOUT_S, output_patterns=(r"Symbolic link: ",))
 
 
-def _dump_records(file_name, records) -> Step:
-    """``file_name`` is a -d dump of exactly ``records`` whole records."""
+def _dump_is_the_replay(variant) -> Step:
+    """The -d dump holds the fixture's own packet records, byte for byte.
+
+    Counting records would pass a dump of the right number of other records,
+    so this compares each one with the record it came from (rxreplay.py
+    ``dump-check``), which for a variant whose records the decoder skips
+    means the dump must be empty.
+    """
+    records = len(rxreplay.packet_record_indices(variant=variant))
     return Step(
-        "verify-dump", f"{file_name} holds the {records} records the replay decoded",
-        lambda context: (sys.executable, _DUMP, _path(file_name)(context), "full",
-                         "--min-records", str(records)),
+        "verify-dump",
+        f"{DUMP} is the {records} record(s) the replay decoded, byte for byte",
+        lambda context: (sys.executable, _REPLAY, "dump-check",
+                         _path(DUMP)(context), _path(FIXTURES[variant])(context),
+                         "--variant", variant),
         timeout_s=_HELPER_TIMEOUT_S,
-        output_patterns=(rf"Receive dump: {records} full records",),
+        output_patterns=(rf"Replay dump: {records} records match the fixture",),
     )
 
 
@@ -336,7 +344,7 @@ def capture_failure_cases(arguments, _resources, _resource_identities, *, now=No
             state_name="The case directory gained only the three capture files",
             after=(_valid_capture("verify-pcapng", PCAPNG, "pcapng", kept),
                    _valid_capture("verify-pcap", PCAP, "pcap", kept),
-                   _dump_records(DUMP, kept))),
+                   _dump_is_the_replay("truncated"))),
         # A writer that cannot create its file: the reason is that create
         # call's, and nothing is left where the file would have been. The -d
         # writer in a missing directory is Raw receive replay's
@@ -367,12 +375,14 @@ def capture_failure_cases(arguments, _resources, _resource_identities, *, now=No
             "replay-skipped-record-keeps-files",
             "ubertooth-rx -i <one record the decoder skips, then a cut-short one>",
             FIXTURES["skipped"], ALL_WRITERS, (_partial_record("skipped"),),
-            "exit 1 naming the partial record; all three files kept, each one "
-            "readable and holding no packet",
+            "exit 1 naming the partial record; all three files kept, the two "
+            "captures readable and holding no packet, and the dump empty, "
+            "because the record the decoder skipped is written to none of them",
             steps=(_fixture("skipped", base),), allow=(PCAPNG, PCAP, DUMP),
             state_name="The case directory gained only the three capture files",
             after=(_valid_capture("verify-pcapng", PCAPNG, "pcapng", 0),
-                   _valid_capture("verify-pcap", PCAP, "pcap", 0))),
+                   _valid_capture("verify-pcap", PCAP, "pcap", 0),
+                   _dump_is_the_replay("skipped"))),
         _replay_case(
             "replay-missing-directory-pcap",
             "ubertooth-rx -i <fixture> -q into a directory that is not there",
