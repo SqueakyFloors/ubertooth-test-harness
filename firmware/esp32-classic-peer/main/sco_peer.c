@@ -332,10 +332,10 @@ static const struct type_row esco_types[] = {
  * length the link settled on. Smallest first, because a type carries up to
  * its maximum and a 64 kbit/s voice link is given that maximum.
  *
- * With no list to go on - a link already going down - the length alone
- * decides, and then two types that could carry it are told apart only by
- * the smaller being named. The status line reports the length and the
- * interval beside this either way, for a reader to check. */
+ * Where the list allowed two types that could both carry the length, which
+ * is what asking for no type in particular leaves, the smaller is named.
+ * The status line reports the length and the interval beside this, for a
+ * reader to check. */
 static const char *pkt_type_name(const struct utesp_sco_link *link)
 {
     const struct type_row *rows;
@@ -355,9 +355,8 @@ static const char *pkt_type_name(const struct utesp_sco_link *link)
     }
     for (size_t i = 0; i < count; i++) {
         bool set = (link->allowed & rows[i].bit) != 0;
-        bool allowed = link->allowed == 0 || set == rows[i].allowed_when_set;
 
-        if (allowed && link->tx_pkt_len <= rows[i].max_payload) {
+        if (set == rows[i].allowed_when_set && link->tx_pkt_len <= rows[i].max_payload) {
             return rows[i].name;
         }
     }
@@ -895,7 +894,7 @@ const char *sco_stop(void)
 const char *sco_set_type(const char *name)
 {
     enum utesp_sco_type type;
-    bool audio;
+    bool running;
 
     /* No check that the audio link machinery came up: this only records a
      * choice for the next link, and "sco start" is where a board that
@@ -911,16 +910,24 @@ const char *sco_set_type(const char *name)
     }
 
     LOCK();
-    audio = sc.audio;
+    running = sc.profile_up;
     UNLOCK();
-    /* The choice reaches the controller only as a link is opened, so taking
-     * it under a live link would leave the status line naming one type while
-     * the air carried another. */
-    if (audio) {
-        return "stop the audio link before choosing a packet type";
+    /* Refused while the profile is running, not merely while a link is up.
+     * The choice reaches the controller as a link is opened or accepted,
+     * and on the accepting board that happens with no shell command in
+     * flight: the far end pages whenever it likes. Taking the choice in
+     * that window would leave the status line naming one type while the air
+     * carried another. With the profile stopped no link can appear. */
+    if (running) {
+        return "stop the audio profile with \"sco stop\" before choosing a packet type";
     }
     utesp_sco_type_set(type);
     return NULL;
+}
+
+void sco_reset_type(void)
+{
+    utesp_sco_type_set(UTESP_SCO_TYPE_DEFAULT);
 }
 
 void sco_zero_counters(void)

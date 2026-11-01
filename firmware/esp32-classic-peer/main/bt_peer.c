@@ -1026,10 +1026,7 @@ const char *bt_defaults(void)
     if ((err = bt_spp_stop()) != NULL) {
         return err;
     }
-    /* The audio link is down after sco_stop(), so this cannot be refused. */
-    if ((err = sco_set_type("default")) != NULL) {
-        return err;
-    }
+    sco_reset_type();
     LOCK();
     st.role = PEER_ROLE_ACCEPTOR;
     st.period_ms = STREAM_PERIOD_MS_DEFAULT;

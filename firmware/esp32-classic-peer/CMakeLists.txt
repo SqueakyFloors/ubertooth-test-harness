@@ -14,11 +14,9 @@ target_sources(${utesp_bt_lib} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/bluedroid/utes
                                        "${CMAKE_CURRENT_LIST_DIR}/bluedroid/utesp_afh.c"
                                        "${CMAKE_CURRENT_LIST_DIR}/bluedroid/utesp_sco_type.c")
 
-# Which packet types a synchronous link may use comes from compile-time
-# tables with no setting an application can reach, one for the board that
-# opens a link and one for the board that accepts one. Each path ends in a
-# single call that carries the list to the controller, so both calls are
-# replaced at link time and utesp_sco_type.c adjusts the list on its way
-# past, on the stack's own task.
+# These two calls carry the list of synchronous packet types a link may use
+# to the controller, and nothing an application can reach decides it. They
+# are replaced at link time so utesp_sco_type.c can adjust the list on its
+# way past; that file says why.
 target_link_libraries(${utesp_bt_lib} INTERFACE "-Wl,--wrap=BTM_CreateSco"
                                                 "-Wl,--wrap=BTM_EScoConnRsp")

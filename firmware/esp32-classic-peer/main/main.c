@@ -27,7 +27,7 @@
 #define SHELL_TX_BUF   2048
 #define SHELL_LINE_MAX 160 /* longest command line accepted */
 #define SHELL_OUT_MAX  1200 /* longest answer line, set by the status JSON,
-                             * whose longest possible form is 1070 bytes:
+                             * whose longest possible form is 1069 bytes:
                              * every number at its widest, the longest name,
                              * and the longest channel map reason */
 #define SHELL_WORDS    8

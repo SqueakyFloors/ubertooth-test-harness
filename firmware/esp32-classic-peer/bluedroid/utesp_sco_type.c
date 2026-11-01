@@ -45,6 +45,8 @@
 #include "stack/btm_api.h"
 #include "stack/hcidefs.h"
 
+#include "esp_bt_main.h"
+
 #include "utesp_sco_type.h"
 
 /* The list of allowed types the two calls carry. Bits 0 to 5 allow a basic
@@ -111,11 +113,18 @@ const char *utesp_sco_type_name(enum utesp_sco_type type)
 uint16_t utesp_sco_types_supported(void)
 {
     /* The controller settles this when it starts, so it is read once rather
-     * than reaching into the stack on every status line. */
+     * than reaching into the stack on every status line. Only while
+     * Bluedroid is enabled: the control block it reads does not exist
+     * before that, and a board whose Bluetooth did not start still answers
+     * the shell. Nothing is kept from a read that could not be made, so the
+     * answer arrives once the stack is up rather than being fixed at 0. */
     static uint16_t cached;
     static bool read_once;
 
     if (!read_once) {
+        if (esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_ENABLED) {
+            return 0;
+        }
         cached = BTM_ReadDeviceScoPacketTypes();
         read_once = true;
     }
@@ -178,10 +187,19 @@ int utesp_sco_link_read(const uint8_t *remote, struct utesp_sco_link *out)
      * peer is never read as this one's. The index is wanted anyway, because
      * the list of allowed types is per link. */
     for (uint16_t i = 0; i < BTM_MAX_SCO_LINKS; i++) {
+        uint16_t allowed;
+
         if (BTM_ReadEScoLinkParms(i, &data) != BTM_SUCCESS) {
             continue;
         }
         if (memcmp(data.bd_addr, remote, BD_ADDR_LEN) != 0) {
+            continue;
+        }
+        /* Non-zero only for a link that is fully connected. BTM hands back
+         * parameters for one on its way up or down too, and those hold the
+         * address this matched on and little else, so a half-made link
+         * would otherwise be described as a finished one. */
+        if ((allowed = BTM_ReadScoPacketTypes(i)) == 0) {
             continue;
         }
         out->link_type = data.link_type;
@@ -189,9 +207,7 @@ int utesp_sco_link_read(const uint8_t *remote, struct utesp_sco_link *out)
         out->rx_pkt_len = data.rx_pkt_len;
         out->tx_interval = data.tx_interval;
         out->retrans_window = data.retrans_window;
-        /* 0 once the link is no longer fully connected, which the caller
-         * reads as "no list to go on". */
-        out->allowed = BTM_ReadScoPacketTypes(i);
+        out->allowed = allowed;
         return UTESP_SCO_OK;
     }
     return UTESP_SCO_NO_LINK;

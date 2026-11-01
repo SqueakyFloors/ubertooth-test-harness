@@ -56,8 +56,7 @@ struct utesp_sco_link {
     /* The packet types this board allowed for this link, in the mask above,
      * as the host sent them to the controller. With the packet length it
      * names the type: the link uses a type that was allowed and that can
-     * carry that length. 0 if the link was already going down when this was
-     * read, which leaves the length on its own. */
+     * carry that length. Always non-zero in a successful read. */
     uint16_t allowed;
 };
 

@@ -360,11 +360,14 @@ payload as EDR, which is a different modulation. A decoder that reads
 basic-rate payloads needs a link that uses plain EV3.
 
 The command takes effect on the next link, so set it before `sco start`. It
-is refused while a link is up (`ERR stop the audio link before choosing a
-packet type`), because the choice reaches the controller only as a link is
-opened. Set it on **both** boards: each board states the types it will allow,
+is refused while the audio profile is running, with `ERR stop the audio
+profile with "sco stop" before choosing a packet type`: the choice reaches
+the controller as a link appears, and on the accepting board that happens
+whenever the far end pages, with no shell command in flight. `role` and
+`defaults` stop the profile too, so either of those also opens the window
+again. Set it on **both** boards: each board states the types it will allow,
 the opening one in its request and the accepting one in its answer, and the
-link uses a type both allowed. `defaults` puts it back to `default`.
+link uses a type both allowed. `defaults` puts the choice back to `default`.
 
 `ev3` names no SCO type on purpose. On the air an HV3 and an EV3 share one
 packet type code, so a capture could not tell them apart; leaving HV out

@@ -70,9 +70,14 @@ const char *sco_start(enum peer_role role, const uint8_t *peer_addr);
 const char *sco_stop(void);
 
 /* Chooses the packet type the next audio link asks for: "ev3", "2ev3", or
- * "default". Refused while a link is up, because it is the opening of a link
- * that carries the choice to the controller. */
+ * "default". Refused while the audio profile is running, because that is
+ * when a link can appear and it is the appearing of a link that carries the
+ * choice to the controller. */
 const char *sco_set_type(const char *name);
+
+/* Puts the choice back to "default", for "defaults". Cannot fail, so a
+ * restore that has already stopped the profile is never left half done. */
+void sco_reset_type(void);
 
 /* The controller's own (e)SCO packet counters, as one JSON object. */
 const char *sco_pkt_stats(char *out, size_t len);
