@@ -322,7 +322,10 @@ def _record_lease_queued(publisher, leases) -> None:
         return
     for queued in leases.queued:
         publisher.emit("lease_queued", "warning", dict(
-            queued, message=board_leases.describe_queued_resource(queued)
+            queued,
+            # Past tense: by the time the run records this, it has its
+            # devices and the wait it describes is over.
+            message=board_leases.describe_queued_resource(queued, past=True),
         ))
 
 

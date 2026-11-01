@@ -1277,7 +1277,7 @@ class NamedTestSequencer:
             for queued in manifest.lease_queue_waits:
                 record = json_value(queued)
                 publisher.emit("lease_queued", "warning", dict(
-                    record, message=describe_queued_resource(record)
+                    record, message=describe_queued_resource(record, past=True)
                 ))
         publisher.emit(
             "host_capabilities",

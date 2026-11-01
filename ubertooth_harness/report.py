@@ -523,7 +523,9 @@ def _queued_rows(manifest: Mapping) -> list[tuple[str, str]]:
         return []
     return [(
         "Queued behind another command",
-        "; ".join(describe_queued_resource(item) for item in queued),
+        # The wait is over by the time a report is read, so the line reads
+        # as what happened, not as what is happening.
+        "; ".join(describe_queued_resource(item, past=True) for item in queued),
     )]
 
 
@@ -1211,7 +1213,7 @@ def _transcript(run: _Run) -> list[str]:
         elif kind == "lease_takeover":
             line(event, f"[M] {describe_takeover(details)}")
         elif kind == "lease_queued":
-            line(event, f"[M] {describe_queued_resource(details)}")
+            line(event, f"[M] {describe_queued_resource(details, past=True)}")
         elif kind == "test_finished":
             line(
                 event,

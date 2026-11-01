@@ -168,10 +168,12 @@ whole set it asked for, the set, how long it has waited of what it asked to
 wait, and the resource still in its way with what that resource's lease
 records. ``boards`` prints it under a free resource, a command that gives
 way says it once on standard error, and a run carries it into ``run.jsonl``
-and its report, so a bench that looks idle explains itself. It is read from
-the tickets of the waiters themselves, so a record is gone the moment its
-waiter stops waiting; no lock file path is in it, since those are in a
-private directory and a resource name is what a reader needs.
+and its report (in the past tense: it has its devices by then), so a bench
+that looks idle explains itself. A listing reads the waiters' own tickets
+every time, so what it shows is gone the moment the waiter stops waiting,
+while a run keeps what it waited behind as its own history. No lock file
+path is in any of it, since those are in a private directory and a resource
+name is what a reader needs.
 
 A lab wrapper that takes its external board locks and then runs
 ``lease`` (which may take the host lock, then leases) follows the same
@@ -188,6 +190,7 @@ import errno
 import fcntl
 import getpass
 import json
+import math
 import os
 import re
 import socket
@@ -247,9 +250,14 @@ _MAX_QUEUED_RECORDS = 16
 # How long a command gives way at a free resource before it is worth a line
 # on standard error and a row in a run's report: longer than the moment two
 # commands take to sort themselves out, short enough that anything a person
-# would notice is reported. The record itself is kept from the first round,
-# so when the line is said it carries the wait as it is then.
+# would notice is reported. Nothing is read about the situation until then,
+# so the ordinary moment of giving way costs no lock probe either.
 _QUEUED_REPORT_S = 2.0
+# How many of a waiter's resources one such record names. A record goes
+# into a run record, which has a per-event size limit (see events.py), and
+# a ticket is another command's file: its set may hold up to
+# _MAX_WAITING_FOR entries of bounded but not small strings.
+_MAX_QUEUED_SET = 16
 # What a taken-over lease's holder record carries into a run record, and how
 # long each of its fields may be there: a lock file is another command's and
 # may hold anything, where a run record has a size limit (see events.py).
@@ -856,20 +864,23 @@ class TicketQueue:
     def blocked_ahead(self, board: Board) -> dict | None:
         """The waiter that is keeping this free resource queued, in a record.
 
-        The oldest command queued for this resource that asked for several
-        and cannot take them all, because a running command holds one of
-        them: while it waits, giving way to it is not bounded, so this
-        resource stays queued until it can take its whole set or its own
-        wait ends (see acquire()). That is what a person looking at a bench
-        where nothing is running needs to read, so queued_record() carries
-        the command, its set, its wait so far and its deadline, and what the
-        resource in its way is held by (#234). None when no such command is
-        in the queue.
+        That is the *oldest* command still waiting for this resource, and
+        only when it asked for several and cannot take them all because a
+        running command holds one: while it waits, giving way to it is not
+        bounded, so this resource stays queued until it can take its whole
+        set or its own wait ends (see acquire()). queued_record() then
+        carries the command, its set, its wait so far and its deadline, and
+        what the resource in its way is held by (#234).
 
-        A command waiting for one resource is not reported: giving way to it
-        is bounded (half a second), so it never explains a bench that has
-        looked idle for minutes. Expired tickets are removed on the way, as
-        in waiting_count(), so a waiter that exits takes its record with it.
+        None when the oldest waiter is not in that state, because it is
+        then not what keeps the resource queued: the oldest ticket is the
+        only one a command gives way to at a resource (ahead_all()), and
+        giving way to a command that wants one resource, or could take
+        everything it asked for, is bounded at half a second. Naming a
+        newer waiter instead would claim a block that is not there.
+
+        Expired tickets are removed on the way, as in waiting_count(), so a
+        waiter that exits takes its record with it.
 
         Every resource in the way is read, where a command giving way reads
         only the first (acquire()): a listing runs once, for a person who
@@ -885,10 +896,9 @@ class TicketQueue:
                 continue
             ticket = read_holder(path)
             if len(waiting_resources(ticket, board)) < 2:
-                continue
+                return None
             blocking = blocking_resources(self.lease_root, ticket, board)
-            if blocking:
-                return queued_record(board, name, ticket, blocking)
+            return queued_record(board, name, ticket, blocking) if blocking else None
         return None
 
     def release(self) -> None:
@@ -1090,10 +1100,15 @@ def ticket_waited_s(name: str, *, now_ns: int | None = None) -> float | None:
 
 
 def describe_seconds(value) -> str:
-    """A wait a person reads in one line: '45s', '4m12s', '1h02m03s'."""
+    """A wait a person reads in one line: '45s', '4m12s', '1h02m03s'.
+
+    Empty for anything that is not a number of seconds, including the
+    infinities and not-a-numbers JSON can carry: a value read out of
+    another command's file must not raise where it is only being shown.
+    """
     try:
         total = int(max(0.0, float(value)))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return ""
     if total >= 3600:
         return f"{total // 3600}h{total % 3600 // 60:02d}m{total % 60:02d}s"
@@ -1121,17 +1136,27 @@ def queued_record(
         "resource": board.alias,
         "key": board.key,
         "ticket": str(name),
+        # The waiting command as it describes itself, cut down the same way
+        # a taken-over lease's holder is (owner, run, purpose, pid, when).
+        # That purpose is a command's own words about itself, which is how
+        # the queue has always named it in an error and in `boards`; the
+        # harness adds nothing of its own, and above all no lock file path.
         "command": _recorded_holder(ticket),
+        # Bounded well below the per-event limit a run record has (see
+        # events.py): this is a line for a person, and a set longer than
+        # this says nothing more about why a resource is queued.
         "waiting_for": [
             {"key": resource.key, "resource": resource.alias}
-            for resource in waiting_resources(ticket, board)
+            for resource in waiting_resources(ticket, board)[:_MAX_QUEUED_SET]
         ],
         "waited_s": None if waited is None else round(waited, 1),
         # A ticket of an earlier harness records no deadline; the message
-        # then says so rather than making one up.
+        # then says so rather than making one up. So does a record whose
+        # deadline is not a number of seconds (JSON carries infinities).
         "wait_s": (
             float(wait_s)
             if isinstance(wait_s, (int, float)) and not isinstance(wait_s, bool)
+            and math.isfinite(wait_s)
             else None
         ),
         "blocked_by": [dict(item) for item in blocking],
@@ -1180,8 +1205,14 @@ def _listed(items: Iterable) -> str:
     return ", ".join(names[:-1]) + f", and {names[-1]}"
 
 
-def describe_queued(record: Mapping) -> str:
-    """Why a free resource cannot be used, without naming it (see #234)."""
+def describe_queued(record: Mapping, *, past: bool = False) -> str:
+    """Why a free resource cannot be used, without naming it (see #234).
+
+    ``past`` for a record read after the wait it describes: a run's own
+    record of why it started late, in its report and the browser view. The
+    situation it describes was true while the run waited and is over by the
+    time anybody reads it, so the line says so.
+    """
     requested = _listed(
         item.get("resource") or item.get("key") or ""
         for item in record.get("waiting_for") or []
@@ -1199,19 +1230,23 @@ def describe_queued(record: Mapping) -> str:
     )
     gave_way = describe_seconds(record.get("gave_way_s"))
     return (
-        f"queued for {describe_holder(record.get('command') or {})}: it asked for "
-        f"{requested or 'several resources'}"
-        + (f", has waited {waited} of {deadline}" if waited else f" (of {deadline})")
-        + f", and is still waiting for {blocked or 'a resource somebody holds'}"
+        f"queued for {describe_holder(record.get('command') or {})}: it "
+        f"{'had asked' if past else 'asked'} for {requested or 'several resources'}"
+        + (f", {'had' if past else 'has'} waited {waited} of {deadline}"
+           if waited else f" (of {deadline})")
+        + f", and {'was' if past else 'is'} still waiting for "
+        + (blocked or "a resource somebody holds")
         # Only a command that gave way has this; a listing says nothing here.
-        + (f". This command has given way for {gave_way}"
+        + (f". This command {'gave' if past else 'has given'} way for {gave_way}"
            if record.get("gave_way_s") else "")
     )
 
 
-def describe_queued_resource(record: Mapping) -> str:
+def describe_queued_resource(record: Mapping, *, past: bool = False) -> str:
     """The one line a resource kept queued is reported in: it names it."""
-    return f"{record.get('resource')} is free but {describe_queued(record)}"
+    return (f"{record.get('resource')} was free and {describe_queued(record, past=True)}"
+            if past else
+            f"{record.get('resource')} is free but {describe_queued(record)}")
 
 
 def describe_waiting(count: int) -> str:
@@ -1529,6 +1564,10 @@ def acquire(
     # keyed by (resource, that command's ticket) (#234).
     queued_waits: dict[tuple[str, str], dict] = {}
     reported: set[tuple[str, str]] = set()
+    # How long this command has given way at each of those pairs, in poll
+    # rounds like every other stretch here: a line is worth saying once it
+    # has lasted (see _QUEUED_REPORT_S).
+    given: dict[tuple[str, str], float] = {}
     # A place in the queue for every resource, before any lock is taken, so
     # waiters are served in the order they arrived (#202).
     queue = TicketQueue(
@@ -1548,7 +1587,8 @@ def acquire(
                 # The first resource of that command's that a running
                 # command holds, with what its lease records: the same read
                 # decides whether giving way is bounded and what this
-                # command reports about it, so the report costs no probes.
+                # command reports about it, so the report needs no second
+                # look at the resource in the way.
                 in_the_way = next(_blocking(root, other, board), None)
                 held_by = None if in_the_way is None else in_the_way[0]
                 if held_by is not None:
@@ -1562,29 +1602,26 @@ def acquire(
                     rounds[marker] = 0.0
                     # Unbounded means this resource can stay queued for the
                     # whole of that command's wait, so a bench that looks
-                    # idle explains itself (#234). The record is kept up to
-                    # date for as long as this command gives way here, and
-                    # said once, when it has lasted long enough to be worth
-                    # a line: the wait so far and what is in the way both
-                    # move while the command waits, and a record written on
-                    # the first round would say neither.
-                    record = _queued_wait(
-                        root, board, ticket, other, external_template, in_the_way,
-                        gave_way_s=(queued_waits.get(marker) or {}).get("gave_way_s", 0.0)
-                        + _POLL_S,
-                    )
-                    if record is None:
-                        # Nothing to explain this round (the resource is
-                        # held after all, or that command wants only this
-                        # one). Any record of this pair is dropped: it
-                        # described a situation that is over.
-                        queued_waits.pop(marker, None)
-                    elif marker in queued_waits or len(queued_waits) < _MAX_QUEUED_RECORDS:
-                        queued_waits[marker] = record
-                        if (marker not in reported
-                                and record["gave_way_s"] >= _QUEUED_REPORT_S):
-                            reported.add(marker)
-                            note(describe_queued_resource(record))
+                    # idle explains itself (#234). Once this command has
+                    # given way here long enough to be worth a line, the
+                    # record is made and then kept up to date on every
+                    # round: the wait so far and the resource in the way
+                    # both move while a command waits, so a record written
+                    # once at the start would say neither. It is said on
+                    # standard error the first time only.
+                    given[marker] = given.get(marker, 0.0) + _POLL_S
+                    if (given[marker] >= _QUEUED_REPORT_S
+                            and (marker in queued_waits
+                                 or len(queued_waits) < _MAX_QUEUED_RECORDS)):
+                        record = _queued_wait(
+                            root, board, ticket, other, external_template,
+                            in_the_way, gave_way_s=given[marker],
+                        )
+                        if record is not None:
+                            queued_waits[marker] = record
+                            if marker not in reported:
+                                reported.add(marker)
+                                note(describe_queued_resource(record))
                 else:
                     # Giving way to a command that could take everything it
                     # asked for right now, and has not, is the one case
@@ -1602,8 +1639,14 @@ def acquire(
                     # the one its error reports.
                     queued, blocked = (board, ticket, other), held_by
             # Only the commands still ahead keep their stretch; one that
-            # stopped waiting, or changed, starts again.
+            # stopped waiting, or changed, starts again. The same for how
+            # long this command has given way at each of them, and for
+            # what it has already said, so neither grows for the life of a
+            # long wait. The records themselves stay: they are what this
+            # command's own run reports about why it started late.
             yielded = rounds
+            given = {pair: seconds for pair, seconds in given.items() if pair in rounds}
+            reported &= rounds.keys()
             if queued is not None:
                 if clock() >= deadline:
                     board, _ticket, other = queued

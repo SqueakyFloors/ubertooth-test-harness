@@ -1589,12 +1589,17 @@ and a ticket whose command died leaves nothing behind. No lock file path
 appears in any of it: the lease directory is private, and the resource and
 the command are what a reader needs.
 
-The command that gives way says the same line once on standard error, so a
+A line is said once a command has given way at that board for more than two
+seconds, so two commands sorting themselves out are not reported as a bench
+standing still. The command that gives way says it on standard error, so a
 `lease` that sits there explains itself, and `run-suite` carries it into its
 run record: a `lease_queued` record in run.jsonl, a line in the transcript, a
-"Queued behind another command" row in report.md, and a "Queued behind" line
-in the browser's live view. A run whose first test started ten minutes late
-has to be able to say why.
+"Queued behind another command" row in report.md, and the same line in the
+browser's live view. A run whose first test started ten minutes late has to
+be able to say why. Those read in the past tense ("UT_0 was free and queued
+for ..."), because the run has its boards by the time anybody reads them, and
+they say how long the run itself gave way; the record is kept up to date for
+as long as the wait lasts, so it is the whole wait, not its first moment.
 
 ### The host lock
 
@@ -2274,7 +2279,11 @@ word and symbol (colour only reinforces it).
   plus symbol), under each test the [known target](#known-targets) it ran
   against or a line saying it had none, the current stage (building,
   preflight, tests), elapsed time,
-  a Cancel button, and the last 200 log lines in a scrolling console panel. A countdown is shown only when
+  a Cancel button, a "Queued behind another command" line for each device the
+  run waited behind before it started (see
+  [Why a board can be free and still nobody's](#why-a-board-can-be-free-and-still-nobodys),
+  shown only when it waited behind somebody), and the last 200 log lines in a
+  scrolling console panel. A countdown is shown only when
   every test in the suite has an estimate. Every implemented test has a
   catalog estimate (`ESTIMATES` in `ubertooth_harness/catalog.py`) for each
   coverage profile: fixed seconds, plus a multiple of its `duration` argument

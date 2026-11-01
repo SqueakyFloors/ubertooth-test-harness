@@ -345,6 +345,9 @@ button.primary:disabled:hover { background: var(--primary); }
 .queued li {
   font-size: 0.85rem; padding: 0.3rem 0.55rem; border-radius: var(--radius-small);
   border-left: 3px solid var(--line); background: var(--surface-2);
+  /* A line carries run IDs, serials and another command's own words: long
+     unbroken tokens wrap rather than widen the column. */
+  overflow-wrap: anywhere;
 }
 
 /* Per board: the times the firmware's watchdog reset it during this run. */

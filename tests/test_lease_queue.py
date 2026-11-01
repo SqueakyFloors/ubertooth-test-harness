@@ -15,7 +15,7 @@ from unittest import mock
 
 from types import SimpleNamespace
 
-from ubertooth_harness import cli, leases
+from ubertooth_harness import cli, events, leases
 from ubertooth_harness.cli import main
 from ubertooth_harness.report import _Run, _setup_rows, render_run
 
@@ -959,46 +959,34 @@ class QueuedReportTests(QueueFixture):
         self.assertEqual(1, len(notes), notes)
         self.assertIn("UT_0 is free but queued for waiting-agent", notes[0])
         self.assertEqual(["UT_0"], [item["resource"] for item in taken.queued])
-        # Only the rounds UT_0 was really free count as giving way at it.
-        self.assertLess(taken.queued[0]["gave_way_s"], 40 * leases._POLL_S)
+        # Every round this command gave way at UT_0 counts, and the record
+        # is up to date to the last of them.
+        self.assertAlmostEqual(
+            40 * leases._POLL_S, taken.queued[0]["gave_way_s"], places=2)
 
-    def test_a_record_of_a_situation_that_is_over_is_dropped(self):
-        """A run must not report a wait that stopped happening.
+    def test_a_run_keeps_what_it_waited_behind_as_its_own_history(self):
+        """The record outlives the wait, and says so.
 
-        UT_0 is free and queued behind a stuck waiter, so a record is made;
-        then UT_0 is taken by somebody else, which needs no explaining, and
-        the record goes rather than reaching the run's report.
+        The ordinary end of such a wait is the waiter ahead taking its
+        devices and leaving the queue, which is also when this command gets
+        its own: dropping the record then would leave a run that started ten
+        minutes late with nothing to show. So it is kept, and the line a
+        reader of the run sees is in the past tense.
         """
-        name = self.waited(120)
-        self.hold_ticket(A, name, self.wanting(A, B, wait_s=600.0))
-        self.hold_ticket(B, name, self.wanting(A, B, wait_s=600.0))
-        stuck = self.hold_lease(B, self.live_holder(owner="stuck"))
-        notes, counted, others = [], [], []
-
-        def sleep(_seconds):
-            counted.append(len(counted) + 1)
-            if len(counted) == 20:
-                # Somebody else takes UT_0, from outside this process (as
-                # above), so there is nothing left to explain about it.
-                others.append(self.hold_lease(A, self.live_holder(owner="other")))
-            if len(counted) == 40:
-                os.close(self.raw.pop())
-                os.unlink(others.pop())
-                os.close(self.raw.pop())
-                os.unlink(stuck)
-                os.close(self.raw.pop())
-                os.close(self.raw.pop())
-                os.unlink(self.ticket_dir(A) / name)
-                os.unlink(self.ticket_dir(B) / name)
-
-        with leases.acquire(
-            [A], holder("newcomer"), directory=self.dir, wait_s=600,
-            clock=lambda: 0.0, sleep=sleep, note=notes.append,
-        ) as taken:
-            self.assertEqual([A], [lease.board for lease in taken.leases])
-        self.assertEqual(1, len(notes), "said more than once")
-        self.assertEqual([], taken.queued,
-                         "reported a wait that was over by the end")
+        notes = []
+        taken, _rounds = self._gives_way(
+            rounds_before_release=20, name=self.waited(300), notes=notes)
+        self.assertEqual(1, len(taken.queued))
+        record = taken.queued[0]
+        now = leases.describe_queued_resource(record)
+        later = leases.describe_queued_resource(record, past=True)
+        self.assertTrue(now.startswith("UT_0 is free but queued for"), now)
+        self.assertIn("has waited", now)
+        self.assertIn("is still waiting for UT_1", now)
+        self.assertTrue(later.startswith("UT_0 was free and queued for"), later)
+        self.assertIn("had waited", later)
+        self.assertIn("was still waiting for UT_1", later)
+        self.assertIn("This command gave way for", later)
 
     def test_a_command_says_nothing_about_a_resource_that_is_held(self):
         # Giving way at a board somebody is using explains itself, and the
@@ -1032,6 +1020,57 @@ class QueuedReportTests(QueueFixture):
         self.assertIn("that command is waiting for UT_1 too", message)
         self.assertIn("that lease is left alone: it was taken on another-host", message)
         self.assertIn("stays held until somebody clears it", message)
+
+    def test_only_the_waiter_whose_turn_it_is_is_reported(self):
+        """The oldest ticket is the only one a resource is kept for.
+
+        A command gives way at a resource to the command that has waited
+        longest for it, and to that one only. So a newer multi-resource
+        waiter stuck at another board is not what keeps this board queued,
+        and reporting it would claim a block that is not there.
+        """
+        self.hold_lease(B, self.live_holder(owner="stuck"))
+        self.hold_ticket(A, self.waited(300), self.wanting(A, B))
+        # Made last, so self.raw.pop() below closes this one's descriptor.
+        oldest = self.hold_ticket(A, self.waited(600), self.live_holder())
+        self.assertNotIn("queued_for", leases.board_states([A], directory=self.dir)[0])
+        # With the single-board command gone, the multi-board one has the
+        # turn, and the board it cannot take yet is reported.
+        os.close(self.raw.pop())
+        os.unlink(oldest)
+        queued = leases.board_states([A], directory=self.dir)[0]["queued_for"]
+        self.assertEqual(["UT_1"], [item["resource"] for item in queued["blocked_by"]])
+
+    def test_a_record_stays_within_what_a_run_record_takes(self):
+        # A ticket is another command's file and may name every resource
+        # the queue reads (_MAX_WAITING_FOR), each name as long as the
+        # queue allows, and the event carries the line as well: it must
+        # still fit the per-event limit rather than failing a run.
+        crowded = self.live_holder(
+            purpose="lease: " + "x" * 400,
+            waiting_for=[{"key": f"{number:032x}", "resource": "U" * 200}
+                         for number in range(leases._MAX_WAITING_FOR + 10)],
+            wait_s=600.0,
+        )
+        record = leases.queued_record(
+            A, self.waited(300), crowded,
+            [leases._blocking_entry(
+                leases.Board("U" * 200, B.key), "foreign", "w" * 400, crowded)],
+        )
+        self.assertEqual(leases._MAX_QUEUED_SET, len(record["waiting_for"]))
+        details = dict(record, message=leases.describe_queued_resource(record, past=True))
+        # What a publisher does with it: over the limit this raises.
+        self.assertEqual(details, events._validated_details(details))
+
+    def test_a_deadline_that_is_not_a_number_of_seconds_says_nothing(self):
+        # JSON carries infinities, and a ticket is another command's file.
+        for value in (float("inf"), float("-inf"), float("nan"), True, "soon", None):
+            with self.subTest(wait_s=value):
+                record = leases.queued_record(
+                    A, self.waited(60), self.wanting(A, B, wait_s=value), [])
+                self.assertIsNone(record["wait_s"])
+                self.assertIn("of a deadline its ticket does not record",
+                              leases.describe_queued(record))
 
     def test_a_wait_reads_as_a_person_would_say_it(self):
         self.assertEqual("0s", leases.describe_seconds(0))
@@ -1151,14 +1190,14 @@ class QueueCliTests(QueueFixture):
         kind, status, details = events[0]
         self.assertEqual(("lease_queued", "warning"), (kind, status))
         self.assertEqual("UT_0", details["resource"])
-        self.assertIn("UT_0 is free but queued for flash-run", details["message"])
+        self.assertIn("UT_0 was free and queued for flash-run", details["message"])
         # The report's setup table, and the transcript line.
         rows = dict(_setup_rows(_Run([{
             "run_id": "r", "event_type": "manifest",
             "timestamp": "2026-01-01T00:00:00.000",
             "details": {"manifest": {"lease_queue_waits": [record]}},
         }])))
-        self.assertIn("UT_0 is free but queued for flash-run",
+        self.assertIn("UT_0 was free and queued for flash-run",
                       rows["Queued behind another command"])
         self.assertNotIn("Queued behind another command", dict(_setup_rows(_Run([{
             "run_id": "r", "event_type": "manifest",
@@ -1169,7 +1208,7 @@ class QueueCliTests(QueueFixture):
             "timestamp": "2026-01-01T00:00:00.000", "event_type": "lease_queued",
             "status": "warning", "details": details,
         }])
-        self.assertIn("[M] UT_0 is free but queued for flash-run", transcript)
+        self.assertIn("[M] UT_0 was free and queued for flash-run", transcript)
         # And the browser live view shows the same line, in a row of its own.
         web = Path(__file__).resolve().parents[1] / "ubertooth_harness" / "web"
         js = (web / "app.js").read_text(encoding="utf-8")
