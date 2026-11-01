@@ -593,7 +593,17 @@
     return fileLinks(live.run_id, files);
   }
 
+  // A run a target runner carried out keeps its output files in that
+  // runner's own run directory; the controller asks the runner for a page,
+  // so such a file opens like any other while its runner is connected.
+  function runnerConnected(runId) {
+    const run = state.runs.get(runId);
+    const target = run && state.targets.get(run.target);
+    return Boolean(target && target.connected && target.online);
+  }
+
   function fileLinks(runId, files) {
+    const onTarget = !runnerConnected(runId);
     return el("ul", { className: "check-files" }, ...files.map((file) => {
       const checks = Array.isArray(file.checks) ? file.checks : [];
       const failed = checks.filter((check) => check && check.reason).length;
@@ -601,12 +611,12 @@
       const about = `${file.stream} · ${fileSize(file.bytes)} · ${checks.length} check`
         + `${checks.length === 1 ? "" : "s"}`
         + (failed ? `, ${failed} failed` : "");
-      // A run the controller did not carry out itself keeps its output files
-      // on the target, so the list is complete but there is nothing to open.
-      if (file.readable === false) {
+      // Only while its runner is away is there nothing to open.
+      if (file.readable === false && onTarget) {
         return el("li", {}, el("span", {
           className: failed ? "hint file-failed" : "hint",
-          title: `${about} · saved on the target, not on the controller`,
+          title: `${about} · in the target's own run directory, and its runner `
+            + "is not connected",
           text: `${name} (on the target)`,
         }));
       }
@@ -614,7 +624,8 @@
         el("button", {
           type: "button",
           className: failed ? "link file-failed" : "link",
-          title: about,
+          title: file.readable === false
+            ? `${about} · read from the target through its runner` : about,
           onclick: () => openOutputFile(runId, String(file.path), 0),
           text: name,
         }));
@@ -911,9 +922,13 @@
       if (data.type === "snapshot") {
         state.targets = new Map((data.targets || []).map((target) => [target.host, target]));
         renderTargets();
+        // A file that stayed on the target is a link only while its runner
+        // is connected, so the live view follows the target's status.
+        renderLive();
       } else if (data.type === "target" && data.target) {
         state.targets.set(data.target.host, data.target);
         renderTargets();
+        renderLive();
       } else if (data.type === "run") {
         upsertRun(data.run);
       } else if (data.type === "event") {

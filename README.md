@@ -1781,7 +1781,8 @@ flash reliability run, compiler output, and long packet listings out of
 run.jsonl: on a release run that cut run.jsonl from 48 MB to about 20 MB, and the dump stderr records
 from 15 MB to 1 MB. Through
 the runner service the `output/` files stay in the runner's run directory;
-only run.jsonl records reach the controller.
+only run.jsonl records reach the controller, which asks that runner for a
+page when the GUI opens one (`GET /api/runs/{run_id}/file` below).
 
 ### Checks read the output files
 
@@ -2087,8 +2088,9 @@ run.jsonl, so the controller deduplicates by `(run_id, sequence)`. SIGINT,
 SIGTERM, or SIGHUP stops the runner after cancelling and waiting for an
 active run.
 
-Messages are JSON objects with `"version": 3` and a `type` (version 2 added
-the run's `commit`, version 3 its `flash_build`; a runner or controller of
+Messages are JSON objects with `"version": 4` and a `type` (version 2 added
+the run's `commit`, version 3 its `flash_build`, version 4 the `run_file`
+request and its answers; a runner or controller of
 another version is refused); each type has an
 exact field set, and anything else (unknown version or type, a missing or
 extra field, a wrong value) gets `protocol_error` and is not acted on. The
@@ -2230,7 +2232,18 @@ word and symbol (colour only reinforces it).
   one [learned on that target](#learned-durations) once its own runs have
   measured it. Build and preflight time are not included: the countdown
   starts with the first test. Otherwise the view shows elapsed time and says
-  why. The view is linkable as `/ui/#run=<run_id>`.
+  why. Under each test is a line of links, one per file that test saved (the
+  build's and preflight's are listed under the checklist), with the stream,
+  the size and the number of checks that read it in the link's tooltip and
+  the failure color on a file a check came out against; opening one shows a
+  bounded page of it in a panel beside the log tail, black on white in a
+  fixed-width font so a saved file is never mistaken for the live stream,
+  with the recorded size, line count and SHA-256 above it and which bytes
+  are shown below. A run a target runner carried out keeps those files in
+  that runner's own run directory, so the controller asks the runner for the
+  page; while the runner is not connected the file is listed as `name (on
+  the target)` and is not a link. The view is linkable as
+  `/ui/#run=<run_id>`, and `/ui/#run=<run_id>&file=<path>` opens that file.
 - **History:** every run, newest first, with started/finished times, ref,
   plan/suite, target and status, a link to its `report.md`, and for a run
   that did not pass a failure summary (each failed phase or test with its
@@ -2256,9 +2269,11 @@ Endpoints (JSON unless noted; `GET /` lists them):
 | `GET /api/runs[?target=HOST]` | runs, newest first |
 | `GET /api/runs/{run_id}` | status, every event, the failure summary (`failures`), `invocations` (from the run's manifest, every planned invocation on the target with `invocation_id`, `test_name`, `estimated_s`, `catalog_estimated_s`, `estimate_source`, `estimate_samples` and `estimate_scaled`; null before the manifest record), and `stages`: the run's build and preflight estimates where its host has learned them |
 | `GET /api/runs/{run_id}/report.md` | the run's report (Markdown) |
+| `GET /api/runs/{run_id}/files` | the output files the run recorded, each with its path, stream, size, line count, SHA-256, where it came from (`owner`), the checks that read it, and `readable`: whether this host holds the file itself |
+| `GET /api/runs/{run_id}/file?path=&offset=&limit=` | one bounded page of a saved output file, with what the run recorded about it and where the page sits in it. Only a path that run's own `run.jsonl` records is served, and only from inside the run directory, with no symbolic link followed; a page is 64 KiB by default and 1 MiB at most. A file that stayed on the target is asked of that run's runner (256 KiB at most, since the page travels in one protocol message, and `page_bytes` says what a page was); 503 while that runner is not connected, 504 if it does not answer in time, 400 or 404 for a path that may not be served, naming the path only |
 | `POST /api/runs/{run_id}/cancel` | `{"reason": ""}`; 202 once the runner accepts |
 | `WS /ws/live[?run_id=ID]` | browser stream: a `snapshot`, then `target` and `run` updates, plus that run's `event` records; a browser 1000 updates behind is closed with 1013 `live stream overflowed` (reconnect for a new snapshot) |
-| `WS /ws/runner` | target runner protocol v3 |
+| `WS /ws/runner` | target runner protocol v4 |
 
 Every request and WebSocket handshake must carry `Host: 127.0.0.1:PORT` or
 `localhost:PORT` and, if it has an `Origin`, that same origin (runner
@@ -2324,7 +2339,7 @@ manifest record); a malformed or out-of-place message is counted on the
 target and ignored, and a first message that is not a valid `register`
 closes the connection. A target is `offline` after three heartbeat intervals
 without a valid message, and runs cannot be started on it: only a message that
-decodes as protocol v3 resets the offline timer, and malformed messages do
+decodes as protocol v4 resets the offline timer, and malformed messages do
 not. The controller allows one
 outstanding start request per target and refuses a target whose runner reports
 an active run. Each run is a flat directory `<results dir>/<run_id>/` with
@@ -2426,8 +2441,8 @@ anyway.
 
 The runner protocol has no version negotiation: the controller and runner
 must speak the same version: protocol v2 (which added the listed commit to
-`run`) and v3 (which added `flash_build`) are each a hard break from the
-version before. An older runner is refused at `register` (the
+`run`), v3 (which added `flash_build`) and v4 (which added the `run_file`
+request and its answers) are each a hard break from the version before. An older runner is refused at `register` (the
 controller closes the connection, code 1008), and since it did register it
 reconnects after the shortest backoff (0.5 s) and is refused again,
 indefinitely; its log shows `registered with ...` then `controller connection

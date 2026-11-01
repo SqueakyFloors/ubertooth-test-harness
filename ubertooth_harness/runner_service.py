@@ -41,6 +41,8 @@ from ubertooth_harness.protocol import (
     decode_controller_message,
     encode_runner_message,
 )
+from ubertooth_harness.protocol import valid_file_page
+from ubertooth_harness.runfiles import OutputFileError, read_output_page
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +53,10 @@ DEFAULT_MAX_BACKOFF_S = 30.0
 _CONNECT_TIMEOUT_S = 10.0
 _TAIL_POLL_S = 0.05
 _STDERR_TAIL_LINES = 20
+# File page requests answered at once. Finding a recorded file means reading
+# the run's run.jsonl, which a soak makes tens of megabytes, so a flood of
+# requests is held rather than served: the controller asks again.
+MAX_FILE_REQUESTS = 4
 _NO_BUILD = (
     "this runner has no libbtbb, so it cannot build; restart it with "
     "--libbtbb-source and --libbtbb-ref (scripts/deploy.sh sets them up by "
@@ -217,6 +223,8 @@ class RunnerService:
         self._connection = None
         self._send_lock = asyncio.Lock()
         self.connections = 0
+        # File page requests being answered now, each in its own task.
+        self._file_tasks: set = set()
 
     # ----- lifecycle -------------------------------------------------------
 
@@ -330,6 +338,11 @@ class RunnerService:
                 for task in tasks:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
+                # A file request being answered is left to finish rather
+                # than cancelled: cancelling would not stop the read it is
+                # waiting on, only forget it, and the next connection would
+                # admit that many requests again on top of it. Its answer
+                # then finds the connection gone and is logged.
         self.log("controller connection closed")
         return True
 
@@ -397,6 +410,8 @@ class RunnerService:
             await self._start_run(message, tasks)
         elif message["type"] == "cancel":
             await self._cancel(message)
+        elif message["type"] == "run_file":
+            await self._take_file_request(message)
 
     async def _start_run(self, message: dict, tasks: list) -> None:
         request_id = message["request_id"]
@@ -508,6 +523,118 @@ class RunnerService:
                 run.process.send_signal(signal.SIGINT)
             except ProcessLookupError:
                 pass
+
+    # ----- saved output files ----------------------------------------------
+
+    async def _take_file_request(self, message: dict) -> None:
+        """Answer a run_file request in its own task, or refuse it as busy.
+
+        Its own task because finding and reading the page is file I/O on a
+        log that can be large: answering it inline would hold up the next
+        message on this connection, which may be a cancel.
+        """
+        if len(self._file_tasks) >= MAX_FILE_REQUESTS:
+            await self._send(
+                "run_file_refused", request_id=message["request_id"],
+                run_id=message["run_id"], status=503,
+                reason=f"this runner answers {MAX_FILE_REQUESTS} file requests "
+                       "at once and is busy with that many; ask again",
+            )
+            return
+        task = asyncio.create_task(self._send_run_file(message))
+        self._file_tasks.add(task)
+        task.add_done_callback(self._file_tasks.discard)
+
+    async def _send_run_file(self, message: dict) -> None:
+        run_id = message["run_id"]
+        answer, fields = await asyncio.to_thread(
+            self._answer_run_file, run_id, message["path"],
+            message["offset"], message["limit"],
+        )
+        try:
+            await self._send(
+                answer, request_id=message["request_id"], run_id=run_id, **fields
+            )
+        except Exception as error:  # noqa: BLE001 - the connection may have gone
+            self.log(f"could not answer the file request for {run_id}: {error}")
+            return
+        # After the answer, so that nothing between here and the answer can
+        # keep it from being sent.
+        if answer == "run_file_refused":
+            self.log(f"refused a file of run {run_id}: {fields['reason']}")
+
+    def _answer_run_file(
+        self, run_id: str, path: str, offset: int, limit: int
+    ) -> tuple[str, dict]:
+        """The answer to one run_file request: a page, or a refusal.
+
+        Every failure becomes a refusal, including one nothing anticipated,
+        because a request this runner leaves unanswered makes the caller on
+        the other side wait out its timeout for an answer that never comes.
+        """
+        try:
+            page = self._read_page(run_id, path, offset, limit)
+        except OutputFileError as error:
+            return "run_file_refused", {
+                "status": error.status, "reason": error.detail,
+            }
+        except Exception as error:  # noqa: BLE001 - silence is the worst answer
+            # A run.jsonl that cannot be read at all, or one holding a record
+            # a page cannot be built from. A record is ordinary data, and
+            # data takes many shapes: a size that is not a number, one too
+            # large for an integer, a details field that is not an object.
+            # Whatever it was, the request is answered. The reason names the
+            # run, the path and the kind of fault, never a path on this
+            # target.
+            return "run_file_refused", {
+                "status": 404,
+                "reason": f"{path!r} cannot be served from run {run_id}: "
+                          f"{type(error).__name__}",
+            }
+        if not valid_file_page(page):
+            # The same reason: a record this protocol cannot carry would make
+            # encoding the answer fail, and silence is the worst answer.
+            return "run_file_refused", {
+                "status": 404,
+                "reason": f"{path!r} is recorded in a way this protocol "
+                          "cannot carry",
+            }
+        return "run_file_page", {"page": page}
+
+    def _read_page(self, run_id: str, path: str, offset: int, limit: int) -> dict:
+        """One page of a file of this runner's own run ``run_id``.
+
+        The same confinement as the controller's own route: only a path that
+        run's run.jsonl records is read, and only from inside that run
+        directory (``runfiles``). Every refusal names the run ID or the path
+        and nothing else, so an answer never says where the run directory is
+        on this target.
+        """
+        named = self.config.output / run_id
+        # No symbolic link is followed for the run directory either, as none
+        # is for a file inside it: a link would let one run ID serve another
+        # run's records, which is what reading only recorded files prevents.
+        # Checked before resolving, because resolving replaces a link with
+        # its target, and its target may sit beside it.
+        if named.is_symlink():
+            raise OutputFileError(f"this runner has no run {run_id!r}", 404)
+        directory = named.resolve()
+        # The protocol lets only one path component of safe characters
+        # through; this also refuses one that resolves anywhere but directly
+        # under this runner's output directory.
+        if directory.parent != self.config.output or not directory.is_dir():
+            raise OutputFileError(f"this runner has no run {run_id!r}", 404)
+        try:
+            return read_output_page(directory, path, offset, limit)
+        except OutputFileError as error:
+            if not error.on_target:
+                raise
+            # Recorded by the run, but no longer in this runner's own run
+            # directory. Saying it is "on the target" would be absurd here.
+            raise OutputFileError(
+                f"{path!r} is recorded by run {run_id} but is no longer in its "
+                "run directory on this target", 404,
+            ) from error
 
     # ----- run supervision and streaming -----------------------------------
 
