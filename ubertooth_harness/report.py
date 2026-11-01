@@ -31,6 +31,7 @@ from ubertooth_harness.rawlog import (
     Chunk,
     CommandCapture,
     format_command_record,
+    line_shape,
 )
 from ubertooth_harness.rf import describe as describe_placement
 from ubertooth_harness.watchdog import wait_counts
@@ -83,14 +84,17 @@ def _time(event: Mapping) -> datetime.datetime:
     return moment
 
 
-# Fewest digits a number needs to be masked wherever it appears rather than
-# only where it stands alone (_redact). A SEGGER probe's serial is nine
+# Fewest characters a serial needs to be masked wherever it appears rather
+# than only where it stands alone (_redact). A SEGGER probe's serial is nine
 # digits or more, so this is about the short width of a registry entry like
 # `000123`, which the tools write as `123`: masking every "123" inside every
 # longer number would mangle the transcript, and a standalone one is masked
 # either way. The padded width of that same entry is 12 digits, so it is
-# masked everywhere, including inside a device path.
-_SERIAL_MIN_DIGITS = 6
+# masked everywhere, including inside a device path. A bridge serial is 1 to
+# 64 characters of the registry's choosing (resources.py), so a short one
+# can read as a word rather than a number; the same width settles both, and
+# what counts as standing alone differs (_redact).
+_SERIAL_MIN_CHARS = 6
 # How wide a DK's by-id name writes its J-Link serial (targets.DK_BY_ID).
 _SERIAL_PADDED_DIGITS = 12
 
@@ -876,6 +880,29 @@ def elapsed(origin: datetime.datetime):
     return stamp
 
 
+# A line break other than the newline the output was split on. A line's
+# shape can hold one: a tool printing its progress in place writes a
+# carriage return, and the whole of that goes into one line of output.
+# The transcript splits what it renders the way str.splitlines() does, so
+# such a shape would arrive as two lines of the note, with the count and the
+# tag on the first alone, and redaction reads a shape by that head
+# (_SHAPE_NOTE_LINE): the rest of the shape would go out as it is. Written
+# the way a reader can see it instead, each shape on its own line.
+_BREAK_IN_A_SHAPE = re.compile("[\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]")
+_BREAK_NAMES = {"\r": r"\r", "\v": r"\v", "\f": r"\f"}
+
+
+def _one_line(text: str) -> str:
+    """``text`` with every line break but a newline written visibly."""
+    def written(match: re.Match) -> str:
+        char = match.group(0)
+        if char in _BREAK_NAMES:
+            return _BREAK_NAMES[char]
+        return f"\\u{ord(char):04x}" if ord(char) > 0xFF else f"\\x{ord(char):02x}"
+
+    return _BREAK_IN_A_SHAPE.sub(written, text)
+
+
 def _omitted_text(note: Mapping) -> str:
     """[M] note text for output kept in the output/ files, not run.jsonl."""
     summary = note.get("output_omitted") or {}
@@ -893,7 +920,7 @@ def _omitted_text(note: Mapping) -> str:
     for shape in summary.get("common_shapes") or []:
         text += (
             f"  {shape.get('count', 0)} x {TAGS.get(shape.get('stream'), '[?]')} "
-            f"{shape.get('shape', '')}\n"
+            f"{_one_line(str(shape.get('shape', '')))}\n"
         )
     rest = summary.get("distinct_shapes", 0) - len(summary.get("common_shapes") or [])
     if rest > 0:
@@ -1361,27 +1388,297 @@ def _mask_cut_serials(text: str, serials: Sequence[str]) -> str:
     return _HEX_RUN.sub(mask, text)
 
 
+# A line the record limits left out of run.jsonl is counted by its shape
+# (rawlog.line_shape), and the shapes are listed in the `[M]` note as
+# `3 x [E] <shape>`. A shape is not the line, so masking a serial does not
+# mask it (#220): line_shape replaces every run of digits with N, so a line
+# that named a board arrives with the serial's digits gone and its hex
+# letters and their positions intact, which is enough to pick one board out
+# of a small bench.
+#
+# The rule reads the shape where the report publishes it and nowhere else:
+# the `[M]` note's own lines, one per shape (_omitted_text, from
+# rawlog.OmittedOutput). Everything else on the page is a command's own
+# output, a board's answer, or the report's prose, and a rule that reads
+# like this one does not belong there: the shape of
+# `a1b2c3d4e5f6face7890abcdef123456` holds `faceN`, and `bInterfaceNumber`
+# is a line a tool really prints, so the rule would cut up output a reader
+# needs. Inside the note that cost is paid and the README states it: the
+# shape of such a line reads `bInter<serial>umber N of N`. Working on the
+# note's lines also means a change to the note's format shows up as a
+# failure of the test that renders a capped command through it, rather than
+# as redaction quietly stopping. What it costs is that the rules read a
+# rendered line rather than the record's own field: a record from another
+# version of the harness whose count is not a whole number, or whose shape
+# holds a line ending, renders a line this does not recognize, and that
+# shape goes out as it is.
+#
+# In a shape, a whole known shape is masked wherever it sits, at every
+# occurrence, overlapping ones as one mask: a serial that repeats itself
+# shapes into something that begins again inside itself. It is masked
+# however few hex letters it carries, because the run naming that serial
+# settles the question by itself, the view _mask_cut_serials takes of a
+# piece of a known serial. It needs two characters of its own, though, since
+# the shape of a serial of 31 digits and a letter is `Na` and masking that
+# would take the letter out of every word of the note.
+#
+# What a cut left of a shape is masked as a piece. The 200-character shape
+# limit cuts a shape, and an output cap can cut the line a shape was counted
+# from, so either end of one can arrive on its own. A piece needs an N of
+# its own and four characters the serial held, because those characters are
+# what names the board and a piece is all the rule has to go on: fewer
+# (`NabN`, the shape of `1ab2`) sits in the shape of too much ordinary
+# output to mask, and a piece with no N in it is a run of the serial's own
+# characters, left to _mask_cut_serials and its width rule for the same
+# reason: `cafe` and `dead` are words a tool prints.
+_SHAPE_MIN_OWN_CHARS = 2
+_PIECE_MIN_OWN_CHARS = 4
+# One line of the `[M]` note that lists the shapes of the lines the record
+# limits left out: `00:00:09.000 [M]   3 x [E] <shape>`. Anchored on the
+# elapsed time the transcript stamps every line with, so a command's own
+# output cannot read as a note of the harness's. The head is taken as it is
+# and the shape is what the rules read.
+_SHAPE_NOTE_LINE = re.compile(
+    r"(?m)^(?P<head>\d{2,}:\d\d:\d\d\.\d\d\d \[M\][^\S\n]+\d+ x \[[^\]\n]*\] )"
+    r"(?P<shape>.*)$"
+)
+# Case folded for comparison: a tool prints a serial in the case it likes,
+# so the letters of a shape are matched in either. The fold maps the ASCII
+# letters a serial can hold and nothing else, which keeps the folded text
+# the same length as the text, so a position in one is a position in the
+# other. (Lower-casing the whole string is not length preserving: `İ`
+# grows.) The `N` line_shape leaves where a run of digits was is folded with
+# the rest, so a shape whose own letters read as one of those N's is masked
+# too: pinning it apart left a serial holding that letter unmasked whenever
+# a tool printed the serial in another case, and masking a shape that reads
+# like a known one costs a reader one line of a note.
+_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+                      "abcdefghijklmnopqrstuvwxyz")
+
+
+def _fold(text: str) -> str:
+    return text.translate(_FOLD)
+
+
+# The runs line_shape replaced, counted in the serial rather than in its
+# shape, because a serial may hold an N of its own.
+_DIGIT_RUN = re.compile(r"\d+")
+
+
+def _own_chars_of_piece(folded: str) -> int:
+    """Characters of a piece of a shape that a serial held, as far as the
+    piece can say: what it says about which board.
+
+    Takes the piece folded, so an `n` is read as one line_shape left where a
+    run of digits was whichever case the line was printed in. The piece
+    alone cannot say whether the serial held that letter instead; for a
+    serial that did, this counts low, which leaves a narrow piece to read
+    rather than masking ordinary text.
+    """
+    return len(folded) - folded.count("n")
+
+
+def _shape_pieces(shapes: Iterable[str]) -> tuple[set[str], int]:
+    """Every piece of every known shape, and the width of the longest.
+
+    Held as a set, because the rule asks of thousands of positions in a long
+    report whether the characters there are a piece of some shape.
+    """
+    pieces = set()
+    for shape in shapes:
+        for start in range(len(shape)):
+            for end in range(start + 1, len(shape) + 1):
+                pieces.add(shape[start:end])
+    return pieces, max((len(shape) for shape in shapes), default=0)
+
+
+def _mask_one_shape(shape: str, known: Sequence[str], pieces: set[str],
+                    longest: int) -> str:
+    """One published shape, with every known shape and piece of one in it
+    masked.
+
+    The whole shapes go first, longest first: a piece taken at an earlier
+    character could otherwise swallow the start of a shape that repeats
+    itself and leave a tail too narrow to mask.
+    """
+    for one in known:
+        shape = _mask_everywhere(shape, one)
+    return _mask_shape_pieces(shape, pieces, longest)
+
+
+def _mask_shape_pieces(shape: str, pieces: set[str], longest: int) -> str:
+    """``shape`` with every piece of a known serial's shape masked.
+
+    Read from the left, taking the longest piece the known shapes hold at
+    each character: what a shape holds is a shape, so masking it is right,
+    and a piece that starts later is shorter. Where no piece wide enough
+    starts at this character, the character is kept and the next one tried.
+    """
+    folded = _fold(shape)
+    out = []
+    index = 0
+    while index < len(shape):
+        end = index
+        # Every prefix of a piece of a shape is a piece of that shape, so
+        # the longest one is reached by growing until there is no longer a
+        # piece there.
+        while (end < min(len(shape), index + longest)
+               and folded[index:end + 1] in pieces):
+            end += 1
+        # Folded, like the lookup above: a shape printed in lower case
+        # carries its placeholder as `n`, and a piece of one is still a
+        # piece of a shape.
+        piece = folded[index:end]
+        if "n" in piece and _own_chars_of_piece(piece) >= _PIECE_MIN_OWN_CHARS:
+            out.append(REDACTED)
+            index = end
+        else:
+            out.append(shape[index])
+            index += 1
+    return "".join(out)
+
+
+def _mask_everywhere(text: str, wanted: str) -> str:
+    """``text`` with every occurrence of ``wanted`` masked, in either case.
+
+    Overlapping occurrences included, as one mask: a serial that repeats
+    itself (`abc-1abc-1abc-1`) shapes into something that can begin again
+    inside itself, and a search that resumed after each match would leave
+    the tail of the second occurrence to read.
+    """
+    folded, needle = _fold(text), _fold(wanted)
+    found = []
+    at = folded.find(needle)
+    while at >= 0:
+        start, stop = at, at + len(needle)
+        if found and start <= found[-1][1]:
+            found[-1] = (found[-1][0], max(found[-1][1], stop))
+        else:
+            found.append((start, stop))
+        at = folded.find(needle, at + 1)
+    if not found:
+        return text
+    out, end = [], 0
+    for start, stop in found:
+        out.append(text[end:start])
+        out.append(REDACTED)
+        end = stop
+    out.append(text[end:])
+    return "".join(out)
+
+
+def _own_chars_of_serial(serial: str, shape: str) -> int:
+    """Characters of a shape that are the serial's own, not an N standing
+    where a run of its digits was: what the shape says about the board.
+
+    Counted from the runs of digits the serial held, not from the N's in the
+    shape, because a serial may hold an N of its own: a bridge serial is any
+    string of letters, digits and ``_.:+-``.
+    """
+    return len(shape) - len(_DIGIT_RUN.findall(serial))
+
+
+def _mask_serial_shapes(text: str, serials: Sequence[str]) -> str:
+    """Mask the shape of a line that named a board the run names."""
+    shapes = set()
+    for serial in serials:
+        shape = line_shape(serial)
+        # No digits in it, so the shape is the serial itself, already masked.
+        if shape == serial:
+            continue
+        # A numeric serial shapes to a bare `N`, and one of 31 digits and a
+        # letter to `Na`: too little to mask, and `N` names nothing at all.
+        if _own_chars_of_serial(serial, shape) >= _SHAPE_MIN_OWN_CHARS:
+            shapes.add(shape)
+    if not shapes:
+        return text
+    # Longest first, since the shape of one serial can hold another's.
+    known = sorted(shapes, key=len, reverse=True)
+    pieces, longest = _shape_pieces({_fold(shape) for shape in shapes})
+
+    def mask(match: re.Match) -> str:
+        return match.group("head") + _mask_one_shape(
+            match.group("shape"), known, pieces, longest,
+        )
+
+    return _SHAPE_NOTE_LINE.sub(mask, text)
+
+
 def _redact(text: str, serials: Iterable[str]) -> str:
     # Read once: the rules below each walk the serials.
     serials = sorted(serials, key=len, reverse=True)
     # The token rule first: masking a short serial inside a 32-hex token
     # would leave the rest of that token, which this rule is there to catch.
     text = _SERIAL_TOKEN.sub(REDACTED, text)
+    # Then the shapes, before any serial is masked as itself: one serial's
+    # own characters can read as a piece of another's shape (two bridge
+    # serials of the registry's choosing), and masking that piece first
+    # would leave the rest of the shape with no shape to match.
+    text = _mask_serial_shapes(text, serials)
     for serial in serials:
-        if serial.isdigit() and len(serial) < _SERIAL_MIN_DIGITS:
-            # Short enough to read as an ordinary number, so it is masked
-            # only where it stands alone and not inside a longer one.
-            text = re.sub(rf"(?<!\d){re.escape(serial)}(?!\d)", REDACTED, text)
+        if len(serial) < _SERIAL_MIN_CHARS:
+            # Short enough to read as an ordinary number or an ordinary
+            # word, so it is masked only where it stands alone and not
+            # inside a longer one: a bridge serial is 1 to 64 characters of
+            # the registry's choosing (resources.py), and masking every `ab`
+            # would leave `<serial>out the l<serial>el`. A letter or digit
+            # on either side is what makes it part of something longer, so a
+            # short serial is still masked inside a device path, where `_`,
+            # `-` and `.` stand around it.
+            boundary = r"\d" if serial.isdigit() else "[0-9A-Za-z]"
+            text = re.sub(
+                rf"(?<!{boundary}){re.escape(serial)}(?!{boundary})",
+                lambda _match: REDACTED, text,
+                flags=0 if serial.isdigit() else re.IGNORECASE,
+            )
         else:
             # Anywhere it appears, which is how the serial inside a device
             # path is masked: a probe's name on macOS
             # (/dev/cu.usbmodem<serial><interface>) puts a digit right after
             # it. A serial this long inside a longer number would be masked
-            # too, which costs a reader nothing.
-            text = text.replace(serial, REDACTED)
+            # too, which costs a reader nothing. In either case, because a
+            # tool may print in the case it likes and the token rule above
+            # reaches only a serial standing on its own.
+            text = re.sub(re.escape(serial), lambda _match: REDACTED, text,
+                          flags=re.IGNORECASE)
     # Last, so a whole serial is masked as one and only the pieces a cut left
     # behind reach this rule.
     return _mask_cut_serials(text, serials)
+
+
+# A heading of a run's own page, to move down a level when the page becomes
+# a section of a report covering several runs. Every heading at once, so a
+# section keeps its subsections under it.
+_RUN_HEADING = re.compile(r"#{2,5} ")
+
+
+def _as_a_section(text: str) -> str:
+    """One run's page as a section of a report covering several.
+
+    Its title becomes the section heading and every heading it wrote moves a
+    level down, so a reader scrolling through two transcripts can see which
+    run each belongs to.
+
+    Lines inside a fenced block are left as they are: they are what a
+    command printed and what a board answered, quoted, and a reader may copy
+    them out (the watchdog's issue body carries `ubertooth-util -w` verbatim).
+    A fence closes on a line of at least as many backticks as opened it, so
+    the transcript's ``` inside the issue body's ```` does not end it.
+    """
+    lines = []
+    fence = 0
+    for line in text.split("\n"):
+        bare = line.strip()
+        ticks = len(bare) - len(bare.lstrip("`"))
+        if fence:
+            if ticks >= fence:
+                fence = 0
+        elif ticks >= 3:
+            fence = ticks
+        elif _RUN_HEADING.match(line):
+            line = "#" + line
+        lines.append(line)
+    return "\n".join(lines).replace("# Ubertooth test run", "## Run", 1)
 
 
 def render_run(events: Sequence[Mapping], *, redact_serials: bool = False, transcript: bool = True) -> str:
@@ -1399,7 +1696,14 @@ def render_run(events: Sequence[Mapping], *, redact_serials: bool = False, trans
 
 
 def render_runs(paths: Sequence[Path | str], *, redact_serials: bool = False, title: str | None = None) -> str:
-    """One report covering several runs (for example macOS and Linux)."""
+    """One report covering several runs (for example macOS and Linux).
+
+    Each run's setup and results, and, when the serials are masked, its
+    transcript as well: ``--redact-serials`` means the whole report masked
+    (#221), and the transcript is most of what a report is worth to a
+    reader. Without masking the page stays a summary, because each run's own
+    ``report.md`` already carries its transcript with its serials in it.
+    """
     runs = []
     for path in paths:
         path = Path(path)
@@ -1411,7 +1715,12 @@ def render_runs(paths: Sequence[Path | str], *, redact_serials: bool = False, ti
         lines.append(f"| `{run.run_id}` | {_cell(host)} | {_cell(run.status)} |")
     text = "\n".join(lines) + "\n"
     for run in runs:
-        text += "\n" + render_run(run.events, transcript=False).replace("# Ubertooth test run", "## Run", 1)
+        # Not masked per run: the whole page is masked below, with every
+        # run's serials, so a board one run names is masked in the other's
+        # transcript too.
+        text += "\n" + _as_a_section(
+            render_run(run.events, transcript=redact_serials)
+        )
     serials = set().union(*(run.serials() for run in runs)) if runs else set()
     return _redact(text, serials) if redact_serials else text
 

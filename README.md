@@ -1909,18 +1909,34 @@ python -m ubertooth_harness report runs/<mac-run-id> runs/<linux-run-id> \
   --title "Ubertooth 2026-11-R1 validation" --output validation.md
 ```
 
-`report` writes one page summarizing each run's setup and results, for example
-macOS and Linux runs for a release; each run's own report.md keeps its full
-transcript. Serial numbers are shown; `--redact-serials` replaces them with
+`report` writes one page covering several runs, for example the macOS and
+Linux runs of a release. It summarizes each run's setup and results; with
+`--redact-serials` it carries each run's transcript as well, so the option
+means the whole report, masked. Without the option the page stays a summary,
+because each run's own `report.md` already keeps its full transcript with its
+serials in it.
+
+Serial numbers are shown; `--redact-serials` replaces them with
 `<serial>`: an Ubertooth's serial, a DK's J-Link serial, and an ESP32 peer's
 bridge serial. A numeric serial is masked in each width the run writes it, as
 registered and as the number the tools take, so a DK's J-Link serial does not
 survive as the `--jlink 1050210121` the harness passes. A width short enough
-to read as an ordinary number (the `123` of a serial registered as `000123`)
-is masked only where it stands alone, so it cannot mask part of a count. A
+to read as an ordinary number or word (the `123` of a serial registered as
+`000123`, or a two-character bridge serial) is masked only where it stands
+alone: a short number between characters that are not digits, a short word
+between characters that are neither letters nor digits. So it cannot mask
+part of a count or of a word, and it is still masked in a `by-id` path,
+where `_`, `-` and `.` stand around it. What it leaves is a serial that
+short written straight against a letter or a digit, as the macOS probe name
+writes one (`/dev/cu.usbmodemab1`). A serial of one or two characters is
+masked wherever it stands alone, so it takes a short word or an option
+letter with it (`-a 0` reads `-<serial> 0`): the registry allows such a
+serial and nothing tells it from an ordinary word, and a registered serial
+is masked rather than published. A
 serial port path keeps its shape with the serial inside it masked
 (`/dev/serial/by-id/usb-SEGGER_J-Link_<serial>-if00`), whether the registry
-held that path or the harness found it. Any standalone 32-hex-digit token is
+held that path or the harness found it. Case is ignored throughout, since a
+tool prints a serial in the case it likes. Any standalone 32-hex-digit token is
 masked too, since that is the shape of an Ubertooth serial. Where output was
 cut inside a serial, which either output cap can do, the piece the cut left
 behind is masked as well: a run of 8 hex digits or more that a serial the run
@@ -1929,8 +1945,41 @@ carrying both letters and digits, which is a serial and little else. Left to
 read are a whole git SHA or digest, a narrower piece, and a long run of
 digits or of letters alone (a counter, a bit string, a field of zeros) that
 no serial the run names holds. The cost of the width rule is that a SHA an
-output cap cut that short reads as `<serial>` too. Redaction is this page
-only: a run's own `report.md`, which carries the transcript, is always
+output cap cut that short reads as `<serial>` too.
+
+The lines an output cap left out of run.jsonl are counted by shape in the
+`[M]` note (`3 x [E] <shape>`), and a shape is not the line: every run of
+digits in it reads `N`, so a line that named a board would arrive with the
+serial's digits gone and its hex letters and their positions intact, which
+is enough to pick one board out of a small bench. So a shape a serial's own
+shape appears in is masked as well, whole or as the 200-character shape
+limit cut it.
+
+The rule reads the shapes in that note and nothing else on the page, since
+the note is the only place a report publishes one. In a shape, masked is the
+whole shape of a serial the run names, at every occurrence and wherever it
+sits, including written against a word of its own as a serial reaches a
+line, and a piece of such a shape that carries an `N` and four or more of
+the characters the serial itself held, since a piece is all the rule has to
+go on there. Every other shape is left to read.
+
+The costs are the width rule's, and fall inside that note. A short value
+whose own shape a known serial's shape holds reads `<serial>` too, so a
+`[M]` line can show two masks where one device was named. A piece a cut left
+with no `N` in it is a run of the serial's own characters, left to read like
+any piece of a serial narrower than 8 hex digits. And a serial with one
+character of its own (31 digits and a letter) keeps its shape, because
+masking `Na` would take that letter out of every other shape in the note.
+
+What the option does not mask is anything that is not a serial the run
+names, and a transcript holds more than those: the decimal serial of a
+device the run never named, the registered Bluetooth addresses and LAPs of
+the devices the harness drove, the addresses of whatever third-party devices
+were on the air, and the paths the commands ran with, which carry a user
+name and a home directory where the run built its tools. Read a report
+before publishing it, as you would a run's own `report.md`.
+
+Redaction is the `report` page only: a run's own `report.md` is always
 written with its serials.
 
 ## Flash reliability
