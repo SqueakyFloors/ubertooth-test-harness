@@ -285,6 +285,25 @@ class ReportTests(unittest.TestCase):
                     _serial_set("001050210121")),
         )
 
+    def test_a_short_serial_that_reads_as_a_word_stands_alone_too(self):
+        # A bridge serial is 1 to 64 characters of the registry's choosing
+        # (resources.py), so a short one can read as an ordinary word.
+        # Masking it everywhere would leave `<serial>out the l<serial>el`;
+        # standing alone between characters that are neither letters nor
+        # digits still masks it in a device path, where `_` and `-` sit
+        # around it.
+        from ubertooth_harness.report import _redact
+
+        self.assertEqual(
+            "[O] about the label Abcd and ABBA\n",
+            _redact("[O] about the label Abcd and ABBA\n", {"ab"}),
+        )
+        self.assertEqual(
+            f"[O] /dev/serial/by-id/usb-Silicon_Labs_{REDACTED}-if00\n",
+            _redact("[O] /dev/serial/by-id/usb-Silicon_Labs_ab-if00\n",
+                    {"ab"}),
+        )
+
     def test_redaction_masks_32_hex_tokens_but_not_longer_digests(self):
         from ubertooth_harness.report import _redact
 
@@ -652,21 +671,21 @@ class ReportTests(unittest.TestCase):
             _redact(line, {serial}),
         )
 
-    def test_a_lower_case_n_in_a_shape_is_not_the_digit_placeholder(self):
-        # line_shape writes the placeholder in upper case, so a lower-case
-        # `n` is a letter the output held. Folding keeps them apart: the
-        # shape of a serial is matched in either case except there.
+    def test_a_shape_is_matched_in_either_case_including_its_n(self):
+        # The fold ignores case everywhere, the `N` that stands where a run
+        # of digits was included. The cost is that a shape whose own letters
+        # read as one of those N's is masked as well; what it buys is that a
+        # serial holding the letter `n` is masked whichever case a tool
+        # printed it in, which no enumeration of spellings covers.
         from ubertooth_harness.report import _redact
 
         serial = "a1b2c3d4"
 
         self.assertEqual("aNbNcNdN", line_shape(serial))
-        self.assertEqual(
-            shape_note("anbncndn"), _redact(shape_note("anbncndn"), {serial}))
-        # The shape itself is masked, in either case of its own letters.
-        for shape in ("aNbNcNdN", "ANBNCNDN"):
+        for shape in ("aNbNcNdN", "ANBNCNDN", "anbncndn"):
             self.assertEqual(
-                shape_note(REDACTED), _redact(shape_note(shape), {serial}))
+                shape_note(REDACTED),
+                _redact(shape_note(shape), {serial}), shape)
 
     def test_a_shape_that_repeats_itself_is_masked_whole(self):
         # A whole shape is masked before the pieces of one, so a word that
@@ -703,27 +722,29 @@ class ReportTests(unittest.TestCase):
         # about the board is counted from the runs of digits the serial held
         # and not from the N's in the shape, or a shape that names a board
         # reads as one that names nothing.
-        from ubertooth_harness.report import _redact, _shape_own_chars
+        from ubertooth_harness.report import _redact, _own_chars_of_serial
 
         serial = "N1a2"
         shape = line_shape(serial)
 
         self.assertEqual("NNaN", shape)
-        self.assertEqual(2, _shape_own_chars(serial, shape))
+        self.assertEqual(2, _own_chars_of_serial(serial, shape))
         self.assertEqual(
             shape_note(f"x {REDACTED} y"),
             _redact(shape_note(f"x {shape} y"), {serial}),
         )
 
-    def test_a_serial_holding_an_n_is_known_in_either_case(self):
-        # The fold leaves `N` alone to keep the placeholder apart from a
-        # letter the serial held, so a serial that holds that letter has to
-        # be known in the case the output printed it in, not only the case
-        # the registry holds.
+    def test_a_serial_holding_an_n_is_known_in_every_case(self):
+        # A bridge serial may hold the letter `n`, and a tool may print it
+        # in any case, including one character of it: the shape is masked
+        # however it was printed, which is why the fold covers the `N` as
+        # well rather than enumerating spellings.
         from ubertooth_harness.report import _redact
 
         for registered, printed in (("esp32n1a2b", "ESP32N1A2B"),
                                     ("ESP32N1A2B", "esp32n1a2b"),
+                                    ("N1N2abc", "n1N2ABC"),
+                                    ("n1a2n3b", "n1a2N3b"),
                                     ("N1a2", "n1A2")):
             shape = line_shape(printed)
             self.assertEqual(

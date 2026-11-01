@@ -1342,12 +1342,15 @@ def _mask_cut_serials(text: str, serials: Sequence[str]) -> str:
 # The rule reads the shape where the report publishes it and nowhere else:
 # the `[M]` note's own lines, one per shape (_omitted_text, from
 # rawlog.OmittedOutput). Everything else on the page is a command's own
-# output, a board's answer, or the report's prose, where a shape that reads
-# like ordinary text would be cut out of it: the shape of
+# output, a board's answer, or the report's prose, and a rule that reads
+# like this one does not belong there: the shape of
 # `a1b2c3d4e5f6face7890abcdef123456` holds `faceN`, and `bInterfaceNumber`
-# is a line a tool really prints. Working on the note's lines also means a
-# change to the note's format shows up as a failure of the test that renders
-# a capped command through it, rather than as redaction quietly stopping.
+# is a line a tool really prints, so the rule would cut up output a reader
+# needs. Inside the note that cost is paid and the README states it: the
+# shape of such a line reads `bInter<serial>umber N of N`. Working on the
+# note's lines also means a change to the note's format shows up as a
+# failure of the test that renders a capped command through it, rather than
+# as redaction quietly stopping.
 #
 # In a shape, a whole known shape is masked wherever it sits, at every
 # occurrence, overlapping ones as one mask: a serial that repeats itself
@@ -1375,31 +1378,42 @@ _PIECE_MIN_OWN_CHARS = 4
 # output cannot read as a note of the harness's. The head is taken as it is
 # and the shape is what the rules read.
 _SHAPE_NOTE_LINE = re.compile(
-    r"(?m)^(?P<head>\d{2,}:\d\d:\d\d\.\d\d\d \[M\][^\S\n]+\d+ x \[[^\]]*\] )"
+    r"(?m)^(?P<head>\d{2,}:\d\d:\d\d\.\d\d\d \[M\][^\S\n]+\d+ x \[[^\]\n]*\] )"
     r"(?P<shape>.*)$"
 )
 # Case folded for comparison: a tool prints a serial in the case it likes,
-# so the letters of a shape are matched in either. Only the ASCII letters a
-# serial can hold are folded, and not the `N` line_shape leaves where a run
-# of digits was, which is always upper case: that keeps the placeholder
-# apart from a letter the serial itself held, and keeps the folded text the
-# same length as the text, so a position in one is a position in the other.
-# (Lower-casing the whole string is not length preserving: `İ` grows.)
-_FOLD = str.maketrans("ABCDEFGHIJKLMOPQRSTUVWXYZ",
-                      "abcdefghijklmopqrstuvwxyz")
+# so the letters of a shape are matched in either. The fold maps the ASCII
+# letters a serial can hold and nothing else, which keeps the folded text
+# the same length as the text, so a position in one is a position in the
+# other. (Lower-casing the whole string is not length preserving: `İ`
+# grows.) The `N` line_shape leaves where a run of digits was is folded with
+# the rest, so a shape whose own letters read as one of those N's is masked
+# too: pinning it apart left a serial holding that letter unmasked whenever
+# a tool printed the serial in another case, and masking a shape that reads
+# like a known one costs a reader one line of a note.
+_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+                      "abcdefghijklmnopqrstuvwxyz")
 
 
 def _fold(text: str) -> str:
     return text.translate(_FOLD)
+
+
 # The runs line_shape replaced, counted in the serial rather than in its
 # shape, because a serial may hold an N of its own.
 _DIGIT_RUN = re.compile(r"\d+")
 
 
-def _own_chars(shape: str) -> int:
-    """Characters of a shape a serial held, rather than an N standing where
-    a run of its digits was: what the shape says about which board."""
-    return len(shape) - shape.count("N")
+def _own_chars_of_piece(piece: str) -> int:
+    """Characters of a piece of a shape that a serial held, as far as the
+    piece can say: what it says about which board.
+
+    Every N in it is read as one line_shape left where a run of digits was,
+    since the piece alone cannot say whether the serial held that letter.
+    For a serial that did, this counts low, which leaves a narrow piece to
+    read rather than masking ordinary text.
+    """
+    return len(piece) - piece.count("N")
 
 
 def _shape_pieces(shapes: Iterable[str]) -> tuple[set[str], int]:
@@ -1450,7 +1464,7 @@ def _mask_shape_pieces(shape: str, pieces: set[str], longest: int) -> str:
                and folded[index:end + 1] in pieces):
             end += 1
         piece = shape[index:end]
-        if "N" in piece and _own_chars(piece) >= _PIECE_MIN_OWN_CHARS:
+        if "N" in piece and _own_chars_of_piece(piece) >= _PIECE_MIN_OWN_CHARS:
             out.append(REDACTED)
             index = end
         else:
@@ -1488,7 +1502,7 @@ def _mask_everywhere(text: str, wanted: str) -> str:
     return "".join(out)
 
 
-def _shape_own_chars(serial: str, shape: str) -> int:
+def _own_chars_of_serial(serial: str, shape: str) -> int:
     """Characters of a shape that are the serial's own, not an N standing
     where a run of its digits was: what the shape says about the board.
 
@@ -1502,21 +1516,14 @@ def _shape_own_chars(serial: str, shape: str) -> int:
 def _mask_serial_shapes(text: str, serials: Sequence[str]) -> str:
     """Mask the shape of a line that named a board the run names."""
     shapes = set()
-    # Both cases of each serial, because the fold that compares shapes
-    # leaves `N` alone to keep the placeholder apart from a letter the
-    # serial held: a bridge serial may hold that letter, and then the case
-    # it was printed in is the case its shape has to be known in.
-    for serial in {
-        spelling for serial in serials
-        for spelling in (serial, serial.lower(), serial.upper())
-    }:
+    for serial in serials:
         shape = line_shape(serial)
         # No digits in it, so the shape is the serial itself, already masked.
         if shape == serial:
             continue
         # A numeric serial shapes to a bare `N`, and one of 31 digits and a
         # letter to `Na`: too little to mask, and `N` names nothing at all.
-        if _shape_own_chars(serial, shape) >= _SHAPE_MIN_OWN_CHARS:
+        if _own_chars_of_serial(serial, shape) >= _SHAPE_MIN_OWN_CHARS:
             shapes.add(shape)
     if not shapes:
         return text
@@ -1539,10 +1546,21 @@ def _redact(text: str, serials: Iterable[str]) -> str:
     # would leave the rest of that token, which this rule is there to catch.
     text = _SERIAL_TOKEN.sub(REDACTED, text)
     for serial in serials:
-        if serial.isdigit() and len(serial) < _SERIAL_MIN_DIGITS:
-            # Short enough to read as an ordinary number, so it is masked
-            # only where it stands alone and not inside a longer one.
-            text = re.sub(rf"(?<!\d){re.escape(serial)}(?!\d)", REDACTED, text)
+        if len(serial) < _SERIAL_MIN_DIGITS:
+            # Short enough to read as an ordinary number or an ordinary
+            # word, so it is masked only where it stands alone and not
+            # inside a longer one: a bridge serial is 1 to 64 characters of
+            # the registry's choosing (resources.py), and masking every `ab`
+            # would leave `<serial>out the l<serial>el`. A letter or digit
+            # on either side is what makes it part of something longer, so a
+            # short serial is still masked inside a device path, where `_`,
+            # `-` and `.` stand around it.
+            boundary = r"\d" if serial.isdigit() else "[0-9A-Za-z]"
+            text = re.sub(
+                rf"(?<!{boundary}){re.escape(serial)}(?!{boundary})",
+                lambda _match: REDACTED, text,
+                flags=0 if serial.isdigit() else re.IGNORECASE,
+            )
         else:
             # Anywhere it appears, which is how the serial inside a device
             # path is masked: a probe's name on macOS
