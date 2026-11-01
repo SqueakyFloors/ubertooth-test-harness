@@ -1518,11 +1518,12 @@ still not take it, for a reason the queue can neither see nor help: a wrapper
 outside the harness holding a board's own lock file while it waits for the
 lease (the order below). Its neighbors give it a clear run at the board and
 then carry on. A command gives way at each board in its own right, so waiting
-one command ahead out never lets it take a board another has been waiting
-longer for. The host lock is the other thing a waiter can be held up by with
-no way through, since it is never taken over (above): one whose holder is
-gone counts as free here, so a lock a person has to clear does not hold the
-whole bench in the queue.
+the command ahead at one board out never lets it take a board another command
+has been waiting longer for; within one board's queue it is the command that
+has waited longest that gets the turn, as before. The host lock is the other
+thing a waiter can be held up by with no way through, since it is never taken
+over (above): one that no running command holds counts as free here, so a
+lock a person has to clear does not hold the whole bench in the queue.
 
 What a multi-board run costs the others, in exchange: while it waits for the
 last board it needs, a command that wants one of the boards already free

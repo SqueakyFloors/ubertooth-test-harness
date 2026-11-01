@@ -755,11 +755,18 @@ class TicketQueue:
         Empty when nothing is ahead of this command anywhere, which is when
         it may try to take its locks. Every resource is looked at, because a
         command gives way at each of them in its own right: having waited
-        out one command ahead never lets it take a resource a different
-        command has been waiting longer for.
+        out the command ahead at one resource never lets it take a resource
+        another command has been waiting longer for. Within one resource's
+        queue it is the oldest waiter that is given way to, as before: once
+        that command has had its turn, this one competes for the resource
+        with the others in between.
         """
         found = []
+        looked_at: set[str] = set()
         for board in self.resources:
+            if board.key in looked_at:
+                continue  # one resource, two entries (a lease and its external lock)
+            looked_at.add(board.key)
             for name in self._names(board):
                 if name >= self.name:
                     break  # this command's own ticket, and the later ones
@@ -771,10 +778,6 @@ class TicketQueue:
                     found.append((board, name, read_holder(path)))
                     break
         return found
-
-    def ahead(self) -> tuple[Board, str, dict] | None:
-        """The first entry of ahead_all(), for a caller that wants one."""
-        return next(iter(self.ahead_all()), None)
 
     def waiting_count(self, board: Board) -> int:
         """How many commands are waiting for this resource right now.
@@ -874,6 +877,10 @@ def waiting_resources(ticket: Mapping, board: Board) -> list[Board]:
         key = str(entry.get("key") or "")
         if not _LOCK_NAME.fullmatch(key) or key in (".", "..") or key in seen:
             continue
+        if key == TAKEOVER_LOCK.removesuffix(".lock"):
+            # Not a resource: every attempt holds that file shared while it
+            # takes its locks, so it would read as held by a running command.
+            continue
         seen.add(key)
         resources.append(Board(_printable(entry.get("resource")) or key, key))
     return resources or [board]
@@ -895,9 +902,16 @@ def _blocked_by(root: Path, ticket: Mapping, board: Board) -> Board | None:
     right now. This is what tells a waiting command whether giving way to
     the command ahead is bounded: see acquire(). A command that wants
     several resources cannot take any of them while one is held, however
-    long its neighbors give way, so a resource held by a running command is
-    the one case where that command is known to be waiting on a lock rather
-    than stuck on something the queue cannot see (#225).
+    long its neighbors give way, so while one is held, giving way is what
+    lets that command collect the rest (#225).
+
+    What this does not tell apart: a command ahead can be waiting on a lock
+    *and* stuck on something the queue cannot see (a wrapper outside the
+    harness holding one board's own lock file while it waits for a lease on
+    that board and another). While the other board is legitimately held,
+    giving way to it is unbounded, so a command that wants only the first
+    board waits out its own deadline. That lasts as long as the resource in
+    the way is held; issue #234 has the case where it is held for good.
 
     One exception: the host lock, unless a running command holds it. It is
     the one lock that is never taken over, so a host lock whose holder is
@@ -1394,7 +1408,7 @@ def board_states(
     """
     root = lease_dir(directory)
     # A listing takes no ticket of its own; it reads the queue, and drops
-    # the tickets of commands that are gone (see waiting_for), so it never
+    # the tickets of commands that are gone (see waiting_count), so it never
     # reports one of those as waiting.
     queue = TicketQueue(root, boards, {})
     states = []

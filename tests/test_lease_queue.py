@@ -400,7 +400,7 @@ class QueueTests(QueueFixture):
             # Neither counts as a command waiting: a ticket is only a ticket
             # once it is under its queue name.
             self.assertEqual(1, queue.waiting_count(A))
-            self.assertIsNone(queue.ahead())
+            self.assertEqual([], queue.ahead_all())
         finally:
             queue.release()
 
@@ -656,27 +656,64 @@ class MultiResourceQueueTests(QueueFixture):
         self.assertIn("that command is waiting for host lock too",
                       str(caught.exception))
 
-    def test_a_host_lock_whose_holder_is_gone_does_not_keep_the_queue(self):
+    def test_a_host_lock_no_running_command_holds_does_not_keep_the_queue(self):
         """A wedged host lock must not hold the bench in the queue.
 
-        The host lock is never taken over, so one whose holder is gone stays
-        locked until a person clears it. Counting it as held would keep every
-        command that wants a board an older waiter asked for giving way until
-        it gave up.
+        The host lock is never taken over, so one no running command holds
+        stays locked until a person clears it, whether its record says the
+        command is gone, came from another host, or says nothing at all (a
+        lease file a release has emptied, still held by a command's child).
+        Counting it as held would keep every command that wants a board an
+        older waiter asked for giving way until it gave up.
         """
-        path = self.dir / f"{leases.HOST_LOCK.key}.lock"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
-        self.raw.append(fd)
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        os.pwrite(fd, (json.dumps(dead_holder()) + "\n").encode(), 0)
-        self.hold_ticket(A, self.older(), self.wanting(leases.HOST_LOCK, A))
+        records = {
+            "gone": dead_holder(),
+            "another host": self.live_holder(hostname="another-host"),
+            "nothing": {},
+        }
+        for what, record in records.items():
+            with self.subTest(record=what):
+                path = self.dir / f"{leases.HOST_LOCK.key}.lock"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+                self.raw.append(fd)
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                os.ftruncate(fd, 0)
+                if record:
+                    os.pwrite(fd, (json.dumps(record) + "\n").encode(), 0)
+                ticket = self.hold_ticket(
+                    A, self.older(), self.wanting(leases.HOST_LOCK, A))
+                rounds = []
+                leases.acquire(
+                    [A], holder("newcomer"), directory=self.dir, wait_s=600,
+                    clock=lambda: 0.0, sleep=rounds.append,
+                ).release()
+                self.assertLessEqual(
+                    len(rounds), 4, "gave way to a waiter with no way through")
+                os.close(self.raw.pop())
+                os.unlink(path)
+                os.unlink(ticket)
+
+    def test_a_ticket_naming_the_queue_s_own_lock_is_not_read_as_a_resource(self):
+        # Every attempt holds takeover.lock shared while it takes its locks,
+        # so a ticket naming it would read as a resource a running command
+        # holds and giving way to that ticket would never be bounded.
+        self.assertEqual(
+            [A],
+            leases.waiting_resources(
+                {"waiting_for": [{"key": leases.TAKEOVER_LOCK.removesuffix(".lock")}]},
+                A),
+        )
+        self.hold_ticket(A, self.older(), self.live_holder(waiting_for=[
+            {"key": leases.TAKEOVER_LOCK.removesuffix(".lock"), "resource": "nice try"},
+            {"key": A.key, "resource": "UT_0"},
+        ]))
         rounds = []
         leases.acquire(
             [A], holder("newcomer"), directory=self.dir, wait_s=600,
             clock=lambda: 0.0, sleep=rounds.append,
         ).release()
-        self.assertLessEqual(len(rounds), 4, "gave way to a waiter with no way through")
+        self.assertLessEqual(len(rounds), 4)
 
     def test_a_ticket_records_every_resource_its_command_wants(self):
         queue = leases.TicketQueue(
