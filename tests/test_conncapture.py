@@ -1,5 +1,4 @@
 import contextlib
-import contextlib
 import io
 from pathlib import Path
 import struct
