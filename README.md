@@ -1464,6 +1464,24 @@ error: UT_0 is queued: agent #14, run 2026-10-31-ble, lease: ubertooth-util
 is still waiting for it; use --wait-for-boards MINUTES to wait for your turn
 ```
 
+A run that wants several boards (and the host lock) is served the same way,
+and that takes one thing more: boards are taken all or nothing, so such a run
+needs every one of them free in the same attempt, and with short leases
+arriving on different boards each can be free in its turn and never all at
+once. So each ticket records the whole set its command is waiting for, and a
+command gives way to an older ticket for as long as anything in that set is
+held, without the bound below. The boards that are free stay free while the
+run waits for the one that is not, until it can take them all; the error a
+newcomer gets says which board that is:
+
+```
+error: UT_1 is queued after waiting 5s: agent #3, run 2026-10-31-flash,
+run-suite release / comprehensive, pid 8120, since ... UTC asked for it first
+and is still waiting for it; that command is waiting for UT_0 too, which is
+held by agent #14, run 2026-10-31-ble, pid 7781, since ... UTC; use
+--wait-for-boards MINUTES to wait for your turn
+```
+
 A ticket is a file named after its number, locked while its command waits and
 removed when it stops waiting. It is locked and written before it appears
 under its queue name, so a ticket counts only while its command is really
@@ -1476,29 +1494,30 @@ UT_0         held  agent #14, run 2026-10-31-ble, pid 7781 (for 0h04m11s)
              queue: 2 commands are waiting for it
 ```
 
-Giving way is bounded in one case: a board that is *free*, and that the
-command could therefore have taken. After half a second of that — two poll
-rounds, enough for a waiter that is really waiting to notice the board was
-released — a command competes for the board as it did before the queue,
-once for each command ahead of it; a command with no
+Giving way is bounded in one case: the command ahead could take everything it
+asked for right now — all of it is free — and has not. After half a second of
+that — two poll rounds, enough for a waiter that is really waiting to notice a
+board was released — a command competes for the board as it did before the
+queue, once for each command ahead of it; a command with no
 `--wait-for-boards` has a whole second before it gives up, so it too ends up
 competing rather than failing (and, if the board is taken again just before
 that second is up, failing with `is queued` where it used to say `is in
-use`). The bound is per stretch of giving way: it starts again whenever the
-board is held, or the command ahead in the queue changes, so a long wait
-never turns into a licence to jump the queue. Giving way to a board somebody
-is using is never bounded: nothing in the harness can be stuck on a lock that
-is held, so the waiters simply take their turns.
+use`). The bound is per stretch of giving way: it starts again whenever one of
+those boards is held, or the command ahead in the queue changes, so a long
+wait never turns into a license to jump the queue. Giving way to a command
+that is waiting for a board somebody is using is never bounded: nothing in
+the harness can be stuck on a lock that is held, so the waiters simply take
+their turns.
 
-That bound is what keeps the queue from becoming a new way to wait forever.
-A command can be ahead in the queue and unable to take the board for reasons
-the queue cannot see or help: a wrapper outside the harness holding a board's
-own lock file while it waits for the lease (the order below), or simply a run
-that is still blocked on the host lock. Its neighbors give it a clear run at
-the board and then carry on. So the queue is not a reservation: a command
-that needs several boards can still miss its turn when each comes free on
-its own and never all at once
-([#225](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/225)).
+That bound is what keeps the queue from becoming a new way to wait forever. A
+command can be ahead in the queue, with everything it asked for free, and
+still not take it, for a reason the queue can neither see nor help: a wrapper
+outside the harness holding a board's own lock file while it waits for the
+lease (the order below). Its neighbors give it a clear run at the board and
+then carry on. The host lock is the other thing a waiter can be held up by
+with no way through, since it is never taken over (above): one whose holder is
+gone counts as free here, so a lock a person has to clear does not hold the
+whole bench in the queue.
 
 ### The host lock
 

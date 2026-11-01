@@ -98,8 +98,17 @@ ticket of a command that is still waiting. What that promises, exactly: a
 command does not take a resource out of turn in the moment it comes free,
 so the command that has been waiting longest gets a clear run at it, and
 one that asks for a board somebody has waited longer for is told so instead
-of taking it. It is not a reservation: see the bound below, and #225 for
-the case it leaves open.
+of taking it.
+
+A command that wants several resources is served the same way, and that
+takes one thing more. Taking locks is all or nothing, so such a command
+needs every resource free in the same attempt; with short leases arriving
+on different boards, each can be free in its turn and never all at once
+(#225). So a ticket records the whole set its command is waiting for, and a
+command gives way to an older ticket for as long as any resource in that
+set is held, without the bound below. The resources that are free stay free
+while the command ahead waits for the one that is not, until it can take
+them all.
 
 A ticket is a file named after its number, locked with ``flock`` by the
 command waiting on it and removed when that command stops waiting, so a
@@ -114,26 +123,24 @@ Ticket numbers come from the wall clock, so a clock set backwards can give a
 newcomer an older place; the order stays total either way, which is what the
 lock order needs.
 
-Giving way is bounded in one case: a resource that is *free*, and that this
-command could therefore have taken. After half a second of that (two poll
-rounds, enough for a waiter that is really waiting to notice a resource was
-released) a command competes for it as it did before the queue. The bound
-is per stretch: it
-starts again whenever the resource is held, or the command ahead in the
-queue changes, so a long wait never turns into a licence to jump the queue
-(and a command behind several waiters gives way once for each of them).
-Giving way to a resource somebody is using is never bounded, since nothing
-here can be stuck on a lock that is held; the waiters simply take their
-turns.
+Giving way is bounded in one case: the command ahead could take every
+resource it asked for right now — all of them are free — and has not. After
+half a second of that (two poll rounds, enough for a waiter that is really
+waiting to notice a resource was released) a command competes for them as
+it did before the queue. The bound is per stretch: it
+starts again whenever one of those resources is held, or the command ahead
+in the queue changes, so a long wait never turns into a license to jump the
+queue (and a command behind several waiters gives way once for each of
+them). Giving way to a command that is waiting for a resource somebody is
+using is never bounded, since nothing here can be stuck on a lock that is
+held; the waiters simply take their turns.
 
 That bound is what keeps the queue from becoming a new way to wait forever.
-A command can be ahead in the queue and unable to take a resource for
-reasons the queue can neither see nor help: a wrapper outside the harness
-holding a board's own lock file while it waits for the lease (the order
-below), or a run still blocked on the host lock. Its neighbors give it a
-clear run and then carry on. The cost of that bound is that the queue is
-not a guarantee: a command that needs several resources can still miss its
-turn when each comes free on its own and never all at once (#225).
+A command can be ahead in the queue, with everything it asked for free, and
+still not take it, for reasons the queue can neither see nor help: a
+wrapper outside the harness holding a board's own lock file while it waits
+for the lease (the order below). Its neighbors give it a clear run and then
+carry on.
 
 A lab wrapper that takes its external board locks and then runs
 ``lease`` (which may take the host lock, then leases) follows the same
@@ -625,6 +632,18 @@ class TicketQueue:
         # would have taken.
         self.resources = list(resources)
         self.holder = holder
+        # Every resource this command is waiting for, written into each of
+        # its tickets: a command reading one ticket then knows the whole set
+        # its owner needs, not only the resource that ticket queues for
+        # (see _blocked_by()). One entry per resource, the same shape a
+        # lease uses, and in lock order.
+        self.wanted: list[dict] = []
+        queued_keys: set[str] = set()
+        for board in self.resources:
+            if board.key in queued_keys:
+                continue  # one resource, two entries (a lease and its external lock)
+            queued_keys.add(board.key)
+            self.wanted.append({"key": board.key, "resource": board.alias})
         self.number = time.time_ns()
         self.name = f"{self.number:020d}-{os.getpid()}-{os.urandom(3).hex()}"
         self.tickets: list[tuple[Path, int]] = []
@@ -668,7 +687,7 @@ class TicketQueue:
                 os.fchmod(fd, 0o644)
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 _stamp(fd, dict(self.holder, resource=board.alias,
-                                ticket=self.name))
+                                ticket=self.name, waiting_for=self.wanted))
                 os.rename(temporary, directory / self.name)
             except FileNotFoundError:
                 # Another command cleared this file as a leftover while it
@@ -802,6 +821,61 @@ class TicketQueue:
 
     def __exit__(self, *_exc) -> None:
         self.release()
+
+
+def waiting_resources(ticket: Mapping, board: Board) -> list[Board]:
+    """Every resource the command holding this ticket is waiting for.
+
+    Read from the ticket's own record, which lists the whole set its command
+    asked for, not only the resource this ticket queues for. A record
+    without the list (a ticket from an earlier harness, or a file written by
+    hand) is read as that one resource, which is all the queue looked at
+    before multi-resource waiters.
+
+    Each key becomes a lock file name here, so only a plain name is used; a
+    record whose entries are something else is read as the one resource.
+    """
+    entries = ticket.get("waiting_for")
+    if not isinstance(entries, list):
+        return [board]
+    resources = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        key = str(entry.get("key") or "")
+        if not _LOCK_NAME.fullmatch(key) or key in (".", ".."):
+            continue
+        resources.append(Board(str(entry.get("resource") or key), key))
+    return resources or [board]
+
+
+def _blocked_by(root: Path, ticket: Mapping, board: Board) -> Board | None:
+    """A resource the command ahead in the queue is waiting for and somebody holds.
+
+    None when every resource that command asked for is free, so it could
+    take them all right now. This is what tells a waiting command whether
+    giving way to the command ahead is bounded: see acquire(). A command
+    that wants several resources cannot take any of them while one is held,
+    however long its neighbors give way, so a resource held by somebody is
+    the one case where that command is known to be waiting on a lock rather
+    than stuck on something the queue cannot see (#225).
+
+    One exception: the host lock is never taken over, so a host lock whose
+    holder is gone stays locked until a person clears it. Counting that as
+    held would keep every command that wants one of this command's boards in
+    the queue until it gave up. It is read as free here, as it was before
+    multi-resource waiters, and the error that names it says what to do.
+    """
+    for resource in waiting_resources(ticket, board):
+        path = root / f"{resource.key}.lock"
+        if not _held(path):
+            continue
+        if resource.key == HOST_LOCK.key and lease_liveness(
+            read_holder(path)
+        )[0] in ("stale", "orphan"):
+            continue
+        return resource
+    return None
 
 
 def describe_waiting(count: int) -> str:
@@ -1015,23 +1089,28 @@ def acquire(
             # Another command asked for one of these resources earlier and
             # is still waiting for it: taking locks now would jump the queue.
             queued = queue.ahead()
+            blocked = None
             if queued is not None:
-                # Giving way to a resource that is free, and that this
-                # command could therefore have taken, is the one case where
-                # the queue could deadlock: a party the queue cannot see may
-                # hold a board's own lock file outside the harness and then
-                # wait for its lease, and the older waiter would be stuck on
-                # that file while this command gave way to the queue. So each
-                # stretch of giving way to a free resource is bounded.
+                # Giving way to a command that could take every resource it
+                # asked for right now, and has not, is the one case where the
+                # queue could deadlock: a party the queue cannot see may hold
+                # a board's own lock file outside the harness and then wait
+                # for its lease, and the older waiter would be stuck on that
+                # file while this command gave way to the queue. So each
+                # stretch of giving way to such a command is bounded.
                 marker = (queued[0].key, queued[1])
                 if marker != giving_way:
                     # A different resource, or the command ahead has changed:
                     # the queue is moving, so this starts again.
                     giving_way, yielded = marker, 0.0
-                if _held(root / f"{queued[0].key}.lock"):
-                    # Nothing here can be stuck on a lock somebody holds, so
-                    # giving way to one is never bounded: the waiters take
-                    # their turns.
+                blocked = _blocked_by(root, queued[2], queued[0])
+                if blocked is not None:
+                    # One of the resources that command asked for is held, so
+                    # it is waiting on a lock, not stuck on something the
+                    # queue cannot see: nothing here can be stuck on a lock
+                    # somebody holds. Giving way to it is not bounded, which
+                    # is what lets a command collect several resources that
+                    # never come free at the same moment (#225).
                     yielded = 0.0
                 else:
                     yielded += _POLL_S
@@ -1048,6 +1127,15 @@ def acquire(
                     if _held(root / f"{board.key}.lock"):
                         busy_now = ("; it is held by " + describe_holder(
                             read_holder(root / f"{board.key}.lock")))
+                    elif blocked is not None:
+                        # This resource is free, and the command ahead is
+                        # waiting for another one that is not: it is holding
+                        # this one for the moment they are all free.
+                        other_lock = root / f"{blocked.key}.lock"
+                        busy_now = (
+                            f"; that command is waiting for {blocked.alias} too, "
+                            f"which is held by {describe_holder(read_holder(other_lock))}"
+                        )
                     elif external_template:
                         # The command ahead may be stuck on the lab's own
                         # lock file rather than on anything the harness
