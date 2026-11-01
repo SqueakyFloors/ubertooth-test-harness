@@ -1313,7 +1313,7 @@ stable path (`/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Cont
 derived from the bridge serial unless the identity names a `serial device`),
 waits for the firmware's boot notice, and speaks its line shell: `status`
 (one JSON line with the BD_ADDR, LAP and UAP), `role`, `spp peer`,
-`spp start`, `stream`, `spp stop`. `reset` restarts the board with the
+`spp start`, `stream`, `spp stop`, `afh`. `reset` restarts the board with the
 bridge's own RTS line, which is how a case releases one. Every command fails
 closed with an `error:` line.
 
@@ -1343,13 +1343,27 @@ version each board reported. An older image, or another major version,
 fails mandatory preflight naming what it found; build and flash it from
 `firmware/esp32-classic-peer` at this harness commit.
 
+`stream` also holds the piconet to part of the band. `--map <20 hex digits>`
+(or `off`) is set on the initiator, which leads the piconet, before the link
+comes up, so a whole capture runs on one map; `--map-report` writes the map
+asked for and the map the live link is really hopping over, read from the
+leader's controller at the start, the middle, and the end of the capture;
+`--command-output` saves the tool's output for a later step; and
+`--interrupt-after` stops a tool that runs until it is signalled. That is what
+`Recover AFH map` is built from, and
+[`ubertooth_harness/afhmap.py`](ubertooth_harness/afhmap.py) is the step that
+compares the two maps. The map commands need `utesp-1.3.0` or a later image,
+where the rest of the driver needs only `utesp-1.0.0`.
+
 The `classic` suite of [`testplans/classic.yaml`](testplans/classic.yaml) is
-the smoke run above, `classic-comprehensive` adds the capture files and the
-role exchange, and `classic-long` is the bounded long variant: the same two
-follow cases over a five-minute capture each, which is what shows that a
-receive run and the pair's link hold up for minutes rather than seconds. The
-sampling soak, `Classic Bluetooth receive soak`, is still a backlog entry;
-sampling is what it waits for, not traffic.
+the smoke run above plus `Recover AFH map`, `classic-comprehensive` adds the
+capture files, the role exchange, and the AFH detection phase, and
+`classic-long` is the bounded long variant: the same two follow cases over a
+five-minute capture each, which is what shows that a receive run and the
+pair's link hold up for minutes rather than seconds. `Recover AFH map` is in
+the release plan as well, on the host the peers are attached to. The sampling
+soak, `Classic Bluetooth receive soak`, is still a backlog entry; sampling is
+what it waits for, not traffic.
 
 Because the comprehensive coverage exchanges the two roles, both peers a plan
 binds must declare both: the registry's role list is what a plan picks a board

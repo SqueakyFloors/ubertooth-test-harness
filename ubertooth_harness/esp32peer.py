@@ -13,6 +13,9 @@ serial. Run as a script by the Classic cases::
                                  [--initiator-address ADDR]
                                  [--period MS] [--payload BYTES]
                                  [--min-writes N] [--timeout S]
+                                 [--map 20-HEX-DIGITS|off]
+                                 [--map-report PATH] [--command-output PATH]
+                                 [--interrupt-after S]
                                  -- COMMAND [ARGUMENT ...]
     python esp32peer.py audio    --acceptor PATH --initiator PATH
                                  [--acceptor-address ADDR]
@@ -40,6 +43,18 @@ packets. With ``--type ev3`` the link's payload is on the air at the basic
 rate, which is the one a receive-only capture can decode; the default the
 stack would pick, 2-EV3, carries it as enhanced-rate.
 
+``--map`` holds the piconet to part of the band: it is set on the initiator,
+which leads the piconet, before the link comes up, so the whole session runs
+on one map (firmware/esp32-classic-peer README, "The channel map").
+``--map-report`` then writes the maps as JSON for afhmap.py: the map that was
+asked for, and the map the link is really hopping over, read from the
+leader's controller at the start, the middle, and the end of the command. A
+link map that changes under the command is reported rather than averaged
+over. ``--command-output`` saves the command's standard output, which is
+passed through as always, so a later step can read it; ``--interrupt-after``
+stops a command that runs until it is signalled, which is what
+``ubertooth-afh`` does once it has a map.
+
 The initiator pages, so it is the piconet central and its LAP is the one on
 the air. ``central LAP`` and ``central UAP`` name it, which is what
 ``ubertooth-rx -l`` and ``-u`` take.
@@ -61,6 +76,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,7 +86,7 @@ if __package__ in (None, ""):
     # Run as a script: make the package importable for the shell-line format.
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from ubertooth_harness import targets  # noqa: E402
+from ubertooth_harness import afhmap, targets  # noqa: E402
 
 # The oldest firmware whose shell has everything this driver uses, and the
 # stable path of its bridge: both from targets.py, which keeps every known
@@ -85,6 +101,10 @@ from ubertooth_harness import targets  # noqa: E402
 # not targets.PEER_FIRMWARE, the version this tree builds: a firmware PR
 # bumps that, and boards on an older 1.x image must stay usable.
 MINIMUM_FIRMWARE = "utesp-1.0.0"
+# The oldest image whose shell has `afh` and reports the live link's map, so
+# only a session given --map asks for it; everything else still runs on
+# MINIMUM_FIRMWARE.
+AFH_MINIMUM_FIRMWARE = "utesp-1.3.0"
 BAUD = 115200
 ROLES = ("acceptor", "initiator")
 BOOT_ROLE = "acceptor"
@@ -130,6 +150,15 @@ AUDIO_ON = "on"
 # timing out here, and a slow one is not cut off mid-command. A link to a
 # board that is awake takes four or five seconds.
 AUDIO_CONNECT_TIMEOUT_S = 40.0
+
+# The channel map: `off` puts every channel back, and the smallest map a
+# piconet may hop over is the spec's twenty channels, which the firmware
+# refuses to go below. Refusing the same maps here keeps a session that
+# cannot work from touching the boards at all.
+AFH_OFF = "off"
+AFH_MIN_CHANNELS = 20
+# Where the link's map is read, as the report and afhmap.py name the three.
+SAMPLE_POINTS = ("start", "middle", "end")
 
 COMMAND_TIMEOUT_S = 5.0
 # Opening the port resets the board; it then has to boot and start Bluetooth
@@ -248,6 +277,37 @@ def payload_bytes(value) -> int:
     if not PAYLOAD_MIN <= number <= PAYLOAD_MAX:
         raise PeerError(f"stream payload must be {PAYLOAD_MIN}-{PAYLOAD_MAX} bytes")
     return number
+
+
+def channel_map(value) -> str:
+    """``off``, or a channel map in the twenty hex digits the shell takes.
+
+    The firmware refuses a map of fewer than twenty channels and one that
+    sets the reserved 80th bit, and so does this: a map no piconet may use
+    tells a test nothing, and refusing it here costs no board time.
+    """
+    text = str(value).strip().lower()
+    if text == AFH_OFF:
+        return AFH_OFF
+    try:
+        channels = afhmap.channels_from_hex(text, "the channel map")
+    except afhmap.AfhMapError as error:
+        raise PeerError(str(error)) from error
+    if len(channels) < AFH_MIN_CHANNELS:
+        raise PeerError(f"a piconet needs at least {AFH_MIN_CHANNELS} channels, "
+                        f"and {text} keeps {len(channels)}")
+    return text
+
+
+def requested_map(wanted: str) -> str:
+    """The map ``wanted`` asks the controller for, as its status reports it.
+
+    ``off`` is every channel, which is what the board reports after it, so a
+    report and a comparison can name one map either way.
+    """
+    if wanted == AFH_OFF:
+        return afhmap.hex_from_channels(range(afhmap.CHANNELS))
+    return wanted
 
 
 # --------------------------------------------------------------------------
@@ -422,6 +482,78 @@ def _report(out, label: str, status: dict) -> None:
     print(f"{label} role: {status['role']} name: {status['name']}", file=out)
 
 
+def set_channel_map(shell: Shell, wanted: str, label: str,
+                    firmware: str | None = None) -> dict:
+    """Hold this board's piconet to ``wanted`` and check the controller took it.
+
+    The shell answers once the controller has taken the map rather than when
+    the command was sent, so the status read after it reports the new map.
+    Reading it back is what makes the report's requested map a measurement
+    and not a restatement of the command line.
+    """
+    check_firmware(firmware if firmware is not None else shell.status()["fw"],
+                   label, AFH_MINIMUM_FIRMWARE)
+    shell.command(f"afh {wanted}")
+    status = shell.status()
+    expected = requested_map(wanted)
+    taken = str(status.get("afh") or "")
+    if taken != expected:
+        raise PeerError(f"{label} reports channel map {taken or 'none'} after "
+                        f"'afh {wanted}', not {expected}")
+    used = len(afhmap.channels_from_hex(expected, "the requested map"))
+    if status.get("afh_used") != used:
+        raise PeerError(f"{label} reports {status.get('afh_used')} channels used "
+                        f"in {taken}, which has {used}")
+    return status
+
+
+def read_link_map(shell: Shell, label: str, at: str, seconds: float) -> dict:
+    """One reading of the map the live link is hopping over.
+
+    Every reason the read can fail is the controller's or the link's, and
+    each one makes the map unknown rather than wrong, so it is refused here
+    instead of being recorded as a map (the peer's README, "The two maps in
+    `status`").
+    """
+    status = shell.status()
+    error = str(status.get("afh_link_error") or "")
+    if error:
+        raise PeerError(f"{label}: the link's channel map could not be read at "
+                        f"the {at} of the command: {error}")
+    link = status.get("afh_link")
+    if not link:
+        raise PeerError(f"{label}: the controller reports no channel map for one "
+                        f"link at the {at} of the command; a board with no link, "
+                        "or more than one, has no piconet map")
+    mode = str(status.get("afh_mode") or "")
+    if mode != "on":
+        raise PeerError(f"{label}: the controller reports AFH {mode or 'unknown'} "
+                        f"at the {at} of the command, so the link is not hopping "
+                        "over a map")
+    channels = afhmap.channels_from_hex(str(link), "the in-force map")
+    if status.get("afh_link_used") != len(channels):
+        raise PeerError(f"{label}: the controller reports "
+                        f"{status.get('afh_link_used')} channels used in {link}, "
+                        f"which has {len(channels)}")
+    return {"at": at, "seconds": round(seconds, 1), "link": str(link),
+            "used": len(channels), "mode": mode, "error": ""}
+
+
+def _report_map(out, requested: str, samples: Sequence[dict]) -> None:
+    print(f"channel map requested: {requested} used "
+          f"{len(afhmap.channels_from_hex(requested, 'the requested map'))}",
+          file=out)
+    for sample in samples:
+        print(f"channel map in force at the {sample['at']} "
+              f"({sample['seconds']:.1f} s): {sample['link']} used "
+              f"{sample['used']}", file=out)
+    maps = {sample["link"] for sample in samples}
+    if len(maps) == 1:
+        print("channel map in force: stable", file=out)
+    else:
+        print("channel map in force: changed under the command", file=out)
+
+
 def _report_traffic(out, label: str, status: dict) -> None:
     print(f"{label} traffic: writes {status['writes']} errors "
           f"{status['write_errors']} received {status['rx_bytes']} bytes "
@@ -513,6 +645,105 @@ def reset(peer: Peer, out=None) -> dict:
     return status
 
 
+def _tee(stream, sinks) -> None:
+    """Pass the command's output on, line by line, to every sink.
+
+    One line at a time and flushed, because the sinks are this process's own
+    standard output, where the step's record reads it, and the saved file a
+    later step reads: a capture stopped partway must leave both complete up
+    to the last line the command wrote.
+    """
+    for line in stream:
+        for sink in sinks:
+            sink.write(line)
+            sink.flush()
+
+
+def _run_command_watched(command: Sequence[str], *, timeout: float,
+                         interrupt_after: float | None = None,
+                         output_path: str | None = None,
+                         sample_at: float | None = None,
+                         sample: Callable[[float], None] | None = None,
+                         out) -> tuple[int, float]:
+    """Run the thing under test, saving its output and stopping it on time.
+
+    ``interrupt_after`` is for a command that runs until it is signalled:
+    ``ubertooth-afh`` prints the map it has worked out and then keeps
+    watching for changes, so the interrupt is the planned end of the capture
+    and its exit status is the command's own. ``sample_at`` reads the peer
+    while the command runs, which costs a round trip to the board's shell
+    and nothing on the air.
+    """
+    started = time.monotonic()
+    saved = (open(output_path, "w", encoding="utf-8")  # noqa: SIM115 (closed below)
+             if output_path else None)
+    try:
+        try:
+            child = subprocess.Popen(list(command), stdout=subprocess.PIPE,
+                                     text=True, errors="replace")
+        except OSError as error:
+            raise PeerError(f"cannot run {command[0]}: {error}") from error
+        sinks = [sys.stdout] + ([saved] if saved else [])
+        pump = threading.Thread(target=_tee, args=(child.stdout, sinks),
+                                daemon=True)
+        pump.start()
+        deadline = started + timeout
+        stop_at = None if interrupt_after is None else started + interrupt_after
+        due = None if sample_at is None or sample is None else started + sample_at
+        overran = False
+        while child.poll() is None:
+            now = time.monotonic()
+            if due is not None and now >= due:
+                due = None
+                sample(now - started)
+                continue
+            if stop_at is not None and now >= stop_at:
+                stop_at = None
+                print(f"command interrupted after {now - started:.1f} s", file=out)
+                out.flush()
+                child.send_signal(signal.SIGINT)
+                # From the interrupt, the command gets the same grace as an
+                # overrunning one: long enough to stop its board and close
+                # its files, not long enough to hold the boards for a run
+                # that is already over.
+                deadline = min(deadline, time.monotonic() + INTERRUPT_TIMEOUT_S)
+                continue
+            if now >= deadline:
+                overran = True
+                break
+            time.sleep(POLL_S)
+        def drained() -> None:
+            """Wait for the reader, then let go of the pipe.
+
+            The reader is given the same grace to pass on what the command
+            wrote before it exited; one still blocked after that is a daemon
+            and does not hold this process open. The pipe is closed only once
+            the reader has let go of it, because closing it underneath would
+            raise in the thread instead of here.
+            """
+            pump.join(INTERRUPT_TIMEOUT_S)
+            if not pump.is_alive():
+                child.stdout.close()
+
+        if overran:
+            # Interrupt first, for the reason _run_command gives: a capture
+            # tool stops its board and closes its files on SIGINT.
+            child.send_signal(signal.SIGINT)
+            try:
+                child.wait(timeout=INTERRUPT_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+            drained()
+            raise PeerError(f"{command[0]} did not finish within {timeout:g}s")
+        status = child.wait()
+        drained()
+        return status, time.monotonic() - started
+    finally:
+        if saved is not None:
+            saved.close()
+
+
 def _run_command(command: Sequence[str], timeout: float) -> tuple[int, float]:
     """Run the thing under test, inheriting our streams, with a deadline.
 
@@ -543,7 +774,9 @@ def stream(acceptor: Peer, initiator: Peer, command: Sequence[str], *,
            period: int = DEFAULT_PERIOD_MS, payload: int = DEFAULT_PAYLOAD,
            min_writes: int = 1, min_seconds: float = 0.0,
            timeout: float = 300.0, out=None,
-           settle_s: float = SETTLE_S) -> int:
+           settle_s: float = SETTLE_S, wanted_map: str | None = None,
+           map_report: str | None = None, command_output: str | None = None,
+           interrupt_after: float | None = None) -> int:
     """Hold the pair's link up and streaming while ``command`` runs.
 
     Both ports are opened first, which resets both boards, so the pair starts
@@ -552,6 +785,10 @@ def stream(acceptor: Peer, initiator: Peer, command: Sequence[str], *,
     out = out or sys.stderr
     period = period_ms(period)
     payload = payload_bytes(payload)
+    wanted = None if wanted_map is None else channel_map(wanted_map)
+    if map_report and wanted is None:
+        raise PeerError("--map-report needs --map: with no map asked for there "
+                        "is nothing to compare a recovered map against")
     if acceptor.device == initiator.device:
         raise PeerError("the acceptor and the initiator are the same bridge; a "
                         "Classic link needs two boards")
@@ -562,7 +799,10 @@ def stream(acceptor: Peer, initiator: Peer, command: Sequence[str], *,
             return _stream(acceptor, acceptor_shell, initiator, initiator_shell,
                            command, period=period, payload=payload,
                            min_writes=min_writes, min_seconds=min_seconds,
-                           timeout=timeout, out=out, settle_s=settle_s)
+                           timeout=timeout, out=out, settle_s=settle_s,
+                           wanted_map=wanted, map_report=map_report,
+                           command_output=command_output,
+                           interrupt_after=interrupt_after)
         finally:
             initiator_shell.close()
     finally:
@@ -581,9 +821,38 @@ def _release(shell: Shell) -> None:
         pass
 
 
+def _middle_of(interrupt_after: float | None, timeout: float) -> float:
+    """Halfway through the capture, which is where the middle sample is read.
+
+    A command that is stopped on time has a known length, so half of it is
+    the middle; one that stops itself has only the deadline, and half of
+    that is the best the session can do.
+    """
+    return (timeout if interrupt_after is None else interrupt_after) / 2
+
+
+def _write_map_report(path: str, requested: str, samples: Sequence[dict],
+                      command: Sequence[str], seconds: float) -> None:
+    """The session's maps as JSON, for afhmap.py to judge the recovery by."""
+    report = {
+        "requested": requested,
+        "requested_used": len(afhmap.channels_from_hex(requested,
+                                                       "the requested map")),
+        "samples": list(samples),
+        "command": list(command),
+        "seconds": round(seconds, 1),
+    }
+    try:
+        Path(path).write_text(json.dumps(report, indent=1, sort_keys=True) + "\n",
+                              encoding="utf-8")
+    except OSError as error:
+        raise PeerError(f"cannot write the map report {path}: {error}") from error
+
+
 def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
             period, payload, min_writes, min_seconds, timeout, out,
-            settle_s) -> int:
+            settle_s, wanted_map=None, map_report=None, command_output=None,
+            interrupt_after=None) -> int:
     acceptor_shell.wait_ready()
     initiator_shell.wait_ready()
     acceptor_status = check_status(acceptor_shell.status(), acceptor.label,
@@ -599,11 +868,17 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
     print(f"central LAP: {initiator_status['lap']}", file=out)
     print(f"central UAP: {initiator_status['uap']}", file=out)
     print(f"stream: {payload} bytes every {period} ms", file=out)
+    samples: list[dict] = []
     try:
         initiator_shell.command("role initiator")
         initiator_shell.command(f"spp peer {acceptor_status['address']}")
         initiator_shell.command(f"stream period {period}")
         initiator_shell.command(f"stream payload {payload}")
+        if wanted_map is not None:
+            # Before the link: the leader announces the map it has when the
+            # link comes up, so the whole capture then runs on one map.
+            set_channel_map(initiator_shell, wanted_map, initiator.label,
+                            initiator_status["fw"])
         initiator_shell.command("spp start", CONNECT_TIMEOUT_S)
         initiator_shell.command("stream on")
         linked = initiator_shell.status()
@@ -614,16 +889,38 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         print(f"link: up to {linked['remote']} at "
               f"{time.strftime('%H:%M:%SZ', time.gmtime())}", file=out)
         time.sleep(settle_s)
+        if wanted_map is not None:
+            samples.append(read_link_map(initiator_shell, initiator.label,
+                                         SAMPLE_POINTS[0], 0.0))
         print("command: " + " ".join(command), file=out)
         out.flush()
-        status, seconds = _run_command(command, timeout)
+        if wanted_map is None and command_output is None and interrupt_after is None:
+            status, seconds = _run_command(command, timeout)
+        else:
+            def middle(elapsed: float) -> None:
+                samples.append(read_link_map(initiator_shell, initiator.label,
+                                             SAMPLE_POINTS[1], elapsed))
+            status, seconds = _run_command_watched(
+                command, timeout=timeout, interrupt_after=interrupt_after,
+                output_path=command_output,
+                sample_at=None if wanted_map is None else _middle_of(
+                    interrupt_after, timeout),
+                sample=None if wanted_map is None else middle, out=out)
         print(f"command exit: {status} after {seconds:.1f} s", file=out)
+        if wanted_map is not None:
+            samples.append(read_link_map(initiator_shell, initiator.label,
+                                         SAMPLE_POINTS[2], seconds))
         initiator_shell.command("stream off")
         after_initiator = initiator_shell.status()
         after_acceptor = acceptor_shell.status()
     finally:
         _release(initiator_shell)
         _release(acceptor_shell)
+    if wanted_map is not None:
+        requested = requested_map(wanted_map)
+        _report_map(out, requested, samples)
+        if map_report:
+            _write_map_report(map_report, requested, samples, command, seconds)
     _report_traffic(out, initiator.label, after_initiator)
     _report_traffic(out, acceptor.label, after_acceptor)
     problems = []
@@ -639,6 +936,13 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
     if seconds < min_seconds:
         problems.append(f"{command[0]} ran {seconds:.1f} s, less than the "
                         f"{min_seconds:g} s this test needs: it stopped early")
+    if len({sample["link"] for sample in samples}) > 1:
+        # The leader's controller may classify channels again while the link
+        # is up. There is then no one map the capture ran on, so the session
+        # says so rather than leaving a comparison to pick a sample.
+        problems.append("the link's channel map changed under the command: "
+                        + "; ".join(f"{sample['at']} {sample['link']}"
+                                    for sample in samples))
     if problems:
         raise PeerError("the pair did not stream: " + "; ".join(problems))
     print("pair streamed: yes", file=out)
@@ -839,6 +1143,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                               help="bytes")
             pair.add_argument("--min-writes", type=int, default=1,
                               help="writes the initiator must report afterwards")
+            pair.add_argument("--map", dest="channel_map",
+                              help="hold the piconet to this channel map "
+                                   "(twenty hex digits) or 'off' for every "
+                                   "channel; set on the initiator before the "
+                                   "link comes up")
+            pair.add_argument("--map-report",
+                              help="write the session's maps here as JSON, for "
+                                   "afhmap.py")
+            pair.add_argument("--command-output",
+                              help="save the command's standard output here as "
+                                   "well as passing it through")
+            pair.add_argument("--interrupt-after", type=float,
+                              help="seconds after which the command is "
+                                   "interrupted, for one that runs until it is "
+                                   "signalled")
         else:
             pair.add_argument("--type", dest="packet_type",
                               default=DEFAULT_AUDIO_TYPE, choices=AUDIO_TYPES,
@@ -871,7 +1190,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return stream(
                 acceptor, initiator, command, period=args.period,
                 payload=args.payload, min_writes=args.min_writes,
-                min_seconds=args.min_seconds, timeout=args.timeout)
+                min_seconds=args.min_seconds, timeout=args.timeout,
+                wanted_map=args.channel_map, map_report=args.map_report,
+                command_output=args.command_output,
+                interrupt_after=args.interrupt_after)
         peer = Peer(args.device, args.role, args.address, args.alias)
         if args.command == "identify":
             identify(peer)

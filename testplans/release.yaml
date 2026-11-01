@@ -135,3 +135,22 @@ suites:
     - Raw receive replay:
         hosts: each
         coverage: comprehensive
+
+    # The only entry here that needs a peer: the two ESP32 Classic boards
+    # hold a piconet to a chosen channel map, which is the only traffic on
+    # the bench whose AFH map is known, so nothing else can check that
+    # `ubertooth-afh` recovers one. It is therefore the Linux host's alone,
+    # and a release run on a host without the pair skips it.
+    #
+    # The smoke profile: its two capture cases, the 40-channel map and the
+    # 20-channel minimum, are what a regression in the map recovery shows up
+    # in. The comprehensive third case, the -t detection phase, runs in
+    # classic-comprehensive rather than lengthening the gate by another two
+    # captures.
+    - Recover AFH map:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        coverage: smoke
+        duration: 90s

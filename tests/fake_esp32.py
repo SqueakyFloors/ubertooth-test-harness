@@ -8,7 +8,13 @@ session can be exercised without hardware.
 
 import json
 
-from ubertooth_harness import esp32peer
+from ubertooth_harness import afhmap, esp32peer
+
+# The map a board boots with, and the three channels these controllers drop
+# of their own accord, which is why the link's map is read rather than
+# assumed (firmware/esp32-classic-peer README, "The two maps in `status`").
+ALL_CHANNELS = afhmap.hex_from_channels(range(afhmap.CHANNELS))
+CONTROLLER_DROPS = (0, 24, 78)
 
 # What the ROM prints after every reset, which opening the bridge causes.
 BOOT_LOG = (
@@ -22,10 +28,16 @@ BOOT_LOG = (
 
 class FakePeerFirmware:
     def __init__(self, address="C8:85:41:2A:1B:2A",
-                 version=esp32peer.MINIMUM_FIRMWARE, start_failure=""):
+                 version=esp32peer.MINIMUM_FIRMWARE, start_failure="",
+                 link_maps=(), link_error=""):
         self.address = address
         self.version = version
         self.start_failure = start_failure
+        # Link maps the controller reports, one per status read, for a test
+        # of a map that changes under a capture; empty means the controller
+        # keeps the map it took, minus the channels it drops by itself.
+        self.link_maps = list(link_maps)
+        self.link_error = link_error
         self.commands = []
         self.silent = False
         self.refuse = {}
@@ -41,6 +53,7 @@ class FakePeerFirmware:
         self.defaults()
 
     def defaults(self):
+        self.afh = ALL_CHANNELS
         self.role = esp32peer.BOOT_ROLE
         self.discoverable = True
         self.spp_server = True
@@ -85,9 +98,36 @@ class FakePeerFirmware:
                                f"{self.start_failure}"]
         return [*BOOT_LOG, f"utesp: {self.version} ready"]
 
+    def link_map(self) -> str | None:
+        """The map the controller reports for the live link, or None.
+
+        With no one link there is no link map. Otherwise the controller
+        drops the three channels it always drops from the map it took, which
+        is what makes the in-force map a subset of the requested one.
+        """
+        if not self.connected:
+            return None
+        if self.link_maps:
+            return self.link_maps.pop(0)
+        kept = afhmap.channels_from_hex(self.afh) - set(CONTROLLER_DROPS)
+        return afhmap.hex_from_channels(kept)
+
     def status(self) -> dict:
         lap, uap = esp32peer.address_parts(self.address)
         nap = "".join(self.address.split(":")[:2]).lower()
+        link = None if self.link_error else self.link_map()
+        return {
+            "afh": self.afh,
+            "afh_used": len(afhmap.channels_from_hex(self.afh)),
+            "afh_link": link,
+            "afh_link_used": (None if link is None
+                              else len(afhmap.channels_from_hex(link))),
+            "afh_mode": None if link is None else "on",
+            "afh_link_error": self.link_error if self.connected else "",
+            **self._base_status(lap, uap, nap),
+        }
+
+    def _base_status(self, lap, uap, nap) -> dict:
         return {
             "role": self.role, "fw": self.version, "bt": not self.start_failure,
             "address": self.address, "lap": lap, "uap": uap, "nap": nap,
@@ -128,6 +168,8 @@ class FakePeerFirmware:
             return self._stream(words[1:])
         if words[:1] == ["sco"]:
             return self._sco(words[1:])
+        if words[:1] == ["afh"]:
+            return self._afh(words[1:])
         if words == ["defaults"]:
             self.defaults()
             return ["OK"]
@@ -191,6 +233,24 @@ class FakePeerFirmware:
             if far is not None and far.connected:
                 far.connected = False
                 far.remote = ""
+
+    def _afh(self, words):
+        """`afh <20 hex digits>` or `afh off`, with the firmware's refusals."""
+        if len(words) != 1:
+            return ["ERR afh takes twenty hex digits or off"]
+        wanted = words[0].lower()
+        if wanted == esp32peer.AFH_OFF:
+            self.afh = ALL_CHANNELS
+            return ["OK"]
+        if len(wanted) != afhmap.MAP_DIGITS or set(wanted) - set("0123456789abcdef"):
+            return ["ERR the channel map must be twenty hex digits"]
+        if int(wanted[-2:], 16) & 0x80:
+            return ["ERR the top bit of the last byte is reserved and must be zero"]
+        if len(afhmap.channels_from_hex(wanted)) < esp32peer.AFH_MIN_CHANNELS:
+            return [f"ERR a piconet needs at least {esp32peer.AFH_MIN_CHANNELS} "
+                    "channels"]
+        self.afh = wanted
+        return ["OK"]
 
     def _stream(self, words):
         if not words:

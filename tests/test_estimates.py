@@ -152,7 +152,10 @@ class EstimateTests(unittest.TestCase):
         # host) adds 15.1 s, and Interrupting a capture 18.5 s, the middle of
         # three runs on the Linux bench host. The release suite is the
         # non-soak release gate and is kept well inside half an hour of test
-        # time.
+        # time. Every entry in it runs on each registered host, so a test
+        # that needs a device only one host has (the ESP32 Classic peers)
+        # lives in its own plan instead: naming a host here would fail
+        # planning on the others.
         plans = {plan["name"]: plan for plan in list_plans(REPOSITORY / "testplans")}
         (suite,) = plans["release"]["suites"]
         self.assertAlmostEqual(654.6, suite["estimated_s"], delta=0.2)

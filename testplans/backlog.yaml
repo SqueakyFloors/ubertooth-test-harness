@@ -8,14 +8,6 @@ suites:
         eero: required
         Ubertooth: default
 
-    # Still waiting on hardware (#88): the ESP32 peers give us a piconet, so
-    # `ubertooth-afh -l -u` has something to recover a map from, but no case
-    # is written yet. `Follow Classic Bluetooth piconet` has moved to the
-    # classic plan now that the peers are on the bench.
-    - Recover AFH map:
-        piconet: required
-        Ubertooth: default
-
     - Bluetooth inquiry scan:
         Bluetooth adapter: required
         Ubertooth: default
