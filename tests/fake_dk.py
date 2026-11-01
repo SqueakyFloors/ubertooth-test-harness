@@ -21,6 +21,14 @@ class FakeFirmware:
         # Statuses to report a short data length before the real one, so a
         # caller that waits for the connection to settle can be exercised.
         self.slow_data_length = 0
+        # The channel classification belongs to the controller: it outlives
+        # the link and the role, so it is not part of conn_defaults(). Set
+        # data_map_restore_fails to stand for a controller that refuses the
+        # restore, which leaves the narrow map in place.
+        self.data_map = nrfdk.DATA_MAP_ALL
+        self.data_map_sets = 0
+        self.data_map_gap_passed = True
+        self.data_map_restore_fails = False
         self.defaults()
         self.conn_defaults()
         self.counter = 7
@@ -49,13 +57,6 @@ class FakeFirmware:
         self.payload_len = 244
         self.period_ms = 100
         self.conn_chmap = "37"
-        # The firmware restores all 37 data channels when it leaves the role.
-        self.data_map = nrfdk.DATA_MAP_ALL
-        self.data_map_sets = 0
-        # The controller needs a second between two classifications, so the
-        # firmware refuses a second one sooner. A test that wants another
-        # map sets this to True, standing for that second having passed.
-        self.data_map_gap_passed = True
         self.cycle_ms = 0
         self.autoupdate_ms = 0
         self.writes = 0
@@ -133,9 +134,22 @@ class FakeFirmware:
         if wanted not in nrfdk.ROLES:
             return ["ERR role must be advertiser, central or peripheral"]
         self.conn_defaults()
+        self._restore_data_map()
         self.defaults()
         self.role = wanted
         return ["OK"]
+
+    def _restore_data_map(self):
+        """What the firmware's restore_data_map() does on leaving the role.
+
+        The count and the one-second gap survive it, and a controller that
+        refuses leaves the narrow map reported as it is.
+        """
+        if self.data_map == nrfdk.DATA_MAP_ALL:
+            return
+        self.data_map_gap_passed = False
+        if not self.data_map_restore_fails:
+            self.data_map = nrfdk.DATA_MAP_ALL
 
     def _conn(self, words):
         if self.role == "advertiser":
@@ -155,6 +169,7 @@ class FakeFirmware:
             return ["OK"]
         if command == "defaults":
             self.conn_defaults()
+            self._restore_data_map()
             return ["OK"]
         if command == "datamap" and args:
             if self.role != "central":
@@ -163,8 +178,8 @@ class FakeFirmware:
             try:
                 wanted = nrfdk.data_map(args[0])
             except nrfdk.NrfDkError:
-                return ["ERR channel map must be 'all' or a list of data "
-                        "channels 0-36, for example 0,12,36"]
+                return ["ERR channel map must be 'all' or a list of at least "
+                        "2 data channels 0-36, for example 0,12,36"]
             if not self.connected:
                 return ["ERR no connection to update"]
             if self.data_map_sets > 0 and not self.data_map_gap_passed:

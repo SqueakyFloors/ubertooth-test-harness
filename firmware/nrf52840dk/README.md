@@ -169,7 +169,7 @@ instead; `nrfdk.py` treats both as a refusal.
 for example a central with a live connection:
 
 ```json
-{"role":"central","fw":"utdk-1.3.0","bt":true,"address":"C0:7D:CD:95:52:86","address_type":"random static","adv":false,"running":false,"type":"nonconn","chmap":"all","interval_ms":100,"payload":"","counter":0,"starts":0,"connections":0,"last_err":0,"conn_on":true,"connected":true,"peer":"C1:92:EC:E7:71:BC","conn_interval_ms":30,"update_ms":60,"dle":true,"interval_units":48,"latency":0,"timeout_units":400,"tx_octets":251,"rx_octets":251,"mtu":247,"phy":"1M","payload_len":244,"period_ms":100,"cycle_ms":4000,"autoupdate_ms":60,"writes":74,"write_errors":4,"received":0,"updates":3,"connects":3,"disconnects":2,"conn_err":0}
+{"role":"central","fw":"utdk-1.3.0","bt":true,"address":"C0:7D:CD:95:52:86","address_type":"random static","adv":false,"running":false,"type":"nonconn","chmap":"all","interval_ms":100,"payload":"","counter":0,"starts":0,"connections":0,"last_err":0,"conn_on":true,"connected":true,"peer":"C1:92:EC:E7:71:BC","conn_interval_ms":30,"update_ms":60,"dle":true,"interval_units":48,"latency":0,"timeout_units":400,"tx_octets":251,"rx_octets":251,"mtu":247,"phy":"1M","payload_len":244,"period_ms":100,"data_map":"ffffffff1f","data_map_used":37,"data_map_sets":0,"cycle_ms":4000,"autoupdate_ms":60,"writes":74,"write_errors":4,"received":0,"updates":3,"connects":3,"disconnects":2,"conn_err":0}
 ```
 
 - `address`: the identity address, a static random address derived from
@@ -192,11 +192,15 @@ for example a central with a live connection:
 - `tx_octets` and `rx_octets`: the negotiated data length, 251 with the
   extension and 27 without; `mtu`: the ATT MTU after the exchange; `phy`:
   `1M`, the only PHY built in.
-- `data_map`: the connection's data channel map, as ten hex digits in the
-  order a CONNECT_IND and an LL_CHANNEL_MAP_IND carry it (bit b of byte i is
-  channel 8i + b), so a capture can be compared with it directly;
-  `data_map_used`: how many of the 37 channels it leaves in use;
-  `data_map_sets`: how many times `conn datamap` has set it since boot.
+- `data_map`: the channel classification this board last gave its
+  controller, as ten hex digits in the order a CONNECT_IND and an
+  `LL_CHANNEL_MAP_IND` carry it (bit b of byte i is channel 8i + b), so a
+  capture's map lines up with it field for field. It is what the central
+  asked for, not a map read back from the link: the controller may drop
+  channels of its own as well, so a recovered map can be narrower.
+  `data_map_used`: how many of the 37 channels the classification leaves in
+  use; `data_map_sets`: how many classifications the controller has taken
+  since boot, which is how the driver tells a real change from an echo.
 - `writes` and `write_errors` count the central's writes (a write can be
   refused when buffers are full as a link is coming down); `received` is
   the bytes the peripheral's characteristic got; `updates`, `connects`
@@ -234,16 +238,17 @@ peripheral's *advertising* channels, and the map in the CONNECT_IND used to
 hold for the life of the link.
 
 A channel map has to leave at least two channels used: the Bluetooth Core
-specification requires it of the HCI command this uses, and the controller
-here refuses a one-channel map (`-EINVAL`, measured on the bench), so the
-firmware refuses one first and says why. Two channels is therefore the most
+specification puts the minimum number of used channels at 2 (Vol 6 Part B,
+4.5.8.1), and the controller here refuses a one-channel map (`-EINVAL`,
+measured on the bench), so the firmware refuses one first and says why. Two channels is therefore the most
 demanding map a test can ask for, and the smallest divisor the remapping can
 be given. A channel above 36 is refused as well.
 
 Two classifications have to be at least a second apart (Bluetooth Core, HCI
 LE Set Host Channel Classification), so a second `conn datamap` sooner than
 that answers `ERR` with how long ago the last one was, rather than being
-dropped by the controller without a word. The classification belongs to the
+dropped by the controller without a word. The second runs from every command
+that reached the controller, including one it refused. The classification belongs to the
 controller and outlives the link that carried it, so leaving the role (`conn
 defaults`, `role <name>`, `nrfdk.py idle`) puts all 37 channels back, waiting
 out that second if it has to; otherwise the next test's CONNECT_IND would

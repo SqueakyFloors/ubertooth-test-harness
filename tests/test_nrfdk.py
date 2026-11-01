@@ -648,6 +648,36 @@ class RoleTests(unittest.TestCase):
                                     "does not report a valid 'data_map'"):
             self.run_quiet(nrfdk.datamap, board.dk, "0,1,2")
 
+    def test_leaving_a_role_puts_every_channel_back(self):
+        board = Board()
+        self.run_quiet(nrfdk.central, board.dk, "C1:92:EC:E7:71:BC", 30)
+        self.run_quiet(nrfdk.datamap, board.dk, "0,1,2")
+
+        status, _out = self.run_quiet(nrfdk.idle, board.dk)
+
+        # The classification outlives the link, so a narrow map left behind
+        # would narrow the next test's CONNECT_IND.
+        self.assertEqual(nrfdk.DATA_MAP_ALL, status["data_map"])
+        # The count is since boot, and the second the controller needs runs
+        # from the restore, so the next map has to wait for it.
+        self.assertEqual(1, status["data_map_sets"])
+        self.run_quiet(nrfdk.central, board.dk, "C1:92:EC:E7:71:BC", 30)
+        with self.assertRaisesRegex(nrfdk.NrfDkError, "1000 ms apart"):
+            self.run_quiet(nrfdk.datamap, board.dk, "4,5")
+
+    def test_a_restore_the_controller_refuses_fails_the_release(self):
+        board = Board()
+        self.run_quiet(nrfdk.central, board.dk, "C1:92:EC:E7:71:BC", 30)
+        self.run_quiet(nrfdk.datamap, board.dk, "0,1,2")
+        board.firmware.data_map_restore_fails = True
+
+        for release in (nrfdk.idle, lambda dk, out=None: nrfdk.role(
+                dk, "advertiser", out=out)):
+            board.firmware.data_map = "0700000000"
+            with self.assertRaisesRegex(nrfdk.NrfDkError,
+                                        "channel map 0700000000, not all 37"):
+                self.run_quiet(release, board.dk)
+
     def test_leaving_a_role_forgets_the_peer(self):
         board = Board()
         self.run_quiet(nrfdk.central, board.dk, "C1:92:EC:E7:71:BC", 30)

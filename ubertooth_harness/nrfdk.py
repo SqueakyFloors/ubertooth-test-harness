@@ -82,6 +82,10 @@ INTERVAL_MIN_MS = 20
 INTERVAL_MAX_MS = 10240
 
 COMMAND_TIMEOUT_S = 3.0
+# `role <name>` and `conn defaults` wait for the link to come down (up to 6 s
+# in the firmware) and may wait out the second the controller needs before it
+# will take the restored channel map.
+LEAVE_TIMEOUT_S = 12.0
 # After a reset (or a flash) the firmware needs a moment to start Bluetooth
 # and the shell.
 BOOT_TIMEOUT_S = 15.0
@@ -115,8 +119,9 @@ _CONNECTION_KEYS = {
 _DATA_MAP_KEYS = {"data_map": str, "data_map_used": int, "data_map_sets": int}
 ROLES = ("advertiser", "central", "peripheral")
 # The data channels a connection hops over, 0 to 36, of which a channel map
-# has to leave at least two used (Bluetooth Core, HCI LE Set Host Channel
-# Classification; the controller on the bench refuses one channel).
+# has to leave at least two used (Bluetooth Core, Vol 6 Part B, 4.5.8.1: the
+# minimum number of used channels is 2; the controller on the bench refuses
+# one channel).
 DATA_CHANNELS = 37
 DATA_CHANNELS_MIN = 2
 DATA_MAP_BYTES = 5
@@ -447,7 +452,9 @@ def data_map(channels: str) -> str:
         return DATA_MAP_ALL
     numbers = []
     for word in channels.split(","):
-        if not word.isdigit() or (len(word) > 1 and word[0] == "0"):
+        # isdecimal(), not isdigit(): the latter is true of characters int()
+        # refuses, and the firmware's parser takes ASCII digits only.
+        if not word.isdecimal() or not word.isascii():
             raise NrfDkError(
                 f"channel map must be 'all' or a list of data channels "
                 f"0-{DATA_CHANNELS - 1}, for example 0,12,36 (got {channels!r})")
@@ -535,8 +542,8 @@ def _report_connection(status: dict, out) -> None:
           f"octets mtu {status['mtu']} phy {status['phy']}", file=out)
     print(f"update: asked {status['update_ms']} ms "
           f"({conn_units(status['update_ms'])} units)", file=out)
-    if status.get("data_map") is not None:
-        # Firmware older than utdk-1.3.0 does not report the map.
+    if all(key in status for key in _DATA_MAP_KEYS):
+        # Firmware older than utdk-1.3.0 reports none of these.
         print(f"channel map: {status['data_map']} "
               f"({status['data_map_used']} of {DATA_CHANNELS} channels, set "
               f"{status['data_map_sets']} time(s))", file=out)
@@ -660,7 +667,7 @@ def idle(dk: Dk, out=None) -> dict:
     """
     shell = _open(dk)
     try:
-        shell.command("role advertiser")
+        shell.command("role advertiser", LEAVE_TIMEOUT_S)
         shell.command("adv defaults")
         status = require_connection_fields(shell.status())
     finally:
@@ -672,10 +679,29 @@ def idle(dk: Dk, out=None) -> dict:
         wrong.append("still advertising")
     if status["conn_on"] or status["connected"]:
         wrong.append("still connected")
+    wrong += _data_map_restored(status)
     if wrong:
         raise NrfDkError("the DK did not go idle: " + ", ".join(wrong))
     _report(status, out)
     return status
+
+
+def _data_map_restored(status: dict) -> list:
+    """Why the board is not fit to hand on, by its channel map.
+
+    The channel classification belongs to the controller and outlives the
+    link, so a board left with a narrowed one would narrow the next test's
+    CONNECT_IND. Leaving the role puts all 37 channels back; if the
+    controller refused, the board says so here and the release fails rather
+    than passing the narrow map on.
+    """
+    found = status.get("data_map")
+    if found is None:  # firmware older than utdk-1.3.0
+        return []
+    if found != DATA_MAP_ALL:
+        return [f"channel map {found}, not all {DATA_CHANNELS} channels "
+                f"({DATA_MAP_ALL})"]
+    return []
 
 
 def role(dk: Dk, wanted: str, out=None) -> dict:
@@ -684,12 +710,15 @@ def role(dk: Dk, wanted: str, out=None) -> dict:
         raise NrfDkError("role must be " + ", ".join(ROLES))
     shell = _open(dk)
     try:
-        shell.command(f"role {wanted}")
+        shell.command(f"role {wanted}", LEAVE_TIMEOUT_S)
         status = shell.status()
     finally:
         shell.close()
     if status["role"] != wanted:
         raise NrfDkError(f"J-Link {dk.serial} reports role {status['role']}, not {wanted}")
+    wrong = _data_map_restored(status)
+    if wrong:
+        raise NrfDkError(f"J-Link {dk.serial} left the role with " + ", ".join(wrong))
     _report(status, out)
     return status
 
@@ -838,6 +867,9 @@ def datamap(dk: Dk, channels: str, out=None) -> dict:
     wanted = data_map(channels)
     shell = _open(dk)
     try:
+        # The count before, so a board that answered OK and changed nothing
+        # cannot pass by echoing the map back.
+        before = shell.status().get("data_map_sets")
         shell.command(f"conn datamap {channels}")
         status = require_connection_fields(shell.status())
     finally:
@@ -856,6 +888,9 @@ def datamap(dk: Dk, channels: str, out=None) -> dict:
     if status["data_map_used"] != used:
         raise NrfDkError(f"the board reports {status['data_map_used']} channels in "
                          f"use, not the {used} its own map {wanted} leaves")
+    if isinstance(before, int) and status["data_map_sets"] <= before:
+        raise NrfDkError(f"the board still reports {status['data_map_sets']} channel "
+                         "map(s) taken by its controller, so this one was not")
     if not status["connected"]:
         raise NrfDkError("the connection dropped during the channel map update")
     _report(status, out)

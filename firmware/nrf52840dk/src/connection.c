@@ -64,15 +64,17 @@
 #define DATA_CHANNELS 37
 #define DATA_MAP_BYTES 5
 /* A connection's channel map has to leave at least two channels used
- * (Bluetooth Core, HCI LE Set Host Channel Classification: at least two
- * channels shall be marked unknown). The controller here refuses a
- * one-channel map with -EINVAL, measured on the bench, so the firmware
- * refuses it first and says why.
+ * (Bluetooth Core, Vol 6 Part B, 4.5.8.1: the minimum number of used
+ * channels is 2). The controller here refuses a one-channel map with
+ * -EINVAL, measured on the bench, so the firmware refuses it first and
+ * says why.
  */
 #define DATA_CHANNELS_MIN 2
 /* Two channel classifications must be at least a second apart (Bluetooth
  * Core, HCI LE Set Host Channel Classification), so a second one sooner is
- * refused rather than quietly dropped by the controller.
+ * refused rather than quietly dropped by the controller. The clock starts
+ * at every command that reaches the controller, not only at the ones it
+ * accepted: the second is between commands.
  */
 #define DATA_MAP_GAP_MS 1000
 /* Leaving the role waits for the link to come down: one connection event at
@@ -120,8 +122,8 @@ static struct {
 	 * All 37 channels until a test narrows it.
 	 */
 	uint8_t data_map[DATA_MAP_BYTES];
-	uint32_t data_map_sets;  /* times it was set since boot */
-	int64_t data_map_at;     /* uptime of the last set, in ms */
+	uint32_t data_map_sets;  /* times the controller took one, since boot */
+	int64_t data_map_at;     /* uptime of the last command to the controller */
 	bool dle;              /* ask for 251-byte data length */
 	uint16_t payload_len;
 	uint32_t period_ms;
@@ -1175,7 +1177,7 @@ static int cmd_datamap(const struct shell *sh, size_t argc, char **argv)
 {
 	uint8_t map[DATA_MAP_BYTES];
 	int64_t since;
-	uint32_t sets;
+	bool asked;
 	bool connected;
 	int err = require_role(sh);
 
@@ -1194,23 +1196,23 @@ static int cmd_datamap(const struct shell *sh, size_t argc, char **argv)
 	}
 	k_mutex_lock(&lock, K_FOREVER);
 	connected = cn.conn != NULL;
-	sets = cn.data_map_sets;
+	asked = cn.data_map_at != 0;
 	since = k_uptime_get() - cn.data_map_at;
 	k_mutex_unlock(&lock);
 	if (!connected) {
 		return utdk_err(sh, "no connection to update");
 	}
-	if (sets > 0 && since < DATA_MAP_GAP_MS) {
+	if (asked && since < DATA_MAP_GAP_MS) {
 		return utdk_err(sh, "channel map updates must be %d ms apart; the "
 				"last one was %lld ms ago", DATA_MAP_GAP_MS, since);
 	}
 	err = bt_le_set_chan_map(map);
 	k_mutex_lock(&lock, K_FOREVER);
 	cn.last_err = err;
+	cn.data_map_at = k_uptime_get();
 	if (!err) {
 		memcpy(cn.data_map, map, sizeof(map));
 		cn.data_map_sets++;
-		cn.data_map_at = k_uptime_get();
 	}
 	k_mutex_unlock(&lock);
 	if (err) {
