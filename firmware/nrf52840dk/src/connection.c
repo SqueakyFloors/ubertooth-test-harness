@@ -228,6 +228,7 @@ static void restore_data_map(void)
 	uint8_t all[DATA_MAP_BYTES];
 	int64_t since;
 	bool narrowed;
+	int err;
 
 	k_mutex_lock(&lock, K_FOREVER);
 	narrowed = data_map_used(cn.data_map) != DATA_CHANNELS;
@@ -240,9 +241,16 @@ static void restore_data_map(void)
 		k_sleep(K_MSEC(DATA_MAP_GAP_MS - since));
 	}
 	data_map_all(all);
-	(void)bt_le_set_chan_map(all);
+	err = bt_le_set_chan_map(all);
 	k_mutex_lock(&lock, K_FOREVER);
-	data_map_all(cn.data_map);
+	cn.last_err = err;
+	/* Only when the controller took it: a status saying all 37 channels
+	 * while the controller still holds the narrow map would hide the
+	 * narrow map from the next test.
+	 */
+	if (!err) {
+		data_map_all(cn.data_map);
+	}
 	cn.data_map_at = k_uptime_get();
 	k_mutex_unlock(&lock);
 }
@@ -1159,9 +1167,9 @@ static int cmd_update(const struct shell *sh, size_t argc, char **argv)
  *
  * The controller holds one channel classification and carries it to every
  * link where it is the central, as an LL_CHANNEL_MAP_IND, so this changes
- * the map of the connection that is up without disturbing it. A map of one
- * channel is the smallest a conformant device can present, because the
- * remapping divides by the number of channels in use.
+ * the map of the connection that is up without disturbing it. Two channels
+ * (DATA_CHANNELS_MIN) is the smallest map allowed, and the most demanding
+ * one: the remapping divides by the number of channels in use.
  */
 static int cmd_datamap(const struct shell *sh, size_t argc, char **argv)
 {

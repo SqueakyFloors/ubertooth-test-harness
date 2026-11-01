@@ -583,6 +583,11 @@ class RoleTests(unittest.TestCase):
         self.assertEqual((2, "0000060000"),
                          (status["data_map_used"], status["data_map"]))
 
+        # A second map within the second the controller needs is refused.
+        with self.assertRaisesRegex(nrfdk.NrfDkError, "1000 ms apart"):
+            self.run_quiet(nrfdk.datamap, board.dk, "0,1,2")
+
+        board.firmware.data_map_gap_passed = True
         status, _out = self.run_quiet(nrfdk.datamap, board.dk, "all")
         self.assertEqual((37, nrfdk.DATA_MAP_ALL),
                          (status["data_map_used"], status["data_map"]))
@@ -612,6 +617,24 @@ class RoleTests(unittest.TestCase):
         with self.assertRaisesRegex(nrfdk.NrfDkError, "only the central"):
             self.run_quiet(nrfdk.datamap, board.dk, "0,1,2")
 
+    def test_a_board_whose_map_and_count_disagree_is_refused(self):
+        board = Board()
+        self.run_quiet(nrfdk.central, board.dk, "C1:92:EC:E7:71:BC", 30)
+        status = board.firmware.status
+        board.firmware.status = lambda: {**status(), "data_map_used": 9}
+
+        with self.assertRaisesRegex(nrfdk.NrfDkError, "9 channels in use"):
+            self.run_quiet(nrfdk.datamap, board.dk, "0,1,2")
+
+    def test_a_board_reporting_a_bad_map_field_is_refused(self):
+        board = Board()
+        self.run_quiet(nrfdk.central, board.dk, "C1:92:EC:E7:71:BC", 30)
+        status = board.firmware.status
+        board.firmware.status = lambda: {**status(), "data_map_sets": "two"}
+
+        with self.assertRaisesRegex(nrfdk.NrfDkError, "valid 'data_map_sets'"):
+            self.run_quiet(nrfdk.datamap, board.dk, "0,1,2")
+
     def test_firmware_that_does_not_report_the_map_is_named(self):
         board = Board()
         self.run_quiet(nrfdk.central, board.dk, "C1:92:EC:E7:71:BC", 30)
@@ -622,7 +645,7 @@ class RoleTests(unittest.TestCase):
         }
 
         with self.assertRaisesRegex(nrfdk.NrfDkError,
-                                    "does not report the connection's channel map"):
+                                    "does not report a valid 'data_map'"):
             self.run_quiet(nrfdk.datamap, board.dk, "0,1,2")
 
     def test_leaving_a_role_forgets_the_peer(self):

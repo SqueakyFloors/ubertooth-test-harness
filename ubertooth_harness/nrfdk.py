@@ -121,10 +121,6 @@ DATA_CHANNELS = 37
 DATA_CHANNELS_MIN = 2
 DATA_MAP_BYTES = 5
 DATA_MAP_ALL = "ffffffff1f"
-# Two channel classifications must be at least a second apart (Bluetooth
-# Core, HCI LE Set Host Channel Classification; the firmware refuses a
-# second one sooner).
-DATA_MAP_GAP_S = 1.0
 # Connection interval, in the firmware's range (Bluetooth Core 7.5 ms-4 s).
 CONN_INTERVAL_MIN_MS = 8
 CONN_INTERVAL_MAX_MS = 4000
@@ -837,8 +833,7 @@ def datamap(dk: Dk, channels: str, out=None) -> dict:
     The central has the controller classify those channels, and the
     controller carries the new map to the link as an LL_CHANNEL_MAP_IND, so
     a sniffer following the connection has to follow the map change. The
-    link must be up; a map of one channel is the smallest a conformant
-    device can present.
+    link must be up, and the map has to leave at least two channels used.
     """
     wanted = data_map(channels)
     shell = _open(dk)
@@ -847,14 +842,20 @@ def datamap(dk: Dk, channels: str, out=None) -> dict:
         status = require_connection_fields(shell.status())
     finally:
         shell.close()
-    for key in _DATA_MAP_KEYS:
-        if key not in status:
+    for key, kind in _DATA_MAP_KEYS.items():
+        value = status.get(key)
+        if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
             raise NrfDkError(
-                f"this firmware does not report the connection's channel map; "
-                f"it needs {FIRMWARE_VERSION} (it reports {status.get('fw', '?')})")
+                f"this firmware does not report a valid '{key}' for the "
+                f"connection's channel map; it needs {FIRMWARE_VERSION} (it "
+                f"reports {status.get('fw', '?')})")
     if status["data_map"] != wanted:
         raise NrfDkError(f"the connection's channel map is {status['data_map']}, "
                          f"not the {wanted} that was asked for")
+    used = bin(int(wanted, 16)).count("1")
+    if status["data_map_used"] != used:
+        raise NrfDkError(f"the board reports {status['data_map_used']} channels in "
+                         f"use, not the {used} its own map {wanted} leaves")
     if not status["connected"]:
         raise NrfDkError("the connection dropped during the channel map update")
     _report(status, out)

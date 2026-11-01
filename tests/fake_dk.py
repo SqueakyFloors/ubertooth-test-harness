@@ -52,6 +52,10 @@ class FakeFirmware:
         # The firmware restores all 37 data channels when it leaves the role.
         self.data_map = nrfdk.DATA_MAP_ALL
         self.data_map_sets = 0
+        # The controller needs a second between two classifications, so the
+        # firmware refuses a second one sooner. A test that wants another
+        # map sets this to True, standing for that second having passed.
+        self.data_map_gap_passed = True
         self.cycle_ms = 0
         self.autoupdate_ms = 0
         self.writes = 0
@@ -163,8 +167,12 @@ class FakeFirmware:
                         "channels 0-36, for example 0,12,36"]
             if not self.connected:
                 return ["ERR no connection to update"]
+            if self.data_map_sets > 0 and not self.data_map_gap_passed:
+                return ["ERR channel map updates must be 1000 ms apart; the "
+                        "last one was 0 ms ago"]
             self.data_map = wanted
             self.data_map_sets += 1
+            self.data_map_gap_passed = False
             return ["OK"]
         if command == "update" and args:
             if not self.connected:
