@@ -54,7 +54,7 @@ try:
     from ubertooth_harness.cli import _writes_firmware as writes_firmware
     from ubertooth_harness.resources import FileResourceRegistry, RegistryError
 
-    from _bench import bench_lock_board, board, lock_key, resolve
+    from _bench import bench_lock_board, lock_key, resolve
 except ImportError:  # run from outside the harness environment
     sys.exit(
         "hold: run this from the harness environment "
@@ -173,16 +173,15 @@ def harness_lease_argv(args, aliases, command) -> list[str]:
 def extra_boards(resources) -> list[leases.Board]:
     """Locks `ubertooth-harness lease` does not take for these devices.
 
-    A type it does not lease yet, and the bench's older lock name for a device
-    whose lease key is not its serial.
+    The bench's older lock name, for a device whose lease key is not its
+    serial. The harness leases every type these helpers hold, so that is the
+    only one left.
     """
-    extra = [board(r) for r in resources if r.type not in leases.LEASED_TYPES]
-    extra += [
+    return [
         second for r in resources
         for second in (bench_lock_board(r),)
         if second is not None
     ]
-    return extra
 
 
 def main(argv: list[str] | None = None) -> int:

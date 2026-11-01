@@ -97,7 +97,7 @@ REGISTRY = textwrap.dedent(
           - VBUS voltage measurement
           - VBUS current measurement
     """
-).lstrip().replace("{BRIDGE2}", BRIDGE2)
+).lstrip()
 
 
 def load(path: Path):
@@ -859,9 +859,10 @@ class PeerArguments(Bench):
             args, {"peer": self.load_registry().get("ESP0")}, command
         )
         self.assertEqual("status", argv[2])
-        self.assertIn("--device", argv)
-        self.assertIn("00:11:22:33:44:55", argv)
-        self.assertIn("ESP0", argv)
+        pairs = dict(zip(argv, argv[1:]))
+        self.assertIn(BRIDGE, pairs["--device"])
+        self.assertEqual("00:11:22:33:44:55", pairs["--address"])
+        self.assertEqual("ESP0", pairs["--alias"])
         self.assertNotIn("--", argv[3:])
 
     def test_stream_passes_both_roles_and_the_command_after_a_separator(self):
@@ -876,10 +877,19 @@ class PeerArguments(Bench):
             command,
         )
         self.assertEqual("stream", argv[2])
-        for expected in ("--acceptor", "--initiator", "--acceptor-address",
-                         "--initiator-address", "--period", "10", "--payload",
-                         "300", "--min-writes", "50"):
-            self.assertIn(expected, argv)
+        pairs = dict(zip(argv, argv[1:]))
+        # The first positional is the acceptor and the second the initiator.
+        # That mapping decides which LAP is on the air, so a swap must fail.
+        self.assertEqual("00:11:22:33:44:55", pairs["--acceptor-address"])
+        self.assertEqual("00:11:22:33:44:66", pairs["--initiator-address"])
+        self.assertEqual("ESP0", pairs["--acceptor-alias"])
+        self.assertEqual("ESP1", pairs["--initiator-alias"])
+        self.assertIn(BRIDGE, pairs["--acceptor"])
+        self.assertIn(BRIDGE2, pairs["--initiator"])
+        # Each value with its own option, so swapping two values fails.
+        self.assertEqual("10", pairs["--period"])
+        self.assertEqual("300", pairs["--payload"])
+        self.assertEqual("50", pairs["--min-writes"])
         self.assertEqual(["--", "ubertooth-rx", "-z", "-t", "30"], argv[-5:])
 
     def test_an_option_not_given_is_left_to_the_delegate(self):
@@ -902,6 +912,8 @@ class PeerArguments(Bench):
         ])
         argv = peer.hold_argv(args, ["ESP0", "ESP1", "UT0"], ["inner"])
         self.assertEqual(str(HOLD), argv[1])
+        # Not forwarded unless asked for, so hold owns the default.
+        self.assertNotIn("--wait-for-boards", argv)
         self.assertIn("ESP0,ESP1,UT0", argv)
         self.assertIn(self.template, argv)
         self.assertIn("alice", argv)
@@ -952,6 +964,25 @@ class PeerArguments(Bench):
         self.assertEqual(7, status)
         self.assertEqual(str(peer.ESP32PEER), argv[1])
         self.assertNotIn(str(HOLD), argv)
+
+    def test_with_cannot_go_with_no_hold(self):
+        """Resolving --with and then not holding it would drop a lock silently."""
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as caught, redirect_stderr(err):
+            peer.parse_args([
+                "stream", "ESP0", "ESP1", "--hardware", str(self.registry),
+                "--with", "UT0", "--no-hold", "--", "true",
+            ])
+        self.assertEqual(2, caught.exception.code)
+        self.assertIn("--no-hold", err.getvalue())
+
+    def test_a_signal_killed_delegate_reads_the_same_either_way(self):
+        """128+N, as the hold path gives, not subprocess's raw negative."""
+        with unittest.mock.patch.object(peer.subprocess, "call", lambda *a, **k: -15):
+            status = peer.main(
+                ["status", "ESP0", "--hardware", str(self.registry), "--no-hold"]
+            )
+        self.assertEqual(143, status)
 
     def test_without_no_hold_it_runs_the_delegate_inside_hold(self):
         status, argv = self.run_peer([

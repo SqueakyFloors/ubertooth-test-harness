@@ -129,7 +129,8 @@ def hold_argv(args, aliases, inner) -> list[str]:
         argv += ["--lease-dir", str(args.lease_dir)]
     if args.owner:
         argv += ["--owner", args.owner]
-    argv += ["--wait-for-boards", str(args.wait_for_boards)]
+    if args.wait_for_boards is not None:
+        argv += ["--wait-for-boards", str(args.wait_for_boards)]
     return argv + [",".join(aliases), "--"] + list(inner)
 
 
@@ -147,7 +148,7 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
         raise SystemExit(_usage(
             "usage: peer status|identify|reset <peer>, or "
             "peer stream <acceptor> <initiator> [options] -- <command> "
-            "(-h for the options)"
+            "('peer stream -h' lists the options)"
         ))
     parser = argparse.ArgumentParser(
         prog="peer", add_help=True,
@@ -167,8 +168,9 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                         help=f"harness lease directory (default ${leases.LEASE_DIR_ENV})")
     shared.add_argument("--owner", default=None,
                         help=f"how you are named to another holder (default ${leases.OWNER_ENV})")
-    shared.add_argument("--wait-for-boards", type=float, default=30.0, metavar="MINUTES",
-                        help="how long to wait for a busy device (default 30)")
+    shared.add_argument("--wait-for-boards", type=float, default=None, metavar="MINUTES",
+                        help="how long to wait for a busy device; hold's default "
+                             "applies when this is left out")
     shared.add_argument("--no-hold", action="store_true",
                         help="the devices are already held by an outer hold")
     for name in ONE_PEER:
@@ -198,8 +200,12 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
         raise SystemExit(_usage(
             f"no registry; pass --hardware or set ${HARDWARE_ENV}"
         ))
-    if args.wait_for_boards < 0:
+    if args.wait_for_boards is not None and args.wait_for_boards < 0:
         raise SystemExit(_usage("--wait-for-boards cannot be negative"))
+    if getattr(args, "also", "") and args.no_hold:
+        # Resolving --with and then not holding it would drop a lock the user
+        # asked for, silently.
+        raise SystemExit(_usage("--with holds devices, so it cannot go with --no-hold"))
     return args, command
 
 
@@ -229,7 +235,9 @@ def main(argv: list[str] | None = None) -> int:
         return _usage(f"error: {error}")
 
     if args.no_hold:
-        return subprocess.call(inner)
+        # exit_status, as the hold path gives: a delegate killed by a signal
+        # must read the same either way.
+        return leases.exit_status(subprocess.call(inner))
     aliases = [resource.alias for resource in list(peers.values()) + extra]
     return subprocess.call(hold_argv(args, aliases, inner))
 
