@@ -207,8 +207,9 @@ static void run(int argc, char **argv)
                 shell_line("%s", json);
             }
             answer(err);
-        } else if (argc == 3 && strcmp(argv[1], "type") == 0) {
-            answer(sco_set_type(argv[2]));
+        } else if (strcmp(argv[1], "type") == 0) {
+            answer(argc == 3 ? sco_set_type(argv[2])
+                             : "sco type takes ev3, 2ev3, or default");
         } else {
             answer("sco takes start, stop, stats, or type <ev3|2ev3|default>");
         }

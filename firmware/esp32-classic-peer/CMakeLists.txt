@@ -14,8 +14,11 @@ target_sources(${utesp_bt_lib} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/bluedroid/utes
                                        "${CMAKE_CURRENT_LIST_DIR}/bluedroid/utesp_afh.c"
                                        "${CMAKE_CURRENT_LIST_DIR}/bluedroid/utesp_sco_type.c")
 
-# The board that accepts a synchronous link answers with the packet types it
-# allows, and that list comes from a static const table with no override. So
-# the one call that carries it to the controller is wrapped, and
-# utesp_sco_type.c adjusts the list on its way past.
-target_link_libraries(${utesp_bt_lib} INTERFACE "-Wl,--wrap=BTM_EScoConnRsp")
+# Which packet types a synchronous link may use comes from compile-time
+# tables with no setting an application can reach, one for the board that
+# opens a link and one for the board that accepts one. Each path ends in a
+# single call that carries the list to the controller, so both calls are
+# replaced at link time and utesp_sco_type.c adjusts the list on its way
+# past, on the stack's own task.
+target_link_libraries(${utesp_bt_lib} INTERFACE "-Wl,--wrap=BTM_CreateSco"
+                                                "-Wl,--wrap=BTM_EScoConnRsp")
