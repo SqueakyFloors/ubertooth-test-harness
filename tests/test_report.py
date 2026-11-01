@@ -598,6 +598,22 @@ class ReportTests(unittest.TestCase):
             _redact(f"  1 x [E] ab{line_shape(serial)} is idle\n", {serial}),
         )
 
+    def test_a_two_character_shape_does_not_cut_up_the_report(self):
+        # A serial with one hex letter in it shapes to `Na`. The rule reads
+        # a shape inside a run of hex letters and N, never over the page, so
+        # a shape that narrow cannot take words out of the report.
+        from ubertooth_harness.report import _redact
+
+        serial = "0000000000000000000000000000000a"
+        page = (
+            "  7 x [E] rx block timestamp N * N nanoseconds\n"
+            "| Host | a Linux host (Linux arm64) |\n"
+            "  signal -70 dBm, name: Ubertooth One\n"
+        )
+
+        self.assertEqual("Na", line_shape(serial))
+        self.assertEqual(page, _redact(page, {serial}))
+
     def test_a_serial_or_shape_in_another_case_is_masked(self):
         # A tool prints in the case it likes, and the registry holds one.
         # The 32-hex token rule reaches a serial standing on its own, so

@@ -1386,6 +1386,29 @@ def _shape_pieces(shapes: Iterable[str]) -> tuple[set[str], int]:
     return pieces, max((len(shape) for shape in shapes), default=0)
 
 
+def _mask_whole_shapes(token: str, whole: re.Pattern, pieces: set[str],
+                       longest: int) -> str:
+    """``token`` with a whole known shape masked wherever it sits in it, and
+    the pieces of one masked in what is left.
+
+    A whole shape goes first because a piece taken at an earlier character
+    could swallow the start of a shape that repeats itself and leave a tail
+    too narrow to mask. It is masked however few hex letters it carries: the
+    line it was counted from named a board the run names, and that settles
+    it. Only inside the run, never over the page: the shape of a serial with
+    one hex letter in it is two characters long (`Na`), and masking that
+    wherever it appeared would cut words out of the report.
+    """
+    out = []
+    at = 0
+    for found in whole.finditer(token):
+        out.append(_mask_shape_pieces(token[at:found.start()], pieces, longest))
+        out.append(REDACTED)
+        at = found.end()
+    out.append(_mask_shape_pieces(token[at:], pieces, longest))
+    return "".join(out)
+
+
 def _mask_shape_pieces(token: str, pieces: set[str], longest: int) -> str:
     """``token`` with every piece of a known serial's shape masked.
 
@@ -1428,18 +1451,19 @@ def _mask_serial_shapes(text: str, serials: Sequence[str]) -> str:
             shapes.add(shape)
     if not shapes:
         return text
-    # A whole shape first, wherever it sits and however few hex letters it
-    # carries: the line it was counted from named a board the run names, and
-    # that settles it. Longest first, since the shape of one serial can hold
-    # the shape of another, and before the pieces below, because a piece
-    # taken at an earlier character could swallow the start of a whole shape
-    # that repeats itself and leave a tail too narrow to mask.
-    for shape in sorted(shapes, key=len, reverse=True):
-        text = re.sub(re.escape(shape), REDACTED, text, flags=re.IGNORECASE)
     pieces, longest = _shape_pieces(shapes)
+    # Longest first, since the shape of one serial can hold the shape of
+    # another and the alternation takes the first that matches.
+    whole = re.compile(
+        "|".join(
+            re.escape(shape)
+            for shape in sorted(shapes, key=len, reverse=True)
+        ),
+        re.IGNORECASE,
+    )
 
     def mask(match: re.Match) -> str:
-        return _mask_shape_pieces(match.group(0), pieces, longest)
+        return _mask_whole_shapes(match.group(0), whole, pieces, longest)
 
     return _SHAPE_TOKEN.sub(mask, text)
 

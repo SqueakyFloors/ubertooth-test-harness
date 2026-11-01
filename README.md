@@ -1890,17 +1890,22 @@ of a serial the run names appears in is masked as well, whole or as the
 200-character shape limit cut it. The shapes keep their point: masked is the
 whole shape of a serial the run names, wherever it sits, including written
 against a word of its own as a serial reaches a line, and a piece of such a
-shape that carries four or more hex letters, since a piece is all the rule
-has to go on. Every other shape is left to read. The cost, as with the width
-rule, is that a short value whose own shape a known serial's shape holds
-reads `<serial>` too.
+shape carrying four or more hex letters, since a piece is all the rule has
+to go on there. Both are read inside a run of hex letters and `N`, never
+over the page: the `N` is what tells a shape from an ordinary run of hex,
+and a `[M]` note is the only place a report publishes shapes. Every other
+shape is left to read. The costs are the width rule's: a short value whose
+own shape a known serial's shape holds reads `<serial>` too, and a piece a
+cut left with no `N` of its own is left to read like any piece of a serial
+narrower than 8 hex digits.
 
 What the option does not mask is anything that is not a serial the run
 names, and a transcript holds more than those: the decimal serial of a
-device the run never named, the paths the commands ran with, which carry a
-user name and a home directory where the run built its tools, and the
-addresses and LAPs of whatever third-party devices were on the air. Read a
-report before publishing it, as you would a run's own `report.md`.
+device the run never named, the registered Bluetooth addresses and LAPs of
+the devices the harness drove, the addresses of whatever third-party devices
+were on the air, and the paths the commands ran with, which carry a user
+name and a home directory where the run built its tools. Read a report
+before publishing it, as you would a run's own `report.md`.
 
 Redaction is the `report` page only: a run's own `report.md` is always
 written with its serials.
