@@ -12,6 +12,7 @@ from ubertooth_harness.rawlog import (
     RECORD_PIECE_CHARS,
     CappedOutput,
     CommandOutputFiles,
+    line_shape,
     record_bytes,
 )
 from ubertooth_harness.report import (
@@ -104,6 +105,23 @@ def capped_events(text: str, stream: str = "stderr") -> list[dict]:
     records.append(command_event(next(moments), "command_finished", "passed",
                                  {"returncode": 0, "duration_s": 9.0, **details}))
     return records
+
+
+def _redact_note(line: str, serials: set) -> str:
+    """``line`` of a note as the transcript stamps it, redacted, with the
+    stamp taken back off: what a shape line of the report comes out as."""
+    from ubertooth_harness.report import _redact
+
+    stamped = _redact(f"00:00:09.000 [M] {line}", serials)
+    return stamped.split("[M] ", 1)[1]
+
+
+def shape_note(shape: str, count: int = 1, tag: str = "[E]") -> str:
+    """One line of the `[M]` note that counts by shape the lines the record
+    limits left out of run.jsonl, as the transcript renders it: the only
+    place a report publishes a shape, and so the only place the shape rules
+    read (report._SHAPE_NOTE_LINE)."""
+    return f"00:00:09.000 [M]   {count} x {tag} {shape}\n"
 
 
 def ubertooth_manifest(serial: str) -> dict:
@@ -274,6 +292,25 @@ class ReportTests(unittest.TestCase):
             "port /dev/cu.usbmodem<serial>1",
             _redact("port /dev/cu.usbmodem0010502101211",
                     _serial_set("001050210121")),
+        )
+
+    def test_a_short_serial_that_reads_as_a_word_stands_alone_too(self):
+        # A bridge serial is 1 to 64 characters of the registry's choosing
+        # (resources.py), so a short one can read as an ordinary word.
+        # Masking it everywhere would leave `<serial>out the l<serial>el`;
+        # standing alone between characters that are neither letters nor
+        # digits still masks it in a device path, where `_` and `-` sit
+        # around it.
+        from ubertooth_harness.report import _redact
+
+        self.assertEqual(
+            "[O] about the label Abcd and ABBA\n",
+            _redact("[O] about the label Abcd and ABBA\n", {"ab"}),
+        )
+        self.assertEqual(
+            f"[O] /dev/serial/by-id/usb-Silicon_Labs_{REDACTED}-if00\n",
+            _redact("[O] /dev/serial/by-id/usb-Silicon_Labs_ab-if00\n",
+                    {"ab"}),
         )
 
     def test_redaction_masks_32_hex_tokens_but_not_longer_digests(self):
@@ -518,6 +555,401 @@ class ReportTests(unittest.TestCase):
         for piece in ("1cc001038088cb956c43ad6", "1cc001038088cb956c43ad61c52000f512ab"):
             self.assertEqual(f"[O] found {piece}\n",
                              _redact(f"[O] found {piece}\n", ()), piece)
+
+    def test_a_line_shape_a_serials_shape_holds_is_masked(self):
+        # #220: the lines the record limits left out of run.jsonl are counted
+        # by shape, and a shape is not the line, so masking the serial leaves
+        # the shape as it is. A serial with its digits spread through it
+        # leaves hex letters and their positions, which name the board.
+        from ubertooth_harness.report import _redact
+
+        serial = "1ab23cd45ef67ab89cd01ef23ab45cd6"
+        shape = line_shape(serial)
+
+        self.assertEqual("NabNcdNefNabNcdNefNabNcdN", shape)  # no 8-wide run
+        self.assertEqual(
+            shape_note(f"board {REDACTED} is idle", 3),
+            _redact(shape_note(f"board {shape} is idle", 3), {serial}),
+        )
+        # The shape itself is held to 200 characters, so a long line's shape
+        # can be cut inside the serial's; what the cut leaves is masked too.
+        self.assertEqual(
+            shape_note(REDACTED), _redact(shape_note(shape[:12]), {serial}))
+
+    def test_a_line_shape_written_against_a_word_is_masked_too(self):
+        # A serial reaches the output it was cut from written straight
+        # against what stood beside it (`ubertooth<serial>`, a device path),
+        # so its shape arrives that way as well. The word it is written
+        # against says nothing about whether the shape is there, including a
+        # word that ends in a hex letter and so reads as more of the shape.
+        from ubertooth_harness.report import _redact
+
+        serial = "1ab23cd45ef67ab89cd01ef23ab45cd6"
+        shape = line_shape(serial)
+
+        for before in ("ubertooth", "/dev/cu.usbmodem", "id=Z", "0x",
+                       "device", "face", "theN"):
+            self.assertEqual(
+                shape_note(f"{before}{REDACTED} is idle"),
+                _redact(shape_note(f"{before}{shape} is idle"), {serial}),
+                before,
+            )
+
+    def test_a_whole_shape_is_masked_however_few_letters_it_carries(self):
+        # A serial with its digits in threes leaves a shape of three hex
+        # letters, and three letters in known positions still name a board
+        # on a small bench. A whole shape is masked for the same reason a
+        # piece of a known serial is: the run naming that serial settles it.
+        # What the letter count decides is whether a *piece* of a shape is
+        # masked, which is all the rule has to go on for a cut shape.
+        from ubertooth_harness.report import _redact
+
+        serial = "1a2b3c45678901234567890123456789"
+
+        self.assertEqual("NaNbNcN", line_shape(serial))
+        self.assertEqual(
+            shape_note(f"board {REDACTED} is idle"),
+            _redact(shape_note(f"board {line_shape(serial)} is idle"), {serial}),
+        )
+        # A piece of a shape that narrow is left to read.
+        self.assertEqual(
+            shape_note("x NabNc y"),
+            _redact(shape_note("x NabNc y"),
+                    {"1ab23cd45ef67ab89cd01ef23ab45cd6"}),
+        )
+
+    def test_a_shape_that_begins_again_inside_itself_is_masked(self):
+        # Every occurrence of a known shape is masked, overlapping ones as
+        # one mask: a serial that repeats itself shapes into something that
+        # begins again inside itself, and a search that resumed after each
+        # match would leave the tail of the second occurrence to read.
+        from ubertooth_harness.report import _redact
+
+        serial = "abc-1abc-1abc-1abc-1"
+        shape = line_shape(serial)
+
+        self.assertEqual("abc-Nabc-Nabc-Nabc-N", shape)
+        for text in (shape, f"abc-N{shape}", f"{shape}{shape}",
+                     f"{shape}abc-N"):
+            self.assertEqual(
+                shape_note(REDACTED), _redact(shape_note(text), {serial}), text)
+        # Two occurrences with text between them are two masks.
+        self.assertEqual(
+            shape_note(f"x {REDACTED} y {REDACTED} z"),
+            _redact(shape_note(f"x {shape} y {shape} z"), {serial}),
+        )
+
+    def test_a_character_that_grows_in_lower_case_does_not_shift_a_mask(self):
+        # Shapes are compared folded, not lower-cased: `İ` is one character
+        # that lower-cases to two, so a position taken from a lower-cased
+        # copy would land late, cutting the shape up and publishing part of
+        # it. Folding leaves every character that is not an ASCII letter
+        # alone, so a position in the folded shape is a position in it.
+        from ubertooth_harness.report import _redact
+
+        serial = "esp32-peer_1a2b"
+        shape = line_shape(serial)
+        hex_serial = "1ab23cd45ef67ab89cd01ef23ab45cd6"
+        piece = line_shape(hex_serial)[:15]
+
+        for before in ("", "İ ", "İ" * 14 + " "):
+            self.assertEqual(
+                shape_note(f"{before}peer {REDACTED} ready", 3),
+                _redact(shape_note(f"{before}peer {shape} ready", 3), {serial}),
+                before,
+            )
+            # The same for a piece a cut left, which is read by position.
+            self.assertEqual(
+                shape_note(f"{before}board {REDACTED} idle"),
+                _redact(shape_note(f"{before}board {piece} idle"),
+                        {hex_serial}),
+                before,
+            )
+
+    def test_the_note_of_a_run_past_99_hours_is_masked(self):
+        # The elapsed time a transcript line carries widens past 99 hours,
+        # and the note's lines are found by it.
+        from ubertooth_harness.report import _redact
+
+        serial = "1ab23cd45ef67ab89cd01ef23ab45cd6"
+        shape = line_shape(serial)
+        line = f"100:00:09.000 [M]   3 x [E] board {shape} idle\n"
+
+        self.assertEqual(
+            f"100:00:09.000 [M]   3 x [E] board {REDACTED} idle\n",
+            _redact(line, {serial}),
+        )
+
+    def test_a_cut_piece_of_a_shape_is_read_in_either_case(self):
+        # The lookup and the test for a placeholder are both folded, so a
+        # piece of a shape printed in lower case is read like one printed
+        # as line_shape wrote it. Before that, a piece whose placeholder
+        # arrived as `n` was left to read.
+        from ubertooth_harness.report import _redact
+
+        serial = "abcden1x2y3"
+        shape = line_shape(serial)
+
+        self.assertEqual("abcdenNxNyN", shape)
+        for piece in (shape[:8], shape[:8].lower(), shape[:6]):
+            self.assertEqual(
+                shape_note(REDACTED),
+                _redact(shape_note(piece), {serial}), piece)
+
+    def test_a_shape_is_matched_in_either_case_including_its_n(self):
+        # The fold ignores case everywhere, the `N` that stands where a run
+        # of digits was included. The cost is that a shape whose own letters
+        # read as one of those N's is masked as well; what it buys is that a
+        # serial holding the letter `n` is masked whichever case a tool
+        # printed it in, which no enumeration of spellings covers.
+        from ubertooth_harness.report import _redact
+
+        serial = "a1b2c3d4"
+
+        self.assertEqual("aNbNcNdN", line_shape(serial))
+        for shape in ("aNbNcNdN", "ANBNCNDN", "anbncndn"):
+            self.assertEqual(
+                shape_note(REDACTED),
+                _redact(shape_note(shape), {serial}), shape)
+
+    def test_a_shape_that_repeats_itself_is_masked_whole(self):
+        # A whole shape is masked before the pieces of one, so a word that
+        # happens to read as more of a shape that repeats itself cannot
+        # carry its start into a piece and leave the tail behind.
+        from ubertooth_harness.report import _redact
+
+        serial = "1ab2" * 8
+
+        self.assertEqual("NabNabNabNabNabNabNabNabN", line_shape(serial))
+        self.assertEqual(
+            shape_note(f"ab{REDACTED} is idle"),
+            _redact(shape_note(f"ab{line_shape(serial)} is idle"), {serial}),
+        )
+
+    def test_a_shape_of_one_character_does_not_cut_up_the_note(self):
+        # A serial with one character of its own shapes to `Na`, and masking
+        # that would take that letter out of every shape in the note. One
+        # character is where the line is drawn: such a shape is left as it
+        # is, and the serial itself is still masked.
+        from ubertooth_harness.report import _redact
+
+        serial = "0000000000000000000000000000000a"
+        page = (
+            shape_note("rx block timestamp N * N nanoseconds", 7)
+            + shape_note("isNaN NaN Nab")
+        )
+
+        self.assertEqual("Na", line_shape(serial))
+        self.assertEqual(page, _redact(page, {serial}))
+
+    def test_a_serials_own_n_is_not_read_as_a_digit_placeholder(self):
+        # A bridge serial may hold an N of its own, so what a shape says
+        # about the board is counted from the runs of digits the serial held
+        # and not from the N's in the shape, or a shape that names a board
+        # reads as one that names nothing.
+        from ubertooth_harness.report import _redact, _own_chars_of_serial
+
+        serial = "N1a2"
+        shape = line_shape(serial)
+
+        self.assertEqual("NNaN", shape)
+        self.assertEqual(2, _own_chars_of_serial(serial, shape))
+        self.assertEqual(
+            shape_note(f"x {REDACTED} y"),
+            _redact(shape_note(f"x {shape} y"), {serial}),
+        )
+
+    def test_a_serial_holding_an_n_is_known_in_every_case(self):
+        # A bridge serial may hold the letter `n`, and a tool may print it
+        # in any case, including one character of it: the shape is masked
+        # however it was printed, which is why the fold covers the `N` as
+        # well rather than enumerating spellings.
+        from ubertooth_harness.report import _redact
+
+        for registered, printed in (("esp32n1a2b", "ESP32N1A2B"),
+                                    ("ESP32N1A2B", "esp32n1a2b"),
+                                    ("N1N2abc", "n1N2ABC"),
+                                    ("n1a2n3b", "n1a2N3b"),
+                                    ("N1a2", "n1A2")):
+            shape = line_shape(printed)
+            self.assertEqual(
+                shape_note(REDACTED),
+                # What _Run.serials() collects: the registered spelling and
+                # its lower case.
+                _redact(shape_note(shape), {registered, registered.lower()}),
+                printed,
+            )
+
+    def test_a_shape_no_run_of_hex_letters_can_hold_is_masked_too(self):
+        # An ESP32 peer's bridge serial is whatever string the bridge
+        # reports, of any letters, digits and _.:+- (resources.py), so its
+        # shape can hold characters no run of hex letters and N carries,
+        # whole or as a cut left it.
+        from ubertooth_harness.report import _redact
+
+        serial = "esp32-peer_1a2b"
+        shape = line_shape(serial)
+
+        self.assertEqual("espN-peer_NaNb", shape)
+        self.assertEqual(
+            shape_note(f"peer {REDACTED} ready", 3),
+            _redact(shape_note(f"peer {shape} ready", 3), {serial}),
+        )
+        self.assertEqual(
+            shape_note(f"usb-{REDACTED}-if00", 3),
+            _redact(shape_note(f"usb-{shape}-if00", 3), {serial}),
+        )
+        self.assertEqual(
+            shape_note(REDACTED), _redact(shape_note(shape[:10]), {serial}))
+
+    def test_output_that_quotes_the_note_is_not_read_as_one(self):
+        # The note's lines are the harness's own, stamped and tagged as it
+        # writes them. A command that prints the same text is output, and
+        # output is left as the command printed it.
+        from ubertooth_harness.report import _redact
+
+        serial = "1ab23cd45ef67ab89cd01ef23ab45cd6"
+        quoted = (
+            f"00:00:09.000 [O] log says: [M]   3 x [E] {line_shape(serial)}\n"
+        )
+
+        self.assertEqual(quoted, _redact(quoted, {serial}))
+
+    def test_a_serial_or_shape_in_another_case_is_masked(self):
+        # A tool prints in the case it likes, and the registry holds one.
+        # The 32-hex token rule reaches a serial standing on its own, so
+        # what needs the case to be ignored is one written against
+        # something else.
+        from ubertooth_harness.report import _redact
+
+        serial = "1ab23cd45ef67ab89cd01ef23ab45cd6"
+        serials = {serial, serial.lower()}  # what _Run.serials() collects
+
+        self.assertEqual(
+            f"[O] face{REDACTED} is idle\n",
+            _redact(f"[O] face{serial.upper()} is idle\n", serials),
+        )
+        self.assertEqual(
+            shape_note(REDACTED),
+            _redact(shape_note(line_shape(serial).upper()), serials),
+        )
+
+    def test_a_line_shape_no_serials_shape_holds_is_left_to_read(self):
+        # What the shape rule leaves readable, which is what the shapes are
+        # in the report for.
+        from ubertooth_harness.report import _redact
+
+        serial = "1ab23cd45ef67ab89cd01ef23ab45cd6"
+        kept = (
+            shape_note("rx block timestamp N * N nanoseconds", 7)
+            + shape_note("Serial No: N", 4, "[O]")   # a numeric serial's shape
+            + shape_note("systime=N ch=N LAP=N err=N", 2)
+            + shape_note("Nab is idle")        # too few letters to name a board
+            + shape_note("deadbeef cafe")      # no N, so no shape token
+            + shape_note("isNaN NaN banana")   # words a tool prints
+            + shape_note("face deadN beefN")   # in no known serial's shape
+        )
+
+        self.assertEqual(kept, _redact(kept, {serial, "001050210121"}))
+
+    def test_a_shape_the_report_did_not_publish_is_left_alone(self):
+        # The rules read the shapes where the note publishes them and
+        # nowhere else, so what a command printed and the page's own prose
+        # keep every word: the shape of this serial holds `faceN`, and
+        # `bInterfaceNumber` is a line a tool really prints.
+        from ubertooth_harness.report import _redact
+
+        serial = "a1b2c3d4e5f6face7890abcdef123456"
+        output = (
+            '00:00:02.000 [O] "bInterfaceNumber" = 0, name: surfaceNormal\n'
+            "| Host | a Linux host (Linux arm64) |\n"
+        )
+
+        self.assertEqual("aNbNcNdNeNfNfaceNabcdefN", line_shape(serial))
+        self.assertEqual(output, _redact(output, {serial}))
+        # The same characters in the note are a shape, and masked.
+        self.assertIn(
+            REDACTED, _redact(shape_note("faceNabcdefN"), {serial}))
+
+    def test_a_shape_holding_a_carriage_return_is_still_one_line(self):
+        # A tool printing its progress in place writes a carriage return,
+        # and the whole of that is one line of output, so its shape holds
+        # one. The note writes it visibly, because the transcript would
+        # otherwise render the shape as two lines with the count and the tag
+        # on the first alone, and the second would go out unmasked.
+        serial = "1ab23cd45ef67ab89cd01ef23ab45cd6"
+        line = f"progress 10%\rboard {serial} is idle\n"
+        events = [ubertooth_manifest(serial)] + capped_events(line * 4000)
+
+        plain = render_run(events)
+        report = render_run(events, redact_serials=True)
+
+        self.assertIn(r"x [E] progress N%\rboard", plain)
+        self.assertNotIn(line_shape(serial), report)
+        self.assertIn(rf"x [E] progress N%\rboard {REDACTED} is idle", report)
+
+    def test_every_line_break_in_a_shape_is_written_visibly(self):
+        # Each character str.splitlines() splits on, since any of them would
+        # otherwise take the rest of a shape onto a line of its own, where
+        # the count and tag redaction reads a shape by are missing.
+        from ubertooth_harness.report import _omitted_text
+
+        serial = "1ab23cd45ef67ab89cd01ef23ab45cd6"
+        shape = line_shape(serial)
+
+        for break_char in ("\r", "\v", "\f", "\x1c", "\x1d", "\x1e",
+                           "\x85", "\u2028", "\u2029"):
+            note = {"output_omitted": {
+                "common_shapes": [
+                    {"stream": "stderr", "shape": f"a{break_char}{shape}",
+                     "count": 3},
+                ],
+            }}
+
+            text = _omitted_text(note)
+
+            self.assertEqual(2, len(text.splitlines()), repr(break_char))
+            self.assertNotIn(break_char, text, repr(break_char))
+            self.assertIn(shape, text, repr(break_char))
+            written = text.splitlines()[1].split(shape)[0].split("[E] ")[1]
+            self.assertEqual(
+                f"  3 x [E] {written}{REDACTED}\n",
+                _redact_note(text.splitlines()[1] + "\n", {serial}),
+                repr(break_char),
+            )
+
+    def test_one_serials_characters_do_not_hide_anothers_shape(self):
+        # A bridge serial is any string the registry chooses, so one
+        # serial's own characters can read as a piece of another's shape.
+        # The shapes are masked before any serial is masked as itself, or
+        # that piece would be masked first and leave the rest of the shape
+        # with no shape to match.
+        from ubertooth_harness.report import _redact
+
+        serial, other = "abc1def2ghij", "defNgh"
+
+        self.assertEqual("abcNdefNghij", line_shape(serial))
+        self.assertEqual(
+            shape_note(REDACTED),
+            _redact(shape_note(line_shape(serial)), {serial, other}),
+        )
+
+    def test_the_shape_summary_of_left_out_output_is_masked(self):
+        # End to end: a command whose output passed the record limits leaves
+        # the lines between the head and the tail counted by shape, and the
+        # [M] note lists them.
+        serial = "1ab23cd45ef67ab89cd01ef23ab45cd6"
+        shape = line_shape(serial)
+        line = f"board {serial} is idle\n"
+        events = [ubertooth_manifest(serial)] + capped_events(line * 4000)
+
+        plain = render_run(events)
+        report = render_run(events, redact_serials=True)
+
+        self.assertIn(f"x [E] board {shape} is idle", plain)
+        self.assertNotIn(shape, report)
+        self.assertIn(f"x [E] board {REDACTED} is idle", report)
+        self.assertNotIn(serial, report)
 
     def test_the_padded_width_is_the_one_a_dk_port_name_carries(self):
         # _SERIAL_PADDED_DIGITS restates the padding in targets.DK_BY_ID;
@@ -837,7 +1269,77 @@ class ReportTests(unittest.TestCase):
             self.assertTrue(report.startswith("# Release validation"))
             self.assertIn("| `mac-run` | Host_Mac | passed |", report)
             self.assertIn("| `linux-run` | Host_Linux | passed |", report)
+            # Unmasked, the page stays a summary: each run's own report.md
+            # carries its transcript with its serials in it.
             self.assertNotIn("## Transcript", report)
+
+    def test_a_redacted_report_carries_each_runs_transcript(self):
+        # #221: --redact-serials means the whole report, masked, and the
+        # transcript is most of what a report is worth to a reader. It is
+        # also where the serials the rules work hardest on appear: in a
+        # command line, in a device path, in a board's answer.
+        with tempfile.TemporaryDirectory() as directory:
+            mac = Path(directory) / "mac-run"
+            linux = Path(directory) / "linux-run"
+            write_run(mac, host="Host_Mac")
+            write_run(linux, host="Host_Linux")
+
+            report = render_runs([mac, linux], redact_serials=True)
+
+            self.assertEqual(2, report.count("### Transcript"))
+            self.assertIn(f"[C] ubertooth-util -U {REDACTED} -s", report)
+            self.assertIn(f"[O] Serial No: {REDACTED}", report)
+            self.assertNotIn(SERIAL, report)
+            # Each run's own sections sit under that run's heading, so a
+            # reader scrolling through two transcripts can see which is which.
+            self.assertIn("## Run `mac-run`", report)
+            self.assertIn("### Results", report)
+            self.assertNotIn("\n## Results\n", report)
+
+    def test_a_runs_subsections_move_down_with_their_section(self):
+        # Everything a run wrote moves a level, so a section that has
+        # subsections (the watchdog's issue to file, a file's checks) keeps
+        # them under it rather than beside it. What a command printed and
+        # what a board answered stay as they are: a fenced block is quoted
+        # output, and a reader may copy it out.
+        from ubertooth_harness.report import _as_a_section
+
+        page = (
+            "# Ubertooth test run `run-a`\n\n## Watchdog\n\n"
+            "### Issue to file on the fork\n\n"
+            "````text\nTitle: a reset\n\n## the board printed this\n"
+            "```text\n### and this\n```\n````\n"
+        )
+
+        self.assertEqual(
+            "## Run `run-a`\n\n### Watchdog\n\n"
+            "#### Issue to file on the fork\n\n"
+            "````text\nTitle: a reset\n\n## the board printed this\n"
+            "```text\n### and this\n```\n````\n",
+            _as_a_section(page),
+        )
+
+    def test_one_runs_board_is_masked_in_the_others_transcript(self):
+        # The page is masked once with every run's serials, not run by run:
+        # the macOS and Linux runs of a release may be taken on one bench,
+        # and a board one run names can be named in the other's output.
+        with tempfile.TemporaryDirectory() as directory:
+            mac = Path(directory) / "mac-run"
+            linux = Path(directory) / "linux-run"
+            write_run(mac, host="Host_Mac")
+            write_run(linux, host="Host_Linux", dk_serial="001050210121")
+            publisher = open_run_publisher(mac, "mac-run")
+            publisher.emit("command_started", "running", {
+                "command_id": "x", "argv": ["nrfdk.py", "--jlink", "1050210121"],
+            })
+            publisher.emit("command_finished", "passed", {
+                "command_id": "x", "returncode": 0, "duration_s": 0.1,
+            })
+
+            report = render_runs([mac, linux], redact_serials=True)
+
+            self.assertIn(f"[C] nrfdk.py --jlink {REDACTED}", report)
+            self.assertNotIn("1050210121", report)
 
     def test_records_are_valid_json_lines(self):
         with tempfile.TemporaryDirectory() as directory:
