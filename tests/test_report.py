@@ -107,6 +107,15 @@ def capped_events(text: str, stream: str = "stderr") -> list[dict]:
     return records
 
 
+def _redact_note(line: str, serials: set) -> str:
+    """``line`` of a note as the transcript stamps it, redacted, with the
+    stamp taken back off: what a shape line of the report comes out as."""
+    from ubertooth_harness.report import _redact
+
+    stamped = _redact(f"00:00:09.000 [M] {line}", serials)
+    return stamped.split("[M] ", 1)[1]
+
+
 def shape_note(shape: str, count: int = 1, tag: str = "[E]") -> str:
     """One line of the `[M]` note that counts by shape the lines the record
     limits left out of run.jsonl, as the transcript renders it: the only
@@ -878,6 +887,36 @@ class ReportTests(unittest.TestCase):
         self.assertIn(r"x [E] progress N%\rboard", plain)
         self.assertNotIn(line_shape(serial), report)
         self.assertIn(rf"x [E] progress N%\rboard {REDACTED} is idle", report)
+
+    def test_every_line_break_in_a_shape_is_written_visibly(self):
+        # Each character str.splitlines() splits on, since any of them would
+        # otherwise take the rest of a shape onto a line of its own, where
+        # the count and tag redaction reads a shape by are missing.
+        from ubertooth_harness.report import _omitted_text
+
+        serial = "1ab23cd45ef67ab89cd01ef23ab45cd6"
+        shape = line_shape(serial)
+
+        for break_char in ("\r", "\v", "\f", "\x1c", "\x1d", "\x1e",
+                           "\x85", "\u2028", "\u2029"):
+            note = {"output_omitted": {
+                "common_shapes": [
+                    {"stream": "stderr", "shape": f"a{break_char}{shape}",
+                     "count": 3},
+                ],
+            }}
+
+            text = _omitted_text(note)
+
+            self.assertEqual(2, len(text.splitlines()), repr(break_char))
+            self.assertNotIn(break_char, text, repr(break_char))
+            self.assertIn(shape, text, repr(break_char))
+            written = text.splitlines()[1].split(shape)[0].split("[E] ")[1]
+            self.assertEqual(
+                f"  3 x [E] {written}{REDACTED}\n",
+                _redact_note(text.splitlines()[1] + "\n", {serial}),
+                repr(break_char),
+            )
 
     def test_one_serials_characters_do_not_hide_anothers_shape(self):
         # A bridge serial is any string the registry chooses, so one
