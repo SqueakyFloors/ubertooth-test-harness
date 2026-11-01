@@ -1136,6 +1136,55 @@ class QueuedReportTests(QueueFixture):
         details = dict(record, message=leases.describe_queued_resource(record, past=True))
         self.assertEqual(details, events._validated_details(details))
 
+    def test_what_is_in_the_way_is_read_again_after_a_board_is_held(self):
+        """A record must not freeze on a lease that has since been cleared.
+
+        UT_0 is free and queued behind a waiter stuck at UT_1, so a record
+        is made; then UT_0 is taken for a while and comes free again with
+        the host lock in the waiter's way instead. The next record says so
+        rather than keeping what it read the first time.
+        """
+        name = self.waited(300)
+        wants = self.wanting(A, B, leases.HOST_LOCK, wait_s=600.0)
+        self.hold_ticket(A, name, wants)
+        first = self.hold_lease(B, self.live_holder(owner="stuck"))
+        notes, counted, taken_by_others = [], [], []
+
+        def sleep(_seconds):
+            counted.append(len(counted) + 1)
+            if len(counted) == 20:
+                # UT_0 goes to somebody else for a while, and what the
+                # waiter is held up by changes underneath.
+                taken_by_others.append(self.hold_lease(A, self.live_holder(owner="other")))
+                self.hold_lease(leases.HOST_LOCK, self.live_holder(owner="power"))
+                os.unlink(first)
+                for descriptor in list(self.raw):
+                    if descriptor == self.raw[-3]:
+                        os.close(descriptor)  # the UT_1 lease
+                        self.raw.remove(descriptor)
+                        break
+            if len(counted) == 30:
+                os.close(self.raw[-2])  # UT_0 is free again
+                self.raw.remove(self.raw[-2])
+                os.unlink(taken_by_others.pop())
+            if len(counted) == 60:
+                for _ in range(len(self.raw)):
+                    os.close(self.raw.pop())
+                os.unlink(self.dir / f"{leases.HOST_LOCK.key}.lock")
+                os.unlink(self.ticket_dir(A) / name)
+
+        with leases.acquire(
+            [A], holder("newcomer"), directory=self.dir, wait_s=600,
+            clock=lambda: 0.0, sleep=sleep, note=notes.append,
+        ) as taken:
+            self.assertEqual([A], [lease.board for lease in taken.leases])
+        self.assertEqual(1, len(notes), notes)
+        self.assertIn("UT_1", notes[0])  # what was in the way at the time
+        # And the record a reader of the run sees names what is in the way
+        # now, not what was when the line was said.
+        self.assertEqual(["host lock"],
+                         [item["resource"] for item in taken.queued[0]["blocked_by"]])
+
     def test_a_lock_file_longer_than_a_record_is_read_as_none(self):
         """A file this reads often must not be loaded whole.
 
@@ -1153,6 +1202,12 @@ class QueuedReportTests(QueueFixture):
         state = leases.board_states([B], directory=self.dir)[0]
         self.assertTrue(state["held"])
         self.assertEqual({}, state["holder"])
+        # Nor can JSON nested deeply enough to exhaust the parser end a
+        # command: that is a file holding no record, like any other.
+        os.ftruncate(self.raw[-1], 0)
+        os.pwrite(self.raw[-1], b"[" * 20_000 + b"]" * 20_000, 0)
+        self.assertEqual({}, leases.read_holder(path))
+        self.assertTrue(leases.board_states([B], directory=self.dir)[0]["held"])
 
     def test_a_record_carries_no_number_json_cannot_write(self):
         # json.loads accepts NaN and the infinities, so a lock file can

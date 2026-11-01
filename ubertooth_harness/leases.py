@@ -528,7 +528,10 @@ def read_holder(path: Path) -> dict:
         text = data.decode("utf-8")
         record = json.loads(text) if text.strip() else {}
         return record if isinstance(record, dict) else {}
-    except (OSError, ValueError):
+    # RecursionError: JSON nested deeply enough to exhaust the parser's
+    # stack is as much "not a record" as text that does not parse at all,
+    # and a file nobody can read must never end a command.
+    except (OSError, ValueError, RecursionError):
         return {}
 
 
@@ -1723,6 +1726,10 @@ def acquire(
     # rounds like every other stretch here: a line is worth saying once it
     # has lasted (see _QUEUED_REPORT_S).
     given: dict[tuple[str, str], float] = {}
+    # Where each of those stretches stood when what is in the way was last
+    # read, so a record is refreshed at a bounded rate and never held to
+    # the length of an earlier stretch.
+    refreshed: dict[tuple[str, str], float] = {}
     # A place in the queue for every resource, before any lock is taken, so
     # waiters are served in the order they arrived (#202).
     queue = TicketQueue(
@@ -1768,24 +1775,28 @@ def acquire(
                         # Somebody is using this resource, which explains
                         # itself; the stretch that is worth reporting is
                         # the one where it is free and still nobody's, so
-                        # it starts when the resource comes free.
+                        # it starts when the resource comes free, and so
+                        # does the next reading of what is in the way.
                         given.pop(marker, None)
+                        refreshed.pop(marker, None)
                     else:
                         # The rounds it has been free and queued, counted
                         # as the time between them: the first one has
                         # lasted no time yet, so this is what has elapsed,
                         # not how often it has been looked at.
                         given[marker] = given.get(marker, -_POLL_S) + _POLL_S
-                        kept = queued_waits.get(marker)
                         # Made once the stretch is worth a line, then kept
                         # up to date, but no more often than that: reading
                         # what is in the way means a lock probe for each
                         # resource that command asked for, and a wait can
-                        # last for thousands of rounds.
+                        # last for thousands of rounds. When it was last
+                        # read is kept here, not taken from the record: a
+                        # stretch that starts again must not be held to the
+                        # length of the one before it.
                         if (given[marker] >= _QUEUED_REPORT_S
-                                and (kept is None
-                                     or given[marker] - kept["gave_way_s"]
-                                     >= _QUEUED_REPORT_S)):
+                                and given[marker] - refreshed.get(marker, -_POLL_S)
+                                >= _QUEUED_REPORT_S):
+                            refreshed[marker] = given[marker]
                             _keep_queued_record(
                                 queued_waits, marker,
                                 _queued_wait(root, board, ticket, other,
@@ -1816,6 +1827,9 @@ def acquire(
             # command's own run reports about why it started late.
             yielded = rounds
             given = {pair: seconds for pair, seconds in given.items() if pair in rounds}
+            refreshed = {
+                pair: seconds for pair, seconds in refreshed.items() if pair in given
+            }
             reported &= rounds.keys()
             if queued is not None:
                 if clock() >= deadline:
