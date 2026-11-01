@@ -213,7 +213,7 @@ class QueueTests(QueueFixture):
         self.assertGreaterEqual(len(with_queue), 2)
 
         without_queue = []
-        with mock.patch.object(leases.TicketQueue, "ahead", lambda _self: None):
+        with mock.patch.object(leases.TicketQueue, "ahead_all", lambda _self: []):
             leases.acquire(
                 [A], holder("agent-3"), directory=self.dir, wait_s=60,
                 clock=lambda: 0.0, sleep=without_queue.append,
@@ -336,7 +336,7 @@ class QueueTests(QueueFixture):
                 self.assertEqual([queue.name], self.tickets(board))
                 self.assertEqual("agent", leases.read_holder(
                     self.ticket_dir(board) / queue.name)["owner"])
-            self.assertEqual(1, queue.waiting_for(A))
+            self.assertEqual(1, queue.waiting_count(A))
         finally:
             queue.release()
         for board in (A, B, leases.HOST_LOCK):
@@ -399,7 +399,7 @@ class QueueTests(QueueFixture):
             self.assertFalse(os.path.exists(theirs), "left a dead command's file")
             # Neither counts as a command waiting: a ticket is only a ticket
             # once it is under its queue name.
-            self.assertEqual(1, queue.waiting_for(A))
+            self.assertEqual(1, queue.waiting_count(A))
             self.assertIsNone(queue.ahead())
         finally:
             queue.release()
@@ -570,6 +570,36 @@ class MultiResourceQueueTests(QueueFixture):
         self.assertGreater(counts["after the run"], 0,
                            "the rush never got a board at all")
 
+    def test_waiting_one_command_out_does_not_take_another_one_s_resource(self):
+        """Each resource is given way at in its own right.
+
+        This command wants both boards. The command ahead at UT_0 has
+        nothing in its way, so this one waits out its stretch there; the
+        command ahead at UT_1 is waiting for the host lock as well and
+        cannot have it, so UT_1 is still its turn and this command gets
+        neither board.
+        """
+        self.hold_ticket(A, self.older(), self.wanting(A))
+        self.hold_ticket(B, self.older(), self.wanting(leases.HOST_LOCK, B))
+        clock, sleep = self._virtual_clock()
+        with leases.acquire([], holder("holder"), directory=self.dir, host_lock=True):
+            with self.assertRaises(leases.LeaseError) as caught:
+                leases.acquire(
+                    [A, B], holder("newcomer"), directory=self.dir, wait_s=30,
+                    clock=clock, sleep=sleep,
+                )
+            message = str(caught.exception)
+            self.assertIn("UT_1 is queued after waiting 30s", message)
+            self.assertIn("that command is waiting for host lock too", message)
+            # With that command out of the queue, the one at UT_0 is waited
+            # out as it would be on its own, and both boards are taken.
+            os.unlink(self.ticket_dir(B) / self.older())
+            with leases.acquire(
+                [A, B], holder("newcomer"), directory=self.dir, wait_s=600,
+                clock=lambda: 0.0, sleep=lambda _seconds: None,
+            ) as taken:
+                self.assertEqual([A, B], [lease.board for lease in taken.leases])
+
     def test_a_ticket_from_before_the_set_is_read_as_its_own_resource(self):
         # A ticket of an earlier harness records no set, so the queue reads
         # the one resource, as it did before multi-resource waiters.
@@ -590,12 +620,29 @@ class MultiResourceQueueTests(QueueFixture):
         self.assertEqual([A], leases.waiting_resources(
             {"waiting_for": ["UT_1", {"key": "../elsewhere"}, {"key": ".."},
                              {"key": "."}, {"key": ""}, {}]}, A))
+        # An alias is only shown to a person, so a record cannot put a line
+        # break or a page of text into an error; a resource named twice
+        # costs one probe, not two.
         self.assertEqual(
-            [leases.Board("UT_1", B.key), leases.Board(B.key, B.key)],
+            [leases.Board("UT_1", B.key)],
             leases.waiting_resources({"waiting_for": [
                 {"key": B.key, "resource": "UT_1"}, {"key": B.key},
             ]}, A),
         )
+        self.assertEqual(
+            [leases.Board("UT_1 oh no", B.key)],
+            leases.waiting_resources(
+                {"waiting_for": [{"key": B.key, "resource": "UT_1\noh no"}]}, A),
+        )
+        self.assertEqual(
+            60, len(leases.waiting_resources(
+                {"waiting_for": [{"key": B.key, "resource": "x" * 200}]}, A)[0].alias))
+        self.assertEqual(
+            leases._MAX_WAITING_FOR,
+            len(leases.waiting_resources({"waiting_for": [
+                {"key": f"nrf52840dk-{number}"}
+                for number in range(leases._MAX_WAITING_FOR + 10)
+            ]}, A)))
 
     def test_a_host_lock_somebody_holds_keeps_the_queue(self):
         clock, sleep = self._virtual_clock()

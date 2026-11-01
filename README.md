@@ -1502,7 +1502,10 @@ queue, once for each command ahead of it; a command with no
 `--wait-for-boards` has a whole second before it gives up, so it too ends up
 competing rather than failing (and, if the board is taken again just before
 that second is up, failing with `is queued` where it used to say `is in
-use`). The bound is per stretch of giving way: it starts again whenever one of
+use`). Where the command ahead is waiting for something it cannot have yet,
+there is no such stretch: a command with no `--wait-for-boards` then fails
+with `is queued` after its second rather than competing. The bound is per
+stretch of giving way, and per board: it starts again whenever one of
 those boards is held, or the command ahead in the queue changes, so a long
 wait never turns into a license to jump the queue. Giving way to a command
 that is waiting for a board somebody is using is never bounded: nothing in
@@ -1514,10 +1517,17 @@ command can be ahead in the queue, with everything it asked for free, and
 still not take it, for a reason the queue can neither see nor help: a wrapper
 outside the harness holding a board's own lock file while it waits for the
 lease (the order below). Its neighbors give it a clear run at the board and
-then carry on. The host lock is the other thing a waiter can be held up by
-with no way through, since it is never taken over (above): one whose holder is
+then carry on. A command gives way at each board in its own right, so waiting
+one command ahead out never lets it take a board another has been waiting
+longer for. The host lock is the other thing a waiter can be held up by with
+no way through, since it is never taken over (above): one whose holder is
 gone counts as free here, so a lock a person has to clear does not hold the
 whole bench in the queue.
+
+What a multi-board run costs the others, in exchange: while it waits for the
+last board it needs, a command that wants one of the boards already free
+waits too, and one that asked to wait for nothing fails with `is queued`.
+That lasts as long as the run's own `--wait-for-boards`.
 
 ### The host lock
 
