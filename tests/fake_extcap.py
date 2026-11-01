@@ -35,6 +35,8 @@ Environment:
   ``ubertooth-util`` could not open every board on the host
 - ``FAKE_EXTCAP_LISTING_ERROR``: report this on ``--extcap-interfaces`` and
   exit 1, for a listing that failed for some other reason
+- ``FAKE_EXTCAP_LISTING_BARE``: the same, written without the ``error: ``
+  prefix, as libubertooth writes some of its failures
 - ``FAKE_EXTCAP_LISTING_STATUS``: the exit status of ``--extcap-interfaces``,
   whatever it reported, for a status the plugin would never give
 
@@ -153,7 +155,12 @@ def main(argv) -> int:
         other = os.environ.get("FAKE_EXTCAP_LISTING_ERROR")
         if other:
             print(f"error: {other}", file=sys.stderr)
-        status = 1 if (busy or other) else 0
+        # libubertooth writes some of its failures with no "error: " prefix,
+        # and the plugin passes those on as they are.
+        bare = os.environ.get("FAKE_EXTCAP_LISTING_BARE")
+        if bare:
+            print(bare, file=sys.stderr)
+        status = 1 if (busy or other or bare) else 0
         return int(os.environ.get("FAKE_EXTCAP_LISTING_STATUS", status))
     if "--extcap-dlts" in names:
         print(f"dlt {{number={DLT}}}{{name=DLT_BLUETOOTH_LE_LL_WITH_PHDR}}"

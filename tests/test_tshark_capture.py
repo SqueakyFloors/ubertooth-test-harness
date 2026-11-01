@@ -296,6 +296,15 @@ class ListingTests(unittest.TestCase):
         self.assertEqual(1, code, out)
         self.assertIn("for something other than a board another program holds", out)
 
+    def test_a_second_failure_beside_a_busy_board_is_not_skipped_past(self):
+        # A diagnosis with no "error: " prefix, which is how libubertooth
+        # writes some of its failures, is still a second thing going wrong.
+        code, out = self.listing(FAKE_EXTCAP_BUSY="1",
+                                 FAKE_EXTCAP_LISTING_BARE="libusb_open failed (-3)")
+
+        self.assertEqual(1, code, out)
+        self.assertIn("for something other than a board another program holds", out)
+
     def test_a_listing_that_fails_without_saying_why_is_a_failure(self):
         code, out = self.listing(FAKE_EXTCAP_LISTING_STATUS="1")
 
