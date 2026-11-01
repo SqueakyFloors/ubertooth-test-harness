@@ -1044,6 +1044,74 @@ refused before any record is decoded.
 this covers the decode path and not the receive path. There is no LE
 equivalent: no tool calls libbtbb's LE file replay.
 
+## Interrupting a capture
+
+**What it does.** Sends a real SIGINT to a running capture tool and requires
+that one Ctrl-C ends it promptly, leaves a capture file a reader can open,
+leaves no process behind and nothing still streaming, and leaves a board that
+answers the next command at once.
+
+**Theory of operation.** Ctrl-C is how a capture normally ends, so what it
+leaves behind is what an operator meets every time. The fork's handler only
+raises a flag; the capture loop reads it on its own thread, ends the stream,
+stops the mode, closes the capture files, and exits 0. The handlers go on
+before the board is opened, so a signal arriving while one is being found is
+not thrown away. Nothing in the harness sent a fork tool a SIGINT before this:
+bounded modes are stopped with SIGTERM, and the only SIGINT it sent went to
+tshark.
+
+The signal has to reach the tool itself, so
+[`captureinterrupt.py`](../ubertooth_harness/captureinterrupt.py) starts it
+directly, with no shell and no `timeout` wrapper (which would be signalled
+instead), sends one SIGINT to that process's own pid, then waits for it and
+reaps it. It starts the tool in a session of its own, which is what lets it
+report whether anything was left behind.
+
+The moment is chosen by evidence, not by a clock. `ubertooth-dump -d` and
+`ubertooth-specan -d` stream whether or not there is traffic, so the capture
+file growing past a floor is proof that the mode is running; `ubertooth-btle
+-n -r -q` writes its two capture headers as the mode starts, which is the
+same evidence for a poll-driven capture. A capture that never gets going is
+reported as a skip, because nothing was interrupted. The early case is the
+other side: it signals a few milliseconds in, which lands either while the
+board is being opened or just after the mode has started, and requires the
+same of both.
+
+**Hardware and arguments.** One `Ubertooth` role, no peer, no firmware write,
+no transmission, and every other registered board is read as a guard.
+`hosts:`, `coverage:`. No RF placement requirement: none of the cases needs
+traffic, so an attenuated board will do.
+
+**Expected outcome.** Smoke runs 2 cases: `ubertooth-dump -d` interrupted once
+it has written 20 whole records, and `ubertooth-btle -n -r -q` interrupted once
+both capture headers are there. Comprehensive runs 4, adding `ubertooth-specan
+-d` interrupted once it is sweeping, and `ubertooth-rx -q` interrupted a few
+milliseconds in. Every case requires: exit 0 within 5 s of the one signal and
+not death by that signal; nothing left in the session the tool ran in; the
+capture file read again after the exit and not grown, so no mode is still
+streaming into it; no `error:`, `warning:`, `note:` or progress line on
+standard output; the file itself readable (whole 68-byte records for the dump,
+whole 3-byte in-band samples for the sweep, a walkable PCAPNG and PCAP for the
+two LE writers); `ubertooth-util -v` answered within 5 s; and then the usual
+cleanup restoring the channel, the squelch, and the LEDs, with the identity
+read again. Each attempt's capture and the tool's own two streams are kept
+beside each other in the run directory, so a failed attempt keeps its
+evidence.
+
+**Known limits.** A stop that lands inside an *unanswered* poll, which is
+where the fork drops the retries still to come
+([ubertooth#856](https://github.com/SqueakyFloors/ubertooth/pull/856)), cannot
+be produced here: it needs a board that has stopped answering, which is the
+board-lost-mid-capture work and its hub power control
+([#141](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/141)).
+The early case cannot say which window its signal landed in, and does not try
+to: a board lookup finishes in 10 to 20 ms on the bench host, so aiming at
+the open window alone would need tens of attempts, each sending a serial read
+to every attached board, which is known to be able to end another run's
+capture ([ubertooth#505](https://github.com/SqueakyFloors/ubertooth/issues/505)).
+Requiring the same prompt exit of both windows catches the regression either
+way. Nothing here checks a second Ctrl-C, because one is meant to be enough.
+
 ## Refused command lines
 
 **What it does.** Refuses a command line that names output files and requires
