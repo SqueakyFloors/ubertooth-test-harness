@@ -122,6 +122,10 @@ class FakePeerFirmware:
         self.sco_rx_frames = 0
         self.sco_rx_bad = 0
         self.sco_packets = 0
+        # A boot clears this; `defaults` does not, as the firmware's does
+        # not. It starts here as well so a firmware built and asked for its
+        # counters without a boot answers rather than raising.
+        self.stats_dead = getattr(self, "stats_dead", False)
         self._audio_link_down()
 
     def _audio_link_down(self):
@@ -347,8 +351,11 @@ class FakePeerFirmware:
     # -- the audio link -----------------------------------------------------
 
     def _sco(self, words):
-        # The firmware's shell takes each of these with an exact word count
-        # (main.c), so an extra word is not a command it knows.
+        # The firmware's shell takes each of these with an exact word count,
+        # so an extra word is not a command it knows. The wording of its
+        # refusals is matched where a driver can reach them; a bare `sco`,
+        # which no driver sends, is answered more tidily here than the
+        # firmware's own argument handling would.
         if words == ["type"] or (words[:1] == ["type"] and len(words) != 2):
             return ["ERR sco type takes ev3, 2ev3, or default"]
         if len(words) != (2 if words[:1] == ["type"] else 1):

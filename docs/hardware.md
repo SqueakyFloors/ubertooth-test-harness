@@ -155,6 +155,11 @@ timing, and the count: the audio pattern the firmware sends does not reach the
 air as it was sent, because the controller codes the samples to CVSD on the
 way out.
 
+The air carries more than the voice link while one is up. The link is opened
+through the Hands-Free Profile, and its service level connection, an ACL link,
+stays up for as long as the session does, so a capture holds that traffic as
+well as the reserved-slot packets.
+
 A board has carried the link, and counted its frames, since `utesp-1.1.0`. The
 packet-type choice, and the fields that report what a link settled on, came
 with `utesp-1.4.0`, which is the image the audio session asks for; every other

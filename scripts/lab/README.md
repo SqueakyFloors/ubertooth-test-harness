@@ -118,7 +118,9 @@ passed through; left out, the module's own defaults apply.
 
 `audio` is the same session with a synchronous (eSCO) voice link instead of
 the data link. A synchronous link carries its packets in reserved slots, so it
-is a different thing on the air and in a decoder:
+is a different thing on the air and in a decoder. The air also carries the
+Hands-Free service level connection the link is opened through, an ACL link,
+for the whole session: a capture holds both:
 
 ```sh
 .venv/bin/python scripts/lab/peer audio ESP32_Linux0 ESP32_Linux1 \
@@ -149,24 +151,31 @@ the link up and settling put frames on the air before the command starts, so a
 total would flatter the run; the difference is what the capture window saw.
 `--min-frames` and `--min-packets` are the floors those differences must
 reach, and both boards must meet them, so a link that fell silent part way
-through does not pass on what it carried at first. The window is the two
-counter reads either side of the command, so it is a few milliseconds wider
-than the command itself; set the floors from the rate the link reports rather
-than to the last packet.
+through does not pass on what it carried at first. The window is bounded by
+the reads either side of the command rather than by the command itself: each
+board's own status, counters, and notices, a few tens of milliseconds in all.
+Set the floors from the rate the link reports, not to the last packet.
 
 A link that went down during the command fails the session even if it came
 straight back: its counters would otherwise add two links' traffic together.
-The board's own `utesp: sco disconnected` is what says so, with a changed
-connection handle, or a controller's count that started again, behind it. `--min-seconds` and
+The board's own `utesp: sco disconnected` is what says so. Behind it are a
+changed connection handle and a controller's count that started again, and
+neither is certain — a controller may hand the same handle back, and the
+firmware's frame counters run on across a new link — so the notice is the
+check to rely on.
+
+A board that cannot be put back in its boot state fails the session too, even
+when the capture itself went well: a board whose audio profile is still
+running refuses the next `role` or `defaults`, and `reset` is the way out. `--min-seconds` and
 `--timeout` work as they do for `stream`.
 
 The link is checked again after the command: one that came back as another
 packet type, or as plain SCO, fails even though it was right at the start.
 
-A counter read the firmware refuses — it refuses one with no link up, and for
-the rest of a boot after a request of its own went unanswered — is reported as
-not counted, with the reason, and the packet floor is reported as not checked,
-rather than ending the session. A link that dropped during the capture is then
+A counter read the board refuses — with no link up, for the rest of a boot
+after a request of its own went unanswered, or because its controller would
+not give them — is reported as not counted, with the reason, and the packet
+floor is reported as not checked, rather than ending the session. A link that dropped during the capture is then
 named in its own words, with the frame counters still there to read.
 
 If a board cannot be put back in its boot state at the end, the session says

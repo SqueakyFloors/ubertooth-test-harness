@@ -347,6 +347,16 @@ class StreamTests(unittest.TestCase):
         self.assertNotIn("central LAP", written)
         self.assertIn("central LAP: e9c5ba", report.getvalue())
 
+    def test_a_floor_cannot_be_negative(self):
+        for options, reason in (({"min_writes": -1}, "the write floor"),
+                                ({"min_seconds": -2},
+                                 "the seconds the command must run for"),
+                                ({"timeout": -1}, "the seconds the command may take")):
+            with self.subTest(options), self.assertRaisesRegex(
+                esp32peer.PeerError, f"{reason} cannot be negative"
+            ):
+                self._stream(**options)
+
     def test_a_pair_that_sent_too_little_fails_the_run(self):
         with self.assertRaisesRegex(esp32peer.PeerError,
                                     "reported 100 writes, fewer than the 1000"):
@@ -410,7 +420,7 @@ class AudioTests(unittest.TestCase):
         self.assertEqual(0, status)
         self.assertIn("central LAP: e9c5ba", report)
         self.assertIn("central UAP: 0d", report)
-        self.assertIn(f"audio link: up to {ACCEPTOR_ADDRESS}", report)
+        self.assertIn(f"paged {ACCEPTOR_ADDRESS}", report)
         self.assertIn("command exit: 0", report)
         self.assertIn("pair carried audio: yes", report)
         # The counters count from when the link came up, so what is reported
@@ -644,10 +654,10 @@ class AudioTests(unittest.TestCase):
         ):
             self._audio(pair=(acceptor, initiator), sco_type="ev3")
 
-    def test_a_board_that_could_not_be_released_is_said_aloud(self):
+    def test_a_board_that_could_not_be_released_fails_the_session(self):
         # A board whose audio profile is still running refuses the next
-        # case's `role` and `defaults`, so a session that could not put it
-        # back has to leave a sign of it in the report.
+        # session's `role` and `defaults`, so a session that could not put it
+        # back has not finished, however well the command itself went.
         class Stuck(FakePeerFirmware):
             def boot(self):
                 lines = super().boot()
@@ -655,12 +665,30 @@ class AudioTests(unittest.TestCase):
                 self.sco = "ready"
                 return lines
 
-        status, report, _acceptor, _initiator = self._audio(
-            pair=_audio_pair(acceptor_class=Stuck), min_frames=10)
-        self.assertEqual(0, status)
-        self.assertIn("note: the acceptor is not in its boot state after its "
-                      "reset: sco 'ready', not 'off', sco_profile 'ag', not "
-                      "'none'", report)
+        acceptor_firmware, initiator_firmware = _audio_pair(
+            acceptor_class=Stuck)
+        acceptor, initiator = _peers(acceptor_firmware, initiator_firmware)
+        report = io.StringIO()
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "the acceptor was not left ready for the next session: it is not "
+            "in its boot state after its reset: sco 'ready', not 'off', "
+            "sco_profile 'ag', not 'none'"
+        ):
+            esp32peer.audio(acceptor, initiator, TRUE, out=report,
+                            settle_s=0.0, min_frames=10)
+        self.assertIn("note: the acceptor is not in its boot state", report.getvalue())
+
+    def test_a_floor_cannot_be_negative(self):
+        for options, reason in (({"min_frames": -1}, "the frame floor"),
+                                ({"min_packets": -5}, "the packet floor"),
+                                ({"min_seconds": -0.5},
+                                 "the seconds the command must run for"),
+                                ({"timeout": -1}, "the seconds the command may take")):
+            with self.subTest(options), self.assertRaisesRegex(
+                esp32peer.PeerError, f"{reason} cannot be negative"
+            ):
+                self._audio(**options)
 
     def test_a_link_that_came_back_during_the_command_is_not_one_link(self):
         # The frame counters carry over a new link, so the floors would pass

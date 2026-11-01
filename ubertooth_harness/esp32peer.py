@@ -412,6 +412,22 @@ class Shell:
                 return parse_status(line, self.label)
         raise PeerError(f"{self.label}: status printed no JSON line")
 
+    def _pending_lines(self, deadline: float):
+        """Lines already on their way, stopping as soon as there are no more.
+
+        Unlike _lines, this does not sit out its deadline waiting for a board
+        that has nothing to say: it is reading what has arrived, and every
+        moment it spends is counted inside somebody's measurement.
+        """
+        while True:
+            while b"\n" in self._buffer:
+                raw, self._buffer = self._buffer.split(b"\n", 1)
+                yield raw.decode("utf-8", "replace").strip("\r \t\x00")
+            chunk = self.port.read(256) if self.clock() < deadline else b""
+            if not chunk:
+                return
+            self._buffer += chunk
+
     def drain_notices(self, timeout: float = NOTICE_DRAIN_S) -> None:
         """Read what the board said by itself, into ``notices``.
 
@@ -421,10 +437,11 @@ class Shell:
         the moment a link goes down: during a capture, which is the whole
         point of the session, no command is in flight to carry it.
 
-        The timeout is a real one, however short: the line is in the kernel's
-        buffer, not this driver's, so the port has to be read for it.
+        The line is in the kernel's buffer, not this driver's, so the port is
+        read for it; the timeout only bounds a board that keeps talking,
+        because this returns as soon as there is nothing more to read.
         """
-        for line in self._lines(self.clock() + timeout):
+        for line in self._pending_lines(self.clock() + timeout):
             if line and self.log is not None:
                 self.log(targets.RECEIVED, line)
             if _NOTICE.match(line):
@@ -732,6 +749,9 @@ def stream(acceptor: Peer, initiator: Peer, command: Sequence[str], *,
     out = out or sys.stderr
     period = period_ms(period)
     payload = payload_bytes(payload)
+    min_writes = whole(min_writes, "the write floor")
+    min_seconds = seconds(min_seconds, "the seconds the command must run for")
+    timeout = seconds(timeout, "the seconds the command may take")
     return _session(
         acceptor, initiator,
         lambda acceptor_shell, initiator_shell: _stream(
@@ -781,14 +801,14 @@ def _introduce(acceptor, acceptor_shell, initiator, initiator_shell,
     return acceptor_status, initiator_status
 
 
-def _release(shell: Shell, label: str = "peer", out=None) -> None:
+def _release(shell: Shell, label: str = "peer", out=None) -> str:
     """Leave a board in its boot state, whatever the session did to it.
 
-    A failure here does not raise: the caller may already be reporting what
-    went wrong, and the case's cleanup resets both boards in any event. It is
-    said aloud, though, because a board whose audio profile is still running
-    refuses the next case's `role` and `defaults`, and a reader of this
-    session's report would otherwise have no sign of it.
+    Returns why it could not, or "". It does not raise: the caller may
+    already be reporting what went wrong, and it decides what a board left
+    behind costs. Either way it is said aloud, because a board whose audio
+    profile is still running refuses the next session's `role` and
+    `defaults`, and a reader would otherwise have no sign of it.
     """
     out = out or sys.stderr
     try:
@@ -796,11 +816,28 @@ def _release(shell: Shell, label: str = "peer", out=None) -> None:
         status = shell.status()
     except PeerError as error:
         print(f"note: the {label} was not released: {error}", file=out)
-        return
+        return str(error)
     wrong = boot_state_problems(status)
-    if wrong:
-        print(f"note: the {label} is not in its boot state after its reset: "
-              + ", ".join(wrong), file=out)
+    if not wrong:
+        return ""
+    print(f"note: the {label} is not in its boot state after its reset: "
+          + ", ".join(wrong), file=out)
+    return "it is not in its boot state after its reset: " + ", ".join(wrong)
+
+
+def whole(value, what: str) -> int:
+    """A floor cannot be negative: a negative one would check nothing."""
+    number = int(value)
+    if number < 0:
+        raise PeerError(f"{what} cannot be negative, got {value!r}")
+    return number
+
+
+def seconds(value, what: str) -> float:
+    number = float(value)
+    if number < 0:
+        raise PeerError(f"{what} cannot be negative, got {value!r}")
+    return number
 
 
 def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
@@ -810,7 +847,10 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
                                     initiator_shell, out)
     print(f"stream: {payload} bytes every {period} ms", file=out)
     try:
-        initiator_shell.command("role initiator")
+        # `role` takes an audio link and its profile down before it changes
+        # anything, which the firmware allows about 18 s for, so it gets the
+        # same deadline here as in an audio session.
+        initiator_shell.command("role initiator", ROLE_TIMEOUT_S)
         initiator_shell.command(f"spp peer {acceptor_status['address']}")
         initiator_shell.command(f"stream period {period}")
         initiator_shell.command(f"stream payload {payload}")
@@ -875,6 +915,10 @@ def audio(acceptor: Peer, initiator: Peer, command: Sequence[str], *,
     """
     out = out or sys.stderr
     wanted = packet_type(sco_type)
+    min_frames = whole(min_frames, "the frame floor")
+    min_packets = whole(min_packets, "the packet floor")
+    min_seconds = seconds(min_seconds, "the seconds the command must run for")
+    timeout = seconds(timeout, "the seconds the command may take")
     return _session(
         acceptor, initiator,
         lambda acceptor_shell, initiator_shell: _audio(
@@ -925,8 +969,11 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         linked = check_audio_status(initiator_shell.status(), initiator.label)
         far = _wait_for_link(acceptor_shell, acceptor.label, link_timeout)
         _check_link(linked, far, acceptor.label, initiator.label, sco_type)
-        print(f"audio link: up to {acceptor_status['address']} at "
-              f"{time.strftime('%H:%M:%SZ', time.gmtime())}", file=out)
+        # The address is the one the initiator was told to page: a
+        # synchronous link carries no remote address over HCI, so unlike a
+        # stream's, this far end is not read back from the board.
+        print(f"audio link: up at {time.strftime('%H:%M:%SZ', time.gmtime())}, "
+              f"paged {acceptor_status['address']}", file=out)
         _report_link(out, linked)
         time.sleep(settle_s)
         # Every counter here counts from the moment the link came up, so the
@@ -965,8 +1012,10 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
                 # counters are already in hand and are the run's result.
                 stopped = str(error)
     finally:
-        _release(initiator_shell, initiator.label, out)
-        _release(acceptor_shell, acceptor.label, out)
+        # A board left with its audio profile running cannot run the next
+        # session, so failing to release one fails this one.
+        left = {initiator.label: _release(initiator_shell, initiator.label, out),
+                acceptor.label: _release(acceptor_shell, acceptor.label, out)}
     sides = ((initiator.label, before_initiator, after_initiator),
              (acceptor.label, before_acceptor, after_acceptor))
     for label, before, after in sides:
@@ -976,6 +1025,10 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
     problems, notes = [], []
     if stopped:
         problems.append(f"the audio link would not stop: {stopped}")
+    for label, reason in left.items():
+        if reason:
+            problems.append(f"the {label} was not left ready for the next "
+                            f"session: {reason}")
     for label, before, after in sides:
         # A link that is down is that, not a link that came back: the
         # firmware zeroes the handle when it goes, so the flap check below
@@ -1004,8 +1057,10 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
                 before.stats is not None and after.stats is not None
                 and after.stats["tx_total"] < before.stats["tx_total"]):
             problems.append(f"the {label}'s counters went backwards while the "
-                            "command ran, so this is not the link they were "
-                            "first read from")
+                            "command ran: either this is not the link they "
+                            "were first read from, or this controller's "
+                            "counters do not add up across reads, and a "
+                            "difference means nothing on it")
         # Each side answers every frame it receives with one of its own, so
         # both ends receiving frames is what shows the link carried audio
         # while the command ran, rather than only before it.
