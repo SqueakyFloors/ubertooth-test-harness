@@ -466,8 +466,10 @@
       // why a run can start late with the bench looking idle. The harness
       // sends the line the report shows.
       const text = String(details.message ?? "");
-      if (text && !live.queued.includes(text)) live.queued.push(text);
-      pushLog(`note: ${text}`);
+      if (text) {
+        if (!live.queued.includes(text)) live.queued.push(text);
+        pushLog(`note: ${text}`);
+      }
     }
     if (kind === "watchdog") {
       // The firmware reset a board, or did not: a count, never a failure.

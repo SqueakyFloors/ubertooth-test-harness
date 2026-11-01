@@ -860,6 +860,35 @@ class QueuedReportTests(QueueFixture):
         self.hold_ticket(A, self.waited(200), self.wanting(A, B))
         self.assertNotIn("queued_for", leases.board_states([A], directory=self.dir)[0])
 
+    def _gives_way(self, *, rounds_before_release, name, notes, wait_s=600):
+        """Give way to a waiter stuck at UT_1, then take UT_0 and report.
+
+        The waiter ahead wants both boards; UT_1 is held by a lease nobody
+        will give back. After the given number of poll rounds that lease
+        goes and the waiter's turn is over, so this command takes UT_0.
+        """
+        self.hold_ticket(A, name, self.wanting(A, B, wait_s=float(wait_s)))
+        self.hold_ticket(B, name, self.wanting(A, B, wait_s=float(wait_s)))
+        lock = self.hold_lease(B, self.live_holder(owner="stuck"))
+        counted = []
+
+        def sleep(_seconds):
+            counted.append(len(counted) + 1)
+            if len(counted) == rounds_before_release:
+                os.close(self.raw.pop())  # the lease in the waiter's way
+                os.unlink(lock)
+                os.close(self.raw.pop())  # and the waiter's own tickets
+                os.close(self.raw.pop())
+                os.unlink(self.ticket_dir(A) / name)
+                os.unlink(self.ticket_dir(B) / name)
+
+        with leases.acquire(
+            [A], holder("newcomer"), directory=self.dir, wait_s=wait_s,
+            clock=lambda: 0.0, sleep=sleep, note=notes.append,
+        ) as taken:
+            self.assertEqual([A], [lease.board for lease in taken.leases])
+            return taken, counted
+
     def test_a_command_that_gives_way_records_it_once(self):
         """What a run carries out of its wait, for its own record.
 
@@ -868,18 +897,55 @@ class QueuedReportTests(QueueFixture):
         gave way at, and says it once on standard error rather than on
         every poll round.
         """
+        notes = []
+        taken, rounds = self._gives_way(
+            rounds_before_release=40, name=self.waited(120), notes=notes)
+        self.assertGreaterEqual(len(rounds), 40)
+        self.assertEqual(1, len(notes), notes)
+        self.assertIn("UT_0 is free but queued for waiting-agent", notes[0])
+        self.assertEqual(1, len(taken.queued))
+        record = taken.queued[0]
+        self.assertEqual("UT_0", record["resource"])
+        self.assertEqual(["UT_1"],
+                         [item["resource"] for item in record["blocked_by"]])
+        # How long this command gave way, counted in poll rounds like every
+        # other stretch in acquire(), and kept up to date to the last round.
+        self.assertAlmostEqual(40 * leases._POLL_S, record["gave_way_s"], places=2)
+        self.assertIn("This command has given way for 10s",
+                      leases.describe_queued_resource(record))
+
+    def test_a_moment_of_giving_way_is_not_worth_a_line(self):
+        # Two commands sorting themselves out in a second say nothing: the
+        # report is for a bench that looks idle, not for every queue.
+        notes = []
+        self._gives_way(rounds_before_release=2, name=self.waited(120), notes=notes)
+        self.assertEqual([], notes)
+
+    def test_a_resource_freed_during_the_wait_is_still_reported(self):
+        """The case #234 is about: a short run frees a board mid-wait.
+
+        UT_0 is held when this command starts waiting, so there is nothing
+        to explain yet; it comes free a few rounds later while the waiter
+        ahead is still stuck at UT_1, and from then on UT_0 is a free board
+        nobody can take. The report has to arrive then, not never.
+        """
         name = self.waited(120)
         self.hold_ticket(A, name, self.wanting(A, B, wait_s=600.0))
         self.hold_ticket(B, name, self.wanting(A, B, wait_s=600.0))
-        held = leases.acquire([B], holder("holder"), directory=self.dir)
-        notes, rounds = [], []
+        stuck = self.hold_lease(B, self.live_holder(owner="stuck"))
+        # A lease held outside this process, so holding it needs no turn in
+        # the queue the older waiter is already ahead in.
+        short = self.hold_lease(A, self.live_holder(owner="short-run"))
+        notes, counted = [], []
 
         def sleep(_seconds):
-            rounds.append(len(rounds) + 1)
-            if len(rounds) == 4:
-                # The waiter ahead gets UT_1 and its turn is over; the
-                # tickets go with it, and this command takes UT_0.
-                held.release()
+            counted.append(len(counted) + 1)
+            if len(counted) == 4:
+                os.close(self.raw.pop())  # the short run ends; UT_0 is free
+                os.unlink(short)
+            if len(counted) == 40:
+                os.close(self.raw.pop())  # and now the lease in the way
+                os.unlink(stuck)
                 os.close(self.raw.pop())
                 os.close(self.raw.pop())
                 os.unlink(self.ticket_dir(A) / name)
@@ -892,10 +958,47 @@ class QueuedReportTests(QueueFixture):
             self.assertEqual([A], [lease.board for lease in taken.leases])
         self.assertEqual(1, len(notes), notes)
         self.assertIn("UT_0 is free but queued for waiting-agent", notes[0])
-        self.assertEqual(1, len(taken.queued))
-        self.assertEqual("UT_0", taken.queued[0]["resource"])
-        self.assertEqual(["UT_1"],
-                         [item["resource"] for item in taken.queued[0]["blocked_by"]])
+        self.assertEqual(["UT_0"], [item["resource"] for item in taken.queued])
+        # Only the rounds UT_0 was really free count as giving way at it.
+        self.assertLess(taken.queued[0]["gave_way_s"], 40 * leases._POLL_S)
+
+    def test_a_record_of_a_situation_that_is_over_is_dropped(self):
+        """A run must not report a wait that stopped happening.
+
+        UT_0 is free and queued behind a stuck waiter, so a record is made;
+        then UT_0 is taken by somebody else, which needs no explaining, and
+        the record goes rather than reaching the run's report.
+        """
+        name = self.waited(120)
+        self.hold_ticket(A, name, self.wanting(A, B, wait_s=600.0))
+        self.hold_ticket(B, name, self.wanting(A, B, wait_s=600.0))
+        stuck = self.hold_lease(B, self.live_holder(owner="stuck"))
+        notes, counted, others = [], [], []
+
+        def sleep(_seconds):
+            counted.append(len(counted) + 1)
+            if len(counted) == 20:
+                # Somebody else takes UT_0, from outside this process (as
+                # above), so there is nothing left to explain about it.
+                others.append(self.hold_lease(A, self.live_holder(owner="other")))
+            if len(counted) == 40:
+                os.close(self.raw.pop())
+                os.unlink(others.pop())
+                os.close(self.raw.pop())
+                os.unlink(stuck)
+                os.close(self.raw.pop())
+                os.close(self.raw.pop())
+                os.unlink(self.ticket_dir(A) / name)
+                os.unlink(self.ticket_dir(B) / name)
+
+        with leases.acquire(
+            [A], holder("newcomer"), directory=self.dir, wait_s=600,
+            clock=lambda: 0.0, sleep=sleep, note=notes.append,
+        ) as taken:
+            self.assertEqual([A], [lease.board for lease in taken.leases])
+        self.assertEqual(1, len(notes), "said more than once")
+        self.assertEqual([], taken.queued,
+                         "reported a wait that was over by the end")
 
     def test_a_command_says_nothing_about_a_resource_that_is_held(self):
         # Giving way at a board somebody is using explains itself, and the
