@@ -11,7 +11,7 @@ checkoff, and a countdown/ETA in a web GUI.
 > compilation, simulated port restoration, grouped and stateful command cases,
 > per-run builds, and flash reliability as a plan test are implemented. Each run
 > writes one run.jsonl and one report.md. The persistent target runner
-> (protocol v3, outbound-only to a loopback controller) is implemented and
+> (protocol v4, outbound-only to a loopback controller) is implemented and
 > tested against a stub controller. The controller (target registry, run
 > dispatch, results store, REST and live WebSocket API; `127.0.0.1` only) is
 > implemented and tested against scripted runners and the real runner, and it
@@ -54,10 +54,12 @@ checkoff, and a countdown/ETA in a web GUI.
   `/api/refs` (git ls-remote of the Ubertooth repository), `/api/plans`,
   `/api/targets`, `/api/targets/{host}/runs` (start), `/api/runs`,
   `/api/runs/{id}` (status and events), `/api/runs/{id}/report.md`,
-  `/api/runs/{id}/cancel`. `/ws/live` fans out target status changes, run
+  `/api/runs/{id}/files` and `/api/runs/{id}/file` (the output files the run
+  saved, and one bounded page of one; a file that stayed on the target is
+  asked of that run's runner), `/api/runs/{id}/cancel`. `/ws/live` fans out target status changes, run
   updates, and (with `?run_id=`) one run's events to browsers, best effort: a
   browser that falls behind is disconnected, never the runner. `/ws/runner`
-  speaks protocol v3. Each run is a flat directory
+  speaks protocol v4. Each run is a flat directory
   `<results dir>/<run_id>/` (`run.json`, `run.jsonl`, `report.md`), with the
   results directory outside the repository by default
   (`$XDG_DATA_HOME/ubertooth-harness/controller/runs`). `GET /` returns a
@@ -92,9 +94,10 @@ the runner refuses any controller URL whose host is not loopback (`127.0.0.1`,
 connects to the checked address itself, ignores proxies, and follows no HTTP
 redirects.
 
-Implemented protocol, version 3 (`ubertooth_harness/protocol.py`; version 2
-added the run's `commit`, version 3 its `flash_build`). Every message is one
-JSON text frame `{"version": 3, "type": ..., ...fields}`. Each
+Implemented protocol, version 4 (`ubertooth_harness/protocol.py`; version 2
+added the run's `commit`, version 3 its `flash_build`, version 4 the
+`run_file` request and its answers). Every message is one
+JSON text frame `{"version": 4, "type": ..., ...fields}`. Each
 type has an exact field set; the receiver rejects any other version, unknown
 type, missing or extra field, or wrongly typed value, and does not act on it
 (the runner answers `protocol_error {reason}`). Inbound messages to the runner
@@ -108,6 +111,7 @@ Controller → target runner:
 |------|--------|
 | `run` | `request_id`, `ref` (git ref name, for the record; no whitespace, no leading `-`), `commit` (the full commit the controller listed for `ref`, which the runner runs; `null` only when the controller could not list refs, and then the runner resolves `ref` in its own Ubertooth checkout), `plan` (name of `<plans dir>/<plan>.yaml`), `suite`, `tests` (exact test names; empty = whole suite), `build` (bool), `flash_build` (bool: with `build`, flash the run's boards with that build's firmware before preflight; false passes `--no-flash-build`; ignored without `build`, and the controller sends and records it false then) |
 | `cancel` | `run_id`, `reason` |
+| `run_file` | `request_id`, `run_id`, `path` (a path that run's own run.jsonl records), `offset` and `limit` in bytes (`limit` at most 256 KiB, since the page travels in one message) |
 
 Target runner → controller:
 
@@ -122,6 +126,8 @@ Target runner → controller:
 | `run_error` | `request_id`, `run_id`, `exit_code`, `reason` (run ended without a `run_finished` record) |
 | `cancel_accepted` | `run_id` |
 | `cancel_rejected` | `run_id`, `reason` |
+| `run_file_page` | `request_id`, `run_id`, `page`: what the run recorded about the file (`path`, `stream`, `bytes`, `lines`, `sha256`) and where this page sits in it (`file_bytes`, `offset`, `length`, `eof`, `page_bytes`, `text`) |
+| `run_file_refused` | `request_id`, `run_id`, `status` (400, 404 or 503, which the controller's route answers with), `reason` (names the run ID or the path only) |
 | `protocol_error` | `reason` |
 
 Semantics:
@@ -158,6 +164,21 @@ Semantics:
   shows, so no run starts only to fail.
 - `cancel` sends the child SIGINT, which run-suite maps to its cooperative
   `CancellationToken` (including power-isolation restoration).
+- `run_file` is how the GUI opens a saved output file of a run a runner
+  carried out: those files stay in the runner's own run directory and only
+  run.jsonl reaches the controller. The runner serves a page under the
+  confinement the controller's own route uses (`runfiles`, over
+  `outputfiles.confined`): only a path that run's own run.jsonl records, only
+  inside the run directory, no symbolic link followed, not even for the run
+  directory itself, and the page bounded. Every request is answered, with a
+  page or a refusal, and a refusal names the run ID or the path and never a
+  path on the target. The runner answers four at once and refuses further
+  ones as busy (503); it reads off the event loop and in its own task, so
+  reading a page of a soak's log does not hold up the next message on the
+  connection, which may be a cancel. The controller asks only for
+  a file that run's own run.jsonl records and this host does not hold, holds
+  at most eight requests per target, answers 503 while the runner is not
+  connected, and 504 if it does not answer within the reply timeout.
 - The run continues if the controller disconnects. The runner reconnects with
   bounded exponential backoff (0.5 s to 30 s), registers with
   `active_run_id`, and replays that run's records from the start of
@@ -1058,9 +1079,9 @@ Later (multi-node), Ansible:
    automated build/install, armed physical power control, and generic
    command/soak execution remain.
 3. **Target runner service** — register/heartbeat/run over the wire; test against a
-   stub controller. Implemented (protocol v3, loopback controllers only;
-   v2 added the listed commit to `run`, v3 `flash_build`; no version
-   interoperates with another).
+   stub controller. Implemented (protocol v4, loopback controllers only;
+   v2 added the listed commit to `run`, v3 `flash_build`, v4 the `run_file`
+   request and its answers; no version interoperates with another).
 4. **Controller + web GUI** — targets, ref dropdown, live checkoff, countdown.
    Implemented: controller (registry, dispatch, results store, REST and live
    WebSocket API, `127.0.0.1` only) and the GUI (targets, run setup, live
