@@ -8,7 +8,11 @@ contents, so no received symbols reach the run record:
     Receive dump: 6751 full records
     Receive dump problem: 3 trailing bytes
 
-and exits 0 when the file is well formed, 1 otherwise.
+and exits 0 when the file is well formed, 1 otherwise. With ``--max-stale N``
+the line also carries how many records were left from an earlier mode
+(stale_records() below), and more than N of them is a problem:
+
+    Receive dump: 6751 full records, 0 stale (0 LE)
 
 Formats, from libubertooth (ubertooth.c cb_dump_full, cb_dump_bitstream;
 ubertooth_callback.c cb_rx):
@@ -117,6 +121,11 @@ def main(argv: list[str] | None = None) -> int:
         "--types", default="br,keep-alive",
         help="comma list of allowed packet types (full format): br, le, keep-alive",
     )
+    parser.add_argument(
+        "--max-stale", type=int, default=None,
+        help="fail when more than this many records are left from an earlier "
+             "mode (full format); the count is added to the summary line",
+    )
     args = parser.parse_args(argv)
     types = tuple(item for item in args.types.split(",") if item)
     if not set(types) <= set(PACKET_TYPES):
@@ -133,7 +142,25 @@ def main(argv: list[str] | None = None) -> int:
     if problem:
         print(f"Receive dump problem: {problem}")
         return 1
-    print(f"Receive dump: {records} {args.format} records")
+    summary = f"Receive dump: {records} {args.format} records"
+    if args.max_stale is None:
+        print(summary)
+        return 0
+    if args.format != "full":
+        print("Receive dump problem: --max-stale needs the full format")
+        return 1
+    try:
+        _records, stale, le = stale_records(args.path)
+    except (OSError, ValueError) as error:
+        print(f"Receive dump problem: {error}")
+        return 1
+    # The count goes in the line whether or not it is within the limit, so
+    # the run record carries the number either way.
+    print(f"{summary}, {stale} stale ({le} LE)")
+    if stale > args.max_stale:
+        print(f"Receive dump problem: {stale} records left from an earlier "
+              f"mode, more than {args.max_stale}")
+        return 1
     return 0
 
 

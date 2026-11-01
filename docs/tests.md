@@ -898,6 +898,75 @@ range, so they check that the tool runs and reports nothing malformed. The
 dump cases check record structure and rate, not that the symbols mean
 anything.
 
+## Board state between runs
+
+**What it does.** Kills a running capture outright, so the board is left in
+the mode that capture started, and then requires the next run on the same
+board to be clean anyway: to say what it found, stop it, capture only its own
+data, and leave a board that answers every read.
+
+**Theory of operation.** A tool that exits normally, or is stopped with
+SIGTERM, sends STOP on the way out, so the board it leaves is idle. A terminal
+or an SSH session that disappears does not: the tool dies where it stands and
+the board keeps streaming into its endpoint. The test makes that state on
+purpose. [`killedcapture.py`](../ubertooth_harness/killedcapture.py) starts the
+capture tool as its own child with nothing in between -- no shell, no
+`timeout` -- waits until the capture file has grown, and sends that process
+SIGKILL, which cannot be caught. It then requires three separate facts before
+the case goes on: the wait returned, what it returned is `-SIGKILL`, and
+signal 0 to the pid fails, because a process whose exit status has been read
+can still be there and still own its device. The tool runs in a session of its
+own, so signal 0 to its process group afterwards says whether it left anything
+behind. The file the killed tool wrote is hashed at that moment and checked
+again at the end of the case, so the evidence is kept rather than quietly
+rewritten by the next run.
+
+The two tools used produce data with nothing on the air -- `ubertooth-dump`
+about 2000 records a second, `ubertooth-specan` about 16 kB a second -- so
+each capture's own contents are the evidence and no peer is needed. They also
+leave different modes, and each one's file says whether a record of the other
+is in it. A dump's 68-byte records carry the firmware's packet type, so a
+record left from the sweep before it fails by type, and a record from before
+the stream started fails by its clock, which restarts at mode entry
+([`rxdump.py`](../ubertooth_harness/rxdump.py), `--max-stale`). A sweep states
+the band before it asks for its mode and writes the frequency of every
+sample, so a sample outside that band, a frequency of the band missing, or one
+byte more than whole samples says either that the stated range was lost at
+mode start or that a record of the previous mode is still in the stream.
+
+The warning the second command has to print comes from libubertooth's
+`ubertooth_bulk_init()`: it reads the mode the board is in, stops it, and
+waits until the board reports that it has left it, because the stop request
+only asks and the mode's loop can hand the endpoint another packet in the
+meantime. The case requires that warning, requires it on stderr rather than
+among the records on stdout, and forbids the second one the same code prints
+when the wait runs out. So a pass means the wait worked, not that it was
+tried.
+
+**Hardware and arguments.** One `Ubertooth`, selected by full serial.
+Guarded. A required `duration:`, which bounds each second capture. No RF peer,
+no firmware write, and nothing is transmitted.
+
+**Expected outcome.** Two cases, one per order of the two captures: a symbol
+dump after a killed spectrum sweep, and a spectrum sweep after a killed symbol
+dump. Each resets the board and reads back the documented boot defaults
+(2441 MHz, PA level 7, squelch -120, LEDs off), kills its capture, runs the
+other tool, checks that capture's contents, confirms the killed capture is
+byte for byte what the kill left, and then reads firmware version, serial,
+channel, PA level, squelch, and the modulation register, each once: a read
+that needs a second try fails the case. A self-reset the firmware records
+while this runs is reported by the usual watchdog read between cases, and the
+guard boards are checked as in every guarded test.
+
+**Known limits.** It kills a capture on purpose, which is the state the test
+is about, and it is the one test here that does so; a board that comes out of
+it wedged is a real finding, not a flake, and on a switchable port a power
+cycle recovers it. The process-group check cannot see a process that left the
+group by starting a session of its own; the host tools start no processes at
+all, so there is nothing of theirs to miss. What a pass does not prove is
+anything about captured content: both tools are checked on record structure,
+packet type, clock, and frequency, never on what the symbols mean.
+
 ## Raw receive replay
 
 **What it does.** Decodes a synthetic capture file with `ubertooth-rx -i`,

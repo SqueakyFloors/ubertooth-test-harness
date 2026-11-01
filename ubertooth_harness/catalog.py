@@ -25,9 +25,9 @@ from ubertooth_harness.patterns import (
 from ubertooth_harness.resources import ESP32_CLASSIC_PEER
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
-    advertiser_cases, classic_cases, connection_cases, dfu_cases, dfu_host_cases,
-    python_cases, receive_cases, refusal_cases, tool_cases, transitions,
-    tshark_cases, util_cases, util_refusal_cases,
+    advertiser_cases, boardstate_cases, classic_cases, connection_cases,
+    dfu_cases, dfu_host_cases, python_cases, receive_cases, refusal_cases,
+    tool_cases, transitions, tshark_cases, util_cases, util_refusal_cases,
 )
 
 
@@ -781,6 +781,9 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "Raw receive": _profiles(
         Estimate(2.1, per_duration=3), Estimate(9.0, per_duration=20)
     ),
+    # Two cases, each a reset, a killed capture, one capture of the duration,
+    # and about a dozen board reads around them.
+    "Board state between runs": _default(Estimate(14.0, per_duration=2)),
     "Raw receive replay": _profiles(Estimate(0.9), Estimate(3.9)),
     "Refused command lines": _profiles(Estimate(10.0), Estimate(20.7)),
     "Util mode refusals": _profiles(Estimate(1.9), Estimate(3.0)),
@@ -1056,6 +1059,19 @@ def builtin_catalog() -> TestCatalog:
             }),
             MappingProxyType({"Ubertooth": "Ubertooth"}),
             command_builder=receive_cases.raw_receive_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+        ),
+        TestDefinition(
+            boardstate_cases.TEST_NAME,
+            "A capture killed with SIGKILL leaves the board in its mode; the "
+            "next run on the same board stops it, captures only its own "
+            "records, and keeps the killed capture as evidence",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH, "duration": DURATION,
+            }),
+            MappingProxyType({"Ubertooth": "Ubertooth"}),
+            command_builder=boardstate_cases.board_state_cases,
             continue_on_case_failure=True,
             guards_other_ubertooths=True,
         ),
