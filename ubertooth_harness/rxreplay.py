@@ -28,8 +28,11 @@ directory, and prints summaries only:
     python rxreplay.py only-fixture DIR NAME --base-time T [--variant V]
 
 The ``partial`` variant is one record cut short and nothing else, so a replay
-of it reads no whole record at all: the input the Failed capture files cases
-use to reach a run that fails after creating its capture files.
+of it reads no whole record at all, and ``skipped`` is one whole record the
+decoder skips followed by one cut short, so a replay of it read a record and
+made no packet of it. The Failed capture files cases use both: a failed replay
+keeps its capture files from the first whole record, whatever the decoder made
+of it, and takes them back before that.
 
 ``only-fixture`` passes when DIR holds NAME and nothing else, and NAME still
 holds the fixture written with that base time and variant: the directory as
@@ -233,7 +236,9 @@ def record_bytes(record: Record, host_time: int) -> bytes:
     return struct.pack(">I", host_time) + header + data
 
 
-VARIANTS = ("full", "truncated", "empty", "partial")
+VARIANTS = ("full", "truncated", "empty", "partial", "skipped")
+# The first record of RECORDS that cb_rx skips, for the "skipped" variant.
+SKIPPED_RECORD = next(index for index, record in enumerate(RECORDS) if record.decoy)
 
 
 def fixture_bytes(base_time: int, variant: str = "full") -> bytes:
@@ -243,6 +248,12 @@ def fixture_bytes(base_time: int, variant: str = "full") -> bytes:
         # One record, short of its last bytes, and nothing before it: a file
         # a replay reads no whole record from.
         return record_bytes(RECORDS[0], base_time)[:RECORD - TRUNCATED_BYTES]
+    if variant == "skipped":
+        # One whole record the decoder skips, then a record cut short: a
+        # replay that read a record and made no packet of it.
+        skipped = RECORDS[SKIPPED_RECORD]
+        return (record_bytes(skipped, base_time)
+                + record_bytes(skipped, base_time + 1)[:RECORD - TRUNCATED_BYTES])
     data = b"".join(
         record_bytes(record, base_time + index) for index, record in enumerate(RECORDS)
     )
@@ -256,6 +267,7 @@ def fixture_bytes(base_time: int, variant: str = "full") -> bytes:
 PARTIAL_RECORD_BYTES = {
     "truncated": RECORD - TRUNCATED_BYTES,
     "partial": RECORD - TRUNCATED_BYTES,
+    "skipped": RECORD - TRUNCATED_BYTES,
 }
 
 
@@ -273,7 +285,7 @@ def expected_packets(variant: str = "full", lap: int | None = None,
                      max_errors: int = 2) -> list[tuple[int, int, int]]:
     """(LAP, access-code errors, channel) of each packet line, in order."""
     records = list(RECORDS)
-    if variant in ("empty", "partial"):
+    if variant in ("empty", "partial", "skipped"):
         records = []
     elif variant == "truncated":
         records = records[:-1]

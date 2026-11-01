@@ -3,13 +3,14 @@
 import io
 import struct
 import sys
+import time
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
 from ubertooth_harness import (
-    capture_failure_cases, capturefile, dfuimage, refusal, rxreplay,
+    capture_failure_cases, capturefile, dfuimage, refusal, rxdump, rxreplay,
 )
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.executor import CommandResult
@@ -24,7 +25,10 @@ NOTE = "note: UBERTOOTH_TEST_NO_DEVICES is set, so no board is selected\n"
 NO_BOARD = "error: no Ubertooth devices found\n"
 LINKTYPE = capturefile.LINKTYPE_BLUETOOTH_BREDR_BB
 # The three capture options, and which writer each one is.
-WRITERS = {"r": "pcapng", "q": "pcap", "d": "dump"}
+WRITERS = {"r": "pcapng", "q": "pcap", "c": "pcap", "d": "dump"}
+# The fixture file each replay variant is written as.
+VARIANT_OF = {name: variant
+              for variant, name in capture_failure_cases.FIXTURES.items()}
 
 
 # --- the files the writers make ----------------------------------------------
@@ -55,7 +59,14 @@ def pcapng_bytes(packets):
 
 
 def dump_bytes(packets):
-    return b"\0" * (rxreplay.RECORD * packets)
+    """``packets`` whole records of the shape rxdump.py accepts: a host time
+    near the file's own, a basic-rate packet type, and a real channel."""
+    now = int(time.time())
+    out = b""
+    for index in range(packets):
+        record = struct.pack(">I", now) + bytes([0, 0, 20 + index % 50])
+        out += record + b"\0" * (rxreplay.RECORD - len(record))
+    return out
 
 
 class FakeTools:
@@ -76,6 +87,8 @@ class FakeTools:
       created, holding their headers.
     - ``discard-evidence``: a replay that did read records takes its files
       back anyway.
+    - ``discard-skipped-record``: a replay keeps its files only once a packet
+      has been decoded, so one whose record the decoder skipped loses them.
     - ``remove-any-path``: the discard removes a symbolic link or /dev/null
       as readily as a regular file.
     - ``stale-reason``: the create failure carries the errno of an earlier
@@ -123,7 +136,8 @@ class FakeTools:
     def _helper(self, command):
         helper = Path(command[1]).name
         module = {"refusal.py": refusal, "rxreplay.py": rxreplay,
-                  "dfuimage.py": dfuimage, "capturefile.py": capturefile}[helper]
+                  "dfuimage.py": dfuimage, "capturefile.py": capturefile,
+                  "rxdump.py": rxdump}[helper]
         if helper == "refusal.py" and command[2] == "probe":
             return self._result(command, 0,
                                 "No-device switch: yes (/p/lib/libubertooth.so.1)\n")
@@ -139,7 +153,7 @@ class FakeTools:
         index = 0
         while index < len(words):
             word = words[index]
-            if word in ("-r", "-q", "-d"):
+            if word in ("-r", "-q", "-c", "-d"):
                 files[word[1]] = words[index + 1]
                 index += 2
                 continue
@@ -151,7 +165,8 @@ class FakeTools:
             index += 1
         if "create-before-board" in self.bugs or "truncate-destination" in self.bugs:
             for option, name in files.items():
-                if not self._create_refusal(name):
+                # A lone "-" is standard output, not a file to create.
+                if name != "-" and not self._create_refusal(name):
                     self._create(option, name, 0)
         if source is None:
             return self._lookup(command, files)
@@ -168,14 +183,16 @@ class FakeTools:
         path = Path(source)
         if path.is_dir():
             read, failure = 0, f"error: reading {source} failed: Is a directory\n"
+            packets = 0
         else:
             data = path.read_bytes()
             read, over = divmod(len(data), rxreplay.RECORD)
             failure = ("" if not over else
                        f"error: {source} ends in a partial record: {over} of "
                        f"{rxreplay.RECORD} bytes, ignored\n")
-        packets = len(rxreplay.expected_packets(
-            "full" if read == len(rxreplay.RECORDS) else "truncated")) if read else 0
+            # The decoder's answer is the fixture's, so a record it skips
+            # counts as read and makes no packet.
+            packets = len(rxreplay.expected_packets(VARIANT_OF[path.name]))
         created = []
         for option, name in sorted(files.items()):
             reason = self._create_refusal(name)
@@ -191,17 +208,17 @@ class FakeTools:
             created.append((option, name))
         if not failure:
             return self._result(command, 0, "")
-        if (read and "discard-evidence" not in self.bugs) or "keep-empty" in self.bugs:
+        kept = read and "discard-evidence" not in self.bugs
+        if read and packets == 0 and "discard-skipped-record" in self.bugs:
+            # The regression: the files are kept only from the first packet.
+            kept = False
+        if kept or "keep-empty" in self.bugs:
             return self._result(command, 1, "", failure)
         warnings = "".join(self._discard(*made) for made in created)
         return self._result(command, 1, "", failure + warnings)
 
     @staticmethod
     def _create_refusal(name):
-        if name == "-":
-            # Standard output, which opt_capture_path() hands the writer; it
-            # is no file, so nothing is created and nothing taken back.
-            return "stdout"
         path = Path(name)
         if path.is_dir():
             return "Is a directory"
@@ -296,7 +313,7 @@ class CaseTests(unittest.TestCase):
         _a, smoke = cases("smoke")
         self.assertEqual(6, len(smoke))
         _a, full = cases("comprehensive")
-        self.assertEqual(13, len(full))
+        self.assertEqual(15, len(full))
         self.assertEqual(len(full), len({case.case_id for case in full}))
         self.assertEqual({case.case_id for case in smoke} & {c.case_id for c in full},
                          {case.case_id for case in smoke})
@@ -337,8 +354,14 @@ class CaseTests(unittest.TestCase):
                     ("no board", "with no board"))
 
     def test_an_empty_capture_left_behind_fails(self):
-        # Fork #1009: the file a run never wrote a packet to goes back.
+        # Fork #1009: the file a run read no whole record for goes back.
         self._fails("keep-empty", ("ubertooth-rx -i <no whole record> -r -q -d",))
+
+    def test_taking_back_the_files_of_a_record_the_decoder_skipped_fails(self):
+        # The line is the first whole record, not the first packet: a run
+        # that kept its files only once a packet was decoded takes these.
+        self._fails("discard-skipped-record",
+                    ("<one record the decoder skips, then a cut-short one>",))
 
     def test_taking_back_a_capture_that_holds_packets_fails(self):
         self._fails("discard-evidence",

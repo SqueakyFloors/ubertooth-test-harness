@@ -53,7 +53,7 @@ import re
 import sys
 from pathlib import Path
 
-from ubertooth_harness import capturefile, dfuimage, refusal, rxreplay
+from ubertooth_harness import capturefile, dfuimage, refusal, rxdump, rxreplay
 from ubertooth_harness.hostneeds import tool_needs
 from ubertooth_harness.outputfiles import text_lines
 from ubertooth_harness.refusal_cases import NO_BOARD_NOTE, probe_step, tool_step
@@ -70,6 +70,7 @@ _DIRECTORY = str(Path(dfuimage.__file__).resolve())
 _REFUSAL = str(Path(refusal.__file__).resolve())
 _REPLAY = str(Path(rxreplay.__file__).resolve())
 _CAPTURE = str(Path(capturefile.__file__).resolve())
+_DUMP = str(Path(rxdump.__file__).resolve())
 _HELPER_TIMEOUT_S = 15.0
 
 # What a board lookup that found nothing prints. The status is 1 and not a
@@ -83,9 +84,10 @@ CANNOT_REMOVE = r"warning: cannot remove "
 # The fixture each case replays, by variant, and the destinations the cases
 # name. A seeded destination must come back from a refused run unchanged, and
 # never as half a capture.
-FIXTURES = {"full": "replay.bin", "truncated": "tail-cut.bin", "partial": "no-record.bin"}
+FIXTURES = {"full": "replay.bin", "truncated": "tail-cut.bin",
+            "partial": "no-record.bin", "skipped": "skipped-record.bin"}
 SEEDED = "kept.pcap"
-PCAPNG, PCAP, DUMP = "new.pcapng", "new.pcap", "new.dump"
+PCAPNG, PCAP, DUMP, PPI = "new.pcapng", "new.pcap", "new.dump", "new-ppi.pcap"
 # The three writers, as the words a tool step takes.
 ALL_WRITERS = ("-r", ("file", PCAPNG), "-q", ("file", PCAP), "-d", ("file", DUMP))
 
@@ -191,6 +193,17 @@ def _symlink(name, target) -> Step:
         timeout_s=_HELPER_TIMEOUT_S, output_patterns=(r"Symbolic link: ",))
 
 
+def _dump_records(file_name, records) -> Step:
+    """``file_name`` is a -d dump of exactly ``records`` whole records."""
+    return Step(
+        "verify-dump", f"{file_name} holds the {records} records the replay decoded",
+        lambda context: (sys.executable, _DUMP, _path(file_name)(context), "full",
+                         "--min-records", str(records)),
+        timeout_s=_HELPER_TIMEOUT_S,
+        output_patterns=(rf"Receive dump: {records} full records",),
+    )
+
+
 def _not_root() -> Step:
     """Skips the case when a read-only directory would not stop this process."""
     return Step(
@@ -217,15 +230,21 @@ def _case(case_id, name, tool, steps, expected_state, *, cleanup=()) -> StateCas
 # --- a setup failure: the board lookup finds nothing --------------------------
 
 
-def _no_device_case(tool, destinations, *, mode=()) -> StateCase:
-    """``tool`` with capture options and no board: it stops at the lookup."""
+def _no_device_case(tool, destinations, *, mode=(), suffix="") -> StateCase:
+    """``tool`` with capture options and no board: it stops at the lookup.
+
+    One of the destinations is the seeded file, so the case states not only
+    that no file was created but that a destination the user already had is
+    not truncated on the way to the lookup. It is never given to ``-r``,
+    which refuses a name that exists (ubertooth-rx.md).
+    """
     words = mode + tuple(
         word for option, name in destinations for word in (option, ("file", name)))
-    named = tuple(name for _option, name in destinations)
+    new = tuple(name for _option, name in destinations if name != SEEDED)
     shown = " ".join((*mode, *(f"{option} <dir>/{name}"
                                for option, name in destinations)))
     return _case(
-        f"{tool.removeprefix('ubertooth-')}-no-device",
+        f"{tool.removeprefix('ubertooth-')}-no-device{suffix}",
         f"{tool} {shown} with no board", tool,
         (
             _seed((SEEDED,)),
@@ -233,12 +252,12 @@ def _no_device_case(tool, destinations, *, mode=()) -> StateCase:
             tool_step("attempt", tool, words, patterns=(NO_BOARD_NOTE, NO_BOARD),
                       # The files are opened only once the board is, so a run
                       # that never opened one says nothing about them.
-                      forbidden=tuple(re.escape(name) for name in named),
+                      forbidden=tuple(re.escape(name) for name in new),
                       check=nothing_on_stdout),
             _state_after(),
         ),
-        "exit 1 at the board lookup; " + ", ".join(named) + " not created; "
-        f"{SEEDED} unchanged; nothing on stdout",
+        "exit 1 at the board lookup; " + ", ".join(new) + " not created; "
+        f"the seeded {SEEDED} not truncated; nothing on stdout",
     )
 
 
@@ -266,7 +285,7 @@ def _stdout_capture_case() -> StateCase:
 # --- a replay: the capture files are created, then the run fails --------------
 
 
-def _replay_step(name, source, words, patterns, *, forbidden=()) -> Step:
+def _replay_step(source, words, patterns, *, forbidden=()) -> Step:
     return tool_step(
         "replay", "ubertooth-rx", ("-i", ("file", source)) + tuple(words),
         patterns=patterns,
@@ -280,7 +299,7 @@ def _replay_case(case_id, name, source, words, patterns, expected, *, steps=(),
     return _case(
         case_id, name, "ubertooth-rx",
         (*steps, _state_before(),
-         _replay_step(name, source, words, patterns),
+         _replay_step(source, words, patterns),
          _state_after(allow=allow, name=state_name), *after),
         expected, cleanup=cleanup)
 
@@ -292,9 +311,11 @@ def capture_failure_cases(arguments, _resources, _resource_identities, *, now=No
     cases = [
         # ubertooth-specan's -d with no board is Refused command lines
         # (specan-d-unopenable), so it is not repeated here.
-        _no_device_case("ubertooth-rx", (("-r", PCAPNG), ("-q", PCAP), ("-d", DUMP))),
-        _no_device_case("ubertooth-btle", (("-r", PCAPNG), ("-q", PCAP)), mode=("-n",)),
-        _no_device_case("ubertooth-dump", (("-d", DUMP),)),
+        _no_device_case("ubertooth-rx",
+                        (("-r", PCAPNG), ("-q", SEEDED), ("-d", DUMP))),
+        _no_device_case("ubertooth-btle", (("-r", PCAPNG), ("-q", SEEDED)),
+                        mode=("-n",)),
+        _no_device_case("ubertooth-dump", (("-d", SEEDED),)),
         # No whole record read: every file created goes back.
         _replay_case(
             "replay-no-record-discards-files",
@@ -308,14 +329,14 @@ def capture_failure_cases(arguments, _resources, _resource_identities, *, now=No
         _replay_case(
             "replay-partial-tail-keeps-files",
             "ubertooth-rx -i <whole records then a cut-short one>: the captures stay",
-            FIXTURES["truncated"], ("-r", ("file", PCAPNG), "-q", ("file", PCAP)),
-            (_partial_record("truncated"),),
-            "exit 1 naming the partial record; both captures kept, each a "
-            f"readable file holding the {kept} packets decoded before the failure",
-            steps=(_fixture("truncated", base),), allow=(PCAPNG, PCAP),
-            state_name="The case directory gained only the two captures",
+            FIXTURES["truncated"], ALL_WRITERS, (_partial_record("truncated"),),
+            "exit 1 naming the partial record; all three files kept, each one "
+            f"readable and holding the {kept} packets decoded before the failure",
+            steps=(_fixture("truncated", base),), allow=(PCAPNG, PCAP, DUMP),
+            state_name="The case directory gained only the three capture files",
             after=(_valid_capture("verify-pcapng", PCAPNG, "pcapng", kept),
-                   _valid_capture("verify-pcap", PCAP, "pcap", kept))),
+                   _valid_capture("verify-pcap", PCAP, "pcap", kept),
+                   _dump_records(DUMP, kept))),
         # A writer that cannot create its file: the reason is that create
         # call's, and nothing is left where the file would have been. The -d
         # writer in a missing directory is Raw receive replay's
@@ -332,7 +353,26 @@ def capture_failure_cases(arguments, _resources, _resource_identities, *, now=No
     if arguments["coverage"] != "comprehensive":
         return tuple(cases)
     cases += [
+        # ubertooth-btle's -c is its own create call (libbtbb's PPI PCAP
+        # writer), and -q and -c share one handle, so it gets a case of its
+        # own rather than another option on the -q one.
+        _no_device_case("ubertooth-btle", (("-c", PPI),), mode=("-n",),
+                        suffix="-ppi"),
         _stdout_capture_case(),
+        # The line the files are kept from is the first whole record, not the
+        # first packet: this input holds one record the decoder skips, and
+        # then one cut short, so a run that kept its files only once a packet
+        # had been decoded would take these away.
+        _replay_case(
+            "replay-skipped-record-keeps-files",
+            "ubertooth-rx -i <one record the decoder skips, then a cut-short one>",
+            FIXTURES["skipped"], ALL_WRITERS, (_partial_record("skipped"),),
+            "exit 1 naming the partial record; all three files kept, each one "
+            "readable and holding no packet",
+            steps=(_fixture("skipped", base),), allow=(PCAPNG, PCAP, DUMP),
+            state_name="The case directory gained only the three capture files",
+            after=(_valid_capture("verify-pcapng", PCAPNG, "pcapng", 0),
+                   _valid_capture("verify-pcap", PCAP, "pcap", 0))),
         _replay_case(
             "replay-missing-directory-pcap",
             "ubertooth-rx -i <fixture> -q into a directory that is not there",
@@ -398,7 +438,9 @@ def capture_failure_cases(arguments, _resources, _resource_identities, *, now=No
             FIXTURES["partial"], ("-q", "/dev/null"),
             (_partial_record("partial"),),
             "exit 1; /dev/null is no file to take back, so nothing is removed "
-            "and no warning is printed",
-            steps=(_fixture("partial", base),)),
+            "and no warning is printed (skipped as root)",
+            # As root a wrong removal would succeed in silence, and take
+            # /dev/null with it, so the case does not run there.
+            steps=(_fixture("partial", base), _not_root())),
     ]
     return tuple(cases)
