@@ -25,9 +25,9 @@ from ubertooth_harness.patterns import (
 from ubertooth_harness.resources import ESP32_CLASSIC_PEER
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
-    advertiser_cases, classic_cases, connection_cases, dfu_cases, dfu_host_cases,
-    python_cases, receive_cases, refusal_cases, tool_cases, transitions,
-    tshark_cases, util_cases, util_refusal_cases,
+    advertiser_cases, capture_failure_cases, classic_cases, connection_cases,
+    dfu_cases, dfu_host_cases, python_cases, receive_cases, refusal_cases,
+    tool_cases, transitions, tshark_cases, util_cases, util_refusal_cases,
 )
 
 
@@ -783,6 +783,10 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     ),
     "Raw receive replay": _profiles(Estimate(0.9), Estimate(3.9)),
     "Refused command lines": _profiles(Estimate(10.0), Estimate(20.7)),
+    # No hardware: 6 cases and 40 commands in smoke, 13 and 91 comprehensive,
+    # all of them short. Measured on the macOS host, where most of the time is
+    # starting a Python helper (about 0.22 s each).
+    "Failed capture files": _profiles(Estimate(5.6), Estimate(12.3)),
     "Util mode refusals": _profiles(Estimate(1.9), Estimate(3.0)),
     "DFU image checks": _profiles(Estimate(8.7), Estimate(37.4)),
     "Python tools": _profiles(Estimate(0.5), Estimate(7.7)),
@@ -1077,6 +1081,19 @@ def builtin_catalog() -> TestCatalog:
             MappingProxyType({"hosts": HOSTS, "coverage": COVERAGE}),
             MappingProxyType({}),
             command_builder=refusal_cases.refusal_cases,
+            continue_on_case_failure=True,
+        ),
+        TestDefinition(
+            "Failed capture files",
+            "A capture that fails leaves no misleading file: a run stopped at "
+            "the board lookup creates none, a replay that reads no whole record "
+            "takes back the ones it created, a destination it cannot create is "
+            "named with its reason, and a capture that did decode packets is "
+            "kept as a file a reader can open, with no Ubertooth "
+            "(UBERTOOTH_TEST_NO_DEVICES=1 and ubertooth-rx -i)",
+            MappingProxyType({"hosts": HOSTS, "coverage": COVERAGE}),
+            MappingProxyType({}),
+            command_builder=capture_failure_cases.capture_failure_cases,
             continue_on_case_failure=True,
         ),
         TestDefinition(

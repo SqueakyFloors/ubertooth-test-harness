@@ -967,6 +967,64 @@ when the name is absent. That is a run-time skip because only the built
 library can tell. The test says nothing about what the tools do once a command
 line is accepted.
 
+## Failed capture files
+
+**What it does.** Drives each capture-output path into a controlled failure and
+requires that nothing a user would later read as a capture is left behind, and
+that what the run did decode is kept as a file a reader can open.
+
+**Theory of operation.** An empty capture file is worse than no file: a user
+cannot tell it apart from a capture that ran and caught nothing. So each tool
+creates its capture files only once everything that can fail has passed, takes
+them back if the run then fails before the first packet, and keeps them from
+the first packet on, because by then they hold evidence. Two ways in make that
+checkable with no board at all. `UBERTOOTH_TEST_NO_DEVICES=1` lets a command
+line be accepted and then stopped at the board lookup, which is the setup
+failure. `ubertooth-rx -i <fixture>` replays a synthetic file
+([`rxreplay.py`](../ubertooth_harness/rxreplay.py)) with no board and no USB,
+and is the one path on which a capture file is really created, written to, and
+then judged: the `partial` fixture is one record cut short, so the run fails
+with its files created and nothing in them yet, and the `truncated` fixture
+holds whole records and then a cut-short one, so the same failure arrives
+after real packets. Each case states its whole directory before the command
+and again afterwards (`dfuimage.py state`), so a temporary file, a truncated
+destination, or a file removed that should have stayed fails the case; a file
+a case does leave stays in the run directory under the name of the attempt
+that wrote it.
+
+**Hardware and arguments.** No board role. `hosts:` and `coverage:`.
+
+**Expected outcome.** Smoke runs 6 cases: `ubertooth-rx -r -q -d`,
+`ubertooth-btle -n -r -q`, and `ubertooth-dump -d` stopped at the board lookup
+(exit 1, the error on stderr, nothing on stdout, no file created, a seeded
+destination unchanged); a replay that reads no whole record taking back all
+three files it created; a replay that reads records and then meets a cut-short
+one keeping both captures, each a readable file holding the packets decoded
+before the failure; and a PCAPNG destination in a directory that is not there,
+reported as `error: <file>: No such file or directory` with nothing created.
+Comprehensive runs 13, adding the same for a PCAP destination, a capture bound
+for standard output whose failure must stay on standard error, a read error
+before any record, a destination that is an existing directory, a destination
+in a read-only directory (skipped when the run is root), and the two paths a
+user arranged rather than a file the run may remove: a symbolic link, which
+must still be there and still name its target, and `/dev/null`. No case
+expects `warning: cannot remove`, so a run that reached for a path it should
+have left alone fails.
+
+**Known limits.** Only the host side. A writer that fails *while* writing its
+header, which is what libbtbb
+[#117](https://github.com/SqueakyFloors/libbtbb/pull/117) and
+[#119](https://github.com/SqueakyFloors/libbtbb/pull/119) take the file away
+for, needs a destination that opens and then refuses a write; nothing here
+produces one, so the removal is checked on the create and decode failures
+instead. `ubertooth-follow`'s own discard
+([ubertooth#1000](https://github.com/SqueakyFloors/ubertooth/pull/1000)) is
+not covered: the tool is built only with BlueZ, and its capture files come
+after an adapter this host does not have. `ubertooth-specan -d` with no board
+is checked by Refused command lines (`specan-d-unopenable`) and the `-d`
+writer in a missing directory by Raw receive replay
+(`replay-dump-unopenable`), so neither is repeated here.
+
 ## Util mode refusals
 
 **What it does.** Refuses `ubertooth-util` command lines that combine the ISP

@@ -17,6 +17,13 @@ suites:
         hosts: each
         coverage: smoke
 
+    # A failed capture's files, with UBERTOOTH_TEST_NO_DEVICES=1 for the
+    # board lookup and ubertooth-rx -i for the writers; skipped when the
+    # built libubertooth predates the switch (fork b6d8ede).
+    - Failed capture files:
+        hosts: each
+        coverage: smoke
+
     # ubertooth-util -f/-i combinations with UBERTOOTH_TEST_NO_DEVICES=1;
     # skipped when the built libubertooth predates it (fork b6d8ede).
     - Util mode refusals:
