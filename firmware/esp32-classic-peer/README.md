@@ -41,7 +41,7 @@ The channel is opened with no security (`ESP_SPP_SEC_NONE`), so a link needs
 no pairing and a capture holds only the SDP lookup, the connection, and the
 data.
 
-Firmware version: `utesp-1.3.0` (`UTESP_FW_VERSION` in `main/peer.h`).
+Firmware version: `utesp-1.4.0` (`UTESP_FW_VERSION` in `main/peer.h`).
 
 ## Versions
 
@@ -103,11 +103,11 @@ not part of any answer, so a driver skips them:
 
 | Notice | When |
 |---|---|
-| `utesp: utesp-1.3.0 ready` | after boot, once Bluetooth is up |
-| `utesp: utesp-1.3.0 start failed: <reason>` | after boot, if it is not |
+| `utesp: utesp-1.4.0 ready` | after boot, once Bluetooth is up |
+| `utesp: utesp-1.4.0 start failed: <reason>` | after boot, if it is not |
 | `utesp: spp connected <address>` | a link came up, either role |
 | `utesp: spp disconnected` | the link went down |
-| `utesp: sco connected` | the synchronous audio link came up |
+| `utesp: sco connected, <packet type>` | the synchronous audio link came up, and the type it uses |
 | `utesp: sco disconnected` | it went down |
 | `utesp: audio link unavailable: <reason>` | after boot, if only the audio half failed to set up; SPP still works and `sco start` answers `ERR` |
 | `utesp: sco frame size <n> unusable, sending no audio` | a link came up asking for a frame size this firmware cannot fill |
@@ -134,6 +134,7 @@ ESP-IDF's own log lines start with `W (` or `E (` and are warnings or errors;
 | `sco start` | acceptor: be ready; initiator: open the audio link |
 | `sco stop` | drop the audio link and stop the profile |
 | `sco stats` | one JSON line of the controller's packet counters, then `OK` |
+| `sco type <ev3\|2ev3\|default>` | the packet type the next audio link asks for |
 | `clock` | one JSON line of the native and piconet clocks, then `OK` |
 | `afh <20 hex digits>` | hop over this channel map |
 | `afh off` | hop over every channel again |
@@ -169,7 +170,7 @@ mistaken for its own.
 `status` reports every field on one line, whichever role is running:
 
 ```json
-{"role":"initiator","fw":"utesp-1.3.0","bt":true,"address":"20:50:0D:E9:C5:BA","lap":"e9c5ba","uap":"0d","nap":"2050","name":"UT-ESP32-E9C5BA","discoverable":true,"spp_server":false,"connecting":false,"connected":true,"peer":"C8:85:41:2A:1B:2A","remote":"C8:85:41:2A:1B:2A","stream":true,"period_ms":20,"payload_len":200,"counter":1483,"writes":1483,"write_errors":0,"rx_bytes":0,"connects":1,"disconnects":0,"last_err":0,"sco":"off","sco_profile":"none","sco_codec":"none","sco_handle":0,"sco_frame_len":0,"sco_tx_frames":0,"sco_tx_errors":0,"sco_rx_frames":0,"sco_rx_bad":0,"afh":"ffffffffff0000000000","afh_used":40,"afh_link":"fefffffeff0000000000","afh_link_used":38,"afh_mode":"on","afh_link_error":""}
+{"role":"initiator","fw":"utesp-1.4.0","bt":true,"address":"20:50:0D:E9:C5:BA","lap":"e9c5ba","uap":"0d","nap":"2050","name":"UT-ESP32-E9C5BA","discoverable":true,"spp_server":false,"connecting":false,"connected":true,"peer":"C8:85:41:2A:1B:2A","remote":"C8:85:41:2A:1B:2A","stream":true,"period_ms":20,"payload_len":200,"counter":1483,"writes":1483,"write_errors":0,"rx_bytes":0,"connects":1,"disconnects":0,"last_err":0,"sco":"off","sco_profile":"none","sco_codec":"none","sco_handle":0,"sco_frame_len":0,"sco_tx_frames":0,"sco_tx_errors":0,"sco_rx_frames":0,"sco_rx_bad":0,"sco_type":"default","sco_link":"none","sco_pkt_type":"none","sco_tx_len":0,"sco_rx_len":0,"sco_interval":0,"sco_retrans_window":0,"sco_types_supported":"003d","afh":"ffffffffff0000000000","afh_used":40,"afh_link":"fefffffeff0000000000","afh_link_used":38,"afh_mode":"on","afh_link_error":""}
 ```
 
 - `address`: the BD_ADDR, split out as `lap`, `uap` and `nap` as well,
@@ -321,6 +322,13 @@ decodes CVSD, so no test compares payloads today.
 | `sco_frame_len` | the frame size the controller asked for, in bytes |
 | `sco_tx_frames`, `sco_tx_errors` | frames the stack took, and frames it refused |
 | `sco_rx_frames`, `sco_rx_bad` | frames received, and how many of those the controller marked damaged |
+| `sco_type` | the packet type the next link will ask for: `default`, `ev3`, or `2ev3` |
+| `sco_link` | `none` (no link), `sco`, `esco`, or `unknown` |
+| `sco_pkt_type` | the packet type the live link is using (see below) |
+| `sco_tx_len`, `sco_rx_len` | bytes per packet on the air, sending and receiving |
+| `sco_interval` | Tesco, the slots between one packet and the next; a slot is 625 microseconds |
+| `sco_retrans_window` | the retransmission window, in the same slots; 0 is none |
+| `sco_types_supported` | the packet types the controller supports, as four hex digits (see below) |
 
 `sco stats` asks the controller for its own packet counters, which is the
 number a capture can be checked against:
@@ -329,44 +337,139 @@ number a capture can be checked against:
 {"rx_total":4057,"rx_correct":4037,"rx_err":0,"rx_none":20,"rx_lost":0,"tx_total":4059,"tx_discarded":0}
 ```
 
-That is a measured 30-second link: 4059 packets each way, one every 7.4 ms,
-which is the rate a 7.5 ms interval gives. The interval itself is not
-reported, so that is an inference from the packet rate, not a reading (see
-below). The frames are 120 bytes of 16-bit samples at that rate, which is
-128 kbit/s handed to the controller; the controller codes it down to the
-64 kbit/s a CVSD link carries on the air.
+That is a measured 30-second 2-EV3 link: 4059 packets each way, one every
+7.4 ms, which is the rate the 12-slot interval `sco_interval` reports gives.
+The frames are 120 bytes of 16-bit samples at that rate, which is 128 kbit/s
+handed to the controller; the controller codes it down to the 64 kbit/s a
+CVSD link carries on the air. An EV3 link carries half as much per packet, so
+the controller halves the interval and the packet rate doubles.
 
-### The packet type is not selectable, and is not reported
+### Choosing the packet type
 
-A test would like to ask for a particular synchronous packet type (EV3, HV3,
-2-EV3) and to read back the link type, packet type, interval, and
-retransmission window the controller settled on. ESP-IDF offers neither, and
-this firmware does not pretend otherwise. In ESP-IDF v5.5.6:
+`sco type` picks the synchronous packet type the next audio link asks for:
 
-- **Choosing the parameters.** The eSCO parameters are a compile-time table
-  inside the stack, `bta_ag_esco_params[]` in
-  `components/bt/host/bluedroid/bta/hf_ag/bta_ag_sco.c`. Which row is used
-  follows from the negotiated codec and from whether both ends set the eSCO
-  S4 feature bit, and both ESP32s do. The one function that would override
-  the row, `bta_ag_set_esco_param()` (declared in
-  `bta/hf_ag/include/bta_ag_int.h`), has no caller anywhere in the tree, and
-  no `esp_hf_*` or `esp_bt_gap_*` function takes synchronous link
-  parameters. So with this image the stack asks for the CVSD S4 row: 2-EV3,
-  12 ms maximum latency, retransmission effort "quality". What the controller
-  actually opens is whatever is left after that row is masked against the
-  packet types the controller supports.
-- **Reading them back.** The stack does read them: `bta_ag_sco_conn_cback()`
-  in the same file calls `BTM_ReadEScoLinkParms()` and stores the link type,
-  transmit interval, retransmission window, and air mode in its own control
-  block. Nothing carries them further; the only synchronous-link facts that
-  reach an application are the audio state (which distinguishes a CVSD link
-  from an mSBC one), the connection handle, the frame size, and the packet
-  counters above, and `status` reports all four.
+| Value | What the link asks for |
+|---|---|
+| `default` | whatever the stack's own table picks, which is 2-EV3 |
+| `ev3` | EV3 and nothing else: no EDR type, and no SCO type either |
+| `2ev3` | 2-EV3 and nothing else, which is the default spelled out |
 
-An Ubertooth capture is the way to see the packet type on the air, which is
-the direction the fork's tests want anyway. The link is easy to find there:
-`ubertooth-rx -l e9c5ba -u 0d -t 30` read 168 packets of the piconet while
-an audio link was up, and 0 in the same 30 seconds with the boards idle.
+It matters because of what is on the air. EV3 carries its payload at the
+basic rate, so a basic-rate receiver can read it; 2-EV3 carries the same
+payload as EDR, which is a different modulation. A decoder that reads
+basic-rate payloads needs a link that uses plain EV3.
+
+The command takes effect on the next link, so set it before `sco start`. It
+is refused while the audio profile is running, with `ERR stop the audio
+profile with "sco stop" before choosing a packet type`: the choice reaches
+the controller as a link appears, and on the accepting board that happens
+whenever the far end pages, with no shell command in flight. `role` and
+`defaults` stop the profile too, so either of those also opens the window
+again. Set it on **both** boards: each board states the types it will allow,
+the opening one in its request and the accepting one in its answer, and the
+link uses a type both allowed. `defaults` puts the choice back to `default`.
+
+`ev3` names no SCO type on purpose. On the air an HV3 and an EV3 share one
+packet type code, so a capture could not tell them apart; leaving HV out
+means a link that cannot be EV3 fails rather than quietly becoming an HV3.
+
+#### How the choice is made
+
+The parameters of a Hands-Free Profile audio link are compile-time tables
+inside the stack, one for the board that opens a link and one for the board
+that accepts one, and no `esp_hf_*` or `esp_bt_gap_*` function takes
+synchronous link parameters. Both tables ask for 2-EV3 between two devices
+that offer the eSCO S4 setting, as these boards do, and the accepting side's
+table does not allow plain EV3 at all, so a board has to be changed on both
+paths. In ESP-IDF v5.5.6 the tables are `bta_ag_esco_params[]` in
+`components/bt/host/bluedroid/bta/hf_ag/bta_ag_sco.c` and
+`bta_hf_client_esco_params[]` in `bta/hf_client/bta_hf_client_sco.c`; the
+second is `static const`, and the one override the first has,
+`bta_ag_set_esco_param()`, has no caller in the tree.
+
+Each path ends in a single call that carries the list of allowed packet types
+to the controller, and nothing else of the link's parameters:
+
+- **`BTM_CreateSco()`**, for the board that opens the link, and for the
+  listening registration on the board that accepts one. Its `pkt_types`
+  argument becomes the link's whole list; the bandwidths, the latency, the
+  voice setting, and the retransmission effort come from what the stack set
+  with `BTM_SetEScoMode()`.
+- **`BTM_EScoConnRsp()`**, for the board that answers an incoming request.
+  Only the list in the parameters it is given is changed.
+
+Both are private to ESP-IDF's `bt` component, so `bluedroid/utesp_sco_type.c`
+is built into that component as the clock and channel-map reads are, and both
+calls are replaced at link time (`-Wl,--wrap` in the project's
+`CMakeLists.txt`) with wrappers that adjust the list on its way past.
+ESP-IDF's own tree is not changed. Wrapping, rather than setting the stack's
+parameters from the shell task, is what keeps the choice off a task that does
+not own the stack's state: each wrapper runs on whichever task the stack
+called from and reads one word. `--wrap` replaces every call, so one image
+covers either role whichever the board takes.
+
+The list is a mask in which bits 0 to 5 allow HV1, HV2, HV3, EV3, EV4, and
+EV5, and bits 6 to 9 **forbid** 2-EV3, 3-EV3, 2-EV5, and 3-EV5 (Core 6.0
+Vol 4 Part E 7.1.26), so a list that names no EDR type still has to forbid
+each one. `ev3` sends `0x03c8` and `2ev3` sends `0x0380`.
+
+BTM masks whatever is asked for against the types the controller itself
+supports, so a controller without EV3 refuses rather than being asked for
+something it cannot do. `sco_types_supported` in `status` is that mask, read
+with `BTM_ReadDeviceScoPacketTypes()`, in the same bit order. These boards
+report `003d`: HV1, HV3, EV3, EV4, and EV5, and no bit forbidding an EDR
+type, so their controllers support EV3 and every EDR type as well.
+
+#### What the link settled on
+
+`sco_pkt_type` names the type the live link is using, and the fields beside
+it are the parameters it is named from. The Synchronous Connection Complete
+event carries the link type, the interval, the retransmission window, the
+packet lengths, and the air mode, but **not** the packet type (Core 6.0 Vol 4
+Part E 7.7.35): nothing in HCI reports it. So the type is worked out from two
+things the host does know — the list of types this board allowed for the
+link, which `BTM_ReadScoPacketTypes()` gives back, and the packet length the
+link settled on. The type named is the smallest allowed one that can carry
+that length, because a type carries up to its own maximum (30 bytes for EV3,
+60 for 2-EV3, 90 for 3-EV3) and a 64 kbit/s voice link is given that maximum.
+With `ev3` or `2ev3` the list names one type, so there is nothing left to
+guess; with `default` two types could carry 30 bytes and the smaller is
+named. `sco_tx_len` and `sco_interval` are reported next to it either way,
+for a reader to check.
+
+A capture is the other half of the answer, and the one the fork's tests want.
+A 2-EV3 and an EV3 carry different packet type codes in the header, so
+libbtbb names them differently — `HV2/2-EV3` for the first and
+`HV3/EV3/3-EV3` for the second (each code is shared with a SCO type and, for
+EV3, with its three-megabit EDR cousin, which is why the names list
+alternatives). The link is easy to find: `ubertooth-rx -l e9c5ba -u 0d -t 30`
+read 168 packets of the piconet while an audio link was up, and 0 in the same
+30 seconds with the boards idle.
+
+Two measured links, 70 seconds each, read from the boards and from the air on
+2026-11-01:
+
+| | `sco type ev3` | `sco type 2ev3` |
+|---|---|---|
+| `sco_pkt_type` | `ev3` | `2-ev3` |
+| `sco_tx_len`, `sco_rx_len` | 30 bytes | 60 bytes |
+| `sco_interval` | 6 slots, 3.75 ms | 12 slots, 7.5 ms |
+| `sco_retrans_window` | 4 slots | 2 slots |
+| `sco_frame_len` | 60 bytes | 120 bytes |
+| Controller's packet count | 18800 each way | 9392 each way |
+| Named on the air | `HV3/EV3/3-EV3` | `HV2/2-EV3` |
+
+So an EV3 link halves the packet length, halves the interval to keep the same
+64 kbit/s, and doubles the packet rate to about 268 packets a second each
+way. That makes it the busiest traffic the pair can put on the air.
+
+The last row is from an Ubertooth capture of each link, counting the packets
+whose header checksum passed: the EV3 link gave 2891 packets named
+`HV3/EV3/3-EV3` and none named `HV2/2-EV3`, and the 2-EV3 link the other way
+round. The capture was read for its packet type codes rather than followed
+packet by packet, because `ubertooth-rx` did not settle on this piconet's
+clock from this traffic; the type code is in each packet's header and does
+not need the clock.
 
 The codec is a build-time choice for the same reason:
 `CONFIG_BT_HFP_WBS_ENABLE` decides whether mSBC is offered at all, and this
