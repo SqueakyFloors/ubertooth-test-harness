@@ -251,6 +251,11 @@ def _pcapng_packet(path, stream, endian, block_type, offset, length,
     block = stream.read(length)
     if len(block) < length:
         raise CaptureFileError(f"{path}: truncated pcapng packet block")
+    # Every block ends with its own total length again, so a block whose
+    # trailer disagrees with its header is not a block, as the interface
+    # block reader already insists.
+    if struct.unpack(endian + "I", block[-4:])[0] != length:
+        raise CaptureFileError(f"{path}: pcapng packet block trailer mismatch")
     if block_type == _PCAPNG_SIMPLE_PACKET:
         if length < 16:
             raise CaptureFileError(f"{path}: short pcapng simple packet block")
@@ -266,7 +271,12 @@ def _pcapng_packet(path, stream, endian, block_type, offset, length,
 
 
 def count_packets(path: Path | str) -> int:
-    """Packet records in a pcap or pcapng file whose header read_header accepts."""
+    """Packet records in a pcap or pcapng file whose header read_header accepts.
+
+    Counting walks each record whole, so a pcapng block whose captured
+    length or trailing total length disagrees with its header is reported
+    rather than counted, where counting the block types alone accepted it.
+    """
     packets = 0
     for _record in packet_records(path):
         packets += 1

@@ -122,6 +122,14 @@ PAIR_COMMANDS = ("stream", "audio")
 AUDIO_FIRMWARE = "utesp-1.4.0"
 # What `status` must report for the link to be up and carrying audio.
 AUDIO_ON = "on"
+# `sco start` on the initiator blocks the shell while the controller starts
+# the hands-free profile (3 s), pages and brings the service level connection
+# up (15 s), opens the audio link (10 s), and, if that failed, puts the
+# profile back (3.5 s). The firmware's README asks for 40 seconds, so that a
+# bring-up that failed answers with the firmware's own reason rather than
+# timing out here, and a slow one is not cut off mid-command. A link to a
+# board that is awake takes four or five seconds.
+AUDIO_CONNECT_TIMEOUT_S = 40.0
 
 COMMAND_TIMEOUT_S = 5.0
 # Opening the port resets the board; it then has to boot and start Bluetooth
@@ -712,7 +720,7 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         initiator_shell.command(f"spp peer {acceptor_status['address']}")
         if packet_type != "default":
             initiator_shell.command(f"sco type {packet_type}")
-        initiator_shell.command("sco start", CONNECT_TIMEOUT_S)
+        initiator_shell.command("sco start", AUDIO_CONNECT_TIMEOUT_S)
         # Both ends have to report the link, not just the one that paged.
         # The audio link is the Hands-Free Profile's, not the Serial Port
         # Profile's, so `remote` stays empty here: whose link it is, is

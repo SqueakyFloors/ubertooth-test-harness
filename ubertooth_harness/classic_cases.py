@@ -104,8 +104,11 @@ PAIR_SETUP_S = (
            + 2 * esp32peer.COMMAND_TIMEOUT_S)
 )
 # The audio bring-up sends four more commands than the stream's and reads
-# one more status, and `sco start` on the initiator pages.
-AUDIO_SETUP_S = PAIR_SETUP_S + 5 * esp32peer.COMMAND_TIMEOUT_S
+# one more status, and `sco start` on the initiator pages, starts the
+# hands-free profile, and opens the audio link, which the firmware allows
+# much longer than an ordinary command.
+AUDIO_SETUP_S = (PAIR_SETUP_S + 5 * esp32peer.COMMAND_TIMEOUT_S
+                 + esp32peer.AUDIO_CONNECT_TIMEOUT_S)
 # One identify or reset: an open with its reset, then a status read.
 PEER_TIMEOUT_S = esp32peer.BOOT_TIMEOUT_S + 4 * esp32peer.COMMAND_TIMEOUT_S
 
@@ -114,6 +117,10 @@ PEER_TIMEOUT_S = esp32peer.BOOT_TIMEOUT_S + 4 * esp32peer.COMMAND_TIMEOUT_S
 # receives, so its packets decode; the 2-EV3 link the stack would choose
 # carries the same payload as enhanced rate.
 AUDIO_TYPE = "ev3"
+# How the boards name that type back, which is the specification's spelling
+# rather than the command line's: `2ev3` on the way in is `2-ev3` on the way
+# out (firmware/esp32-classic-peer/README.md, `sco_pkt_type`).
+AUDIO_PACKET_TYPE = AUDIO_TYPE.replace("2ev3", "2-ev3")
 # What libbtbb names an EV3 packet. The four header bits cannot tell an EV3
 # from an HV3 or a 3-EV3, so this one name covers all three
 # (bredrrecord.TYPE_NAMES).
@@ -127,8 +134,9 @@ MIN_AUDIO_FRAMES = 100
 # is given no address: the decoder keeps a piconet per LAP it hears and
 # fills the UAP in once a packet's CRC settles it, so the records before
 # that carry none, and how many that is depends on how much of the piconet
-# the sweep happened to hear.
-MIN_SURVEY_UAP_RECORDS = 1
+# the sweep happened to hear. A 25-second survey on the bench recorded 235
+# packets and 182 of them carried a recovered UAP.
+MIN_SURVEY_UAP_RECORDS = 10
 # Records whose header HEC must have passed. A header only passes when it
 # decoded at the piconet's clock and its HEC gave the piconet's UAP, which
 # is what makes the header and reference-UAP checks bite; how many of a
@@ -386,10 +394,13 @@ def _pair_patterns(acceptor, initiator, *, audio=False) -> tuple[str, ...]:
         # The type the link settled on, which is the one the records on the
         # air must carry: a 2-EV3 link would put its payload on the air as
         # enhanced rate, where a basic-rate capture reads a different type.
+        # The boards report it with the hyphen the specification uses
+        # (`2-ev3`), which is not how the command line spells it.
+        settled = re.escape(AUDIO_PACKET_TYPE)
         return common + (
-            rf"(?m)^audio link: esco {AUDIO_TYPE} ",
-            rf"(?m)^initiator audio: on {AUDIO_TYPE}, sent \d+ received \d+ frames$",
-        ) + exited + (rf"(?m)^pair carried audio: {AUDIO_TYPE}$",)
+            rf"(?m)^audio link: esco {settled}, \d+ bytes every \d+ slots, ",
+            rf"(?m)^initiator audio: on {settled}, sent \d+ received \d+ frames$",
+        ) + exited + (rf"(?m)^pair carried audio: {settled}$",)
     return common + (r"(?m)^link: up to ",) + exited + (
         r"(?m)^pair streamed: yes$",)
 

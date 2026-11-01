@@ -330,18 +330,24 @@ class Consistency(unittest.TestCase):
                                    GOOD_FLAGS, b"")
                 for index, when in enumerate(times)]
 
-    def test_a_record_stamped_well_before_the_one_before_it_is_a_problem(self):
-        step = bredrrecord.MAX_BACKWARDS_NS
-        self.assertIn("625 us before the one before",
-                      " ".join(bredrrecord.problems(
-                          self.stamped(10 * step, 10 * step - step - 1))))
+    def test_the_timestamps_are_reported_and_not_judged(self):
+        # A packet caught as the capture clock's period count ticks over can
+        # carry a time a whole period out in either direction, so a bound on
+        # these would fail a good capture; the summary says what they did.
+        records = self.stamped(2_000_000_000, 1_000_000_000, 3_000_000_000)
+        self.assertEqual([], bredrrecord.problems(records))
+        line, = [line for line in bredrrecord.summary(records, "x.pcap")
+                 if line.startswith("BR/EDR times:")]
+        self.assertEqual("BR/EDR times: 3 stamped, spanning 2.0 s, 1 stepping "
+                         "back, the largest by 1000000 us", line)
 
-    def test_a_record_stamped_slightly_early_is_not(self):
-        # Two packets decoded out of one bank of symbols can land
-        # microseconds apart in either order.
-        step = bredrrecord.MAX_BACKWARDS_NS
-        self.assertEqual([], bredrrecord.problems(
-            self.stamped(10 * step, 10 * step - step, 11 * step)))
+    def test_the_counts_come_before_the_records_in_a_failure(self):
+        # main() shows only the first few, and the counts are what a reader
+        # needs first.
+        bad = bredrrecord._HEADER.unpack(record(channel=79)[:22])
+        many = [bredrrecord.Record(index, 0, *bad, b"") for index in range(20)]
+        failures = bredrrecord.problems(many, min_packets=50)
+        self.assertIn("expected at least 50", failures[0])
 
 
 class CommandLine(unittest.TestCase):

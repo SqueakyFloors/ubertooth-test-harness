@@ -339,8 +339,8 @@ class RecordFieldCaseTests(unittest.TestCase):
         self.assertIn("--min-frames", argv)
         # Its report must name the type the link settled on, and the
         # deadline covers the longer bring-up.
-        self.assertIn(rf"(?m)^audio link: esco {AUDIO_TYPE} ",
-                      step.output_patterns)
+        self.assertTrue(any("audio link: esco" in pattern
+                            for pattern in step.output_patterns))
         self.assertGreater(step.timeout_s, 25.0 + AUDIO_SETUP_S - 1)
         # The tool's own packet lines need the piconet's clock, which it does
         # not settle on from audio traffic, so the records carry the check.
@@ -361,6 +361,44 @@ class RecordFieldCaseTests(unittest.TestCase):
                        "--min-hec-valid", "--following-lap"):
             self.assertNotIn(absent, checks)
         self.assertIn("--min-reference-uap", checks)
+
+    def test_the_steps_patterns_match_what_the_driver_really_prints(self):
+        """Each pattern against the driver's own report, not a copy of it.
+
+        A pattern is written from what the driver is meant to print, so the
+        two can drift apart and nothing fails until a bench run. This builds
+        both reports from the firmware fake and matches every pattern
+        against them.
+        """
+        import io
+        import re as regex
+        import sys as system
+
+        from tests.fake_esp32 import FakePeerFirmware, opener
+
+        for audio, cases in ((False, self.cases()),
+                             (True, self.cases("comprehensive"))):
+            acceptor = FakePeerFirmware(ACCEPTOR_ADDRESS,
+                                        version=esp32peer.AUDIO_FIRMWARE)
+            initiator = FakePeerFirmware(INITIATOR_ADDRESS,
+                                         version=esp32peer.AUDIO_FIRMWARE)
+            acceptor.link(initiator)
+            open_one = opener({"/dev/a": acceptor, "/dev/b": initiator})
+            peers = (esp32peer.Peer("/dev/a", "acceptor", ACCEPTOR_ADDRESS,
+                                    opener=open_one),
+                     esp32peer.Peer("/dev/b", "initiator", INITIATOR_ADDRESS,
+                                    opener=open_one))
+            report = io.StringIO()
+            drive = esp32peer.audio if audio else esp32peer.stream
+            extra = ({"packet_type": AUDIO_TYPE, "min_frames": 10} if audio
+                     else {"min_writes": 10})
+            drive(*peers, (system.executable, "-c", "pass"), out=report,
+                  settle_s=0.0, **extra)
+            case = cases["audio-fields" if audio else "follow-fields"]
+            step = self.steps(case)["stream-and-receive"]
+            for pattern in step.output_patterns:
+                with self.subTest(audio=audio, pattern=pattern):
+                    self.assertRegex(report.getvalue(), regex.compile(pattern))
 
     def test_every_case_resets_both_peers_and_restores_the_board(self):
         for case_id, case in self.cases("comprehensive").items():

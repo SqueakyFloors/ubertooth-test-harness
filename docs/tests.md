@@ -1526,9 +1526,16 @@ record's fields to each other:
 - the payload's own length field, with the packet type's header size and CRC,
   must come to exactly as many payload bytes as the record holds;
 - the header's HEC, run backwards, must give the reference upper address part
-  (UAP) the record carries, in every record that says the HEC passed;
+  (UAP) the record carries, in every record that says the HEC passed and
+  carries a reference UAP to compare it with;
 - the payload's CRC, recomputed with that UAP, must match the one carried in
   the payload, in every record that says the CRC passed.
+
+The last two need the record to carry a reference UAP, which the record's own
+flag says. libbtbb records what it checked whether or not it had an address to
+record, so a record can report a passing HEC with no reference UAP beside it;
+those two checks skip such a record rather than guessing at the UAP, and the
+followed cases require a floor of records that do carry both.
 
 A record that mixed one packet's header with another's metadata fails all
 three. The rest are flag-to-field agreements of the same kind: the noise flag
@@ -1615,7 +1622,13 @@ input.
 The survey case cannot assert whose records it reads. A survey is given no
 address, so it records every piconet in range, and the bench hears ambient
 traffic now and then; its checks are therefore the internal ones plus a count
-of records carrying a recovered UAP.
+of records carrying a recovered UAP. It is also the one case where most
+records have no decoded header: once the survey has settled a piconet's UAP
+it stops reading headers for it, so those records carry an empty header with
+the HEC flags clear, and the HEC and CRC checks pass over them. A 25-second
+survey on the bench recorded 235 packets, 182 carrying a recovered UAP and
+one a header that had been checked, which is why the header floor belongs to
+the followed cases and not this one.
 
 An EV3 capture's packet *names* are read from the records, not from the tool's
 packet lines: `ubertooth-rx` does not settle on this pair's clock from audio

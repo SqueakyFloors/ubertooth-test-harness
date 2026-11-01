@@ -28,9 +28,16 @@ packet's header with another's metadata does not pass:
 - the payload's own length field, with the packet type's header size and
   CRC, must come to exactly as many payload bytes as the record holds;
 - the header's HEC, reversed, must give the reference upper address part
-  (UAP) the record carries, whenever the record says the HEC passed;
+  (UAP) the record carries, whenever the record says the HEC passed and
+  carries a reference UAP;
 - the payload's CRC, recomputed with that UAP, must match the one in the
   payload, whenever the record says the CRC passed.
+
+The last two need a reference UAP in the record. libbtbb records what it
+checked whether or not the capture had an address to record, so a record can
+report a passing HEC with no UAP beside it; those checks skip it rather than
+guess, and a caller asks for a floor of records that carry both
+(``--min-hec-valid``).
 
 The last two need the link to be unencrypted, which the bench's ESP32 peers
 are (they pair with nobody). A capture of an encrypted piconet would decode
@@ -131,11 +138,14 @@ LAP_ANY = 0xFFFFFF
 UAP_ANY = 0xFF
 # A dBm figure outside this range is not a reading of this receiver.
 MIN_DBM, MAX_DBM = -128, 0
-# The rate 1/3 code over the 18-bit header can mend at most the 10 bits it
-# carries three times over; the rate 2/3 code over a payload corrects one
+# The header's 18 bits are each sent three times, and the decoder takes the
+# majority of each three, counting every triple that disagreed. It accepts
+# the header only when fewer than a quarter of the 18 disagreed, so a header
+# that decoded was mended in at most 3 places (libbtbb's unfec13()); four
+# bench captures gave 0 to 3. The rate 2/3 code over a payload corrects one
 # bit per 15-symbol block, and the longest payload it carries is a DM5's 228
 # bytes, which is 183 blocks.
-MAX_CORRECTED_HEADER_BITS = 10
+MAX_CORRECTED_HEADER_BITS = 3
 MAX_CORRECTED_PAYLOAD_BITS = 183
 # Transport and rate nibbles of payload_transport_rate: ubertooth-rx tells
 # libbtbb the transport is unknown (BTBB_TRANSPORT_ANY) and the modulation
@@ -146,13 +156,6 @@ MOD_GFSK = 0
 # (PCAPNG_BREDR_OPTION_BD_ADDR), and the length of its value.
 OPTION_BD_ADDR = 0xD340
 _BD_ADDR_LEN = 8
-# How far a record's timestamp may fall before the one before it. The host
-# builds each one from the capture clock the board reports, and two packets
-# decoded out of one 400 microsecond bank of symbols can land microseconds
-# apart in either order: a 25-second bench capture of 285 records had one
-# step of 225 us backwards. A step larger than a 625 us slot is not that,
-# and is what a mishandled clock rollover looks like.
-MAX_BACKWARDS_NS = 625_000
 # More records than any test of ours captures; a file with this many is not
 # read into memory.
 _MAX_RECORDS = 200_000
@@ -302,7 +305,13 @@ class Record:
 
 
 def records(path: Path | str) -> list[Record]:
-    """Every BR/EDR record of ``path``, in file order."""
+    """Every BR/EDR record of ``path``, in file order.
+
+    The whole list is held at once, payloads and all, because the checks
+    count and compare across it. A capture of the length these tests take is
+    a few hundred records of a few hundred bytes; a file with more than
+    ``_MAX_RECORDS`` is refused rather than read.
+    """
     fmt, link_type = read_header(path)
     if link_type != LINKTYPE_BLUETOOTH_BREDR_BB:
         raise RecordError(f"{path}: {fmt} link type {link_type}, not a BR/EDR "
@@ -387,6 +396,8 @@ def _consistency(record: Record, *, payload_checks: bool) -> list[str]:
         problems.append("the HEC is valid but was not checked")
     if record.has(CRC_VALID) and not record.has(CRC_CHECKED):
         problems.append("the CRC is valid but was not checked")
+    if record.has(MIC_VALID) and not record.has(MIC_CHECKED):
+        problems.append("the message integrity check is valid but was not made")
     if record.has(CRC_CHECKED) and len(record.payload) < 3:
         problems.append(f"a CRC was checked over {len(record.payload)} payload "
                         "bytes, which cannot hold a CRC and a byte for it to cover")
@@ -441,9 +452,6 @@ def problems(found: list[Record], *, lap: int | None = None,
     failures = []
     if len(found) < min_packets:
         failures.append(f"{len(found)} records, expected at least {min_packets}")
-    for record in found:
-        for problem in _consistency(record, payload_checks=payload_checks):
-            failures.append(f"record {record.index}: {problem}")
     if lap is not None:
         wrong = [record for record in found if record.lap != lap]
         if wrong:
@@ -492,14 +500,12 @@ def problems(found: list[Record], *, lap: int | None = None,
     for name in require_types:
         if not any(record.packet_type == TYPE_NUMBERS[name] for record in found):
             failures.append(f"no {name} record")
-    stamped = [record.timestamp_ns for record in found
-               if record.timestamp_ns is not None]
-    backwards = sum(1 for before, after in zip(stamped, stamped[1:])
-                    if before - after > MAX_BACKWARDS_NS)
-    if backwards:
-        failures.append(f"{backwards} records are stamped more than "
-                        f"{MAX_BACKWARDS_NS // 1000} us before the one before "
-                        "them")
+    # The per-record failures come last, because there can be one per record
+    # and the caller shows only the first few: the counts and addresses above
+    # are what a reader needs first.
+    for record in found:
+        for problem in _consistency(record, payload_checks=payload_checks):
+            failures.append(f"record {record.index}: {problem}")
     return failures
 
 
@@ -530,6 +536,7 @@ def summary(found: list[Record], label: str) -> list[str]:
                  + (f"{min(noises)} to {max(noises)} dBm in {len(noises)} records"
                     if noises else "no record reports a measured figure"))
     lines.append("BR/EDR flags: " + _counted(flags))
+    lines.append("BR/EDR times: " + _times(found))
     lines.append("BR/EDR header fields: "
                  + _counted(Counter(f"lt_addr {record.lt_addr}"
                                     for record in found))
@@ -537,6 +544,30 @@ def summary(found: list[Record], label: str) -> list[str]:
                      f"flow {record.flow} arqn {record.arqn} seqn {record.seqn}"
                      for record in found)))
     return lines
+
+
+def _times(found: list[Record]) -> str:
+    """What the record timestamps did, reported and not asserted.
+
+    Nothing here fails on them. Each one is built from the capture clock the
+    board reports, and the fork notes that the firmware latches that clock
+    and its period count with separate reads, so a packet caught as the
+    count ticks over carries a time a whole period out, in either direction.
+    Any bound tight enough to mean something would therefore fail a good
+    capture now and then. Small steps backwards are ordinary too: two
+    packets decoded out of one 400 microsecond bank land in either order,
+    and a bench capture of 285 records had one step of 225 us.
+    """
+    stamped = [record.timestamp_ns for record in found
+               if record.timestamp_ns is not None]
+    if not stamped:
+        return "no record carries one"
+    steps = [after - before for before, after in zip(stamped, stamped[1:])]
+    back = [-step for step in steps if step < 0]
+    return (f"{len(stamped)} stamped, spanning "
+            f"{(max(stamped) - min(stamped)) / 1e9:.1f} s, "
+            + (f"{len(back)} stepping back, the largest by "
+               f"{max(back) / 1000:.0f} us" if back else "none stepping back"))
 
 
 def _counted(counter: Counter) -> str:
