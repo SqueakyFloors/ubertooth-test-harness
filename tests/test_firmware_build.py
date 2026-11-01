@@ -23,7 +23,7 @@ import yaml
 
 from tests.executables import write_executable
 from tests.test_nrfdk import hex_file
-from ubertooth_harness import nrfdk
+from ubertooth_harness import nrfdk, targets
 
 ROOT = Path(__file__).resolve().parents[1]
 # The path the shell works with: a `sh` started in ROOT reports the physical
@@ -35,6 +35,8 @@ WORKFLOW = ROOT / ".github" / "workflows" / "firmware.yml"
 FIRMWARE = ROOT / "firmware" / "nrf52840dk"
 NCS_VERSION = (FIRMWARE / "NCS_VERSION").read_text().strip()
 BOARD = "nrf52840dk/nrf52840"
+# What tells the algorithm 1 build apart from the default one.
+CHANSEL1 = "chan-sel-1.conf"
 # Whether a comparison against a git ref can be tested here: the suite also
 # runs from a tree exported with git archive (scripts/local-ci.sh), which has
 # no history to resolve a ref against.
@@ -49,9 +51,10 @@ HAS_HISTORY = subprocess.run(
 # Writes the image west build would produce when the command is a build, and
 # records every command. $FAKE_HEX_PAYLOAD is the image every build leaves;
 # $FAKE_HEX_PAYLOAD_<n> replaces it for the nth build, which is how a test
-# gives the comparison build an image of its own. With $FAKE_DOCKER_EXIT, or
-# $FAKE_DOCKER_EXIT_<n> for one build, it fails like a build that does not
-# compile.
+# gives the comparison build an image of its own, and
+# $FAKE_HEX_PAYLOAD_CHANSEL1 the one the algorithm 1 build leaves, whichever
+# build that turns out to be. With $FAKE_DOCKER_EXIT, or $FAKE_DOCKER_EXIT_<n>
+# for one build, it fails like a build that does not compile.
 FAKE_DOCKER = textwrap.dedent("""\
     #!/bin/sh
     printf '%s\\n' "$*" >> "$FAKE_LOG"
@@ -68,8 +71,17 @@ FAKE_DOCKER = textwrap.dedent("""\
             all=$*
             sources=${all##* -s }
             (cd "${sources%% *}" && find . -type f | sort) > "$FAKE_BUILDS.$builds"
-            mkdir -p "$(dirname "$FAKE_HEX")"
-            cp "$payload" "$FAKE_HEX" ;;
+            # The image goes where west build was told to put it, so a build
+            # with a build directory of its own leaves its own image.
+            out=${all##* -d }
+            out=${out%% *}/zephyr/zephyr.hex
+            case "$all" in
+                # The algorithm 1 image, which carries its own version string.
+                *chan-sel-1.conf*)
+                    payload=${FAKE_HEX_PAYLOAD_CHANSEL1:-$payload} ;;
+            esac
+            mkdir -p "$(dirname "$out")"
+            cp "$payload" "$out" ;;
     esac
     exit 0
     """)
@@ -96,8 +108,10 @@ class FirmwareStepTests(unittest.TestCase):
             CI_TEMP=str(self.work),
             FAKE_LOG=str(self.log),
             FAKE_BUILDS=str(self.directory / "builds"),
-            FAKE_HEX=str(self.workspace / "utdk-build" / "zephyr" / "zephyr.hex"),
             FAKE_HEX_PAYLOAD=self.image("image", version=version),
+            FAKE_HEX_PAYLOAD_CHANSEL1=self.image(
+                "chansel1", filler=b"\x33",
+                version=targets.DK_FIRMWARE_CHAN_SEL_1),
         )
         env.update(environment)
         # DK_BASE_REF and DK_BASE_SRC are the environment's, not this
@@ -146,11 +160,25 @@ class FirmwareStepTests(unittest.TestCase):
         return self.log.read_text().splitlines() if self.log.exists() else []
 
     def builds(self):
-        return [command for command in self.commands() if "west build" in command]
+        """Every build of the default image, which is the one the comparison
+        is about. The algorithm 1 build is counted on its own
+        (``chansel1_build``), so the counts here stay about one image."""
+        return [command for command in self.commands()
+                if "west build" in command and CHANSEL1 not in command]
 
-    def find(self, word):
-        """The one recorded command holding ``word``."""
-        found = [command for command in self.commands() if word in command]
+    def chansel1_build(self):
+        """The one build of the algorithm 1 image."""
+        return self.find(CHANSEL1, every=True)
+
+    def find(self, word, *, every=False):
+        """The one recorded command holding ``word``.
+
+        Without ``every``, the algorithm 1 build is left out: it names the
+        same board, image and sources as the default build, so every search
+        for one of those would otherwise find two commands.
+        """
+        found = [command for command in self.commands()
+                 if word in command and (every or CHANSEL1 not in command)]
         self.assertEqual(1, len(found), f"{word}: {found}")
         return found[0]
 
@@ -243,11 +271,45 @@ class FirmwareStepTests(unittest.TestCase):
     def test_the_workspace_can_be_kept_outside_the_work_directory(self):
         kept = self.directory / "kept"
 
-        result = self.run_step(NCS_WORKSPACE=str(kept),
-                               FAKE_HEX=str(kept / "utdk-build/zephyr/zephyr.hex"))
+        result = self.run_step(NCS_WORKSPACE=str(kept))
 
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn(f"-v {kept}:{kept}", self.find("west build"))
+
+    def test_the_algorithm_1_image_is_built_and_checked_too(self):
+        # Its Kconfig fragment and devicetree overlay are compiled nowhere
+        # else, so without this a change that breaks them would reach the
+        # bench unnoticed.
+        result = self.run_step()
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        build = self.chansel1_build()
+        self.assertIn("-DEXTRA_DTC_OVERLAY_FILE=chan-sel-1.overlay", build)
+        # Its own build directory, so the comparison's is left as it was.
+        self.assertIn("utdk-chansel1", build)
+        self.assertIn(f"the second image carries {targets.DK_FIRMWARE_CHAN_SEL_1}",
+                      result.stdout)
+
+    def test_an_algorithm_1_image_with_the_wrong_version_fails(self):
+        # The default version is the start of that one, so an image carrying
+        # the default string only must not pass as the algorithm 1 image.
+        result = self.run_step(
+            FAKE_HEX_PAYLOAD_CHANSEL1=self.image("plain", filler=b"\x44"))
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("does not contain firmware version", result.stdout + result.stderr)
+
+    def test_a_change_to_the_algorithm_1_files_needs_a_bump_too(self):
+        # That image is not compared, so its two extra files are: without
+        # this, a change to them would leave a board carrying it on the old
+        # image with nothing to say so.
+        base = self.base_sources()
+        (base / "chan-sel-1.conf").write_text("CONFIG_BT_CTLR_CHAN_SEL_2=n\n")
+
+        result = self.run_step(DK_BASE_SRC=str(base))
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("chan-sel-1.conf differs", result.stderr)
 
     def test_without_a_base_nothing_is_compared(self):
         # The schedule, a push, and a developer's own run have no other

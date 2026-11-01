@@ -96,8 +96,10 @@ under this directory, once a week, and on request
 ([#147](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/147));
 it is not a required check, because the image and the workspace are gigabytes.
 The image it builds is not published: a board is flashed from a local build.
-It builds the default image only; the algorithm 1 image comes from the same
-sources, so a source change that needs a version bump is caught either way.
+It builds both images and checks that each carries its own version string.
+Only the default image is compared against the base commit's; a change
+confined to `chan-sel-1.conf` or `chan-sel-1.overlay` is caught by comparing
+those two files, which asks for the same version bump.
 
 With `DK_BASE_REF` (a git ref, which the workflow sets to the commit a pull
 request is against) or `DK_BASE_SRC` (a directory of these sources) it builds

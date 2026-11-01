@@ -264,6 +264,10 @@ run_firmware_dk() {
     workspace=${NCS_WORKSPACE:-$WORK/ncs}
     build=$workspace/utdk-build
     hex=$build/zephyr/zephyr.hex
+    # The second image's build directory, kept apart from the one the
+    # comparison builds in.
+    chansel1=$workspace/utdk-chansel1
+    chansel1_hex=$chansel1/zephyr/zephyr.hex
     # The sources every build compiles, copied here from the tree or from
     # another commit, so the comparison below builds the same paths twice and
     # a difference in the image is a difference in the sources.
@@ -366,7 +370,7 @@ run_firmware_dk() {
         base=$1
         label=$2
         step "the image against $label"
-        for file in src/roles.h NCS_VERSION; do
+        for file in src/roles.h NCS_VERSION chan-sel-1.conf chan-sel-1.overlay; do
             if [ ! -f "$base/$file" ]; then
                 echo "error: $base holds no $file, so it is not a copy of" \
                      "$DK_FIRMWARE to compare against" >&2
@@ -397,6 +401,19 @@ run_firmware_dk() {
                  "ubertooth_harness/nrfdk.py" >&2
             return 1
         fi
+        # The algorithm 1 image is not compared: that would need a second
+        # pair of builds for an image only one test uses. Its two extra files
+        # are compared instead, so a change confined to them still asks for
+        # the bump that reflashes a board carrying that image.
+        for file in chan-sel-1.conf chan-sel-1.overlay; do
+            if ! cmp -s "$repo/$DK_FIRMWARE/$file" "$base/$file"; then
+                echo "error: $file differs from $label while UTDK_FW_VERSION is" \
+                     "still $here, so a board running the algorithm 1 image would" \
+                     "keep the old one: bump it in $DK_FIRMWARE/src/roles.h and" \
+                     "ubertooth_harness/targets.py" >&2
+                return 1
+            fi
+        done
         cp "$hex" "$workspace/utdk-here.hex"
         dk_sources "$base"
         ncs "west build -p always --no-sysbuild -b $NCS_BOARD -d $build -s $src"
@@ -435,21 +452,6 @@ run_firmware_dk() {
     [ -x .venv/bin/python ] || "$PYTHON" bootstrap.py
     .venv/bin/python -m ubertooth_harness.nrfdk check-image "$hex"
 
-    # The second image: the same roles on a controller without channel
-    # selection algorithm 2. It has its own Kconfig fragment and devicetree
-    # overlay, which nothing else compiles, so a change that breaks it would
-    # otherwise reach the bench before anyone noticed.
-    chansel1=$WORK/dk-chansel1
-    step "build $DK_FIRMWARE for $NCS_BOARD without channel selection algorithm 2"
-    ncs "west build -p always --no-sysbuild -b $NCS_BOARD -d $chansel1 -s $src -- \
-         -DEXTRA_CONF_FILE=chan-sel-1.conf -DEXTRA_DTC_OVERLAY_FILE=chan-sel-1.overlay"
-    step "the second image carries its own firmware version"
-    ls -l "$chansel1/zephyr/zephyr.hex"
-    .venv/bin/python -m ubertooth_harness.nrfdk check-image \
-        --version "$(.venv/bin/python -c \
-            'from ubertooth_harness import targets; print(targets.DK_FIRMWARE_CHAN_SEL_1)')" \
-        "$chansel1/zephyr/zephyr.hex"
-
     # The sources to compare the image against: a directory of them
     # (DK_BASE_SRC, which wins where both are set), or a git ref this
     # repository holds (DK_BASE_REF, which the Firmware workflow sets to the
@@ -483,6 +485,22 @@ run_firmware_dk() {
         rm -f "$workspace/base-firmware.tar"
         compare_dk_image "$base_tree/$DK_FIRMWARE" "$DK_BASE_REF"
     fi
+
+    # The second image: the same roles on a controller without channel
+    # selection algorithm 2. Its Kconfig fragment and devicetree overlay are
+    # compiled nowhere else, so a change that breaks them would otherwise
+    # reach the bench unnoticed. It is built last, after the comparison, so
+    # the build directory the comparison works in is left as it was.
+    chansel1_version=$(.venv/bin/python -c \
+        'from ubertooth_harness import targets; print(targets.DK_FIRMWARE_CHAN_SEL_1)')
+    step "build $DK_FIRMWARE for $NCS_BOARD without channel selection algorithm 2"
+    dk_sources "$repo/$DK_FIRMWARE"
+    ncs "west build -p always --no-sysbuild -b $NCS_BOARD -d $chansel1 -s $src -- \
+         -DEXTRA_CONF_FILE=chan-sel-1.conf -DEXTRA_DTC_OVERLAY_FILE=chan-sel-1.overlay"
+    step "the second image carries $chansel1_version"
+    ls -l "$chansel1_hex"
+    .venv/bin/python -m ubertooth_harness.nrfdk check-image \
+        --version "$chansel1_version" "$chansel1_hex"
 }
 
 case "${1:-}" in
