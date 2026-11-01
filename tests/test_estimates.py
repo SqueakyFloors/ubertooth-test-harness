@@ -149,12 +149,13 @@ class EstimateTests(unittest.TestCase):
     def test_release_estimate_is_the_calibration_run(self):
         # The release plan run at fork 7bb07c9 took 621.0 s of test time, and
         # Failed capture files (comprehensive, measured on the same macOS
-        # host) adds 15.1 s, and Interrupting a capture 34.0 s. The release
-        # suite is the non-soak release gate and is kept well inside half an
-        # hour of test time.
+        # host) adds 15.1 s, and Interrupting a capture 18.5 s, the middle of
+        # three runs on the Linux bench host. The release suite is the
+        # non-soak release gate and is kept well inside half an hour of test
+        # time.
         plans = {plan["name"]: plan for plan in list_plans(REPOSITORY / "testplans")}
         (suite,) = plans["release"]["suites"]
-        self.assertAlmostEqual(670.1, suite["estimated_s"], delta=0.2)
+        self.assertAlmostEqual(654.6, suite["estimated_s"], delta=0.2)
         self.assertLessEqual(suite["estimated_s"], 30 * 60)
 
 
