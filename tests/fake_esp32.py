@@ -32,6 +32,12 @@ BOOT_LOG = (
 # and not the second.
 AUDIO_FIRMWARE = "utesp-1.1.0"
 
+# How fast each of the controller's packet counters runs, as a percentage of
+# a read's worth of frames. No two are the same, so no two differences across
+# a window are either, and a driver cannot take one counter for another.
+PACKET_STEPS = {"tx_total": 100, "tx_discarded": 4, "rx_total": 96,
+                "rx_correct": 90, "rx_err": 8, "rx_none": 12, "rx_lost": 16}
+
 # What a link of each packet type settles on, as both were measured on the
 # bench (firmware README, "What the link settled on"). An EV3 packet carries
 # half the payload of a 2-EV3, so the interval halves to keep the same rate.
@@ -128,6 +134,7 @@ class FakePeerFirmware:
         self.sco_rx_frames = 0
         self.sco_rx_bad = 0
         self.sco_packets = 0
+        self.packets = {field: 0 for field in PACKET_STEPS}
         # A boot clears this; `defaults` does not, as the firmware's does
         # not. It starts here as well so a firmware built and asked for its
         # counters without a boot answers rather than raising.
@@ -190,15 +197,12 @@ class FakePeerFirmware:
     def sco_stats(self) -> dict:
         """The controller's own packet counters, as `sco stats` answers.
 
-        No two of these are equal, as the firmware's own measured sample is
-        not, so a driver that reads or reports one field as another is
-        caught rather than agreeing with itself.
+        Each of these advances at its own rate, so no two of them are equal
+        and neither are any two of their differences: a driver that reads or
+        reports one field as another is caught rather than agreeing with
+        itself. The firmware's own measured sample is uneven in the same way.
         """
-        sent = self.sco_packets
-        return {"tx_total": sent, "tx_discarded": sent // 50,
-                "rx_total": max(sent - 2, 0), "rx_correct": max(sent - 6, 0),
-                "rx_err": sent // 25, "rx_none": sent // 10,
-                "rx_lost": sent // 5}
+        return dict(self.packets)
 
     def status(self) -> dict:
         lap, uap = esp32peer.address_parts(self.address)
@@ -457,12 +461,18 @@ class FakePeerFirmware:
         """One read's worth of traffic on a live link.
 
         Each side answers every frame it receives with one of its own, so
-        both frame counters move, and the controller counts a packet for
-        each.
+        both frame counters move, and the controller counts packets for
+        them. Every counter has a step of its own, none of them equal, so a
+        report or a check that takes one counter for another shows up.
         """
-        self.sco_tx_frames += self.frames_per_read
-        self.sco_rx_frames += self.frames_per_read
-        self.sco_packets += self.frames_per_read
+        step = self.frames_per_read
+        self.sco_tx_frames += step
+        self.sco_rx_frames += step - 2
+        self.sco_tx_errors += 1
+        self.sco_rx_bad += 3
+        for field, part in PACKET_STEPS.items():
+            self.packets[field] += max(step * part // 100, 0)
+        self.sco_packets = self.packets["tx_total"]
 
     def _sco_stop(self):
         far = self.peer_firmware
@@ -502,7 +512,20 @@ class FakePeerPort:
             self.pending.clear()
             self._boot()
 
+    def _materialize(self):
+        """Move what the board has said by itself into the port's buffer."""
+        while self.firmware.unsolicited:
+            self.pending += self.firmware.unsolicited.pop(0).encode() + b"\r\n"
+
+    @property
+    def in_waiting(self) -> int:
+        self._materialize()
+        return len(self.pending)
+
     def reset_input_buffer(self):
+        # A notice waiting here is lost, as it is on a real port: whoever
+        # wants it has to take it before clearing.
+        self._materialize()
         self.pending.clear()
 
     def write(self, data: bytes):
@@ -518,8 +541,7 @@ class FakePeerPort:
 
     def read(self, size: int) -> bytes:
         # Whatever the board said by itself since the last read arrives now.
-        while self.firmware.unsolicited:
-            self.pending += self.firmware.unsolicited.pop(0).encode() + b"\r\n"
+        self._materialize()
         chunk = bytes(self.pending[:size])
         del self.pending[:size]
         return chunk

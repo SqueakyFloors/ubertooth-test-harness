@@ -380,13 +380,20 @@ class Shell:
         self.notices.append(line)
 
     def _keep_notices(self) -> None:
-        """File any notice already read but not yet looked at.
+        """File any notice already arrived but not yet looked at.
 
         A board's notice can arrive in the same chunk as the answer to the
-        last command, after its `OK`, and nothing has looked at it. Clearing
-        the buffer without this would throw away the board's own news, which
-        for an audio link is how a link that went down says so.
+        last command, after its `OK`, or land on the port between two
+        commands with nobody reading. Clearing the buffer without this would
+        throw away the board's own news, which for an audio link is how a
+        link that went down says so.
+
+        Whatever is already waiting is taken, and nothing is waited for: this
+        runs before every command and must cost nothing.
         """
+        waiting = getattr(self.port, "in_waiting", 0)
+        if waiting:
+            self._buffer += self.port.read(waiting)
         while b"\n" in self._buffer:
             raw, self._buffer = self._buffer.split(b"\n", 1)
             line = raw.decode("utf-8", "replace").strip("\r \t\x00")
@@ -562,7 +569,7 @@ def boot_state_problems(status: dict) -> list[str]:
     expected = dict(BOOT_STATE)
     expected.update({key: value for key, value in AUDIO_BOOT_STATE.items()
                      if key in status})
-    return [f"{key} {status[key]!r}, not {value!r}"
+    return [f"{key} {status.get(key)!r}, not {value!r}"
             for key, value in expected.items() if status.get(key) != value]
 
 
@@ -764,9 +771,9 @@ def stream(acceptor: Peer, initiator: Peer, command: Sequence[str], *,
     out = out or sys.stderr
     period = period_ms(period)
     payload = payload_bytes(payload)
-    min_writes = whole(min_writes, "the write floor")
-    min_seconds = seconds(min_seconds, "the seconds the command must run for")
-    timeout = seconds(timeout, "the seconds the command may take")
+    min_writes = nonnegative(min_writes, "the write floor")
+    min_seconds = nonnegative_seconds(min_seconds, "the seconds the command must run for")
+    timeout = nonnegative_seconds(timeout, "the seconds the command may take")
     return _session(
         acceptor, initiator,
         lambda acceptor_shell, initiator_shell: _stream(
@@ -840,7 +847,7 @@ def _release(shell: Shell, label: str = "peer", out=None) -> str:
     return "it is not in its boot state after its reset: " + ", ".join(wrong)
 
 
-def whole(value, what: str) -> int:
+def nonnegative(value, what: str) -> int:
     """A floor cannot be negative: a negative one would check nothing."""
     number = int(value)
     if number < 0:
@@ -848,7 +855,7 @@ def whole(value, what: str) -> int:
     return number
 
 
-def seconds(value, what: str) -> float:
+def nonnegative_seconds(value, what: str) -> float:
     number = float(value)
     if number < 0:
         raise PeerError(f"{what} cannot be negative, got {value!r}")
@@ -930,10 +937,10 @@ def audio(acceptor: Peer, initiator: Peer, command: Sequence[str], *,
     """
     out = out or sys.stderr
     wanted = packet_type(sco_type)
-    min_frames = whole(min_frames, "the frame floor")
-    min_packets = whole(min_packets, "the packet floor")
-    min_seconds = seconds(min_seconds, "the seconds the command must run for")
-    timeout = seconds(timeout, "the seconds the command may take")
+    min_frames = nonnegative(min_frames, "the frame floor")
+    min_packets = nonnegative(min_packets, "the packet floor")
+    min_seconds = nonnegative_seconds(min_seconds, "the seconds the command must run for")
+    timeout = nonnegative_seconds(timeout, "the seconds the command may take")
     return _session(
         acceptor, initiator,
         lambda acceptor_shell, initiator_shell: _audio(
@@ -1032,9 +1039,14 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
                 stopped = str(error)
     finally:
         # A board left with its audio profile running cannot run the next
-        # session, so failing to release one fails this one.
-        left = {initiator.label: _release(initiator_shell, initiator.label, out),
-                acceptor.label: _release(acceptor_shell, acceptor.label, out)}
+        # session, so failing to release one fails this one. The second
+        # board is released whatever the first one does, interrupt included.
+        left = {}
+        try:
+            left[initiator.label] = _release(initiator_shell, initiator.label,
+                                             out)
+        finally:
+            left[acceptor.label] = _release(acceptor_shell, acceptor.label, out)
     sides = ((initiator.label, before_initiator, after_initiator),
              (acceptor.label, before_acceptor, after_acceptor))
     for label, before, after in sides:
@@ -1183,10 +1195,12 @@ def _wait_for_link(shell: Shell, label: str,
     page learns the link is up from a callback, which can land after the
     paging board's command has already answered.
     """
-    deadline = time.monotonic() + timeout
+    # The shell's clock, as every other wait in this module uses, so a test
+    # does not have to spend the deadline in real time.
+    deadline = shell.clock() + timeout
     while True:
         status = check_audio_status(shell.status(), label)
-        if status["sco"] == SCO_UP or time.monotonic() >= deadline:
+        if status["sco"] == SCO_UP or shell.clock() >= deadline:
             return status
         time.sleep(POLL_S)
 
@@ -1216,6 +1230,14 @@ def _check_link(linked: dict, far: dict, acceptor_label: str,
                 f"the {label} reports the audio link up with no connection "
                 f"handle or frame size (handle {status['sco_handle']}, frame "
                 f"{status['sco_frame_len']} bytes)")
+        if status["sco_interval"] != linked["sco_interval"]:
+            # Tesco belongs to the link, not to an end of it, so the two
+            # boards reporting different ones means they are not describing
+            # the same link.
+            raise PeerError(
+                f"the two boards report different audio intervals: "
+                f"{initiator_label} {linked['sco_interval']} slots, {label} "
+                f"{status['sco_interval']} slots")
         if status["sco_link"] != ESCO:
             # Every name this session goes by says eSCO, and an EV3 or 2-EV3
             # packet type is an eSCO one. A plain SCO link reported as a pass
@@ -1320,8 +1342,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        # The boards have been released by the session's own cleanup; this is
-        # only to report it as a line rather than a traceback.
+        # The session's cleanup has tried to release both boards on the way
+        # out; this is only to report the interrupt as a line rather than a
+        # traceback.
         print("error: interrupted", file=sys.stderr)
         return 1
     return 0

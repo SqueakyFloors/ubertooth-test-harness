@@ -128,6 +128,13 @@ for the whole session: a capture holds both:
     ubertooth-rx -U <serial> -l <ESP32_Linux1's LAP> -u <its UAP> -t 30
 ```
 
+`ubertooth-rx` has not been seen to settle on this pair's clock from a voice
+link, so do not expect it to enter follow mode and print packet detail. What
+a run like that gives is the records it writes without a clock, where each
+packet's header carries its type code: that is what tells an EV3 link from a
+2-EV3 one on the air ([`docs/hardware.md`](../../docs/hardware.md), "Reading a
+Classic capture of the peer pair").
+
 `--type` picks the packet type the link asks for, on both boards, because a
 link uses a type both of them allowed:
 
@@ -155,9 +162,10 @@ counters.
 
 The difference is the point. Bringing the link up and settling put frames on
 the air before the command starts, so a total would flatter the run. The
-window is bounded by the reads either side of the command — each board's
-status, counters, and notices, a few tens of milliseconds in all — rather
-than by the command itself.
+window is bounded by the reads either side of the command rather than by the
+command itself, and those reads wait on each board's controller: a status
+read can wait on its channel map and a counter read on its packet counters,
+so allow a second or two of traffic either side, not milliseconds.
 
 `--min-frames` and `--min-packets` are the floors those differences must
 reach, on both boards, so a link that fell silent part way through does not

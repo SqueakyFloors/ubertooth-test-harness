@@ -427,12 +427,12 @@ class AudioTests(unittest.TestCase):
         # is the difference across the command: two reads of each board
         # inside the window, at 50 frames a read in the fake.
         self.assertIn("initiator audio frames while the command ran: sent 100 "
-                      "refused 0 received 100 damaged 0", report)
+                      "refused 2 received 96 damaged 6", report)
         # No two of the fake's counters are equal, so this pins each field to
         # its own label rather than agreeing with a transposition.
         self.assertIn("acceptor audio packets while the command ran: sent 100 "
-                      "discarded 2 received 100 good 100 errors 4 missing 10 "
-                      "lost 20", report)
+                      "discarded 4 received 96 good 90 errors 8 missing 12 "
+                      "lost 16", report)
         # The mask each controller supports, so a refused type can be read
         # rather than puzzled over.
         self.assertIn("audio types supported: initiator 003d, acceptor 003d",
@@ -745,7 +745,8 @@ class AudioTests(unittest.TestCase):
                 answer = super().handle(line)
                 if line == "sco stats" and not self.rewound:
                     self.rewound = True
-                    self.sco_packets = 0
+                    for field in self.packets:
+                        self.packets[field] = 0
                 return answer
 
         with self.assertRaisesRegex(
@@ -985,7 +986,7 @@ class AudioTests(unittest.TestCase):
     def test_a_link_that_carried_too_few_frames_fails(self):
         with self.assertRaisesRegex(
             esp32peer.PeerError,
-            "the acceptor received 100 frames while the command ran, fewer "
+            "the acceptor received 96 frames while the command ran, fewer "
             "than the 500 this test needs"
         ):
             self._audio(min_frames=500)
