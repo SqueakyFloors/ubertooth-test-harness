@@ -955,14 +955,13 @@ capture found it, and the board reported leaving it inside the wait.
 Guarded. A required `duration:`, which bounds each second capture. No RF peer,
 no firmware write, and nothing is transmitted.
 
-**Expected outcome.** Two cases, one per order of the two captures: a symbol
-dump after a killed spectrum sweep, and a spectrum sweep after a killed symbol
-dump. Each resets the board and reads back the documented boot defaults
-(2441 MHz, PA level 7, squelch -120, LEDs off), kills its capture, runs the
-other tool, checks that capture's contents, confirms the killed capture is
-byte for byte what the kill left, and then reads firmware version, serial,
-channel, PA level, squelch, and the modulation register, each once: a read
-that needs a second try fails the case. Cleanup stops the board, resets it,
+**Expected outcome.** One case: a symbol dump after a killed spectrum sweep.
+It resets the board and reads back the documented boot defaults (2441 MHz, PA
+level 7, squelch -120, LEDs off), kills the sweep, runs the dump, checks the
+dump's records and the modulation the radio ended up in, confirms the killed
+capture is byte for byte what the kill left, and then reads firmware version,
+serial, channel, PA level, and squelch, each once: a read that needs a second
+try fails the case. Cleanup stops the board, resets it,
 requires the documented boot defaults again, and then puts back every setting
 the case recorded; this is the one test that leaves a board in a mode on
 purpose, so it hands the next test a board it has seen boot. A self-reset the
@@ -975,7 +974,17 @@ there instead, the board would be idle, the warning the case requires would
 never print, and the case would fail for a reason that has nothing to do with
 the behavior it is about. Only Linux has been checked (the mode was still
 running both times); check a macOS host before putting this test in
-[`mac.yaml`](../testplans/mac.yaml). The clock half of the record check sees a leftover
+[`mac.yaml`](../testplans/mac.yaml).
+
+The order of the two captures is not free. A board left in a spectrum sweep
+answers the mode read libubertooth makes at a capture start, so the warning is
+reliable. A board left in a symbol dump does not always: nothing is draining
+its endpoint, and the control read can stall, in which case libubertooth
+cannot tell what the board is doing and says nothing, which is what the fork
+chose for that case. Measured on the lab host: the board was still in `rx
+symbols` in 3 of 3 tries after a killed dump, so the mode is there, but one
+run of the dump-then-sweep order got the warning and another did not. That
+order is therefore not a test, and only the sweep-then-dump order is used. The clock half of the record check sees a leftover
 basic-rate record only when its clock is ahead of the new stream's first one,
 so a short previous stream can go unseen there; the packet type is what
 catches a record of the sweep, whatever its clock. A pass does not separate a

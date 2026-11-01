@@ -26,7 +26,6 @@ from tests.test_receive_cases import full_record
 
 TEST = boardstate_cases.TEST_NAME
 DUMP_CASE = "A symbol dump after a killed spectrum sweep"
-SWEEP_CASE = "A spectrum sweep after a killed symbol dump"
 # What the killed tool had written when it was killed, in the fake.
 KILLED_BYTES = 8192
 
@@ -41,17 +40,19 @@ class BoardStateUbertooth(ToolUbertooth):
     and records belong), ``mode-did-not-stop`` (the wait for the board to
     leave the mode ran out), ``foreign-records`` (the new capture opens with a
     record of the mode before it), ``stale-records`` (a basic-rate record from
-    before the stream started, #318), ``range-lost-at-mode-start`` (the mode
-    start threw away the band the sweep stated), ``evidence-overwritten``
-    (the next run writes over the file the killed one left), and
-    ``modulation-read-fails`` (the board stops answering a read afterwards).
+    before the stream started, #318), ``modulation-lost-at-mode-start`` (the
+    mode start threw away the modulation the capture stated for it),
+    ``evidence-overwritten`` (the next run writes over the file the killed one
+    left), and ``modulation-read-fails`` (the board stops answering a read
+    afterwards).
     """
 
-    MODES = {"ubertooth-specan": boardstate_cases.MODE_SPECAN,
-             "ubertooth-dump": boardstate_cases.MODE_RX_SYMBOLS}
+    MODES = {"ubertooth-specan": boardstate_cases.MODE_SPECAN}
 
     def __init__(self, *args, bugs=(), records=200, **kwargs):
         super().__init__(*args, **kwargs)
+        # MDMCTRL, which keeps whatever the last mode programmed.
+        self.modulation = "0029"
         self.bugs = set(bugs)
         self.records = records
         # The mode a killed capture left the board running, by number; None
@@ -73,9 +74,13 @@ class BoardStateUbertooth(ToolUbertooth):
         if command[0] == "ubertooth-dump":
             self.commands.append(command)
             return self._dump(command, on_output)
-        if command[0] == "ubertooth-debug" and "modulation-read-fails" in self.bugs:
+        if command[0] == "ubertooth-debug":
             self.commands.append(command)
-            return self._result(command, 1, "", "error: register read failed\n",
+            if "modulation-read-fails" in self.bugs:
+                return self._result(command, 1, "",
+                                    "error: register read failed\n", on_output)
+            return self._result(command, 0,
+                                f"%MDMCTRL = 0x{self.modulation.upper()}\n", "",
                                 on_output)
         return super().run(argv, timeout_s=timeout_s, cancellation=cancellation,
                            on_output=on_output)
@@ -136,6 +141,12 @@ class BoardStateUbertooth(ToolUbertooth):
     # ubertooth-dump ------------------------------------------------------
     def _dump(self, command, on_output):
         opts = list(command[3:])
+        # The mode start resets the modulation to basic rate; a capture that
+        # states LE for it gets LE, unless this bug is on (fork d4aca18).
+        if "-l" in opts and "modulation-lost-at-mode-start" not in self.bugs:
+            self.modulation = boardstate_cases.MDMCTRL_LE
+        else:
+            self.modulation = "0029"
         stdout, stderr = self._previous_mode()
         data = bytearray()
         if "foreign-records" in self.bugs:
@@ -161,8 +172,6 @@ class BoardStateUbertooth(ToolUbertooth):
         low = int(opts[opts.index("-l") + 1])
         high = int(opts[opts.index("-u") + 1])
         stdout, stderr = self._previous_mode()
-        if "range-lost-at-mode-start" in self.bugs:
-            low, high = 2402, 2480
         data = bytearray()
         if "foreign-records" in self.bugs:
             # A record of the dump before it, in the stream the samples are
@@ -207,10 +216,10 @@ class CaseGenerationTests(unittest.TestCase):
 
     def setUp(self):
         _arguments, self.cases = cases_for()
-        self.dump, self.sweep = self.cases
+        (self.dump,) = self.cases
 
-    def test_one_case_per_order_of_the_two_captures(self):
-        self.assertEqual(["killed-specan-then-dump", "killed-dump-then-specan"],
+    def test_one_case_the_dump_after_a_killed_sweep(self):
+        self.assertEqual(["killed-specan-then-dump"],
                          [case.case_id for case in self.cases])
         for case in self.cases:
             self.assertIsInstance(case, StateCase)
@@ -240,15 +249,14 @@ class CaseGenerationTests(unittest.TestCase):
 
     def test_the_second_capture_is_the_other_tool_and_names_the_mode_left(self):
         context = {"capture dir": "/run/captures"}
-        expected = {
-            "killed-specan-then-dump": ("ubertooth-dump", boardstate_cases.MODE_SPECAN),
-            "killed-dump-then-specan": ("ubertooth-specan",
-                                        boardstate_cases.MODE_RX_SYMBOLS),
-        }
         for case in self.cases:
-            tool, mode = expected[case.case_id]
+            tool, mode = "ubertooth-dump", boardstate_cases.MODE_SPECAN
             step = next(s for s in case.steps if s.step_id == "second-capture")
-            self.assertEqual(tool, step.resolve_argv(context)[0])
+            argv = step.resolve_argv(context)
+            self.assertEqual(tool, argv[0])
+            # The modulation is stated before the mode request, which is the
+            # setting the case requires to survive the mode start.
+            self.assertIn("-l", argv)
             self.assertTrue(step.continuous)
             self.assertIn(f"still in mode {mode} from an earlier run",
                           " ".join(step.output_patterns))
@@ -273,10 +281,10 @@ class CaseGenerationTests(unittest.TestCase):
         self.assertEqual(["--min-records", "100"],
                          argv[argv.index("--min-records"):][:2])
 
-    def test_the_sweep_check_requires_the_whole_stated_range(self):
-        step = next(s for s in self.sweep.steps if s.step_id == "verify-second-capture")
-        self.assertEqual("5 frequencies in 2440-2444, 0 outside",
-                         step.observe.expected)
+    def test_the_stated_modulation_has_to_survive_the_mode_start(self):
+        step = next(s for s in self.dump.steps
+                    if s.step_id == "verify-modulation-survived")
+        self.assertEqual(boardstate_cases.MDMCTRL_LE, step.observe.expected)
 
     def test_every_read_the_issue_asks_for_runs_after_the_kill(self):
         for case in self.cases:
@@ -284,7 +292,9 @@ class CaseGenerationTests(unittest.TestCase):
             for step_id in ("verify-killed-capture-kept", "read-firmware-after-kill",
                             "read-serial-after-kill", "read-channel-after-kill",
                             "read-pa-level-after-kill", "read-squelch-after-kill",
-                            "read-leds-after-kill", "read-modulation-after-kill"):
+                            "read-leds-after-kill",
+                            # The modulation read, which also checks its value.
+                            "verify-modulation-survived"):
                 self.assertIn(step_id, ids)
 
     def test_the_cleanup_stops_resets_checks_defaults_and_restores(self):
@@ -314,33 +324,33 @@ class CaseOutcomeTests(unittest.TestCase):
 
     def test_a_capture_that_says_nothing_about_the_mode_it_found_fails(self):
         _summary, failed = self.run_with(bugs=("no-warning",))
-        self.assertEqual(sorted([DUMP_CASE, SWEEP_CASE]), failed)
+        self.assertEqual([DUMP_CASE], failed)
 
     def test_the_warning_on_stdout_fails(self):
         _summary, failed = self.run_with(bugs=("warning-on-stdout",))
-        self.assertEqual(sorted([DUMP_CASE, SWEEP_CASE]), failed)
+        self.assertEqual([DUMP_CASE], failed)
 
     def test_a_board_that_did_not_leave_the_mode_fails(self):
         _summary, failed = self.run_with(bugs=("mode-did-not-stop",))
-        self.assertEqual(sorted([DUMP_CASE, SWEEP_CASE]), failed)
+        self.assertEqual([DUMP_CASE], failed)
 
-    def test_a_record_of_the_previous_mode_fails_both_captures(self):
+    def test_a_record_of_the_previous_mode_fails(self):
         _summary, failed = self.run_with(bugs=("foreign-records",))
-        self.assertEqual(sorted([DUMP_CASE, SWEEP_CASE]), failed)
+        self.assertEqual([DUMP_CASE], failed)
 
-    def test_records_from_before_the_stream_started_fail_the_dump(self):
+    def test_records_from_before_the_stream_started_fail(self):
         _summary, failed = self.run_with(bugs=("stale-records",))
         self.assertEqual([DUMP_CASE], failed)
 
-    def test_a_range_lost_at_mode_start_fails_the_sweep(self):
-        _summary, failed = self.run_with(bugs=("range-lost-at-mode-start",))
-        self.assertEqual([SWEEP_CASE], failed)
+    def test_a_modulation_lost_at_mode_start_fails(self):
+        _summary, failed = self.run_with(bugs=("modulation-lost-at-mode-start",))
+        self.assertEqual([DUMP_CASE], failed)
 
     def test_overwriting_the_killed_capture_fails(self):
         _summary, failed = self.run_with(bugs=("evidence-overwritten",))
-        self.assertEqual(sorted([DUMP_CASE, SWEEP_CASE]), failed)
+        self.assertEqual([DUMP_CASE], failed)
 
-    def test_too_few_records_fails_the_dump(self):
+    def test_too_few_records_fails(self):
         _summary, failed = self.run_with(records=10)
         self.assertEqual([DUMP_CASE], failed)
 
@@ -348,7 +358,7 @@ class CaseOutcomeTests(unittest.TestCase):
         # The reads after the kill are the point of the case: a board that
         # does not answer one is a board the killed run left unusable.
         _summary, failed = self.run_with(bugs=("modulation-read-fails",))
-        self.assertEqual(sorted([DUMP_CASE, SWEEP_CASE]), failed)
+        self.assertEqual([DUMP_CASE], failed)
 
 
 class DumpCheckerTests(unittest.TestCase):
