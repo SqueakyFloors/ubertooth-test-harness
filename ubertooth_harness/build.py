@@ -17,6 +17,7 @@ from typing import Callable, Mapping, Sequence
 from ubertooth_harness.cancellation import CancellationToken
 from ubertooth_harness.executor import CommandExecutor, CommandResult
 from ubertooth_harness.manifest import FileIdentity, SourceRevision
+from ubertooth_harness.patterns import APPLICATION_IMAGE, BTBR_IMAGE
 from ubertooth_harness.preflight import HOST_VERSION_LABEL, host_version_patterns
 from ubertooth_harness.pytools import PYTHON_ENV, PYTHON_TOOLS_ENV
 from ubertooth_harness.rawlog import record_output
@@ -46,8 +47,6 @@ _FIRMWARE_HINTS = {
 # for one or the other (host/doc/ubertooth-btbr.md, FIRMWARE). Building both
 # here is what lets a test flash btbr and put the application back from
 # artifacts of the same commit.
-APPLICATION_IMAGE = "bluetooth_rxtx"
-BTBR_IMAGE = "btbr"
 FIRMWARE_IMAGES = (APPLICATION_IMAGE, BTBR_IMAGE)
 # Run-manifest artifact names of the two images, as a plan and --artifact
 # write them. "test build" is the application image every other test needs;
@@ -164,7 +163,6 @@ BUILT_TOOLS = (
 # Installed by ENABLE_PYTHON=ON; their first line names the interpreter.
 PYTHON_TOOLS = ("ubertooth-specan-ui", "ubertooth-btbr")
 BUILD_DEADLINE_S = 3600.0
-
 
 
 def required_tools(plan: BuildPlan) -> tuple[str, ...]:

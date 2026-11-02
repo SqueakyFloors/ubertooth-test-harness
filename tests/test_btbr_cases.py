@@ -21,7 +21,11 @@ from ubertooth_harness.build import (
 )
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.manifest import SourceRevision
-from ubertooth_harness.patterns import firmware_image, image_name_pattern
+from ubertooth_harness.patterns import (
+    FIRMWARE_VERSION_RE,
+    image_name_pattern,
+    matched_image,
+)
 from ubertooth_harness.plan import image_label
 from ubertooth_harness.stateful import (
     APPLICATION_IMAGE_LABEL,
@@ -131,11 +135,15 @@ class ImagePatternTests(unittest.TestCase):
         self.assertNotRegex(self.OLD_LINE, application)
 
     def test_the_image_a_board_reports_is_readable(self):
-        self.assertEqual("btbr", firmware_image(self.BTBR_LINE))
-        self.assertEqual("bluetooth_rxtx",
-                         firmware_image(self.APPLICATION_LINE))
-        self.assertIsNone(firmware_image(self.OLD_LINE))
-        self.assertIsNone(firmware_image("nothing of the kind"))
+        # The way the cases read it: the version line's match, which carries
+        # the image name as a group of its own.
+        def image(line):
+            return matched_image(FIRMWARE_VERSION_RE.search(line))
+
+        self.assertEqual("btbr", image(self.BTBR_LINE))
+        self.assertEqual("bluetooth_rxtx", image(self.APPLICATION_LINE))
+        self.assertIsNone(image(self.OLD_LINE))
+        self.assertIsNone(image("nothing of the kind"))
 
 
 class CaseTests(unittest.TestCase):

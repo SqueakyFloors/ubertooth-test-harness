@@ -214,6 +214,64 @@ class SessionTests(unittest.TestCase):
         self.assertIn("checks: 0 passed of 11, 0 failed, 11 not run", report)
 
 
+class StreamReaderTests(unittest.TestCase):
+    """How the reader treats carriage returns, which decide whether a check
+    sees an answer the tool printed: every pattern anchors on the end of a
+    line, and the tool ends some of its lines with a carriage return and a
+    newline."""
+
+    def stream(self):
+        return btbrconsole.Stream("stderr", io.BytesIO(), None, "")
+
+    def test_a_carriage_return_before_a_newline_goes(self):
+        stream = self.stream()
+        stream._append("Set bdaddr 223344556677 -> sw b155\r\n")
+        self.assertEqual("Set bdaddr 223344556677 -> sw b155\n",
+                         stream.text)
+
+    def test_a_carriage_return_split_across_two_reads_goes(self):
+        # A read can end between the two bytes, which is the case no single
+        # replacement over one chunk would catch.
+        stream = self.stream()
+        stream._append("first line\r")
+        # Held back, so nothing yet says the line ended.
+        self.assertEqual("first line", stream.text)
+        stream._append("\nsecond line\r\n")
+        self.assertEqual("first line\nsecond line\n", stream.text)
+
+    def test_a_redraw_before_a_line_leaves_no_carriage_return(self):
+        # A progress redraw immediately before a CRLF-terminated line gives
+        # `...\r\r\n`, where replacing the pair once would leave one in.
+        stream = self.stream()
+        stream._append("progress\r\r\n")
+        self.assertEqual("progress\n", stream.text)
+
+    def test_a_carriage_return_with_no_newline_after_it_stays(self):
+        # The tool redraws a line with one, so it is text like any other.
+        stream = self.stream()
+        stream._append("counting 1\rcounting 2\r")
+        stream._append("counting 3\n")
+        self.assertEqual("counting 1\rcounting 2\rcounting 3\n",
+                         stream.text)
+
+    def test_a_carriage_return_at_the_end_of_the_stream_is_kept(self):
+        source = io.BytesIO(b"last\r")
+        stream = btbrconsole.Stream("stderr", source, None, "")
+        stream.thread.start()
+        stream.thread.join(5.0)
+        self.assertEqual("last\r", stream.text)
+
+    def test_nothing_more_is_kept_once_the_stream_has_overflowed(self):
+        # A chunk appended after one was dropped would leave a hole in the
+        # middle of the text, and every offset a wait started from would
+        # point past its answer.
+        stream = self.stream()
+        stream._append("a" * (btbrconsole.MAX_STREAM_CHARS + 1))
+        self.assertTrue(stream.overflowed)
+        stream._append("small\n")
+        self.assertEqual("", stream.text)
+
+
 class CheckListTests(unittest.TestCase):
     def test_the_no_answer_check_runs_after_the_page_and_before_the_streams(self):
         smoke = [name for name, _check in btbrconsole.checks(False)]

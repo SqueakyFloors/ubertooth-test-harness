@@ -144,12 +144,17 @@ HELP_ONE = ("inquiry", "inquiry: Discover nearby devices")
 # Not anchored at the start of a line: the prompt has no newline of its own,
 # so the first answer after it lands on the end of the prompt.
 SET_BDADDR = r"(?m)Set bdaddr (?P<address>[0-9a-f]+) -> sw [0-9a-f]+$"
+# Carriage returns the stream reader drops: the ones a newline follows, all
+# of them, so a redraw right before a line (`...\r\r\n`) leaves none behind.
+CR_BEFORE_NEWLINE = re.compile(r"\r+(?=\n)")
 # The firmware prints that address with %llx, so an address with a leading
 # zero byte comes back shorter than twelve digits: it is compared as a number.
 # Paging, in the order the firmware reports it.
 PAGING_STARTED = "Paging started"
 PAGING_CONNECTED = "Central started"
-PAGING_READY = re.compile(r"(?m)^Connection ready, lt_addr=(?P<lt_addr>\d+)$")
+# Not anchored at the start of a line, for the same reason as SET_BDADDR: an
+# answer printed right after a prompt lands on the end of it.
+PAGING_READY = re.compile(r"(?m)Connection ready, lt_addr=(?P<lt_addr>\d+)$")
 LMP_COMPLETE = "LMP setup complete"
 PAGING_TIMEOUT = "paging timeout"
 PAGING_DONE = "Paging done"
@@ -159,8 +164,10 @@ INQUIRY_DONE = "Inquiry done"
 # opcode is `0x<hex>`, or `<opcode>/<extended opcode>` for an escape opcode,
 # and the line ends in `, refused` only where there was something to refuse: a
 # PDU that expects no answer is just reported (host/python/ubtbr/ubtbr/lmp.py).
+# There is one line per opcode, so one that landed on the end of a prompt
+# would be the only one there is: not anchored at the start of a line either.
 LMP_UNHANDLED = re.compile(
-    r"(?m)^warning: LMP opcode (?P<opcode>\S+) is not handled in state \d+")
+    r"(?m)warning: LMP opcode (?P<opcode>\S+) is not handled in state \d+")
 
 # An inquiry response is an FHS packet carrying the responder's address, and
 # its Extended Inquiry Response follows as fields of its own.
@@ -170,9 +177,11 @@ EIR_NAME = re.compile(r"COMPLETE_LOCAL_NAME: '(?P<name>[^']*)'")
 LMP_NAME_RES = "LMP_NAME_RES"
 # How much of the peer's name the printed LMP_NAME_RES line is checked for.
 # The line shows the PDU's first seventeen bytes, three of which are the
-# opcode, the fragment offset, and the length, so a fourteen-character name
-# fits whole and a longer one is cut.
-NAME_BYTES_CHECKED = 10
+# opcode, the fragment offset, and the length, so fourteen characters of the
+# name are on it and a longer name is cut. The bench's names are fifteen
+# characters (`UT-ESP32-` and the LAP), so fourteen is as much as there is to
+# compare and still enough to tell one peer from another.
+NAME_BYTES_CHECKED = 14
 # Records and progress lines, each of which belongs on one stream only. The
 # capture pattern is not anchored to the start of a line: the prompt carries no
 # newline of its own, so a record printed right after one does not start a
@@ -250,34 +259,37 @@ class Stream:
             if not chunk:
                 break
             self._append(chunk.decode("utf-8", errors="replace"))
-        # Whatever was held back waiting for a newline that never came.
-        self._append("")
+        # A carriage return held back for a newline that never came is part
+        # of the text like any other character, so the last append keeps it
+        # and `text` and the echoed transcript stay in step.
+        self._append("", final=True)
         with self._lock:
             tail, self._unechoed = self._unechoed, ""
-            if self._pending_cr:
-                tail, self._pending_cr = tail + self._pending_cr, ""
         if tail:
             self._echo([tail])
 
-    def _append(self, text: str) -> None:
+    def _append(self, text: str, *, final: bool = False) -> None:
         with self._lock:
             # The tool ends some of its lines with a carriage return and a
-            # newline. The carriage return goes here, because every pattern
-            # the checks wait for anchors on the end of a line and one left
-            # in would stop it matching: that is how a `bdaddr` answer the
-            # tool did print read as one it had not. A chunk that ends on the
-            # carriage return keeps it back until the next chunk says whether
-            # a newline follows, so a read split between the two cannot leave
-            # one in. A carriage return on its own stays: the tool redraws a
-            # line with it.
+            # newline. Every carriage return before a newline goes here,
+            # because every pattern the checks wait for anchors on the end of
+            # a line and one left in would stop it matching: that is how a
+            # `bdaddr` answer the tool did print read as one it had not. A
+            # chunk that ends on a carriage return keeps it back until the
+            # next chunk says whether a newline follows, so a read split
+            # between the two cannot leave one in. A carriage return that no
+            # newline follows stays: the tool redraws a line with it.
             text = self._pending_cr + text
             self._pending_cr = ""
-            if text.endswith("\r"):
+            if text.endswith("\r") and not final:
                 text, self._pending_cr = text[:-1], "\r"
-            text = text.replace("\r\n", "\n")
+            text = CR_BEFORE_NEWLINE.sub("", text)
             if not text:
                 return
-            if self._size + len(text) > MAX_STREAM_CHARS:
+            # Once a stream has overflowed nothing more is kept: appending
+            # again would leave a hole in the middle of ``text``, and every
+            # offset a wait started from would point past its answer.
+            if self.overflowed or self._size + len(text) > MAX_STREAM_CHARS:
                 self.overflowed = True
             else:
                 self._chunks.append(text)
@@ -303,13 +315,26 @@ class Stream:
         self._sink.flush()
 
     def _redact(self, line: str) -> str:
-        """Any address but the peer's, replaced before the line is written."""
-        if self._keep and "bdaddr=" not in line:
+        """Any address or name but the peer's, replaced before it is written.
+
+        An inquiry hears every discoverable device in range, and the tool
+        renders a response inside a warning, so a third party's address and
+        the name in its Extended Inquiry Response could both reach the run
+        record by this stream.
+        """
+        if not self._keep:
             return line
-        return FHS_BDADDR.sub(
+        line = FHS_BDADDR.sub(
             lambda found: ("bdaddr=" + found["address"]
                            if found["address"].lower() == self._keep
                            else "bdaddr=<another device>"),
+            line)
+        # The peer's own name holds its LAP, which is how a name is told from
+        # another device's without a registry to ask.
+        return EIR_NAME.sub(
+            lambda found: ("COMPLETE_LOCAL_NAME: '" + found["name"] + "'"
+                           if self._keep in found["name"].lower()
+                           else "COMPLETE_LOCAL_NAME: '<another device>'"),
             line)
 
     @property

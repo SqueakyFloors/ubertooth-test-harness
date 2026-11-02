@@ -377,8 +377,10 @@ both images from the same commit and records both in its manifest, as
 is the only test that writes the alternate one; it writes the application image
 back in its cleanup, which runs after a failure or a cancellation too.
 
-A board left on `btbr` runs none of the other tools, so preflight names the
-image it found rather than only saying the identity did not match:
+A board left on `btbr` runs none of the other tools, so where it reports the
+run's own revision, preflight names the image it found rather than only saying
+the identity did not match. (A board carrying any image at another revision is
+turned down for the revision, which already says to flash it.)
 
 ```
 Firmware version: UT_Linux5 runs the btbr image at git-b2cd6c68, not

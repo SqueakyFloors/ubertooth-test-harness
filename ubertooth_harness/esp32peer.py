@@ -318,8 +318,8 @@ def address_parts(address: str) -> tuple[str, str]:
 def device_name(address: str) -> str:
     """The name the firmware gives a board with this address.
 
-    `main/bt_peer.c` builds it as `UT-ESP32-` and the top three bytes of the
-    LAP in upper case, and the shell cannot set it, so it follows from the
+    `main/bt_peer.c` builds it as `UT-ESP32-` and the LAP in upper case, and
+    the shell cannot set it, so it follows from the
     address and is unique per board. It is the name the board answers an
     inquiry and an LMP name request with, which is how a capture says which
     board replied. A registry may write it down beside the address for a

@@ -2152,6 +2152,7 @@ the tool named the opcode in exactly one `warning:` line. So a connection held
 for the hold brings one, and the check requires that, because a check that
 decided nothing should not read as a pass; a peer firmware that stopped asking
 would fail it, and the reason says why.
+
 ## Recover AFH map
 
 **What it does.** The same two peers hold a piconet whose Adaptive Frequency

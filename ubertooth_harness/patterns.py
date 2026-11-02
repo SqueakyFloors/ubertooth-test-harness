@@ -66,11 +66,6 @@ def matched_image(match: re.Match | None) -> str | None:
     return match.groupdict().get("image")
 
 
-def firmware_image(output: str) -> str | None:
-    """The image name a `ubertooth-util -v` line in ``output`` reports."""
-    return matched_image(FIRMWARE_VERSION_RE.search(output))
-
-
 PART_ID_PATTERN = r"Part ID:\s+[0-9A-Fa-f]+"
 BOARD_ID_PATTERN = r"Board ID Number:\s+\d+"
 
