@@ -60,11 +60,8 @@ from typing import Mapping
 from ubertooth_harness import afhmap, capturefile, esp32peer
 from ubertooth_harness.classic_cases import (
     ACCEPTOR_ROLE,
-    DEFAULT_MAX_AC_ERRORS,
     INITIATOR_ROLE,
-    MIN_HEC_VALID_RECORDS,
     MIN_PACKETS,
-    MIN_REFERENCE_UAP_RECORDS,
     MIN_WRITES,
     PAIR_SETUP_S,
     STREAM_PAYLOAD,
@@ -75,6 +72,7 @@ from ubertooth_harness.classic_cases import (
     _capture_path,
     _pair,
     _pair_patterns,
+    _record_checks,
     _record_step,
     _reset_step,
     piconet_packets,
@@ -117,14 +115,18 @@ _ESP32PEER = str(Path(esp32peer.__file__).resolve())
 # `ubertooth_set_timeout()`). So `-s` adds a whole inquiry to the run: BlueZ
 # is asked for 8 units of 1.28 s, which is 10.24 s.
 INQUIRY_S = 11.0
+# The inquiry runs its full 8 units whatever it finds, so this is also the
+# least a -s run can take on top of its window, which is what makes the floor
+# below bound the sweep rather than being satisfied by the inquiry alone.
+INQUIRY_MIN_S = 8 * 1.28
 # And each device either half found is paged for its name, once by the inquiry
-# half and once per survey result. The read the survey results go through
-# passes a zero timeout, which BlueZ takes as "no deadline", so a device that
-# answers the page and then says nothing can hold the tool for as long as its
-# controller allows (fork #1090). This is an allowance, not a bound: the
-# driver's own deadline is the backstop, and a run that overruns it fails with
-# the driver's message rather than hanging.
-NAME_READS_S = 30.0
+# half and once per survey result. Every one of those reads is bounded at 25 s
+# (`REMOTE_NAME_TIMEOUT_MS` in ubertooth-scan.c, fork #1091): until that
+# landed, the survey's read passed a zero timeout, which BlueZ takes as no
+# deadline at all, and one silent device could hold the tool forever. This
+# allows two such devices with margin; a bench with more falls back on the
+# driver's own deadline, which fails with its message.
+NAME_READS_S = 60.0
 # What -x adds, which is the one allowance here that is not a worst case.
 # `extra_info()` is called for every device the inquiry answered and, per
 # device, connects (25 s), sleeps a second, and reads the name (25 s), the
@@ -140,16 +142,27 @@ EXTENDED_REPORT_S = 240.0
 # plus this or the capture is shorter than the plan asked for -- and with a
 # slow page there is no capture at all.
 #
-# Every figure is the tool's own deadline, so the setup cannot take longer
-# than this without failing instead: the page BlueZ is given 25 s
-# (`hci_create_connection(..., 25000)` in ubertooth-follow.c), and the clock
-# and the clock offset 1 s each (`HCI_TIMEOUT_MS`).
+# It is an allowance rather than a bound. Most of it is the tool's own
+# deadlines, which it cannot exceed without failing instead: BlueZ is given
+# 25 s for the page (`hci_create_connection(..., 25000)`), 1 s each for the
+# clock and the clock offset (`HCI_TIMEOUT_MS`), and 10 s to drop the link
+# again, which `follow_release_adapter()` does immediately before the receive
+# loop. The rest has no deadline at all -- opening the board, checking its
+# firmware API, creating the capture files, setting the target address and
+# zeroing the clock, and starting the transfer thread -- so BOARD_SETUP_S is
+# a margin for it. If the setup ever outruns the whole allowance the capture
+# is shorter than the plan asked for and nothing here notices, because the
+# tool prints no mark for the moment its capture begins; `docs/tests.md`
+# records that under this test's known limits.
 PAGE_S = 25.0
 HCI_READ_S = 1.0
-FOLLOW_SETUP_S = PAGE_S + 2 * HCI_READ_S
-# -a reads the channel map first, up to three times 1 s apart
-# (`FOLLOW_AFH_READ_ATTEMPTS`, `FOLLOW_AFH_RETRY_DELAY_US`).
-AFH_READ_S = 3 * (HCI_READ_S + 0.2)
+TEARDOWN_S = 10.0
+BOARD_SETUP_S = 15.0
+FOLLOW_SETUP_S = PAGE_S + 2 * HCI_READ_S + TEARDOWN_S + BOARD_SETUP_S
+# -a reads the channel map first, up to three times with a wait of a fifth of
+# a second between attempts (`FOLLOW_AFH_READ_ATTEMPTS`,
+# `FOLLOW_AFH_RETRY_DELAY_US`), so three reads and two waits.
+AFH_READ_S = 3 * HCI_READ_S + 2 * 0.2
 
 # Both tools and both ESP32 bridges are Linux's: libbluetooth is BlueZ, and
 # the peers are reached through /dev/serial/by-id.
@@ -252,26 +265,30 @@ def _adapter_up_step(step_id: str, hci: dict) -> Step:
     )
 
 
-def _adapter_free_step(step_id: str, name: str, hci: dict, peers) -> Step:
-    """No link to a peer is on the adapter.
+def _adapter_free_step(step_id: str, name: str, hci: dict) -> Step:
+    """The adapter holds no link at all.
 
-    Run before the tool, so a case does not start with a link an earlier run
-    left up, and again at the start of the cleanup. At the start, because the
-    two peer resets that follow drop every link a peer holds: a free check
-    after them would always pass and so would say nothing.
+    Any link, not the peers' addresses alone, for two reasons. ``-x`` pages
+    the address the scan assembles from a survey result, which is
+    ``00:00:<UAP>:<LAP>`` and so is not a registered address at all, and that
+    is the link most likely to be left behind, since the tool drops it
+    best-effort. And a link to either peer cannot survive the step anyway:
+    ``esp32peer.py stream`` resets both boards on its way out, whatever
+    happened, and a reset drops every link a board holds.
 
-    ``ubertooth-follow`` drops the link to its target before the capture
-    starts, and ``ubertooth-scan -x`` drops each link it opened, so a link
-    still up at the end is one this host is holding, and the peer stays held
-    until its controller times the link out.
+    So what this catches is a link to something else -- a device ``-x``
+    reached, or a piconet a follow paged -- that the tool opened and did not
+    close. Run before the tool as well, where it is the stronger check: a
+    bench whose adapter starts free is one whose later state means something.
     """
     return Step(
         step_id, name,
         ("hcitool", "-i", hci["device"], "con"),
         timeout_s=ADAPTER_READ_S,
         output_patterns=(r"(?m)^Connections:",),
-        forbidden_patterns=tuple(
-            re.escape(peer["address"]) for peer in peers),
+        # One line per link, each naming its type; `Connections:` alone is a
+        # free controller.
+        forbidden_patterns=(r"(?m)^\s*[<>]\s+(?:ACL|SCO|eSCO|LE)\s",),
     )
 
 
@@ -299,7 +316,7 @@ def inquiry_found(address: str, name: str) -> Check:
     return check
 
 
-def scan_results_list(lap: str) -> Check:
+def scan_results_list(lap: str, *, with_map: bool = False) -> Check:
     """The Ubertooth half's survey reported this piconet.
 
     Named apart from ``classic_cases.survey_lists``, which reads
@@ -308,19 +325,32 @@ def scan_results_list(lap: str) -> Check:
     and a map line after each result, so the two parsers are not
     interchangeable.
 
+    With ``with_map``, the map line that must follow this piconet's result is
+    read as part of it. The scan prints one map per result, so a map line
+    found anywhere in the output would otherwise be another piconet's.
+
     The LAP is compared in the form ``-l`` takes, so the colons the tool
     prints between the three bytes are removed first.
     """
     def check(output) -> str:
-        found = {
-            match["lap"].replace(":", "").lower()
-            for match in map(SCAN_RESULT_LINE.match, text_lines(output))
-            if match
-        }
-        if lap in found:
-            return ""
-        listed = ", ".join(sorted(found)) if found else "nothing"
-        return f"the scan results listed {listed}, not LAP {lap}"
+        found: dict[str, bool] = {}
+        current = None
+        for line in text_lines(output):
+            match = SCAN_RESULT_LINE.match(line)
+            if match:
+                current = match["lap"].replace(":", "").lower()
+                found.setdefault(current, False)
+                continue
+            if current is not None and afhmap.MAP_LINE.match(line):
+                found[current] = True
+            current = None
+        if lap not in found:
+            listed = ", ".join(sorted(found)) if found else "nothing"
+            return f"the scan results listed {listed}, not LAP {lap}"
+        if with_map and not found[lap]:
+            return (f"the result for LAP {lap} has no 'AFH map:' line after "
+                    "it; the scan prints one per piconet it reports")
+        return ""
     return check
 
 
@@ -420,14 +450,16 @@ def _session_argv(acceptor, initiator, command, *, timeout, min_seconds,
 
 def _tool_case(*, case_id, name, serial, hci, acceptor, initiator, command,
                seconds, needs, expected_state, check=None, patterns=(),
-               returncodes=(0,), interrupt=False, extra_s=0.0, files=(),
-               verify=()):
+               returncodes=(0,), interrupt=False, extra_s=0.0, floor_s=0.0,
+               files=(), verify=()):
     """One tool run against the adapter while the ESP32 pair streams.
 
     ``seconds`` is the capture window: the tool's own ``-t`` where it has
     one, otherwise the point at which the driver interrupts it.
     ``extra_s`` is what the tool spends outside that window and which the
-    deadline has to allow for as well.
+    deadline has to allow for as well; ``floor_s`` is the part of that which
+    it spends however the run goes, which the minimum duration adds, so that
+    the floor bounds the capture rather than being satisfied without one.
     """
     # The driver's deadline covers the window, what the tool spends outside
     # it, and slack for a host under load.
@@ -440,10 +472,12 @@ def _tool_case(*, case_id, name, serial, hci, acceptor, initiator, command,
         interrupt_after = float(seconds) + extra_s
         min_seconds = interrupt_after - EARLY_EXIT_S
     else:
-        # The tool bounds its own capture, and what it does outside that
-        # window only makes the run longer, so the window is the floor.
+        # The tool bounds its own capture. The floor is the window plus
+        # whatever the tool must spend outside it whatever it finds, so that
+        # the floor bounds the capture and not only the run: for -s that is a
+        # whole inquiry, which runs its 8 units however many devices answer.
         interrupt_after = None
-        min_seconds = seconds - EARLY_EXIT_S
+        min_seconds = seconds + floor_s - EARLY_EXIT_S
     argv = _session_argv(acceptor, initiator, command, timeout=timeout,
                          min_seconds=min_seconds,
                          interrupt_after=interrupt_after, files=files)
@@ -452,11 +486,10 @@ def _tool_case(*, case_id, name, serial, hci, acceptor, initiator, command,
         *_read_originals(serial, MODE_RESET_SETTINGS),
         _adapter_up_step("adapter-up", hci),
         _adapter_free_step(
-            "adapter-idle",
-            f"{hci['device']} starts with no link to either peer",
-            hci, (acceptor, initiator)),
+            "adapter-idle", f"{hci['device']} starts with no link at all", hci),
         Step("pair-and-run",
-             f"The pair streams while {' '.join(command)} runs for {seconds} s",
+             f"The pair streams while {' '.join(command)} runs, capturing for "
+             f"{seconds} s inside a {seconds + extra_s:g} s window",
              argv,
              timeout_s=PAIR_SETUP_S + timeout,
              mutates=True,
@@ -469,10 +502,11 @@ def _tool_case(*, case_id, name, serial, hci, acceptor, initiator, command,
     return StateCase(
         case_id, name, steps,
         # The free check first: the two resets below drop every link a peer
-        # holds, so after them it could only ever pass.
+        # holds, so after them a link to one could never show up. The
+        # driver's own release has already reset them, so what is left to
+        # catch here is a link to anything else.
         (_adapter_free_step(
-            "adapter-free", f"{hci['device']} holds no link to either peer",
-            hci, (acceptor, initiator)),
+            "adapter-free", f"{hci['device']} holds no link at all", hci),
          _reset_step("reset-initiator", initiator, INITIATOR_ROLE),
          _reset_step("reset-acceptor", acceptor, ACCEPTOR_ROLE))
         + _cleanup(serial, MODE_RESET_SETTINGS),
@@ -522,6 +556,7 @@ def inquiry_scan_cases(arguments, resources, resource_identities):
         # name read per device it found.
         inquiry = INQUIRY_S if "-s" in options else 0.0
         case.setdefault("extra_s", inquiry + NAME_READS_S)
+        case.setdefault("floor_s", INQUIRY_MIN_S if "-s" in options else 0.0)
         return _tool_case(
             serial=serial, hci=hci, acceptor=acceptor, initiator=initiator,
             command=("ubertooth-scan", "-U", serial, "-b", device,
@@ -547,9 +582,9 @@ def inquiry_scan_cases(arguments, resources, resource_identities):
         scan(case_id="survey",
              name=f"ubertooth-scan sweeps and reports the piconet LAP {central} "
                   "with a channel map",
-             check=_all(scan_results_list(central), maps_reported()),
-             expected_state=f"the scan results listed LAP {central} and one "
-                            "'AFH map:' line for it"),
+             check=scan_results_list(central, with_map=True),
+             expected_state=f"the scan results listed LAP {central} with the "
+                            "'AFH map:' line the scan built for it"),
     ]
     if arguments["coverage"] == "comprehensive":
         # -x asks each device found for its name, version and features over a
@@ -570,7 +605,7 @@ def inquiry_scan_cases(arguments, resources, resource_identities):
                  f"version over a connection, and the piconet LAP {central}",
             check=_all(inquiry_found(acceptor["address"], acceptor_name),
                        extended_report(acceptor["address"], acceptor_name),
-                       scan_results_list(central), maps_reported()),
+                       scan_results_list(central)),
             returncodes=(0, 1),
             extra_s=INQUIRY_S + NAME_READS_S + EXTENDED_REPORT_S,
             patterns=_pair_report(acceptor, initiator, exit_status="[01]"),
@@ -661,20 +696,14 @@ def follow_over_hci_cases(arguments, resources, resource_identities):
                     "verify-capture",
                     "The -q file is a BR/EDR pcap and holds the packets",
                     "follow.pcap", "pcap", MIN_PACKETS),
+                # The same checks the Classic record test makes of a
+                # followed capture, from the one place that spells them out:
+                # -t gives this tool the UAP as well as the LAP, so the
+                # reference address is knowable in full. Not `following=`,
+                # which reads an option only a PCAPNG carries.
                 _record_step(
                     "verify-records",
                     f"Every record in the -q file carries LAP {central}",
-                    "follow.pcap",
-                    # -t gives the tool the UAP as well as the LAP, so the
-                    # reference address is knowable in full, and a header
-                    # only passes its HEC when it decoded at this piconet's
-                    # clock and gave this UAP.
-                    ("--lap", central,
-                     "--reference-lap", central,
-                     "--reference-uap", central_uap,
-                     "--min-reference-uap", str(MIN_REFERENCE_UAP_RECORDS),
-                     "--min-hec-valid", str(MIN_HEC_VALID_RECORDS),
-                     "--min-packets", str(MIN_PACKETS),
-                     "--max-access-code-errors", str(DEFAULT_MAX_AC_ERRORS))),
+                    "follow.pcap", _record_checks(initiator)),
             )))
     return tuple(cases)

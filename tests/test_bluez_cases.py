@@ -22,6 +22,7 @@ from ubertooth_harness.bluez_cases import (
     AFH_READ_S,
     EXTENDED_REPORT_S,
     FOLLOW_SETUP_S,
+    INQUIRY_MIN_S,
     INQUIRY_S,
     NAME_READS_S,
     extended_report,
@@ -325,7 +326,19 @@ class InquiryCaseTests(unittest.TestCase):
         # -t bounds the tool's own capture, so the driver does not interrupt
         # it; it only refuses a run that stopped early.
         self.assertNotIn("--interrupt-after", argv)
-        self.assertEqual("24.5", argv[argv.index("--min-seconds") + 1])
+        self.assertEqual(str(25 + INQUIRY_MIN_S - 0.5),
+                         argv[argv.index("--min-seconds") + 1])
+
+    def test_the_floor_bounds_the_sweep_and_not_only_the_run(self):
+        """-t's alarm is armed after the inquiry, so a floor of the window
+        alone would be satisfied by the inquiry with no sweep at all."""
+        with_s = driver_argv(scan_cases()["inquiry"])
+        without = driver_argv(scan_cases()["survey"])
+        self.assertEqual(str(25 + INQUIRY_MIN_S - 0.5),
+                         with_s[with_s.index("--min-seconds") + 1])
+        self.assertEqual("24.5", without[without.index("--min-seconds") + 1])
+        # The inquiry runs its 8 units of 1.28 s however many devices answer.
+        self.assertAlmostEqual(10.24, INQUIRY_MIN_S)
 
     def test_the_deadline_allows_for_the_inquiry_the_t_window_does_not_cover(self):
         """ubertooth-scan arms its -t alarm only after the BlueZ inquiry."""
@@ -401,6 +414,15 @@ class FollowCaseTests(unittest.TestCase):
              "-t", INITIATOR_ADDRESS, "-a"],
             tool_argv(follow_cases()["follow-target-afh"]))
 
+    def test_the_setup_allowance_covers_the_teardown_and_the_board_work(self):
+        """The link is dropped (10 s) and the board opened, checked, and set
+        up, all before the receive loop."""
+        from ubertooth_harness.bluez_cases import (
+            BOARD_SETUP_S, HCI_READ_S, PAGE_S, TEARDOWN_S)
+        self.assertEqual(PAGE_S + 2 * HCI_READ_S + TEARDOWN_S + BOARD_SETUP_S,
+                         FOLLOW_SETUP_S)
+        self.assertGreater(FOLLOW_SETUP_S, PAGE_S + 2 * HCI_READ_S)
+
     def test_the_window_is_the_capture_plus_what_the_tool_does_before_it(self):
         """The page and the clock reads are inside the window the driver
         interrupts at, so a window of the duration alone would leave a slow
@@ -422,6 +444,8 @@ class FollowCaseTests(unittest.TestCase):
         with_afh = driver_argv(follow_cases()["follow-target-afh"])
         self.assertEqual(str(25 + FOLLOW_SETUP_S + AFH_READ_S),
                          with_afh[with_afh.index("--interrupt-after") + 1])
+        # Three reads and two waits, not three of each.
+        self.assertAlmostEqual(3 * 1.0 + 2 * 0.2, AFH_READ_S)
         self.assertGreater(
             float(with_afh[with_afh.index("--interrupt-after") + 1]),
             float(plain[plain.index("--interrupt-after") + 1]))
@@ -437,6 +461,14 @@ class FollowCaseTests(unittest.TestCase):
         self.assertEqual(["verify-capture", "verify-records"],
                          [step.step_id for step in case.steps][-2:])
 
+    def test_the_record_checks_are_the_classic_tests_own(self):
+        """One place spells out what a followed capture's records must hold."""
+        from ubertooth_harness.classic_cases import _record_checks
+        case = follow_cases("comprehensive")["follow-target-pcap"]
+        argv = list(steps(case)["verify-records"].resolve_argv(CONTEXT))
+        initiator = {"lap": CENTRAL_LAP, "uap": CENTRAL_UAP}
+        self.assertEqual(list(_record_checks(initiator)), argv[3:])
+
     def test_the_pcap_records_are_decoded_and_held_to_the_centrals_lap(self):
         """A BR/EDR capture of the right size says nothing about whose
         packets are in it."""
@@ -447,6 +479,7 @@ class FollowCaseTests(unittest.TestCase):
         self.assertEqual(CENTRAL_LAP, argv[argv.index("--reference-lap") + 1])
         self.assertEqual(CENTRAL_UAP, argv[argv.index("--reference-uap") + 1])
         self.assertIn("--min-hec-valid", argv)
+        self.assertIn("--min-reference-uap", argv)
 
     def test_no_case_runs_l_and_u_without_t(self):
         """The page then goes to a guessed 00:00: address, and whether it
@@ -494,28 +527,29 @@ class AdapterStepTests(unittest.TestCase):
             fake_bluez.hciconfig(address="00:11:22:33:44:55"),
             re.compile(address))
 
-    def test_a_free_adapter_passes_the_cleanup_read(self):
+    def test_a_free_adapter_passes_the_read(self):
         case = follow_cases()["follow-target"]
         step = next(s for s in case.cleanup if s.step_id == "adapter-free")
         self.assertEqual(("hcitool", "-i", fake_bluez.ADAPTER, "con"),
                          step.resolve_argv({}))
         self.patterns(step, fake_bluez.hcitool_con())
 
-    def test_a_link_left_on_the_adapter_fails_the_cleanup_read(self):
+    def test_any_link_left_on_the_adapter_fails_the_read(self):
+        """Any link, not the peers' addresses: -x pages the 00:00: address
+        the scan assembles, and a link to a peer cannot survive the driver's
+        own reset of both boards."""
         case = follow_cases()["follow-target"]
-        step = next(s for s in case.cleanup if s.step_id == "adapter-free")
-        for address in (ACCEPTOR_ADDRESS, INITIATOR_ADDRESS):
-            with self.subTest(address):
-                text = fake_bluez.hcitool_con(address)
-                found = [pattern for pattern in step.forbidden_patterns
-                         if re.search(pattern, text)]
-                self.assertEqual([re.escape(address)], found)
-
-    def test_a_link_to_someone_elses_device_is_not_held_against_the_run(self):
-        case = follow_cases()["follow-target"]
-        step = next(s for s in case.cleanup if s.step_id == "adapter-free")
-        text = fake_bluez.hcitool_con(fake_bluez.OTHER_ADDRESS)
-        self.patterns(step, text)
+        for step_id in ("adapter-idle", "adapter-free"):
+            step = next(s for s in list(case.steps) + list(case.cleanup)
+                        if s.step_id == step_id)
+            for address in (ACCEPTOR_ADDRESS, fake_bluez.OTHER_ADDRESS,
+                            "00:00:0D:E9:C5:BA"):
+                with self.subTest(step_id=step_id, address=address):
+                    text = fake_bluez.hcitool_con(address)
+                    self.assertTrue(
+                        any(re.search(pattern, text)
+                            for pattern in step.forbidden_patterns),
+                        f"a link to {address} was not caught")
 
 
 class OutputCheckTests(unittest.TestCase):
@@ -548,6 +582,18 @@ class OutputCheckTests(unittest.TestCase):
         self.assertIn("not LAP " + CENTRAL_LAP,
                       check(fake_bluez.scan_survey(lap="2a1b2a", uap="41")))
         self.assertIn("listed nothing", check(""))
+
+    def test_the_maps_check_reads_the_map_that_follows_this_piconet(self):
+        """The scan prints one map per result, so a map line elsewhere in
+        the output belongs to another piconet."""
+        check = scan_results_list(CENTRAL_LAP, with_map=True)
+        self.assertEqual("", check(fake_bluez.scan_survey()))
+        # This piconet listed with no map of its own, another with one.
+        self.assertIn("has no 'AFH map:' line after it", check(
+            f"??:??:{CENTRAL_UAP.upper()}:E9:C5:BA\n"
+            + fake_bluez.scan_survey(lap="2a1b2a", uap="41")))
+        self.assertIn("not LAP " + CENTRAL_LAP,
+                      check(fake_bluez.scan_survey(lap="2a1b2a", uap="41")))
 
     def test_the_map_check_counts_the_lines_the_scan_prints_per_piconet(self):
         self.assertEqual("", maps_reported()(fake_bluez.scan_survey()))

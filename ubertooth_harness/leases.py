@@ -414,7 +414,7 @@ def board_key(alias: str, identity: Mapping) -> str:
 
 # nRF52840 DKs (BLE test devices), ESP32 Classic peers, and the host
 # Bluetooth adapter are leased too, by J-Link serial, by USB bridge serial,
-# and by HCI device name. Every one of those keys is prefixed, so none can
+# and by the controller's own address. Every one of those keys is prefixed, so none can
 # clash with an Ubertooth's bare 32 hex digits, with the host lock, or with
 # `takeover`, which would name the takeover lock's own file; a CP2102N bridge
 # serial is 32 hex digits itself.

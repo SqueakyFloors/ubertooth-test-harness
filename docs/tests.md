@@ -2201,10 +2201,16 @@ number is the order the kernel attached controllers in rather than a property
 of the adapter, so the address is what identifies it, and an adapter that came
 back as another `hciN` fails here, naming what was found, instead of the test
 driving whatever took the name. `hcitool -i <device> con` then says it holds
-no link to either peer, so a case does not start with a link an earlier run
-left up. The same check runs again at the start of the cleanup — at the
-start, because the peer resets that follow drop every link a peer holds, so a
-free check after them could only ever pass.
+no link at all, so a case does not start with a link an earlier run left up.
+The same check runs again, first thing in the cleanup.
+
+Any link, not the peers' addresses alone, and the distinction matters: `-x`
+pages the address the scan assembles from a survey result, `00:00:<UAP>:<LAP>`,
+which is not a registered address, and that is the link most likely to be
+left behind. A link to either peer cannot survive the step in any case, since
+`esp32peer.py stream` resets both boards on its way out whatever happened. So
+the check before the tool is the stronger of the two: it is what makes the
+state afterwards mean anything.
 
 **Hardware and arguments.** One `Ubertooth`, one `Bluetooth adapter`, and an
 `acceptor` and an `initiator` (ESP32 Classic peer, `utesp-1.0.0` or a later
@@ -2262,15 +2268,6 @@ read, times however many devices are in range. The case allows four minutes,
 which covers two or three devices behaving normally with a wide margin; a run
 that needs more fails on the driver's deadline, with its message.
 
-One more thing the first run may meet. The name read the survey results go
-through passes a **zero timeout** (`print_name_and_class()` in
-`ubertooth-scan.c`), which BlueZ takes as no deadline at all; the same tool
-gives its other reads 25 seconds. A device that answers the page and then
-says nothing can therefore hold the tool for as long as its controller
-allows. The case's deadline is the backstop: the driver interrupts and then
-kills the tool, and the case fails with the driver's message rather than the
-run hanging.
-
 `-e` is not exercised: no case passes it, so the survey runs with the tool's
 default of two allowed access-code bit errors.
 
@@ -2314,16 +2311,22 @@ fails the case.
 so it captures until it is signalled, and the driver is what signals it.
 
 **The window the driver gives it is not the capture.** Everything the tool
-does before it starts capturing happens inside that window: the page, which
-BlueZ is allowed 25 seconds for, the clock and clock-offset reads at a second
-each, and with `-a` up to three channel-map reads a fifth of a second apart.
-Those are the tool's own deadlines, so the setup cannot take longer without
-failing instead, and the window is therefore the `duration:` **plus** that
-setup — which is what makes the capture at least as long as the plan asked
-for. A window of the duration alone would have left a slow page no capture at
-all, and `--min-seconds` could not have caught it, because the page would
-have satisfied the floor on its own. The floor is the whole window, less half
-a second, so a command that returned sooner stopped for a reason of its own. The adapter is read before each case and checked for a
+does before it starts capturing happens inside that window, so the window is
+the `duration:` **plus** an allowance for all of it, which is what makes the
+capture at least as long as the plan asked for. A window of the duration
+alone would have left a slow page no capture at all, and `--min-seconds`
+could not have caught it, because the page would have satisfied the floor on
+its own. The floor is the whole window, less half a second, so a command that
+returned sooner stopped for a reason of its own.
+
+Most of the allowance is the tool's own deadlines, which it cannot exceed
+without failing instead: BlueZ is given 25 s for the page, 1 s each for the
+clock and the clock offset, 10 s to drop the link to the target again — which
+it does immediately before the receive loop — and, with `-a`, three
+channel-map reads with a fifth of a second between them. The rest has no
+deadline at all: opening the board, checking its firmware API, creating the
+capture files, setting the target address and zeroing the clock, and starting
+the transfer thread. A margin covers those. The adapter is read before each case and checked for a
 leftover link afterwards: the tool drops the link to the target before the
 capture starts, so a link still up at the end is one this host is holding.
 
@@ -2357,7 +2360,7 @@ outcome nobody has seen, so there is none.
 ([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)):
 the checks come from the tool's source and are exercised against samples of
 its output, and the `hci` plan stays out of the release gate until a real run
-passes. Three things the first real run has to settle.
+passes. Four things the first real run has to settle.
 
 Whether the ESP32 takes a second link at all. Paging it from the adapter
 makes it a peripheral in the adapter's piconet while it is already leading
@@ -2374,6 +2377,14 @@ channels it holds — the ESP32's `afh` command sets the board's own channel
 classification, which is advice to whichever device leads a link, so it
 cannot be used to predict this map. Comparing a recovered map with a known
 one is `Recover AFH map`'s job, from the air.
+
+Whether the allowance for the setup is enough. The window the driver
+interrupts at is the capture plus that allowance, and the parts of the setup
+with no deadline of their own are covered by a margin rather than a bound. If
+the setup ever outruns the whole allowance the capture is shorter than the
+plan asked for and nothing notices, because the tool prints no mark for the
+moment its capture begins. A bench that sees short captures should widen
+`BOARD_SETUP_S` rather than the duration.
 
 Whether `-a` finds a map to read. The tool treats a remote that reports AFH
 **off** as a documented outcome: it says "the remote device is not using AFH;
