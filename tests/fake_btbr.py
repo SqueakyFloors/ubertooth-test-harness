@@ -61,7 +61,9 @@ OTHER = CONFIG["other"]
 OTHER_NAME = CONFIG["other_name"]
 
 def err(text):
-    sys.stderr.write(text + "\\n")
+    # Carriage return and newline, as the tool itself ends these lines: a
+    # driver that anchors a pattern on the end of a line has to cope.
+    sys.stderr.write(text + "\\r\\n")
     sys.stderr.flush()
 
 def out(text):

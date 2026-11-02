@@ -238,6 +238,9 @@ class Stream:
         # has to mean the same thing before and after a chunk arrives, or
         # every wait that starts from one looks past its answer.
         self._unechoed = ""
+        # A carriage return at the end of a chunk, held back until the next
+        # chunk says whether a newline follows it (see _append).
+        self._pending_cr = ""
         self.overflowed = False
         self.thread = threading.Thread(target=self._read, daemon=True)
 
@@ -247,13 +250,33 @@ class Stream:
             if not chunk:
                 break
             self._append(chunk.decode("utf-8", errors="replace"))
+        # Whatever was held back waiting for a newline that never came.
+        self._append("")
         with self._lock:
             tail, self._unechoed = self._unechoed, ""
+            if self._pending_cr:
+                tail, self._pending_cr = tail + self._pending_cr, ""
         if tail:
             self._echo([tail])
 
     def _append(self, text: str) -> None:
         with self._lock:
+            # The tool ends some of its lines with a carriage return and a
+            # newline. The carriage return goes here, because every pattern
+            # the checks wait for anchors on the end of a line and one left
+            # in would stop it matching: that is how a `bdaddr` answer the
+            # tool did print read as one it had not. A chunk that ends on the
+            # carriage return keeps it back until the next chunk says whether
+            # a newline follows, so a read split between the two cannot leave
+            # one in. A carriage return on its own stays: the tool redraws a
+            # line with it.
+            text = self._pending_cr + text
+            self._pending_cr = ""
+            if text.endswith("\r"):
+                text, self._pending_cr = text[:-1], "\r"
+            text = text.replace("\r\n", "\n")
+            if not text:
+                return
             if self._size + len(text) > MAX_STREAM_CHARS:
                 self.overflowed = True
             else:
