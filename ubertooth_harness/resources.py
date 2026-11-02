@@ -417,6 +417,7 @@ class FileResourceRegistry:
                 _validate_peer(resource)
             if resource.type == DEBUG_PROGRAMMER:
                 _validate_programmer(resource)
+        self._validate_programmer_serials()
         self._validate_pairs()
         used_power_ports = {}
         for resource in self.resources.values():
@@ -491,6 +492,31 @@ class FileResourceRegistry:
                         f"{used_power_ports[key]} and {resource.alias}"
                     )
                 used_power_ports[key] = resource.alias
+
+    def _validate_programmer_serials(self) -> None:
+        """One serial is one programmer.
+
+        The identity check above compares whole identity mappings, so two
+        programmers differing only in an optional ``serial device`` would
+        both pass it while naming one device -- and the lease key is the
+        serial alone, so each would think it had held that device for a
+        target of its own. Compared without regard to case, because a serial
+        written two ways is still one adapter, while the two spellings would
+        name two lock files.
+        """
+        seen: dict[str, str] = {}
+        for resource in sorted(self.resources.values(), key=lambda r: r.alias):
+            if resource.type != DEBUG_PROGRAMMER:
+                continue
+            serial = str(resource.identity.get("serial", "")).strip().lower()
+            if serial in seen:
+                raise RegistryError(
+                    f"{DEBUG_PROGRAMMER}s {seen[serial]} and {resource.alias} are "
+                    f"registered with the same serial "
+                    f"'{resource.identity.get('serial')}'; one serial is one "
+                    "programmer, whichever way it is written"
+                )
+            seen[serial] = resource.alias
 
     def _validate_pairs(self) -> None:
         """Permanently wired pairs: one target each, on one host, no loop.

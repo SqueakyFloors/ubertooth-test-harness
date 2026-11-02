@@ -178,6 +178,26 @@ class PairRegistry(PairTestCase):
             "are not attached to one host",
         )
 
+    def test_two_programmers_cannot_share_one_serial(self):
+        """One serial is one adapter, and the lease key is the serial alone.
+
+        The identity check compares whole identity mappings, so an optional
+        `serial device` on one of them would otherwise let two resources
+        name one device, each holding it for a target of its own.
+        """
+        for second_serial, label in (
+            (PROGRAMMER_SERIAL, "the same"),
+            (PROGRAMMER_SERIAL.lower(), "the same in another case"),
+        ):
+            with self.subTest(label=label):
+                second = (
+                    PROGRAMMER.replace("Prog0", "Prog1")
+                    .replace("programs: UT_Debug", "programs: UT_Free")
+                    .replace(PROGRAMMER_SERIAL, second_serial)
+                    + "      serial device: /dev/serial/by-id/usb-Vendor_A-if00-port0\n"
+                )
+                self.refuse(PROGRAMMER + second, "the same serial")
+
     def test_one_target_has_one_programmer(self):
         second = PROGRAMMER.replace("Prog0", "Prog1").replace(
             PROGRAMMER_SERIAL, "B111BB11"
