@@ -2584,6 +2584,77 @@ frame-ancestors 'none'; ...` (no inline script or style),
 controller and runner text only as text, never as HTML. Static files are
 served from memory by exact name, so no request path reaches the filesystem.
 
+### Run groups: one plan on several hosts
+
+A run on several hosts is a **run group**: `POST /api/run-groups` takes the
+same run request with a `hosts` list and starts **one child run per host**,
+together. Each child is an ordinary run of its own host, with its own runner,
+boards, leases and run directory, and records the group it belongs to as
+`group_id` in its `run.json`; the runner protocol is unchanged, so a target
+needs nothing new. The GUI side of this (choosing several hosts, a pill per
+host on every row, a transcript tab per host) is the next step and is not
+built yet, so for now a group is started through the API.
+
+The ref is resolved once and every child is sent that commit, so a branch
+that moves while the runs are starting cannot leave one host on another
+revision. Each host then stands on its own: one that is offline, busy, or
+whose runner rejects the run leaves its reason on that member while the
+others run, and the group says it did not run everywhere (`complete: false`,
+and `error` once nothing is running). A group not one host of which started
+is no group at all: nothing is stored and the answer names, host by host,
+why. The exception is a request that timed out: it stays pending and may
+still be accepted, so that group is stored and a child that arrives late is
+still one of its hosts, while the answer still says nothing started. Such a
+host reads `starting` until its request is answered or expires, so a group
+whose child may still arrive does not read as finished and then run again.
+Once the last of those requests is gone, no child can arrive: the host says
+the runner never answered, and a group with no child at all is forgotten,
+record and all. Such a request cannot outlive the controller,
+though: a controller restarted while one was pending has no record of it, so
+a run the runner reports afterwards is adopted as a run of its own.
+
+A group's status is read from its children, so it cannot drift from them:
+`running` while any child is active (including one still being started,
+whose member reads `starting`), `passed` only when every host asked for ran
+and passed, otherwise the worst outcome among them — an error, then a
+failure, then a [lost](#controller) run, then a cancel, and a status this
+code does not know ranks as an error.
+`POST /api/run-groups/{group_id}/cancel` cancels every active child and
+reports each host's outcome. A host that is still starting has nothing to
+cancel yet; its outcome says so, and the child its runner may still accept
+is cancelled as it arrives.
+
+`GET /api/run-groups/{group_id}` is the per-host result: one row per step —
+build, flash, preflight, then the tests in planned order — each with one cell
+**per host that runs that step, and only those**, so a Linux-only test has a
+Linux cell and no macOS one. Which steps a host runs comes from that run's
+own manifest record, which is what its planner compiled there. Each cell
+carries the status, when it started and finished, how long it took, why it
+failed, the estimate [learned for that host](#learned-durations), and its
+parts (a test's invocations, one per board; a flash's boards). A required test
+the planner could not compile on a host ([blocked, not left
+out](#hardware-a-step-is-about-blocked-not-left-out)) has no invocation, so
+its cell is that planning record and reads `blocked`, which ranks worse than
+a pass: a host where one board ran and another was blocked does not read as
+passed.
+
+A run started on one target of its own (`POST /api/targets/{host}/runs`)
+stores no group record and is listed as a **group of one** whose ID is the
+run's own, so `GET /api/run-groups` is the whole history whatever started a
+run. Group records live in `groups/` beside the run directories, one JSON
+file each, holding only what was asked for, which run each host got, and
+whether a cancel was asked for.
+
+```sh
+# Start the release suite on the Linux lab host and a Mac, as one group.
+curl -s -X POST http://127.0.0.1:8765/api/run-groups \
+  -H 'Content-Type: application/json' \
+  -d '{"hosts": ["Host_Linux", "Host_Mac"], "ref": "main",
+       "plan": "release", "suite": "release", "build": true}'
+# Follow it: one stream carries both hosts' runs and events.
+# ws://127.0.0.1:8765/ws/live?group_id=<group_id>
+```
+
 Endpoints (JSON unless noted; `GET /` lists them):
 
 | Endpoint | |
@@ -2593,13 +2664,17 @@ Endpoints (JSON unless noted; `GET /` lists them):
 | `GET /api/plans[?target=HOST]` | every `<plan>.yaml` in `--plans-dir` with its suites, test names, per-test `estimated_s` (one invocation with the step's arguments, else null) and `per_board` (runs once per selected board), the build options each test and suite needs (`needs_firmware_build` and `needs_python_tools`: cases are left out without it; `requires_firmware_build` and `requires_python_tools`: the test cannot run without it at all) and `needs_artifacts` (image labels the step names that no build produces, so only `run-suite --artifact` can pass them), the suite total when every test has one, `per_board_tests`, and `runnable` (the plan's `runnable` flag; false for plans of planned tests and for a plan that does not load); a plan that does not load is listed with its `error`. With a `target`, `estimated_s` is what that host's own runs measured when enough of them did; `catalog_estimated_s`, `estimate_source` (`learned`, `catalog` or `none`), `estimate_samples` and `estimate_scaled` say which, and `stages` lists the build, preflight and flash durations learned for it (see [Learned durations](#learned-durations)). Without one, nothing is learned and the catalog estimate stands. A `target` whose name is not a host name is refused with 422; the registry is not consulted, so a name no target has registered is answered with whatever has been learned under it, which is normally nothing |
 | `GET /api/targets`, `GET /api/targets/{host}` | registry: host, hostname, OS, Python, Ubertooth serials, last heartbeat, `online`/`offline`, connected, active run |
 | `POST /api/targets/{host}/runs` | start a run with the protocol `run` fields: `{"ref", "commit": null, "plan", "suite", "tests": [], "build": false, "flash_build": true, "with_firmware": false, "with_python": false}` (`commit`, optional, is the full commit the caller saw listed for `ref`; `flash_build` applies only with `build` and is recorded false without it; `with_firmware` and `with_python` add `--with-firmware` and `--with-python` to the run's build, and either one without `build` is refused with 422 naming it); 201 with the run (including the `commit` sent to the runner), 409 busy, offline, rejected by the runner, or `ref` moved away from `commit`, 422 invalid, a ref not in `/api/refs` (full commit IDs are accepted), or a name listing several commits, 504 no answer |
+| `POST /api/run-groups` | start a [run group](#run-groups-one-plan-on-several-hosts): the same body as a run plus `{"hosts": ["Host_Linux", "Host_Mac"]}` (at least one, each named once, at most 16). 201 with the group, each member carrying its `run_id` or the `error` that host's start gave; 422 for an unusable request, a ref not in `/api/refs`, or an option that needs `build` without it; when no host started, the one status every host gave (404 an unknown target, 409 busy, 503 a runner away, 504 no answer in time) or 409 where they differ |
+| `GET /api/run-groups[?target=HOST]` | groups, newest first, each with its members; a run of its own is listed as a group of one (`implicit: true`, its ID the run's own) |
+| `GET /api/run-groups/{group_id}` | the group, each member's run with its failure summary, stage estimates and planned invocations (at most 600 of them, since this answer carries one list per host; the whole list stays at `GET /api/runs/{run_id}`), `steps` (one row per build, flash, preflight and test, with one cell per host that runs it) and `progress` (cells planned, cells done, and the summed estimate when every cell has one, which a run that flashes its boards has not got: flashing the run's build is not a learned stage) |
+| `POST /api/run-groups/{group_id}/cancel` | `{"reason": ""}`; 202 with each host's outcome once at least one child was cancelled, or once a host is still starting (its outcome says so, and the child its runner may still accept is cancelled as it arrives); 409 when nothing is running and nothing is starting; when no child could be cancelled, the one status every host gave (409 busy, 503 runner away, 504 no answer) or 409 where they differ |
 | `GET /api/runs[?target=HOST]` | runs, newest first |
 | `GET /api/runs/{run_id}` | status, every event, the failure summary (`failures`), `invocations` (from the run's manifest, every planned invocation on the target with `invocation_id`, `test_name`, `estimated_s`, `catalog_estimated_s`, `estimate_source`, `estimate_samples` and `estimate_scaled`; null before the manifest record), and `stages`: the run's build and preflight estimates where its host has learned them |
 | `GET /api/runs/{run_id}/report.md` | the run's report (Markdown) |
 | `GET /api/runs/{run_id}/files` | the output files the run recorded, each with its path, stream, size, line count, SHA-256, where it came from (`owner`), the checks that read it, and `readable`: whether this host holds the file itself |
 | `GET /api/runs/{run_id}/file?path=&offset=&limit=` | one bounded page of a saved output file, with what the run recorded about it and where the page sits in it. Only a path that run's own `run.jsonl` records is served, and only from inside the run directory, with no symbolic link followed; a page is 64 KiB by default and 1 MiB at most. A file that stayed on the target is asked of that run's runner (256 KiB at most, since the page travels in one protocol message, and `page_bytes` says what a page was); 503 while that runner is not connected, 504 if it does not answer in time, 400 or 404 for a path that may not be served, naming the path only |
 | `POST /api/runs/{run_id}/cancel` | `{"reason": ""}`; 202 once the runner accepts |
-| `WS /ws/live[?run_id=ID]` | browser stream: a `snapshot`, then `target` and `run` updates, plus that run's `event` records; a browser 1000 updates behind is closed with 1013 `live stream overflowed` (reconnect for a new snapshot) |
+| `WS /ws/live[?run_id=ID\|?group_id=ID]` | browser stream: a `snapshot`, then `target`, `run` and `group` updates. With `run_id`, that one run's `event` records too (and its group in the snapshot); with `group_id`, every member run's updates and `event` records, one stream for the whole group. Name one or the other, not both. A `group` update carries `"removed": true` when that group is forgotten (it started no run and no request can still be accepted), so a page does not keep a group the history no longer lists. A browser 1000 updates behind is closed with 1013 `live stream overflowed` (reconnect for a new snapshot); a group stream carries every member's traffic, so it reaches that mark sooner than one run's does |
 | `WS /ws/runner` | target runner protocol v5 |
 
 Every request and WebSocket handshake must carry `Host: 127.0.0.1:PORT` or
@@ -2681,10 +2756,13 @@ decodes as protocol v5 resets the offline timer, and malformed messages do
 not. The controller allows one
 outstanding start request per target and refuses a target whose runner reports
 an active run. Each run is a flat directory `<results dir>/<run_id>/` with
-`run.json` (the controller's record: target, request, status, exit code),
+`run.json` (the controller's record: target, request, status, exit code, and
+the `group_id` of a run started as one host of a
+[run group](#run-groups-one-plan-on-several-hosts)),
 `run.jsonl` (the runner's records, deduplicated by `(run_id, sequence)` across
 reconnects and controller restarts), and `report.md`, compiled from that
-run.jsonl when the run ends. The default results directory is
+run.jsonl when the run ends. Group records are one JSON file each in `groups/`
+beside those directories. The default results directory is
 `$XDG_DATA_HOME/ubertooth-harness/controller/runs` (else
 `~/.local/share/...`), outside the repository. A run still executing when the
 controller restarts is picked up again when its runner reconnects. A stored run
