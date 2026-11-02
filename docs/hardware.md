@@ -166,8 +166,9 @@ reserved-slot packets.
 
 A board has carried the link, and counted its frames, since `utesp-1.1.0`; the
 packet-type choice and the fields reporting what a link settled on came with
-`utesp-1.4.0`, which is what an audio session asks for. Every other command
-works on any 1.x image.
+`utesp-1.4.0`, and the counters that say how many links a profile has had with
+`utesp-1.5.0`, which is what an audio session asks for (below). Every other
+command works on any 1.x image.
 
 Registered with the bridge serial and the BD_ADDR its `status` reports (the
 factory MAC plus two in the last byte, so it too is fixed per board). Those

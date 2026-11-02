@@ -677,7 +677,9 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
     print(f"central UAP: {initiator_status['uap']}", file=out)
     print(f"stream: {payload} bytes every {period} ms", file=out)
     try:
-        initiator_shell.command("role initiator", ROLE_TIMEOUT_S)
+        # The ordinary deadline: opening the bridges has just reset both
+        # boards, so there is no audio link here for `role` to take down.
+        initiator_shell.command(ROLE_INITIATOR)
         initiator_shell.command(f"spp peer {acceptor_status['address']}")
         initiator_shell.command(f"stream period {period}")
         initiator_shell.command(f"stream payload {payload}")
@@ -1078,9 +1080,15 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
             time.sleep(settle_s)
             far = acceptor_shell.status()
         _require_audio_up(far, acceptor, initiator_status["address"])
+        # What each board says its link is, kept to compare with after the
+        # command. The reading rather than the type that was asked for: with
+        # `default` no particular type was asked for, and the link still has
+        # to be the same one at the end as at the start.
+        settled = {}
         for peer_status, peer in ((linked, initiator), (far, acceptor)):
             _require_audio_type(peer_status, peer, packet_type)
-        checked = packet_type
+            settled[peer.label] = (peer_status["sco_link"],
+                                   peer_status["sco_pkt_type"])
         print(f"audio link: {_audio_field(linked, 'sco_link', str, initiator.label)} "
               f"{_audio_field(linked, 'sco_pkt_type', str, initiator.label)}, "
               f"{_audio_field(linked, 'sco_tx_len', int, initiator.label)} bytes "
@@ -1126,10 +1134,15 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
             end = after.get(peer.label)
             if end is None or end["status"].get("sco") != AUDIO_ON:
                 continue
-            try:
-                _require_audio_type(end["status"], peer, checked)
-            except PeerError as error:
-                problems.append(f"after the command ran, {error}")
+            was = settled.get(peer.label)
+            now = (end["status"].get("sco_link"),
+                   end["status"].get("sco_pkt_type"))
+            if was is not None and now != was:
+                problems.append(
+                    f"after the command ran, the {peer.label}'s audio link "
+                    f"reads {now[0]} {now[1]}, not the {was[0]} {was[1]} it "
+                    "carried when the command started: the command did not "
+                    "run against one link")
         # The link comes down before the boards are released, so a stop the
         # firmware refuses is reported as itself rather than hidden by the
         # reset that would have cleared it anyway.

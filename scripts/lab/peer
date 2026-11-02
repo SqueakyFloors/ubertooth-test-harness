@@ -82,6 +82,9 @@ ONE_PEER = ("status", "identify", "reset")
 SESSIONS = esp32peer.PAIR_COMMANDS
 # What each session forwards to the delegate, and the delegate's name for it.
 # An option left out is not passed, so the delegate's own default applies.
+# Keyed by the names in SESSIONS: argparse turns down any other subcommand
+# before this is read, and a session the module gained without an entry here
+# would take no options at all rather than the wrong ones.
 SESSION_OPTIONS = {
     "stream": (
         ("--period", "period"), ("--payload", "payload"),
@@ -242,6 +245,12 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
         ))
     if args.wait_for_boards is not None and args.wait_for_boards < 0:
         raise SystemExit(_usage("--wait-for-boards cannot be negative"))
+    # Refused here as well as in the module, so nothing is held first.
+    for option, value in (("--min-frames", getattr(args, "min_frames", None)),
+                          ("--min-writes", getattr(args, "min_writes", None)),
+                          ("--min-seconds", getattr(args, "min_seconds", None))):
+        if value is not None and value < 0:
+            raise SystemExit(_usage(f"{option} cannot be negative"))
     if getattr(args, "also", "") and args.no_hold:
         # Resolving --with and then not holding it would drop a lock the user
         # asked for, silently.

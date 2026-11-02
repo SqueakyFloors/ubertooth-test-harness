@@ -98,28 +98,25 @@ MIN_WRITES = 50
 PAIR_SETUP_S = (
     2 * esp32peer.BOOT_TIMEOUT_S                      # both boards boot
     + 8 * esp32peer.COMMAND_TIMEOUT_S                 # settings and statuses
-    # `role` is one of those commands and has a deadline of its own, because
-    # it stops an audio link and its profile before it changes anything.
-    + (esp32peer.ROLE_TIMEOUT_S - esp32peer.COMMAND_TIMEOUT_S)
     + esp32peer.CONNECT_TIMEOUT_S                     # page and SDP lookup
     + esp32peer.SETTLE_S
     + 2 * (esp32peer.BOOT_TIMEOUT_S                   # the two releases
            + 2 * esp32peer.COMMAND_TIMEOUT_S)
 )
-# The audio bring-up sends four more commands than the stream's and reads
-# one more status, and `sco start` on the initiator pages, starts the
-# hands-free profile, and opens the audio link, which the firmware allows
-# much longer than an ordinary command. So: the five ordinary commands the
-# bring-up adds to the stream session's, the eight readings the session
-# takes (a status and the controller's packet counters on each board,
-# before the command and after it, where the old one took two statuses),
-# and the two `sco stop` calls on their own longer deadline. Only the
-# initiator's `sco start` gets AUDIO_CONNECT_TIMEOUT_S: the acceptor's only
-# starts a profile, which the firmware allows three seconds for, so it is
-# budgeted as an ordinary command.
-AUDIO_SETUP_S = (PAIR_SETUP_S + (5 + 8) * esp32peer.COMMAND_TIMEOUT_S
+# The audio bring-up sends more commands than the stream's and reads more
+# statuses, and three of its commands have deadlines of their own. So, on
+# top of the stream session's budget: the three ordinary commands the
+# bring-up adds, the eight readings the session takes (a status and the
+# controller's packet counters on each board, before the command and after
+# it, where the old one took two statuses), the two `sco stop` calls on
+# their longer deadline, both `sco start` calls on theirs (the initiator's
+# pages and opens the link, and the acceptor's waits for the far end on the
+# same deadline), and `role initiator`, which here may have an audio link
+# and its profile to take down first.
+AUDIO_SETUP_S = (PAIR_SETUP_S + (3 + 8) * esp32peer.COMMAND_TIMEOUT_S
                  + 2 * esp32peer.AUDIO_STOP_TIMEOUT_S
-                 + esp32peer.AUDIO_CONNECT_TIMEOUT_S)
+                 + 2 * esp32peer.AUDIO_CONNECT_TIMEOUT_S
+                 + (esp32peer.ROLE_TIMEOUT_S - esp32peer.COMMAND_TIMEOUT_S))
 # One identify or reset: an open with its reset, then a status read.
 PEER_TIMEOUT_S = esp32peer.BOOT_TIMEOUT_S + 4 * esp32peer.COMMAND_TIMEOUT_S
 

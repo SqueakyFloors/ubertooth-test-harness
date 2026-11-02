@@ -928,7 +928,7 @@ class PeerArguments(Bench):
                        "--timeout"):
             self.assertNotIn(absent, argv)
 
-    def test_a_packet_type_the_firmware_has_no_name_for_is_refused(self):
+    def test_the_script_refuses_a_packet_type_it_has_no_name_for(self):
         err = io.StringIO()
         with self.assertRaises(SystemExit) as caught, redirect_stderr(err):
             peer.parse_args([

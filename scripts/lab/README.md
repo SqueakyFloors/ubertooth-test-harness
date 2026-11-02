@@ -157,9 +157,11 @@ packet's header carries its type code: that is what tells an EV3 link from a
 Classic capture of the peer pair").
 
 The audio link needs a newer peer image than the other commands,
-`utesp-1.4.0` or a later 1.x, because that is where the packet-type choice and
-the fields reporting what a link settled on arrived; the link itself and its
-frame counters are older. A board on an older image is told so.
+`utesp-1.5.0` or a later 1.x: the packet-type choice and the fields reporting
+what a link settled on arrived in `utesp-1.4.0`, and the counters that say how
+many links a profile has had, which is how the session tells one link from a
+link that flapped, in `utesp-1.5.0`. The link itself and its frame counters are
+older. A board on an older image is told so.
 
 Inside an outer `hold` that already has these devices, add `--no-hold`: holding
 them twice would wait for a lock this process already holds.
