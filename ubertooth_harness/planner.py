@@ -326,6 +326,7 @@ class PlanCompiler:
         not_applicable: list[NotApplicable] = []
         absent_hosts: set[str] = set()
         blocked_tests: list[Blocked] = []
+        recorded_blocked: set[tuple[str, str]] = set()
         sequence = 0
         try:
             for step in plan.steps(suite):
@@ -459,9 +460,16 @@ class PlanCompiler:
                         except MissingRequiredHardware as error:
                             if strict_hardware:
                                 raise
-                            step_blocked.append(
-                                Blocked(host, step.test_name, str(error))
-                            )
+                            # One record per test and host. `Ubertooth: each`
+                            # tries every board and each combination hits the
+                            # same absence, and the live run view matches a
+                            # planning record to its test by name, so a
+                            # second record would show the test twice.
+                            if (host, step.test_name) not in recorded_blocked:
+                                recorded_blocked.add((host, step.test_name))
+                                step_blocked.append(
+                                    Blocked(host, step.test_name, str(error))
+                                )
                             continue
                         # Numbered only once it is an invocation, so the IDs
                         # of a suite with a blocked step stay consecutive.

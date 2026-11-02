@@ -230,6 +230,23 @@ class BlockedPlanningTests(unittest.TestCase):
                 blocked.describe(),
             )
 
+    def test_every_board_each_tries_gives_one_record_for_the_test(self):
+        """`Ubertooth: each` tries both boards and each hits the same
+        absence; the live run view matches a record to its test by name, so
+        a second record would show the test twice."""
+        step = EXCLUSIVE_STEP.replace(
+            "        Ubertooth: default", "        Ubertooth: each"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            compiled = self.compile(
+                directory, (HOST_STEP, step), ONE_BOARD + UNMAPPED_SECOND_BOARD
+            )
+
+            self.assertEqual(
+                [("Host_Linux", "Exclusive Ubertooth topology")],
+                [(item.host, item.test_name) for item in compiled.blocked],
+            )
+
     def test_a_mapped_second_board_compiles_as_before(self):
         with tempfile.TemporaryDirectory() as directory:
             compiled = self.compile(
