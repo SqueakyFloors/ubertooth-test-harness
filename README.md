@@ -141,7 +141,11 @@ Every test accepts `platforms:` (`linux`, `macos`, no duplicates) beside its
 
 Every test that binds hardware also accepts `rf:`, which asks for a board by
 where it sits on the bench, one requirement per hardware role (see
-[RF placement](#rf-placement-where-a-board-sits-on-the-bench)).
+[RF placement](#rf-placement-where-a-board-sits-on-the-bench)), and
+`required hardware: true`, which says the hardware that step names is what
+the step is there to measure: a registry without it blocks the step and fails
+the run instead of leaving it out (see
+[Hardware a step is about](#hardware-a-step-is-about-blocked-not-left-out)).
 
 The two select separately: `hosts:` says which registered hosts the step may
 run on, `platforms:` which of them can run it. A host whose platform the step
@@ -195,14 +199,27 @@ a host whose platform the step does not list:
 - an explicit device alias this registry does not have (`this registry has no
   Ubertooth 'UT_Lab7'`).
 
-So the release plan, which every registered host runs, can hold a step for
-hardware only the bench host has: the other hosts, and the other registries,
-record it and run the rest. A suite with nothing this registry can run is
-still an error, and it names the first few steps it left out. A host this
-registry has not got never runs anything of its own, so what it left out is
-recorded in the runs of the hosts that are here, and `run-suite --dry-run`
-lists it; one record per test, so a host that runs that test, or has its own
-reason for leaving it out, keeps its own.
+So a plan every registered host runs can hold a step for hardware only the
+bench host has: the other hosts, and the other registries, record it and run
+the rest. Where such a step is a gate rather than a convenience, the plan
+says `required hardware: true` and the record fails the run instead (the next
+section); the release plan's one peer step does.
+
+A suite with nothing this registry can run is still an error, and it names
+the first few steps it left out. A host this registry has not got never runs
+anything of its own, so what it left out is recorded in the runs of the hosts
+that are here, and `run-suite --dry-run` lists it; one record per test, so a
+host that runs that test, or has its own reason for leaving it out, keeps its
+own. A blocked record for such a host is carried the same way, by the runs of
+the hosts that are here, unless one of them runs that test: that run measures
+what the step is about, so none of them fails on the absent host's part of it.
+
+A record for a host the registry *does* have belongs to that host's run
+alone, which is the rule for every blocked record. So a bench whose gate host
+is registered but has lost the hardware fails that host's run, and a run of
+the same plan on another of its hosts passes without the gate: the release is
+run on the gate host, or as a run group over the bench, which is where the
+measurement is.
 
 What a host here cannot run is decided first, and has not changed: a platform
 the step does not list, and a board placed differently from what the test
@@ -246,7 +263,19 @@ the subject of the test rather than something it merely binds:
   Host_Linux, which has one`);
 - `exclusive Ubertooth: true` where another registered board on the host is on
   no power controller (`extra Ubertooth UT_Linux1 has no power mapping, so it
-  cannot be switched off to leave UT_Linux0 alone`).
+  cannot be switched off to leave UT_Linux0 alone`);
+- a step that says so itself with `required hardware: true`, for the hardware
+  it binds. That is how a gate suite holds a test for peer hardware: a host
+  with no peer registered (`host Host_Linux has no default ESP32 Classic peer
+  for the acceptor role`), and a registry without that host at all
+  (`Host_Linux is not a host in this registry`), are both blocked rather than
+  left out. `testplans/release.yaml` uses it for `Recover AFH map`, the one
+  entry there that names a bench host. A step without the argument, or with
+  it written `false`, is left out as before.
+
+The argument is about absence only. What a host here cannot run at all — its
+platform, or a board placed differently from what the test needs — is decided
+first and is unchanged by it.
 
 Such a step is recorded as **blocked** before anything runs, and it is left
 out of the invocations so every unrelated step in the suite still compiles and
@@ -268,10 +297,11 @@ was: the refusal names the blocked step, and there is no run to fail. That is
 what `mac-polling` does on a bench with an unmapped board, since it names one
 step and one board (`Ubertooth: default`). `testplans/exclusive.yaml` names
 one step but `Ubertooth: each`, so the step runs for every board that can be
-left alone, is blocked for the rest, and the run fails. A mixed suite — one
-holding a blocked step beside steps that run — behaves the same way; no
-committed plan is one today, since `exclusive Ubertooth` appears only in those
-two and `alternate Ubertooths` in none.
+left alone, is blocked for the rest, and the run fails. A mixed suite, one
+holding a blocked step beside steps that run, behaves the same way:
+`testplans/release.yaml` is that suite on a bench without the ESP32 Classic
+peers, where every other release test runs and the run fails on the one gate
+it could not measure.
 
 A `power:` mapping that is present but wrong (an unknown controller, a port
 the controller has not got, a controller that cannot switch one) is a registry
@@ -763,15 +793,30 @@ python -m ubertooth_harness validate-plan testplans/release.yaml \
   --hardware hardware.yaml --suite release
 python -m ubertooth_harness run-suite \
   --plan testplans/release.yaml --suite release \
-  --hardware hardware.yaml --host Host_Mac \
+  --hardware hardware.yaml --host Host_Linux \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref main --output runs
 ```
 
-Every test in that plan runs on any target, so the tests that need a peer
-device are not in it: run the `ble`, `connection`, `classic`, and `btbr`
-suites as well, wherever those devices are registered. The `btbr` suite is the
-only coverage of `ubertooth-btbr` and of the `btbr` firmware image, and it
-needs `--build --with-firmware --with-python`.
+All but one test in that plan runs on any target. The exception is
+`Recover AFH map`, which needs the two ESP32 Classic peers and so names the
+Linux host they are on; it carries `required hardware: true`, so a bench
+without them runs the rest of the plan and the run fails on it rather than
+passing with that gate unmeasured (see
+[Hardware a step is about](#hardware-a-step-is-about-blocked-not-left-out)).
+It runs the `smoke` profile there, about 520 s of the plan's roughly 1175 s.
+A target that is not the host it names plans about 655 s of the suite: the
+total counts every step, whichever host it is for (#284).
+
+That step leases both ESP32 Classic bridges for the length of the run, so the
+peer suites below run before or after the release plan, not beside it.
+
+The other tests that need a peer device are not in the plan: run the `ble`,
+`connection`, `classic`, and `btbr` suites as well, wherever those devices
+are registered. The `btbr` suite is the only coverage of `ubertooth-btbr` and
+of the `btbr` firmware image, and it needs `--build --with-firmware
+--with-python`. The `classic` suite repeats the gate's two AFH captures;
+`classic-comprehensive` runs them with the third, `-t` detection case as
+well, so it is the one to run after the gate.
 
 | Test | `smoke` (fast plan) | `comprehensive` (release plan) |
 |------|---------------------|--------------------------------|
@@ -805,7 +850,7 @@ needs `--build --with-firmware --with-python`.
 | `Follow Classic Bluetooth piconet` | `classic` plan; the same two peers and the same bring-up: `ubertooth-rx -l <central LAP> -u <central UAP>` must report at least ten packet lines and none of another LAP (libbtbb is asked for one access code), and `-l`/`-u` for the peer that is *not* the central must report no packet at all | adds `-l` without `-u` (the UAP is recovered from the air) and `-l -u -q` (PCAP with link type 255) |
 | `Classic capture record fields` | `classic` plan; the same two peers and the same bring-up, but the check is inside the capture files: `bredrrecord.py` decodes every `LINKTYPE_BLUETOOTH_BREDR_BB` record of a `-l <central LAP> -u <central UAP> -q -r` capture, and each must carry the central's LAP and that LAP and UAP as its reference address, with every flag that describes a field in the record agreeing with that field, its access-code errors inside the limit the run allowed, and, where it holds a payload, that payload's length field agreeing with the bytes it holds and its CRC, recomputed with the reference UAP, agreeing with the one it carries (the bench's own traffic records no payload, so what fires live is the headers, addresses and flags), and the PCAPNG naming the central's LAP and UAP as the address it was following; the same with the peers' roles swapped must carry the other board's LAP instead | adds an EV3 audio link (`sco type ev3`, so the voice payload is on the air at the basic rate), whose records must include an `HV3/EV3/3-EV3` packet, and a survey, whose records must include one carrying a UAP the survey recovered for itself |
 | `Classic btbr console` | writes the selected board's firmware and transmits (`allow RF transmission: true`); `classic` plan, `btbr` suite, which a release runs alongside the release plan; an Ubertooth and one ESP32 Classic peer with the `acceptor` role on one host, and a run carrying both firmware images and the Python tools (`--build --with-firmware --with-python`). The run's `btbr` image is written and the board must report `btbr` and that revision by name (`bluetooth_rxtx` is a mismatch, and so is the revision alone), the peer is reset to its discoverable boot state and must report the device name its own address gives, and one `ubertooth-btbr` session then comes up — the startup the `btbr` image answers, and the prompt — and decides eleven checks down that prompt: `?` and `? inquiry`, a word that is no command, `?` on one, three addresses that are not ones and `page` with no address (each one `error:` line with the prompt up), `bdaddr` taking an address, an inquiry hearing the peer by BD_ADDR and by the name in its Extended Inquiry Response, a page reaching `LMP setup complete` with the peer's `LMP_NAME_RES` on the air, `idle` inside each of those two, an LMP request with no handler named once per opcode, and the capture on standard output with the progress on standard error. The cleanup always writes `bluetooth_rxtx` back, reads it, and resets the peer. The capture never leaves the driver: an inquiry hears every discoverable device in range, so only the records matched for the registered peer are reported and the rest are counted | adds paging an address nothing answers: `paging timeout` after the firmware's whole attempt, with no connection. `sessions: <n>` repeats the whole flash-and-session cycle (the `btbr-long` suite runs five) |
-| `Recover AFH map` | `classic` plan; the same two peers, with the initiator's controller told to keep a chosen set of channels before the link comes up, so the piconet's Adaptive Frequency Hopping map is known: `ubertooth-afh -e 0 -r` then runs for `duration` and must work that map out from the air. The map the link is really hopping over is read from the leader's controller at the start, the middle and the end of the capture and must be the same all three times; the recovered map must hold at least 90% of the channels in force and mark at most 70% of the channels out of force used. Two maps: channels 0 to 39, and the 20-channel minimum. Afterwards both peers are reset and the Ubertooth restored, as above | adds the tool's other path, `-t <duration>`, whose `AFH map:` line is judged on the channels it found, its stray channels reported with a looser ceiling because that map fills channel gaps and never drops a channel |
+| `Recover AFH map` | `release` plan (smoke, `required hardware: true`) and `classic` plan; the same two peers, with the initiator's controller told to keep a chosen set of channels before the link comes up, so the piconet's Adaptive Frequency Hopping map is known: `ubertooth-afh -e 0 -r` then runs for `duration` and must work that map out from the air. The map the link is really hopping over is read from the leader's controller at the start, the middle and the end of the capture and must be the same all three times; the recovered map must hold at least 90% of the channels in force and mark at most 70% of the channels out of force used. Two maps: channels 0 to 39, and the 20-channel minimum. Afterwards both peers are reset and the Ubertooth restored, as above | adds the tool's other path, `-t <duration>`, whose `AFH map:` line is judged on the channels it found, its stray channels reported with a looser ceiling because that map fills channel gaps and never drops a channel |
 | `DFU images` | writes the selected board's firmware; slow plan (not fast): `-d <test image> -r`, then `-u -r` reads back the image padded with 0xff; `-s` on the image without its suffix gives the build's `.dfu` | `firmware` plan (not release): adds `-s` refusing a `.dfu`; seven bad images (wrong CRC, truncated, no suffix, text, no `UFD`, wrong vendor, wrong product) refused before a device is opened (fork #198, #199, fixed in e8edd15), the board still in its application with the same flash (read back); `-s` refuses a suffixed `.bin` and accepts a read-only one (fork #200, fixed in 9d710fe). At 6fee30c `-d <image> -r` exits 1 after a good flash (fork #267, fixed in 89d9197), so the write cases fail there |
 | `BLE mode conflicts` | no `coverage` argument; release plan | every combination of `ubertooth-btle -f -n -p` must be rejected before sniffing |
 | `Ubertooth util conflicts` | no `coverage` argument; requires `allow RF transmission: true`; release plan | every pair of `-q -n -e -t -x -I` must be rejected with the fork's `error: options ... cannot be combined` before a mode starts |

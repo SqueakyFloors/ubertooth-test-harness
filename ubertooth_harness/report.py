@@ -161,9 +161,10 @@ class _Run:
             e.get("details", {}) for e in self.events
             if e["event_type"] == "not_applicable"
         ]
-        # Required tests this bench has not got the hardware for
-        # (planner.py): also left out before the run, but the run fails
-        # rather than passing with the gate unmeasured.
+        # Required tests whose hardware is not registered (planner.py): on
+        # this host, or on a host this registry has not got at all. Also
+        # left out before the run, but the run fails rather than passing
+        # with the gate unmeasured.
         self.blocked = [
             e.get("details", {}) for e in self.events
             if e["event_type"] == "blocked"
@@ -596,15 +597,17 @@ def _known(value) -> str:
 
 
 def _blocked_section(run: _Run) -> list[str]:
-    """Required tests that never ran: this bench has not got the hardware
-    they are about, so the run cannot pass without them."""
+    """Required tests that never ran: the hardware they are about is not
+    registered, so the run cannot pass without them. Either this host has
+    not got it, or the step named a host this registry has not got at all."""
     if not run.blocked:
         return []
     lines = [
         "", "## Blocked", "",
-        "Required tests this bench has not got the hardware for. They never "
-        "ran, so the run fails: unlike a not-applicable test, each one is "
-        "about the hardware that is missing.", "",
+        "Required tests whose hardware is not registered: on this host, or "
+        "on a host this registry has not got. They never ran, so the run "
+        "fails: unlike a not-applicable test, each one is about the hardware "
+        "that is missing.", "",
         "| Test | Host | Reason |", "|---|---|---|",
     ]
     for item in run.blocked:

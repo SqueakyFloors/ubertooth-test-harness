@@ -833,12 +833,13 @@ def _run_suite(args: argparse.Namespace) -> int:
         and (not selected_names or invocation.test_name in selected_names)
     )
     # Whole tests left out at planning (hostneeds.py, planner.py): what this
-    # host cannot run, and what this bench has not got the hardware for.
+    # host cannot run, and what this registry has not got the hardware for.
     not_applicable = tuple(
         item for item in compiled.for_host(args.host)
         if not selected_names or item.test_name in selected_names
     )
-    # Required tests this host has not got the hardware for (planner.py):
+    # Required tests whose hardware is not registered (planner.py): on this
+    # host, or on a host this registry has not got at all. They are
     # recorded, everything else runs, and the run ends failed.
     blocked = tuple(
         item for item in compiled.blocked_for_host(args.host)
@@ -995,10 +996,13 @@ def _dry_run(args, catalog, plan, host, invocations, not_applicable, blocked=())
           f"and {len(not_applicable)} test(s) not applicable"
           + (f", {len(blocked)} test(s) blocked" if blocked else ""))
     if blocked:
+        # Not "on this host": a record may be about a host this registry has
+        # not got, which no run of its own will ever carry. Each line above
+        # names the host it is about.
         print(
-            f"error: {len(blocked)} required test(s) cannot run on {args.host}; "
-            "the run would fail. Register the hardware they need, or run a "
-            "suite without them.",
+            f"error: {len(blocked)} required test(s) of {args.suite} cannot "
+            "run; the run would fail. Register the hardware they need, or run "
+            "a suite without them.",
             file=sys.stderr,
         )
         return 1

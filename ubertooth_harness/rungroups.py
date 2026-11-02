@@ -601,9 +601,11 @@ def host_steps(
             else:
                 _close(part, status, timestamp, _reason(details))
         elif kind == "blocked":
-            # A required test the planner could not compile on this host. It
-            # is in no invocation, so the record is the step: without one the
-            # host would show nothing for a test that fails its run.
+            # A required test this host's run could not run: the hardware it
+            # is about is not registered here, or not anywhere in this
+            # registry. It is in no invocation, so the record is the step:
+            # without one the host would show nothing for a test that fails
+            # its run.
             name = _label(details.get("test_name"))
             if not name or (name not in tests and len(tests) >= MAX_TEST_STEPS):
                 continue

@@ -285,7 +285,7 @@ Combinations: `-c` with `-l`: last one wins. Covered (Raw receive, comprehensive
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
 | `-h` | help | Covered | Host CLI surface |
-| `-l <LAP>` | target LAP | Covered | Recover AFH map (`classic` plan): the piconet's LAP, against two ESP32 Classic peers held to a chosen channel map |
+| `-l <LAP>` | target LAP | Covered | Recover AFH map (`release` and `classic` plans): the piconet's LAP, against two ESP32 Classic peers held to a chosen channel map |
 | `-u <UAP>` | target UAP | Covered | Same |
 | `-m <n>` | channel-removal threshold | Hard | Left at its default by Recover AFH map: a channel the piconet stops using inside one capture is not something the peers make happen |
 | `-r` | print the map every second | Covered | Recover AFH map (smoke): one `<time> <80 bits>` line per second, and the last of them is the recovered map, judged against the map the link is hopping over. Classic Bluetooth receive (comprehensive) covers the line format with no piconet |
@@ -548,7 +548,9 @@ Next, harness work:
     `firmware/esp32-classic-peer`. Implemented
     ([#250](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/250)):
     Recover AFH map, on the same pair held to a chosen channel map
-    (`utesp-1.3.0` or later).
+    (`utesp-1.3.0` or later), which is release coverage as well: the
+    `release` plan holds it with `required hardware: true`, so a bench
+    without the peers fails the gate rather than skipping it.
     Bluetooth inquiry scan is still a backlog entry: `ubertooth-scan` needs a
     host Bluetooth adapter.
     The fixtures each needs are tracked as `hardware needed` issues: BLE
