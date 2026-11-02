@@ -115,10 +115,11 @@ difference there is reported as a build that does not repeat itself rather
 than as a missing bump.
 
 That costs four builds where the versions match: both images on each side.
-The ordinary run is about four and a half minutes, which is a build of about
-45 seconds more than comparing the default image alone; a run that has to
-repeat both images on both sides takes up to eight builds, about two and a
-quarter minutes more. A base commit from before the algorithm 1 image existed
+One build takes 32 to 48 seconds of a job of about four and a half minutes,
+most of which is pulling the toolchain image and making the SDK workspace, so
+comparing both images rather than the default one alone costs about 40
+seconds; a run that has to repeat both images on both sides takes up to eight
+builds, about two minutes more. A base commit from before the algorithm 1 image existed
 has none to compare, and needs none: that image's version string arrived with
 it, so every board asked for it is flashed anyway.
 
