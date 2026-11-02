@@ -3,7 +3,9 @@
 One section per test in the harness catalog
 ([`ubertooth_harness/catalog.py`](../ubertooth_harness/catalog.py)), in catalog
 order. Each heading is the exact catalog name, which is also the name a plan
-writes, so a test without a section here is easy to spot.
+writes, so a test without a section here is easy to spot. The last section,
+`Out of scope: ...`, is the exception: it records what the harness has decided
+not to test, so a missing catalog entry is not mistaken for an oversight.
 
 Each section says what the test does, how it produces a known answer, what
 hardware and arguments it needs, what passes and fails, and what it cannot
@@ -923,9 +925,10 @@ alternates BLE and BR/EDR five times and requires zero packets from the
 previous mode in every dump and every capture.
 
 **Known limits.** No peer: the E-GO cases print nothing with no skateboard in
-range, so they check that the tool runs and reports nothing malformed. The
-dump cases check record structure and rate, not that the symbols mean
-anything.
+range, so they check that the tool runs and reports nothing malformed. That is
+as far as the harness goes with E-GO on purpose, not for want of a fixture
+(see `Out of scope: Uberducky and E-GO devices`). The dump cases check record
+structure and rate, not that the symbols mean anything.
 
 ## Board state between runs
 
@@ -2595,37 +2598,25 @@ name it.
 **Known limits.** Needs a firmware image other than the usual one, so it would
 write firmware and have to be the last test on its board.
 
-## Uberducky HID
+## Out of scope: Uberducky and E-GO devices
 
-**What it does.** Nothing yet: a catalog entry for exercising an Uberducky HID
-fixture.
+Device-level testing of `ubertooth-ducky` and `ubertooth-ego` is out of scope
+([#89](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/89)), by
+the maintainer's scope decision. There is no catalog test and no backlog entry
+for either, and neither is waiting on a fixture: the harness will not drive an
+Uberducky HID peer or a registered E-GO skateboard. So `ubertooth-ducky -q`
+and `-b`, which transmit, `ubertooth-ego -i` and `-j`, which transmit, and
+`ubertooth-ego -f`, which needs a skateboard to follow, all stay untested.
 
-**Theory of operation.** Not established.
+What the harness does keep for both tools needs no peer and no transmission:
 
-**Hardware and arguments.** A required `Uberducky:` resource; no Ubertooth
-role.
+- `Host CLI surface` runs `ubertooth-ducky -h` and `ubertooth-ego -h` and
+  requires exit 0 with the tool's own name in the output.
+- `Argument validation` covers their refusals: `ducky -A36`, `-A40`, a
+  malformed `-a` address, `ego -l0`, `-l49`, and a stray word on each, every
+  one refused with exit 1 and no device change.
+- `Raw receive` runs `ubertooth-ego -r -c 2440` with nothing in range, along
+  with `-l 1`, `-l 48`, and `-a 630f9ffe` accepted and `-a zz` refused, so the
+  receive path and its parsing are exercised without an E-GO present.
 
-**Expected outcome.** No implementation; only a `runnable: false` plan may
-name it.
-
-**Known limits.** Needs an Uberducky fixture
-([#89](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/89)), and
-`ubertooth-ducky` transmits, so a plan would have to allow RF.
-
-## E-GO skateboard capture
-
-**What it does.** Nothing yet: a catalog entry for capturing a registered E-GO
-skateboard.
-
-**Theory of operation.** Not established. `Raw receive` covers
-`ubertooth-ego -r` with nothing in range, where the expected answer is that it
-runs and prints nothing malformed.
-
-**Hardware and arguments.** A required `skateboard:` resource; no Ubertooth
-role.
-
-**Expected outcome.** No implementation; only a `runnable: false` plan may
-name it.
-
-**Known limits.** Needs an E-GO skateboard as a fixture
-([#89](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/89)).
+[`COVERAGE.md`](../COVERAGE.md) carries the per-option status for both tools.

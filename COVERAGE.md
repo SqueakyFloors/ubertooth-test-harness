@@ -33,6 +33,8 @@ test is in no plan. The notes say what is missing.
 **Hard**: needs an RF peer, a GUI, RF transmission, firmware other than
 `bluetooth_rxtx`, a second device, or is destructive. The notes say which.
 **N/A**: nothing to test (for example a no-op).
+**Out of scope**: the harness has decided not to test the option, so it is not
+a gap waiting on hardware. The notes say why and link the decision.
 Tests that are only catalog entries (every `backlog.yaml` item, including
 `BLE monitor` and the soaks, and the `mac-polling` soak) have no
 implementation yet. They count as Not covered. Only `runnable: false` plans
@@ -300,9 +302,9 @@ The receive transfer is given back between the detection and monitoring phases (
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
 | `-h` | help | Covered | Host CLI surface |
-| `-f` | follow mode | Hard | Needs an E-GO skateboard (backlog) |
+| `-f` | follow mode | Out of scope | Needs an E-GO skateboard; device-level E-GO testing is out of scope ([#89](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/89)) |
 | `-r` | continuous RX on one channel | Covered | Raw receive (smoke): `-r -c 2440` runs until stopped; any packet line must be on 2440 MHz |
-| `-i` / `-j` | interfere (`-j` alias) | Hard | Transmits RF |
+| `-i` / `-j` | interfere (`-j` alias) | Out of scope | Transmits RF; device-level E-GO testing is out of scope ([#89](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/89)) |
 | `-c <2402-2480>` | RX channel (MHz) | Partial | Raw receive: `-c 2440` accepted; the channel cannot be read during the mode. `-c 2500` is accepted ([ubertooth#155](https://github.com/SqueakyFloors/ubertooth/issues/155)) |
 | `-l <1-48>` | capture length | Covered | `-l1` and `-l48` accepted (Raw receive, comprehensive); `-l0` (smoke) and `-l49` rejected: Argument validation |
 | `-a <code>` | access code | Covered | Raw receive (comprehensive): `-a 630f9ffe` accepted, `-a zz` rejected with exit 1 |
@@ -315,12 +317,12 @@ Combinations: two or more of `-f`/`-r`/`-i`: last one wins (`do_mode` is overwri
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
 | `-h` | help | Covered | Host CLI surface |
-| `-q[uuid]` | send a quack | Hard | Transmits RF; needs an Uberducky (backlog) |
-| `-b` | Uberducky bootloader | Hard | Transmits; changes the peer's firmware state |
+| `-q[uuid]` | send a quack | Out of scope | Transmits RF and needs an Uberducky; device-level Uberducky testing is out of scope ([#89](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/89)) |
+| `-b` | Uberducky bootloader | Out of scope | Transmits and changes the peer's firmware state; out of scope with the rest of Uberducky ([#89](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/89)) |
 | `-A <37-39>` | advertising channel | Partial | `-A36` (smoke) and `-A40` rejected: Argument validation. Only matters with `-q` |
 | `-a <bdaddr>` | source address | Partial | A malformed address is rejected (Argument validation, comprehensive). Using it needs `-q` (transmits) |
 | `-s` | sarcastic output (undocumented) | N/A | Cosmetic |
-| `-U <index\|serial>` | select device | Hard | Only matters with `-q` |
+| `-U <index\|serial>` | select device | Out of scope | Only matters with `-q`, which is out of scope ([#89](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/89)) |
 
 ## ubertooth-scan (BlueZ builds only)
 
@@ -474,9 +476,11 @@ A test that fails cleanly (device verified restored, guards unchanged) no longer
 
 - **GUI:** `ubertooth-specan-ui` needs Qt and a display. Only `-h` and the
   argument checks can run headless (an offscreen Qt platform may allow a smoke run).
-- **Transmits RF:** `ubertooth-util -t -n -e`, `ubertooth-btle -s -i -I -j -J`,
-  `ubertooth-ego -i -j`, and `ubertooth-ducky -q -b`. These need an explicit
-  RF allowance in the plan, like `allow RF transmission` on Ubertooth util conflicts.
+- **Transmits RF:** `ubertooth-util -t -n -e` and `ubertooth-btle -s -i -I -j
+  -J`. These need an explicit RF allowance in the plan, like
+  `allow RF transmission` on Ubertooth util conflicts. `ubertooth-ego -i -j`
+  and `ubertooth-ducky -q -b` transmit too, but they are out of scope rather
+  than hard (below).
 - **Leaves the application firmware:** `ubertooth-util -i` and
   `ubertooth-dfu -d` or `-u` without `-r`. They need a recovery path (USB power cycle,
   DFU/ISP reflash). The Reset into invalid application backlog item covers part of this.
@@ -485,8 +489,7 @@ A test that fails cleanly (device verified restored, guards unchanged) no longer
   Classic Bluetooth piconet and `ubertooth-afh` by Recover AFH map; follow
   needs a host Bluetooth adapter as well,
   [#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)),
-  BLE connection (`ubertooth-btle -f/-p` with real traffic, `-t`), E-GO
-  skateboard, Uberducky.
+  BLE connection (`ubertooth-btle -f/-p` with real traffic, `-t`).
 - **Needs a host Bluetooth adapter / BlueZ:** `ubertooth-scan`, `ubertooth-follow` (Linux).
 - **Needs a second Ubertooth:** the `ubertooth-util -n`/`-e`/`-m` range test
   (Two-device range test, `range` plan), `-U all` and no-selector listing
@@ -498,6 +501,15 @@ A test that fails cleanly (device verified restored, guards unchanged) no longer
   on the bench makes an inquiry or a page), and `monitor` (a race against a
   real peripheral).
 - **Does nothing:** `ubertooth-tx`.
+- **Out of scope, not a gap:** the device behavior of `ubertooth-ducky` and
+  `ubertooth-ego` beyond receive. The harness will not drive an Uberducky HID
+  peer or a registered E-GO skateboard, so `ducky -q -b -U` and `ego -f -i -j`
+  stay untested by decision
+  ([#89](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/89)),
+  not for want of a fixture. Both tools keep host coverage that needs neither
+  a peer nor transmission: `-h` (Host CLI surface), their argument refusals
+  (Argument validation), and `ubertooth-ego -r` with its `-c`, `-l`, and `-a`
+  options (Raw receive). There is no backlog entry for either.
 
 ## Suggested next tests
 
@@ -542,5 +554,8 @@ Next, harness work:
     The fixtures each needs are tracked as `hardware needed` issues: BLE
     advertiser [#86](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/86),
     BLE connection [#87](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/87),
-    Classic piconet and Bluetooth adapter [#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88),
-    other boards and peers [#89](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/89).
+    Classic piconet and Bluetooth adapter [#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88).
+    Other boards and peers were [#89](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/89),
+    now closed: its remaining fixtures are on the bench, the destructive
+    reset-into-invalid-application run is [#141](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/141),
+    and the Uberducky and E-GO items are out of scope (above).
