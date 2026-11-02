@@ -640,6 +640,31 @@ class PlanEstimateTests(StoreTestCase):
         self.assertEqual([], learned_stages(None, HOST))
         self.assertEqual([], learned_stages(self.store, None))
 
+    def test_a_firmware_build_is_estimated_as_a_firmware_build(self):
+        # The two kinds of build are learned apart, and a run that asks for
+        # the firmware image (#257) takes much the longer of them.
+        for seconds in (300.0, 310.0, 320.0):
+            self.store.add(Key("build", "", HOST, "host tools", None), seconds)
+        for seconds in (600.0, 610.0, 620.0):
+            self.store.add(Key("build", "", HOST, "with firmware", None), seconds)
+        host_tools = run_stage_estimates(self.store, [], HOST, build=True)
+        firmware = run_stage_estimates(
+            self.store, [], HOST, build=True, with_firmware=True)
+        self.assertEqual([("host tools", 310.0)],
+                         [(s["profile"], s["estimated_s"]) for s in host_tools])
+        self.assertEqual([("with firmware", 610.0)],
+                         [(s["profile"], s["estimated_s"]) for s in firmware])
+        # A run's own build_started record is the better answer than what it
+        # was asked for: a run that builds the firmware only because it
+        # flashes its boards says so there, and an adopted run has no request.
+        started = [{"event_type": "build_started", "status": "running",
+                    "details": {"with_firmware": True}}]
+        self.assertEqual(
+            [("with firmware", 610.0)],
+            [(s["profile"], s["estimated_s"])
+             for s in run_stage_estimates(self.store, started, HOST)],
+        )
+
 
 class ControllerLearningTests(ControllerTestCase):
     """The controller learns when a run ends, and reports it over the API."""

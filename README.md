@@ -48,7 +48,8 @@ it through an SSH tunnel; nothing is exposed on the network.
 4. **Run something:** in Run setup pick a git ref (for example `main`), a plan
    (`host` needs no board and is a safe first run), the target, keep "Build the
    ref on the target first" and "Flash the firmware to the boards first"
-   ticked, and press Run. The Live run card ticks off
+   ticked (the two "Build … too" boxes follow what the suite needs), and
+   press Run. The Live run card ticks off
    each test; History keeps every run with its `report.md`.
 
 If it does not connect:
@@ -2187,7 +2188,14 @@ plan in `--plans-dir` (`fast` is `testplans/fast.yaml`), a suite, optional
 exact test names, whether to `--build`, and, with `build`, whether to flash
 the boards with that build first (`flash_build`; false passes
 `--no-flash-build`, see [Flashing the boards with the run's
-build](#flashing-the-boards-with-the-runs-build)). When the commit (or ref) is not
+build](#flashing-the-boards-with-the-runs-build)) and whether that build also
+builds and records the firmware image (`with_firmware`, which passes
+`--with-firmware`) or the Python tools (`with_python`, which passes
+`--with-python`). `run-suite` takes neither of those two without `--build`,
+so a request that asks for one without `build` is refused rather than sent.
+A run that needs an image a build cannot produce (the published KGV image of
+`Flash reliability`) still has to come from the command line, which is where
+`--artifact` can be passed. When the commit (or ref) is not
 in `--ubertooth-source` yet, typically because it was pushed after the
 checkout was last fetched, the run fetches it once from the checkout's remote
 (`origin`, or the remote a `remote/name` ref names) within 60 s and resolves
@@ -2224,12 +2232,15 @@ run.jsonl, so the controller deduplicates by `(run_id, sequence)`. SIGINT,
 SIGTERM, or SIGHUP stops the runner after cancelling and waiting for an
 active run.
 
-Messages are JSON objects with `"version": 4` and a `type` (version 2 added
+Messages are JSON objects with `"version": 5` and a `type` (version 2 added
 the run's `commit`, version 3 its `flash_build`, version 4 the `run_file`
-request and its answers; a runner or controller of
+request and its answers, version 5 the run's `with_firmware` and
+`with_python`; a runner or controller of
 another version is refused); each type has an
 exact field set, and anything else (unknown version or type, a missing or
-extra field, a wrong value) gets `protocol_error` and is not acted on. The
+extra field, a wrong value, or a combination the receiver could not act on,
+such as `with_firmware` without `build`) gets `protocol_error` and is not
+acted on. The
 schema is in [`ubertooth_harness/protocol.py`](ubertooth_harness/protocol.py)
 and [DESIGN.md section 2](DESIGN.md#2-target-runner-protocol-controller--target-runner).
 
@@ -2336,9 +2347,22 @@ word and symbol (colour only reinforces it).
   `/api/refs`), plan and suite (from `/api/plans`, with the suite's tests;
   only runnable plans are offered, and plans of planned tests such as
   `backlog` are named as not runnable), target, whether to build the ref first,
-  and "Flash the firmware to the boards first" (ticked by default; disabled,
+  "Flash the firmware to the boards first" (ticked by default; disabled,
   with a note, while Build is unticked; see [Flashing the boards with the
-  run's build](#flashing-the-boards-with-the-runs-build)); Run starts the whole suite.
+  run's build](#flashing-the-boards-with-the-runs-build)), and the two
+  further build options, "Build the firmware image too" (`--with-firmware`)
+  and "Build the Python tools too" (`--with-python`); Run starts the whole suite.
+  Each of those two carries a note saying what it costs and follows what the
+  chosen suite needs: a suite with a test that cannot run without it (`DFU
+  images`, `Flash reliability`) has it ticked and held there, a suite that
+  would only leave cases out without it (`DFU image checks` without the
+  image, `Python tools` without the Python build) has it ticked for you to
+  untick, and otherwise it is yours to choose. Both need Build, and are
+  disabled with a note while Build is unticked. `/api/plans` is where those
+  needs come from: every test and suite carries `needs_firmware_build` and
+  `needs_python_tools` (cases left out without it) and
+  `requires_firmware_build` and `requires_python_tools` (the test cannot run
+  without it), from what the catalog declares.
 - **Live run:** the suite's tests as a checklist that ticks from the run's
   events (✓ passed, ✗ failed, … running, ○ pending or not run; always text
   plus symbol), under each test the [known target](#known-targets) it ran
@@ -2403,9 +2427,9 @@ Endpoints (JSON unless noted; `GET /` lists them):
 |---|---|
 | `GET /ui/` | the web GUI (HTML, `app.js`, `app.css`) |
 | `GET /api/refs` | `{"repository", "refs": [{"name", "kind", "commit"}], "fetched_at"}` from `git ls-remote` (`kind` is `default`, `branch` or `tag`); 503 if it cannot be listed |
-| `GET /api/plans[?target=HOST]` | every `<plan>.yaml` in `--plans-dir` with its suites, test names, per-test `estimated_s` (one invocation with the step's arguments, else null) and `per_board` (runs once per selected board), the suite total when every test has one, `per_board_tests`, and `runnable` (the plan's `runnable` flag; false for plans of planned tests and for a plan that does not load); a plan that does not load is listed with its `error`. With a `target`, `estimated_s` is what that host's own runs measured when enough of them did; `catalog_estimated_s`, `estimate_source` (`learned`, `catalog` or `none`), `estimate_samples` and `estimate_scaled` say which, and `stages` lists the build, preflight and flash durations learned for it (see [Learned durations](#learned-durations)). Without one, nothing is learned and the catalog estimate stands. A `target` whose name is not a host name is refused with 422; the registry is not consulted, so a name no target has registered is answered with whatever has been learned under it, which is normally nothing |
+| `GET /api/plans[?target=HOST]` | every `<plan>.yaml` in `--plans-dir` with its suites, test names, per-test `estimated_s` (one invocation with the step's arguments, else null) and `per_board` (runs once per selected board), the build options each test and suite needs (`needs_firmware_build` and `needs_python_tools`: cases are left out without it; `requires_firmware_build` and `requires_python_tools`: the test cannot run without it at all), the suite total when every test has one, `per_board_tests`, and `runnable` (the plan's `runnable` flag; false for plans of planned tests and for a plan that does not load); a plan that does not load is listed with its `error`. With a `target`, `estimated_s` is what that host's own runs measured when enough of them did; `catalog_estimated_s`, `estimate_source` (`learned`, `catalog` or `none`), `estimate_samples` and `estimate_scaled` say which, and `stages` lists the build, preflight and flash durations learned for it (see [Learned durations](#learned-durations)). Without one, nothing is learned and the catalog estimate stands. A `target` whose name is not a host name is refused with 422; the registry is not consulted, so a name no target has registered is answered with whatever has been learned under it, which is normally nothing |
 | `GET /api/targets`, `GET /api/targets/{host}` | registry: host, hostname, OS, Python, Ubertooth serials, last heartbeat, `online`/`offline`, connected, active run |
-| `POST /api/targets/{host}/runs` | start a run with the protocol `run` fields: `{"ref", "commit": null, "plan", "suite", "tests": [], "build": false, "flash_build": true}` (`commit`, optional, is the full commit the caller saw listed for `ref`; `flash_build` applies only with `build` and is recorded false without it); 201 with the run (including the `commit` sent to the runner), 409 busy, offline, rejected by the runner, or `ref` moved away from `commit`, 422 invalid, a ref not in `/api/refs` (full commit IDs are accepted), or a name listing several commits, 504 no answer |
+| `POST /api/targets/{host}/runs` | start a run with the protocol `run` fields: `{"ref", "commit": null, "plan", "suite", "tests": [], "build": false, "flash_build": true, "with_firmware": false, "with_python": false}` (`commit`, optional, is the full commit the caller saw listed for `ref`; `flash_build` applies only with `build` and is recorded false without it; `with_firmware` and `with_python` add `--with-firmware` and `--with-python` to the run's build, and either one without `build` is refused with 422 naming it); 201 with the run (including the `commit` sent to the runner), 409 busy, offline, rejected by the runner, or `ref` moved away from `commit`, 422 invalid, a ref not in `/api/refs` (full commit IDs are accepted), or a name listing several commits, 504 no answer |
 | `GET /api/runs[?target=HOST]` | runs, newest first |
 | `GET /api/runs/{run_id}` | status, every event, the failure summary (`failures`), `invocations` (from the run's manifest, every planned invocation on the target with `invocation_id`, `test_name`, `estimated_s`, `catalog_estimated_s`, `estimate_source`, `estimate_samples` and `estimate_scaled`; null before the manifest record), and `stages`: the run's build and preflight estimates where its host has learned them |
 | `GET /api/runs/{run_id}/report.md` | the run's report (Markdown) |
@@ -2413,7 +2437,7 @@ Endpoints (JSON unless noted; `GET /` lists them):
 | `GET /api/runs/{run_id}/file?path=&offset=&limit=` | one bounded page of a saved output file, with what the run recorded about it and where the page sits in it. Only a path that run's own `run.jsonl` records is served, and only from inside the run directory, with no symbolic link followed; a page is 64 KiB by default and 1 MiB at most. A file that stayed on the target is asked of that run's runner (256 KiB at most, since the page travels in one protocol message, and `page_bytes` says what a page was); 503 while that runner is not connected, 504 if it does not answer in time, 400 or 404 for a path that may not be served, naming the path only |
 | `POST /api/runs/{run_id}/cancel` | `{"reason": ""}`; 202 once the runner accepts |
 | `WS /ws/live[?run_id=ID]` | browser stream: a `snapshot`, then `target` and `run` updates, plus that run's `event` records; a browser 1000 updates behind is closed with 1013 `live stream overflowed` (reconnect for a new snapshot) |
-| `WS /ws/runner` | target runner protocol v4 |
+| `WS /ws/runner` | target runner protocol v5 |
 
 Every request and WebSocket handshake must carry `Host: 127.0.0.1:PORT` or
 `localhost:PORT` and, if it has an `Origin`, that same origin (runner
@@ -2479,7 +2503,7 @@ manifest record); a malformed or out-of-place message is counted on the
 target and ignored, and a first message that is not a valid `register`
 closes the connection. A target is `offline` after three heartbeat intervals
 without a valid message, and runs cannot be started on it: only a message that
-decodes as protocol v4 resets the offline timer, and malformed messages do
+decodes as protocol v5 resets the offline timer, and malformed messages do
 not. The controller allows one
 outstanding start request per target and refuses a target whose runner reports
 an active run. Each run is a flat directory `<results dir>/<run_id>/` with
@@ -2581,8 +2605,9 @@ anyway.
 
 The runner protocol has no version negotiation: the controller and runner
 must speak the same version: protocol v2 (which added the listed commit to
-`run`), v3 (which added `flash_build`) and v4 (which added the `run_file`
-request and its answers) are each a hard break from the version before. An older runner is refused at `register` (the
+`run`), v3 (which added `flash_build`), v4 (which added the `run_file`
+request and its answers) and v5 (which added the run's `with_firmware` and
+`with_python`) are each a hard break from the version before. An older runner is refused at `register` (the
 controller closes the connection, code 1008), and since it did register it
 reconnects after the shortest backoff (0.5 s) and is refused again,
 indefinitely; its log shows `registered with ...` then `controller connection

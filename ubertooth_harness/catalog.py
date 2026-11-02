@@ -315,6 +315,21 @@ class TestDefinition:
     # What every case of the test needs from the host (hostneeds.py). The
     # plan's `platforms:` argument adds a platform need (test_needs).
     needs: Needs = NO_NEEDS
+    # What SOME of the test's cases need from the run's build: the firmware
+    # image ("test build"), the Python tools, or both; without it those cases
+    # are left out as not applicable. Only those two fields of Needs belong
+    # here and in build_required.
+    #
+    # Unlike `needs`, which leaves a whole test out where its host does not
+    # meet it, these two are how a run's build options are chosen: the cases
+    # are built from the host's own registry resources, so a client without
+    # one (the controller's plan listing, and so the GUI) cannot read the
+    # needs off the cases themselves.
+    build_needs: Needs = NO_NEEDS
+    # What the test cannot run at all without: its cases name the run's own
+    # image in their artifacts (or its command needs one), so a run without
+    # it is refused rather than leaving a case out. Implies build_needs.
+    build_required: Needs = NO_NEEDS
     # Expected wall time by coverage profile (DEFAULT_PROFILE for a test
     # without a coverage argument); see ESTIMATES.
     estimates: Mapping[str, Estimate] | None = None
@@ -322,6 +337,40 @@ class TestDefinition:
     # (rf.py): a capture or a survey asks for NORMAL_LINK, so the planner
     # keeps it off an attenuated board. The plan's `rf:` overrides it per role.
     rf_defaults: Mapping[str, PlacementRequirement] | None = None
+
+    def __post_init__(self):
+        for field, declared in (("build_needs", self.build_needs),
+                                ("build_required", self.build_required)):
+            unwanted = Needs(
+                platforms=declared.platforms,
+                bluez_tools=declared.bluez_tools,
+                host_tools=declared.host_tools,
+            )
+            if unwanted:
+                raise ValueError(
+                    f"{self.name}: {field} carries build options only "
+                    f"(python_tools, firmware_build), not {unwanted.describe()}"
+                )
+
+    def build_options(self) -> Needs:
+        """The run build options some case of this test needs.
+
+        Its own test-wide needs, what its cases need, and what it cannot run
+        without at all.
+        """
+        return Needs(
+            python_tools=(self.needs.python_tools or self.build_needs.python_tools
+                          or self.build_required.python_tools),
+            firmware_build=(self.needs.firmware_build or self.build_needs.firmware_build
+                            or self.build_required.firmware_build),
+        )
+
+    def required_build_options(self) -> Needs:
+        """The run build options without which this test cannot run at all."""
+        return Needs(
+            python_tools=self.build_required.python_tools,
+            firmware_build=self.build_required.firmware_build,
+        )
 
     def placement_requirements(
         self, arguments: Mapping
@@ -1198,6 +1247,9 @@ def builtin_catalog() -> TestCatalog:
             MappingProxyType({}),
             command_builder=dfu_host_cases.dfu_host_cases,
             continue_on_case_failure=True,
+            # One -s case compares against the run's own test image; without
+            # one it is left out as not applicable and the rest still run.
+            build_needs=Needs(firmware_build=True),
         ),
         TestDefinition(
             "Python tools",
@@ -1208,6 +1260,8 @@ def builtin_catalog() -> TestCatalog:
             MappingProxyType({}),
             command_builder=python_cases.python_tool_cases,
             continue_on_case_failure=True,
+            # ubertooth-specan-ui exists only in the Python tools build.
+            build_needs=Needs(python_tools=True),
         ),
         TestDefinition(
             "BLE extcap interfaces",
@@ -1424,6 +1478,11 @@ def builtin_catalog() -> TestCatalog:
             establishes_firmware=True,
             writes_firmware=True,
             check_arguments=_check_alternation,
+            # Its image sequence names the run's test build in every plan
+            # here, and a run without that image is refused; the published
+            # KGV image beside it still has to come from --artifact, which
+            # only the command line can pass.
+            build_required=Needs(firmware_build=True),
         ),
         stateful_test(
             "DFU images",
@@ -1435,6 +1494,9 @@ def builtin_catalog() -> TestCatalog:
             # verified, so the test must be the last on its board.
             establishes_firmware=True,
             writes_firmware=True,
+            # Every case writes the run's own test image, and a run without
+            # one is refused rather than leaving them out (#257).
+            build_required=Needs(firmware_build=True),
         ),
         TestDefinition(
             "Exclusive Ubertooth topology",

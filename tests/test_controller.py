@@ -38,6 +38,7 @@ from ubertooth_harness.controller import (
 )
 from ubertooth_harness.gui import GitRefSource
 from ubertooth_harness.protocol import (
+    PROTOCOL_VERSION,
     decode_controller_message,
     encode_runner_message,
 )
@@ -201,7 +202,7 @@ class BindTests(ControllerTestCase):
         self.assertEqual({"127.0.0.1"}, addresses)
         status, payload, _ = await self.http("GET", "/")
         self.assertEqual(200, status)
-        self.assertEqual(4, payload["protocol_version"])
+        self.assertEqual(PROTOCOL_VERSION, payload["protocol_version"])
         self.assertEqual("127.0.0.1", payload["bind"])
         self.assertIn("POST /api/targets/{host}/runs", payload["endpoints"])
         # No CDN-backed docs pages.
@@ -419,6 +420,100 @@ class RunTests(ControllerTestCase):
                         lambda: self.controller.targets["Host_A"].active_run_id is None
                     )
 
+    async def test_the_build_options_are_sent_recorded_and_served(self):
+        # What the request asks for reaches the runner, the stored record and
+        # the API view, so a test that needs an image or the Python tools can
+        # be dispatched the way the command line runs it (#257).
+        cases = (
+            ({"build": True, "with_firmware": True}, (True, False)),
+            ({"build": True, "with_python": True}, (False, True)),
+            ({"build": True, "with_firmware": True, "with_python": True},
+             (True, True)),
+            ({"build": True}, (False, False)),
+            ({"build": False}, (False, False)),
+        )
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            for index, (body, expected) in enumerate(cases):
+                with self.subTest(body):
+                    post, message = await self.start_run(runner, **body)
+                    self.assertEqual(
+                        expected,
+                        (message["with_firmware"], message["with_python"]),
+                    )
+                    run_id = f"options-{index}"
+                    await runner.send(
+                        "run_accepted", request_id=message["request_id"], run_id=run_id
+                    )
+                    status, payload, _ = await post
+                    self.assertEqual(201, status, payload)
+                    self.assertEqual(
+                        expected,
+                        (payload["run"]["with_firmware"], payload["run"]["with_python"]),
+                    )
+                    record = json.loads(
+                        (self.results / run_id / "run.json").read_text()
+                    )
+                    self.assertEqual(
+                        expected, (record["with_firmware"], record["with_python"])
+                    )
+                    detail = (await self.http("GET", f"/api/runs/{run_id}"))[1]
+                    self.assertEqual(
+                        expected,
+                        (detail["run"]["with_firmware"], detail["run"]["with_python"]),
+                    )
+                    await runner.send(
+                        "run_error", request_id=message["request_id"], run_id=run_id,
+                        exit_code=2, reason="test",
+                    )
+                    await wait_until(
+                        lambda: self.controller.targets["Host_A"].active_run_id is None
+                    )
+
+    async def test_a_build_option_without_build_is_refused_by_name(self):
+        # run-suite refuses --with-firmware and --with-python without
+        # --build, so the controller never sends such a run: the caller is
+        # told which option it was, and nothing reaches the runner.
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            base = {"ref": "main", "plan": "fast", "suite": "fast"}
+            for option in ("with_firmware", "with_python"):
+                for build in (False, None):
+                    body = {**base, option: True}
+                    if build is not None:
+                        body["build"] = build
+                    with self.subTest(body):
+                        status, payload, _ = await self.http(
+                            "POST", "/api/targets/Host_A/runs", body
+                        )
+                        self.assertEqual(422, status, payload)
+                        self.assertIn(option, payload["detail"])
+                        self.assertIn("requires build", payload["detail"])
+            self.assertEqual({}, self.controller.runs)
+            # Nothing was sent: the next run request is the first message.
+            post, message = await self.start_run(runner, build=True)
+            self.assertEqual("run", message["type"])
+            await runner.send(
+                "run_rejected", request_id=message["request_id"], reason="done"
+            )
+            self.assertEqual(409, (await post)[0])
+
+    async def test_a_record_stored_before_the_build_options_loads(self):
+        # A run.json written by an earlier controller has neither field; it
+        # loads as the run it was, with both options off.
+        directory = self.results / "old-run"
+        directory.mkdir(parents=True)
+        (directory / "run.json").write_text(json.dumps({
+            "run_id": "old-run", "target": "Host_A", "ref": "main",
+            "plan": "fast", "suite": "fast", "tests": [], "build": True,
+            "flash_build": True, "status": "passed", "exit_code": 0,
+        }), encoding="utf-8")
+        await self.server.stop()
+        await self.start_controller()
+        run = self.controller.runs["old-run"]
+        self.assertEqual((False, False), (run.with_firmware, run.with_python))
+        self.assertEqual("passed", run.status)
+
     async def test_run_is_dispatched_streamed_and_persisted(self):
         # Recorded only: the controller never reads the runner's directory.
         runner_dir = self.root / "runner-runs" / "run-1"
@@ -571,6 +666,11 @@ class RunTests(ControllerTestCase):
                 {**base, "extra": 1},
                 {**base, "build": "yes"},
                 {**base, "flash_build": "yes"},
+                {**base, "build": True, "with_firmware": "yes"},
+                {**base, "build": True, "with_python": 1},
+                # Not a flag the API takes: the interpreter name the command
+                # line can pass to --with-python is not offered here.
+                {**base, "build": True, "with_python": "python3.12"},
                 {"ref": "main"},
             ):
                 with self.subTest(body):

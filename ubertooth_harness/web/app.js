@@ -7,6 +7,22 @@
 (function () {
   const LOG_LINES = 200;
   const LOG_LINE_CHARS = 500;
+  // The two build options beyond Build itself: the run's firmware image and
+  // the Python tools. `need` and `require` are the flags /api/plans sets on
+  // a test that leaves cases out without the option, and on one that cannot
+  // run without it at all. `cost` is the page's own note for the option,
+  // read once at start and kept as the first sentence of the note; `chosen`
+  // is the operator's own last tick, null until they make one.
+  const BUILD_OPTIONS = [
+    {
+      id: "with-firmware", what: "the run's firmware image",
+      need: "needs_firmware_build", require: "requires_firmware_build",
+    },
+    {
+      id: "with-python", what: "the Python tools build",
+      need: "needs_python_tools", require: "requires_python_tools",
+    },
+  ];
   const STATUS_TEXT = {
     pending: ["○", "pending"],
     running: ["…", "running"],
@@ -254,6 +270,8 @@
     $("suite-tests").textContent = suite
       ? `${suite.tests.map((test) => test.name).join(", ")}. ${estimateText(suite)}`
       : "";
+    // This suite may need build options the last one did not.
+    syncBuildOptions();
   }
 
   function estimateText(suite) {
@@ -280,8 +298,11 @@
       suite: $("suite").value,
       tests: [],
       build: $("build").checked,
-      // Flashing applies only to a run that builds.
+      // Flashing and the two extra build options apply only to a run that
+      // builds; the controller refuses either extra without Build.
       flash_build: $("build").checked && $("flash-build").checked,
+      with_firmware: $("build").checked && $("with-firmware").checked,
+      with_python: $("build").checked && $("with-python").checked,
     };
     if (!host || !body.ref || !body.plan || !body.suite) {
       status.textContent = "Choose a ref, plan, suite and target first.";
@@ -967,17 +988,60 @@
     });
   }
 
-  // Flash needs Build: disabled, with a note, while Build is unticked.
-  function syncFlashBuild() {
+  function neededBy(suite, need) {
+    return suite ? suite.tests.filter((test) => test[need]).map((test) => test.name) : [];
+  }
+
+  // Flash and the two build options need Build: each is disabled, with a
+  // note, while Build is unticked. Then, for each build option and the
+  // chosen suite: a suite with a test that cannot run without the option has
+  // it ticked and held there; a suite that would only leave cases out has it
+  // ticked for the operator to untick; a suite that needs neither leaves the
+  // box as the operator last had it. Every note names the tests concerned.
+  // Called whenever Build, the plan, the suite or the plan list changes.
+  function syncBuildOptions() {
     const build = $("build").checked;
     $("flash-build").disabled = !build;
     $("flash-build-note").hidden = build;
+    const suite = findSuite($("plan").value, $("suite").value);
+    const suiteName = $("suite").value;
+    for (const option of BUILD_OPTIONS) {
+      const box = $(option.id);
+      const required = neededBy(suite, option.require);
+      const needed = neededBy(suite, option.need);
+      box.checked = required.length > 0
+        || (option.chosen === null ? needed.length > 0 : option.chosen);
+      box.disabled = !build || required.length > 0;
+      const sentences = [option.cost];
+      if (required.length) {
+        sentences.push(`The ${suiteName} suite cannot run without ${option.what}: `
+          + `${required.join(", ")}.`);
+      } else if (needed.length) {
+        sentences.push(`Ticked because the ${suiteName} suite would leave cases out `
+          + `without ${option.what}: ${needed.join(", ")}. Untick to run it without them.`);
+      }
+      if (!build) {
+        sentences.push(needed.length
+          ? "Needs Build: without it the run has none of this, and those tests cannot use it."
+          : "Needs Build.");
+      }
+      $(`${option.id}-note`).textContent = sentences.join(" ");
+    }
   }
 
   function start() {
     $("run-form").addEventListener("submit", submitRun);
-    $("build").addEventListener("change", syncFlashBuild);
-    syncFlashBuild();
+    for (const option of BUILD_OPTIONS) {
+      option.cost = $(`${option.id}-note`).textContent;
+      option.chosen = null;
+      // Only a tick of the operator's own: a suite's need never becomes one,
+      // and once they have ticked or unticked it, their choice stands.
+      $(option.id).addEventListener("change", () => {
+        option.chosen = $(option.id).checked;
+      });
+    }
+    $("build").addEventListener("change", syncBuildOptions);
+    syncBuildOptions();
     $("refs-reload").addEventListener("click", loadRefs);
     $("plan").addEventListener("change", renderSuites);
     $("suite").addEventListener("change", renderSuiteTests);

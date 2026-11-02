@@ -33,6 +33,7 @@ from ubertooth_harness.learned import (
     RUN_STAGES,
     UNKNOWN,
     EstimateStore,
+    build_profile,
 )
 from ubertooth_harness.manifest import ManifestError, _safe_repository
 from ubertooth_harness.outputfiles import output_file_list
@@ -309,6 +310,38 @@ def _per_board(catalog: TestCatalog, step: TestStep) -> bool:
     return any(step.arguments.get(role) == "each" for role in roles)
 
 
+_NO_BUILD_NEEDS = {
+    "needs_firmware_build": False, "needs_python_tools": False,
+    "requires_firmware_build": False, "requires_python_tools": False,
+}
+
+
+def _build_needs(catalog: TestCatalog, test_name) -> dict:
+    """The build options a test needs: ``run-suite --with-firmware`` for the
+    run's test image, ``--with-python`` for the Python tools.
+
+    ``needs_*`` is what some case of it needs, and leaves that case out as
+    not applicable when the run does not have it; ``requires_*`` is what the
+    whole test is refused without, which implies ``needs_*``. Both are what
+    the catalog declares (``TestDefinition``), which is the only way to know
+    here: a case's own needs are known once the cases are built from the
+    host's registry resources, and this listing has no registry. A test the
+    catalog does not know needs neither.
+    """
+    try:
+        definition = catalog.get(test_name)
+    except CatalogError:
+        return dict(_NO_BUILD_NEEDS)
+    needed = definition.build_options()
+    required = definition.required_build_options()
+    return {
+        "needs_firmware_build": needed.firmware_build,
+        "needs_python_tools": needed.python_tools,
+        "requires_firmware_build": required.firmware_build,
+        "requires_python_tools": required.python_tools,
+    }
+
+
 def list_plans(
     plans_dir: Path,
     *,
@@ -319,7 +352,11 @@ def list_plans(
 
     A plan that does not load is listed with its error and no suites.
     ``runnable`` is the plan's ``runnable`` flag (false for plans of planned
-    tests, such as backlog.yaml); the GUI offers only runnable plans.
+    tests, such as backlog.yaml); the GUI offers only runnable plans. Each
+    test, and each suite that holds one such test, carries
+    ``needs_firmware_build``, ``needs_python_tools``,
+    ``requires_firmware_build`` and ``requires_python_tools``: the build
+    options a run of it should or must ask for (see ``_build_needs``).
     Estimates are per invocation: a ``per_board`` test runs once for every
     board it selects on the target, which only the run's plan (its manifest)
     counts; see planned_invocations.
@@ -351,6 +388,7 @@ def list_plans(
                     **estimate_fields(catalog, step.test_name, step.arguments,
                                       estimates=estimates, host=target),
                     "per_board": _per_board(catalog, step),
+                    **_build_needs(catalog, step.test_name),
                 }
                 for step in steps
             ]
@@ -365,6 +403,13 @@ def list_plans(
                 ),
                 "unestimated_tests": seconds.count(None),
                 "per_board_tests": sum(test["per_board"] for test in tests),
+                # True when any test in the suite needs (or cannot run
+                # without) that build option, so a client that dispatches the
+                # suite (the GUI) can ask for it.
+                **{
+                    field: any(test[field] for test in tests)
+                    for field in _NO_BUILD_NEEDS
+                },
             })
         plans.append({"name": path.stem, "title": plan.name, "error": None,
                       "runnable": plan.runnable, "suites": suites})
@@ -428,12 +473,30 @@ def planned_invocations(
     return planned
 
 
+def _builds_firmware(events: Sequence[Mapping], requested: bool) -> bool:
+    """Whether this run's build includes the firmware image.
+
+    Its own ``build_started`` record when it has one (which also covers a run
+    that built the firmware only because it flashed its boards, and a run
+    adopted from a runner report, which carries no request), else what the
+    run was asked for.
+    """
+    for event in events:
+        if not isinstance(event, Mapping) or event.get("event_type") != "build_started":
+            continue
+        details = event.get("details")
+        if isinstance(details, Mapping) and "with_firmware" in details:
+            return bool(details["with_firmware"])
+    return bool(requested)
+
+
 def run_stage_estimates(
     estimates: EstimateStore | None,
     events: Sequence[Mapping],
     host: str | None,
     *,
     build: bool = False,
+    with_firmware: bool = False,
 ) -> list[dict]:
     """What the run's build and preflight are expected to take, if known.
 
@@ -441,6 +504,9 @@ def run_stage_estimates(
     not finished a run of its own gets an empty list. Preflight scales with
     its number of checks, which the run's manifest record gives; a build is
     listed as soon as the run asks for one or its records show one started.
+    A firmware build is much the longer of the two kinds, so the estimate is
+    looked up for the kind this run builds: what its own ``build_started``
+    record says, else what the run was asked for.
     """
     if estimates is None or not host:
         return []
@@ -455,9 +521,8 @@ def run_stage_estimates(
         for event in events
     )
     if building:
-        # The runner builds host tools only, so the firmware variant is not
-        # asked for here; a stored one is still listed by /api/plans.
-        wanted.append((BUILD_STAGE, "host tools", None))
+        wanted.append((BUILD_STAGE, build_profile(_builds_firmware(
+            events, with_firmware)), None))
     if checks is not None:
         # A float, as the stored keys and /api/plans report units.
         wanted.append((PREFLIGHT_STAGE, "", {"argument": PREFLIGHT_UNITS,

@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 import unittest
 
+from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.gui import (
     ASSETS,
     WEB_DIR,
@@ -24,6 +25,7 @@ from ubertooth_harness.gui import (
     parse_ls_remote,
     run_git,
 )
+from ubertooth_harness.gui import _build_needs as build_needs
 from ubertooth_harness.plan import load_plan
 
 try:
@@ -413,6 +415,77 @@ class PlanTests(ControllerTestCase):
         self.assertAlmostEqual(sum(estimates.values()), suite["estimated_s"], places=6)
         self.assertEqual(0, suite["unestimated_tests"])
 
+    async def test_plans_say_which_build_options_a_suite_needs(self):
+        # So the GUI can ask for the image or the Python tools the chosen
+        # suite's tests need, instead of the run being refused or those
+        # tests left out (#257).
+        status, payload, _ = await self.http("GET", "/api/plans")
+        self.assertEqual(200, status)
+        plans = {plan["name"]: plan for plan in payload["plans"]}
+        suites = {
+            (name, suite["name"]): suite
+            for name, plan in plans.items() for suite in plan["suites"]
+        }
+        # slow holds DFU images and Flash reliability, which are refused
+        # without the run's image, so the suite cannot run without it.
+        slow = suites[("slow", "slow")]
+        self.assertEqual((True, True, False, False), (
+            slow["needs_firmware_build"], slow["requires_firmware_build"],
+            slow["needs_python_tools"], slow["requires_python_tools"],
+        ))
+        self.assertEqual(
+            {"DFU images", "Flash reliability"},
+            {test["name"] for test in slow["tests"] if test["requires_firmware_build"]},
+        )
+        # host needs both, and is refused without neither: each option only
+        # decides whether some cases run.
+        host = suites[("host", "host")]
+        self.assertEqual((True, False, True, False), (
+            host["needs_firmware_build"], host["requires_firmware_build"],
+            host["needs_python_tools"], host["requires_python_tools"],
+        ))
+        self.assertEqual(
+            {"DFU image checks"},
+            {test["name"] for test in host["tests"] if test["needs_firmware_build"]},
+        )
+        self.assertEqual(
+            {"Python tools"},
+            {test["name"] for test in host["tests"] if test["needs_python_tools"]},
+        )
+        # A suite of tests that need neither says so, test by test.
+        ble = suites[("ble", "ble")]
+        self.assertEqual((False, False),
+                         (ble["needs_firmware_build"], ble["needs_python_tools"]))
+        self.assertEqual(
+            [],
+            [test["name"] for test in ble["tests"]
+             if test["needs_firmware_build"] or test["needs_python_tools"]],
+        )
+        # The firmware plan needs the image and not the Python tools: the two
+        # options are reported apart.
+        firmware = suites[("firmware", "firmware")]
+        self.assertEqual((True, False), (firmware["needs_firmware_build"],
+                                         firmware["needs_python_tools"]))
+
+    def test_a_suite_of_tests_that_need_nothing_built_says_so(self):
+        fields = ("needs_firmware_build", "needs_python_tools",
+                  "requires_firmware_build", "requires_python_tools")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "elsewhere.yaml").write_text(
+                "plan: Elsewhere\nsuites:\n  quick:\n    - Host version: {}\n",
+                encoding="utf-8",
+            )
+            (suite,) = list_plans(root)[0]["suites"]
+        self.assertEqual([False] * 4, [suite[field] for field in fields])
+        self.assertEqual([False] * 4, [suite["tests"][0][field] for field in fields])
+        # A test the catalog does not know needs nothing either, rather than
+        # the listing failing over it.
+        self.assertEqual(
+            [False] * 4,
+            [build_needs(builtin_catalog(), "No such test")[field] for field in fields],
+        )
+
     def test_estimates_sum_and_broken_plans_are_listed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -617,6 +690,54 @@ class PageWiringTests(unittest.TestCase):
         self.assertIn("select.replaceChildren(...usable.map(", body)
         self.assertEqual(1, body.count("select.replaceChildren("))
         self.assertIn("Not runnable (planned tests)", body)
+
+    def test_the_build_options_are_offered_explained_and_sent(self):
+        # Both options are on the form, each with the note the operator reads
+        # about what it costs, and each is sent only with Build (#257).
+        for option, name in (("with-firmware", "with_firmware"),
+                             ("with-python", "with_python")):
+            self.assertRegex(
+                self.html,
+                rf'<input type="checkbox" id="{option}" name="{name}"'
+                rf' aria-describedby="{option}-note">',
+            )
+            note = re.search(rf'<p id="{option}-note" class="hint">([^<]+)</p>', self.html)
+            self.assertIsNotNone(note, option)
+            self.assertIn("build time", note.group(1))
+            self.assertIn(
+                f'{name}: $("build").checked && $("{option}").checked,', self.js
+            )
+        # Neither is ticked by default: a suite that needs one ticks it.
+        for option in ("with-firmware", "with-python"):
+            self.assertNotRegex(self.html, rf'id="{option}"[^>]*\bchecked\b')
+        for field in ("needs_firmware_build", "requires_firmware_build",
+                      "needs_python_tools", "requires_python_tools"):
+            self.assertIn(f'"{field}"', self.js)
+
+    def test_a_suite_that_needs_a_build_option_holds_it_ticked(self):
+        body = self.js[self.js.index("function syncBuildOptions()"):
+                       self.js.index("function start()")]
+        # Held ticked only for a suite that cannot run without the option; a
+        # suite that would only leave cases out has it ticked and untickable,
+        # and otherwise the operator's own last choice stands.
+        self.assertIn(
+            "box.checked = required.length > 0\n"
+            "        || (option.chosen === null ? needed.length > 0 : option.chosen);",
+            body,
+        )
+        self.assertIn("box.disabled = !build || required.length > 0;", body)
+        self.assertIn("cannot run without ", body)
+        self.assertIn("Untick to run it without them.", body)
+        # The note keeps the page's own cost sentence, names the tests that
+        # need the option, and says when Build is what is missing.
+        self.assertIn("const sentences = [option.cost];", body)
+        self.assertIn('needed.join(", ")', body)
+        self.assertIn("Needs Build.", body)
+        # Every path that can change what the suite needs syncs the options.
+        for caller in ("function renderSuiteTests()", "function start()"):
+            section = self.js[self.js.index(caller):]
+            self.assertIn("syncBuildOptions()", section[:section.index("\n  }")])
+        self.assertNotIn("syncFlashBuild", self.js)
 
     def test_script_has_no_html_injection_sinks(self):
         for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write",

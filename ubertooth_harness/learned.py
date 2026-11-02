@@ -630,9 +630,18 @@ def _units_pair(argument, value) -> tuple[str, float] | None:
     return (argument, number)
 
 
+def build_profile(with_firmware) -> str:
+    """The profile a build is learned under.
+
+    A firmware build takes much longer than host tools alone, so the two are
+    learned apart and an estimate is only ever shown for the kind of build a
+    run actually asks for.
+    """
+    return "with firmware" if with_firmware else "host tools"
+
+
 def _build_profile(details: Mapping) -> str:
-    """A firmware build takes much longer than host tools alone."""
-    return "with firmware" if details.get("with_firmware") else "host tools"
+    return build_profile(details.get("with_firmware"))
 
 
 def _host(value, fallback: str) -> str:

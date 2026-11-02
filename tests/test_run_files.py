@@ -514,8 +514,9 @@ class ProtocolMessageTests(unittest.TestCase):
                     status=status, reason="no")
 
     def test_the_version_says_the_pair_is_there(self):
-        # The protocol has no negotiation, so the pair arrives with a bump.
-        self.assertEqual(4, PROTOCOL_VERSION)
+        # The protocol has no negotiation, so the pair arrived with a bump:
+        # version 4, and no version since has taken it away.
+        self.assertGreaterEqual(PROTOCOL_VERSION, 4)
 
 
 class RunnerPageTests(unittest.IsolatedAsyncioTestCase):
