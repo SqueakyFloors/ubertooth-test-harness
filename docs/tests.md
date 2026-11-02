@@ -2417,8 +2417,11 @@ and the image check record in `d91bb06`
 Against a build older than `10c3381` the `read-back` step fails with
 `read-back range was not reported`, and the cleanup fails with `the read-back
 did not report the range it covers` without rewriting the image. Against one
-between `10c3381` and `31228b0` the dump matches the file, so the case passes
-for a different reason than it does now.
+between `10c3381` and `31228b0` the range is reported but nothing is filled
+in, so the dump equals the file and the comparison fails the other way:
+`vector checksum at 0x0401c is 0x00000000, expected 0x...`, because that
+field is checked against what the writer should have worked out rather than
+allowed to differ.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial, with
 every other registered board as guards. `coverage:`. Needs the firmware build

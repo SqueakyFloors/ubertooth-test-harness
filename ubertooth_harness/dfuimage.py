@@ -516,11 +516,13 @@ def readback_plan(output: str) -> ReadbackPlan | None:
 
 
 def written_problems(readback: bytes, image: bytes) -> list[str]:
-    """Why the start of ``readback`` is not ``image`` as -d writes it.
+    """Why the flash in ``readback`` does not hold ``image`` as -d writes it.
 
     A field the tool fills in is checked against what the tool should have
     worked out, and named when it does not hold it; every other byte has to
-    be the image file's own.
+    be the image file's own, and the last block's padding 0xff. This says
+    nothing about how long the dump is, so a caller can tell flash that
+    really differs from a read-back that only described itself oddly.
     """
     expected = written_image(image)
     written = readback[:len(expected)]
@@ -548,6 +550,10 @@ def written_problems(readback: bytes, image: bytes) -> list[str]:
                      if a != b)
         problems.append("application flash differs from the image at "
                         f"0x{APPLICATION_OFFSET + first:05x}")
+    padded = image_block_count(image) * BLOCK_SIZE
+    padding = readback[len(image):padded]
+    if len(readback) >= padded and padding != b"\xff" * len(padding):
+        problems.append("last block padding is not 0xff")
     return problems
 
 
@@ -570,10 +576,6 @@ def readback_problems(readback: bytes, image: bytes, *,
             problems.append(f"read-back is {len(readback)} bytes, not the "
                             f"{plan.length} the command reported")
     problems += written_problems(readback, image)
-    padded = image_block_count(image) * BLOCK_SIZE
-    padding = readback[len(image):padded]
-    if len(readback) >= padded and padding != b"\xff" * len(padding):
-        problems.append("last block padding is not 0xff")
     return problems
 
 
@@ -869,12 +871,13 @@ def restore(board: Board, image: Path, revision: str, readback: Path) -> int:
         print("Restore: board did not return to its application")
         return 1
     data = image.read_bytes()
-    problems = readback_problems(readback.read_bytes(), data, plan=read.plan)
-    if read.plan is None:
-        # A read-back that said nothing about what it covers cannot be
-        # compared at all (so there is always something in problems), and the
-        # next one would say no more: a rewrite would spend a flash cycle on
-        # a shared board for nothing.
+    dump = readback.read_bytes()
+    problems = readback_problems(dump, data, plan=read.plan)
+    if problems and not written_problems(dump, data):
+        # The flash holds the image: what is wrong is what the read-back said
+        # about itself (no range, or one that does not add up), and another
+        # read-back would say the same. A rewrite would spend a flash cycle
+        # on a shared board for nothing.
         print(f"Restore: {'; '.join(problems)}")
         return 1
     if problems:

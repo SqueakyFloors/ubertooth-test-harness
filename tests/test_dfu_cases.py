@@ -87,7 +87,8 @@ class FakeDfuBoard:
     (#199), ``double_suffix`` and ``needs_write_access`` (#200),
     ``detach_exit_1`` (#267: -d -r exits 1 after a good flash), and ``bad_readback``,
     ``bad_vector_checksum``, ``no_plan_line`` (a -u that says nothing about
-    the range it covers, as earlier builds did), ``partial_write_on_reject``,
+    the range it covers, as earlier builds did), ``odd_plan_line`` (a -u that
+    reports a range no part has), ``partial_write_on_reject``,
     ``reject_exit_zero``, ``stays_in_dfu_after_upload``, ``wrong_sign_vendor``,
     ``dfu_count_extra`` for failures no fork has shown.
 
@@ -117,6 +118,9 @@ class FakeDfuBoard:
     def plan_line(self, selected) -> str:
         """What this board's -u says it is about to read. Without a selector
         the board is already in DFU, where its part cannot be read."""
+        if self.flags.get("odd_plan_line"):
+            return ("Reading back 1024 bytes, 0x4000-0x43ff: part 0x25011722 "
+                    "(LPC1754) has 128 KiB of flash\n")
         return plan_line(self.flash_size, identified=selected is not None)
 
     def _board(self, serial, guards=()):
@@ -1109,11 +1113,9 @@ class DfuReadbackRunTests(unittest.TestCase):
         self.assertIn("vector checksum at 0x0401c", summary.failure_reason)
         self.assertIn("flash still differs after the rewrite", summary.failure_reason)
 
-    def test_a_cleanup_whose_read_back_reports_no_range_does_not_rewrite(self):
-        """Nothing a rewrite can fix: the next read-back would say no more,
-        so the cleanup fails rather than spending a flash cycle."""
+    def restore_with(self, **flags):
         image = firmware(image_check=True)
-        board = FakeDfuBoard(image, no_plan_line=True)
+        board = FakeDfuBoard(image, **flags)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             path = root / "test.dfu"
@@ -1121,11 +1123,34 @@ class DfuReadbackRunTests(unittest.TestCase):
             with redirect_stdout(io.StringIO()) as out:
                 code = dfuimage.restore(board._board(SERIAL), path, REVISION,
                                         root / "r.bin")
+        return board, code, out.getvalue()
+
+    def test_a_cleanup_whose_read_back_describes_itself_oddly_does_not_rewrite(self):
+        """The flash holds the image either way, so there is nothing a
+        rewrite could fix and another read-back would say the same: the
+        cleanup fails without spending a flash cycle on a shared board."""
+        for flags, reason in (
+            ({"no_plan_line": True}, "the read-back did not report the range it covers"),
+            ({"odd_plan_line": True},
+             "the read-back covers 1024 bytes, which is no application region "
+             "in the fork's part table"),
+        ):
+            with self.subTest(**flags):
+                board, code, output = self.restore_with(**flags)
+                self.assertEqual(1, code)
+                self.assertIn(f"Restore: {reason}", output)
+                self.assertEqual([], [command for command in board.commands
+                                      if command[0] == "ubertooth-dfu"
+                                      and "-d" in command])
+
+    def test_a_cleanup_whose_flash_differs_does_rewrite(self):
+        board, code, output = self.restore_with(bad_vector_checksum=True)
         self.assertEqual(1, code)
-        self.assertIn("Restore: the read-back did not report the range it covers",
-                      out.getvalue())
-        self.assertEqual([], [c for c in board.commands
-                              if c[0] == "ubertooth-dfu" and "-d" in c])
+        self.assertIn("Flash differs from the test image; rewriting it", output)
+        self.assertIn("Restore: flash still differs after the rewrite: vector "
+                      "checksum at 0x0401c is ", output)
+        self.assertEqual(1, len([command for command in board.commands
+                                 if command[0] == "ubertooth-dfu" and "-d" in command]))
 
     def test_a_tool_that_reports_no_range_fails_the_read_back_step(self):
         """An earlier -u said nothing about what it was reading. The step
