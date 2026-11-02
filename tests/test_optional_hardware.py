@@ -8,6 +8,7 @@ on purpose (#265).
 """
 
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -19,7 +20,7 @@ from tests.test_cli import make_source
 from ubertooth_harness import cli
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.plan import load_plan
-from ubertooth_harness.planner import PlanCompiler, PlanningError
+from ubertooth_harness.planner import PlanCompiler, PlanningError, TestInvocation
 from ubertooth_harness.resources import (
     FileResourceRegistry,
     MissingResource,
@@ -113,7 +114,7 @@ class OptionalHardwarePlanningTests(unittest.TestCase):
             (left_out,) = compiled.not_applicable
             self.assertEqual("Host_Lab", left_out.host)
             self.assertEqual("Ubertooth identity", left_out.test_name)
-            self.assertEqual("no such host in this registry", left_out.reason)
+            self.assertEqual("Host_Lab is not a host in this registry", left_out.reason)
             self.assertEqual(("Host_Lab",), compiled.absent_hosts)
             # No run is ever made for Host_Lab, so the step is part of the
             # record of whichever host does run the suite. Both hosts here
@@ -286,8 +287,8 @@ class OptionalHardwarePlanningTests(unittest.TestCase):
             self.assertEqual((), compiled.for_host("Host_Mac"))
             (item,) = compiled.for_host("Host_Linux")
             self.assertEqual(
-                "Ubertooth identity: not applicable on Host_Lab: no such host "
-                "in this registry",
+                "Ubertooth identity: not applicable on Host_Lab: Host_Lab is "
+                "not a host in this registry",
                 item.describe(),
             )
 
@@ -308,7 +309,7 @@ class OptionalHardwarePlanningTests(unittest.TestCase):
             )
             self.assertEqual(
                 [
-                    ("Host_Lab", "no such host in this registry"),
+                    ("Host_Lab", "Host_Lab is not a host in this registry"),
                     ("Host_Mac", "runs only on Linux, and Host_Mac is macOS"),
                 ],
                 [(item.host, item.reason) for item in compiled.not_applicable],
@@ -462,6 +463,60 @@ class OptionalHardwarePlanningTests(unittest.TestCase):
                     self.assertNotIsInstance(caught.exception, MissingResource)
 
 
+class RunRecordTests(unittest.TestCase):
+    """What a real run records for a step left out for an absent host."""
+
+    def test_the_run_log_and_report_carry_the_step_and_name_its_host(self):
+        from tests.test_sequencer import CollectSink, FakeExecutor, run_contract
+        from ubertooth_harness.sequencer import NamedTestSequencer
+
+        step = """    - Ubertooth identity:
+        hosts: [Host_Lab]
+        Ubertooth: default
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "hardware.yaml").write_text(HARDWARE)
+            (root / "plan.yaml").write_text(plan_text(HOST_STEP, step))
+            registry = FileResourceRegistry.load(root / "hardware.yaml")
+            compiled = PlanCompiler(builtin_catalog(), registry).compile_suite(
+                load_plan(root / "plan.yaml"), "release"
+            )
+            left_out = compiled.for_host("Host_Mac")
+            invocation = TestInvocation(
+                "001-Host version", "Host version", "Host_Mac", {"hosts": "each"}, {},
+            )
+            manifest, checks = run_contract(root, invocation)
+
+            summary = NamedTestSequencer(
+                FakeExecutor(), event_sink=CollectSink()
+            ).run(
+                (invocation,), root, run_id="named-run", manifest=manifest,
+                preflight_checks=checks, not_applicable=left_out,
+            )
+
+            self.assertTrue(summary.passed, summary.failure_reason)
+            self.assertEqual(1, summary.not_applicable_tests)
+            recorded = [
+                json.loads(line)["details"]
+                for line in (root / "run.jsonl").read_text().splitlines()
+                if json.loads(line)["event_type"] == "not_applicable"
+            ]
+            self.assertEqual(
+                [("Host_Lab", "Ubertooth identity",
+                  "Host_Lab is not a host in this registry")],
+                [(item["host"], item["test_name"], item["reason"])
+                 for item in recorded],
+            )
+            report = (root / "report.md").read_text()
+            self.assertIn("## Not applicable", report)
+            self.assertIn(
+                "| Ubertooth identity | (whole test) | Host_Lab | Host_Lab is "
+                "not a host in this registry |",
+                report,
+            )
+
+
 class DryRunTests(unittest.TestCase):
     """What run-suite would do: the step is left out, and it says so."""
 
@@ -493,8 +548,8 @@ class DryRunTests(unittest.TestCase):
 
         self.assertEqual(0, code)
         self.assertIn(
-            "Ubertooth identity: not applicable on Host_Lab: no such host in "
-            "this registry",
+            "Ubertooth identity: not applicable on Host_Lab: Host_Lab is not "
+            "a host in this registry",
             text,
         )
         # The total does not claim the skip was this host's doing; each

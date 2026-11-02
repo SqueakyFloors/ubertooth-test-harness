@@ -584,7 +584,8 @@ def _known(value) -> str:
 
 
 def _not_applicable_section(run: _Run) -> list[str]:
-    """What the run left out because the host cannot run it, and why."""
+    """What the run left out, and why: the host named cannot run it, or this
+    bench has not got the hardware it binds."""
     if not run.not_applicable:
         return []
     lines = [

@@ -707,7 +707,10 @@ placement each role must have), and a step no host that is here can run that
 way is still a `PlanningError`; only the hosts left after that are asked for
 the hardware, and a step none of them has it for is left out. A host alias
 the registry has not got runs nothing at all, so `CompiledSuite.for_host`
-reports what it left out to every host. `PlanCompiler.compile_suite(strict_hardware=True)` makes
+reports what it left out to the hosts that are here, one record per test: a
+host that runs that test, or that has its own reason for leaving it out,
+keeps its own, since the live run view matches a planning record to its test
+by name. `PlanCompiler.compile_suite(strict_hardware=True)` makes
 the same absence a `PlanningError` instead, and `validate-plan --hardware`
 uses it: a registry named on the command line is the bench being checked
 against, so a host or role it cannot provide is a typo or a bench set up

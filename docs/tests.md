@@ -54,7 +54,10 @@ is left out before the run as not applicable, the same way a platform
 mismatch is. So a plan every host runs may still hold a step for hardware
 only one bench has. What a host that is here cannot run is still a plan
 error: a platform it does not have, and a board placed differently from what
-the test needs, fail planning when no other named host can run the step.
+the test needs, fail planning when no other named host can run the step; so
+do two absences that are still to be decided, `alternate Ubertooths` on a
+one-board host and `exclusive Ubertooth` with an unmapped board
+([#269](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/269)).
 `validate-plan --hardware <registry>` refuses the absence too, since there
 the bench is named on purpose (README, "Hardware a registry has not got").
 

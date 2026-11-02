@@ -93,19 +93,21 @@ class CompiledSuite:
         what a host the registry has not got was left out of, since no run of
         its own will ever carry that. Each item names its own host.
 
-        A test this host does run is not reported absent to it: the live
-        checklist matches a planning item to the test by name, so saying
-        both would leave the test's own row marked not applicable. A second
-        step naming the same test for an absent host is then not recorded
-        here, which is the lesser loss.
+        One record per test, and nothing about a test this host runs: the
+        live run view matches a planning record to the test by name, so a
+        second record would mark the test's own row not applicable, or show
+        the test twice. A step this host has its own reason for keeps that
+        reason, which says more to the host running it. So a second step
+        naming the same test for an absent host is not recorded here.
         """
-        running = {
+        mine = tuple(item for item in self.not_applicable if item.host == host)
+        covered = {item.test_name for item in mine}
+        covered |= {
             item.test_name for item in self.invocations if item.host == host
         }
-        return tuple(
+        return mine + tuple(
             item for item in self.not_applicable
-            if item.host == host
-            or (item.host in self.absent_hosts and item.test_name not in running)
+            if item.host in self.absent_hosts and item.test_name not in covered
         )
 
 
@@ -311,9 +313,14 @@ class PlanCompiler:
                 )
                 hosts, absent = self._selected_hosts(host_selector, strict_hardware)
                 absent_hosts.update(absent)
+                # The reason names the host itself: the live run view shows a
+                # planning record by its reason alone, and "this registry has
+                # no such host" there would read as being about the host the
+                # run is on.
                 left_out = [
                     NotApplicable(
-                        alias, step.test_name, "no such host in this registry"
+                        alias, step.test_name,
+                        f"{alias} is not a host in this registry",
                     )
                     for alias in absent
                 ]

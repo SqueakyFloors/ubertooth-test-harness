@@ -204,7 +204,12 @@ class ResourceRegistry(Protocol):
         role: str | None = None,
     ) -> tuple[str, ...]:
         """Those of them whose RF placement satisfies the requirement, and
-        which may be bound to ``role`` when one is given."""
+        which may be bound to ``role`` when one is given.
+
+        ``resolve_hardware`` answers the same way for ``default``, and for
+        ``each`` with a requirement. ``each`` without one is by type alone,
+        as it always has been.
+        """
 
     def resolve_hardware(
         self,
