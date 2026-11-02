@@ -210,9 +210,11 @@ has no `power:` mapping
 
 What a host here cannot run is decided first, and has not changed: a platform
 the step does not list, and a board placed differently from what the test
-needs, leave that host out, and a step no host that is here can run this way
-still fails planning. Only when the hosts that could have run it have not got
-the hardware is the step left out.
+needs, leave that host out, and a step whose every named host is here and
+cannot run it this way still fails planning. Only when the hosts that could
+have run it have not got the hardware is the step left out — and a step that
+names a host this registry has not got is left out either way, since the host
+that would have run it is not here to be judged.
 
 `validate-plan --hardware <registry>` is the strict one: there the registry
 is named on purpose, so the same absence fails, which is what catches a plan

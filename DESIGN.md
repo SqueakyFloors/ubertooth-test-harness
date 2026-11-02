@@ -703,8 +703,11 @@ test binds (`resources.MissingResource`), are recorded as not applicable and
 left out, so a step for one bench's hardware does not stop every other bench
 running the plan. The order matters: each selected host is first judged on
 what it can run at all (`platforms:`, the definition's needs, and the RF
-placement each role must have), and a step no host that is here can run that
-way is still a `PlanningError`; only the hosts left after that are asked for
+placement each role must have), and a step whose every named host is here and
+cannot run it that way is still a `PlanningError` — with a host the registry
+has not got among those named, the step is left out instead, since the host
+that would have run it is not here to be judged; only the hosts left are
+asked for
 the hardware, and a step none of them has it for is left out. A host alias
 the registry has not got runs nothing at all, so `CompiledSuite.for_host`
 reports what it left out to the hosts that are here, one record per test: a

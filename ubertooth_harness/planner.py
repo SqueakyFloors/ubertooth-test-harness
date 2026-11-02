@@ -81,7 +81,8 @@ class TestInvocation:
 @dataclass(frozen=True)
 class CompiledSuite:
     invocations: tuple[TestInvocation, ...]
-    # Tests a selected host cannot run (test-wide needs); one per host.
+    # Tests left out: what a selected host cannot run (test-wide needs, RF
+    # placement), and what this registry has not got the hardware for.
     not_applicable: tuple[NotApplicable, ...] = ()
     # Host aliases a step named that this registry has not got. No run is
     # ever made for them, so what they left out belongs to the record of
@@ -105,10 +106,15 @@ class CompiledSuite:
         covered |= {
             item.test_name for item in self.invocations if item.host == host
         }
-        return mine + tuple(
-            item for item in self.not_applicable
-            if item.host in self.absent_hosts and item.test_name not in covered
-        )
+        absent = []
+        for item in self.not_applicable:
+            if item.host not in self.absent_hosts or item.test_name in covered:
+                continue
+            # Two steps may name the same test for two hosts the registry has
+            # not got; this run says it once.
+            covered.add(item.test_name)
+            absent.append(item)
+        return mine + tuple(absent)
 
 
 class PlanCompiler:

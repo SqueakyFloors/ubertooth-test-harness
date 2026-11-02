@@ -812,7 +812,8 @@ def _run_suite(args: argparse.Namespace) -> int:
         if invocation.host == args.host
         and (not selected_names or invocation.test_name in selected_names)
     )
-    # Whole tests this host cannot run (hostneeds.py), recorded, not run.
+    # Whole tests left out at planning (hostneeds.py, planner.py): what this
+    # host cannot run, and what this bench has not got the hardware for.
     not_applicable = tuple(
         item for item in compiled.for_host(args.host)
         if not selected_names or item.test_name in selected_names

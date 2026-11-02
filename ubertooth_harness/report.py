@@ -154,8 +154,9 @@ class _Run:
                 record = open_tests.get(details.get("invocation_id"))
                 if record is not None:
                     record["finished"] = event
-        # Left out before the run because the host cannot run them
-        # (hostneeds.py): neither skipped nor failed.
+        # Left out before the run, because the host named cannot run them or
+        # this bench has not got the hardware (hostneeds.py, planner.py):
+        # neither skipped nor failed.
         self.not_applicable = [
             e.get("details", {}) for e in self.events
             if e["event_type"] == "not_applicable"

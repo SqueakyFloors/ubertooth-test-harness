@@ -26,6 +26,7 @@ from ubertooth_harness.resources import (
     MissingResource,
     RegistryError,
 )
+from ubertooth_harness.rf import PlacementRequirement
 
 
 # A Linux host with two Ubertooths and a DK registered as the advertiser, and
@@ -366,6 +367,15 @@ class OptionalHardwarePlanningTests(unittest.TestCase):
                 r"\(DK_Linux0 declares peripheral\)",
             ):
                 self.compile(directory, (step,), hardware)
+            registry = FileResourceRegistry.load(
+                Path(directory) / "hardware.yaml"
+            )
+            # Absence, not the placement refusal it would have been.
+            with self.assertRaises(MissingResource):
+                registry.resolve_hardware(
+                    "Host_Linux", "nRF52840 DK", "default", "advertiser",
+                    PlacementRequirement(min_attenuation_db=10),
+                )
 
     def test_a_suite_with_nothing_this_registry_can_run_is_still_an_error(self):
         with tempfile.TemporaryDirectory() as directory:
