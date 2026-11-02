@@ -52,8 +52,8 @@ been shown about whether 20 dB at a meter damages packets: a completed round
 trip is not evidence that none were damaged, since the range test keeps the
 first reply of up to sixteen copies and reports only the lowest level and
 copy that got through. So the checks that turn on error flags, recovery under
-errors, or an access-code error threshold are pointed at the 40 dB board the
-bench is getting rather than at 20 dB, following the issue's own request for
+errors, or an access-code error threshold are pointed at the bench's 40 dB
+receiver rather than at 20 dB, following the issue's own request for
 a larger figure, and `CHECKS` carries the measurement each one still needs
 instead of a threshold inferred from the runs above.
 
@@ -72,11 +72,17 @@ from typing import Mapping
 
 from ubertooth_harness.rf import NORMAL_LINK, PlacementError, PlacementRequirement
 
-# Attenuations the bench has been measured at, in dB. A runnable plan may
-# only point a test at one of these (plan.check_runnable); the rest are
-# attenuators the maintainer can fit on request.
+# Attenuations the bench has been MEASURED at, in dB. A runnable plan may
+# only point a test at one of these (plan.check_runnable).
+#
+# Fitted is not measured, and this list tracks the second. A 40 dB receiver
+# has been on the bench and in the registry since 2026-11-02, so a 40 dB
+# entry can now be planned and run by hand; it joins this list when a run has
+# produced the figures its checks would be judged against, and not before.
+# The maintainer's attenuators stack in 1, 3, 5, 10, 20 and 30 dB steps, so
+# 20 and 40 dB are the current measurement points rather than fixed limits.
 MEASURED_ATTENUATIONS_DB: tuple[float, ...] = (20.0,)
-# Attenuations the weak-link checks ask for and the bench has not had yet.
+# Attenuations the weak-link checks ask for, which no run has characterized.
 PLANNED_ATTENUATIONS_DB: tuple[float, ...] = (30.0, 40.0)
 
 
