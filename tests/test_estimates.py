@@ -166,15 +166,15 @@ class EstimateTests(unittest.TestCase):
         # The release plan run at fork 7bb07c9 took 621.0 s of test time, and
         # Failed capture files (comprehensive, measured on the same macOS
         # host) adds 15.1 s, and Interrupting a capture 18.5 s, the middle of
-        # three runs on the Linux bench host. The release suite is the
-        # non-soak release gate and is kept well inside half an hour of test
-        # time. Every entry in it runs on each registered host, so a test
-        # that needs a device only one host has (the ESP32 Classic peers)
-        # lives in its own plan instead: naming a host here would fail
-        # planning on the others.
+        # three runs on the Linux bench host. Recover AFH map (smoke, two
+        # two-minute captures) adds 520.0 s: it is release coverage, and the
+        # one entry that names the bench host its ESP32 Classic peers are on,
+        # which `required hardware: true` makes safe (#250). The suite is the
+        # non-soak release gate; half an hour of test time is the planning
+        # target it is kept inside, not a cap (#250).
         plans = {plan["name"]: plan for plan in list_plans(REPOSITORY / "testplans")}
         (suite,) = plans["release"]["suites"]
-        self.assertAlmostEqual(654.6, suite["estimated_s"], delta=0.2)
+        self.assertAlmostEqual(1174.6, suite["estimated_s"], delta=0.2)
         self.assertLessEqual(suite["estimated_s"], 30 * 60)
 
 

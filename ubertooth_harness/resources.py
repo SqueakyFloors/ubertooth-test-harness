@@ -55,6 +55,11 @@ class MissingRequiredHardware(RegistryError):
     planning records the step as blocked (``hostneeds.Blocked``), runs
     everything unrelated, and fails the run. ``validate-plan --hardware``
     refuses it outright, as it does every other absence.
+
+    A plan step may say the same of the hardware it binds, with
+    ``required hardware: true``: there the host or the device is missing in
+    the registry's own words (``MissingResource``), and the planner records
+    it as blocked rather than not applicable.
     """
 
 

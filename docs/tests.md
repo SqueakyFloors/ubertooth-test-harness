@@ -2203,9 +2203,17 @@ attenuated or more distant receiver) if a run's skirt makes it ambiguous.
 peers must run `utesp-1.3.0` or a later 1.x image, which is where `afh` and
 the link map arrived; an older one fails the case naming what it found. No
 `rf:` default, so a plan may place the receiver anywhere; two minutes is the
-capture window the classic plan uses. The release plan does not name it:
-every entry there runs on each registered host, and naming the one host the
-peers are attached to would fail planning on the others.
+capture window both plans that hold it use.
+
+The release plan holds it too, as the `smoke` profile, and it is the one
+entry there that names a bench host, because the peers are on one host. It
+carries `required hardware: true`, so the naming costs the other benches
+nothing and hides nothing either: a registry without those peers, or without
+that host, runs every other release test and records this one as blocked, and
+the run finishes failed rather than passing with the recovery unmeasured. Its
+smoke estimate is about 520 s, which takes the release suite to about 1175 s
+(roughly 20 minutes). The third, `-t` case stays in the
+`classic-comprehensive` suite, which a release runs alongside the gate.
 
 **Expected outcome.** Smoke runs 2 cases, one per map: channels 0 to 39, and
 channels 30 to 49, the twenty the spec allows at least and the firmware's own

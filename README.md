@@ -141,7 +141,11 @@ Every test accepts `platforms:` (`linux`, `macos`, no duplicates) beside its
 
 Every test that binds hardware also accepts `rf:`, which asks for a board by
 where it sits on the bench, one requirement per hardware role (see
-[RF placement](#rf-placement-where-a-board-sits-on-the-bench)).
+[RF placement](#rf-placement-where-a-board-sits-on-the-bench)), and
+`required hardware: true`, which says the hardware that step names is what
+the step is there to measure: a registry without it blocks the step and fails
+the run instead of leaving it out (see
+[Hardware a step is about](#hardware-a-step-is-about-blocked-not-left-out)).
 
 The two select separately: `hosts:` says which registered hosts the step may
 run on, `platforms:` which of them can run it. A host whose platform the step
@@ -195,14 +199,19 @@ a host whose platform the step does not list:
 - an explicit device alias this registry does not have (`this registry has no
   Ubertooth 'UT_Lab7'`).
 
-So the release plan, which every registered host runs, can hold a step for
-hardware only the bench host has: the other hosts, and the other registries,
-record it and run the rest. A suite with nothing this registry can run is
-still an error, and it names the first few steps it left out. A host this
-registry has not got never runs anything of its own, so what it left out is
-recorded in the runs of the hosts that are here, and `run-suite --dry-run`
-lists it; one record per test, so a host that runs that test, or has its own
-reason for leaving it out, keeps its own.
+So a plan every registered host runs can hold a step for hardware only the
+bench host has: the other hosts, and the other registries, record it and run
+the rest. Where such a step is a gate rather than a convenience, the plan
+says `required hardware: true` and the record fails the run instead (the next
+section); the release plan's one peer step does.
+
+A suite with nothing this registry can run is still an error, and it names
+the first few steps it left out. A host this registry has not got never runs
+anything of its own, so what it left out is recorded in the runs of the hosts
+that are here, and `run-suite --dry-run` lists it; one record per test, so a
+host that runs that test, or has its own reason for leaving it out, keeps its
+own. A blocked record for such a host is carried the same way, by every run
+of the suite.
 
 What a host here cannot run is decided first, and has not changed: a platform
 the step does not list, and a board placed differently from what the test
@@ -246,7 +255,19 @@ the subject of the test rather than something it merely binds:
   Host_Linux, which has one`);
 - `exclusive Ubertooth: true` where another registered board on the host is on
   no power controller (`extra Ubertooth UT_Linux1 has no power mapping, so it
-  cannot be switched off to leave UT_Linux0 alone`).
+  cannot be switched off to leave UT_Linux0 alone`);
+- a step that says so itself with `required hardware: true`, for the hardware
+  it binds. That is how a gate suite holds a test for peer hardware: a host
+  with no peer registered (`host Host_Linux has no default ESP32 Classic peer
+  for the acceptor role`), and a registry without that host at all
+  (`Host_Linux is not a host in this registry`), are both blocked rather than
+  left out. `testplans/release.yaml` uses it for `Recover AFH map`, the one
+  entry there that names a bench host. A step without the argument, or with
+  it written `false`, is left out as before.
+
+The argument is about absence only. What a host here cannot run at all — its
+platform, or a board placed differently from what the test needs — is decided
+first and is unchanged by it.
 
 Such a step is recorded as **blocked** before anything runs, and it is left
 out of the invocations so every unrelated step in the suite still compiles and
@@ -268,10 +289,11 @@ was: the refusal names the blocked step, and there is no run to fail. That is
 what `mac-polling` does on a bench with an unmapped board, since it names one
 step and one board (`Ubertooth: default`). `testplans/exclusive.yaml` names
 one step but `Ubertooth: each`, so the step runs for every board that can be
-left alone, is blocked for the rest, and the run fails. A mixed suite — one
-holding a blocked step beside steps that run — behaves the same way; no
-committed plan is one today, since `exclusive Ubertooth` appears only in those
-two and `alternate Ubertooths` in none.
+left alone, is blocked for the rest, and the run fails. A mixed suite, one
+holding a blocked step beside steps that run, behaves the same way:
+`testplans/release.yaml` is that suite on a bench without the ESP32 Classic
+peers, where every other release test runs and the run fails on the one gate
+it could not measure.
 
 A `power:` mapping that is present but wrong (an unknown controller, a port
 the controller has not got, a controller that cannot switch one) is a registry
@@ -767,11 +789,21 @@ python -m ubertooth_harness run-suite \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref main --output runs
 ```
 
-Every test in that plan runs on any target, so the tests that need a peer
-device are not in it: run the `ble`, `connection`, `classic`, and `btbr`
-suites as well, wherever those devices are registered. The `btbr` suite is the
-only coverage of `ubertooth-btbr` and of the `btbr` firmware image, and it
-needs `--build --with-firmware --with-python`.
+All but one test in that plan runs on any target. The exception is
+`Recover AFH map`, which needs the two ESP32 Classic peers and so names the
+Linux host they are on; it carries `required hardware: true`, so a bench
+without them runs the rest of the plan and the run fails on it rather than
+passing with that gate unmeasured (see
+[Hardware a step is about](#hardware-a-step-is-about-blocked-not-left-out)).
+It runs the `smoke` profile there, about 520 s of the plan's roughly 1175 s.
+
+The other tests that need a peer device are not in the plan: run the `ble`,
+`connection`, `classic`, and `btbr` suites as well, wherever those devices
+are registered. The `btbr` suite is the only coverage of `ubertooth-btbr` and
+of the `btbr` firmware image, and it needs `--build --with-firmware
+--with-python`. The `classic` suite repeats the gate's two AFH captures;
+`classic-comprehensive` runs them with the third, `-t` detection case as
+well, so it is the one to run after the gate.
 
 | Test | `smoke` (fast plan) | `comprehensive` (release plan) |
 |------|---------------------|--------------------------------|

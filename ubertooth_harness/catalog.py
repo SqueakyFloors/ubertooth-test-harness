@@ -42,6 +42,11 @@ class CatalogError(ValueError):
 # pass/fail measure for one test (watchdog.py).
 WATCHDOG_LIMIT_ARGUMENT = "max_watchdog_resets"
 
+# The plan argument that makes one step's hardware part of what the step
+# measures: without it the step is blocked and the run fails, rather than
+# being left out as not applicable (planner.py, hostneeds.Blocked).
+REQUIRED_HARDWARE_ARGUMENT = "required hardware"
+
 _MISSING = object()
 _DURATION_RE = re.compile(r"^([1-9][0-9]*)(ms|s|m|h)$")
 
@@ -594,6 +599,12 @@ PLATFORMS_ARGUMENT = ArgumentRule(_platforms)
 # Every test that binds hardware accepts `rf:` (builtin_catalog adds it), one
 # placement requirement per hardware role. Optional, like `platforms:`.
 RF_ARGUMENT = ArgumentRule(_rf)
+# Every test that binds hardware accepts `required hardware:` (builtin_catalog
+# adds it), so a plan can say that one step's hardware is what the step is
+# there to measure. Optional, like `platforms:`: a step that leaves it out,
+# or writes it false, is left out where this registry has not got its
+# hardware, as before.
+REQUIRED_HARDWARE = ArgumentRule(_boolean)
 DURATION = ArgumentRule(_duration, required=True)
 SAMPLE_EVERY = ArgumentRule(_duration, required=True)
 COVERAGE = ArgumentRule(_coverage, required=True)
@@ -1725,14 +1736,28 @@ def builtin_catalog() -> TestCatalog:
         ]
     )
     return TestCatalog(
-        _accept_rf(_accept_watchdog_limit(_accept_platforms(
+        _accept_required_hardware(_accept_rf(_accept_watchdog_limit(_accept_platforms(
             replace(
                 definition,
                 estimates=ESTIMATES.get(definition.name),
                 rf_defaults=RF_DEFAULTS.get(definition.name),
-            ))))
+            )))))
         for definition in definitions
     )
+
+
+def _accept_required_hardware(definition: TestDefinition) -> TestDefinition:
+    """Accept `required hardware:` on every test that binds hardware.
+
+    A test that binds none has no hardware a registry could be without, so
+    it cannot take the argument, as it cannot take `rf:`.
+    """
+    if (not definition.hardware_roles
+            or REQUIRED_HARDWARE_ARGUMENT in definition.arguments):
+        return definition
+    arguments = dict(definition.arguments)
+    arguments[REQUIRED_HARDWARE_ARGUMENT] = REQUIRED_HARDWARE
+    return replace(definition, arguments=MappingProxyType(arguments))
 
 
 def _accept_rf(definition: TestDefinition) -> TestDefinition:

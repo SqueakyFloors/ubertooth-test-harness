@@ -245,13 +245,19 @@ class PlanTests(unittest.TestCase):
                 self.assertEqual(coverage, found[0].arguments["coverage"])
                 self.assertEqual("2m", found[0].arguments["duration"])
 
-    def test_the_release_plan_does_not_name_it(self):
-        # Every release entry runs on each registered host, and this test
-        # needs the ESP32 peers, which one host has: naming a host there
-        # fails planning on the others rather than skipping.
+    def test_the_release_plan_holds_it_as_required_hardware(self):
+        # The peers are on one host, so this is the one release entry that
+        # names a host. `required hardware: true` is what makes that
+        # honest: a bench without them runs the rest of the plan and fails
+        # on this step rather than leaving the gate unmeasured (#250).
+        # tests/test_release_peer_gate.py compiles it both ways.
         plan = load_plan(ROOT / "testplans" / "release.yaml", builtin_catalog())
-        self.assertEqual([], [step for step in plan.steps("release")
-                              if step.test_name == TEST])
+        (step,) = [step for step in plan.steps("release")
+                   if step.test_name == TEST]
+        self.assertIs(True, step.arguments["required hardware"])
+        self.assertEqual(("Host_Linux",), step.arguments["hosts"])
+        self.assertEqual("smoke", step.arguments["coverage"])
+        self.assertEqual("2m", step.arguments["duration"])
 
 
 if __name__ == "__main__":
