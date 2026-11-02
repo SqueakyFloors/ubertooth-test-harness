@@ -2357,8 +2357,8 @@ word and symbol (colour only reinforces it).
   and "Build the Python tools too" (`--with-python`); Run starts the whole suite.
   Each of those two carries a note saying what it costs and follows what the
   chosen suite needs. A suite with a test that cannot run without the option
-  (`DFU images` and `Flash reliability` without the run's image) has it
-  ticked and held there. A suite that would only leave cases out without it
+  (`DFU images`, and `Flash reliability` where its plan entry's `image
+  sequence:` names the run's own image) has it ticked and held there. A suite that would only leave cases out without it
   (`DFU image checks` without the image, `Python tools` without the Python
   build) is named in the note, which invites the tick but does not tick it:
   a build nobody asked for costs time, and the firmware build needs

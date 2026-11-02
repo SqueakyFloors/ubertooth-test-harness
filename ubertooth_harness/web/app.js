@@ -293,8 +293,8 @@
     return ` This suite also needs ${wanted.join(", ")},`
       + ` ${wanted.length > 1 ? "images" : "an image"} no build makes,`
       + ` for ${tests.join(", ")}: run it on the target with run-suite`
-      + ` ${artifacts}. A run started here builds, flashes the boards, and is`
-      + " then refused before its tests.";
+      + ` ${artifacts}. A run started here builds first, and flashes whatever`
+      + " it would flash, before it is refused without running a test.";
   }
 
   function estimateText(suite) {
