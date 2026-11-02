@@ -983,19 +983,22 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # For the scan that is a whole BlueZ inquiry per -s case, because the
     # tool arms the alarm -t asks for only after the inquiry has run, plus a
     # name read per device either half found; -x then fetches a report from
-    # each of them over a connection, which is the one case here that can
-    # take minutes. Two cases in smoke, three comprehensive.
+    # each of them over a connection. This is what the cases are expected to
+    # cost, not the deadlines they are allowed: `ubertooth-scan` ends its own
+    # sweep, so a healthy run finishes well inside them. Two cases in smoke,
+    # three comprehensive; the -x case is reckoned at about a minute.
     "Bluetooth inquiry scan": _profiles(
-        Estimate(70.0, per_duration=2), Estimate(200.0, per_duration=3)
+        Estimate(80.0, per_duration=2), Estimate(145.0, per_duration=3)
     ),
-    # ESTIMATE_PENDING_HW: the same bring-up, plus the setup allowance, which
-    # the driver waits out whatever the page really cost, because it is the
-    # driver that ends the command. That is 52 s a case and 55.6 s with -a,
-    # against a 25 s duration, so the fixed part carries the difference: two
-    # cases in smoke (20 s bring-up plus 27 s of allowance each, and 3.6 s
-    # more for -a), three comprehensive.
+    # ESTIMATE_PENDING_HW. Unlike the scan, this tool bounds nothing itself:
+    # the driver ends the command, so a case costs its whole window whatever
+    # the page really took. The window is the duration plus FOLLOW_SETUP_S
+    # (52 s), and 3.6 s more for -a, so the fixed part is the allowance plus
+    # the pair's bring-up: smoke 2 * 52 + 3.6 + 2 * 20 of bring-up and about
+    # 8 s of board reads and cleanup each, comprehensive three cases of the
+    # same.
     "Follow Classic piconet over HCI": _profiles(
-        Estimate(115.0, per_duration=2), Estimate(170.0, per_duration=3)
+        Estimate(165.0, per_duration=2), Estimate(245.0, per_duration=3)
     ),
 })
 

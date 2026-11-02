@@ -20,6 +20,7 @@ from ubertooth_harness.bluez_cases import (
     adapter,
     follow_over_hci_cases,
     AFH_READ_S,
+    BOARD_SETUP_S,
     EXTENDED_REPORT_S,
     FOLLOW_SETUP_S,
     INQUIRY_MIN_S,
@@ -344,9 +345,9 @@ class InquiryCaseTests(unittest.TestCase):
         """ubertooth-scan arms its -t alarm only after the BlueZ inquiry."""
         with_s = driver_argv(scan_cases()["inquiry"])
         without = driver_argv(scan_cases()["survey"])
-        self.assertEqual(str(25 + INQUIRY_S + NAME_READS_S + 5.0),
+        self.assertEqual(str(25 + INQUIRY_S + NAME_READS_S + BOARD_SETUP_S + 5.0),
                          with_s[with_s.index("--timeout") + 1])
-        self.assertEqual(str(25 + NAME_READS_S + 5.0),
+        self.assertEqual(str(25 + NAME_READS_S + BOARD_SETUP_S + 5.0),
                          without[without.index("--timeout") + 1])
         self.assertGreater(float(with_s[with_s.index("--timeout") + 1]),
                            float(without[without.index("--timeout") + 1]))
@@ -355,7 +356,8 @@ class InquiryCaseTests(unittest.TestCase):
         """-x fetches a report over a connection per device it found."""
         argv = driver_argv(scan_cases("comprehensive")["extended-report"])
         self.assertEqual(
-            str(25 + INQUIRY_S + NAME_READS_S + EXTENDED_REPORT_S + 5.0),
+            str(25 + INQUIRY_S + NAME_READS_S + BOARD_SETUP_S
+                + EXTENDED_REPORT_S + 5.0),
             argv[argv.index("--timeout") + 1])
         plain = driver_argv(scan_cases()["inquiry"])
         self.assertGreater(float(argv[argv.index("--timeout") + 1]),
@@ -374,8 +376,8 @@ class InquiryCaseTests(unittest.TestCase):
             with self.subTest(case_id):
                 cleanup = [step.step_id for step in case.cleanup]
                 self.assertEqual(
-                    ["adapter-free", "reset-initiator", "reset-acceptor",
-                     "cleanup-stop"], cleanup[:4])
+                    ["adapter-free", "adapter-still-up", "reset-initiator",
+                     "reset-acceptor", "cleanup-stop"], cleanup[:5])
                 self.assertEqual("restored-device-identity", cleanup[-1])
 
     def test_every_case_checks_the_adapter_is_free_before_the_tool_runs(self):
@@ -533,6 +535,17 @@ class AdapterStepTests(unittest.TestCase):
         self.assertEqual(("hcitool", "-i", fake_bluez.ADAPTER, "con"),
                          step.resolve_argv({}))
         self.patterns(step, fake_bluez.hcitool_con())
+
+    def test_the_cleanup_also_rereads_the_adapter_itself(self):
+        """hcitool con lists links only for a controller that is up, so a
+        free read alone would pass for an adapter that went away."""
+        case = follow_cases()["follow-target"]
+        step = next(s for s in case.cleanup if s.step_id == "adapter-still-up")
+        self.assertEqual(("hciconfig", fake_bluez.ADAPTER),
+                         step.resolve_argv({}))
+        self.patterns(step, fake_bluez.hciconfig(up=True))
+        self.assertNotRegex(fake_bluez.hciconfig(up=False),
+                            re.compile(r"(?m)^\s+UP\b"))
 
     def test_any_link_left_on_the_adapter_fails_the_read(self):
         """Any link, not the peers' addresses: -x pages the 00:00: address

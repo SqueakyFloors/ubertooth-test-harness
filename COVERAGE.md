@@ -350,7 +350,7 @@ A stray word, `-h stray`, a bare `-`, and `-- -x` are refused with `error: unexp
 | `-d <file>` | binary dump | Partial | Capture needs a piconet (Hard). Refused command lines (no Ubertooth, smoke, Linux only: not applicable on macOS): a stray word, `-h`, or `-e 9` after it creates no file and leaves an existing one unchanged; `-d` twice with `-h` (comprehensive) |
 | `-a` | enable AFH | Hard | Follow Classic piconet over HCI (smoke): the map of the link the page made is read over HCI, printed, and handed to the board. Which channels it holds is not checked, because it is the map of that link rather than of the pair's own piconet. Same wait for an adapter |
 | `-b <hciN>` | HCI device | Hard | Follow Classic piconet over HCI: the adapter the registry names. Same wait for an adapter |
-| `-w <slots>` | USB delay | Not covered | No case passes it, so the follow runs with the default of 5 slots |
+| `-w <slots>` | USB delay | Hard | Needs an adapter and a piconet; no case passes it, so the follow runs with the default of 5 slots |
 
 A stray word with no file option, `-h stray`, a bare `-`, and `-- -x` are refused with `error: unexpected argument '<word>'` and exit 1 before any HCI device or board (one argument rule, `ubertooth-follow.md` ARGUMENTS): Covered (Refused command lines, no Ubertooth; `follow stray` in smoke, the rest comprehensive; Linux only).
 

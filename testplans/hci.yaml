@@ -23,14 +23,16 @@ plan: BlueZ tools with a host Bluetooth adapter
 # piconet, as the classic plan records: the Ubertooth sweeps 79 channels and
 # decodes about one packet of the piconet a second.
 #
-# A `duration:` here is the capture alone, and neither tool's command is that
-# long. `ubertooth-scan` arms the alarm `-t` asks for only after its BlueZ
-# inquiry has run, so `-s` adds a whole inquiry (about 10 s) on top, and both
-# halves page each device they found for its name. `ubertooth-follow` has no
-# capture timeout at all: the driver ends it, and the page (up to 25 s) and
-# the clock reads happen inside the window it is given, so that window is the
-# capture plus the setup. The cases allow for both in their own deadlines; a
-# run of this plan takes a good deal longer than the sum of its durations.
+# A `duration:` here is a floor on the capture, and neither tool's command is
+# that long. `ubertooth-scan` arms the alarm `-t` asks for only after its
+# BlueZ inquiry has run, so `-s` adds a whole inquiry (about 10 s) on top, and
+# both halves page each device they found for its name. `ubertooth-follow` has
+# no capture timeout at all: the driver ends it, and the page (up to 25 s),
+# the clock reads, the teardown of the link it made, and the board setup all
+# happen inside the window it is given, so that window is the capture plus an
+# allowance for all of it -- about 77 s for a 25 s duration. The cases carry
+# those allowances; a run of this plan takes several times the sum of its
+# durations. The estimates in catalog.py have the figures.
 suites:
   hci:
     - Bluetooth inquiry scan:

@@ -898,16 +898,14 @@ does:
 | `nRF52840 DK` | Bluetooth LE | `ubertooth_harness/nrfdk.py` | `firmware/nrf52840dk` |
 | `ESP32 Classic peer` | Classic Bluetooth (BR/EDR) | `ubertooth_harness/esp32peer.py` | `firmware/esp32-classic-peer` |
 
-A third radio, the host's own Bluetooth controller, is registered too but is
-driven by the tool under test rather than by the harness; it is section 3f
-below.
-
 Both speak the same line shell over a serial port — one command line in,
 data lines out, then one `OK` or `ERR <reason>`, with `status` on a single
 JSON line — so a reader of one driver can read the other. Both are leased
 like an Ubertooth, under a prefixed key (`nrf52840dk-<J-Link serial>`,
 `esp32-<bridge serial>`), and both are checked in preflight by asking the
-board to identify itself.
+board to identify itself. A third radio, the host's own Bluetooth controller,
+is registered too, but it is driven by the tool under test rather than by the
+harness and has neither a driver nor a serial shell; it is section 3f.
 
 They differ in one way that shapes how a case is written. **A DK keeps its
 state when its serial port is closed; an ESP32 does not.** On an ESP32 dev

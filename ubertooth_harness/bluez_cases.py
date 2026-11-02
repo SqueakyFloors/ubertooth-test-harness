@@ -157,6 +157,9 @@ EXTENDED_REPORT_S = 240.0
 PAGE_S = 25.0
 HCI_READ_S = 1.0
 TEARDOWN_S = 10.0
+# Opening the board, checking its firmware API, creating the capture files,
+# and starting the transfer thread. No deadline of their own, and outside
+# both tools' own windows, so both allow for it.
 BOARD_SETUP_S = 15.0
 FOLLOW_SETUP_S = PAGE_S + 2 * HCI_READ_S + TEARDOWN_S + BOARD_SETUP_S
 # -a reads the channel map first, up to three times with a wait of a fifth of
@@ -276,10 +279,13 @@ def _adapter_free_step(step_id: str, name: str, hci: dict) -> Step:
     ``esp32peer.py stream`` resets both boards on its way out, whatever
     happened, and a reset drops every link a board holds.
 
-    So what this catches is a link to something else -- a device ``-x``
-    reached, or a piconet a follow paged -- that the tool opened and did not
-    close. Run before the tool as well, where it is the stronger check: a
-    bench whose adapter starts free is one whose later state means something.
+    So what this catches afterwards is a link to something else that the tool
+    opened and did not close, which in practice means a device ``-x``
+    reached: ``ubertooth-follow`` makes one link, to its target, and drops it
+    before the capture starts, so in that test the cleanup read has nothing
+    left to find and the one before the tool is the whole of it. Running it
+    before is the stronger check either way: a bench whose adapter starts
+    free is one whose state afterwards means something.
     """
     return Step(
         step_id, name,
@@ -307,8 +313,8 @@ def inquiry_found(address: str, name: str) -> Check:
         if address not in found:
             listed = ", ".join(sorted(found)) if found else "nothing"
             return (f"the inquiry reported {listed}, not {address}: the peer "
-                    "is discoverable from boot, so a run that does not find "
-                    "it found neither")
+                    "is discoverable from boot, so an inquiry that missed it "
+                    "did not work")
         if found[address] != name:
             return (f"the inquiry reported {address} as {found[address]!r}, "
                     f"and the peer firmware names it {name!r}")
@@ -355,13 +361,18 @@ def scan_results_list(lap: str, *, with_map: bool = False) -> Check:
 
 
 def maps_reported(minimum: int = 1) -> Check:
-    """The scan printed a channel map for the piconets it found.
+    """The tool printed a channel map.
 
-    ``ubertooth-scan`` writes one ``AFH map:`` line after each survey result,
-    so beside ``scan_results_list`` this is a weak check: it catches a result
-    whose map came out empty, where ``afh_map_line()`` writes a blank line
-    rather than a map. It carries the ``-a`` case of
-    ``Follow Classic piconet over HCI``, where the map is the point.
+    For the ``-a`` case of ``Follow Classic piconet over HCI``, which is its
+    only use: there the map is the point, and the tool prints it only when it
+    read one and handed it to the board.
+
+    Not for ``ubertooth-scan``, where it could not fail. That tool prints a
+    map line after every survey result, and ``afh_map_line()`` writes an
+    empty string only for a null map, which libbtbb never hands it; an
+    all-zero map prints as ``AFH map: 0x`` and twenty zeros. The survey case
+    uses ``scan_results_list(..., with_map=True)``, which reads the map that
+    follows one named result rather than counting lines.
     """
     def check(output) -> str:
         maps = [line for line in text_lines(output) if afhmap.MAP_LINE.match(line)]
@@ -408,6 +419,9 @@ def extended_report(address: str, name: str) -> Check:
         found_name = next(
             (found["name"] for found in map(_EXTENDED_NAME.match, mine)
              if found), None)
+        if found_name is None:
+            return (f"the extended report of {address} has no 'Device Name:' "
+                    f"line; the peer firmware names it {name!r}")
         if found_name != name:
             return (f"the extended report of {address} names it "
                     f"{found_name!r}, and the peer firmware names it {name!r}")
@@ -507,10 +521,15 @@ def _tool_case(*, case_id, name, serial, hci, acceptor, initiator, command,
         # catch here is a link to anything else.
         (_adapter_free_step(
             "adapter-free", f"{hci['device']} holds no link at all", hci),
+         # And is still the adapter it was. `hcitool con` lists links only for
+         # a controller that is up, so without this an adapter that went down
+         # during the case, or came back as another hciN, would read as free.
+         _adapter_up_step("adapter-still-up", hci),
          _reset_step("reset-initiator", initiator, INITIATOR_ROLE),
          _reset_step("reset-acceptor", acceptor, ACCEPTOR_ROLE))
         + _cleanup(serial, MODE_RESET_SETTINGS),
-        expected_state=(expected_state + f"; no link left on {hci['device']}; "
+        expected_state=(expected_state + f"; no link left on {hci['device']}, "
+                        "which is still up at its registered address; "
                         "both peers reset to their boot state; "
                         "channel, squelch, and LEDs restored"),
         capture_dir=bool(files),
@@ -555,7 +574,7 @@ def inquiry_scan_cases(arguments, resources, resource_identities):
         # every case; -s adds a whole inquiry before the window opens, and a
         # name read per device it found.
         inquiry = INQUIRY_S if "-s" in options else 0.0
-        case.setdefault("extra_s", inquiry + NAME_READS_S)
+        case.setdefault("extra_s", inquiry + NAME_READS_S + BOARD_SETUP_S)
         case.setdefault("floor_s", INQUIRY_MIN_S if "-s" in options else 0.0)
         return _tool_case(
             serial=serial, hci=hci, acceptor=acceptor, initiator=initiator,
@@ -607,7 +626,8 @@ def inquiry_scan_cases(arguments, resources, resource_identities):
                        extended_report(acceptor["address"], acceptor_name),
                        scan_results_list(central)),
             returncodes=(0, 1),
-            extra_s=INQUIRY_S + NAME_READS_S + EXTENDED_REPORT_S,
+            extra_s=(INQUIRY_S + NAME_READS_S + BOARD_SETUP_S
+                     + EXTENDED_REPORT_S),
             patterns=_pair_report(acceptor, initiator, exit_status="[01]"),
             expected_state=(f"the extended report of {acceptor['address']} held "
                             f"{acceptor_name} and an LMP version, and the scan "

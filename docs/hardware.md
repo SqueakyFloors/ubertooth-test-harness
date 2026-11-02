@@ -231,9 +231,10 @@ An Ubertooth cannot stand in for either: it has no HCI interface, and the
 clock and the map come over HCI from a controller joined to the link. So an
 ordinary USB Bluetooth adapter, of any make BlueZ drives, is the whole
 requirement. BR/EDR is what both tools use; Bluetooth LE support is not
-needed. It must be up (`hciconfig <device> up`) and not claimed by anything
-else, which in practice means `bluetoothd` left alone and no `bluetoothctl`
-session holding it.
+needed. It must be up (`hciconfig <device> up`) and not in use by
+anything else: `bluetoothd` may run, since the cases drive the controller
+through BlueZ rather than around it, but nothing else may hold a link on it
+while a case runs, and the cases refuse to start if one is up.
 
 Registered as a `Bluetooth adapter` with two identity keys: `hci device`, the
 `hciN` name BlueZ gave it, which is what the tools take with `-b`, and
@@ -242,10 +243,12 @@ Registered as a `Bluetooth adapter` with two identity keys: `hci device`, the
 one host has one controller for these tools.
 
 The `hciN` number is the order the kernel attached controllers in, not a
-property of the adapter, so the address is what identifies it. Every case
-reads `hciconfig <device>` first and fails, naming what it found, if the
-address is not the registered one, rather than driving whatever took the
-name, and what names its lock. An adapter is leased like a board, under
+property of the adapter, so the address is what identifies it, and what names its
+lock. Every case reads `hciconfig <device>` first and fails, naming what it
+found, if the address is not the registered one, rather than driving whatever
+took the name; it reads it again in the cleanup, so an adapter that went away
+during a case is reported rather than passing as one with no links. An
+adapter is leased like a board, under
 `bluez-<address without its colons>`: one
 controller answers one inquiry at a time and holds one link to a target, so
 two tests using it at once would read each other's results.

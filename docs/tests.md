@@ -2230,9 +2230,11 @@ own, so three patterns over the whole output would let another device's
 `LMP Version:` line stand in for a missing one. That case takes either exit
 status: `-x` exits 1 when any part of any device's report could not be
 fetched, and the devices it asks include whatever else in range answered the
-inquiry. Because the tool also exits 1 when its own capture stream died or
-the board refused the teardown, that case requires the piconet in the survey
-results as well, so a dead capture cannot pass it. Every case also
+inquiry. The tool also exits 1 when its own capture stream died or the
+board refused the teardown, so that case requires the piconet in the survey
+results as well — which shows the sweep decoded it, not that the stream
+survived to the end. A stream that died after that is caught by the step
+after it, which asks the board to stop and reports what it finds. Every case also
 requires the driver's own
 report — both peers' addresses, the central's LAP and UAP, a link that came
 up, and a pair that streamed — so a capture of nothing cannot pass as a
@@ -2262,11 +2264,14 @@ devices land in the run record, which is why no run output is committed.
 
 `-x` is also the one case whose deadline is not a worst case. The tool calls
 its per-device report for every device the inquiry answered, and per device
-that is a connect (25 s), a name read (25 s), a version read (20 s) and up to
-two feature pages (20 s each): about 113 seconds if a device fails every
-read, times however many devices are in range. The case allows four minutes,
-which covers two or three devices behaving normally with a wide margin; a run
-that needs more fails on the driver's deadline, with its message.
+that is a connect (25 s), a name read (25 s), a version read (20 s), the
+features and the first extended feature page (20 s each), the clock offset
+and channel map (1 s each), and dropping the link again (10 s). That is about 143 seconds a device if every
+read fails, and another 20 for each further extended feature page it reports.
+The case allows four minutes for it, which with the window and the inquiry
+puts its whole deadline at 356 seconds; that covers two devices behaving
+normally with a wide margin, and a run that needs more fails on the driver's
+deadline, with its message.
 
 `-e` is not exercised: no case passes it, so the survey runs with the tool's
 default of two allowed access-code bit errors.
@@ -2332,8 +2337,11 @@ capture starts, so a link still up at the end is one this host is holding.
 
 **Hardware and arguments.** The same four roles, arguments, platform, and
 host tools as `Bluetooth inquiry scan`, and the same `hci` plan. The
-`duration:` is the capture, not an option of the tool's and not the length of
-the command: the driver adds the setup above to the window it interrupts at.
+`duration:` is a **floor** on the capture, not an option of the tool's and not
+the length of the command: the driver adds the setup allowance to the window
+it interrupts at, so a tool whose page was answered at once captures for most
+of that allowance as well. A `duration: 25s` follow case normally runs for
+about 77 seconds and captures for most of them.
 
 **Expected outcome.** Smoke runs two cases: `-t <central>`, where the tool
 must report following that piconet, say it is not using AFH, and print at
