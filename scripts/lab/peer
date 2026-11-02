@@ -5,6 +5,7 @@
     peer identify <peer>
     peer reset    <peer>
     peer stream   <acceptor> <initiator> [options] -- <command> [arg...]
+    peer audio    <acceptor> <initiator> [options] -- <command> [arg...]
 
 A peer is named the way every bench helper names a device: a registry alias, a
 full bridge serial, or an unambiguous prefix of one. This looks up what
@@ -12,12 +13,18 @@ full bridge serial, or an unambiguous prefix of one. This looks up what
 the board's registered BD_ADDR -- holds the devices, and runs it.
 
 That division is the whole script. ``esp32peer.py`` does the work: it opens the
-bridges, checks the firmware and the address, brings the Serial Port Profile
-link up, streams a counted payload while your command runs, stops the pair,
+bridges, checks the firmware and the address, brings a link up between the two
+boards, keeps it carrying traffic while your command runs, takes it down,
 reports what the two boards did, and fails closed. ``scripts/lab/hold`` does
 the locking. Neither is reimplemented here.
 
-``stream`` is how a capture is taken, because opening a bridge resets the
+``stream`` carries data over the Serial Port Profile. ``audio`` carries voice
+over a synchronous (eSCO) link, which uses reserved slots and so is a
+different thing on the air; ``--type ev3`` asks for a link whose packets carry
+their payload at the basic rate, where the stack's own choice, 2-EV3, carries
+it as EDR.
+
+Either is how a capture is taken, because opening a bridge resets the
 board: one invocation has to be one session, so the command under test runs
 *inside* it. The initiator pages, so it is the piconet central and its LAP is
 the one on the air; ``esp32peer.py`` prints ``central LAP`` and ``central UAP``
@@ -30,6 +37,8 @@ peers are one lock group:
 
     peer stream ESP32_Linux0 ESP32_Linux1 --with UT_Linux1 -- \\
         ubertooth-rx -U <serial> -z -t 30
+    peer audio ESP32_Linux0 ESP32_Linux1 --type ev3 --with UT_Linux1 -- \\
+        ubertooth-rx -U <serial> -l <LAP> -u <UAP> -t 30
 
 Inside an outer ``hold`` that already has these devices, pass ``--no-hold``;
 holding them twice would wait for a lock this process already has.
@@ -68,6 +77,27 @@ HARDWARE_ENV = "UBERTOOTH_HARNESS_HARDWARE"
 HOLD = _HERE / "hold"
 ESP32PEER = Path(esp32peer.__file__).resolve()
 ONE_PEER = ("status", "identify", "reset")
+# The commands that take two boards and run a command inside one session,
+# from the module itself rather than a second list that could drift from it.
+SESSIONS = esp32peer.PAIR_COMMANDS
+# What each session forwards to the delegate, and the delegate's name for it.
+# An option left out is not passed, so the delegate's own default applies.
+# Keyed by the names in SESSIONS, which this file builds a subparser for
+# apiece: a name outside those is turned down by argparse before this is
+# read, so the two cannot disagree about which sessions exist. What they can
+# disagree about is the options a session takes, which is why each entry
+# names the delegate's own argument.
+SESSION_OPTIONS = {
+    "stream": (
+        ("--period", "period"), ("--payload", "payload"),
+        ("--min-writes", "min_writes"), ("--min-seconds", "min_seconds"),
+        ("--timeout", "timeout"),
+    ),
+    "audio": (
+        ("--type", "packet_type"), ("--min-frames", "min_frames"),
+        ("--min-seconds", "min_seconds"), ("--timeout", "timeout"),
+    ),
+}
 HELP_FLAGS = ("-h", "--help")
 
 
@@ -110,13 +140,10 @@ def esp32peer_argv(args, peers: dict, command) -> list[str]:
             f"--{role}-address", board.identity["BD_ADDR"],
             f"--{role}-alias", board.alias,
         ]
-    for name, value in (
-        ("--period", args.period), ("--payload", args.payload),
-        ("--min-writes", args.min_writes), ("--min-seconds", args.min_seconds),
-        ("--timeout", args.timeout),
-    ):
+    for option, attribute in SESSION_OPTIONS[args.command]:
+        value = getattr(args, attribute)
         if value is not None:
-            argv += [name, str(value)]
+            argv += [option, str(value)]
     return argv + ["--"] + list(command)
 
 
@@ -147,8 +174,8 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     else:
         raise SystemExit(_usage(
             "usage: peer status|identify|reset <peer>, or "
-            "peer stream <acceptor> <initiator> [options] -- <command> "
-            "('peer stream -h' lists the options)"
+            "peer stream|audio <acceptor> <initiator> [options] -- <command> "
+            "('peer stream -h' and 'peer audio -h' list the options)"
         ))
     parser = argparse.ArgumentParser(
         prog="peer", add_help=True,
@@ -176,24 +203,42 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     for name in ONE_PEER:
         one = sub.add_parser(name, parents=[shared], help=f"{name} one peer")
         one.add_argument("peer", help="alias, bridge serial, or an unambiguous prefix")
+    # Both sessions name the pair and hold the same extra devices; each adds
+    # the options of the traffic it makes.
+    session = argparse.ArgumentParser(add_help=False, parents=[shared])
+    session.add_argument("acceptor", help="the listening board")
+    session.add_argument("initiator",
+                         help="the paging board; it is the piconet central")
+    session.add_argument("--with", dest="also", default="",
+                         help="comma-separated extra devices to hold, for example "
+                              "the Ubertooth doing the capture")
+    session.add_argument("--min-seconds", type=float, default=None, metavar="S")
+    session.add_argument("--timeout", type=float, default=None, metavar="S")
     stream = sub.add_parser(
-        "stream", parents=[shared],
-        help="bring the pair's link up and run a command while it streams",
+        "stream", parents=[session],
+        help="bring the pair's data link up and run a command while it streams",
     )
-    stream.add_argument("acceptor", help="the listening board")
-    stream.add_argument("initiator", help="the paging board; it is the piconet central")
-    stream.add_argument("--with", dest="also", default="",
-                        help="comma-separated extra devices to hold, for example "
-                             "the Ubertooth doing the capture")
     stream.add_argument("--period", type=int, default=None, metavar="MS")
     stream.add_argument("--payload", type=int, default=None, metavar="BYTES")
     stream.add_argument("--min-writes", type=int, default=None, metavar="N")
-    stream.add_argument("--min-seconds", type=float, default=None, metavar="S")
-    stream.add_argument("--timeout", type=float, default=None, metavar="S")
+    audio = sub.add_parser(
+        "audio", parents=[session],
+        help="bring an audio (eSCO) link up and run a command while it carries "
+             "voice",
+    )
+    audio.add_argument("--type", dest="packet_type", default=None,
+                       choices=esp32peer.AUDIO_TYPES, metavar="TYPE",
+                       help="the audio link's packet type: "
+                            + ", ".join(esp32peer.AUDIO_TYPES)
+                            + f" (the module's default is "
+                              f"{esp32peer.DEFAULT_AUDIO_TYPE}, whose payload "
+                              "is on the air at the basic rate)")
+    audio.add_argument("--min-frames", type=int, default=None, metavar="N")
 
     args = parser.parse_args(before)
-    if args.command == "stream" and not command:
-        raise SystemExit(_usage("stream needs the command to run after --"))
+    if args.command in SESSIONS and not command:
+        raise SystemExit(_usage(
+            f"{args.command} needs the command to run after --"))
     if args.command in ONE_PEER and command:
         raise SystemExit(_usage(f"{args.command} takes no command after --"))
     if args.hardware is None:
@@ -202,6 +247,11 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
         ))
     if args.wait_for_boards is not None and args.wait_for_boards < 0:
         raise SystemExit(_usage("--wait-for-boards cannot be negative"))
+    # The frame floor is refused here as well as in the module, so nothing
+    # is held and no board is reset before the mistake is reported. The
+    # module's own refusal stays, for a caller that does not come this way.
+    if getattr(args, "min_frames", None) is not None and args.min_frames < 0:
+        raise SystemExit(_usage("--min-frames cannot be negative"))
     if getattr(args, "also", "") and args.no_hold:
         # Resolving --with and then not holding it would drop a lock the user
         # asked for, silently.

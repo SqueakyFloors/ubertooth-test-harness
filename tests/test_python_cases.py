@@ -14,6 +14,7 @@ from ubertooth_harness.build import (
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.plan import load_plan
+from ubertooth_harness.report import load_events
 
 from tests.test_build import (
     LIBBTBB, UBERTOOTH, FakeBuildExecutor, make_plan, publisher_in,
@@ -666,6 +667,21 @@ class PythonBuildTests(unittest.TestCase):
             self.assertEqual(str(plan.bin_dir), env[pytools.PYTHON_TOOLS_ENV])
             names = {item.name for item in result.artifacts}
             self.assertIn("built ubertooth-specan-ui", names)
+
+    def test_the_build_record_says_whether_the_python_tools_were_built(self):
+        # Building them is real extra work, so the build estimate is learned
+        # apart for a build that includes them (#271); the record is where
+        # the controller reads which build a run made.
+        for python in (True, False):
+            with self.subTest(with_python=python), tempfile.TemporaryDirectory() as work:
+                plan = self.python_plan(work) if python else make_plan(work)
+                self.run_build(plan, tools=PYTHON_TOOLS if python else ())
+                started = next(
+                    event for event in load_events(Path(work) / "run.jsonl")
+                    if event["event_type"] == "build_started"
+                )
+                self.assertEqual(python, started["details"]["with_python"])
+                self.assertFalse(started["details"]["with_firmware"])
 
     def test_python_tools_must_be_installed_for_that_interpreter(self):
         with tempfile.TemporaryDirectory() as work:

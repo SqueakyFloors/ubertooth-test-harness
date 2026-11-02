@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 import unittest
 
+from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.gui import (
     ASSETS,
     WEB_DIR,
@@ -24,6 +25,7 @@ from ubertooth_harness.gui import (
     parse_ls_remote,
     run_git,
 )
+from ubertooth_harness.gui import _build_needs as build_needs
 from ubertooth_harness.plan import load_plan
 
 try:
@@ -413,6 +415,120 @@ class PlanTests(ControllerTestCase):
         self.assertAlmostEqual(sum(estimates.values()), suite["estimated_s"], places=6)
         self.assertEqual(0, suite["unestimated_tests"])
 
+    async def test_plans_say_which_build_options_a_suite_needs(self):
+        # So the GUI can ask for the image or the Python tools the chosen
+        # suite's tests need, instead of the run being refused or those
+        # tests left out (#257).
+        status, payload, _ = await self.http("GET", "/api/plans")
+        self.assertEqual(200, status)
+        plans = {plan["name"]: plan for plan in payload["plans"]}
+        suites = {
+            (name, suite["name"]): suite
+            for name, plan in plans.items() for suite in plan["suites"]
+        }
+        # slow holds DFU images and Flash reliability, which are refused
+        # without the run's image, so the suite cannot run without it.
+        slow = suites[("slow", "slow")]
+        self.assertEqual((True, True, False, False), (
+            slow["needs_firmware_build"], slow["requires_firmware_build"],
+            slow["needs_python_tools"], slow["requires_python_tools"],
+        ))
+        self.assertEqual(
+            {"DFU images", "Flash reliability"},
+            {test["name"] for test in slow["tests"] if test["requires_firmware_build"]},
+        )
+        # host needs both, and is refused without neither: each option only
+        # decides whether some cases run.
+        host = suites[("host", "host")]
+        self.assertEqual((True, False, True, False), (
+            host["needs_firmware_build"], host["requires_firmware_build"],
+            host["needs_python_tools"], host["requires_python_tools"],
+        ))
+        self.assertEqual(
+            {"DFU image checks"},
+            {test["name"] for test in host["tests"] if test["needs_firmware_build"]},
+        )
+        self.assertEqual(
+            {"Python tools"},
+            {test["name"] for test in host["tests"] if test["needs_python_tools"]},
+        )
+        # slow also names Flash reliability, which needs a published image no
+        # build makes: the listing says which, so the GUI can say the run
+        # would be refused (nothing can send an artifact over the protocol).
+        self.assertEqual(["KGV"], slow["needs_artifacts"])
+        self.assertEqual(
+            {"Flash reliability"},
+            {test["name"] for test in slow["tests"] if test["needs_artifacts"]},
+        )
+        self.assertEqual([], host["needs_artifacts"])
+        # A suite of tests that need neither says so, test by test.
+        ble = suites[("ble", "ble")]
+        self.assertEqual((False, False),
+                         (ble["needs_firmware_build"], ble["needs_python_tools"]))
+        self.assertEqual(
+            [],
+            [test["name"] for test in ble["tests"]
+             if test["needs_firmware_build"] or test["needs_python_tools"]],
+        )
+        # The firmware plan needs the image and not the Python tools: the two
+        # options are reported apart.
+        firmware = suites[("firmware", "firmware")]
+        self.assertEqual((True, False), (firmware["needs_firmware_build"],
+                                         firmware["needs_python_tools"]))
+
+    def test_the_images_a_step_names_decide_what_its_suite_needs(self):
+        # Flash reliability's plan entry lists the images it flashes, so a
+        # suite needs the firmware build only where the entry names the run's
+        # own image, and names every other image as one --artifact must pass.
+        entry = (
+            "    - Flash reliability:\n"
+            "        hosts: [Host_Linux]\n"
+            "        platforms: [linux]\n"
+            "        Ubertooth: default\n"
+            "        flashes: 2\n"
+            "        image sequence: [{sequence}]\n"
+            "        KGV sha256: " + "a" * 64 + "\n"
+            "        KGV revision: 2020-12-R1\n"
+        )
+        cases = {
+            "test build, KGV": (True, ["KGV"]),
+            "2020-12-R1, KGV": (False, ["2020-12-R1", "KGV"]),
+        }
+        for sequence, (firmware, artifacts) in cases.items():
+            with self.subTest(sequence=sequence), tempfile.TemporaryDirectory() as d:
+                (Path(d) / "flash.yaml").write_text(
+                    "plan: Flash\nsuites:\n  flash:\n"
+                    + entry.format(sequence=sequence),
+                    encoding="utf-8",
+                )
+                (suite,) = list_plans(Path(d))[0]["suites"]
+                self.assertEqual(
+                    (firmware, firmware, artifacts),
+                    (suite["needs_firmware_build"], suite["requires_firmware_build"],
+                     suite["needs_artifacts"]),
+                )
+
+    def test_a_suite_of_tests_that_need_nothing_built_says_so(self):
+        fields = ("needs_firmware_build", "needs_python_tools",
+                  "requires_firmware_build", "requires_python_tools")
+        self.assertEqual([], build_needs(builtin_catalog(), "Host version")
+                         ["needs_artifacts"])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "elsewhere.yaml").write_text(
+                "plan: Elsewhere\nsuites:\n  quick:\n    - Host version: {}\n",
+                encoding="utf-8",
+            )
+            (suite,) = list_plans(root)[0]["suites"]
+        self.assertEqual([False] * 4, [suite[field] for field in fields])
+        self.assertEqual([False] * 4, [suite["tests"][0][field] for field in fields])
+        # A test the catalog does not know needs nothing either, rather than
+        # the listing failing over it.
+        self.assertEqual(
+            [False] * 4,
+            [build_needs(builtin_catalog(), "No such test")[field] for field in fields],
+        )
+
     def test_estimates_sum_and_broken_plans_are_listed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -617,6 +733,82 @@ class PageWiringTests(unittest.TestCase):
         self.assertIn("select.replaceChildren(...usable.map(", body)
         self.assertEqual(1, body.count("select.replaceChildren("))
         self.assertIn("Not runnable (planned tests)", body)
+
+    def test_the_build_options_are_offered_explained_and_sent(self):
+        # Both options are on the form, each with the note the operator reads
+        # about what it costs, and each is sent only with Build (#257).
+        for option, name in (("with-firmware", "with_firmware"),
+                             ("with-python", "with_python")):
+            self.assertRegex(
+                self.html,
+                rf'<input type="checkbox" id="{option}" name="{name}"'
+                rf' aria-describedby="{option}-note">',
+            )
+            note = re.search(rf'<p id="{option}-note" class="hint">([^<]+)</p>', self.html)
+            self.assertIsNotNone(note, option)
+            self.assertIn("build time", note.group(1))
+            self.assertIn(
+                f'{name}: $("build").checked && $("{option}").checked,', self.js
+            )
+        # Neither is ticked by default: a suite that needs one ticks it.
+        for option in ("with-firmware", "with-python"):
+            self.assertNotRegex(self.html, rf'id="{option}"[^>]*\bchecked\b')
+        for field in ("needs_firmware_build", "requires_firmware_build",
+                      "needs_python_tools", "requires_python_tools"):
+            self.assertIn(f'"{field}"', self.js)
+
+    def test_a_suite_that_needs_a_build_option_holds_it_ticked(self):
+        body = self.js[self.js.index("function syncBuildOptions()"):
+                       self.js.index("function start()")]
+        # Ticked and held for a suite that cannot run without the option;
+        # otherwise the box keeps what the operator set, so nothing is
+        # built, or made to fail on a target without the toolchain, for a
+        # suite that would only leave cases out.
+        # The operator's own tick is remembered apart from the box, so a tick
+        # one suite forces does not follow them to the next suite.
+        self.assertIn("box.checked = required.length > 0 || option.chosen;", body)
+        self.assertIn("option.chosen = $(option.id).checked;", self.js)
+        self.assertIn("box.disabled = !build || required.length > 0;", body)
+        self.assertIn("cannot run without ", body)
+        # That suite's note names the cases and invites the tick instead, and
+        # says when flashing builds the image anyway. Every note keeps the
+        # page's own cost sentence and says when Build is what is missing.
+        self.assertIn("needed.length && !box.checked", body)
+        self.assertIn("Tick it to run them.", body)
+        self.assertIn("option.builtByFlash && flashing", body)
+        self.assertIn("const sentences = [option.cost];", body)
+        self.assertIn('needed.join(", ")', body)
+        self.assertIn("Needs Build.", body)
+        # Every path that can change what is needed or what is ticked syncs
+        # the options: the plan and suite selects (through renderSuiteTests),
+        # Build, Flash, and the boxes themselves.
+        for caller in ("function renderSuiteTests()", "function start()"):
+            section = self.js[self.js.index(caller):]
+            self.assertIn("syncBuildOptions", section[:section.index("\n  }")])
+        start = self.js[self.js.index("function start()"):]
+        for control in ('$("build")', '$("flash-build")'):
+            self.assertIn(f'{control}.addEventListener("change", syncBuildOptions)',
+                          start)
+        # Each box records the operator's choice, then syncs.
+        self.assertRegex(
+            start,
+            r'\$\(option\.id\)\.addEventListener\("change", \(\) => \{\s*'
+            r'option\.chosen = \$\(option\.id\)\.checked;\s*syncBuildOptions\(\);',
+        )
+        self.assertNotIn("syncFlashBuild", self.js)
+
+    def test_a_suite_needing_an_image_no_build_makes_says_so(self):
+        # The build options cover every image a run can build; an image only
+        # --artifact can pass is named instead of silently failing the run.
+        body = self.js[self.js.index("function artifactWarning(suite)"):
+                       self.js.index("function syncBuildOptions()")]
+        self.assertIn("suite.needs_artifacts", body)
+        self.assertIn("no build makes", body)
+        self.assertIn('--artifact "${label}=PATH"', body)
+        # What such a run costs before it is refused, so Run is not pressed
+        # expecting a quick refusal.
+        self.assertIn("builds first, and flashes whatever", body)
+        self.assertIn("+ artifactWarning(suite)", self.js)
 
     def test_script_has_no_html_injection_sinks(self):
         for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write",
