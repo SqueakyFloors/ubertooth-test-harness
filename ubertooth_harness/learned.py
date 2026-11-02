@@ -658,10 +658,11 @@ def build_profile(with_firmware, with_python) -> str:
 
 
 def _build_profile(details: Mapping) -> str:
-    # An option a record does not name reads as off. A build that made the
-    # Python tools before they were recorded therefore left a sample among
-    # the host-tools ones, where it stays until the newer samples push it
-    # out; nothing can tell now which of the stored samples those were.
+    # An option a record does not name reads as off, since a build that
+    # could not record it could not be asked for it either. The exception
+    # is a target still running a runner from between the two changes: it
+    # passes --with-python but records nothing of it, so that build's sample
+    # joins the host-tools ones until the newer samples push it out.
     return build_profile(details.get("with_firmware"), details.get("with_python"))
 
 

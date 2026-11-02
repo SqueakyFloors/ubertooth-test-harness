@@ -433,9 +433,9 @@ class StageTests(StoreTestCase):
 
     def test_an_option_a_build_record_does_not_name_reads_as_off(self):
         # A record written before the Python tools were recorded names only
-        # the firmware, and nothing can say now whether such a build made
-        # them: its sample belongs to the profile it was learned under, where
-        # a run that asks for neither extra joins it.
+        # the firmware, which reads as off: its sample stays under the
+        # profile it was learned with, where a run that asks for neither
+        # extra joins it.
         self.learn([record("build_started", "running", 0.0, with_firmware=False),
                     record("build_finished", "passed", 100.0)])
         self.learn([record("build_started", "running", 0.0, with_firmware=True),
@@ -447,8 +447,9 @@ class StageTests(StoreTestCase):
             {"host tools": [100.0, 110.0], "with firmware": [300.0]},
             {key.profile: self.store.samples(key) for key in self.store.keys()},
         )
-        # Whatever a record carries for an option, what counts is whether it
-        # was built: a record naming the interpreter reads as built.
+        # What a record carries for an option says only whether it was
+        # built, whatever the value is: a build emits a boolean, and
+        # anything else a reader finds there is read the same way.
         self.assertEqual("host tools and Python tools",
                          build_profile(None, "python3.12"))
 
