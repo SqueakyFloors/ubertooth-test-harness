@@ -7,8 +7,8 @@
 #   scripts/ci.sh libbtbb-pin   only the build's libbtbb pin check
 #   scripts/ci.sh firmware-dk   build the nRF52840 DK role firmware (needs docker)
 #
-# firmware-dk compares the image it builds with the one another commit's
-# sources build when DK_BASE_REF (a git ref, for example origin/main) or
+# firmware-dk builds both DK images and compares each with the one another
+# commit's sources build when DK_BASE_REF (a git ref, for example origin/main) or
 # DK_BASE_SRC (a directory holding the sources, which wins where both are
 # set) says what to compare against.
 #
@@ -319,6 +319,38 @@ run_firmware_dk() {
         cp -R "$1/." "$src/"
     }
 
+    # These sources build two images, named `default` and `chansel1` here.
+    # Each has a build directory of its own, so one never overwrites the
+    # other's image.
+    dk_build_dir() {
+        case $1 in
+            default) echo "$build" ;;
+            chansel1) echo "$chansel1" ;;
+        esac
+    }
+
+    # What an image is called in the output a reader sees.
+    dk_image_name() {
+        case $1 in
+            default) echo "default" ;;
+            chansel1) echo "algorithm 1" ;;
+        esac
+    }
+
+    # Build image $2 from the sources in $1. The two images differ only in
+    # which controller is compiled, which the Kconfig fragment and the
+    # devicetree overlay select.
+    dk_build() {
+        case $2 in
+            default) extra= ;;
+            chansel1) extra=" -- -DEXTRA_CONF_FILE=chan-sel-1.conf \
+                         -DEXTRA_DTC_OVERLAY_FILE=chan-sel-1.overlay" ;;
+        esac
+        dk_sources "$1"
+        ncs "west build -p always --no-sysbuild -b $NCS_BOARD \
+             -d $(dk_build_dir "$2") -s $src$extra"
+    }
+
     dk_fw_version() {
         fw=$(sed -n 's/^#define UTDK_FW_VERSION "\(.*\)".*/\1/p' "$1/src/roles.h")
         if [ -z "$fw" ]; then
@@ -342,21 +374,19 @@ run_firmware_dk() {
     # nothing about the change between them. Measured in CI on 2026-10-31:
     # two builds of one tree gave byte-identical images.
     dk_image_repeats() {
-        step "the image $2 builds a second time"
+        step "the $(dk_image_name "$3") image of $2 builds a second time"
         # Checked here, because this function is called in a || list, where
         # set -e does not end the script: a build that failed would otherwise
         # be read as an image that came out different.
-        if ! dk_sources "$1" ||
-           ! ncs "west build -p always --no-sysbuild -b $NCS_BOARD -d $build -s $src"
-        then
-            echo "error: $2 did not build a second time, so the images cannot" \
-                 "be compared" >&2
+        if ! dk_build "$1" "$3"; then
+            echo "error: $2 did not build its $(dk_image_name "$3") image a" \
+                 "second time, so the images cannot be compared" >&2
             return 1
         fi
-        cmp -s "$3" "$hex" && return 0
-        echo "error: two builds of $2 gave different images, so comparing two" \
-             "trees says nothing; make the build reproducible (fixed build" \
-             "paths and timestamps) first" >&2
+        cmp -s "$4" "$(dk_build_dir "$3")/zephyr/zephyr.hex" && return 0
+        echo "error: two builds of $2 gave different $(dk_image_name "$3")" \
+             "images, so comparing two trees says nothing; make the build" \
+             "reproducible (fixed build paths and timestamps) first" >&2
         return 1
     }
 
@@ -366,10 +396,46 @@ run_firmware_dk() {
     # run then tests the old image and says nothing about the new one (#210).
     # The images decide, not the files: a comment or formatting change leaves
     # the image identical and asks for no bump.
+    # One of the two images, built from the base's sources and compared with
+    # this tree's. $base, $label, and $here are compare_dk_image's.
+    compare_one_dk_image() {
+        name=$1
+        human=$(dk_image_name "$name")
+        here_hex=$workspace/utdk-$name-here.hex
+        there_hex=$workspace/utdk-$name-there.hex
+        step "the $human image against $label"
+        # A base from before the algorithm 1 image builds none, and no board
+        # can be carrying one: that image's version string arrived with it,
+        # so `ensure` flashes every board asked for it whatever a comparison
+        # would say.
+        if [ "$name" = chansel1 ] && [ ! -f "$base/chan-sel-1.conf" ]; then
+            echo "$label builds no $human image, so no board carries one and" \
+                 "there is nothing to compare"
+            return 0
+        fi
+        dk_build "$base" "$name"
+        cp "$(dk_build_dir "$name")/zephyr/zephyr.hex" "$there_hex"
+        if cmp -s "$here_hex" "$there_hex"; then
+            echo "the $human image is the one $label builds, so $here still" \
+                 "describes it"
+            return 0
+        fi
+        # Before blaming the change: each side has to repeat itself, or the
+        # difference is in the build and not in the sources.
+        dk_image_repeats "$repo/$DK_FIRMWARE" "this tree" "$name" "$here_hex" \
+            || return 1
+        dk_image_repeats "$base" "$label" "$name" "$there_hex" || return 1
+        echo "error: the $human image differs from the one $label builds while" \
+             "UTDK_FW_VERSION is still $here: bump it in" \
+             "$DK_FIRMWARE/src/roles.h and ubertooth_harness/targets.py, or a" \
+             "board already running $here keeps the old image" >&2
+        return 1
+    }
+
     compare_dk_image() {
         base=$1
         label=$2
-        step "the image against $label"
+        step "the images against $label"
         for file in src/roles.h NCS_VERSION; do
             if [ ! -f "$base/$file" ]; then
                 echo "error: $base holds no $file, so it is not a copy of" \
@@ -398,51 +464,30 @@ run_firmware_dk() {
             echo "error: the nRF Connect SDK moved from $base_sdk to $version" \
                  "while UTDK_FW_VERSION is still $here: a new toolchain builds" \
                  "a new image, so bump it in $DK_FIRMWARE/src/roles.h and" \
-                 "ubertooth_harness/nrfdk.py" >&2
+                 "ubertooth_harness/targets.py" >&2
             return 1
         fi
-        # The algorithm 1 image is not compared: that would need a second
-        # pair of builds for an image only one test uses. Its two extra files
-        # are compared instead, so a change confined to them still asks for
-        # the bump that reflashes a board carrying that image. A base from
-        # before those files existed does not reach here, because adding them
-        # came with a version bump, which returns above.
-        for file in chan-sel-1.conf chan-sel-1.overlay; do
-            if ! cmp -s "$repo/$DK_FIRMWARE/$file" "$base/$file"; then
-                echo "error: $file differs from $label while UTDK_FW_VERSION is" \
-                     "still $here, so a board running the algorithm 1 image would" \
-                     "keep the old one: bump it in $DK_FIRMWARE/src/roles.h and" \
-                     "ubertooth_harness/targets.py" >&2
-                return 1
-            fi
+        # This tree's images, copied out of the build directories the base's
+        # builds write into next.
+        for name in default chansel1; do
+            cp "$(dk_build_dir "$name")/zephyr/zephyr.hex" \
+               "$workspace/utdk-$name-here.hex"
         done
-        cp "$hex" "$workspace/utdk-here.hex"
-        dk_sources "$base"
-        ncs "west build -p always --no-sysbuild -b $NCS_BOARD -d $build -s $src"
-        cp "$hex" "$workspace/utdk-there.hex"
-        if cmp -s "$workspace/utdk-here.hex" "$workspace/utdk-there.hex"; then
-            # The images are the same bytes, so the build directory holds this
-            # tree's image whichever build wrote it last. Leave the sources in
-            # the workspace as this tree's.
-            dk_sources "$repo/$DK_FIRMWARE"
-            echo "the image is the one $label builds, so $here still describes it"
-            return 0
-        fi
-        # Before blaming the change: each side has to repeat itself, or the
-        # difference is in the build and not in the sources.
-        dk_image_repeats "$repo/$DK_FIRMWARE" "this tree" \
-            "$workspace/utdk-here.hex" || return 1
-        dk_image_repeats "$base" "$label" "$workspace/utdk-there.hex" || return 1
-        echo "error: the image differs from the one $label builds while" \
-             "UTDK_FW_VERSION is still $here: bump it in" \
-             "$DK_FIRMWARE/src/roles.h and ubertooth_harness/nrfdk.py, or a" \
-             "board already running $here keeps the old image" >&2
-        return 1
+        # Both images are compared. A board carries one or the other, and
+        # `ensure` leaves either in place while the version is unchanged, so
+        # a change that reaches only the algorithm 1 image needs the bump as
+        # much as one that reaches the default image.
+        for name in default chansel1; do
+            compare_one_dk_image "$name"
+        done
+        # Each image is the one the base builds, so every build directory
+        # holds this tree's image whichever build wrote it last. Leave the
+        # sources in the workspace as this tree's.
+        dk_sources "$repo/$DK_FIRMWARE"
     }
 
     step "build $DK_FIRMWARE for $NCS_BOARD"
-    dk_sources "$repo/$DK_FIRMWARE"
-    ncs "west build -p always --no-sysbuild -b $NCS_BOARD -d $build -s $src"
+    dk_build "$repo/$DK_FIRMWARE" default
 
     # The same check the harness makes before it flashes a board: an image
     # that does not carry the pinned version string would be left in place by
@@ -454,7 +499,21 @@ run_firmware_dk() {
     [ -x .venv/bin/python ] || "$PYTHON" bootstrap.py
     .venv/bin/python -m ubertooth_harness.nrfdk check-image "$hex"
 
-    # The sources to compare the image against: a directory of them
+    # The second image: the same roles on a controller without channel
+    # selection algorithm 2. Its Kconfig fragment and devicetree overlay are
+    # compiled nowhere else, so a change that breaks them would otherwise
+    # reach the bench unnoticed. It is built here, before the comparison,
+    # which needs this tree's copy of both images.
+    chansel1_version=$(.venv/bin/python -c \
+        'from ubertooth_harness import targets; print(targets.DK_FIRMWARE_CHAN_SEL_1)')
+    step "build $DK_FIRMWARE for $NCS_BOARD without channel selection algorithm 2"
+    dk_build "$repo/$DK_FIRMWARE" chansel1
+    step "the second image carries $chansel1_version"
+    ls -l "$chansel1_hex"
+    .venv/bin/python -m ubertooth_harness.nrfdk check-image \
+        --version "$chansel1_version" "$chansel1_hex"
+
+    # The sources to compare the images against: a directory of them
     # (DK_BASE_SRC, which wins where both are set), or a git ref this
     # repository holds (DK_BASE_REF, which the Firmware workflow sets to the
     # commit a pull request is against). With neither, nothing is compared.
@@ -466,13 +525,13 @@ run_firmware_dk() {
     if [ -n "${DK_BASE_SRC:-}" ]; then
         compare_dk_image "$DK_BASE_SRC" "$DK_BASE_SRC"
     elif [ -z "${DK_BASE_REF:-}" ]; then
-        step "the image against another commit"
-        echo "no base sources given (DK_BASE_REF or DK_BASE_SRC), so the image" \
-             "is not compared and a missing version bump would not show up here"
+        step "the images against another commit"
+        echo "no base sources given (DK_BASE_REF or DK_BASE_SRC), so the images" \
+             "are not compared and a missing version bump would not show up here"
     elif ! git -C "$repo" cat-file -e "$DK_BASE_REF:$DK_FIRMWARE/src/roles.h" 2>/dev/null; then
-        step "the image against $DK_BASE_REF"
+        step "the images against $DK_BASE_REF"
         echo "error: $DK_BASE_REF does not resolve to a tree holding" \
-             "$DK_FIRMWARE here, so the image cannot be compared: the ref is" \
+             "$DK_FIRMWARE here, so the images cannot be compared: the ref is" \
              "not in this history (the workflow checks the whole history out" \
              "for it), or it is a commit from before that directory. Name a" \
              "ref that has it, or unset DK_BASE_REF" >&2
@@ -487,22 +546,6 @@ run_firmware_dk() {
         rm -f "$workspace/base-firmware.tar"
         compare_dk_image "$base_tree/$DK_FIRMWARE" "$DK_BASE_REF"
     fi
-
-    # The second image: the same roles on a controller without channel
-    # selection algorithm 2. Its Kconfig fragment and devicetree overlay are
-    # compiled nowhere else, so a change that breaks them would otherwise
-    # reach the bench unnoticed. It is built last, after the comparison, so
-    # the build directory the comparison works in is left as it was.
-    chansel1_version=$(.venv/bin/python -c \
-        'from ubertooth_harness import targets; print(targets.DK_FIRMWARE_CHAN_SEL_1)')
-    step "build $DK_FIRMWARE for $NCS_BOARD without channel selection algorithm 2"
-    dk_sources "$repo/$DK_FIRMWARE"
-    ncs "west build -p always --no-sysbuild -b $NCS_BOARD -d $chansel1 -s $src -- \
-         -DEXTRA_CONF_FILE=chan-sel-1.conf -DEXTRA_DTC_OVERLAY_FILE=chan-sel-1.overlay"
-    step "the second image carries $chansel1_version"
-    ls -l "$chansel1_hex"
-    .venv/bin/python -m ubertooth_harness.nrfdk check-image \
-        --version "$chansel1_version" "$chansel1_hex"
 }
 
 case "${1:-}" in

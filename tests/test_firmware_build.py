@@ -50,11 +50,11 @@ HAS_HISTORY = subprocess.run(
 
 # Writes the image west build would produce when the command is a build, and
 # records every command. $FAKE_HEX_PAYLOAD is the image every build leaves;
-# $FAKE_HEX_PAYLOAD_<n> replaces it for the nth build, which is how a test
-# gives the comparison build an image of its own, and
-# $FAKE_HEX_PAYLOAD_CHANSEL1 the one the algorithm 1 build leaves, whichever
-# build that turns out to be. With $FAKE_DOCKER_EXIT, or $FAKE_DOCKER_EXIT_<n>
-# for one build, it fails like a build that does not compile.
+# $FAKE_HEX_PAYLOAD_CHANSEL1 is the one every algorithm 1 build leaves,
+# whichever builds those turn out to be, and $FAKE_HEX_PAYLOAD_<n> replaces
+# either for the nth build, which is how a test gives one comparison build an
+# image of its own. With $FAKE_DOCKER_EXIT, or $FAKE_DOCKER_EXIT_<n> for one
+# build, it fails like a build that does not compile.
 FAKE_DOCKER = textwrap.dedent("""\
     #!/bin/sh
     printf '%s\\n' "$*" >> "$FAKE_LOG"
@@ -65,7 +65,6 @@ FAKE_DOCKER = textwrap.dedent("""\
             printf '%s\\n' "$builds" > "$FAKE_BUILDS"
             eval "code=\\${FAKE_DOCKER_EXIT_$builds:-\\${FAKE_DOCKER_EXIT:-0}}"
             [ "$code" = 0 ] || exit "$code"
-            eval "payload=\\${FAKE_HEX_PAYLOAD_$builds:-\\$FAKE_HEX_PAYLOAD}"
             # The sources this build compiled, for a test to look at: the
             # command ends with the directory west build is given.
             all=$*
@@ -78,8 +77,10 @@ FAKE_DOCKER = textwrap.dedent("""\
             case "$all" in
                 # The algorithm 1 image, which carries its own version string.
                 *chan-sel-1.conf*)
-                    payload=${FAKE_HEX_PAYLOAD_CHANSEL1:-$payload} ;;
+                    fallback=${FAKE_HEX_PAYLOAD_CHANSEL1:-$FAKE_HEX_PAYLOAD} ;;
+                *) fallback=$FAKE_HEX_PAYLOAD ;;
             esac
+            eval "payload=\\${FAKE_HEX_PAYLOAD_$builds:-\\$fallback}"
             mkdir -p "$(dirname "$out")"
             cp "$payload" "$out" ;;
     esac
@@ -160,15 +161,16 @@ class FirmwareStepTests(unittest.TestCase):
         return self.log.read_text().splitlines() if self.log.exists() else []
 
     def builds(self):
-        """Every build of the default image, which is the one the comparison
-        is about. The algorithm 1 build is counted on its own
-        (``chansel1_build``), so the counts here stay about one image."""
+        """Every build of the default image. The algorithm 1 builds are
+        counted on their own (``chansel1_builds``), so the counts here stay
+        about one image."""
         return [command for command in self.commands()
                 if "west build" in command and CHANSEL1 not in command]
 
-    def chansel1_build(self):
-        """The one build of the algorithm 1 image."""
-        return self.find(CHANSEL1, every=True)
+    def chansel1_builds(self):
+        """Every build of the algorithm 1 image."""
+        return [command for command in self.commands()
+                if "west build" in command and CHANSEL1 in command]
 
     def find(self, word, *, every=False):
         """The one recorded command holding ``word``.
@@ -283,10 +285,11 @@ class FirmwareStepTests(unittest.TestCase):
         result = self.run_step()
 
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-        build = self.chansel1_build()
-        self.assertIn("-DEXTRA_DTC_OVERLAY_FILE=chan-sel-1.overlay", build)
-        # Its own build directory, so the comparison's is left as it was.
-        self.assertIn("utdk-chansel1", build)
+        builds = self.chansel1_builds()
+        self.assertEqual(1, len(builds), builds)
+        self.assertIn("-DEXTRA_DTC_OVERLAY_FILE=chan-sel-1.overlay", builds[0])
+        # Its own build directory, so the default image's is left as it was.
+        self.assertIn("utdk-chansel1", builds[0])
         self.assertIn(f"the second image carries {targets.DK_FIRMWARE_CHAN_SEL_1}",
                       result.stdout)
 
@@ -299,17 +302,63 @@ class FirmwareStepTests(unittest.TestCase):
         self.assertEqual(1, result.returncode, result.stdout)
         self.assertIn("does not contain firmware version", result.stdout + result.stderr)
 
-    def test_a_change_to_the_algorithm_1_files_needs_a_bump_too(self):
-        # That image is not compared, so its two extra files are: without
-        # this, a change to them would leave a board carrying it on the old
-        # image with nothing to say so.
+    def test_a_changed_algorithm_1_image_without_a_version_bump_fails(self):
+        # The algorithm 1 image gets the comparison the default one gets: a
+        # change that reaches only it, such as one confined to
+        # chan-sel-1.conf or to an `#if !UTDK_CHAN_SEL_2` branch of the
+        # shared sources, would otherwise leave a board carrying it on the
+        # old image with nothing to say so.
         base = self.base_sources()
-        (base / "chan-sel-1.conf").write_text("CONFIG_BT_CTLR_CHAN_SEL_2=n\n")
+        other = self.image("other-chansel1", filler=b"\x55",
+                           version=targets.DK_FIRMWARE_CHAN_SEL_1)
+
+        # Build 4 is the base's algorithm 1 image, build 6 its repeat.
+        result = self.run_step(DK_BASE_SRC=str(base),
+                               FAKE_HEX_PAYLOAD_4=other,
+                               FAKE_HEX_PAYLOAD_6=other)
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("the algorithm 1 image differs from the one", result.stderr)
+        self.assertIn(f"UTDK_FW_VERSION is still {nrfdk.FIRMWARE_VERSION}",
+                      result.stderr)
+        self.assertIn("bump it in firmware/nrf52840dk/src/roles.h", result.stderr)
+        # The default image matched, so only the algorithm 1 image repeated:
+        # this tree and the base, once each.
+        self.assertIn("the default image is the one", result.stdout)
+        self.assertEqual(2, len(self.builds()), self.builds())
+        self.assertEqual(4, len(self.chansel1_builds()), self.chansel1_builds())
+        self.assertNotIn("./src/base-only.c", self.compiled(5))
+        self.assertIn("./src/base-only.c", self.compiled(6))
+        self.assertNotIn("firmware-dk passed", result.stdout)
+
+    def test_an_algorithm_1_image_the_base_also_builds_passes(self):
+        base = self.base_sources()
 
         result = self.run_step(DK_BASE_SRC=str(base))
 
-        self.assertEqual(1, result.returncode, result.stdout)
-        self.assertIn("chan-sel-1.conf differs", result.stderr)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("the algorithm 1 image is the one", result.stdout)
+        # Each image is built once per side and nothing repeats.
+        self.assertEqual(2, len(self.builds()), self.builds())
+        self.assertEqual(2, len(self.chansel1_builds()), self.chansel1_builds())
+        # The second of them compiled the base's sources.
+        self.assertIn("./src/base-only.c", self.compiled(4))
+
+    def test_a_base_without_the_algorithm_1_files_compares_the_default_image(self):
+        # The first commit to carry that image has no older one to compare it
+        # with, and needs none: its version string arrived with it, so every
+        # board asked for it is flashed anyway.
+        base = self.base_sources()
+        (base / "chan-sel-1.conf").unlink()
+        (base / "chan-sel-1.overlay").unlink()
+
+        result = self.run_step(DK_BASE_SRC=str(base))
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("the default image is the one", result.stdout)
+        self.assertIn("builds no algorithm 1 image", result.stdout)
+        # Only this tree built that image.
+        self.assertEqual(1, len(self.chansel1_builds()), self.chansel1_builds())
 
     def test_without_a_base_nothing_is_compared(self):
         # The schedule, a push, and a developer's own run have no other
@@ -318,6 +367,7 @@ class FirmwareStepTests(unittest.TestCase):
 
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertEqual(1, len(self.builds()), self.builds())
+        self.assertEqual(1, len(self.chansel1_builds()), self.chansel1_builds())
         self.assertIn("no base sources given", result.stdout)
         self.assertIn("a missing version bump would not show up", result.stdout)
 
@@ -333,10 +383,10 @@ class FirmwareStepTests(unittest.TestCase):
         builds = self.builds()
         self.assertEqual(2, len(builds), builds)
         self.assertIn(f"-s {self.workspace}/utdk-src", builds[1])
-        self.assertIn("the image is the one", result.stdout)
-        # The second build compiled the base sources, not this tree's again.
+        self.assertIn("the default image is the one", result.stdout)
+        # The base's own build compiled its sources, not this tree's again.
         self.assertNotIn("./src/base-only.c", self.compiled(1))
-        self.assertIn("./src/base-only.c", self.compiled(2))
+        self.assertIn("./src/base-only.c", self.compiled(3))
         # The workspace is left holding this tree's sources.
         self.assertFalse((self.workspace / "utdk-src" / "src" / "base-only.c").exists())
 
@@ -346,19 +396,24 @@ class FirmwareStepTests(unittest.TestCase):
         base = self.base_sources()
         other = self.image("other", filler=b"\x11")
 
+        # Build 3 is the base's default image, build 5 its repeat.
         result = self.run_step(DK_BASE_SRC=str(base),
-                               FAKE_HEX_PAYLOAD_2=other,
-                               FAKE_HEX_PAYLOAD_4=other)
+                               FAKE_HEX_PAYLOAD_3=other,
+                               FAKE_HEX_PAYLOAD_5=other)
 
         self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("the default image differs from the one", result.stderr)
         self.assertIn(f"UTDK_FW_VERSION is still {nrfdk.FIRMWARE_VERSION}",
                       result.stderr)
         self.assertIn("bump it in firmware/nrf52840dk/src/roles.h", result.stderr)
         # Each side was built twice, to show the difference is the change and
         # not the build: this tree, the base, then each again.
         self.assertEqual(4, len(self.builds()), self.builds())
-        self.assertNotIn("./src/base-only.c", self.compiled(3))
-        self.assertIn("./src/base-only.c", self.compiled(4))
+        self.assertNotIn("./src/base-only.c", self.compiled(4))
+        self.assertIn("./src/base-only.c", self.compiled(5))
+        # The default image decided it, so the algorithm 1 one was never
+        # compared.
+        self.assertEqual(1, len(self.chansel1_builds()), self.chansel1_builds())
         self.assertNotIn("firmware-dk passed", result.stdout)
 
     def test_a_version_bump_needs_no_comparison(self):
@@ -378,11 +433,12 @@ class FirmwareStepTests(unittest.TestCase):
         base = self.base_sources()
 
         result = self.run_step(DK_BASE_SRC=str(base),
-                               FAKE_HEX_PAYLOAD_2=self.image("two", filler=b"\x11"),
-                               FAKE_HEX_PAYLOAD_3=self.image("three", filler=b"\x22"))
+                               FAKE_HEX_PAYLOAD_3=self.image("two", filler=b"\x11"),
+                               FAKE_HEX_PAYLOAD_4=self.image("three", filler=b"\x22"))
 
         self.assertEqual(1, result.returncode, result.stdout)
-        self.assertIn("two builds of this tree gave different images", result.stderr)
+        self.assertIn("two builds of this tree gave different default images",
+                      result.stderr)
         self.assertNotIn("bump it", result.stderr)
         self.assertEqual(3, len(self.builds()), self.builds())
 
@@ -391,11 +447,12 @@ class FirmwareStepTests(unittest.TestCase):
         other = self.image("two", filler=b"\x11")
 
         result = self.run_step(DK_BASE_SRC=str(base),
-                               FAKE_HEX_PAYLOAD_2=other,
-                               FAKE_HEX_PAYLOAD_4=self.image("four", filler=b"\x22"))
+                               FAKE_HEX_PAYLOAD_3=other,
+                               FAKE_HEX_PAYLOAD_5=self.image("four", filler=b"\x22"))
 
         self.assertEqual(1, result.returncode, result.stdout)
-        self.assertIn(f"two builds of {base} gave different images", result.stderr)
+        self.assertIn(f"two builds of {base} gave different default images",
+                      result.stderr)
         self.assertNotIn("bump it", result.stderr)
         self.assertEqual(4, len(self.builds()), self.builds())
 
@@ -405,18 +462,19 @@ class FirmwareStepTests(unittest.TestCase):
         base = self.base_sources()
 
         result = self.run_step(DK_BASE_SRC=str(base),
-                               FAKE_HEX_PAYLOAD_2=self.image("two", filler=b"\x11"),
-                               FAKE_DOCKER_EXIT_3="1")
+                               FAKE_HEX_PAYLOAD_3=self.image("two", filler=b"\x11"),
+                               FAKE_DOCKER_EXIT_4="1")
 
         self.assertEqual(1, result.returncode, result.stdout)
-        self.assertIn("this tree did not build a second time", result.stderr)
+        self.assertIn("this tree did not build its default image a second time",
+                      result.stderr)
         self.assertNotIn("gave different images", result.stderr)
         self.assertNotIn("bump it", result.stderr)
 
     def test_a_base_that_does_not_build_fails_the_step(self):
         base = self.base_sources()
 
-        result = self.run_step(DK_BASE_SRC=str(base), FAKE_DOCKER_EXIT_2="1")
+        result = self.run_step(DK_BASE_SRC=str(base), FAKE_DOCKER_EXIT_3="1")
 
         self.assertEqual(1, result.returncode, result.stdout)
         self.assertEqual(2, len(self.builds()), self.builds())
@@ -462,7 +520,7 @@ class FirmwareStepTests(unittest.TestCase):
         result = self.run_step(DK_BASE_SRC=str(base), DK_BASE_REF="no-such-ref")
 
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-        self.assertIn(f"the image against {base}", result.stdout)
+        self.assertIn(f"the images against {base}", result.stdout)
         self.assertNotIn("no-such-ref", result.stdout + result.stderr)
 
     @unittest.skipUnless(
@@ -472,12 +530,14 @@ class FirmwareStepTests(unittest.TestCase):
         result = self.run_step(DK_BASE_REF="HEAD")
 
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-        self.assertIn("the image is the one HEAD builds", result.stdout)
+        self.assertIn("the default image is the one HEAD builds", result.stdout)
+        self.assertIn("the algorithm 1 image is the one HEAD builds", result.stdout)
         # HEAD's sources, exported from this repository and built.
         self.assertTrue(
             (self.workspace / "base-firmware" / "firmware" / "nrf52840dk"
              / "src" / "roles.h").exists(), result.stdout)
         self.assertEqual(2, len(self.builds()), self.builds())
+        self.assertEqual(2, len(self.chansel1_builds()), self.chansel1_builds())
         # Everything the comparison writes goes to the workspace.
         self.assertEqual("", subprocess.run(
             ("git", "-C", str(ROOT), "status", "--porcelain"),

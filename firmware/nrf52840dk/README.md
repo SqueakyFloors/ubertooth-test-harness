@@ -97,30 +97,32 @@ under this directory, once a week, and on request
 it is not a required check, because the image and the workspace are gigabytes.
 The image it builds is not published: a board is flashed from a local build.
 It builds both images and checks that each carries its own version string.
-Only the default image is compared against the base commit's; a change
-confined to `chan-sel-1.conf` or `chan-sel-1.overlay` is caught by comparing
-those two files, which asks for the same version bump. What neither catches is
-a change confined to an `#if !UTDK_CHAN_SEL_2` branch of the shared sources:
-the default image is then unchanged, so nothing asks for the bump, and a board
-already carrying the algorithm 1 image keeps the old one. Bump the version by
-hand for such a change.
 
 With `DK_BASE_REF` (a git ref, which the workflow sets to the commit a pull
 request is against) or `DK_BASE_SRC` (a directory of these sources) it builds
-those sources too and compares the two images, which is how the workflow
-holds a pull request to the rule that a change to the image bumps
+those sources too and compares both images with the base's, which is how the
+workflow holds a pull request to the rule that a change to either image bumps
 `UTDK_FW_VERSION`
 ([#210](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/210)):
 without a bump, `nrfdk.py ensure` leaves the old image on every board that
-already reports this version. A change that leaves the image identical, such
-as a comment, needs no bump and the step passes. Both builds compile a copy
-of the sources at one path in the SDK workspace, so a difference in the image
-is a difference in the sources; two builds of one tree gave byte-identical
-images when this was measured in CI on 2026-10-31. When the images do differ,
-each side is built once more, and a difference there is reported as a build
-that does not repeat itself rather than as a missing bump.
+already reports this version, whichever of the two it carries. A change that
+leaves both images identical, such as a comment, needs no bump and the step
+passes. Every build compiles a copy of the sources at one path in the SDK
+workspace, so a difference in an image is a difference in the sources; two
+builds of one tree gave byte-identical images when this was measured in CI on
+2026-10-31. When an image does differ, each side builds it once more, and a
+difference there is reported as a build that does not repeat itself rather
+than as a missing bump.
 
-Both builds use the SDK and the toolchain image this directory pins, so a
+That costs four builds where the versions match: both images on each side.
+The ordinary run is about four and a half minutes, which is a build of about
+45 seconds more than comparing the default image alone; a run that has to
+repeat both images on both sides takes up to eight builds, about two and a
+quarter minutes more. A base commit from before the algorithm 1 image existed
+has none to compare, and needs none: that image's version string arrived with
+it, so every board asked for it is flashed anyway.
+
+Every build uses the SDK and the toolchain image this directory pins, so a
 comparison cannot see what moving `NCS_VERSION` did to the image. A new
 toolchain builds a new image, so that needs the version bump as a source
 change does, and the step says so rather than comparing.
