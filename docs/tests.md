@@ -2439,22 +2439,76 @@ name it.
 
 ## Reset into invalid application
 
-**What it does.** Nothing yet: a catalog entry for verifying that a board with
-an invalid application firmware can be recovered.
+**What it does.** Writes an image the bootloader must refuse to start, cuts
+the board's USB power and turns it back on, and requires the board to come up
+as a DFU bootloader device rather than running the image. Then it writes the
+run's own image back and checks the revision.
 
-**Theory of operation.** Not established. The recovery path it would need now
-exists, since the lab hub can switch board power; the test itself is tracked
-as [#141](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/141).
+**Theory of operation.** On every power-up the bootloader decides whether
+there is an application it can start, from the two words at the start of the
+application region: the initial stack pointer must be inside RAM and
+word-aligned, and the reset vector must be a Thumb address above the
+bootloader (`firmware/bootloader/app_image.h`). Erased flash fails both,
+which is what an interrupted download leaves there. Before that check
+existed, such a board faulted on every power-up and came back only when
+someone bridged its P4 entry pin at the bench; with it, the bootloader keeps
+running and the next image can go on over USB. The test makes exactly that
+situation on purpose, so the answer is knowable: the board must enumerate,
+and must enumerate as a bootloader.
 
-**Hardware and arguments.** One `Ubertooth` and a required `USB power
-controller:` resource.
+Two things make the image the right instrument. It is a valid Ubertooth DFU
+file — correct suffix, firmware info block intact, only the two vector words
+changed — so `ubertooth-dfu` has no reason to refuse it and the flash really
+does end up holding it. And the cycle is a power cycle, not the reset `-r`
+already does, because the decision under test is the one taken on a cold
+boot. The board under test has no serial while it sits in its bootloader, so
+it is identified by elimination, as the DFU images test does it: exactly one
+serial-less Ubertooth device attached, and every guard board enumerated by
+its own serial.
 
-**Expected outcome.** No implementation; only a `runnable: false` plan may
-name it.
+The LPC vector checksum at offset 0x1c is deliberately not what the image
+gets wrong. The bootloader does not read that word and no host tool writes
+it, so an image that failed only the checksum would start normally.
 
-**Known limits.** This is a destructive test by nature: it deliberately leaves
-a board outside its application firmware, so it needs both power control and
-an agreed recovery path before it can run.
+**Hardware and arguments.** One `Ubertooth` with a `power:` mapping in the
+registry, on a `USB power controller` that can switch VBUS per port, plus
+every other registered board as guards. The plan names the controller
+(`USB power controller:`), which must be the one the board is registered on,
+so a bench whose wiring moved fails planning instead of switching whatever is
+on that port; the port itself is only ever read from the registry. The run
+needs `--allow-power-changes` and the run's own firmware image
+(`--build --with-firmware`, or a `test build` artifact), holds the host lock
+throughout, and leases the board and its guards. It writes firmware and
+establishes it, so preflight checks only the board's serial and the test must
+be the last one on that board.
+
+**Expected outcome.** One case. The write must reach the flash and must not
+report a verified revision afterwards: the board stays in its bootloader, so
+`ubertooth-dfu -d <image> -r` ends with an error and exit 1, and that is the
+expected outcome here. The cycle must then show, after the port comes back,
+the board's serial absent and exactly one DFU bootloader device, with every
+guard where it was. A board that comes back running the image, or that does
+not come back at all, fails the case and the message says which. The
+recovery step writes the run's image back without a selector, waits for the
+application, and reads the flash back. The cleanup runs whatever happened: it
+powers the port on if it is off, then recovers the board and reads its
+revision, so a failed case still ends with a board on the test image.
+
+**Known limits.** It is destructive. If the bootloader does start the
+unstartable image, the board faults, leaves USB, and needs its P4 entry pin
+bridged by hand — the failure the test exists to catch is also the failure
+nothing in the harness can recover from. So it lives in `testplans/power.yaml`
+and is run by hand with someone at the bench, not in an unattended plan. A
+run killed outright (SIGKILL) between the switch-off and the restore leaves
+the port off; the next run's cleanup step, or
+`ubertooth-harness lease --host-lock` with the hub's own tool, switches it
+back on. The one case covers erased vectors; the other unstartable images the
+harness can build (a misaligned or out-of-RAM stack pointer, an ARM-mode
+reset vector, an entry inside the bootloader) are checked on the host only,
+in the unit tests, because each extra hardware case is another cold boot with
+the same risk and the same bootloader check behind it. The hardware run is
+still outstanding
+([#141](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/141)).
 
 ## Receive-only firmware
 

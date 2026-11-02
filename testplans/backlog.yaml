@@ -27,10 +27,10 @@ suites:
         Bluetooth adapter: required
         Ubertooth: default
 
-    # The lab hub can switch board power now (#2); the test is #141.
-    - Reset into invalid application:
-        Ubertooth: default
-        USB power controller: required
+    # `Reset into invalid application` is implemented (#141) and lives in
+    # testplans/power.yaml, which is run by hand: it leaves a board outside
+    # its application until its own recovery step, so someone has to be able
+    # to reach the bench.
 
     - Receive-only firmware:
         Ubertooth: default

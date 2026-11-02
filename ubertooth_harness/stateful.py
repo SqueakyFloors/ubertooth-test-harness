@@ -20,6 +20,11 @@ COVERAGE_PROFILES = ("smoke", "comprehensive")
 CAPTURE_DIR = "captures"
 CAPTURE_DIR_KEY = "capture dir"
 EXPECTED_REVISION_KEY = "expected firmware revision"
+# The resource registry the run was started with, for a step that has to read
+# the bench itself rather than take it from a command line: which controller
+# and port a board is registered on is the registry's to say, never a plan's
+# or a case builder's.
+REGISTRY_PATH_KEY = "hardware registry"
 # Which try of a retried group of steps is running, counting from 1.
 ATTEMPT_KEY = "attempt"
 

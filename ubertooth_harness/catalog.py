@@ -28,7 +28,7 @@ from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
     advertiser_cases, afh_cases, boardstate_cases, capture_failure_cases,
     classic_cases, connection_cases, dfu_cases, dfu_host_cases,
-    interrupt_cases, python_cases, receive_cases,
+    interrupt_cases, invalidapp_cases, python_cases, receive_cases,
     refusal_cases, tool_cases, transitions, tshark_cases, util_cases,
     util_refusal_cases,
 )
@@ -307,6 +307,12 @@ class TestDefinition:
     # The test writes firmware to a board, so run-suite holds the host lock
     # (leases.py) for the run: no power change or other write may overlap it.
     writes_firmware: bool = False
+    # A case of the test switches the selected board's USB power off and on
+    # through its registered controller. The planner resolves the port from
+    # the board's own registry mapping (planner.TestInvocation.power_cycle),
+    # run-suite requires --allow-power-changes, and the run holds the host
+    # lock for the whole test, as power isolation does.
+    switches_power: bool = False
     # Cross-argument rule checked on the normalized arguments (no registry).
     check_arguments: Callable[[Mapping], None] | None = None
     # The planner binds every other registered Ubertooth on the host as a
@@ -975,6 +981,14 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "Recover AFH map": _profiles(
         Estimate(40.0, per_duration=4), Estimate(60.0, per_duration=6)
     ),
+    # ESTIMATE_PENDING_HW. Not measured: this test has not run on hardware
+    # yet. It is built from what the same commands cost elsewhere -- the
+    # write and the read-back of DFU images, the power cycle and
+    # re-enumeration of Exclusive Ubertooth topology -- as the write of the
+    # unstartable image and its post-reset polling, the cycle, the recovery
+    # write with its read-back, and the cleanup's checks. Replace it with the
+    # measurement from the first hardware run.
+    invalidapp_cases.TEST_NAME: _default(Estimate(90.0)),
 })
 
 
@@ -998,15 +1012,17 @@ RF_DEFAULTS: Mapping[str, Mapping[str, PlacementRequirement]] = MappingProxyType
 
 def builtin_catalog() -> TestCatalog:
     """Return the fixed catalog; YAML cannot add executable implementations."""
-    def stateful_test(name, description, builder, *, coverage=True, **options):
+    def stateful_test(name, description, builder, *, coverage=True, extra=None,
+                      hardware_roles=None, **options):
         arguments = {"hosts": HOSTS, "Ubertooth": UBERTOOTH}
         if coverage:
             arguments["coverage"] = COVERAGE
+        arguments.update(extra or {})
         return TestDefinition(
             name,
             description,
             MappingProxyType(arguments),
-            MappingProxyType({"Ubertooth": "Ubertooth"}),
+            MappingProxyType(hardware_roles or {"Ubertooth": "Ubertooth"}),
             command_builder=builder,
             guards_other_ubertooths=True,
             **options,
@@ -1638,14 +1654,34 @@ def builtin_catalog() -> TestCatalog:
                 }),
                 MappingProxyType({"Ubertooth": "Ubertooth"}),
             ),
-            TestDefinition(
-                "Reset into invalid application", "Verify recovery from an invalid app",
-                MappingProxyType({
-                    "hosts": HOSTS,
-                    "Ubertooth": UBERTOOTH,
-                    "USB power controller": ArgumentRule(_required_text, required=True),
-                }),
-                MappingProxyType({"Ubertooth": "Ubertooth"}),
+            stateful_test(
+                invalidapp_cases.TEST_NAME,
+                "An image the bootloader must refuse to start, then a power "
+                "cycle: the board has to come up as a DFU bootloader device "
+                "rather than run the image, and the run's own image goes back "
+                "on it",
+                invalidapp_cases.invalid_application_cases,
+                coverage=False,
+                extra={
+                    # The plan names the hub, so a bench whose wiring moved
+                    # fails planning instead of switching the wrong port; the
+                    # port itself comes from the board's registry mapping.
+                    "USB power controller": ArgumentRule(_selector, required=True),
+                },
+                hardware_roles={
+                    "Ubertooth": "Ubertooth",
+                    "USB power controller": "USB power controller",
+                },
+                # It leaves an unstartable image in the board's flash until
+                # its own recovery step writes the test image back, so it
+                # establishes the firmware it verifies and must be the last
+                # test on its board.
+                establishes_firmware=True,
+                writes_firmware=True,
+                switches_power=True,
+                # Every case writes the run's own image, as DFU images does;
+                # a run without one is refused rather than leaving it out.
+                build_required=Needs(firmware_build=True),
             ),
             _device_test("Receive-only firmware", "Exercise a receive-only build"),
             TestDefinition(

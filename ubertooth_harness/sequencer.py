@@ -62,6 +62,7 @@ from ubertooth_harness.stateful import (
     CAPTURE_DIR_KEY,
     EXPECTED_REVISION_KEY,
     MissingContext,
+    REGISTRY_PATH_KEY,
     StateCase,
     StateCaseError,
     Unrestorable,
@@ -168,6 +169,7 @@ class NamedTestSequencer:
         clock=time.monotonic,
         isolation: IsolationRuntime | None = None,
         registry=None,
+        registry_path=None,
         watchdog_search=None,
     ):
         self.executor = executor
@@ -177,6 +179,11 @@ class NamedTestSequencer:
         self.isolation = isolation
         # Hosts' platforms and other Ubertooths (flash guards) come from here.
         self.registry = registry
+        # The registry file itself, for a case step that reads the bench: the
+        # board's power mapping, which no plan or case builder may invent.
+        # A run started without one leaves the context entry out, and such a
+        # step fails saying which value it needed.
+        self.registry_path = registry_path
         # How the run looks for an open fork issue about a board's self-reset;
         # `gh issue list` by default (watchdog.py). Injected by tests, which
         # must not reach GitHub.
@@ -747,6 +754,8 @@ class NamedTestSequencer:
             },
         )
         context: dict[str, str] = {}
+        if self.registry_path is not None:
+            context[REGISTRY_PATH_KEY] = str(self.registry_path)
         if case.artifacts or case.optional_artifacts:
             # Checked when the run was planned; hashed again here. Nothing
             # has run yet, so a refusal leaves the device as it was.

@@ -53,8 +53,13 @@ class FakeDfuBoard:
     ``wrong_sign_vendor``, ``dfu_count_extra`` for failures no fork has shown.
     """
 
-    def __init__(self, image: bytes, **flags):
+    def __init__(self, image: bytes, *, serial=None, guards=None, **flags):
         self.flags = flags
+        # Which board this is and which other boards answer beside it. The
+        # defaults are the short selectors these tests use; a test whose
+        # registry carries real 32-hex serials passes its own.
+        self.serial = (serial or SERIAL).lower()
+        self.guards = {guard.lower() for guard in (guards or (GUARD,))}
         self.mode = "app"
         self.flash = bytearray(b"\xff" * dfuimage.APPLICATION_SIZE)
         self._program(image)
@@ -97,10 +102,10 @@ class FakeDfuBoard:
                 code = dfuimage.main(list(command[2:]), board_factory=self._board)
             return self._result(command, code, out.getvalue())
         if command[0] == "ubertooth-util":
-            serial = command[command.index("-U") + 1]
-            if serial == GUARD:
+            serial = command[command.index("-U") + 1].lower()
+            if serial in self.guards:
                 return self._result(command, 0, "Firmware version: git-guard (API:1.10)\n")
-            if serial != SERIAL or self.mode != "app":
+            if serial != self.serial or self.mode != "app":
                 return self._result(command, 1, "", f"no Ubertooth found with serial matching '{serial}'\n")
             return self._result(command, 0, f"Firmware version: {self.revision} (API:1.10)\n")
         assert command[0] == "ubertooth-dfu", command
@@ -111,7 +116,7 @@ class FakeDfuBoard:
         if "-s" in options:
             return self._sign(command, Path(options[options.index("-s") + 1]))
         selected = options[options.index("-U") + 1] if "-U" in options else None
-        assert selected in (None, SERIAL), command
+        assert selected in (None, self.serial), command
         if selected is None:
             if self.mode != "dfu":
                 # Never reached by the harness: it would pick the default board.
@@ -157,12 +162,35 @@ class FakeDfuBoard:
         if "-r" in options:
             if not (self.flags.get("stays_in_dfu_after_upload") and "-u" in options):
                 self.mode = "app"
+            if self.flags.get("checks_vectors") and not self.startable:
+                # The bootloader will not start what is in the flash
+                # (firmware/bootloader/app_image.h), so the reset leaves the
+                # board in DFU and the post-reset check cannot pass.
+                self.mode = "dfu"
+                if "-d" in options:
+                    return self._result(
+                        command, 1, "", stderr + "DFU +0.300s: firmware "
+                        "programming completed\n"
+                        "error: the firmware was written, but the board did "
+                        "not come back on USB: power-cycle it and read its "
+                        "revision with ubertooth-util -V before flashing it "
+                        "again\n")
             if "-d" in options:
                 if self.flags.get("detach_exit_1"):
                     return self._result(command, 1, "", stderr + "error: control message unsupported\n"
                                         "Detach failed: could not enter DFU mode\n")
                 stderr += f"Verified firmware revision: {self.revision}\n"
         return self._result(command, 0, "", stderr)
+
+    @property
+    def startable(self) -> bool:
+        """Whether the bootloader would start what is in the flash now.
+
+        Only consulted with ``checks_vectors``: the filler images the other
+        tests write carry no realistic vector table, so modeling the check
+        for all of them would refuse images those tests expect to run.
+        """
+        return not dfuimage.startable_problems(bytes(self.flash))
 
     def _read(self):
         data = bytearray(self.flash)

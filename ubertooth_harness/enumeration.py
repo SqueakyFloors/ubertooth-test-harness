@@ -21,6 +21,10 @@ UBERTOOTH_VENDOR = "1d50"
 # host/libubertooth): Zero (6000) and its bootloader (6001), One (6002) and its
 # DFU bootloader (6003). A board in a bootloader is still powered.
 UBERTOOTH_PRODUCTS = frozenset({"6000", "6001", "6002", "6003"})
+# The Ubertooth One's DFU bootloader. It reports no serial, so it is
+# enumerated under UNIDENTIFIED_PREFIX with this product at the end of the
+# entry; a caller that expects a board to be sitting in it matches on that.
+DFU_BOOTLOADER_PRODUCT = "6003"
 SYSFS_USB_DEVICES = "/sys/bus/usb/devices"
 # macOS has no sysfs. `ioreg` prints the kernel's IO registry, which holds the
 # descriptors macOS read when each device was enumerated; -p IOUSB selects the
@@ -223,6 +227,18 @@ def local_enumerator(platform: str | None = None) -> UbertoothEnumerator:
     raise EnumerationError(f"USB enumeration is not supported on {platform}")
 
 
+class Expectation(Protocol):
+    """A required enumeration state, as the waits below read one.
+
+    Only ``problems`` is used, so a caller whose rule cannot be written as a
+    set of serials (a board in its DFU bootloader reports none, so it is
+    counted rather than named) can bring its own.
+    """
+
+    def problems(self, seen: frozenset[str]) -> list[str]:
+        """Why ``seen`` is not the required state ([] when it is)."""
+
+
 @dataclass(frozen=True)
 class EnumerationExpectation:
     """Required enumeration state.
@@ -269,7 +285,7 @@ class EnumerationExpectation:
 
 def wait_for_enumeration(
     enumerator: UbertoothEnumerator,
-    expectation: EnumerationExpectation,
+    expectation: Expectation,
     deadline_s: float,
     *,
     settle_s: float = 0.0,

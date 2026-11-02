@@ -680,6 +680,13 @@ def _validate(
                         "    exclusive: no other registered Ubertooth; "
                         "read-only enumeration check"
                     )
+                if invocation.power_cycle is not None:
+                    target = invocation.power_cycle
+                    print(
+                        f"    power cycle: {target.resource_alias} off and on "
+                        f"via {target.controller_alias} port {target.port} "
+                        "(needs --allow-power-changes)"
+                    )
     return 0
 
 
@@ -954,6 +961,30 @@ def _dry_run(args, catalog, plan, host, invocations, not_applicable) -> int:
     return 0
 
 
+def _check_power_cycles_armed(args, invocations) -> None:
+    """Refuse a run whose test switches board power without the opt-in.
+
+    The same option power isolation needs, checked before anything is built
+    or run: a test that power-cycles a board can leave it needing someone at
+    the bench, so it never starts by accident.
+    """
+    cycling = [
+        invocation for invocation in invocations
+        if getattr(invocation, "power_cycle", None) is not None
+    ]
+    if cycling and not args.allow_power_changes:
+        named = ", ".join(sorted({
+            f"{invocation.test_name} ({invocation.power_cycle.resource_alias} on "
+            f"{invocation.power_cycle.controller_alias} port "
+            f"{invocation.power_cycle.port})"
+            for invocation in cycling
+        }))
+        raise HarnessError(
+            f"{named} power-cycles the board it selects; rerun with "
+            "--allow-power-changes"
+        )
+
+
 def _run_leased(
     args, catalog, plan, registry, invocations, sources, artifacts, run_id, leases,
     not_applicable=(),
@@ -980,6 +1011,7 @@ def _run_leased(
             isolation.check_ready(
                 invocation.power_isolation, invocation.resources.get("Ubertooth")
             )
+    _check_power_cycles_armed(args, invocations)
     built = None
     publisher = None
     executor = SubprocessCommandExecutor()
@@ -1034,6 +1066,7 @@ def _run_leased(
             event_sink=_terminal_sink(),
             isolation=isolation,
             registry=registry,
+            registry_path=args.hardware,
         ).run(
             invocations,
             run_dir,

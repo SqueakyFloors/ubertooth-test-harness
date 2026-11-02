@@ -20,7 +20,12 @@ from ubertooth_harness.rf import (
     PlacementRequirement,
     describe as describe_placement,
 )
-from ubertooth_harness.topology import PowerIsolationAction, plan_exclusive_ubertooth
+from ubertooth_harness.topology import (
+    PowerCycleTarget,
+    PowerIsolationAction,
+    plan_exclusive_ubertooth,
+    plan_power_cycle,
+)
 
 
 # Any placement at all: asks ``registry.placed`` whether a host has a unit
@@ -63,6 +68,12 @@ class TestInvocation:
     # board on the host) the run still checks, read-only, that the selected
     # board is the only Ubertooth enumerated.
     exclusive_ubertooth: bool = False
+    # The port a power-cycling test may switch (topology.PowerCycleTarget),
+    # resolved from the selected board's own registry mapping. Unlike
+    # ``power_isolation``, which the run applies around the whole test, this
+    # is switched by a step inside a case, so what happened is in that step's
+    # own record; what the invocation carries is the permission and the port.
+    power_cycle: PowerCycleTarget | None = None
     # The RF placement of every bound resource that has one (rf.py), by role,
     # so the manifest, run.jsonl, and the report say what the run's numbers
     # were taken at. A role whose resource has no `rf:` is absent.
@@ -409,6 +420,23 @@ class PlanCompiler:
                             resources, identities = self._guarded(
                                 host, resources, identities
                             )
+                        power_cycle = None
+                        if definition.switches_power:
+                            selected_board = resources.get("Ubertooth")
+                            if selected_board is None:
+                                raise PlanningError(
+                                    f"{step.test_name}: a test that switches "
+                                    "board power requires an Ubertooth role"
+                                )
+                            # The board's own mapping decides the port, and a
+                            # controller the plan names has to be that one.
+                            # A board with no mapping fails planning here, as
+                            # an unmapped board does for exclusive isolation
+                            # (#269 covers leaving both out instead).
+                            power_cycle = plan_power_cycle(
+                                self.registry, host, selected_board,
+                                resources.get("USB power controller"),
+                            )
                         power_isolation = ()
                         exclusive = arguments.get("exclusive Ubertooth") is True
                         if exclusive:
@@ -436,6 +464,7 @@ class PlanCompiler:
                                 }),
                                 power_isolation=power_isolation,
                                 exclusive_ubertooth=exclusive,
+                                power_cycle=power_cycle,
                             )
                         )
                 if len(invocations) == step_start:
