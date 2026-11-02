@@ -36,16 +36,33 @@ numbers were taken at even when the bench was rewired since.
 
 ## What the bench has been measured at
 
-20 dB at about a meter is the only setting measured, and only by driving
-`ubertooth-util -e`, `-n` and `-m` by hand: the `range-weak-link` suite has
-never judged a result, because it stops on a fork bug first (`docs/tests.md`,
-`Two-device range test`). What those runs establish is narrow. Ten round
-trips completed, with request and reply PA levels of 0 to 2, so the level
-stayed inside the bound the ordinary suite already applies; and a full-band
-`specan` mean moved 1.1 dB between the attenuated board and an ordinary one,
-with 0.1 dB of run-to-run spread, so mean band RSSI cannot measure an
-attenuator at all (both figures from
-harness PR #217).
+Both settings have been measured only by driving `ubertooth-util -e`, `-n`
+and `-m` by hand: the `range-weak-link` suite has never judged a result,
+because it stops on a fork bug first (`docs/tests.md`, `Two-device range
+test`). What those runs establish is narrow.
+
+At 20 dB (harness PR #217): ten round trips completed, request and reply PA
+levels 0 to 2, so the level stayed inside the bound the ordinary suite
+already applies; and a full-band `specan` mean moved 1.1 dB between the
+attenuated board and an ordinary one, with 0.1 dB of run-to-run spread, so
+mean band RSSI cannot measure an attenuator at all.
+
+At 20 against 40 dB (2026-11-02, one sender and one firmware for both sides,
+six rounds each; `docs/tests.md` has the table): the responder's reply PA
+level separates cleanly, reaching 1 behind 20 dB and 3 behind 40 dB, while
+every round completed. So 40 dB neither loses the link nor is too clean to
+measure, and the reply level is the figure that moves. The copy numbers run
+over most of their 0 to 15 range at both, so at this sample size they
+discriminate nothing.
+
+**Measured is per test, not per bench, and this list is per bench.** Those
+runs measured the *range test* at 40 dB; they say nothing about what a
+capture decodes there, because the range test retries a packet up to sixteen
+times and reports only the copy that got through. So 40 dB is not in the list
+below: adding it would let the four capture entries into a runnable plan
+carrying floors set over a strong link, which is the one thing the gate
+exists to stop. A 40 dB range entry is what this measurement licenses, and
+promoting it wants a per-test record rather than this global one.
 
 What no measurement covers is a capture taken over this link. Nothing has
 been shown about whether 20 dB at a meter damages packets: a completed round

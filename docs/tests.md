@@ -783,8 +783,32 @@ the case runs at all with an attenuated responder.
 
 The suite writes that as `weak link: {responder: 20}`, which pins the
 responder to exactly 20 dB with its antenna attached and the sender to an
-ordinary board. Exactly, not a range, because that is the one configuration
-measured. A bench with a different attenuator fails planning with the
+ordinary board. Exactly, not a range, because the figures below belong to one
+attenuation each.
+
+**20 dB against 40 dB, measured 2026-11-02.** One ordinary sender and one
+firmware revision on both sides (`bluetooth_rxtx git-31228b05`, API 1.57,
+verified on each board inside the hold), six rounds per responder, each
+responder about a meter away behind its own attenuator:
+
+| responder | request PA level per round | reply PA level per round |
+|---|---|---|
+| 20 dB | 0, 0, 0, 0, 0, 0 | 0, 0, 0, 1, 1, 0 |
+| 40 dB | 0, 0, 1, 0, 1, 1 | 3, 3, 2, 3, 3, 1 |
+
+All twelve rounds completed with a clean round trip and no `mismatch on
+byte`. The figure that moves is the **reply** PA level — the level the
+attenuated board has to transmit at to be heard — which reaches 1 behind
+20 dB and 3 behind 40 dB. The request level barely moves, because that
+direction is an ordinary sender reaching an attenuated receiver rather than
+the reverse.
+
+Two consequences. 40 dB is a usable measurement point: it neither loses the
+link nor leaves the levels indistinguishable. But reply level 3 is exactly
+`maximum PA level`'s default bound here, so a 40 dB entry would sit on the
+bound and needs that argument raised rather than inherited. The copy numbers
+(`request number`, `reply number`) are not a discriminator at this sample
+size: they ranged over 0 to 15 at both attenuations. A bench with a different attenuator fails planning with the
 requirement in the message, which is more use than a run judged against
 figures taken elsewhere. Distance cannot be pinned, since a placement
 requirement has no distance key, so a board at 20 dB much further away is
