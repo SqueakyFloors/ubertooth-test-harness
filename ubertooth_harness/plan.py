@@ -7,6 +7,7 @@ from typing import Mapping
 
 import yaml
 
+from ubertooth_harness import weaklink
 from ubertooth_harness.catalog import CatalogError, TestCatalog, builtin_catalog
 
 
@@ -148,10 +149,43 @@ def unimplemented_tests(plan: Plan, catalog: TestCatalog | None = None) -> tuple
     return tuple(names)
 
 
+def unmeasured_attenuations(
+    plan: Plan, catalog: TestCatalog | None = None
+) -> Mapping[str, tuple[float, ...]]:
+    """Per test, the attenuations it is pointed at that nobody has measured.
+
+    A test's pass or fail figures were set on whatever link it last ran over,
+    so running it behind an attenuator the bench has never been measured at
+    would judge it against figures taken somewhere else. Those entries wait in
+    a plan with ``runnable: false`` until the measurement exists
+    (``weaklink.MEASURED_ATTENUATIONS_DB``).
+    """
+    test_catalog = catalog or builtin_catalog()
+    found = {}
+    for steps in plan.suites.values():
+        for step in steps:
+            definition = test_catalog.get(step.test_name)
+            asked = definition.placement_requirements(step.arguments)
+            unmeasured = weaklink.unmeasured(
+                want.min_attenuation_db for want in asked.values()
+                if want.min_attenuation_db
+            )
+            if unmeasured:
+                found.setdefault(step.test_name, set()).update(unmeasured)
+    return MappingProxyType({
+        name: tuple(sorted(values)) for name, values in found.items()
+    })
+
+
 def check_runnable(plan: Plan, catalog: TestCatalog | None = None) -> None:
-    """Refuse a runnable plan that names a test with no implementation:
-    run-suite would refuse its suite. Planned tests go in a plan with
-    ``runnable: false`` (testplans/backlog.yaml)."""
+    """Refuse a runnable plan that cannot judge what it would run.
+
+    Two ways it cannot: a test with no implementation, whose suite run-suite
+    would refuse; and a test pointed at an attenuation the bench has never
+    been measured at, which would be judged against figures taken over
+    another link. Both wait in a plan with ``runnable: false``
+    (testplans/backlog.yaml, testplans/weak-link.yaml).
+    """
     if not plan.runnable:
         return
     missing = unimplemented_tests(plan, catalog)
@@ -160,4 +194,17 @@ def check_runnable(plan: Plan, catalog: TestCatalog | None = None) -> None:
             f"plan {plan.name} names tests with no implementation: "
             + ", ".join(missing)
             + "; move them to a plan with 'runnable: false' (testplans/backlog.yaml)"
+        )
+    unmeasured = unmeasured_attenuations(plan, catalog)
+    if unmeasured:
+        named = "; ".join(
+            f"{name} at {weaklink.describe_attenuations(values)}"
+            for name, values in unmeasured.items()
+        )
+        raise PlanError(
+            f"plan {plan.name} asks for attenuation the bench has not been "
+            f"measured at: {named}. The bench is measured at "
+            f"{weaklink.describe_attenuations(weaklink.MEASURED_ATTENUATIONS_DB)}"
+            "; until a measurement exists these wait in a plan with "
+            "'runnable: false' (testplans/weak-link.yaml)"
         )

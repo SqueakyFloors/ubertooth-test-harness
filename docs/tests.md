@@ -73,19 +73,29 @@ cases need an ordinary link declares that as its own default, so a plan does
 not have to; the plan's `rf:` overrides the default role by role. The sections
 below name the default where a test has one.
 
-**Weak link.** `weak link:` is the shorthand for the usual case, an
-attenuation in dB per role: `weak link: {Ubertooth: 20}` asks for a board at
-exactly 20 dB with its antenna attached, and for an ordinary board for every
-other role of the test, which is what makes the attenuation of a run's figures
-a single number in the plan ([`weaklink.py`](../ubertooth_harness/weaklink.py)).
-Exactly, not at least: a figure measured behind 20 dB says nothing about a
+**Weak link.** `weak link:` is the shorthand for the usual case, one role at
+an attenuation in dB: `weak link: {Ubertooth: 20}` asks for a board at exactly
+20 dB with its antenna attached, and for an ordinary board for every other
+role of the test, which is what makes the attenuation of a run's figures a
+single number in the plan
+([`weaklink.py`](../ubertooth_harness/weaklink.py)). It names exactly one
+role, because a figure from a run where two boards were attenuated would
+belong to neither attenuation; a plan that really wants two placements has
+`rf:`, and a test takes one argument or the other, never both. Exactly that
+attenuation, not at least: a figure measured behind 20 dB says nothing about a
 bench with 10 dB or 40 dB in the path, so a bench carrying a different
 attenuator is told what the check needs rather than run against numbers taken
-elsewhere. A test takes `rf:` or `weak link:`, not both. The attenuation a run
-used is not read back from the argument: the planner records the placement of
-each board it bound, and the report quotes that beside the figures.
-[`testplans/weak-link.yaml`](../testplans/weak-link.yaml) collects the checks
-that need the bench's weak-link board and says what each one is waiting on.
+elsewhere. The attenuation a run used is not read back from the argument: the
+planner records the placement of each board it bound, and the report quotes
+that beside the figures.
+
+A **runnable** plan may only point a test at an attenuation the bench has been
+measured at, today 20 dB alone (`weaklink.MEASURED_ATTENUATIONS_DB`); any
+other is a plan error naming what is missing. A test's floors were set over
+whatever link it last ran, so running it behind an uncharacterized attenuator
+would judge it against figures taken elsewhere.
+[`testplans/weak-link.yaml`](../testplans/weak-link.yaml) is where those
+entries wait, and it says what each one needs measured.
 
 **Coverage profiles.** A test with a `coverage:` argument takes `smoke` or
 `comprehensive`. Smoke keeps one case per behavior; comprehensive adds the
@@ -780,7 +790,7 @@ transmitter at each PA level the plan lists while the attenuated board reads
 the channel it transmits on, so the RSSI step per level is a figure.
 
 **Theory of operation.** The PA level is the one transmit-side quantity the
-firmware sets directly (`FREND.PA_LEVEL`, 0 for about −25 dBm up to 7 for
+firmware sets directly (`FREND.PA_LEVEL`, 0 for about -25 dBm up to 7 for
 about 0 dBm), so a receiver at a fixed attenuation should read a signal that
 rises with it. Both halves have to be held for that to mean anything: the
 level, which the sender sets with `ubertooth-util -a<level>` before entering
@@ -790,25 +800,29 @@ bench was doing.
 
 The receiver's reading would come from `ubertooth-specan` over a narrow range
 around the sender's channel, read per frequency rather than as a band mean.
-The band mean is what cannot work: three 10-second `ubertooth-specan -g`
-sweeps per board put the attenuated board 1.1 dB from an ordinary one, with
-0.1 dB of run-to-run spread, because most of a sweep is the receiver's own
-noise floor, and the two boards' per-frequency minima overlap while their
-peaks differ. A peak at a frequency a sender is holding is a different
-measurement from the floor across the band.
+The band mean is what cannot work, and that part is measured: three 10-second
+`ubertooth-specan -g` sweeps per board put the attenuated board 1.1 dB from
+an ordinary one, with 0.1 dB of run-to-run spread, because most of a sweep is
+the receiver's own noise floor
+([#217](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/217)). A
+peak at a frequency a sender is holding is a different measurement from the
+floor across the band.
 
-Attenuation is what makes this measurable at bench distance rather than
-decoration. Two boards centimeters apart saturate the receiver at any level,
-so every level reads much the same, and a receiver at PA 7 from an adjacent
-board has wedged until a power cycle. The attenuated board sits about a meter
-away behind its attenuator, which is the placement on this bench where the
-levels have room to separate.
+Why the attenuated board rather than any two boards is the issue's own
+reasoning, not a measurement here: attenuation is what keeps the receiver out
+of saturation at bench distance, and
+[#168](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/168)
+records a receiver at PA 7 from an adjacent board wedging until a power
+cycle. Whether the levels in fact separate on this board at this attenuation
+is one of the things a first run would answer.
 
 **Hardware and arguments.** A `sender` and a `receiver` (both Ubertooth) on
 one named `host:`, a required `allow RF transmission: true` because the sender
 transmits, `PA levels:` (an ascending list of at least two distinct levels
-0-7), and a `duration:` per level. `weak link: {receiver: 20}` is how a plan
-puts the attenuated board on the receiving side.
+0-7), a `channel:` in MHz for both boards to hold, and a `duration:`, which
+is the whole test as it is everywhere else rather than a time per level — the
+catalog's wall-time estimate reads it that way. `weak link: {receiver: 20}`
+is how a plan puts the attenuated board on the receiving side.
 
 **Expected outcome.** No implementation; only a `runnable: false` plan may
 name it. What it would judge is the RSSI difference between consecutive
@@ -835,8 +849,9 @@ side. What is settled is why a driven sender is needed at all: the figures the
 tools report — `ubertooth-rx`'s `s=`, `n=` and `snr=` beside each packet, and
 `ubertooth-specan`'s RSSI per frequency — mean something only when the
 transmitter's level is known and held. Against ambient traffic the signal is
-whatever happened to be on the air, and a 25-second survey on this bench finds
-no piconet more often than it finds one.
+whatever happened to be on the air, and how much of a piconet a sweeping
+receiver hears varies widely between runs, which is why the Classic tests
+carry floors rather than counts.
 
 What is not settled is which reading to take, because the two candidates do
 not line up. The per-packet figures come from packet lines, so they need the
@@ -855,8 +870,9 @@ absent one.
 
 **Hardware and arguments.** A `sender` and a `receiver` (both Ubertooth) on
 one named `host:`, a required `allow RF transmission: true`, one `PA level:`
-(0-7) for the sender to hold, and a `duration:`. `weak link: {receiver: 20}`
-puts the attenuated board on the receiving side.
+(0-7) for the sender to hold, a `channel:` in MHz for both boards, and a
+`duration:`. `weak link: {receiver: 20}` puts the attenuated board on the
+receiving side.
 
 **Expected outcome.** No implementation; only a `runnable: false` plan may
 name it. The figure it would judge — the level at which packets stop arriving,

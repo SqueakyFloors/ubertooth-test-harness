@@ -387,17 +387,23 @@ own `rf_defaults`. Captures, surveys, and tests that hold a live connection
 default to an ordinary link, so the planner keeps them off an attenuated
 board; a plan's `rf:` or `weak link:` overrides that per role.
 
-`weak link:` (`weaklink.py`) is an attenuation in dB per role, and it speaks
-for every role of the test: the roles it names at exactly that attenuation
-with their antennas attached, and every other hardware role an ordinary
-board. That is one number in the plan where `rf:` needs a record per role, and
-it keeps "one weak link per test" true by construction, so a figure from a run
-belongs to one attenuation. Because the two say the same thing in two ways, a
-test takes one or the other, never both. The attenuation a run used is not
-read back from the argument: `resource_placements` carries the placement of
-every board the planner bound, which is what a report quotes. `weaklink.CHECKS`
-is the list of weak-link checks and the measurement each one still needs; none
-is in a runnable plan, and `testplans/weak-link.yaml` is where they wait. The requirement
+`weak link:` (`weaklink.py`) names one role and an attenuation in dB, and it
+speaks for every role of the test: that role at exactly that attenuation with
+its antenna attached, and every other hardware role an ordinary board. That is
+one number in the plan where `rf:` needs a record per role. It refuses a
+second role, so a figure from a run always belongs to one attenuation; a plan
+that wants two placements says so with `rf:`, and a test takes one argument or
+the other, never both. The attenuation a run used is not read back from the
+argument: `resource_placements` carries the placement of every board the
+planner bound, which is what a report quotes.
+
+`plan.check_runnable` refuses a runnable plan that points a test at an
+attenuation outside `weaklink.MEASURED_ATTENUATIONS_DB`, alongside its older
+refusal of a test with no implementation. A test's floors were set over
+whatever link it last ran, so an uncharacterized attenuator would have it
+judged against figures from elsewhere. `weaklink.CHECKS` is the list of
+weak-link checks and the measurement each one still needs; none is in a
+runnable plan, and `testplans/weak-link.yaml` is where they wait. The requirement
 narrows `ResourceRegistry.resolve_hardware` before the selector is read, and
 is filtered by the role as well, so a unit that could never take the role is
 not offered as the one that satisfies the placement: `default` prefers the

@@ -317,13 +317,16 @@ waiting on is a measurement at the attenuation that would set its floors.
 `ubertooth_harness/weaklink.py` names the measurement per check.
 
 Tests whose cases need an ordinary link ask for one themselves, so a plan need
-not: `Classic Bluetooth receive`, `Raw receive`, `BLE extcap capture`,
-`BLE extcap in tshark`,
-`Capture known BLE advertiser`, and `Capture known BLE connection` require
-`antenna: true` with no attenuation, which keeps a capture, a survey, or a
-followed connection off an attenuated board. A plan's `rf:` or `weak link:`
-for a role overrides that default, which is how one of those tests is pointed
-at the attenuated board on purpose.
+not: every test that takes a capture, runs a survey, or follows a live
+connection requires `antenna: true` with no attenuation on its `Ubertooth`
+role, which keeps it off an attenuated board. Those are `Classic Bluetooth
+receive`, `Raw receive`, `BLE extcap capture`, `BLE extcap in tshark`,
+`Capture known BLE advertiser`, `Capture known BLE connection`, `Follow a BLE
+connection across its end`, `Classic capture record fields`, `Capture known
+Classic device`, `Follow Classic Bluetooth piconet`, and `Recover AFH map`
+(`catalog.RF_DEFAULTS`). A plan's `rf:` or `weak link:` for a role overrides
+that default, which is how one of those tests is pointed at the attenuated
+board on purpose.
 
 Every run records the placement of each board it used that records one, in
 `run.jsonl`: on each invocation of the `manifest` record

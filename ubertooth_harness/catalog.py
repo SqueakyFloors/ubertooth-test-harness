@@ -148,6 +148,14 @@ def _pa_level(value):
     return value
 
 
+def _channel_mhz(value):
+    # The range ubertooth-util -c takes.
+    if (not isinstance(value, int) or isinstance(value, bool)
+            or not 2402 <= value <= 2480):
+        raise CatalogError("must be a channel of 2402-2480 MHz")
+    return value
+
+
 def _pa_levels(value):
     """An ascending list of distinct PA levels, as a power curve needs them."""
     if not isinstance(value, (list, tuple)) or len(value) < 2:
@@ -1039,6 +1047,14 @@ RF_DEFAULTS: Mapping[str, Mapping[str, PlacementRequirement]] = MappingProxyType
         "Capture known BLE advertiser",
         "Capture known BLE connection",
         "Follow a BLE connection across its end",
+        # The three Classic peer tests were left out when this list was
+        # written, though each one is a capture or a followed connection and
+        # wants an ordinary link for the same reason as the rest. On a bench
+        # whose default board is the attenuated one they would otherwise
+        # select it silently.
+        "Capture known Classic device",
+        "Follow Classic Bluetooth piconet",
+        "Recover AFH map",
     )
 })
 
@@ -1226,6 +1242,12 @@ def builtin_catalog() -> TestCatalog:
                 # The sender transmits at every level the plan lists.
                 "allow RF transmission": ArgumentRule(_required_true, required=True),
                 "PA levels": ArgumentRule(_pa_levels, required=True),
+                # The channel both boards hold: the sender transmits on it and
+                # the receiver sweeps around it, so a reading per level needs
+                # it fixed and named rather than left to the boot default.
+                "channel": ArgumentRule(_channel_mhz, required=True),
+                # The whole test, as everywhere else, not per level: the
+                # catalog's own estimate reads this argument that way.
                 "duration": DURATION,
             }),
             MappingProxyType({"sender": "Ubertooth", "receiver": "Ubertooth"}),
@@ -1242,6 +1264,7 @@ def builtin_catalog() -> TestCatalog:
                 "receiver": ArgumentRule(_selector, required=True),
                 "allow RF transmission": ArgumentRule(_required_true, required=True),
                 "PA level": ArgumentRule(_pa_level, required=True),
+                "channel": ArgumentRule(_channel_mhz, required=True),
                 "duration": DURATION,
             }),
             MappingProxyType({"sender": "Ubertooth", "receiver": "Ubertooth"}),
@@ -1747,7 +1770,7 @@ def builtin_catalog() -> TestCatalog:
         ]
     )
     return TestCatalog(
-        _accept_rf(_accept_watchdog_limit(_accept_platforms(
+        _accept_placement_arguments(_accept_watchdog_limit(_accept_platforms(
             replace(
                 definition,
                 estimates=ESTIMATES.get(definition.name),
@@ -1757,7 +1780,7 @@ def builtin_catalog() -> TestCatalog:
     )
 
 
-def _accept_rf(definition: TestDefinition) -> TestDefinition:
+def _accept_placement_arguments(definition: TestDefinition) -> TestDefinition:
     """Accept `rf:` and `weak link:` on every test that binds hardware, so a
     plan can ask for a placement for any of its roles. A test that binds none
     cannot."""

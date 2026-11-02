@@ -48,9 +48,10 @@ resources:
     # or the position changes, because reports quote them as what the run's
     # figures were taken at. A plan then asks for this board with
     # `weak link: {Ubertooth: 20}`, which also asks for an ordinary board for
-    # every other role of that test; captures, surveys and follow tests keep
-    # away from it on their own. testplans/weak-link.yaml collects the checks
-    # this board is for.
+    # every other role of that test; the capture, survey and follow tests
+    # declare an ordinary link as their own default, so they keep away from
+    # it unless a plan says otherwise. testplans/weak-link.yaml collects the
+    # checks this board is for.
     # rf:
     #   antenna: true
     #   attenuation_db: 20

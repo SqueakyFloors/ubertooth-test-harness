@@ -8,7 +8,13 @@ from pathlib import Path
 
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.cli import main
-from ubertooth_harness.plan import PlanError, check_runnable, load_plan, unimplemented_tests
+from ubertooth_harness.plan import (
+    PlanError,
+    check_runnable,
+    load_plan,
+    unimplemented_tests,
+    unmeasured_attenuations,
+)
 from ubertooth_harness.planner import PlanCompiler
 from ubertooth_harness.resources import FileResourceRegistry
 
@@ -95,8 +101,15 @@ class RunnablePlanTests(unittest.TestCase):
                 check_runnable(plan, catalog)
             if not plan.runnable:
                 not_runnable.append(path.name)
-                # A not-runnable plan exists for planned tests only.
-                self.assertTrue(unimplemented_tests(plan, catalog), path.name)
+                # A not-runnable plan exists for what a runnable one cannot
+                # carry: a planned test with no implementation, or a test
+                # pointed at an attenuation the bench has not been measured
+                # at (both are what check_runnable refuses).
+                self.assertTrue(
+                    unimplemented_tests(plan, catalog)
+                    or unmeasured_attenuations(plan, catalog),
+                    path.name,
+                )
         self.assertEqual(["backlog.yaml", "mac-polling.yaml", "weak-link.yaml"],
                          not_runnable)
 

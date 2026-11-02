@@ -5,14 +5,20 @@ plan: Weak-link receiver
 # asks for a board at exactly that attenuation and an ordinary board for every
 # other role (ubertooth_harness/weaklink.py).
 #
-# Not runnable, and not because the code is missing. Seven of these nine
-# entries name a test that already exists and works on a strong link; what is
-# missing is one measurement per entry, so that the test's floors and
-# tolerances belong to the weak link rather than to the strong one they were
-# set on. weaklink.CHECKS names the measurement each one needs, and
-# docs/tests.md says per test what a weak link changes for it. An entry moves
-# into the plan it belongs to (ble.yaml, classic.yaml, range.yaml) once its
-# measurement exists and its figures are written down, not before.
+# Not runnable, for two reasons. `Transmit power steps` and `Receiver
+# sensitivity` have no implementation at all, which on its own keeps a plan
+# naming them out of `run-suite`. The other seven name a test that already
+# exists and works on a strong link; what each is missing is one measurement,
+# so that the test's floors and tolerances belong to the weak link rather
+# than to the strong one they were set on. The four 40 dB entries would be
+# refused by `check_runnable` even in a plan marked runnable, because the
+# bench has never been measured at 40 dB
+# (weaklink.MEASURED_ATTENUATIONS_DB).
+#
+# weaklink.CHECKS names the measurement each one needs, and docs/tests.md
+# says per test what a weak link changes for it. An entry moves into the plan
+# it belongs to (ble.yaml, classic.yaml, range.yaml) once its measurement
+# exists and its figures are written down, not before.
 #
 # `range-weak-link` in range.yaml is the one weak-link suite that is runnable:
 # 20 dB at about a meter was measured there, and the suite keeps the bound the
@@ -57,9 +63,10 @@ suites:
     # The two transmit-side entries have no implementation: the figure each
     # would judge (RSSI per PA level, and the level at which packets stop
     # arriving) has not been measured at any attenuation. A fixed attenuation
-    # is what makes either of them a figure rather than a bench artifact; a
-    # full-band specan mean moves about 1 dB between the attenuated board and
-    # an ordinary one, so ambient traffic cannot give it.
+    # is what makes either of them a figure rather than a bench artifact, and
+    # a band mean cannot stand in: measured in #217, a full-band specan mean
+    # moves 1.1 dB between the attenuated board and an ordinary one, with
+    # 0.1 dB of run-to-run spread.
     - Transmit power steps:
         host: Host_Linux
         sender: default
@@ -67,7 +74,10 @@ suites:
         weak link: {receiver: 20}
         allow RF transmission: true
         PA levels: [0, 1, 2, 3, 4, 5, 6, 7]
-        duration: 10s
+        # One channel both boards hold, away from the busiest part of the
+        # band; `duration:` is the whole test, as it is everywhere else.
+        channel: 2410
+        duration: 2m
 
     - Receiver sensitivity:
         host: Host_Linux
@@ -76,14 +86,19 @@ suites:
         weak link: {receiver: 20}
         allow RF transmission: true
         PA level: 0
-        duration: 10s
+        channel: 2410
+        duration: 30s
 
-  # What needs a different attenuator. 20 dB at about a meter produced no bit
-  # errors at all: ten range-test round trips were clean. Error flags,
-  # recovery under errors, and an access-code error threshold all need
-  # packets that arrived damaged, so they wait for the 40 dB board the
-  # maintainer is fitting. Run the same entries at 30 dB too if that
-  # attenuator goes on first: two points make a curve, one makes a claim.
+  # What needs a different attenuator. Error flags, recovery under errors,
+  # and an access-code error threshold all need a link that delivers damaged
+  # packets, and nothing establishes that 20 dB at a meter does: the only
+  # runs at 20 dB were range-test round trips, which report the lowest PA
+  # level and copy that got through rather than anything about the packets
+  # that did not. So these follow the issue's own request for a larger figure
+  # and wait for the 40 dB board the maintainer is fitting. Run the same
+  # entries at 30 dB too if that attenuator goes on first: two points make a
+  # curve, one makes a claim. Either way the attenuation has to be registered
+  # and measured before these can leave this plan.
   weak-link-40db:
     # Do the HEC and CRC flags in BR/EDR records fire, and do the flagged
     # records stay internally consistent? The test's floors (records with a

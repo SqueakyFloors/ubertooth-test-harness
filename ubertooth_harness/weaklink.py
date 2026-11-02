@@ -34,18 +34,33 @@ planner records the placement of every board it bound (`resource_placements`),
 and the report quotes it beside the figures, so a report says what its
 numbers were taken at even when the bench was rewired since.
 
-## What the bench has measured
+## What the bench has been measured at
 
-20 dB at about a meter is the only setting measured through the harness so
-far, and what it establishes is narrow (see `docs/tests.md`, `Two-device
-range test`): a round trip stays clean, the required PA level stays inside
-the bound the ordinary suite already applies, and a full-band `specan` mean
-moves about 1 dB, so mean band RSSI cannot measure an attenuator at all.
-What it did not produce is bit errors: ten round trips were clean. Every
-check below that turns on error flags, recovery under errors, or an
-access-code error threshold therefore needs more attenuation, which is why
-`CHECKS` carries the figure each one still needs rather than a threshold
-guessed from the 20 dB bench.
+20 dB at about a meter is the only setting measured, and only by driving
+`ubertooth-util -e`, `-n` and `-m` by hand: the `range-weak-link` suite has
+never judged a result, because it stops on a fork bug first (`docs/tests.md`,
+`Two-device range test`). What those runs establish is narrow. Ten round
+trips completed, with request and reply PA levels of 0 to 2, so the level
+stayed inside the bound the ordinary suite already applies; and a full-band
+`specan` mean moved 1.1 dB between the attenuated board and an ordinary one,
+with 0.1 dB of run-to-run spread, so mean band RSSI cannot measure an
+attenuator at all (both figures from
+harness PR #217).
+
+What no measurement covers is a capture taken over this link. Nothing has
+been shown about whether 20 dB at a meter damages packets: a completed round
+trip is not evidence that none were damaged, since the range test keeps the
+first reply of up to sixteen copies and reports only the lowest level and
+copy that got through. So the checks that turn on error flags, recovery under
+errors, or an access-code error threshold are pointed at the 40 dB board the
+bench is getting rather than at 20 dB, following the issue's own request for
+a larger figure, and `CHECKS` carries the measurement each one still needs
+instead of a threshold inferred from the runs above.
+
+`measured()` and `unmeasured()` are what give this force: `plan.check_runnable`
+refuses a runnable plan that points a test at an attenuation not in
+`MEASURED_ATTENUATIONS_DB`, so an entry cannot quietly start judging its old
+floors over a link nobody has characterized.
 """
 
 from __future__ import annotations
@@ -57,17 +72,43 @@ from typing import Mapping
 
 from ubertooth_harness.rf import NORMAL_LINK, PlacementError, PlacementRequirement
 
-# Attenuations measured through the harness, in dB. Only a figure taken at
-# one of these is a measurement; the rest are the bench the maintainer can
-# fit on request.
+# Attenuations the bench has been measured at, in dB. A runnable plan may
+# only point a test at one of these (plan.check_runnable); the rest are
+# attenuators the maintainer can fit on request.
 MEASURED_ATTENUATIONS_DB: tuple[float, ...] = (20.0,)
 # Attenuations the weak-link checks ask for and the bench has not had yet.
 PLANNED_ATTENUATIONS_DB: tuple[float, ...] = (30.0, 40.0)
 
 
 def measured(attenuation_db: float) -> bool:
-    """True when the bench has been measured at this attenuation."""
+    """True when the bench has been measured at this attenuation.
+
+    This is what keeps an unmeasured attenuation out of a runnable plan
+    (``unmeasured``): a test's floors were set on whatever link it last ran
+    over, so pointing it at an attenuation nobody has measured would judge it
+    against figures from somewhere else.
+    """
     return float(attenuation_db) in MEASURED_ATTENUATIONS_DB
+
+
+def unmeasured(attenuations_db) -> tuple[float, ...]:
+    """Those of these attenuations the bench has not been measured at.
+
+    Sorted, each once, so a refusal names them in a stable order.
+    """
+    return tuple(sorted({
+        float(value) for value in attenuations_db if not measured(value)
+    }))
+
+
+def describe_attenuations(attenuations_db) -> str:
+    """``20 dB``, ``30 and 40 dB``, ``20, 30 and 40 dB``."""
+    figures = [f"{value:g}" for value in attenuations_db]
+    if not figures:
+        return "no attenuation"
+    if len(figures) == 1:
+        return f"{figures[0]} dB"
+    return ", ".join(figures[:-1]) + f" and {figures[-1]} dB"
 
 
 def weak_receiver(attenuation_db: float) -> PlacementRequirement:
@@ -80,15 +121,27 @@ def weak_receiver(attenuation_db: float) -> PlacementRequirement:
 
 
 def weak_link(raw: Mapping) -> Mapping[str, float]:
-    """A plan's ``weak link:`` argument: attenuation in dB per hardware role.
+    """A plan's ``weak link:`` argument: one role, at an attenuation in dB.
 
-    The caller checks the role names against the test's own roles, as it does
-    for ``rf:``; here only the shape and the numbers are judged.
+    Exactly one role, because a figure from a run where two boards were
+    attenuated would not say which attenuation it belonged to. A plan that
+    really wants two placements has ``rf:``, which says so plainly.
+
+    The caller checks the role name against the test's own roles, as it does
+    for ``rf:``; here only the shape and the number are judged.
     """
     if not isinstance(raw, Mapping) or not raw:
         raise PlacementError(
             "weak link must be a non-empty mapping of hardware role to "
             "attenuation in dB"
+        )
+    if len(raw) > 1:
+        raise PlacementError(
+            "weak link names one role, not "
+            + ", ".join(sorted(str(role) for role in raw))
+            + "; every other role is required to be an ordinary board, and a "
+            "figure from two attenuated boards belongs to neither "
+            "attenuation. Use rf: to ask for two placements"
         )
     asked = {}
     for role, value in raw.items():
@@ -117,20 +170,27 @@ def placements(
 ) -> Mapping[str, PlacementRequirement]:
     """What a ``weak link:`` argument requires of each role of a test.
 
-    The roles it names sit at exactly their attenuation; every other hardware
-    role the test binds must be an ordinary board. One weak link per test is
-    the whole point: a figure from a run where two boards were attenuated
-    would not say which attenuation it belonged to.
+    The one role it names sits at exactly its attenuation; every other
+    hardware role the test binds must be an ordinary board.
 
     A plan that did not ask for a weak link requires nothing, so an empty
     argument gives no requirements rather than demanding ordinary boards
-    everywhere.
+    everywhere. A role the test does not bind is caught by the caller, which
+    knows the test's roles; reaching here with one would drop the weak link
+    silently, so it is refused instead.
     """
     if not asked:
         return MappingProxyType({})
+    roles = tuple(hardware_roles or {})
+    unknown = sorted(set(asked) - set(roles))
+    if unknown:
+        raise PlacementError(
+            f"weak link names role(s) the test does not bind: "
+            + ", ".join(unknown)
+        )
     return MappingProxyType({
         role: weak_receiver(asked[role]) if role in asked else NORMAL_LINK
-        for role in (hardware_roles or {})
+        for role in roles
     })
 
 
@@ -175,9 +235,9 @@ CHECKS: tuple[Check, ...] = (
     Check(
         "HEC and CRC error flags, Classic",
         "Classic capture record fields", "Ubertooth", 40.0,
-        "a capture with real bit errors: at 20 dB every round trip was clean, "
-        "and the test's floors for headers whose HEC passed were set on a "
-        "strong link",
+        "a capture holding records the flags actually fired on, and what the "
+        "test's floors for headers whose HEC passed should be over such a "
+        "link; today's floors were set on a strong one",
     ),
     Check(
         "HEC and CRC error flags, BLE",
@@ -189,7 +249,7 @@ CHECKS: tuple[Check, ...] = (
         "UAP and clock recovery under errors",
         "Capture known Classic device", "Ubertooth", 40.0,
         "how often libbtbb settles on a wrong UAP when packets are marginal, "
-        "which needs marginal packets first",
+        "which needs a link that delivers marginal packets first",
     ),
     Check(
         "Access-code error threshold (ubertooth-rx -e)",
@@ -200,14 +260,14 @@ CHECKS: tuple[Check, ...] = (
     Check(
         "Follow a marginal Classic piconet",
         "Follow Classic Bluetooth piconet", "Ubertooth", 20.0,
-        "one capture at 20 dB: the ESP32 pair was held by other work when the "
-        "bench was last free",
+        "one capture over this link: whether follow survives the lost packets "
+        "and recovers, and what packet floor it then supports",
     ),
     Check(
         "Follow a marginal BLE connection",
         "Follow a BLE connection across its end", "Ubertooth", 20.0,
-        "one capture at 20 dB: the DK pair was held by other work when the "
-        "bench was last free",
+        "one capture over this link: whether follow reacquires the connection "
+        "across its end when packets are lost, and at what rate",
     ),
     Check(
         "Board-to-DK capture with an attenuated receiver",
