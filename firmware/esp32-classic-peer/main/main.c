@@ -27,7 +27,7 @@
 #define SHELL_TX_BUF   2048
 #define SHELL_LINE_MAX 160 /* longest command line accepted */
 #define SHELL_OUT_MAX  1200 /* longest answer line, set by the status JSON,
-                             * whose longest possible form is 1069 bytes:
+                             * whose longest possible form is 1124 bytes:
                              * every number at its widest, the longest name,
                              * and the longest channel map reason */
 #define SHELL_WORDS    8
@@ -87,6 +87,21 @@ static bool parse_uint(const char *s, unsigned *out)
     return true;
 }
 
+/* The nth word of the command line, or "" when the line has no nth word.
+ *
+ * handle_line() fills only the words a line really had, so argv beyond argc
+ * holds whatever was last on the shell task's stack. Every branch of run()
+ * reads its operands through this, which is what keeps a line shorter than
+ * the branch expects from reading one of those: a branch that tested an
+ * operand before testing argc used to read an uninitialized pointer
+ * (#262), and no arrangement of argc tests can be relied on not to grow
+ * that back. "" matches no subcommand and parses as no number, so a short
+ * line falls through to the usage answer by itself. */
+static const char *word(int argc, char **argv, int n)
+{
+    return n < argc ? argv[n] : "";
+}
+
 /* "on" or "off". */
 static bool parse_onoff(const char *s, bool *out)
 {
@@ -117,7 +132,7 @@ static void cmd_help(void)
         "sco start                     open the synchronous audio link",
         "sco stop                      drop it and stop the profile",
         "sco stats                     the controller's packet counters",
-        "sco type <ev3|2ev3|default>   the packet type the next link asks for",
+        "sco type <" SCO_TYPE_NAMES ">   the packet type the next link asks for",
         "clock                         the native and piconet clocks",
         "afh <20 hex digits>           hop over this channel map",
         "afh off                       hop over every channel again",
@@ -132,7 +147,14 @@ static void cmd_help(void)
 
 static void run(int argc, char **argv)
 {
+    /* The command and its two operands. argv[0] is always there, because
+     * handle_line() answers nothing at all for a blank line; the operands
+     * come through word(), so a branch cannot read one the line did not
+     * carry. Nothing below indexes argv itself, and a unit test checks
+     * that it stays that way. */
     const char *c = argv[0];
+    const char *a1 = word(argc, argv, 1);
+    const char *a2 = word(argc, argv, 2);
 
     if (argc == 1 && strcmp(c, "version") == 0) {
         shell_line("%s", UTESP_FW_VERSION);
@@ -154,9 +176,9 @@ static void run(int argc, char **argv)
         return;
     }
     if (argc == 2 && strcmp(c, "role") == 0) {
-        if (strcmp(argv[1], "acceptor") == 0) {
+        if (strcmp(a1, "acceptor") == 0) {
             answer(bt_set_role(PEER_ROLE_ACCEPTOR));
-        } else if (strcmp(argv[1], "initiator") == 0) {
+        } else if (strcmp(a1, "initiator") == 0) {
             answer(bt_set_role(PEER_ROLE_INITIATOR));
         } else {
             answer("role must be acceptor or initiator");
@@ -165,15 +187,15 @@ static void run(int argc, char **argv)
     }
     if (argc == 2 && strcmp(c, "disc") == 0) {
         bool on;
-        answer(parse_onoff(argv[1], &on) ? bt_set_discoverable(on) : "disc takes on or off");
+        answer(parse_onoff(a1, &on) ? bt_set_discoverable(on) : "disc takes on or off");
         return;
     }
     if (strcmp(c, "spp") == 0) {
-        if (argc == 3 && strcmp(argv[1], "peer") == 0) {
-            answer(bt_set_peer(argv[2]));
-        } else if (argc == 2 && strcmp(argv[1], "start") == 0) {
+        if (argc == 3 && strcmp(a1, "peer") == 0) {
+            answer(bt_set_peer(a2));
+        } else if (argc == 2 && strcmp(a1, "start") == 0) {
             answer(bt_spp_start());
-        } else if (argc == 2 && strcmp(argv[1], "stop") == 0) {
+        } else if (argc == 2 && strcmp(a1, "stop") == 0) {
             answer(bt_spp_stop());
         } else {
             answer("spp takes peer <address>, start, or stop");
@@ -183,23 +205,23 @@ static void run(int argc, char **argv)
     if (strcmp(c, "stream") == 0) {
         bool on;
         unsigned v;
-        if (argc == 2 && parse_onoff(argv[1], &on)) {
+        if (argc == 2 && parse_onoff(a1, &on)) {
             answer(bt_stream(on));
-        } else if (argc == 3 && strcmp(argv[1], "period") == 0) {
-            answer(parse_uint(argv[2], &v) ? bt_stream_period(v) : "period must be a number");
-        } else if (argc == 3 && strcmp(argv[1], "payload") == 0) {
-            answer(parse_uint(argv[2], &v) ? bt_stream_payload(v) : "payload must be a number");
+        } else if (argc == 3 && strcmp(a1, "period") == 0) {
+            answer(parse_uint(a2, &v) ? bt_stream_period(v) : "period must be a number");
+        } else if (argc == 3 && strcmp(a1, "payload") == 0) {
+            answer(parse_uint(a2, &v) ? bt_stream_payload(v) : "payload must be a number");
         } else {
             answer("stream takes on, off, period <ms>, or payload <bytes>");
         }
         return;
     }
     if (strcmp(c, "sco") == 0) {
-        if (argc == 2 && strcmp(argv[1], "start") == 0) {
+        if (argc == 2 && strcmp(a1, "start") == 0) {
             answer(bt_sco_start());
-        } else if (argc == 2 && strcmp(argv[1], "stop") == 0) {
+        } else if (argc == 2 && strcmp(a1, "stop") == 0) {
             answer(sco_stop());
-        } else if (argc == 2 && strcmp(argv[1], "stats") == 0) {
+        } else if (argc == 2 && strcmp(a1, "stats") == 0) {
             /* static for the same reason as the status line above. */
             static char json[SHELL_OUT_MAX];
             const char *err = sco_pkt_stats(json, sizeof(json));
@@ -207,19 +229,21 @@ static void run(int argc, char **argv)
                 shell_line("%s", json);
             }
             answer(err);
-        } else if (strcmp(argv[1], "type") == 0) {
-            answer(argc == 3 ? sco_set_type(argv[2])
-                             : "sco type takes ev3, 2ev3, or default");
+        } else if (strcmp(a1, "type") == 0) {
+            /* The type's own usage line, which names the three it takes;
+             * every other malformed "sco" line gets the command's. Bare
+             * "sco" has no first word to match "type", so it goes below. */
+            answer(argc == 3 ? sco_set_type(a2) : SCO_TYPE_USAGE);
         } else {
-            answer("sco takes start, stop, stats, or type <ev3|2ev3|default>");
+            answer(SCO_USAGE);
         }
         return;
     }
     if (strcmp(c, "afh") == 0) {
-        if (argc == 2 && strcmp(argv[1], "off") == 0) {
+        if (argc == 2 && strcmp(a1, "off") == 0) {
             answer(bt_set_afh_all());
         } else if (argc == 2) {
-            answer(bt_set_afh(argv[1]));
+            answer(bt_set_afh(a1));
         } else {
             answer("afh takes twenty hex digits or off");
         }

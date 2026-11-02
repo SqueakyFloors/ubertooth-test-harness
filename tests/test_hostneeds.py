@@ -349,7 +349,7 @@ class SequencerTests(unittest.TestCase):
         self.assertEqual(2, capabilities["details"]["not_applicable"])
 
         # report.md: the result line, the table column, a section and the transcript.
-        self.assertIn("1 cases and 2 tests not applicable on this host", report)
+        self.assertIn("1 cases and 2 tests not applicable", report)
         self.assertIn("| Host can run | macos (build); BlueZ tools: none; Python tools build: "
                       "no; firmware build: no |", report)
         self.assertIn("| Not applicable cases |", report)
@@ -432,7 +432,7 @@ class DryRunTests(unittest.TestCase):
                       "build's .dfu: needs a firmware build", text)
         self.assertIn("    run: ubertooth-util help", text)
         self.assertRegex(text, r"total: 2 test\(s\), \d+ case\(s\) to run, 3 case\(s\) and 0 "
-                               r"test\(s\) not applicable on Host_Local")
+                               r"test\(s\) not applicable")
 
     def test_a_test_build_artifact_makes_the_sign_case_applicable(self):
         code, text = self.dry_run("--artifact", "test build=IMAGE")

@@ -651,7 +651,13 @@ def _validate(
         compiler = PlanCompiler(catalog, registry)
         selected_suites = (suite,) if suite else tuple(plan.suites)
         for suite_name in selected_suites:
-            compiled = compiler.compile_suite(plan, suite_name)
+            # Strict: a registry named on the command line is the bench the
+            # plan is being checked against, so a host or role it has not got
+            # is a typo in the plan or a bench set up differently, not a step
+            # to leave out. Run planning is the permissive one.
+            compiled = compiler.compile_suite(
+                plan, suite_name, strict_hardware=True
+            )
             invocations = compiled.invocations
             print(f"compiled {suite_name}: {len(invocations)} invocation(s)")
             for item in compiled.not_applicable:
@@ -826,7 +832,8 @@ def _run_suite(args: argparse.Namespace) -> int:
         if invocation.host == args.host
         and (not selected_names or invocation.test_name in selected_names)
     )
-    # Whole tests this host cannot run (hostneeds.py), recorded, not run.
+    # Whole tests left out at planning (hostneeds.py, planner.py): what this
+    # host cannot run, and what this bench has not got the hardware for.
     not_applicable = tuple(
         item for item in compiled.for_host(args.host)
         if not selected_names or item.test_name in selected_names
@@ -967,8 +974,10 @@ def _dry_run(args, catalog, plan, host, invocations, not_applicable) -> int:
             print(f"    not applicable on {args.host}: {case.name}: {reason}")
     for item in not_applicable:
         print(f"  {item.describe()}")
+    # Not "on this host": a step left out because this registry has no such
+    # host is not this host's doing, and each line above names its own host.
     print(f"total: {len(invocations)} test(s), {runs} case(s) to run, {omitted} case(s) "
-          f"and {len(not_applicable)} test(s) not applicable on {args.host}")
+          f"and {len(not_applicable)} test(s) not applicable")
     return 0
 
 

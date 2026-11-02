@@ -263,7 +263,8 @@ def run_capabilities(
 
 @dataclass(frozen=True)
 class NotApplicable:
-    """A test or case left out because its host cannot run it."""
+    """A test or case left out: the host named cannot run it, or this bench
+    has not got the hardware it binds (planner.py)."""
 
     host: str
     test_name: str

@@ -86,8 +86,9 @@ class SequencerSummary:
     failure_reason: str
     duration_s: float
     skipped_cases: int = 0
-    # Left out before the run because the host cannot run them (hostneeds.py);
-    # neither skipped nor failed. Tests: every case, or the whole test.
+    # Left out before the run, because the host named cannot run them or this
+    # bench has not got the hardware (hostneeds.py, planner.py); neither
+    # skipped nor failed. Tests: every case, or the whole test.
     not_applicable_cases: int = 0
     not_applicable_tests: int = 0
     # Times a board reset itself during the run, as the firmware counts them
@@ -1114,7 +1115,8 @@ class NamedTestSequencer:
         comes from the registry's platform and the manifest's build and
         artifacts. Cases it cannot run are left out before anything runs and
         recorded as not applicable, with ``not_applicable`` (whole tests the
-        planner left out for this host).
+        planner left out of this run: what this host cannot run, and what
+        this bench has not got the hardware for).
         """
         run_id = validate_run_id(run_id)
         manifest = self._validate_run_contract(

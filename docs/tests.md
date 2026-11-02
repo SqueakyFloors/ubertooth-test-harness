@@ -47,6 +47,22 @@ self-reset is reported and judged by a person, not failed
 `Exclusive Ubertooth topology`, and `MAC polling soak` must state their
 platforms.
 
+**Hardware the bench has not got.** A step whose `hosts:` name a host this
+registry does not have, or whose hardware roles no selected host can bind (no
+ESP32 Classic peer, no DK, no default for the role, none declaring the role),
+is left out before the run as not applicable, the same way a platform
+mismatch is. So a plan every host runs may still hold a step for hardware
+only one bench has. What a host that is here cannot run is still a plan
+error: a platform it does not have, and a board placed differently from what
+the test needs, fail planning when every host the step names is here and none
+can run it (with a host this registry has not got among them, the step is
+left out instead); so
+do two absences that are still to be decided, `alternate Ubertooths` on a
+one-board host and `exclusive Ubertooth` with an unmapped board
+([#269](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/269)).
+`validate-plan --hardware <registry>` refuses the absence too, since there
+the bench is named on purpose (README, "Hardware a registry has not got").
+
 **RF placement.** Every test with a hardware role also accepts `rf:`, one
 requirement per role, which says what the role's placement on the bench must
 be: `antenna`, `min_attenuation_db`, and `max_attenuation_db`
@@ -898,6 +914,119 @@ range, so they check that the tool runs and reports nothing malformed. The
 dump cases check record structure and rate, not that the symbols mean
 anything.
 
+## Board state between runs
+
+**What it does.** Kills a running capture outright, so the board is left in
+the mode that capture started, and then requires the next run on the same
+board to be clean anyway: to say what it found, stop it, capture only its own
+data, and leave a board that answers every read.
+
+**Theory of operation.** A tool that exits normally, or is stopped with
+SIGTERM, sends STOP on the way out, so the board it leaves is idle. A terminal
+or an SSH session that disappears does not: the tool dies where it stands and
+the board keeps streaming into its endpoint. The test makes that state on
+purpose. [`killedcapture.py`](../ubertooth_harness/killedcapture.py) starts the
+capture tool as its own child with nothing in between -- no shell, no
+`timeout` -- waits until the capture file has grown, and sends that process
+SIGKILL, which cannot be caught. What it then requires before the case goes on
+is that the wait for the tool returned `-SIGKILL`: it died of the signal where
+it stood, rather than ending some other way, and its exit status has been
+read, so it is out of the process table rather than sitting there with its
+device still open. The tool runs in a session of its own, which is what lets
+the module take it and anything it started down together on a failure or when
+the harness stops the step; that session also puts it outside the group the
+harness signals, so those signals are caught and passed on rather than leaving
+a capture streaming, and its own output goes to a file rather than to the
+step's streams, which an orphan would hold open. The file the killed tool wrote is hashed at the kill and
+checked again at the end of the case, so the evidence is kept rather than
+quietly rewritten by the next run.
+
+Both tools used produce data with nothing on the air -- `ubertooth-specan`
+about 16 kB a second, `ubertooth-dump` about 2000 records a second -- so the
+dump's own contents are the evidence and no peer is needed. The sweep is the
+mode left behind and the dump is the capture that has to cope with it, which
+is the order that works: see the known limits below. A dump's 68-byte records
+carry the firmware's packet type, so a record left from the sweep fails by
+type, since the firmware types a sweep's records SPECAN. A record of a mode
+that writes basic-rate records would pass that and fails instead by its clock,
+which restarts at mode entry
+([`rxdump.py`](../ubertooth_harness/rxdump.py), `--max-stale`): no mode in
+this test writes those, so that half is the "zero stale records" the issue
+asks for rather than the leak this pairing can produce.
+
+The dump states its modulation, LE, before it asks for its mode, and a mode
+start puts the modulation back to basic rate. So the radio ending up in LE is
+what says a setting stated for this capture survived the mode start on a board
+that was left in another mode; it is read afterwards from the CC2400 MDMCTRL
+register, which keeps what the last mode programmed.
+
+The warning the second command has to print comes from libubertooth's
+`ubertooth_bulk_init()`: it reads the mode the board is in, stops it, and
+waits until the board reports that it has left it, because the stop request
+only asks and the mode's loop can hand the endpoint another packet in the
+meantime. The case requires that warning, requires it on stderr rather than
+among the records on stdout, and forbids the second one the same code prints
+when the wait runs out. Together those say the board was in a mode, the
+capture found it, and the board reported leaving it inside the wait.
+
+**Hardware and arguments.** One `Ubertooth`, selected by full serial.
+Guarded. A required `duration:`, which bounds the dump. No RF peer,
+no firmware write, and nothing is transmitted.
+
+**Expected outcome.** One case: a symbol dump after a killed spectrum sweep.
+It resets the board and reads back the documented boot defaults (2441 MHz, PA
+level 7, squelch -120, LEDs off), kills the sweep, runs the dump, checks the
+dump's records and the modulation the radio ended up in, confirms the killed
+capture is byte for byte what the kill left, and then reads firmware version,
+serial, channel, PA level, and squelch, each once: a read that needs a second
+try fails the case. Cleanup stops the board, resets it,
+requires the documented boot defaults again, and then puts back every setting
+the case recorded; this is the one test that leaves a board in a mode on
+purpose, so it hands the next test a board it has seen boot. A self-reset the
+firmware records while this runs is reported by the usual watchdog read
+between cases, and the guard boards are checked as in every guarded test.
+
+**Known limits.** Whether the killed tool left a process of its own behind is
+not checked, and cannot be after the fact: the tool's pid is also its process
+group's id, and once the tool has been reaped that id is free to be given to
+the next process that starts a session of its own, which the harness does for
+every step, so a question about the group could be answered by somebody else's
+process. The host tools are single processes, so there is nothing of theirs to
+miss; a tool that did start one would need the process table read by name. A
+failure, or the harness stopping the step, does take the whole group down,
+which is when it matters and when the group is certainly this run's.
+
+The case rests on the host leaving the board alone when the
+killed process's handle closes. On a host or kernel that reset the device
+there instead, the board would be idle, the warning the case requires would
+never print, and the case would fail for a reason that has nothing to do with
+the behavior it is about. Only Linux has been checked (the mode was still
+running in 3 tries of 3); check a macOS host before putting this test in
+[`mac.yaml`](../testplans/mac.yaml).
+
+The order of the two captures is not free. A board left in a spectrum sweep
+answers the mode read libubertooth makes at a capture start, so the warning is
+reliable. A board left in a symbol dump does not always: nothing is draining
+its endpoint, and the control read can stall, in which case libubertooth
+cannot tell what the board is doing and says nothing, which is what the fork
+chose for that case. Measured on the lab host: the board was still in `rx
+symbols` in 3 of 3 tries after a killed dump, so the mode is there, but one
+run of the dump-then-sweep order got the warning and another did not. That
+order is therefore not a test, and only the sweep-then-dump order is used. The clock half of the record check sees a leftover
+basic-rate record only when its clock is ahead of the new stream's first one,
+so a short previous stream can go unseen there; the packet type is what
+catches a record of the sweep, whatever its clock. A pass does not separate a
+build that waits for the board
+to leave the mode from one that warns and starts anyway. The only difference
+between them is a packet or so of the previous mode reaching the new capture,
+which is what the record and sample checks look for, so a run where nothing
+happens to leak cannot tell them apart; the fork pins the wait itself in its
+own unit tests. It kills a capture on purpose, which is the state the test is
+about, and it is the one test here that does so; a board that comes out of it
+wedged is a real finding, not a flake, and on a switchable port a power cycle
+recovers it. Nothing here is checked about captured content: the dump is judged
+on record structure, packet type, and clock, never on what the symbols mean.
+
 ## Raw receive replay
 
 **What it does.** Decodes a synthetic capture file with `ubertooth-rx -i`,
@@ -930,6 +1059,99 @@ refused before any record is decoded.
 **Known limits.** The fixture is synthetic, never an over-the-air capture, so
 this covers the decode path and not the receive path. There is no LE
 equivalent: no tool calls libbtbb's LE file replay.
+
+## Interrupting a capture
+
+**What it does.** Sends a real SIGINT to a running capture tool and requires
+that one Ctrl-C ends it promptly, leaves a capture file a reader can open,
+leaves no process behind and nothing still streaming, and leaves a board that
+answers the next command at once.
+
+**Theory of operation.** Ctrl-C is how a capture normally ends, so what it
+leaves behind is what an operator meets every time. The fork's handler only
+raises a flag; the capture loop reads it on its own thread, ends the stream,
+stops the mode, closes the capture files, and exits 0. The handlers go on
+before the board is opened, so a signal arriving while one is being found is
+not thrown away. Nothing in the harness asserted any of that before this.
+Bounded modes are stopped with SIGTERM; the one place a fork tool met a SIGINT
+is the no-selector follow case, where `timeout -s INT` is a deadline and the
+expected outcome is status 124 with SIGKILL behind it; and the cases that do
+check a SIGINT send it to tshark.
+
+The signal has to reach the tool itself, so
+[`captureinterrupt.py`](../ubertooth_harness/captureinterrupt.py) starts it
+directly, with no shell and no `timeout` wrapper (which would be signalled
+instead), sends one SIGINT to that process's own pid, then waits for it and
+reaps it. It starts the tool in a process group of its own, which is what lets it say
+whether the run left a process behind, and take it down afterwards: the group
+goes down on the way out, and a SIGTERM, SIGINT or SIGHUP to the helper —
+which is what a canceled run or a step deadline sends — takes it down and
+then re-raises, so a tool with a mode started cannot outlive its step. The
+verdict is reached before any of that, so a process the run left is a finding
+and not something the helper tidied away before looking.
+
+For the two cases that can wait for evidence, the moment is chosen by it, not
+by a clock. `ubertooth-dump -d` and `ubertooth-specan -d` stream whether or
+not there is traffic, so the capture file growing past a floor is proof that
+the mode is running. `ubertooth-dump` flushes each record, so its file grows a
+record at a time; `ubertooth-specan` does not, so its file grows a stdio
+buffer at a time and the floor is a buffer's worth rather than a few samples.
+A capture that never gets there, and a tool that exits on its own before the
+signal, both fail the case: these streams do not depend on the air, so neither
+is something the bench decides, and no case here can pass by skipping.
+
+**Hardware and arguments.** One `Ubertooth` role, no peer, no firmware write,
+no transmission, and every other registered board is read as a guard.
+`hosts:`, `coverage:`. No RF placement requirement: none of the cases needs
+traffic, so an attenuated board will do.
+
+**Expected outcome.** Smoke runs 2 cases: `ubertooth-dump -d` interrupted once
+it has written 20 whole records, and `ubertooth-btle -n -r -q` interrupted
+1.5 s after its PCAPNG appears. Comprehensive runs 3, adding `ubertooth-specan
+-d` interrupted once it has written a buffer's worth of samples. Every case
+requires: exit 0 within 5 s of the one signal and not death by that signal;
+nothing left in the process group the tool ran in; the capture file read again
+after the exit and not grown, so no mode is still streaming into it; no
+`error:`, `warning:` or progress line on standard output — `note:` is not one
+of those, because `ubertooth-btle` prints its undecoded-packet note on the
+report stream, which is standard output for a capture written to a file, and
+the fork puts it there deliberately; for the two tools that report
+unconditionally, their own line on standard error, so a quiet or misdirected
+teardown is caught (`rx block timestamp ...` for the dump, `Ubertooth stopped`
+for the sweep, while `ubertooth-btle` and `ubertooth-rx` print on their error
+and note paths only, so their cases ask for none); the file itself readable
+(whole 68-byte records for the dump, whole 3-byte in-band samples for the
+sweep, a walkable PCAPNG and PCAP for the two LE writers); the channel and the
+squelch back at the 2441 MHz and -120 a mode stop leaves, read before the
+cleanup's own stop, so a board still carrying the mode's settings is seen;
+`ubertooth-util -v` answered within 5 s; and then the usual cleanup restoring
+the channel, the squelch, and the LEDs, with the identity read again. The tool's own two streams are kept beside the capture, as
+`<capture>.stdout.log` and `.stderr.log`, so a failed run keeps its
+evidence.
+
+**Known limits.** The `ubertooth-btle` case's moment is a settling time, not
+evidence: the tool creates both capture files after the board is open and
+before the mode requests, and libbtbb sizes a PCAPNG in pages, so the file
+reaches its floor as soon as it appears. That case therefore rests on the exit
+and the teardown, not on having caught a running mode. For the same two
+writers "the capture stopped growing" is weak, because a quiet LE capture
+would not grow in the half second after the exit either; and the no-orphan
+check cannot fail for any of these tools, since none of them forks, so it is
+a guard rather than a measurement. What that case really rests on is the
+prompt exit 0, the readable capture files, and the board's state afterwards. A stop that lands inside an *unanswered* poll, which is
+where the fork drops the retries still to come
+([ubertooth#856](https://github.com/SqueakyFloors/ubertooth/pull/856)), cannot
+be produced here: it needs a board that has stopped answering, which is the
+board-lost-mid-capture work and its hub power control
+([#141](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/141)).
+A signal aimed at the board-open window is out of reach from here, so no case
+claims it. A lookup finishes in 10 to 20 ms on the bench host, so landing
+inside it would take many tries; and on a build from before the handlers moved
+ahead of the open ([ubertooth#839](https://github.com/SqueakyFloors/ubertooth/pull/839),
+fork `3311ce36`) a signal that landed there killed the tool outright, which is
+indistinguishable from one that arrived before the handler was installed on a
+build that has the fix. There is no outcome that separates the two, so a case
+built on it would either fail a correct build or retry a broken one away. Nothing here checks a second Ctrl-C, because one is meant to be enough.
 
 ## Refused command lines
 
@@ -1412,6 +1634,122 @@ one for every CONNECT_IND it decodes and another device in range gets one
 too, and when none matches it names each field of the pair's own option that
 differs.
 
+## Follow a BLE connection across its end
+
+**What it does.** The same two nRF52840 DKs connect and reconnect for about
+18 seconds while one `ubertooth-btle -f` capture runs across the whole
+window, and the board is read back as soon as the capture stops.
+
+**Theory of operation.** `Capture known BLE connection` deliberately keeps its
+window inside one connection, so it says nothing about what happens at the
+end of one. This test takes the other window. Three things only a multi-cycle
+capture can show:
+
+- A follow that ends cleanly finds the next connection. The capture has to
+  hold a CONNECT_IND for two of the pair's connections, with packets on each
+  one's own access address, which means the board stopped following the first
+  connection when it closed and picked the second one up from its own
+  CONNECT_IND.
+- A follow is not hijacked. During a follow the board writes the access
+  address it synchronized on into every record it sends, and it synchronizes
+  on exactly one at a time: the advertising address while it hunts, then the
+  connection's own. So a packet on an access address that no CONNECT_IND in
+  the file handed out is a connection the file cannot explain, and the check
+  refuses it. A CONNECT_IND from another device in range explains its own
+  packets just as well as the pair's explains the pair's.
+- A follow survives the parameter update. The central asks for the new
+  interval 1.2 s into each connection and the update's instant is a few
+  connection events later, so a packet with a correct CRC 2 s or more after
+  its own CONNECT_IND is one the board tracked across the update. The capture
+  records carry the time each packet arrived, which is what that distance is
+  measured in. Every connection the file holds a later CONNECT_IND for has to
+  show one, so a follow that died on the second connection's update cannot
+  pass on the first connection's evidence. The last connection in the file is
+  left out of that, because the capture window, not the follow, is usually
+  what ends it. What keeps that exemption honest is a pair of checks on the
+  file's own clock. A board whose follow died goes back to hunting and keeps
+  recording advertising packets, so the capture may go on recording for no
+  more than two of the central's cycles after the last packet it heard of the
+  pair -- two, because the Ubertooth is not expected to catch every
+  reconnection, and missing the last one costs a whole connection's worth of
+  silence. And the records have to span all but one cycle of the window the
+  capture was given, or the capture stopped hearing everything rather than
+  just the pair's connections. Neither reads the window's start out of the
+  file, because the first record arrives some unknown time after the command
+  did.
+
+The DKs are then asked what they did, which is the only place the number of
+cycles can be read: a window the central spent on one long connection reports
+one connect and no disconnect, and is told apart from one it spent cycling.
+Last, the board itself is read, after the capture has been stopped as any
+mode is: it must answer an identity and a settings read at once, report
+itself back in idle mode rather than still in BLE follow mode, and show no
+new unrequested watchdog reset against the count read before the capture.
+That says the stop left the board usable, not that the follow ended on its
+own -- what says the follow ended on its own is the capture holding the next
+connection from its own CONNECT_IND. The other registered Ubertooths on the host are guarded, as in every
+case here.
+
+**Hardware and arguments.** The same hardware as `Capture known BLE
+connection`: one `Ubertooth` and two nRF52840 DKs as `central` and
+`peripheral`. A required `duration:`, `interval:` (default 30 ms) and
+`update:` (default 60 ms); no `coverage:`, because there is one capture case.
+The duration must be longer than three of the central's 5 s connections and
+at most 30 s, so one case does not hold the boards for long. The same entry
+is in the `connection` suite and in `ble-comprehensive`, because there is one
+capture case either way. The Ubertooth needs an ordinary link. Writes DK
+firmware, so the run holds the host lock.
+
+**Expected outcome.** 2 cases: both DKs confirmed on the pinned firmware at
+their registered addresses, and the capture across the window. The capture
+case passes when every CONNECT_IND it holds from the pair carries the
+parameters the central was told to ask for, at least two distinct connections
+appear with at least three packets each on their own access addresses, no
+packet is on an unannounced access address, every connection but the last carries a
+packet with a correct CRC 2 s or more after its own CONNECT_IND, the capture
+records nothing for more than 10 s after the pair's last good packet and its
+records span all but 5 s of its window, the central reports at least three
+connects and two disconnects, and the board reads back idle with an unchanged
+self-reset count. Cleanup leaves both DKs idle in the advertiser
+role and restores the Ubertooth's channel, squelch, and LEDs.
+
+**Known limits.** Like the single-connection cases, the counts are floors a
+working follow clears, not expected counts, and a capture that misses them is
+taken again, up to three captures. Only the capture and the checks of it are
+retried: the reads after them have to see the board as the last capture left
+it. Two connections is a floor rather than the three or four the window spans,
+because the board hunts on one advertising channel and catches part of what is
+there, so it is not expected to see every reconnection. A window spanning
+several reconnections used to die partway through
+([ubertooth#505](https://github.com/SqueakyFloors/ubertooth/issues/505),
+fixed), which is why the single-connection test still keeps its window inside
+one connection.
+
+The two checks above have tolerances of their own, so between them they
+allow a narrow worst case: a capture that stopped recording near the end of
+its permitted span, with the pair's last good packet near the start of the
+permitted quiet time, hides a longer dead follow than either tolerance
+suggests. Reaching it needs the board to stop recording anything in a
+particular few seconds, and a failed capture is taken again, so the shape is
+unlikely rather than impossible.
+
+Two things the checks cannot separate. A connection's packets look
+unexplained whether the board followed a connection it never announced or
+the CONNECT_IND itself was lost on the way to the host, which does happen —
+the firmware counts capture transfer errors for that reason. Three captures
+make it unlikely rather than impossible. And the connect and disconnect
+counters the central reports run from the board's boot, so on a second or
+third capture attempt they cover the whole case rather than that one window:
+they say the central is cycling while the case runs, and the capture check,
+which wants two of the pair's connections in the file the attempt just
+wrote, is what binds per window.
+
+"No stale records from follow mode" is checked as far as one command can: the
+board reports itself back in idle mode, and the capture file holds no packet
+on an access address it does not also announce. Whether a *later* capture
+picks up records left by this one is a different measurement, which `BLE CRC
+transitions` makes with `stalecheck.py`.
+
 ## Capture known Classic device
 
 **What it does.** Two ESP32 Classic peers hold a Serial Port Profile link and
@@ -1569,6 +1907,34 @@ voice packets never appear in a capture of the SPP stream. It is held to the
 same floors as a stream capture, which the bench measured for it too: 394
 records with 112 passing headers against 285 with 59 for the stream.
 
+What the session has to show about the link, beside the records, is read from
+both boards twice: once as late as possible before the capture starts and
+once as soon as it has finished. Every figure the case matches is the
+movement between those two readings, so it belongs to the capture's own
+window rather than to the whole life of a board
+([#264](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/264)).
+Each board reports the frames its application sent and received, its send
+errors and damaged frames, and the controller's own count of synchronous
+packets - the packets that were on the air, as against what the two
+applications made of them. A board whose controller sent or received nothing,
+or received packets and not one of them correct, fails: frames handled over a
+link the air never carried would describe a capture of nothing.
+
+`link 0 opened 0 dropped` on each board is the case's assertion that this was
+one link throughout. A link that went down and came back leaves both boards
+reading `on` either side of the capture and is still two links with a gap in
+the middle, which no record in the file would show; the firmware counts the
+links a profile has had so that a session can tell the difference, and the
+connection handle is compared as a second witness for a link renegotiated
+without a drop being counted.
+
+The link is taken down with `sco stop` on both boards before they are
+released, and both the stop and the release are checked. A board that refuses
+to stop, or that does not come back to its boot state, fails the case - and
+the measurements above are reported first either way, because a spent
+30-second capture whose figures were thrown away because of what happened
+afterwards is the worst of both outcomes.
+
 One thing a record does not carry is a clock, so this test asserts nothing
 about one; see the known limits.
 
@@ -1583,9 +1949,9 @@ error in either shows up instead of agreeing with itself.
 **Hardware and arguments.** As `Capture known Classic device`: one `Ubertooth`
 and two ESP32 Classic peers as `acceptor` and `initiator`, `coverage:`, a
 required `duration:`, Linux only. The comprehensive profile's audio case needs
-the peers on `utesp-1.4.0` or a later 1.x image, which is where `sco type`
-arrived; preflight reports the version either way, and the case fails naming
-it on anything older.
+the peers on `utesp-1.5.0` or a later 1.x image: `sco type` arrived in
+`utesp-1.4.0` and the two link counters in `utesp-1.5.0`. Preflight reports
+the version either way, and the case fails naming it on anything older.
 
 **Expected outcome.** Smoke runs 2 cases. `-l <central LAP> -u <central UAP>`
 with both `-q` and `-r`, after which each file must hold at least ten records,
@@ -1595,7 +1961,9 @@ passed and ten carrying the reference UAP, and the PCAPNG must name the
 central's LAP and UAP, with a full UAP mask, as the address it was following; then the same with the roles swapped,
 where every record must carry the other board's LAP instead.
 Comprehensive runs 4, adding the EV3 audio link, whose records must include at
-least one `HV3/EV3/3-EV3` packet, and a survey (`-z -r`), whose records must
+least one `HV3/EV3/3-EV3` packet and whose session must report one unbroken
+link, both applications' frame counters, and both controllers' packet
+counters, all measured across the capture alone; and a survey (`-z -r`), whose records must
 include at least one carrying a UAP the survey recovered for itself. Each case
 keeps its capture files in the run directory. The cleanup is the same as the
 other two Classic tests: both peers reset to their boot state, the Ubertooth's
@@ -2001,6 +2369,53 @@ name it.
 **Known limits.** The piconet it needs is on the bench now, as the two ESP32
 Classic peers; what is missing is the case
 ([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)).
+
+## Recover a BLE connection promiscuously
+
+**What it does.** Nothing yet: a catalog entry for `ubertooth-btle -p` against
+a live connection between two nRF52840 DKs that hops with Bluetooth channel
+selection algorithm 1.
+
+**Theory of operation.** `-p` joins a connection that is already up, with no
+CONNECT_IND to read, so it has to work the connection out from the air: the
+access address, then the CRC init value, then the connection interval from the
+spacings between the connection's visits to the one channel it listens on, and
+last the hop increment. Only algorithm 1 repeats those visits on a cycle it can
+measure, which is why the fork's `ubertooth-btle` documents `-p` as recovering
+algorithm 1 connections only.
+
+Until now the bench had no algorithm 1 connection to point it at: every DK
+link negotiated algorithm 2, which both ends support. The second DK image
+(`firmware/nrf52840dk`, built with `chan-sel-1.conf` and `chan-sel-1.overlay`)
+has a controller without algorithm 2, and a link uses algorithm 2 only when
+both ends have it, so one DK on that image makes every connection it is part
+of an algorithm 1 one. Its `status` carries the proof: `chan_sel_2` false, and
+`chan_sel` `1` while the link is up. The peer on the default image reports
+`chan_sel` `unknown`, which is honest — a controller that has algorithm 2 is
+not told which one was agreed.
+
+**Hardware and arguments.** One `Ubertooth`, a `central` and a `peripheral`
+(nRF52840 DK). The central would run the algorithm 1 image, since it is the
+side whose CONNECT_IND carries the ChSel bit, and the peripheral the default
+one; `coverage:` and a `duration:`. The pair would run with `conn cycle off`,
+because `-p` needs a connection that stays up, and the board's squelch has to
+be raised from its default −120 dBm first: the access-address hunt is gated by
+it, and at the default the hunt latches onto noise.
+
+**Expected outcome.** No implementation; only a `runnable: false` plan may
+name it. The outcome it is meant to check is all four of the lines `-p`
+reports — access address, CRC init, hop interval, and hop increment — with the
+hop interval equal to the interval the central asked for.
+
+**Known limits.** The hardware it needs is on the bench, and the connection is
+confirmed to be an algorithm 1 one. What is not yet shown is the outcome: in a
+90-second run against such a connection, with the squelch at −60 dBm, `-p`
+reported the access address and the CRC init value and went no further, and
+over a hundred packets on that access address decoded with valid CRCs. Whether
+a longer run, another squelch, or a change in the fork reaches the interval and
+the increment is open
+([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)), so
+the case is not written to a result nobody has seen.
 
 ## Bluetooth inquiry scan
 

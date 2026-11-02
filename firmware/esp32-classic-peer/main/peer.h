@@ -8,7 +8,15 @@
 
 /* The harness pins this string and reflashes a board that reports anything
  * else, so it changes whenever the shell protocol or the air behavior does. */
-#define UTESP_FW_VERSION "utesp-1.4.0"
+#define UTESP_FW_VERSION "utesp-1.5.0"
+
+/* The packet types "sco type" takes, and the two lines the shell refuses a
+ * malformed "sco" line with. One definition of each, so the help text, the
+ * refusals, and the setter cannot come to disagree about what the command
+ * accepts. */
+#define SCO_TYPE_NAMES "ev3|2ev3|default"
+#define SCO_TYPE_USAGE "sco type takes ev3, 2ev3, or default"
+#define SCO_USAGE      "sco takes start, stop, stats, or type <" SCO_TYPE_NAMES ">"
 
 enum peer_role {
     PEER_ROLE_ACCEPTOR = 0, /* the boot role: wait for the other board */
@@ -94,6 +102,10 @@ struct sco_view {
     unsigned handle;
     unsigned frame_len;
     uint32_t tx_frames, tx_errors, rx_frames, rx_bad;
+    /* How many synchronous links this profile has had, and how many of them
+     * went down again. A reader that saw a link at one moment and a link at
+     * another can tell from these whether it was the same link. */
+    uint32_t connects, disconnects;
     /* The packet type asked for, and what the controller settled on. */
     const char *type;      /* default, ev3, 2ev3 */
     const char *link;      /* none, sco, esco, unknown */

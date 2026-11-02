@@ -55,7 +55,7 @@ suites:
         duration: 25s
 
     # The comprehensive profile adds the audio link, which needs the peers
-    # on utesp-1.4.0 or a later 1.x image, and a survey.
+    # on utesp-1.5.0 or a later 1.x image, and a survey.
     - Classic capture record fields:
         hosts: [Host_Linux]
         Ubertooth: default

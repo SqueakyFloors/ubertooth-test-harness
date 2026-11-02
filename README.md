@@ -175,6 +175,70 @@ roles may name each one by alias or narrow it by RF placement, but not with
 discovery is reconciled as present/missing/unknown before execution and never
 silently reassigns an alias.
 
+### Hardware a registry has not got
+
+One plan is compiled against every bench's registry, so a step may name a
+host this registry has not got, or a device no host here has. Run planning
+records that as not applicable and leaves the step out, the way it leaves out
+a host whose platform the step does not list:
+
+- a `hosts:` alias this registry does not have (`not applicable on Host_Lab:
+  Host_Lab is not a host in this registry`);
+- a host with no device for a hardware role the test binds: no default for
+  the role (`host Host_Mac has no default ESP32 Classic peer for the acceptor
+  role`), no device of the type at all (`host Host_Mac has no nRF52840 DK
+  resources`), or no device that declares the role (`host Host_Mac has no
+  nRF52840 DK for the advertiser role (DK_Mac0 declares peripheral)`) — when
+  the host's default cannot take the role but another device of its can, that
+  one takes it, as it does for a placement the default cannot satisfy;
+- an explicit device alias this registry does not have (`this registry has no
+  Ubertooth 'UT_Lab7'`).
+
+So the release plan, which every registered host runs, can hold a step for
+hardware only the bench host has: the other hosts, and the other registries,
+record it and run the rest. A suite with nothing this registry can run is
+still an error, and it names the first few steps it left out. A host this
+registry has not got never runs anything of its own, so what it left out is
+recorded in the runs of the hosts that are here, and `run-suite --dry-run`
+lists it; one record per test, so a host that runs that test, or has its own
+reason for leaving it out, keeps its own.
+
+Two absences still end the compile, for now: `alternate Ubertooths` on a host
+with one registered Ubertooth, and `exclusive Ubertooth` where another board
+has no `power:` mapping
+([#269](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/269)).
+
+What a host here cannot run is decided first, and has not changed: a platform
+the step does not list, and a board placed differently from what the test
+needs, leave that host out, and a step whose every named host is here and
+cannot run it this way still fails planning. Only when the hosts that could
+have run it have not got the hardware is the step left out — and a step that
+names a host this registry has not got is left out either way, since the host
+that would have run it is not here to be judged.
+
+`validate-plan --hardware <registry>` is the strict one: there the registry
+is named on purpose, so the same absence fails, which is what catches a plan
+entry for hardware a bench is meant to provide. Every committed suite is
+compiled that way against [`hardware.example.yaml`](hardware.example.yaml) in
+the unit suite (`tests/test_runnable_plans.py`), bar `range-weak-link`, which
+asks for a board behind an attenuator that the example registry carries
+commented out; CI validates the main suites with it as well.
+
+Because it is the stricter of the two, `validate-plan --hardware` refuses a
+plan on a bench that has only some of the hardware it names, where the run
+itself would leave those steps out. On such a bench, check a run with
+`run-suite --dry-run`, which lists exactly what would run and what would be
+left out.
+
+Two refusals are mistakes in the plan rather than absence, and fail wherever
+the plan is compiled: an alias that differs from a registered one only in
+case (`it has 'Host_Linux', so check the spelling in the plan`), and a
+registered alias used as something it is not (`resource UT_Linux0 is not a
+Host`, `resource DK_Linux0 is not a Ubertooth attached to Host_Linux`,
+`resource DK_Linux1 declares the role(s) peripheral, not advertiser`). A role
+or argument name the test does not have is refused when the plan loads, with
+no registry at all.
+
 ### RF placement: where a board sits on the bench
 
 A unit may record its RF placement, so a test can ask for a weak link and a
@@ -440,7 +504,7 @@ python -m ubertooth_harness run-suite \
   --hardware hardware.yaml --host Host_Linux \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
   --libbtbb-source /path/to/libbtbb \
-  --libbtbb-ref bf878df27e131dd8ab56bb3497918eb9a83f607b \
+  --libbtbb-ref 017676965a77cd7b00bfede343b7800dee6aa6a5 \
   --build --output runs
 ```
 
@@ -521,7 +585,7 @@ python -m ubertooth_harness run-suite --plan testplans/host.yaml --suite host \
   --hardware host-only.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
   --libbtbb-source /path/to/libbtbb \
-  --libbtbb-ref bf878df27e131dd8ab56bb3497918eb9a83f607b \
+  --libbtbb-ref 017676965a77cd7b00bfede343b7800dee6aa6a5 \
   --build --output runs
 ```
 
@@ -617,9 +681,11 @@ section, a `Not applicable cases` column, and a `Host can run` row in report.md,
 `not_applicable_cases` and `not_applicable_tests` in the run summary, and
 `not applicable` in the web GUI. `run-suite --dry-run` prints the same decision
 for every case before any build, lease, or run. A plan entry that no host it
-names can run (no case applies on any of them) fails planning. A test whose
-every case is not applicable finishes `not_applicable` and does not fail the
-run.
+names can run (no case applies on any of them) fails planning, unless what
+the hosts lack is the hardware it binds, which is recorded instead (see
+[Hardware a registry has not got](#hardware-a-registry-has-not-got)). A test
+whose every case is not applicable finishes `not_applicable` and does not
+fail the run.
 
 | Needs | Cases | Not applicable when |
 |---|---|---|
@@ -670,6 +736,7 @@ needs `--build --with-firmware --with-python`.
 | `Spectrum RSSI sanity` | fast plan, one bounded full-band `ubertooth-specan` sweep (`duration` long) that must also pass the Spectrum analyzer sweep checks: every frequency's lowest reading (its noise floor) is -115 to -80 dBm (up to 5 of the 79 may stay above -80 dBm, a continuous emitter), the mean reading is negative (below -54 dBm), and there are at least three distinct readings. The tool prints the CC2400 RSSI register, dBm + 54 (specan-ui adds -54). Needs no signal source | no comprehensive profile |
 | `Classic Bluetooth receive` | `ubertooth-rx -z -t N` survey (exits 0 by itself, N = `duration` in whole seconds, no earlier than N-0.5 s, survey lines are piconet addresses); `-t N -r` PCAPNG with link type 255; `ubertooth-afh -t N` with no piconet in range says no packet arrived and exits 2 after about N s, printing no map (fork #187, 3b22c95) | adds `-t N` without `-z`; `-c 39` (every packet on channel 39); `-s` (the default sweep, no notice) and `-s -c 39` (the channel wins; fork #361); `-e 0` and `-e 4` (no packet over the limit); `-q` PCAP (link type 255); `-d` (68-byte BR records, checked by `rxdump.py`); `afh -t N -e 2` (same exit 2); `afh -r` one map line per second; `afh` with an unknown `-U` exits 1 (fork #185, fixed in 219a5b0) |
 | `Raw receive` | `ubertooth-dump -d` (68-byte records) and `-b -d` (401-byte bitstream records), checked by `rxdump.py` with at least 50 records per second; `ubertooth-ego -r -c 2440` runs until stopped | adds `dump -l`, `-l -c`, `-c -l` (the last modulation wins, read back from CC2400 MDMCTRL with `ubertooth-debug`); `ego -l 1`, `-l 48`, `-a 630f9ffe`; `ego -a zz` rejected; five rounds of `dump -d` after `btle -n -A37` and `btle -n -A37 -q` after that dump, every stream bounded with SIGTERM, hold no packet from the previous mode, with the per-iteration stale count recorded (`stalecheck.py`; fork #318, fixed in 9e31dd5) |
+| `Interrupting a capture` | one Ubertooth, no peer; `fast` plan (smoke) and `release` plan (comprehensive): one real SIGINT, sent to the tool's own process and nothing else (`captureinterrupt.py` starts it with no shell and no `timeout` wrapper, then waits for it and reaps it). `ubertooth-dump -d` is interrupted once it has written 20 whole records, and `ubertooth-btle -n -r -q` 1.5 s after its PCAPNG appears. Every case requires exit 0 within 5 s of the signal and not death by it, nothing left in the process group the tool ran in, the capture file read again after the exit and not grown, no `error:`/`warning:`/`note:`/progress line on stdout (`note:` excepted: `ubertooth-btle` puts its undecoded-packet note on the report stream, which is stdout for a capture to a file) and, for the two tools that report unconditionally, their own line on stderr, the file itself readable (whole 68-byte records; a walkable PCAPNG and PCAP), the channel and squelch back at the 2441 MHz and -120 a mode stop leaves, read before the cleanup's own stop, `ubertooth-util -v` answered within 5 s, and the usual restore with the identity read again | adds `ubertooth-specan -d` interrupted once it has written a buffer's worth of samples (whole in-band 3-byte samples) |
 | `Refused command lines` | no Ubertooth; `host` and `fast` plans, and CI: every file option (`btle -r -q -c`, `follow -r -q -d`, `rx -r -q -d`, `dump -d`, `specan -d`, `dfu -s -u`) refused by a stray word, `-h`, and a bad later value (`dump`: `-U` without its value; `dfu -s`: a second `-s`, which is refused as a repeat) creates no file, leaves an existing one unchanged, and leaves no other file; the refusal comes before any board lookup (every `-h` exits 0, `btle` since fork e4f1dc5, `follow` and `dfu` since 12211ce, and still creates nothing); the extra-file note is on stderr (`btle -n -q - -c`: `warning: ignoring extra capture file` since fork e4f1dc5, the one note left because `-q` and `-c` share one handle); an option given a value twice is refused before the stray word and before any board (`btle -q -q`, `rx -r -r`, `follow -q -q`: `error: option '-X' given more than once`); a stray word on `ubertooth-scan` and `ubertooth-follow` (no file) is refused naming it (one argument rule); follow and scan cases are Linux only (BlueZ), not applicable on macOS | adds `scan` and `follow` with `-h stray` (refused, no usage), a bare `-`, and `-- -x`, and the checks after the option loop (`btle -f -n`, `-a -a<address>`, `-r -`; `rx -z -l`, `-u` without `-l`; `specan -l` above `-u`), `-d` twice with `-h` (refused as a repeat, no usage text), `specan -d` in a missing directory with no board (exit 1 at the board lookup; the file, which is opened only once a board is, neither created nor mentioned), and `dfu -u` with a missing `-s` input or a bad `-d` image (no temporary file), and `dfu -s <file.bin> -d <bad image>` (no `.dfu` created or replaced; fork #286, fixed in f2e06fa) |
 | `Failed capture files` | no Ubertooth; `host` plan (smoke) and `release` plan (comprehensive), and CI: a capture that fails leaves no misleading file. `env UBERTOOTH_TEST_NO_DEVICES=1` lets a command line be accepted and then stopped at the board lookup, which must create no capture file (`rx -r -q -d`, `btle -n -r -q`, `dump -d`; the files are opened only once a board is), leave a seeded destination untruncated, say nothing on stdout, and exit 1 rather than a libusb return value (fork #565). `ubertooth-rx -i <fixture>` replays a synthetic file with no board and no USB, so a capture file is really created and written: a replay that reads no whole record takes back all three files it created (fork #1009), one that reads whole records keeps them, each readable and holding the packets it decoded, and a PCAPNG destination in a directory that is not there is reported as `error: <file>: <reason>` with nothing created (fork #1020) | adds `btle -c` and `dump -d` on the seeded destination (its own create call), a PCAP destination in a missing directory, a replay whose one whole record the decoder skips (the files are kept from the first record, not the first packet), a capture bound for `-` whose failure stays on stderr, a read error before any record, a destination that is an existing directory, one in a read-only directory, and a symbolic link and `/dev/null`, which the run must leave where they are (the last two skipped as root) |
 | `Util mode refusals` | no Ubertooth; `host` and `fast` plans, and CI: `ubertooth-util -i` with each of `-q -n -e -t -x -I`, in both orders (12 commands), refused with exit 1 and `error: options <modes in the fork's order> cannot be combined; give only one of -q -n -e -t -x -I -i`; `-z` and `-z-60` with `-i`, in both orders, refused with `error: -z cannot be combined with -i`; `-f` and `-f -i` refused with `error: unrecognized option '-f'` (fork `db5649b` removed `-f`); never the `no board is selected` note | adds `-x -i -q`, `-i -i -x`, `-z -x -i` (the mode refusal first), `-x -i stray` (the stray word first); `-N -i` and `-i -N` print the count `0`, then `-i` finds no board and says `error: no Ubertooth devices found`, exit 1 (since `db5649b` `-N` runs the rest of the command; the line is libubertooth's since `753269b`); `-U all -i` gives the `-U all` refusal alone |
@@ -684,6 +751,7 @@ needs `--build --with-firmware --with-python`.
 | `Two-device range test` | no `coverage` argument; `range` plan; two registered boards on one host (`sender`, `responder`; the same board in both roles is refused), `allow RF transmission: true`: both boards reset (so neither has an old result) and set to 2410 MHz, `-e` on the responder, which must then answer USB with its RX LED on and still be at 2410 MHz before `-n` on the sender (so a failure tells a wedged repeater from a wedged sender), then the sender's `-m` is read until a result appears (10 s deadline) and must give request and reply PA levels at most `maximum PA level` (0-7, default 7; both suites of the `range` plan set 3) and copy numbers 0-15; a mismatch fails, naming the field that differs; the sender is idle afterwards (LEDs off, back to 2441 MHz: the idle reset ran); the responder still answers USB with its RX LED on, keeps no result, and `-S` stops it (LEDs off, back to 2441 MHz); channel, PA, squelch, LEDs and CRC of both boards restored, other registered boards guarded. Passes on fork main since fork #601 (fork #26, #483), about 9 runs in 10 on a bench pair; the rest fail with `mismatch on byte 0` (fork #677) | no comprehensive profile |
 | `Capture known BLE advertiser` | `ble` plan; an Ubertooth and an nRF52840 DK with the `advertiser` role on one host (see [BLE test devices](#ble-test-devices-nrf52840-dk)): the DK is flashed with `firmware/nrf52840dk` when it reports another version, and must report its registered address; for each of channels 37, 38 and 39 the DK advertises (`ADV_NONCONN_IND`, `interval`, `payload` tag) on that channel only and `ubertooth-btle -n -A<channel> -q` captures for `duration`: at least a fifth of its advertising events and no more than its interval allows, every one on that channel's RF channel, CRC right, from its address, with the harness payload (magic, channel map, tag) and a counter between the DK's counters before and after; `-n -A37` while it advertises on 38 holds none of its packets; `-f -A37 -r` (PCAPNG) holds them too; the DK is stopped and returned to its boot settings, the Ubertooth's channel, squelch and LEDs restored, other registered boards guarded | adds every listen/advertise channel pair that must hold nothing, `-f -A38`/`-A39`, `ADV_IND` (which is scannable, so the advertiser's own scan responses to scanners nearby are counted and only their channel is checked), advertising on all three channels, a 1000 ms interval (packet bound), and no tag |
 | `Capture known BLE connection` | `ble` plan, `connection` suite; an Ubertooth and two nRF52840 DKs, one with the `central` role and one with the `peripheral` role, on one host (see [BLE test devices](#ble-test-devices-nrf52840-dk)): both DKs are flashed with `firmware/nrf52840dk` when they report another version and must report their registered addresses; the peripheral advertises connectable, the central connects at `interval` with a 251-byte data length, writes 244 bytes every 50 ms, asks for `update` once connected, and remakes the link every 5 s; `ubertooth-btle -f -r` captures for `duration` and the capture must hold one CONNECT_IND between the two addresses with exactly that interval, latency 0 and a 4 s supervision timeout, a hop increment of 5-16, every data channel in the channel map, at least five packets on the connection's access address, of which at least one decodes with a correct CRC, and at least one longer than the 27 bytes a link without Data Length Extension allows; a capture that misses any of that is taken again, up to three captures; both DKs are left idle in the advertiser role, the Ubertooth's channel, squelch and LEDs restored, other registered boards guarded | adds the same with `-q` (PCAP) and a case that reads the connection information libbtbb records in a PCAPNG: one of the recorded options must be, byte for byte, a CONNECT_IND this capture decoded from the two addresses, so the parameters a reader follows the connection with are the ones that went over the air ([libbtbb#21](https://github.com/SqueakyFloors/libbtbb/issues/21) had them copied 6 bytes early) |
+| `Follow a BLE connection across its end` | no `coverage` argument; `ble` plan, `connection` suite; the same pair and the same bring-up as the test above, with one capture across the whole window: the central remakes the link every 5 s and `ubertooth-btle -f -A37 -r` runs for a `duration` of more than three of those connections (at most 30 s). The capture must hold a CONNECT_IND for at least two distinct connections between the two addresses, each carrying at least three packets on its own access address, no packet on an access address that no CONNECT_IND in the file handed out, and, for every connection the file holds a later CONNECT_IND for, a packet with a correct CRC 2 s or more after its own CONNECT_IND, which is past the parameter update the central asks for 1.2 s in. The last connection in the file is left out of that, because the window is what ends it; instead the capture may go on recording for no more than 10 s after the last packet it heard of the pair, and its records must span all but 5 s of its window, so a follow that died during that connection is not mistaken for a window that ended. The central must report at least three connects and two disconnects, and afterwards the board must answer `-s -C` at once, read back in idle mode rather than BLE follow mode, and show no new unrequested watchdog reset; a capture that misses any of that is taken again, up to three captures, and only the capture and its checks are retried. Both DKs are left idle in the advertiser role, the Ubertooth's channel, squelch and LEDs restored, other registered boards guarded | one capture case either way |
 | `Capture known Classic device` | `classic` plan; an Ubertooth and two ESP32 Classic peers with the `acceptor` and `initiator` roles on one host (see [Classic test devices](#classic-test-devices-esp32-classic-peers)): both peers must already run `firmware/esp32-classic-peer`, which mandatory preflight checks by asking each one to identify itself; `esp32peer.py stream` then brings a Serial Port Profile link up between them, streams 200 bytes every 20 ms, and runs `ubertooth-rx` for `duration` while it holds. `ubertooth-rx -z` must list the piconet central's LAP in its survey results, and a run with no target must report at least ten packet lines carrying that LAP; the central is whichever peer pages, so its LAP is the initiator's. Afterwards the pair must report a link that never went down and at least fifty writes, both peers are reset to the firmware's boot state, the Ubertooth's channel, squelch and LEDs are restored, and other registered boards are guarded | adds `-z -r` (PCAPNG with link type 255) and the same survey with the peers' roles swapped, which must list the other board's LAP and not the first one's |
 | `Follow Classic Bluetooth piconet` | `classic` plan; the same two peers and the same bring-up: `ubertooth-rx -l <central LAP> -u <central UAP>` must report at least ten packet lines and none of another LAP (libbtbb is asked for one access code), and `-l`/`-u` for the peer that is *not* the central must report no packet at all | adds `-l` without `-u` (the UAP is recovered from the air) and `-l -u -q` (PCAP with link type 255) |
 | `Classic capture record fields` | `classic` plan; the same two peers and the same bring-up, but the check is inside the capture files: `bredrrecord.py` decodes every `LINKTYPE_BLUETOOTH_BREDR_BB` record of a `-l <central LAP> -u <central UAP> -q -r` capture, and each must carry the central's LAP and that LAP and UAP as its reference address, with every flag that describes a field in the record agreeing with that field, its access-code errors inside the limit the run allowed, and, where it holds a payload, that payload's length field agreeing with the bytes it holds and its CRC, recomputed with the reference UAP, agreeing with the one it carries (the bench's own traffic records no payload, so what fires live is the headers, addresses and flags), and the PCAPNG naming the central's LAP and UAP as the address it was following; the same with the peers' roles swapped must carry the other board's LAP instead | adds an EV3 audio link (`sco type ev3`, so the voice payload is on the air at the basic rate), whose records must include an `HV3/EV3/3-EV3` packet, and a survey, whose records must include one carrying a UAP the survey recovered for itself |
@@ -991,7 +1059,7 @@ python -m ubertooth_harness run-suite --plan testplans/fast.yaml --suite fast \
   --hardware hardware.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref feature/my-change \
   --libbtbb-source /path/to/libbtbb \
-  --libbtbb-ref bf878df27e131dd8ab56bb3497918eb9a83f607b \
+  --libbtbb-ref 017676965a77cd7b00bfede343b7800dee6aa6a5 \
   --build [--no-flash-build] [--with-firmware] [--with-python[=PYTHON]] \
   --output runs
 ```
@@ -1248,6 +1316,13 @@ to 251 bytes, writes 244-byte payloads, and asks for a connection parameter
 update, dropping and remaking the link every few seconds. A capture started
 at any moment therefore holds a whole connection, which is what
 `ubertooth-btle -f` is checked against.
+
+`Follow a BLE connection across its end`, in the same suite, takes the window
+that test leaves out: one capture across several of those reconnections. It
+asks what a capture of one connection cannot — that the follow ends when the
+connection does and finds the next one, that every connection the file
+carries packets for is one the file also announced, and that the board is
+idle and answering as soon as the capture is stopped.
 
 The DKs transmit at normal BLE power; the Ubertooth only receives.
 
@@ -1960,7 +2035,7 @@ GUI both show what it says:
 - a **Known targets** section gives the whole line per test, for example
   `Run against known target: nRF52840 DK advertiser DK_Linux0
   (J-Link 000123456789, /dev/serial/by-id/usb-SEGGER_J-Link_000123456789-if00),
-  requires firmware utdk-1.3.0, BLE address C0:00:00:00:00:01`, and a test
+  requires firmware utdk-1.4.0, BLE address C0:00:00:00:00:01`, and a test
   with no known target says `No known target: the harness drove no device for
   this test`, which the GUI shortens to `no known target`;
 - the transcript carries the same line as an `[M]` record where the test
@@ -2168,7 +2243,7 @@ python -m ubertooth_harness runner \
   --hardware hardware.yaml --host Host_Mac \
   --ubertooth-source /path/to/ubertooth \
   [--libbtbb-source /path/to/libbtbb \
-   --libbtbb-ref bf878df27e131dd8ab56bb3497918eb9a83f607b] \
+   --libbtbb-ref 017676965a77cd7b00bfede343b7800dee6aa6a5] \
   [--plans-dir testplans] [--allow-power-changes] \
   --output runs
 ```
@@ -2841,16 +2916,18 @@ scripts/local-ci.sh -r <sha> -s "ssh lab-host.example"
 A second workflow (`.github/workflows/firmware.yml`) compiles the nRF52840 DK
 role firmware, which the test and build jobs do not: it needs the nRF Connect
 SDK, so it builds in Nordic's toolchain image for the version
-`firmware/nrf52840dk/NCS_VERSION` pins, and checks that the image carries the
-firmware version string the harness flashes by. On a pull request it also
-builds the sources of the commit the request is against and fails when the
-image changed while `UTDK_FW_VERSION` did not: `nrfdk.py ensure` flashes a DK
-only when the board reports another version, so that change would never reach
-a board that already runs this one. The images decide and not the files, so a
-comment or formatting change leaves the image identical and asks for no bump;
-a build that does not repeat itself is reported as that rather than as a
-missing bump; and a bump of `NCS_VERSION`, which both builds would use and
-the comparison could not see, asks for the version bump by itself.
+`firmware/nrf52840dk/NCS_VERSION` pins. It builds both images the sources
+hold, the default one and the one whose connections hop with channel
+selection algorithm 1, and checks that each carries the firmware version
+string the harness flashes it by. On a pull request it also builds both
+images of the commit the request is against and fails when either changed
+while `UTDK_FW_VERSION` did not: `nrfdk.py ensure` flashes a DK only when the
+board reports another version, so that change would never reach a board that
+already runs this one, whichever image it carries. The images decide and not
+the files, so a comment or formatting change leaves them identical and asks
+for no bump; a build that does not repeat itself is reported as that rather
+than as a missing bump; and a bump of `NCS_VERSION`, which every build would
+use and the comparison could not see, asks for the version bump by itself.
 
 That image and the SDK workspace are gigabytes, so the workflow runs only on
 a change under `firmware/nrf52840dk` (or to `scripts/ci.sh` or the workflow

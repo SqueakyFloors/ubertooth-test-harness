@@ -103,9 +103,11 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 	utdk_address(address, sizeof(address));
 	used = snprintf(line, sizeof(line),
 			"{\"role\":\"%s\",\"fw\":\"%s\",\"bt\":%s,"
-			"\"address\":\"%s\",\"address_type\":\"random static\"",
-			utdk_role_name(active_role), UTDK_FW_VERSION,
-			bt_ready ? "true" : "false", address);
+			"\"address\":\"%s\",\"address_type\":\"random static\","
+			"\"chan_sel_2\":%s",
+			utdk_role_name(active_role), UTDK_FW_REPORTED,
+			bt_ready ? "true" : "false", address,
+			UTDK_CHAN_SEL_2 ? "true" : "false");
 	if (used > 0 && (size_t)used < sizeof(line)) {
 		/* Every role reports the advertiser's fields, so one status
 		 * shape serves them all; the connection fields follow.
@@ -157,7 +159,7 @@ static int cmd_version(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
-	shell_print(sh, "%s", UTDK_FW_VERSION);
+	shell_print(sh, "%s", UTDK_FW_REPORTED);
 	return utdk_ok(sh);
 }
 
@@ -180,6 +182,6 @@ int main(void)
 	if (err) {
 		printk("utdk: connection init failed (%d)\n", err);
 	}
-	printk("utdk: %s ready\n", UTDK_FW_VERSION);
+	printk("utdk: %s ready\n", UTDK_FW_REPORTED);
 	return 0;
 }
