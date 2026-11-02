@@ -53,9 +53,21 @@ STEP_NAMES = {
     FLASH_STEP: "Flash the boards",
     PREFLIGHT_STEP: "Preflight",
 }
+# Bounds on what one run's records can turn into. A plan takes at most 100
+# tests and a bench has a handful of boards, so these are past any real run
+# and keep a record that names something else from growing the answer: the
+# records are data, not something this side chose.
+MAX_LABEL_CHARS = 200
+MAX_REASON_CHARS = 2000
+MAX_TEST_STEPS = 200
+MAX_STEP_PARTS = 500
 
 RUNNING = "running"
 PENDING = "pending"
+# A member whose start request has been sent and not yet answered. Only a
+# member status: the group reads as running while one of its hosts is still
+# being started.
+STARTING = "starting"
 # Planned, but the run ended before it was reached.
 NOT_REACHED = "not_reached"
 PASSED = "passed"
@@ -68,11 +80,13 @@ NOT_APPLICABLE = "not_applicable"
 
 # Worst first: the status of a step, or of a whole group, is the worst of its
 # parts. A status this module does not know ranks with ``error``, because an
-# outcome nobody here understands is a problem, not a pass. ``not_applicable``
-# ranks last: a test that passed on one board and did not apply on another
-# passed as far as it could.
+# outcome nobody here understands is a problem, not a pass. A run that was
+# lost (its runner no longer has it) ranks worse than one that was cancelled,
+# which is what somebody asked for. ``not_applicable`` ranks last: a test
+# that passed on one board and did not apply on another passed as far as it
+# could.
 RANK_ORDER = (
-    RUNNING, ERROR, FAILED, CANCELED, LOST, SKIPPED, NOT_REACHED, PENDING,
+    RUNNING, ERROR, FAILED, LOST, CANCELED, SKIPPED, NOT_REACHED, PENDING,
     PASSED, NOT_APPLICABLE,
 )
 RANK = {status: index for index, status in enumerate(RANK_ORDER)}
@@ -132,7 +146,17 @@ def _status(value) -> str:
 
 def _reason(details: Mapping) -> str:
     reason = details.get("reason")
-    return str(reason)[:2000] if reason else ""
+    return str(reason)[:MAX_REASON_CHARS] if reason else ""
+
+
+def _label(value) -> str:
+    """A name out of a run record: a test, an invocation, or a board.
+
+    Bounded here, because every one of these becomes a step key or a part of
+    one in what the API returns, and a record is data: the runner's protocol
+    message may be megabytes.
+    """
+    return str(value)[:MAX_LABEL_CHARS] if value else ""
 
 
 # ----- the group record ----------------------------------------------------
@@ -289,30 +313,47 @@ def member_views(group: RunGroup, runs: Mapping[str, Mapping]) -> list[dict]:
 
     ``runs`` maps run ID to the run's own view. A host with no run, or whose
     run is no longer stored, is an ``error`` of the group: it did not do what
-    the group asked for.
+    the group asked for. While the children are still being started
+    (``dispatched_at`` is not set yet) a host that has neither a run nor a
+    reason is ``starting``, because nothing has gone wrong with it yet.
     """
     views = []
     for entry in group.members:
         run_id = entry.get("run_id") if isinstance(entry.get("run_id"), str) else None
         run = runs.get(run_id) if run_id else None
         error = entry.get("error")
-        if run is None:
+        starting = (
+            run is None and not run_id and not error and not group.dispatched_at
+        )
+        if run is None and not starting:
             error = error or (RUN_GONE if run_id else NO_RUN)
         views.append({
             "host": entry.get("host"),
             "run_id": run_id,
-            "error": error if run is None else None,
-            "status": run["status"] if run is not None else ERROR,
+            "error": None if run is not None or starting else error,
+            "status": (
+                run["status"] if run is not None
+                else STARTING if starting else ERROR
+            ),
             "run": dict(run) if run is not None else None,
         })
     return views
 
 
 def group_status(members: Sequence[Mapping]) -> str:
-    """``running`` while any child is active, else the worst child outcome."""
+    """``running`` while any child is active, else the worst child outcome.
+
+    A host still being started counts as running: the group is under way,
+    and only once every request has been answered can a host that got no run
+    be an error of the group.
+    """
     if not members:
         return ERROR
-    return worst([_status(member.get("status")) for member in members])
+    return worst([
+        RUNNING if _status(member.get("status")) == STARTING
+        else _status(member.get("status"))
+        for member in members
+    ])
 
 
 def _finished_at(group: RunGroup, members: Sequence[Mapping]) -> str | None:
@@ -396,9 +437,13 @@ def _planned_tests(invocations: Sequence[Mapping] | None) -> dict[str, list[dict
     for invocation in invocations or ():
         if not isinstance(invocation, Mapping):
             continue
-        name = str(invocation.get("test_name") or "")
-        identifier = str(invocation.get("invocation_id") or "")
+        name = _label(invocation.get("test_name"))
+        identifier = _label(invocation.get("invocation_id"))
         if not name or not identifier:
+            continue
+        if name not in planned and len(planned) >= MAX_TEST_STEPS:
+            continue
+        if len(planned.get(name, ())) >= MAX_STEP_PARTS:
             continue
         part = _part(identifier, name)
         part["estimated_s"] = invocation.get("estimated_s")
@@ -467,8 +512,10 @@ def host_steps(
             else:
                 _close(part, status, timestamp, _reason(details))
         elif kind in ("build_flash_board_started", "build_flash_board_finished"):
-            resource = str(details.get("resource") or "")
-            if not resource:
+            resource = _label(details.get("resource"))
+            if not resource or (
+                resource not in boards and len(boards) >= MAX_STEP_PARTS
+            ):
                 continue
             part = boards.setdefault(resource, _part(resource, resource))
             if kind.endswith("_started"):
@@ -476,12 +523,20 @@ def host_steps(
             else:
                 _close(part, status, timestamp, _reason(details))
         elif kind in ("test_started", "test_finished"):
-            name = str(details.get("test_name") or "")
-            identifier = str(details.get("invocation_id") or "")
+            name = _label(details.get("test_name"))
+            identifier = _label(details.get("invocation_id"))
             if not name or not identifier:
                 continue
             part = by_invocation.get(identifier)
             if part is None:
+                # An invocation the manifest did not plan (a run adopted from
+                # a runner report has no manifest here). Bounded, so records
+                # that name one test after another cannot grow the answer.
+                parts = tests.get(name)
+                if parts is None and len(tests) >= MAX_TEST_STEPS:
+                    continue
+                if parts is not None and len(parts) >= MAX_STEP_PARTS:
+                    continue
                 part = _part(identifier, name)
                 by_invocation[identifier] = part
                 tests.setdefault(name, []).append(part)
@@ -603,7 +658,9 @@ def group_progress(steps: Sequence[Mapping]) -> dict:
     One unit per cell, so a group of two hosts counts each host's preflight.
     A step the run never reached counts as done: nothing more will happen to
     it. ``estimated_s`` is the sum over every cell, and None unless every one
-    of them has an estimate, exactly as a suite total is.
+    of them has an estimate, exactly as a suite total is; a group that
+    flashes its boards therefore has none, since flashing the run's build is
+    not a learned stage (``_stage_estimate``).
     """
     cells = [cell for step in steps for cell in step["hosts"].values()]
     seconds = [cell["estimated_s"] for cell in cells]

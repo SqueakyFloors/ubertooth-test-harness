@@ -12,10 +12,11 @@ from records alone, because that is what a per-host pill is drawn from.
 import asyncio
 import json
 import unittest
+from unittest.mock import patch
 
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
-from ubertooth_harness.controller import UNKNOWN_GROUP, UNKNOWN_RUN
+from ubertooth_harness.controller import UNKNOWN_GROUP, UNKNOWN_RUN, Controller
 from ubertooth_harness.rungroups import (
     BUILD_STEP,
     FLASH_STEP,
@@ -164,6 +165,15 @@ class StepModelTests(unittest.TestCase):
         self.assertEqual(
             "failed", group_status([{"status": "canceled"}, {"status": "failed"}])
         )
+        # A run the runner no longer has is worse than a cancel somebody
+        # asked for.
+        self.assertEqual(
+            "lost", group_status([{"status": "canceled"}, {"status": "lost"}])
+        )
+        # A host still being started has not gone wrong: the group is running.
+        self.assertEqual(
+            "running", group_status([{"status": "passed"}, {"status": "starting"}])
+        )
         self.assertEqual("error", group_status([]))
 
     def test_steps_carry_each_stage_and_each_test(self):
@@ -260,6 +270,25 @@ class StepModelTests(unittest.TestCase):
         self.assertEqual("passed", preflight["status"])
         self.assertEqual("canceled", test["status"])
         self.assertEqual("canceled", test["items"][0]["status"])
+
+    def test_what_records_can_turn_into_is_bounded(self):
+        """The records are data: a runner's message may be megabytes."""
+        long_name = "N" * 5000
+        events = [
+            record("run-5", index, "test_started", "running",
+                   invocation_id=f"{index:03d}-{long_name}", test_name=long_name)
+            for index in range(1, 4)
+        ] + [
+            record("run-5", 100 + index, "test_started", "running",
+                   invocation_id=f"{index:03d}-T{index}", test_name=f"T{index}")
+            for index in range(300)
+        ]
+        steps = host_steps(events, run_status="running")
+        tests = [step for step in steps if step["kind"] == TEST_STEP]
+        self.assertEqual(200, len(tests))
+        self.assertEqual(200, len(tests[0]["key"]))
+        self.assertEqual(3, len(tests[0]["items"]))
+        self.assertTrue(all(len(item["id"]) <= 200 for item in tests[0]["items"]))
 
     def test_malformed_records_are_data_not_a_failure(self):
         steps = host_steps(
@@ -366,6 +395,22 @@ class GroupRecordTests(unittest.TestCase):
             (view["status"], view["hosts"], view["hosts_asked"],
              view["hosts_started"], view["complete"], view["finished_at"]),
         )
+
+    def test_a_host_still_being_started_is_not_an_error_yet(self):
+        """Until every request is answered, a host without a run is starting."""
+        group = new_group([LINUX, MAC], {"plan": "fast"})
+        group.set_member_run(LINUX, "run-1")
+        view = group_view(group, {"run-1": {"run_id": "run-1", "status": "running"}})
+        self.assertEqual("running", view["status"])
+        self.assertEqual(["running", "starting"],
+                         [member["status"] for member in view["members"]])
+        self.assertIsNone(view["members"][1]["error"])
+        # Once the requests have been answered, a host with no run is an
+        # error of the group and says why.
+        group.dispatched_at = "2026-01-01T00:00:01.000+00:00"
+        view = group_view(group, {"run-1": {"run_id": "run-1", "status": "passed"}})
+        self.assertEqual("error", view["status"])
+        self.assertEqual("its run was never started", view["members"][1]["error"])
 
     def test_a_member_whose_run_is_gone_is_an_error_of_the_group(self):
         group = new_group([LINUX], {"plan": "fast"})
@@ -548,6 +593,53 @@ class GroupStartTests(RunGroupTestCase):
         self.assertFalse((self.results / GROUPS_DIR).exists())
         status, payload, _ = await self.http("GET", "/api/run-groups")
         self.assertEqual([], payload["groups"])
+
+    async def test_a_group_whose_requests_time_out_keeps_a_late_child(self):
+        """A request that timed out may still be accepted, so the group stays."""
+        linux, mac = await self.runners()
+        self.controller.reply_timeout_s = 0.3
+        post = await self.start_group([LINUX, MAC])
+        requests = {runner.host: await runner.recv() for runner in (linux, mac)}
+        status, payload, _ = await post
+        self.assertEqual(504, status, payload)
+        self.assertIn("no run started", payload["detail"])
+        self.assertIn("did not answer in time", payload["detail"])
+        # Stored, because both requests are still pending.
+        (group_id,) = list(self.controller.groups)
+        self.assertTrue(
+            (self.results / GROUPS_DIR / f"{group_id}.json").is_file()
+        )
+        view = (await self.group(group_id))["group"]
+        self.assertEqual(("error", 0, False),
+                         (view["status"], view["hosts_started"], view["complete"]))
+        # The Mac's runner answers late: its run is still one of the group's.
+        await mac.send(
+            "run_accepted", request_id=requests[MAC]["request_id"], run_id="run-2"
+        )
+        await wait_until(lambda: "run-2" in self.controller.runs)
+        self.assertEqual(group_id, self.controller.runs["run-2"].group_id)
+        view = (await self.group(group_id))["group"]
+        self.assertEqual(("running", 1, False),
+                         (view["status"], view["hosts_started"], view["complete"]))
+        self.assertEqual(["error", "running"],
+                         [member["status"] for member in view["members"]])
+
+    async def test_a_fault_in_the_controller_is_not_reported_as_a_refusal(self):
+        await self.runners([LINUX])
+        with patch.object(
+            Controller, "_request_run", side_effect=RuntimeError("/private/path broke")
+        ):
+            with self.assertRaises(RuntimeError):
+                await self.controller.start_group(
+                    [LINUX], ref="main", plan="fast", suite="fast", tests=[],
+                    build=False,
+                )
+        # Nothing stored, and the log carries the detail rather than the
+        # answer or the group record.
+        self.assertEqual({}, self.controller.groups)
+        self.assertTrue(
+            any("/private/path broke" in line for line in self.logs), self.logs
+        )
 
     async def test_a_busy_host_and_an_offline_one_each_give_their_reason(self):
         linux, mac = await self.runners()

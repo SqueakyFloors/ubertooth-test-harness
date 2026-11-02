@@ -1081,13 +1081,17 @@ shape whatever started a run.
   concurrently, and a host that is offline, busy, or whose runner rejects the
   run leaves its reason on that member while the others run. The group then
   reports `complete: false` and, once nothing is running, `error`: a group
-  that ran on two hosts of three did not do what was asked. A group not one
+  that ran on two hosts of three did not do what was asked. A member whose
+  start request has not been answered yet reads `starting`, and the group
+  reads `running`: nothing has gone wrong with that host yet. A group not one
   host of which started is no group at all — nothing is stored and the caller
-  is told, host by host, why (409, or the one status every host gave).
+  is told, host by host, why (409, or the one status every host gave) — unless
+  a request timed out, which stays pending and may still be accepted: that
+  group is stored, so a late child is still one of its hosts.
 - **Status is derived, never stored.** `running` while any child is active,
   `passed` only when every host the group asked for ran and passed, otherwise
-  the worst child outcome (`error` over `failed` over `canceled` over
-  `passed`, with a status the code does not know ranking as an error). A
+  the worst child outcome (`error` over `failed` over `lost` over `canceled`
+  over `passed`, with a status the code does not know ranking as an error). A
   stored group record holds only the request, which run each host got, and
   whether a cancel was asked for, so nothing has to be kept in step with the
   children.
@@ -1105,7 +1109,9 @@ shape whatever started a run.
   the reason it failed, the estimate learned for that host, and its parts (a
   test's invocations, one per board; a flash's boards), which is what a pill
   that doubles as a progress bar needs. `progress` counts the cells, so a
-  group of two hosts counts each host's preflight.
+  group of two hosts counts each host's preflight; its summed estimate needs
+  every cell to have one, which a run that flashes its boards has not got,
+  since flashing the run's build is not learned as a stage (4a).
 - **Live.** `/ws/live?group_id=ID` carries every member run's updates and
   events on one stream (one transcript per host) plus the group's own
   updates; `?run_id=ID` is unchanged and still carries that one run, with the

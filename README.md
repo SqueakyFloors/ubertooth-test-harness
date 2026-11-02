@@ -2530,13 +2530,18 @@ whose runner rejects the run leaves its reason on that member while the
 others run, and the group says it did not run everywhere (`complete: false`,
 and `error` once nothing is running). A group not one host of which started
 is no group at all: nothing is stored and the answer names, host by host,
-why.
+why. The exception is a request that timed out: it stays pending and may
+still be accepted, so that group is stored and a child that arrives late is
+still one of its hosts, while the answer still says nothing started.
 
 A group's status is read from its children, so it cannot drift from them:
-`running` while any child is active, `passed` only when every host asked for
-ran and passed, otherwise the worst outcome among them (an error, then a
-failure, then a cancel). `POST /api/run-groups/{group_id}/cancel` cancels
-every active child and reports each host's outcome.
+`running` while any child is active (including one still being started,
+whose member reads `starting`), `passed` only when every host asked for ran
+and passed, otherwise the worst outcome among them — an error, then a
+failure, then a [lost](#controller) run, then a cancel, and a status this
+code does not know ranks as an error.
+`POST /api/run-groups/{group_id}/cancel` cancels every active child and
+reports each host's outcome.
 
 `GET /api/run-groups/{group_id}` is the per-host result: one row per step —
 build, flash, preflight, then the tests in planned order — each with one cell
@@ -2575,15 +2580,15 @@ Endpoints (JSON unless noted; `GET /` lists them):
 | `POST /api/targets/{host}/runs` | start a run with the protocol `run` fields: `{"ref", "commit": null, "plan", "suite", "tests": [], "build": false, "flash_build": true, "with_firmware": false, "with_python": false}` (`commit`, optional, is the full commit the caller saw listed for `ref`; `flash_build` applies only with `build` and is recorded false without it; `with_firmware` and `with_python` add `--with-firmware` and `--with-python` to the run's build, and either one without `build` is refused with 422 naming it); 201 with the run (including the `commit` sent to the runner), 409 busy, offline, rejected by the runner, or `ref` moved away from `commit`, 422 invalid, a ref not in `/api/refs` (full commit IDs are accepted), or a name listing several commits, 504 no answer |
 | `POST /api/run-groups` | start a [run group](#run-groups-one-plan-on-several-hosts): the same body as a run plus `{"hosts": ["Host_Linux", "Host_Mac"]}` (at least one, each named once, at most 16). 201 with the group, each member carrying its `run_id` or the `error` that host's start gave; 409 when no host started (or the one status every host gave), 422 for an unusable request, a ref not in `/api/refs`, or an option that needs `build` without it |
 | `GET /api/run-groups[?target=HOST]` | groups, newest first, each with its members; a run of its own is listed as a group of one (`implicit: true`, its ID the run's own) |
-| `GET /api/run-groups/{group_id}` | the group, each member's run with its failure summary, planned invocations and stage estimates, `steps` (one row per build, flash, preflight and test, with one cell per host that runs it) and `progress` (cells planned, cells done, and the summed estimate when every cell has one) |
-| `POST /api/run-groups/{group_id}/cancel` | `{"reason": ""}`; 202 with each host's outcome once at least one child was cancelled, 409 when nothing is running or no child could be cancelled |
+| `GET /api/run-groups/{group_id}` | the group, each member's run with its failure summary, planned invocations and stage estimates, `steps` (one row per build, flash, preflight and test, with one cell per host that runs it) and `progress` (cells planned, cells done, and the summed estimate when every cell has one, which a run that flashes its boards has not got: flashing the run's build is not a learned stage) |
+| `POST /api/run-groups/{group_id}/cancel` | `{"reason": ""}`; 202 with each host's outcome once at least one child was cancelled, 409 when nothing is running; when no child could be cancelled, the one status every host gave (409 busy, 503 runner away, 504 no answer) or 409 where they differ |
 | `GET /api/runs[?target=HOST]` | runs, newest first |
 | `GET /api/runs/{run_id}` | status, every event, the failure summary (`failures`), `invocations` (from the run's manifest, every planned invocation on the target with `invocation_id`, `test_name`, `estimated_s`, `catalog_estimated_s`, `estimate_source`, `estimate_samples` and `estimate_scaled`; null before the manifest record), and `stages`: the run's build and preflight estimates where its host has learned them |
 | `GET /api/runs/{run_id}/report.md` | the run's report (Markdown) |
 | `GET /api/runs/{run_id}/files` | the output files the run recorded, each with its path, stream, size, line count, SHA-256, where it came from (`owner`), the checks that read it, and `readable`: whether this host holds the file itself |
 | `GET /api/runs/{run_id}/file?path=&offset=&limit=` | one bounded page of a saved output file, with what the run recorded about it and where the page sits in it. Only a path that run's own `run.jsonl` records is served, and only from inside the run directory, with no symbolic link followed; a page is 64 KiB by default and 1 MiB at most. A file that stayed on the target is asked of that run's runner (256 KiB at most, since the page travels in one protocol message, and `page_bytes` says what a page was); 503 while that runner is not connected, 504 if it does not answer in time, 400 or 404 for a path that may not be served, naming the path only |
 | `POST /api/runs/{run_id}/cancel` | `{"reason": ""}`; 202 once the runner accepts |
-| `WS /ws/live[?run_id=ID\|?group_id=ID]` | browser stream: a `snapshot`, then `target`, `run` and `group` updates. With `run_id`, that one run's `event` records too (and its group in the snapshot); with `group_id`, every member run's updates and `event` records, one stream for the whole group. Name one or the other, not both. A browser 1000 updates behind is closed with 1013 `live stream overflowed` (reconnect for a new snapshot) |
+| `WS /ws/live[?run_id=ID\|?group_id=ID]` | browser stream: a `snapshot`, then `target`, `run` and `group` updates. With `run_id`, that one run's `event` records too (and its group in the snapshot); with `group_id`, every member run's updates and `event` records, one stream for the whole group. Name one or the other, not both. A browser 1000 updates behind is closed with 1013 `live stream overflowed` (reconnect for a new snapshot); a group stream carries every member's traffic, so it reaches that mark sooner than one run's does |
 | `WS /ws/runner` | target runner protocol v5 |
 
 Every request and WebSocket handshake must carry `Host: 127.0.0.1:PORT` or
