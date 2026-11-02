@@ -30,6 +30,16 @@ flat directory ``<results dir>/<run_id>/`` holding ``run.json`` (the
 controller's record), ``run.jsonl`` (the runner's events appended as received,
 deduplicated by sequence), and ``report.md`` (compiled from that run.jsonl
 when the run ends, exactly as run-suite compiles it on the target).
+
+A run on several hosts is a **run group** (``ubertooth_harness/rungroups.py``):
+one child run per selected host, started together, each with its own runner,
+boards and leases. The group record is one file in
+``<results dir>/groups/<group_id>.json`` and holds only what was asked for and
+which run each host got; the group's status, when it finished and what each
+host's steps did are derived from the children's own records, so nothing has
+to be kept in step with them. The protocol is unchanged: a child run is an
+ordinary run, and a run that belongs to no stored group is presented as a
+group of one.
 """
 
 import asyncio
@@ -76,6 +86,18 @@ from ubertooth_harness.protocol import (
     decode_runner_message,
     encode_controller_message,
 )
+from ubertooth_harness.rungroups import (
+    GROUPS_DIR,
+    MAX_GROUP_HOSTS,
+    RunGroup,
+    group_from_record,
+    group_progress,
+    group_view,
+    host_steps,
+    implicit_group,
+    merge_steps,
+    new_group,
+)
 
 
 BIND_ADDRESS = "127.0.0.1"
@@ -107,6 +129,7 @@ BIND_OVERRIDE_VARIABLES = (
 POLICY_VIOLATION = 1008
 TRY_AGAIN_LATER = 1013
 UNKNOWN_RUN = 4404
+UNKNOWN_GROUP = 4405
 # Terminal status of a stored run whose target registered without it.
 LOST = "lost"
 
@@ -210,7 +233,7 @@ _RUN_FIELDS = (
     "build", "flash_build", "with_firmware", "with_python",
     "status", "created_at", "finished_at", "exit_code", "reason",
     "runner_run_directory", "report", "report_error", "cancel_requested", "adopted",
-    "learned_durations",
+    "learned_durations", "group_id",
 )
 
 
@@ -255,6 +278,10 @@ class Run:
     # Created from a runner report rather than a start request (for example,
     # the run outlived a controller restart).
     adopted: bool = False
+    # The run group this run is one host of, if it was started as part of
+    # one. A run of its own has none, and is presented as a group of one
+    # (rungroups.implicit_group), so a client has one shape to read.
+    group_id: str | None = None
     # Its durations are already in the estimate store; see Controller.learn.
     learned_durations: bool = False
     seen: set = dataclasses.field(default_factory=set, repr=False)
@@ -310,6 +337,10 @@ class _Pending:
     fields: dict | None = None
     waiters: int = 0
     expires_at: float | None = None  # controller clock; set while unwaited
+    # The run group this request belongs to, if any. Carried beside the
+    # protocol fields because the group is the controller's own record and
+    # the run message knows nothing of it.
+    group_id: str | None = None
 
     @property
     def awaited(self) -> bool:
@@ -328,10 +359,31 @@ class _Pending:
 
 
 class _Subscriber:
-    def __init__(self, run_id: str | None):
+    """One browser's live stream: one run, one whole group, or everything."""
+
+    def __init__(self, run_id: str | None, group_id: str | None = None):
         self.run_id = run_id
+        self.group_id = group_id
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=LIVE_QUEUE_LIMIT)
         self.overflowed = False
+
+    @property
+    def unfiltered(self) -> bool:
+        return self.run_id is None and self.group_id is None
+
+    def wants(self, run_id: str, group_id: str | None) -> bool:
+        """Whether this stream carries a run's updates and events.
+
+        ``group_id`` is the group that run belongs to, which is read as the
+        run moves rather than when the stream opened: a run accepted after a
+        group stream was opened still reaches it.
+        """
+        if self.group_id is not None:
+            return self.group_id == group_id
+        return self.run_id in (None, run_id)
+
+    def wants_group(self, group_id: str) -> bool:
+        return self.unfiltered or self.group_id == group_id
 
     def offer(self, message: dict) -> None:
         if self.overflowed:
@@ -382,6 +434,8 @@ class Controller:
         self.port: int | None = None
         self.targets: dict[str, Target] = {}
         self.runs: dict[str, Run] = {}
+        self.groups: dict[str, RunGroup] = {}
+        self.groups_dir = self.results_dir / GROUPS_DIR
         self._links: dict[str, Link] = {}
         self._send_locks: dict[Link, asyncio.Lock] = {}
         self._pending_runs: dict[str, _Pending] = {}
@@ -390,6 +444,7 @@ class Controller:
         self._pending_files: dict[str, _Pending] = {}
         self._subscribers: set[_Subscriber] = set()
         self._load_runs()
+        self._load_groups()
 
     # ----- results store ---------------------------------------------------
 
@@ -461,11 +516,13 @@ class Controller:
         if directory.parent != self.results_dir:
             raise _Violation(f"run_id {run_id!r} is not a flat directory name")
         if (
-            # The learned durations live beside the run directories, so a
-            # run must not take that name (a generated run ID never does).
-            # Case-insensitively: on a Mac's filesystem Estimates.json and
-            # estimates.json are the same file.
-            directory.name.casefold() == self.estimates.path.name.casefold()
+            # The learned durations and the group records live beside the run
+            # directories, so a run must not take either name (a generated
+            # run ID never does). Case-insensitively: on a Mac's filesystem
+            # Estimates.json and estimates.json are the same file.
+            directory.name.casefold() in (
+                self.estimates.path.name.casefold(), GROUPS_DIR.casefold()
+            )
             or directory.name.startswith(".")
         ):
             raise _Violation(f"run_id {run_id!r} is reserved")
@@ -478,6 +535,79 @@ class Controller:
             json.dumps(run.record(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
         os.replace(temporary, run.directory / RUN_RECORD)
+
+    # ----- run groups ------------------------------------------------------
+
+    def _load_groups(self) -> None:
+        """Every stored group record; an unreadable one is logged and left."""
+        try:
+            paths = sorted(self.groups_dir.iterdir())
+        except (FileNotFoundError, NotADirectoryError):
+            return
+        except OSError as error:
+            self.log(f"cannot read the group records: {error}")
+            return
+        for path in paths:
+            if path.suffix != ".json" or not path.is_file():
+                continue
+            try:
+                group = group_from_record(json.loads(path.read_text(encoding="utf-8")))
+            except (OSError, ValueError, TypeError) as error:
+                self.log(f"skipping unreadable group {path.name}: {error}")
+                continue
+            if group.group_id != path.stem:
+                self.log(f"skipping group {path.name}: group_id mismatch")
+                continue
+            self.groups[group.group_id] = group
+
+    def _persist_group(self, group: RunGroup) -> None:
+        self.groups_dir.mkdir(parents=True, exist_ok=True)
+        destination = self.groups_dir / f"{group.group_id}.json"
+        temporary = self.groups_dir / f".{group.group_id}.json.tmp"
+        temporary.write_text(
+            json.dumps(group.record(), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, destination)
+
+    def group_of(self, run: Run) -> RunGroup:
+        """The group a run belongs to, or the group of one it is shown as."""
+        group = self.groups.get(run.group_id) if run.group_id else None
+        return group if group is not None else implicit_group(run.view())
+
+    def get_group(self, group_id: str) -> RunGroup:
+        """One group by ID: a stored group, or a run shown as a group of one."""
+        if not valid_identifier(group_id):
+            raise ControllerError(f"unknown run group {group_id!r}", 404)
+        group = self.groups.get(group_id)
+        if group is not None:
+            return group
+        run = self.runs.get(group_id)
+        if run is None or (run.group_id and run.group_id in self.groups):
+            # A run that belongs to a stored group is not a group of its own.
+            raise ControllerError(f"unknown run group {group_id!r}", 404)
+        return implicit_group(run.view())
+
+    def group_views(self, target: str | None = None) -> list[dict]:
+        """Every group, newest first: the stored ones and the groups of one.
+
+        A run that belongs to no stored group is listed as a group of one, so
+        the history is one list whatever a run was started by. With a
+        ``target``, only groups that asked for that host.
+        """
+        runs = {run_id: run.view() for run_id, run in self.runs.items()}
+        groups = list(self.groups.values())
+        grouped = {run_id for group in groups for run_id in group.run_ids()}
+        for run in self.runs.values():
+            if run.run_id in grouped or run.run_id in self.groups:
+                continue
+            groups.append(implicit_group(runs[run.run_id]))
+        views = [
+            group_view(group, runs) for group in groups
+            if target is None or target in group.hosts
+        ]
+        views.sort(key=lambda view: (view["created_at"], view["group_id"]), reverse=True)
+        return views
 
     def _append_event(self, run: Run, event: dict) -> None:
         run.directory.mkdir(parents=True, exist_ok=True)
@@ -556,9 +686,17 @@ class Controller:
 
     # ----- live fan-out ----------------------------------------------------
 
+    def _group_id_of(self, run_id: str) -> str | None:
+        """The group whose stream a run's updates belong to."""
+        run = self.runs.get(run_id)
+        if run is None:
+            return None
+        return self.group_of(run).group_id
+
     def _publish(self, message: dict, run_id: str | None = None) -> None:
+        group_id = None if run_id is None else self._group_id_of(run_id)
         for subscriber in list(self._subscribers):
-            if run_id is None or subscriber.run_id in (None, run_id):
+            if run_id is None or subscriber.wants(run_id, group_id):
                 subscriber.offer(message)
 
     def _publish_target(self, target: Target) -> None:
@@ -566,18 +704,66 @@ class Controller:
 
     def _publish_run(self, run: Run) -> None:
         self._publish({"type": "run", "run": run.view()}, run.run_id)
+        # A group's status is its children's, so whichever child moved, the
+        # group moved with it. The update goes to the browsers that follow
+        # that group and to those that follow nothing in particular; a
+        # browser following one run is left with that run's own updates, as
+        # it was before groups existed.
+        self._publish_group(self.group_of(run))
 
-    async def live_session(self, link: Link, run_id: str | None) -> None:
-        """Stream target and run updates (and one run's events) to a browser."""
+    def _publish_group(self, group: RunGroup) -> None:
+        message = {"type": "group", "group": self.view_group(group)}
+        for subscriber in list(self._subscribers):
+            if subscriber.wants_group(group.group_id):
+                subscriber.offer(message)
+
+    def view_group(self, group: RunGroup) -> dict:
+        """One group as the API and the live stream report it."""
+        return group_view(
+            group,
+            {
+                run_id: self.runs[run_id].view()
+                for run_id in group.run_ids() if run_id in self.runs
+            },
+        )
+
+    async def live_session(
+        self, link: Link, run_id: str | None, group_id: str | None = None
+    ) -> None:
+        """Stream target, run and group updates to a browser.
+
+        With ``run_id``, that run's own events come too; with ``group_id``,
+        every member run's updates and events do, so one stream carries a
+        whole group (one transcript per host). With neither, every target,
+        run and group update does.
+        """
+        group = None
         if run_id is not None and run_id not in self.runs:
             await link.close(UNKNOWN_RUN, "unknown run")
             return
-        subscriber = _Subscriber(run_id)
+        if group_id is not None:
+            try:
+                group = self.get_group(group_id)
+            except ControllerError:
+                await link.close(UNKNOWN_GROUP, "unknown run group")
+                return
+        if group is None and run_id is not None:
+            group = self.group_of(self.runs[run_id])
+        subscriber = _Subscriber(run_id, group_id)
         subscriber.offer({
             "type": "snapshot",
             "protocol_version": PROTOCOL_VERSION,
             "targets": [target.view() for target in self.targets.values()],
             "run": self.runs[run_id].view() if run_id else None,
+            # The group the stream follows, or the one the followed run is a
+            # host of (a group of one for a run of its own), so a client has
+            # it without a further request.
+            "group": self.view_group(group) if group is not None else None,
+            # Every member run of a followed group, in the group's host order.
+            "runs": [
+                self.runs[member].view() for member in group.run_ids()
+                if member in self.runs
+            ] if group_id is not None else [],
         })
         self._subscribers.add(subscriber)
 
@@ -818,6 +1004,15 @@ class Controller:
             directory = self._run_directory(run_id)
             del self._pending_runs[message["request_id"]]
             fields = pending.fields
+            group = self.groups.get(pending.group_id) if pending.group_id else None
+            if pending.group_id and group is None:
+                # The group was given up on because no host started (every
+                # request had failed or timed out), and this is one of those
+                # requests answered late. The run stands on its own.
+                self.log(
+                    f"run {run_id} was accepted after run group "
+                    f"{pending.group_id} was given up on; it stands on its own"
+                )
             run = Run(
                 run_id=run_id, target=target.host,
                 directory=directory,
@@ -827,9 +1022,12 @@ class Controller:
                 flash_build=fields["flash_build"],
                 with_firmware=fields["with_firmware"],
                 with_python=fields["with_python"],
+                group_id=group.group_id if group is not None else None,
             )
             self.runs[run_id] = run
             self._persist(run)
+            if group is not None and group.set_member_run(target.host, run_id):
+                self._persist_group(group)
             target.active_run_id = run_id
             pending.resolve(run)
             self._publish_run(run)
@@ -1137,16 +1335,21 @@ class Controller:
         (current,) = listed
         return current
 
-    async def start_run(
-        self, host: str, *, ref: str, plan: str, suite: str,
-        tests: list[str], build: bool, commit: str | None = None,
-        flash_build: bool = True, with_firmware: bool = False,
-        with_python: bool = False,
-    ) -> Run:
+    async def _run_fields(
+        self, *, ref: str, plan: str, suite: str, tests: list[str], build: bool,
+        commit: str | None, flash_build: bool, with_firmware: bool,
+        with_python: bool,
+    ) -> dict:
+        """The ``run`` message's fields, with the ref resolved once.
+
+        A group resolves the ref here and sends every host the same commit,
+        so one plan on several hosts is one revision on all of them even if
+        the branch moves while the runs are being started.
+        """
         # Refused before anything else: run-suite takes neither option
         # without --build, so such a request could only start a run that
-        # fails at once. The protocol refuses it too (its encode below), but
-        # the caller gets the option's own name from here.
+        # fails at once. The protocol refuses it too (encode_controller_message
+        # below), but the caller gets the option's own name from here.
         for option, wanted in (
             ("with_firmware", with_firmware), ("with_python", with_python),
         ):
@@ -1155,9 +1358,36 @@ class Controller:
                     f"{option} requires build: run-suite refuses "
                     f"--{option.replace('_', '-')} without --build", 422
                 )
+        return dict(
+            ref=ref, commit=await self.resolve_ref(ref, commit), plan=plan,
+            suite=suite, tests=list(tests),
+            # Flashing applies only to a run that builds (#135).
+            build=build, flash_build=bool(build and flash_build),
+            # Each one asked for without build was refused above, so these
+            # are what the caller asked for (#257).
+            with_firmware=with_firmware, with_python=with_python,
+        )
+
+    async def start_run(
+        self, host: str, *, ref: str, plan: str, suite: str,
+        tests: list[str], build: bool, commit: str | None = None,
+        flash_build: bool = True, with_firmware: bool = False,
+        with_python: bool = False,
+    ) -> Run:
         # Checked first of what can wait: everything after it runs without
         # yielding until the request is recorded as pending.
-        commit = await self.resolve_ref(ref, commit)
+        fields = await self._run_fields(
+            ref=ref, plan=plan, suite=suite, tests=tests, build=build,
+            commit=commit, flash_build=flash_build, with_firmware=with_firmware,
+            with_python=with_python,
+        )
+        return await self._request_run(host, fields)
+
+    async def _request_run(
+        self, host: str, fields: Mapping, group_id: str | None = None
+    ) -> Run:
+        """Ask one target's runner to start a run; nothing here yields until
+        the request is recorded as pending."""
         target, link = self._target_link(host)
         if target.active_run_id is not None:
             raise ControllerError(
@@ -1171,19 +1401,15 @@ class Controller:
             if pending.host == host and pending.awaited:
                 raise ControllerError(f"a run request to {host} is already pending", 409)
         request_id = uuid.uuid4().hex
-        fields = dict(
-            ref=ref, commit=commit, plan=plan, suite=suite, tests=list(tests),
-            # Flashing applies only to a run that builds (#135).
-            build=build, flash_build=bool(build and flash_build),
-            # Each one asked for without build was refused above, so these
-            # are what the caller asked for (#257).
-            with_firmware=with_firmware, with_python=with_python,
-        )
+        fields = dict(fields)
         try:
             text = encode_controller_message("run", request_id=request_id, **fields)
         except ProtocolError as error:
             raise ControllerError(str(error), 422) from None
-        pending = _Pending(host, asyncio.get_running_loop().create_future(), fields)
+        pending = _Pending(
+            host, asyncio.get_running_loop().create_future(), fields,
+            group_id=group_id,
+        )
         # Kept until the runner answers or disconnects, or the grace period
         # after the last caller gave up passes, so a late run_accepted still
         # creates the run.
@@ -1229,6 +1455,194 @@ class Controller:
         if run is None:
             raise ControllerError(f"unknown run {run_id!r}", 404)
         return run
+
+    # ----- run groups ------------------------------------------------------
+
+    def _group_hosts(self, hosts) -> list[str]:
+        """The hosts a group may ask for, in the order they were asked for."""
+        if not isinstance(hosts, (list, tuple)) or not hosts:
+            raise ControllerError("hosts must name at least one target", 422)
+        chosen = list(hosts)
+        if len(set(chosen)) != len(chosen):
+            raise ControllerError("hosts must not name a target twice", 422)
+        if len(chosen) > MAX_GROUP_HOSTS:
+            raise ControllerError(
+                f"a run group takes at most {MAX_GROUP_HOSTS} hosts", 422
+            )
+        if not all(valid_identifier(host) for host in chosen):
+            raise ControllerError("each host must be a registry host name", 422)
+        return chosen
+
+    @staticmethod
+    def _detail(error: BaseException) -> str:
+        return error.detail if isinstance(error, ControllerError) else str(error)
+
+    async def start_group(
+        self, hosts, *, ref: str, plan: str, suite: str, tests: list[str],
+        build: bool, commit: str | None = None, flash_build: bool = True,
+        with_firmware: bool = False, with_python: bool = False,
+    ) -> RunGroup:
+        """Start one child run per host, together, as one run group.
+
+        The ref is resolved once, so every host runs the same commit. Each
+        host's request is sent and awaited concurrently and stands on its own:
+        a host that is offline, busy, or whose runner rejects the run leaves
+        its reason on that member, and the hosts that did start still run. The
+        group's status then reports that it did not run everywhere.
+
+        A group not one host of which started is no group at all: nothing is
+        stored and the caller is told, host by host, why.
+        """
+        chosen = self._group_hosts(hosts)
+        fields = await self._run_fields(
+            ref=ref, plan=plan, suite=suite, tests=tests, build=build,
+            commit=commit, flash_build=flash_build, with_firmware=with_firmware,
+            with_python=with_python,
+        )
+        group = new_group(chosen, fields)
+        while group.group_id in self.groups or group.group_id in self.runs:
+            # A generated group ID is unique, and never the shape of a run ID;
+            # a runner that named a run one anyway does not get to shadow it.
+            group = new_group(chosen, fields)
+        self.groups[group.group_id] = group
+        results = await asyncio.gather(
+            *(self._request_run(host, fields, group.group_id) for host in chosen),
+            return_exceptions=True,
+        )
+        failures: list[tuple[str, BaseException]] = []
+        stopped = None
+        for host, result in zip(chosen, results):
+            if isinstance(result, asyncio.CancelledError):
+                stopped = result
+            elif isinstance(result, BaseException):
+                failures.append((host, result))
+                group.set_member_error(host, self._detail(result))
+            else:
+                group.set_member_run(host, result.run_id)
+        group.dispatched_at = _now()
+        if group.run_ids():
+            self._persist_group(group)
+            self._publish_group(group)
+            if stopped is not None:
+                raise stopped
+            return group
+        del self.groups[group.group_id]
+        if stopped is not None:
+            raise stopped
+        statuses = {
+            error.status for _host, error in failures
+            if isinstance(error, ControllerError)
+        }
+        raise ControllerError(
+            "no run started: " + "; ".join(
+                f"{host}: {self._detail(error)}" for host, error in failures
+            ),
+            statuses.pop() if len(statuses) == 1 else 409,
+        )
+
+    async def cancel_group(self, group_id: str, reason: str) -> tuple[RunGroup, list[dict]]:
+        """Cancel every active run of a group; returns the group and each host's outcome.
+
+        Each host's cancel stands on its own, as its run does: a host whose
+        runner is away keeps its own reason and the others are still
+        cancelled. Only when not one of them could be cancelled is this a
+        refusal, because then nothing was asked of any runner.
+        """
+        group = self.get_group(group_id)
+        active = [
+            (entry["host"], entry["run_id"]) for entry in group.members
+            if isinstance(entry.get("run_id"), str)
+            and entry["run_id"] in self.runs and self.runs[entry["run_id"]].active
+        ]
+        if not active:
+            raise ControllerError(
+                f"run group {group.group_id} has no active run", 409
+            )
+        results = await asyncio.gather(
+            *(self.cancel_run(run_id, reason) for _host, run_id in active),
+            return_exceptions=True,
+        )
+        outcomes, failures = [], []
+        for (host, run_id), result in zip(active, results):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            if isinstance(result, BaseException):
+                failures.append(result)
+                outcomes.append({
+                    "host": host, "run_id": run_id, "canceled": False,
+                    "error": self._detail(result),
+                })
+            else:
+                outcomes.append({
+                    "host": host, "run_id": run_id, "canceled": True, "error": None,
+                })
+        if len(failures) == len(active):
+            if len(failures) == 1:
+                raise failures[0]
+            statuses = {
+                error.status for error in failures
+                if isinstance(error, ControllerError)
+            }
+            raise ControllerError(
+                f"could not cancel any run in group {group.group_id}: " + "; ".join(
+                    f"{outcome['host']}: {outcome['error']}" for outcome in outcomes
+                ),
+                statuses.pop() if len(statuses) == 1 else 409,
+            )
+        if group.implicit:
+            # A group of one keeps nothing of its own: the cancel is on the
+            # run, so the group is read again from it.
+            group = self.get_group(group.group_id)
+        elif not group.cancel_requested:
+            # Recorded on the group as well as on each run: a group whose
+            # cancel reached only some hosts still asked for all of them.
+            group.cancel_requested = True
+            group.cancel_reason = reason[:2000] or None
+            self._persist_group(group)
+        self._publish_group(group)
+        return group, outcomes
+
+    async def group_detail(self, group: RunGroup) -> dict:
+        """The group with each host's run, its steps, and the merged step rows.
+
+        One row per step with one cell per host that runs it: what a per-host
+        pill is drawn from. Each member keeps its own failure summary,
+        planned invocations and stage estimates, exactly as
+        ``/api/runs/{run_id}`` reports them for a run on its own.
+        """
+        view = self.view_group(group)
+        members, per_host = [], {}
+        for member in view["members"]:
+            run = self.runs.get(member["run_id"]) if member["run_id"] else None
+            if run is None:
+                members.append({
+                    **member, "failures": [], "invocations": None, "stages": [],
+                })
+                continue
+            events = await asyncio.to_thread(self.read_events, run)
+            estimates = self.estimates
+            invocations = planned_invocations(events, estimates=estimates)
+            stages = run_stage_estimates(
+                estimates, events, run.target, build=run.build,
+                # As in /api/runs/{run_id}: a run that flashes its boards
+                # builds the firmware for that whether it asked for the image
+                # or not.
+                with_firmware=run.with_firmware or run.flash_build,
+                with_python=run.with_python,
+            )
+            per_host[member["host"]] = host_steps(
+                events, build=run.build, flash_build=run.flash_build,
+                run_status=run.status, invocations=invocations, stages=stages,
+            )
+            members.append({
+                **member, "failures": failure_summary(member["run"], events),
+                "invocations": invocations, "stages": stages,
+            })
+        steps = merge_steps(per_host, view["hosts"])
+        return {
+            "group": view, "members": members, "steps": steps,
+            "progress": group_progress(steps),
+        }
 
     async def read_run_file(
         self, run: Run, path: str, offset: int = 0, limit: int = PAGE_BYTES
@@ -1515,6 +1929,22 @@ ENDPOINTS = {
         "with_firmware, with_python}; flash_build is recorded false without "
         "build, and with_firmware or with_python without build is refused"
     ),
+    "POST /api/run-groups": (
+        "start one run per host as a run group: {hosts, ref, commit, plan, "
+        "suite, tests, build, flash_build, with_firmware, with_python}; 201 "
+        "with the group, each member carrying its run or why it did not start"
+    ),
+    "GET /api/run-groups": (
+        "run groups, newest first (?target=HOST); a run of its own is listed "
+        "as a group of one"
+    ),
+    "GET /api/run-groups/{group_id}": (
+        "one group with each host's run and one step row per build, flash, "
+        "preflight and test, with one cell per host that runs it"
+    ),
+    "POST /api/run-groups/{group_id}/cancel": (
+        "cancel every active run of a group: {reason}"
+    ),
     "GET /api/runs": "runs, newest first (?target=HOST)",
     "GET /api/runs/{run_id}": (
         "one run with its events, failure summary, planned invocations and "
@@ -1528,7 +1958,11 @@ ENDPOINTS = {
         "asked of its runner, 503 while that runner is away"
     ),
     "POST /api/runs/{run_id}/cancel": "cancel an active run: {reason}",
-    "WS /ws/live": "live target and run updates (?run_id=ID adds that run's events)",
+    "WS /ws/live": (
+        "live target, run and group updates (?run_id=ID adds that run's "
+        "events; ?group_id=ID follows a whole group, every member run's "
+        "updates and events)"
+    ),
     # From PROTOCOL_VERSION, so the next bump cannot leave it stale.
     "WS /ws/runner": f"target runner protocol v{PROTOCOL_VERSION}",
 }
@@ -1554,6 +1988,13 @@ def create_app(controller: Controller):
         # needs build, and is refused (422) without it.
         with_firmware: bool = False
         with_python: bool = False
+
+    class GroupRequest(RunRequest):
+        # The same run request, for every host the group names (each gets its
+        # own child run). One host is a group of one. What may be in the list
+        # is checked in one place, Controller._group_hosts, so an empty list,
+        # a repeated host and a name no registry could hold all read alike.
+        hosts: list[str]
 
     class CancelRequest(BaseModel):
         model_config = ConfigDict(extra="forbid", strict=True)
@@ -1639,6 +2080,31 @@ def create_app(controller: Controller):
         )
         return {"run": run.view()}
 
+    @app.post("/api/run-groups", status_code=201)
+    async def start_group(request: GroupRequest):
+        group = await controller.start_group(
+            request.hosts, ref=request.ref, plan=request.plan,
+            suite=request.suite, tests=request.tests, build=request.build,
+            commit=request.commit, flash_build=request.flash_build,
+            with_firmware=request.with_firmware, with_python=request.with_python,
+        )
+        return {"group": controller.view_group(group)}
+
+    @app.get("/api/run-groups")
+    async def list_groups(target: str | None = None):
+        if target is not None and not valid_identifier(target):
+            raise ControllerError("target must be a registry host name", 422)
+        return {"groups": controller.group_views(target)}
+
+    @app.get("/api/run-groups/{group_id}")
+    async def get_group(group_id: str):
+        return await controller.group_detail(controller.get_group(group_id))
+
+    @app.post("/api/run-groups/{group_id}/cancel", status_code=202)
+    async def cancel_group(group_id: str, request: CancelRequest):
+        group, canceled = await controller.cancel_group(group_id, request.reason)
+        return {"group": controller.view_group(group), "canceled": canceled}
+
     @app.get("/api/runs")
     async def list_runs(target: str | None = None):
         runs = [
@@ -1703,11 +2169,18 @@ def create_app(controller: Controller):
     @app.websocket("/ws/live")
     async def live_socket(websocket: WebSocket):
         run_id = websocket.query_params.get("run_id")
-        if run_id is not None and not valid_identifier(run_id):
-            await websocket.close(POLICY_VIOLATION, "invalid run_id")
+        group_id = websocket.query_params.get("group_id")
+        for name, value in (("run_id", run_id), ("group_id", group_id)):
+            if value is not None and not valid_identifier(value):
+                await websocket.close(POLICY_VIOLATION, f"invalid {name}")
+                return
+        if run_id is not None and group_id is not None:
+            # One stream follows one thing: a group already carries every
+            # member run's updates and events.
+            await websocket.close(POLICY_VIOLATION, "name a run or a group, not both")
             return
         await websocket.accept()
-        await controller.live_session(_StarletteLink(websocket), run_id)
+        await controller.live_session(_StarletteLink(websocket), run_id, group_id)
 
     return LocalRequestGuard(app, controller)
 
