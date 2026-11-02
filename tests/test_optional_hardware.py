@@ -270,6 +270,103 @@ class OptionalHardwarePlanningTests(unittest.TestCase):
                 [(item.host, item.reason) for item in compiled.not_applicable],
             )
 
+    def test_a_host_that_is_here_runs_the_step_an_absent_one_was_named_for(self):
+        """With one host absent and one here, the step runs, and the host
+        that runs it is not told it was left out of it."""
+        step = """    - Ubertooth identity:
+        hosts: [Host_Lab, Host_Mac]
+        Ubertooth: default
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            compiled = self.compile(directory, (step,))
+
+            (invocation,) = compiled.invocations
+            self.assertEqual("Host_Mac", invocation.host)
+            # The step ran, and the record still says the bench has no
+            # Host_Lab: the line names that host, not the one running.
+            for host in ("Host_Mac", "Host_Linux"):
+                (item,) = compiled.for_host(host)
+                self.assertEqual(
+                    "Ubertooth identity: not applicable on Host_Lab: no such "
+                    "host in this registry",
+                    item.describe(),
+                )
+
+    def test_a_platform_blocked_host_beside_an_absent_one_leaves_the_step_out(self):
+        """The host that would have run it is not here, so the Mac's platform
+        is beside the point and the step belongs to another bench."""
+        step = """    - Ubertooth identity:
+        hosts: [Host_Lab, Host_Mac]
+        platforms: [linux]
+        Ubertooth: default
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            compiled = self.compile(directory, (HOST_STEP, step))
+
+            self.assertEqual(
+                ("Host_Linux", "Host_Mac"),
+                tuple(item.host for item in compiled.invocations),
+            )
+            self.assertEqual(
+                [
+                    ("Host_Lab", "no such host in this registry"),
+                    ("Host_Mac", "runs only on Linux, and Host_Mac is macOS"),
+                ],
+                [(item.host, item.reason) for item in compiled.not_applicable],
+            )
+
+    def test_another_device_takes_a_role_the_hosts_default_cannot(self):
+        """The plan said `default`, and the bench does have an advertiser: it
+        takes the role, as it would for a placement the default cannot
+        satisfy."""
+        step = """    - Capture known BLE advertiser:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        advertiser: default
+        coverage: smoke
+        duration: 5s
+"""
+        hardware = HARDWARE.replace(
+            "      advertiser: DK_Linux0", "      nRF52840 DK: DK_Linux0"
+        ).replace("    roles: [advertiser]", "    roles: [peripheral]") + """  DK_Linux1:
+    type: nRF52840 DK
+    attached to: Host_Linux
+    roles: [advertiser]
+    identity: {jlink serial: "000123456790", BLE address: "C0:00:00:00:00:03"}
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            compiled = self.compile(directory, (step,), hardware)
+
+            (invocation,) = compiled.invocations
+            self.assertEqual("DK_Linux1", invocation.resources["advertiser"])
+
+    def test_a_role_no_device_can_take_is_absence_not_a_placement_failure(self):
+        """With an `rf:` requirement on the role as well, a host whose only
+        DK is placed as asked but declares another role has not got the
+        hardware; the reason says so rather than blaming the placement."""
+        step = """    - Capture known BLE advertiser:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        advertiser: default
+        coverage: smoke
+        duration: 5s
+        rf:
+          advertiser: {min_attenuation_db: 10}
+"""
+        hardware = HARDWARE.replace(
+            "      advertiser: DK_Linux0", "      nRF52840 DK: DK_Linux0"
+        ).replace(
+            "    roles: [advertiser]",
+            "    roles: [peripheral]\n    rf: {attenuation_db: 20}",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                PlanningError,
+                "host Host_Linux has no nRF52840 DK for the advertiser role "
+                r"\(DK_Linux0 declares peripheral\)",
+            ):
+                self.compile(directory, (step,), hardware)
+
     def test_a_suite_with_nothing_this_registry_can_run_is_still_an_error(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(
@@ -401,7 +498,10 @@ class DryRunTests(unittest.TestCase):
             "this registry",
             text,
         )
-        self.assertIn(f"1 test(s) not applicable on {host}", text)
+        # The count is not claimed to be this host's doing; each line names
+        # the host it belongs to.
+        self.assertIn(f"case(s) not applicable on {host}, and 1 test(s) left out",
+                      text)
 
     def test_a_step_whose_hardware_this_host_has_not_got_is_reported(self):
         code, text, host = self.dry_run(HOST_STEP, CLASSIC_STEP)
@@ -413,7 +513,7 @@ class DryRunTests(unittest.TestCase):
                 "host Host_Linux has no default ESP32 Classic peer",
                 text,
             )
-            self.assertIn("1 test(s) not applicable", text)
+            self.assertIn("1 test(s) left out", text)
         else:
             # The step names the Linux host only, so the Mac's run never had
             # it: the Linux run is where it is recorded.

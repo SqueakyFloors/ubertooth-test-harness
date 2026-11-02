@@ -16,8 +16,17 @@ from ubertooth_harness.hostneeds import (
 )
 from ubertooth_harness.plan import Plan
 from ubertooth_harness.resources import MissingResource, RegistryError, ResourceRegistry
-from ubertooth_harness.rf import describe as describe_placement
+from ubertooth_harness.rf import (
+    PlacementRequirement,
+    describe as describe_placement,
+)
 from ubertooth_harness.topology import PowerIsolationAction, plan_exclusive_ubertooth
+
+
+# Any placement at all: used to ask whether a host has a unit that could
+# take a role wherever it sat, which tells absence from a placement it
+# cannot satisfy.
+ANY_PLACEMENT = PlacementRequirement()
 
 
 class PlanningError(ValueError):
@@ -78,6 +87,9 @@ class CompiledSuite:
     absent_hosts: tuple[str, ...] = ()
 
     def for_host(self, host: str) -> tuple[NotApplicable, ...]:
+        """What this host's run records: what this host was left out of, and
+        what a host the registry has not got was left out of, since no run of
+        its own will ever carry that. Each item names its own host."""
         return tuple(
             item for item in self.not_applicable
             if item.host == host or item.host in self.absent_hosts
@@ -172,8 +184,9 @@ class PlanCompiler:
         ``each``): an explicit alias that cannot satisfy the requirement is a
         mistake in the plan, and ``resolve_hardware`` refuses it.
 
-        A host with no unit of the type at all is not answered here: that is
-        absence, which binding the role reports in its own words.
+        A host that could not take the role wherever its units sat is not
+        answered here: that is absence, which binding the role reports in its
+        own words, naming the role rather than a placement.
         """
         for role, placement in wanted.items():
             selector = arguments.get(role, "default")
@@ -182,9 +195,9 @@ class PlanCompiler:
             resource_type = definition.hardware_roles[role]
             if self.registry.placed(host, resource_type, placement, role):
                 continue
-            registered = self.registry.hardware(host, resource_type)
-            if not registered:
+            if not self.registry.placed(host, resource_type, ANY_PLACEMENT, role):
                 continue
+            registered = self.registry.hardware(host, resource_type)
             have = "; ".join(
                 f"{alias} has {describe_placement(self.registry.get(alias).rf)}"
                 for alias in registered
@@ -312,7 +325,10 @@ class PlanCompiler:
                     else:
                         candidates.append(alias)
                 left_out.extend(blocked)
-                if not candidates and blocked:
+                if not candidates and blocked and not absent:
+                    # Every host the step names is here, and none can run it.
+                    # With an absent host among them the step was written for
+                    # a bench this is not, so it is left out instead.
                     raise PlanningError(
                         f"{step.test_name}: no selected host can run it: "
                         + "; ".join(f"{item.host}: {item.reason}" for item in blocked)

@@ -187,8 +187,10 @@ a host whose platform the step does not list:
 - a host with no device for a hardware role the test binds: no default for
   the role (`host Host_Mac has no default ESP32 Classic peer for the acceptor
   role`), no device of the type at all (`host Host_Mac has no nRF52840 DK
-  resources`), or none that declares the role (`host Host_Mac has no
-  nRF52840 DK for the advertiser role (DK_Mac0 declares peripheral)`);
+  resources`), or no device that declares the role (`host Host_Mac has no
+  nRF52840 DK for the advertiser role (DK_Mac0 declares peripheral)`) — when
+  the host's default cannot take the role but another device of its can, that
+  one takes it, as it does for a placement the default cannot satisfy;
 - an explicit device alias this registry does not have (`this registry has no
   Ubertooth 'UT_Lab7'`).
 

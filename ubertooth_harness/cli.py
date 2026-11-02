@@ -946,8 +946,10 @@ def _dry_run(args, catalog, plan, host, invocations, not_applicable) -> int:
             print(f"    not applicable on {args.host}: {case.name}: {reason}")
     for item in not_applicable:
         print(f"  {item.describe()}")
+    # Each not-applicable line above names its own host: a step left out
+    # because this registry has no such host is not this host's doing.
     print(f"total: {len(invocations)} test(s), {runs} case(s) to run, {omitted} case(s) "
-          f"and {len(not_applicable)} test(s) not applicable on {args.host}")
+          f"not applicable on {args.host}, and {len(not_applicable)} test(s) left out")
     return 0
 
 

@@ -326,7 +326,7 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
         if summary.get("not_applicable_cases") or summary.get("not_applicable_tests"):
             result += (
                 f", {summary.get('not_applicable_cases', 0)} cases and "
-                f"{summary.get('not_applicable_tests', 0)} tests not applicable on this host"
+                f"{summary.get('not_applicable_tests', 0)} tests not applicable"
             )
         if summary.get("watchdog_resets"):
             result += (
@@ -589,8 +589,8 @@ def _not_applicable_section(run: _Run) -> list[str]:
         return []
     lines = [
         "", "## Not applicable", "",
-        "Left out before the run because this host cannot run them; "
-        "not skipped and not failed.", "",
+        "Left out before the run, because the host named cannot run them or "
+        "this bench has not got the hardware; not skipped and not failed.", "",
         "| Test | Case | Host | Reason |", "|---|---|---|---|",
     ]
     for item in run.not_applicable:

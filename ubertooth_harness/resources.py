@@ -503,6 +503,13 @@ class FileResourceRegistry:
         )
 
         def refuse_unplaced():
+            # A host where nothing could take the role wherever it sat has
+            # not got the hardware at all, which is the more useful answer
+            # than one about a placement.
+            if role and not any(
+                self._takes_role(self.get(alias), role) for alias in eligible
+            ):
+                refuse_roleless()
             raise RegistryError(
                 f"host {host} has no {resource_type} with "
                 f"{placement.describe()} ({self._placements(eligible)})"
@@ -512,16 +519,17 @@ class FileResourceRegistry:
             """The host has units of the type, none of them for this role.
 
             Absence: the plan left the choice to the harness, so there is
-            nothing to correct in it; this bench has no such unit.
+            nothing to correct in it; this bench has no such unit. Every unit
+            of the type here declares roles, or one of them would have taken
+            the role, so each is named with what it does declare.
             """
             declared = "; ".join(
                 f"{alias} declares {', '.join(self.get(alias).roles)}"
                 for alias in eligible
-                if self.get(alias).roles
             )
             raise MissingResource(
-                f"host {host} has no {resource_type} for the {role} role"
-                + (f" ({declared})" if declared else "")
+                f"host {host} has no {resource_type} for the {role} role "
+                f"({declared})"
             )
 
         if selector == "default":
@@ -549,7 +557,17 @@ class FileResourceRegistry:
                 # requirement it was chosen for.
                 alias = matching[0]
             if not self._takes_role(self.get(alias), role):
-                refuse_roleless()
+                # The host's default cannot take this role, so the
+                # lowest-alias unit on the host that can takes it, as it does
+                # for a placement the default cannot satisfy. Only a host
+                # where nothing can take the role has not got the hardware.
+                for_role = tuple(
+                    candidate for candidate in (matching or eligible)
+                    if self._takes_role(self.get(candidate), role)
+                )
+                if not for_role:
+                    refuse_roleless()
+                alias = for_role[0]
             return (alias,)
         if selector == "each":
             if not eligible:

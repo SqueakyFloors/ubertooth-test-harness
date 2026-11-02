@@ -102,18 +102,26 @@ class RunnablePlanTests(unittest.TestCase):
         """
         catalog = builtin_catalog()
         registry = FileResourceRegistry.load(ROOT / "hardware.example.yaml")
-        compiled = 0
-        for path in sorted(PLANS.glob("*.yaml")):
-            plan = load_plan(path, catalog)
-            for suite in plan.suites:
-                if suite == "range-weak-link":
-                    continue
-                with self.subTest(f"{path.name}:{suite}"):
-                    PlanCompiler(catalog, registry).compile_suite(
-                        plan, suite, strict_hardware=True
-                    )
-                    compiled += 1
-        self.assertGreaterEqual(compiled, 16)
+        suites = [
+            (path, suite)
+            for path in sorted(PLANS.glob("*.yaml"))
+            for suite in load_plan(path, catalog).suites
+        ]
+        skipped = [name for _path, name in suites if name == "range-weak-link"]
+        compiled = []
+        for path, suite in suites:
+            if suite in skipped:
+                continue
+            with self.subTest(f"{path.name}:{suite}"):
+                PlanCompiler(catalog, registry).compile_suite(
+                    load_plan(path, catalog), suite, strict_hardware=True
+                )
+                compiled.append(suite)
+        # Every suite in the repo, bar the one named above: a suite added to
+        # a plan is compiled here too, or this fails.
+        self.assertEqual(["range-weak-link"], skipped)
+        self.assertEqual(len(suites) - 1, len(compiled))
+        self.assertIn("release", compiled)
 
     def test_the_fast_plan_runs_spectrum_rssi_sanity_and_not_ble_monitor(self):
         names = [step.test_name for step in load_plan(PLANS / "fast.yaml").steps("fast")]
