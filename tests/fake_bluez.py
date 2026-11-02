@@ -121,14 +121,3 @@ def follow_progress(target: str = INITIATOR_ADDRESS, lap: str = CENTRAL_LAP,
     lines.append("AFH map read: 79 of 79 channels in use" if afh
                  else "Not use AFH")
     return "\n".join(lines) + "\n"
-
-
-def follow_page_refused(uap: str = CENTRAL_UAP, lap: str = CENTRAL_LAP) -> str:
-    """The standard error of ``ubertooth-follow -l <LAP> -u <UAP>`` when the
-    page to the guessed address is refused."""
-    guessed = "00:00:" + ":".join(
-        [uap.upper()] + [lap[index:index + 2].upper() for index in (0, 2, 4)])
-    return (f"error: connecting to {guessed} failed: Host is down; -l and -u "
-            "give four of the six bytes of the target address, so 00:00 is a "
-            "guess: give the whole target address with -t "
-            "xx:xx:xx:xx:xx:xx\n")

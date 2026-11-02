@@ -19,11 +19,12 @@ from ubertooth_harness.bluez_cases import (
     INQUIRY_TEST_NAME,
     adapter,
     follow_over_hci_cases,
+    INQUIRY_S,
+    NAME_READS_S,
     inquiry_found,
     inquiry_scan_cases,
     maps_reported,
-    pages_from_lap_uap,
-    survey_lists,
+    scan_results_list,
 )
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.classic_cases import MIN_PACKETS
@@ -169,13 +170,28 @@ class AdapterResourceTests(unittest.TestCase):
                 f"      hci device: {fake_bluez.ADAPTER}\n",
                 f"      hci device: {fake_bluez.ADAPTER}\n      serial: x\n", 1))
 
-    def test_the_adapter_is_leased_by_its_hci_device(self):
+    def test_the_adapter_is_leased_by_its_address(self):
         registry = registry_with(ADAPTER_REGISTRY)
         invocations = PlanCompiler(builtin_catalog(), registry).compile(
             load_plan(PLAN), "hci")
         boards = leases.boards_for_invocations(invocations, registry)
-        self.assertIn((ADAPTER_ALIAS, f"bluez-{fake_bluez.ADAPTER}"),
+        expected = "bluez-" + fake_bluez.ADAPTER_ADDRESS.replace(":", "").lower()
+        self.assertIn((ADAPTER_ALIAS, expected),
                       [(board.alias, board.key) for board in boards])
+
+    def test_two_hosts_adapters_called_hci0_get_different_lease_keys(self):
+        """hciN is attach order, so the address is what names the lock."""
+        from ubertooth_harness.resources import Resource
+        keys = {
+            leases.resource_key(Resource(
+                alias=alias, type=ADAPTER_ROLE, platform=None, roles=(),
+                defaults={}, attached_to="Host_Linux",
+                identity={"hci device": "hci0", "BD_ADDR": address},
+                capabilities=(), power={}, driver=None))
+            for alias, address in (("BT_A", "00:1A:7D:DA:71:13"),
+                                   ("BT_B", "00:1A:7D:DA:71:14"))
+        }
+        self.assertEqual(2, len(keys))
 
     def test_a_bench_without_an_adapter_is_told_what_it_has_not_got(self):
         """Every step of this plan binds the adapter, so a bench without one
@@ -240,7 +256,7 @@ class PlanTests(unittest.TestCase):
         registry = FileResourceRegistry.load(ROOT / "hardware.example.yaml")
         catalog = builtin_catalog()
         plan = load_plan(PLAN, catalog)
-        for suite, counts in (("hci", (2, 2)), ("hci-comprehensive", (4, 4))):
+        for suite, counts in (("hci", (2, 2)), ("hci-comprehensive", (4, 3))):
             invocations = PlanCompiler(catalog, registry).compile(plan, suite)
             self.assertEqual(len(counts), len(invocations))
             for invocation, count in zip(invocations, counts):
@@ -307,7 +323,17 @@ class InquiryCaseTests(unittest.TestCase):
         # it; it only refuses a run that stopped early.
         self.assertNotIn("--interrupt-after", argv)
         self.assertEqual("24.5", argv[argv.index("--min-seconds") + 1])
-        self.assertEqual("30.0", argv[argv.index("--timeout") + 1])
+
+    def test_the_deadline_allows_for_the_inquiry_the_t_window_does_not_cover(self):
+        """ubertooth-scan arms its -t alarm only after the BlueZ inquiry."""
+        with_s = driver_argv(scan_cases()["inquiry"])
+        without = driver_argv(scan_cases()["survey"])
+        self.assertEqual(str(25 + INQUIRY_S + NAME_READS_S + 5.0),
+                         with_s[with_s.index("--timeout") + 1])
+        self.assertEqual(str(25 + NAME_READS_S + 5.0),
+                         without[without.index("--timeout") + 1])
+        self.assertGreater(float(with_s[with_s.index("--timeout") + 1]),
+                           float(without[without.index("--timeout") + 1]))
 
     def test_every_case_reads_the_adapter_first(self):
         for case_id, case in scan_cases("comprehensive").items():
@@ -316,14 +342,22 @@ class InquiryCaseTests(unittest.TestCase):
                 self.assertEqual(("hciconfig", fake_bluez.ADAPTER),
                                  step.resolve_argv({}))
 
-    def test_every_case_resets_both_peers_and_frees_the_adapter(self):
+    def test_every_case_frees_the_adapter_before_it_resets_the_peers(self):
+        """A peer reset drops its links, so a later free check says nothing."""
         for case_id, case in scan_cases("comprehensive").items():
             with self.subTest(case_id):
                 cleanup = [step.step_id for step in case.cleanup]
                 self.assertEqual(
-                    ["reset-initiator", "reset-acceptor", "adapter-free",
+                    ["adapter-free", "reset-initiator", "reset-acceptor",
                      "cleanup-stop"], cleanup[:4])
                 self.assertEqual("restored-device-identity", cleanup[-1])
+
+    def test_every_case_checks_the_adapter_is_free_before_the_tool_runs(self):
+        for case_id, case in scan_cases("comprehensive").items():
+            with self.subTest(case_id):
+                order = [step.step_id for step in case.steps]
+                self.assertLess(order.index("adapter-idle"),
+                                order.index("pair-and-run"))
 
     def test_the_cases_declare_linux_bluez_and_the_two_host_tools(self):
         needs = scan_cases()["inquiry"].needs
@@ -338,10 +372,9 @@ class FollowCaseTests(unittest.TestCase):
         self.assertEqual(["follow-target", "follow-target-afh"],
                          list(follow_cases()))
 
-    def test_comprehensive_adds_the_pcap_and_the_refused_page(self):
+    def test_comprehensive_adds_the_pcap(self):
         self.assertEqual(
-            ["follow-target", "follow-target-afh", "follow-target-pcap",
-             "follow-lap-uap-needs-the-whole-address"],
+            ["follow-target", "follow-target-afh", "follow-target-pcap"],
             list(follow_cases("comprehensive")))
 
     def test_the_target_is_the_piconet_central_not_the_acceptor(self):
@@ -373,29 +406,25 @@ class FollowCaseTests(unittest.TestCase):
              "-t", INITIATOR_ADDRESS, "-q",
              "/run/captures/hci/follow.pcap"],
             tool_argv(case))
-        self.assertEqual("verify-capture",
-                         [step.step_id for step in case.steps][-1])
+        self.assertEqual(["verify-capture", "verify-records"],
+                         [step.step_id for step in case.steps][-2:])
 
-    def test_the_refused_page_case_expects_exit_1_and_captures_nothing(self):
-        case = follow_cases("comprehensive")[
-            "follow-lap-uap-needs-the-whole-address"]
-        step = steps(case)["pair-and-run"]
-        self.assertEqual(
-            ["ubertooth-follow", "-U", SERIAL, "-b", fake_bluez.ADAPTER,
-             "-l", CENTRAL_LAP, "-u", CENTRAL_UAP],
-            tool_argv(case))
-        self.assertEqual((1,), step.expected_returncodes)
-        self.assertIsNone(step.output_check)
+    def test_the_pcap_records_are_decoded_and_held_to_the_centrals_lap(self):
+        """A BR/EDR capture of the right size says nothing about whose
+        packets are in it."""
+        case = follow_cases("comprehensive")["follow-target-pcap"]
+        argv = list(steps(case)["verify-records"].resolve_argv(CONTEXT))
+        self.assertEqual("/run/captures/hci/follow.pcap", argv[2])
+        self.assertEqual(CENTRAL_LAP, argv[argv.index("--lap") + 1])
+        self.assertEqual(CENTRAL_LAP, argv[argv.index("--reference-lap") + 1])
 
-    def test_a_target_whose_address_begins_00_00_gets_no_refusal_case(self):
-        """-l and -u guess those two bytes, so for such a peer they are right."""
-        self.assertTrue(pages_from_lap_uap("00:00:0D:E9:C5:BA"))
-        self.assertFalse(pages_from_lap_uap(INITIATOR_ADDRESS))
-        identities = dict(IDENTITIES)
-        identities["initiator"] = {"bridge serial": INITIATOR_BRIDGE,
-                                   "BD_ADDR": "00:00:0D:E9:C5:BA"}
-        self.assertNotIn("follow-lap-uap-needs-the-whole-address",
-                         follow_cases("comprehensive", identities))
+    def test_no_case_runs_l_and_u_without_t(self):
+        """The page then goes to a guessed 00:00: address, and whether it
+        arrives is not knowable in advance, so no case asserts an outcome."""
+        for case in follow_cases("comprehensive").values():
+            with self.subTest(case.case_id):
+                self.assertIn("-t", tool_argv(case))
+                self.assertNotIn("-l", tool_argv(case))
 
     def test_the_cases_declare_linux_bluez_and_the_two_host_tools(self):
         needs = follow_cases()["follow-target"].needs
@@ -479,7 +508,7 @@ class OutputCheckTests(unittest.TestCase):
                          esp32peer.device_name(INITIATOR_ADDRESS))
 
     def test_the_survey_check_reads_the_scan_results(self):
-        check = survey_lists(CENTRAL_LAP)
+        check = scan_results_list(CENTRAL_LAP)
         self.assertEqual("", check(fake_bluez.scan_survey()))
         # A piconet whose UAP the sweep did not recover is still listed by
         # its LAP, and that is what -l takes.
@@ -555,11 +584,6 @@ class ToolPatternTests(unittest.TestCase):
         self.assertNotRegex(plain,
                             re.compile(r"(?m)^AFH map read: \d+ of 79 "))
 
-    def test_the_refusal_pattern_matches_the_tools_own_message(self):
-        case = follow_cases("comprehensive")[
-            "follow-lap-uap-needs-the-whole-address"]
-        self.matched(case, fake_bluez.follow_page_refused(), skip=self.DRIVER)
-
     def test_the_extended_report_patterns_match_what_x_prints(self):
         case = scan_cases("comprehensive")["extended-report"]
         self.matched(case, fake_bluez.scan_extended(), skip=self.DRIVER)
@@ -598,12 +622,28 @@ class ToolPatternTests(unittest.TestCase):
                     with self.subTest(pattern=pattern):
                         self.assertRegex(text, re.compile(pattern))
 
-    def test_the_refused_case_expects_the_drivers_non_zero_exit_line(self):
-        case = follow_cases("comprehensive")[
-            "follow-lap-uap-needs-the-whole-address"]
-        exits = [pattern for pattern in steps(case)["pair-and-run"].output_patterns
+    def test_the_extended_report_case_takes_either_exit_status(self):
+        """-x exits 1 when any device's report failed, and the devices it
+        asks include whatever else in range answered the inquiry."""
+        case = scan_cases("comprehensive")["extended-report"]
+        step = steps(case)["pair-and-run"]
+        self.assertEqual((0, 1), step.expected_returncodes)
+        exits = [pattern for pattern in step.output_patterns
                  if "command exit:" in pattern]
-        self.assertEqual([r"(?m)^command exit: 1 after \d+\.\d s$"], exits)
+        self.assertEqual([r"(?m)^command exit: [01] after \d+\.\d s$"], exits)
+        for status in ("0", "1"):
+            with self.subTest(status):
+                self.assertRegex(f"command exit: {status} after 30.1 s",
+                                 re.compile(exits[0]))
+
+    def test_every_other_case_pins_a_zero_exit(self):
+        for cases in (scan_cases("comprehensive"), follow_cases("comprehensive")):
+            for case_id, case in cases.items():
+                if case_id == "extended-report":
+                    continue
+                with self.subTest(case_id):
+                    step = steps(case)["pair-and-run"]
+                    self.assertEqual((0,), step.expected_returncodes)
 
 
 class AdapterHelperTests(unittest.TestCase):

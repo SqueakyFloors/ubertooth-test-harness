@@ -228,10 +228,19 @@ name. An adapter is leased like a board, under `bluez-<hci device>`: one
 controller answers one inquiry at a time and holds one link to a target, so
 two tests using it at once would read each other's results.
 
-The cases also run `hcitool -i <device> con` in their cleanup, to catch a
-link to a peer that a run left up. `hciconfig` and `hcitool` come with BlueZ
-and are declared as host tools the harness does not install, so a host
-without them leaves the cases out rather than failing them.
+The cases also run `hcitool -i <device> con`, before the tool and again at
+the start of the cleanup, to catch a link to a peer that a run left up.
+
+`hciconfig` and `hcitool` are declared as host tools the harness does not
+install, so a host without them leaves the cases out rather than failing
+them — **and that is a trap worth knowing**: they are BlueZ's older tools and
+some distributions have moved them out of the main `bluez` package, so a bench
+that has an adapter but not them runs the `hci` plan with every case left out
+and the run passes having exercised nothing. Install them with the adapter,
+and read a run's `Not applicable` section before believing it proved
+anything. A mechanism that cannot be missing this way (`btmgmt`,
+`bluetoothctl`, or `/sys/class/bluetooth/<device>/address`) is worth
+considering once a bench exists to test one on.
 
 What is still unknown, and what the first real run on a bench will settle, is
 in [`docs/tests.md`](tests.md) under `Bluetooth inquiry scan` and

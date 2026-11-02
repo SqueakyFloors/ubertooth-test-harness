@@ -2148,8 +2148,12 @@ Ubertooth's sweep must report that piconet by the central's LAP, with the
 channel map the scan built for it; and `-x` must fetch the acceptor's name
 and LMP version over a connection the scan makes itself.
 
-**Theory of operation.** The tool has two halves and they answer different
-questions, so the cases run them apart before running them together.
+**Theory of operation.** The tool has two halves. The Ubertooth's sweep runs
+always; `-s` adds the adapter's inquiry before it. So the cases differ by what
+they require, not only by what they run: the smoke `-s` case requires the
+inquiry's result alone, so a bench whose sweep happened to hear no piconet
+still tests the adapter, and the comprehensive case requires both of the same
+run.
 
 `-s` is the adapter's half: a BlueZ inquiry, and the name read back from each
 device that answers. Both ESP32 peers are discoverable and connectable from
@@ -2172,15 +2176,27 @@ a run that reported a piconet and no map did not finish its result.
 The pair is held up by one `esp32peer.py stream` session per case, as the
 other Classic tests are: opening an ESP32's bridge resets it, so the pair
 cannot be set up in one step and used in the next. `ubertooth-scan` bounds
-its own capture with `-t`, so the driver does not interrupt it; it only
-refuses a run that stopped early.
+its own sweep with `-t`, so the driver does not interrupt it; it only refuses
+a run that stopped early.
 
-The adapter is read first, with `hciconfig <device>`: it exists, it is up,
-and its address is the one the registry records. The `hciN` number is the
-order the kernel attached controllers in rather than a property of the
-adapter, so the address is what identifies it — an adapter that came back as
-another `hciN` fails here, naming what was found, instead of the test driving
-whatever took the name.
+**`-t` is not the whole run.** The tool arms the alarm `-t` asks for only
+after the BlueZ inquiry has returned (`main()` in `ubertooth-scan.c`: the
+`if (scan)` block comes before `ubertooth_set_timeout()`), so `-s` adds a
+whole inquiry — BlueZ is asked for 8 units of 1.28 s, about 10 s — on top of
+the window. Each device either half found is then paged for its name. The
+cases allow for both in their deadlines, so a `duration:` of 25 s describes
+the sweep and not the case.
+
+The adapter is read twice before the tool runs. `hciconfig <device>` says it
+exists, it is up, and its address is the one the registry records: the `hciN`
+number is the order the kernel attached controllers in rather than a property
+of the adapter, so the address is what identifies it, and an adapter that came
+back as another `hciN` fails here, naming what was found, instead of the test
+driving whatever took the name. `hcitool -i <device> con` then says it holds
+no link to either peer, so a case does not start with a link an earlier run
+left up. The same check runs again at the start of the cleanup — at the
+start, because the peer resets that follow drop every link a peer holds, so a
+free check after them could only ever pass.
 
 **Hardware and arguments.** One `Ubertooth`, one `Bluetooth adapter`, and an
 `acceptor` and an `initiator` (ESP32 Classic peer, `utesp-1.0.0` or a later
@@ -2194,7 +2210,11 @@ must report the acceptor at its registered address under its firmware name,
 and no `-s`, where the scan results must name the central's LAP and carry at
 least one `AFH map:` line. Comprehensive adds both halves in one run, and
 `-s -x`, where the extended report must hold the acceptor's address, its
-name, and an LMP version line. Every case also requires the driver's own
+name, and an LMP version line. That case takes either exit status, and says
+so: `-x` exits 1 when any part of any device's report could not be fetched,
+and the devices it asks include whatever else in range answered the inquiry,
+so the acceptor's own three lines are what decide it. Every case also
+requires the driver's own
 report — both peers' addresses, the central's LAP and UAP, a link that came
 up, and a pair that streamed — so a capture of nothing cannot pass as a
 capture of a quiet piconet. Each case resets both peers, checks the adapter
@@ -2221,8 +2241,25 @@ but a run on a busy site will transmit to strangers' devices. That is the
 tool's design, not something the harness chooses. The addresses of such
 devices land in the run record, which is why no run output is committed.
 
+One more thing the first run may meet. The name read the survey results go
+through passes a **zero timeout** (`print_name_and_class()` in
+`ubertooth-scan.c`), which BlueZ takes as no deadline at all; the same tool
+gives its other reads 25 seconds. A device that answers the page and then
+says nothing can therefore hold the tool for as long as its controller
+allows. The case's deadline is the backstop: the driver interrupts and then
+kills the tool, and the case fails with the driver's message rather than the
+run hanging.
+
 `-e` is not exercised: no case passes it, so the survey runs with the tool's
 default of two allowed access-code bit errors.
+
+**A host without `hciconfig` and `hcitool` runs nothing.** Both are declared
+as host tools the harness does not install, and a missing host tool makes a
+case *not applicable* rather than failing it. They are BlueZ's older tools
+and some distributions have moved them out of the main package, so a bench
+that has an adapter but not them would run this plan with every case left out
+and the run would pass having exercised nothing. Read the `Not applicable`
+section of a run's report before believing an `hci` run proved anything.
 
 ## Follow Classic piconet over HCI
 
@@ -2269,15 +2306,22 @@ tool's.
 must report following that piconet, say it is not using AFH, and print at
 least ten packet lines, all with the central's LAP; and `-t <central> -a`,
 which must additionally report `AFH map read: <n> of 79 channels in use` and
-print the map as an `AFH map:` line. Comprehensive adds `-q`, whose file must
-be a BR/EDR PCAP holding those packets, and one refusal case: with `-l` and
-`-u` instead of `-t`, the tool has four of the six address bytes, pages the
-guessed `00:00:<UAP>:<LAP>`, and must exit 1 with the message that names
+print the map as an `AFH map:` line. Comprehensive adds `-q`, whose file must be a
+BR/EDR PCAP that the record decoder then reads: at least ten records, each
+carrying the central's LAP as its own and as its reference address, since a
+capture of the right size says nothing about whose packets are in it. As with
+the scan, every case requires the pair's own report, reads the adapter before
+and after, resets both peers, and restores the board.
+
+**`-l` and `-u` without `-t` are deliberately not exercised.** The tool then
+has four of the six address bytes and asks BlueZ to connect to
+`00:00:<UAP>:<LAP>`; the fork's message says to give the whole address with
 `-t` ([fork
-#316](https://github.com/SqueakyFloors/ubertooth/issues/316)). That case is
-left out when the registered peer's address really does begin `00:00`, where
-the guess would be right. As with the scan, every case requires the pair's
-own report and resets both peers, frees the adapter, and restores the board.
+#316](https://github.com/SqueakyFloors/ubertooth/issues/316)). Whether that
+page is refused is not knowable in advance: a page carries only the LAP and
+the UAP (Bluetooth Core, Vol 2, Part B 1.3, 6.4.6), so the two guessed bytes
+need not decide whether it arrives. A case either way would be asserting an
+outcome nobody has seen, so there is none.
 
 **Known limits.** **Nothing here has run against a real adapter**
 ([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)):

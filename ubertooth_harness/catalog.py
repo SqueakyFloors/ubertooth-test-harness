@@ -898,18 +898,22 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     ),
     # ESTIMATE_PENDING_HW: no bench has an adapter yet, so both of these are
     # the pair's own bring-up (which the four tests above measured at about
-    # 20 s a case) plus two adapter reads, times the cases. The BlueZ
-    # inquiry of -s takes about ten seconds of the scan's own window rather
-    # than adding to it. Two cases in smoke, four comprehensive.
+    # 20 s a case) plus two adapter reads, times the cases, and then what the
+    # tool spends outside the window the duration names.
+    #
+    # For the scan that is a whole BlueZ inquiry per -s case, because the
+    # tool arms the alarm -t asks for only after the inquiry has run, plus a
+    # name read per device either half found. Three of the four cases pass
+    # -s. Two cases in smoke, four comprehensive.
     "Bluetooth inquiry scan": _profiles(
-        Estimate(45.0, per_duration=2), Estimate(90.0, per_duration=4)
+        Estimate(70.0, per_duration=2), Estimate(170.0, per_duration=4)
     ),
     # ESTIMATE_PENDING_HW: the same bring-up, plus the page, the clock reads
     # and, for -a, the channel map read, which BlueZ allows a second each.
-    # Two cases in smoke, four comprehensive, and the refused one captures
-    # nothing, so the duration counts three times there.
+    # Two cases in smoke, three comprehensive, and the capture of each is the
+    # whole duration, because the driver is what ends it.
     "Follow Classic piconet over HCI": _profiles(
-        Estimate(50.0, per_duration=2), Estimate(100.0, per_duration=3)
+        Estimate(50.0, per_duration=2), Estimate(80.0, per_duration=3)
     ),
 })
 

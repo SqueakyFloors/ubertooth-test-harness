@@ -21,8 +21,13 @@ plan: BlueZ tools with a host Bluetooth adapter
 #
 # 25 s per capture is what the bench needs for a useful count of this
 # piconet, as the classic plan records: the Ubertooth sweeps 79 channels and
-# decodes about one packet of the piconet a second. ubertooth-scan spends
-# about ten seconds of that window on the BlueZ inquiry when -s is given.
+# decodes about one packet of the piconet a second.
+#
+# A `duration:` here is the sweep alone. `ubertooth-scan` arms the alarm `-t`
+# asks for only after its BlueZ inquiry has run, so `-s` adds a whole inquiry
+# (about 10 s) on top, and both halves page each device they found for its
+# name. The cases allow for that in their own deadlines; a run of this plan
+# takes longer than the sum of its durations.
 suites:
   hci:
     - Bluetooth inquiry scan:
