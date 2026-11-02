@@ -798,6 +798,45 @@ class RecoverTests(unittest.TestCase):
         self.assertEqual(1, code)
         self.assertIn("Recovery: board", output)
 
+    def test_an_image_the_board_could_not_start_is_not_written(self):
+        """The cleanup runs whatever happened, including after the image
+        step refused the run's own image. Writing it then would turn a board
+        that was merely in its bootloader into one that needs the bench."""
+        board = dfu_board()
+        code, output = self.run_recover(
+            board, dfuimage.make_unstartable("erased-vectors", firmware()))
+        self.assertEqual(1, code)
+        self.assertIn("not one the bootloader would start", output)
+        self.assertIn("it was not written", output)
+        self.assertEqual([], self.written(board))
+        self.assertEqual("dfu", board.mode)
+
+    def test_a_write_that_errored_still_names_a_guard_it_reached(self):
+        board = dfu_board(guards=(GUARDS[0],))
+        original = board.run
+        attempted = False
+
+        def run(argv, **kwargs):
+            nonlocal attempted
+            command = tuple(argv)
+            if (command[0] == "ubertooth-dfu" and "-d" in command
+                    and "-U" not in command):
+                attempted = True
+                return board._result(command, 1, "", "error: it went wrong\n")
+            if command[0] == "ubertooth-util" and GUARDS[0] in command:
+                # Its own firmware for the baseline read, the written image
+                # once the write has been attempted.
+                revision = REVISION if attempted else "git-guard"
+                return board._result(
+                    command, 0, f"Firmware version: {revision} (API:1.10)\n")
+            return original(argv, **kwargs)
+
+        board.run = run
+        code, output = self.run_recover(board, firmware(), guards=(GUARDS[0],))
+        self.assertEqual(1, code)
+        self.assertIn("it went wrong", output)
+        self.assertIn("the write reached a guard board", output)
+
     def test_two_dfu_devices_stop_the_recovery_rather_than_guess(self):
         board = dfu_board(dfu_count_extra=1)
         code, output = self.run_recover(board, firmware())
@@ -983,6 +1022,16 @@ class CaseTests(unittest.TestCase):
         with self.assertRaises(LookupError) as caught:
             step.resolve_argv(self.context)
         self.assertEqual(REGISTRY_PATH_KEY, caught.exception.args[0])
+
+    def test_the_write_steps_forbidden_line_catches_a_write_that_did_not_take(self):
+        """With erased vectors a board that jumped into them cannot print a
+        verified revision: it faults and leaves USB, which the cycle step
+        and its diagnosis cover. What the forbidden line catches is a board
+        still running the application it had."""
+        step = next(s for s in self.case.steps if s.step_id == "write")
+        self.assertEqual((0, 1), step.expected_returncodes)
+        self.assertEqual(("Verified firmware revision",),
+                         step.forbidden_patterns)
 
     def test_the_catalog_declares_what_the_run_has_to_arrange(self):
         self.assertTrue(self.definition.switches_power)

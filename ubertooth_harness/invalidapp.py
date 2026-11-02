@@ -17,6 +17,14 @@ power, turns it back on, and requires the board to come up as a DFU
 bootloader rather than as its application. Then it writes the run's own image
 back and checks the revision.
 
+The bootloader it asks that of is the one already in the board's flash, which
+no run writes: ubertooth-dfu writes the application region only, and a
+bootloader is replaced over ISP or JTAG. A board whose bootloader predates
+the check -- the factory one, for instance -- does not fail this test, it is
+bricked by it, and no host tool reads a bootloader version yet. Which board
+this runs on is a person's decision, which is why it takes two explicit
+options and lives in a plan of its own.
+
 The commands:
 
 - ``make`` writes the unstartable image beside the run's test image and says
@@ -531,6 +539,16 @@ def recover(
     recovery needs is the revision the board answers with, which is what the
     issue asks for and what `Flash reliability` verifies a write by.
     """
+    problems = dfuimage.startable_problems(image.read_bytes())
+    if problems:
+        # The one image this writes is the run's own, and if that is not an
+        # image a board could start, writing it is how a board that was
+        # merely in its bootloader becomes one that needs the bench. The
+        # board is left as it is, and the run says what is wrong with the
+        # image it was given.
+        log("Recovery: the image this would write is not one the bootloader "
+            "would start, so it was not written: " + "; ".join(problems))
+        return 1
     guards: dict[str, str | None] = {}
     seen = board.revision()
     if seen is None:
@@ -548,7 +566,13 @@ def recover(
             "image, which both it and the unstartable image report")
         failure = board.write(image)
     if failure:
-        log(f"Recovery: {failure}")
+        # A no-selector write that errored may still have reached a board,
+        # so the guards are read here as well as on the way out.
+        written = board.changed_guards(guards)
+        log(f"Recovery: {failure}"
+            + ("; and the write reached a guard board: " + "; ".join(written)
+               + ". Write that board's own firmware back before using it"
+               if written else ""))
         return 1
     returned = board.wait_revision()
     # A write with no selector reaches whichever device answers DFU, and if

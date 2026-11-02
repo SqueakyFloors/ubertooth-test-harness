@@ -1044,7 +1044,7 @@ RF_DEFAULTS: Mapping[str, Mapping[str, PlacementRequirement]] = MappingProxyType
 def builtin_catalog() -> TestCatalog:
     """Return the fixed catalog; YAML cannot add executable implementations."""
     def stateful_test(name, description, builder, *, coverage=True, extra=None,
-                      hardware_roles=None, **options):
+                      **options):
         arguments = {"hosts": HOSTS, "Ubertooth": UBERTOOTH}
         if coverage:
             arguments["coverage"] = COVERAGE
@@ -1053,7 +1053,7 @@ def builtin_catalog() -> TestCatalog:
             name,
             description,
             MappingProxyType(arguments),
-            MappingProxyType(hardware_roles or {"Ubertooth": "Ubertooth"}),
+            MappingProxyType({"Ubertooth": "Ubertooth"}),
             command_builder=builder,
             guards_other_ubertooths=True,
             **options,

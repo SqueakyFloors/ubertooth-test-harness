@@ -2599,9 +2599,16 @@ it is identified by elimination, as the DFU images test does it: exactly one
 serial-less Ubertooth device attached, and every guard board enumerated by
 its own serial.
 
-**Hardware and arguments.** One `Ubertooth` with a `power:` mapping in the
-registry, on a `USB power controller` that can switch VBUS per port, plus
-every other registered board as guards. Required: `platforms:`, because the verdict is a USB
+**Hardware and arguments.** One `Ubertooth` whose **bootloader came from this
+tree**, with the startable check in it, and which has a `power:` mapping in
+the registry on a `USB power controller` that can switch VBUS per port, plus
+every other registered board as guards. The bootloader is the precondition
+that matters most and the one the harness cannot check: `ubertooth-dfu`
+writes the application region only, a bootloader is replaced over ISP or
+JTAG, and no host tool reads a board's bootloader version yet. On a board
+carrying the factory bootloader this test does not fail — it bricks the
+board, which then needs its P4 entry pin bridged, because that bootloader
+jumps into the erased vectors it was given. Required: `platforms:`, because the verdict is a USB
 enumeration check and that is fail-closed on Linux only, and
 `USB power controller:`, the hub the board must be on. A plan pointed at the
 wrong hub fails planning rather than switching whatever is on that hub's
@@ -2624,10 +2631,10 @@ be the last one on that board.
 **Expected outcome.** One case. The write must reach the flash and must not
 report a verified revision afterwards: the board stays in its bootloader, so
 `ubertooth-dfu -d <image> -r` ends with an error and exit 1, and that is the
-expected outcome here. The step accepts exit 0 as well, deliberately: a board
-that did come back running the image would exit 0, and it must fail on the
-`Verified firmware revision` line it then prints, which says what happened,
-rather than on an exit status that does not. The cycle must then show, after the port comes back,
+expected outcome here. The step accepts exit 0 as well, so that the forbidden
+`Verified firmware revision` line is what decides: what that line catches is
+a write that did not take, leaving the board still running the application it
+had, which answers the revision check and looks like a successful flash. The cycle must then show, after the port comes back,
 the board's serial absent and exactly one DFU bootloader device, with every
 guard where it was. A board that comes back running the image, or that does
 not come back at all, fails the case and the message says which. The
@@ -2644,7 +2651,13 @@ startable. The cleanup runs whatever happened: it powers the port on if it is
 off, then writes the image and reads the revision, so a failed case still
 ends with a board on the test image.
 
-**Known limits.** It is destructive. If the bootloader does start the
+**Known limits.** A pass says what the bootloader in that board's flash does,
+and that bootloader is not what the run built: it cannot be written over USB,
+so a hardware pass cannot be attributed to the commit the run was given. What
+it does show is that the board the lab keeps for this comes up in its
+bootloader after a cold boot with an image it must refuse.
+
+It is destructive. If the bootloader does start the
 unstartable image, the board faults, leaves USB, and needs its P4 entry pin
 bridged by hand — the failure the test exists to catch is also the failure
 nothing in the harness can recover from. So it lives in `testplans/power.yaml`
@@ -2659,7 +2672,10 @@ preflight reads the board's serial before any case runs, and a board in DFU
 reports none. What the cleanup steps do cover is the case's own command being
 stopped: the harness signals a command that outlives its step deadline, with
 SIGTERM and then SIGKILL two seconds later, so the helper's own handlers
-normally restore the port before it goes. The one case covers erased vectors; the other unstartable images the
+normally restore the port before it goes. The GUI lists the `power` plan like any other, with nothing to say it is
+destructive, and a run dispatched from it is refused for want of
+`--allow-destructive`: fail-closed, but it advertises a suite that cannot run
+there. The one case covers erased vectors; the other unstartable images the
 harness can build (a misaligned or out-of-RAM stack pointer, an ARM-mode
 reset vector, an entry inside the bootloader) are checked on the host only,
 in the unit tests, because each extra hardware case is another cold boot with

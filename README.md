@@ -522,6 +522,14 @@ revision. The port comes from the board's `power:` mapping, and the plan names
 the controller it must be on, so a bench whose wiring moved fails planning
 rather than switching whatever is on that port.
 
+**The board's bootloader is the precondition.** The verdict is about the
+bootloader already in the board's flash, and `ubertooth-dfu` writes the
+application region only: a bootloader is replaced over ISP or JTAG, and no
+host tool reads its version yet, so the harness cannot check it. On a board
+whose bootloader came from this tree the test is a test; on a board with the
+factory bootloader it is a way to brick that board, which then needs its P4
+entry pin bridged. Know which board you are on before you run it.
+
 **Run it by hand, with someone who can reach the bench.** It is destructive:
 if the bootloader does start the unstartable image, the board faults on every
 power-up and needs its P4 entry pin bridged by hand, which no harness command
@@ -554,7 +562,9 @@ on, so no dispatched run, and no click in the GUI, can start a test that
 could leave a board needing the bench.
 
 It writes the board's firmware, so it must be the last test on that board, and
-the run holds the [host lock](#sharing-boards-leases) throughout.
+the run holds the [host lock](#sharing-boards-leases) throughout. Both options
+are needed for `--dry-run` as well, since the refusal comes before it: a dry
+run that exits 0 means the suite can run as asked.
 
 [`testplans/mac.yaml`](testplans/mac.yaml) is the macOS plan, for a Mac
 host (`Host_Mac` in the registry). The firmware and radio are the same on every

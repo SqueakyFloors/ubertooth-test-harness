@@ -10,6 +10,17 @@ the failure it guards against is a board that faults on each one. A reset
 over USB exercises the same check, but only a cold boot shows the board
 coming up on its own.
 
+What the verdict rests on is the bootloader already in the board's flash,
+which is not what this run built: ubertooth-dfu writes the application
+region only, and a bootloader is replaced over ISP or JTAG. So the board has
+to be one whose bootloader came from this tree with the startable check in
+it. A board carrying the factory bootloader, or one from before that check,
+jumps into the erased vectors and faults on every power-up -- the failure
+this test is written to catch, on a board that never had the fix. There is
+no way to read a board's bootloader version over USB yet, so the harness
+cannot check this and the person running it has to know which board they
+are on.
+
 Why it is destructive. If the bootloader does start the unstartable image,
 the board faults, stops answering USB, and needs the P4 entry pin bridged by
 hand at the bench; nothing the harness can do reaches it. So the test needs a
@@ -136,12 +147,18 @@ def _steps(serial, guards, board_alias, controller_alias):
              tool_argv("ubertooth-dfu", "-U", serial, "-d",
                        case_file(BAD_IMAGE), "-r"),
              timeout_s=WRITE_TIMEOUT_S, mutates=True,
-             # The host accepts the file and writes it; the reset then leaves
-             # the board in its bootloader, so the revision check after the
-             # reset cannot pass and the command exits 1. Exit 0 is kept
-             # acceptable here so that a board which did come back running
-             # the image fails on the forbidden line below, which says what
-             # happened, rather than on an exit status that does not.
+             # The host accepts the file and writes it; the reset then
+             # leaves the board in its bootloader, so the revision check
+             # after the reset cannot pass and the command exits 1.
+             #
+             # Exit 0 is accepted so that the forbidden line below is what
+             # decides. What that line catches is a write that did not take:
+             # a board still running the application it had answers the
+             # revision check, and ubertooth-dfu reports a verified
+             # revision, which looks like success and is not this test. (A
+             # board that did jump into the erased vectors cannot print it:
+             # it faults at once and leaves USB, which the cycle step and
+             # its diagnosis are there for.)
              expected_returncodes=(0, 1),
              output_patterns=(_PROGRAMMED,),
              forbidden_patterns=(_VERIFIED,)),
