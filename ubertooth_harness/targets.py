@@ -48,7 +48,7 @@ DK_FIRMWARE = "utdk-1.4.0"
 # version, so `nrfdk.py ensure` flashes a board that carries the other image
 # rather than running a test against a link layer the test did not ask for.
 DK_FIRMWARE_CHAN_SEL_1 = f"{DK_FIRMWARE}-chansel1"
-PEER_FIRMWARE = "utesp-1.4.0"
+PEER_FIRMWARE = "utesp-1.5.0"
 
 
 @dataclass(frozen=True)

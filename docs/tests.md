@@ -1907,6 +1907,34 @@ voice packets never appear in a capture of the SPP stream. It is held to the
 same floors as a stream capture, which the bench measured for it too: 394
 records with 112 passing headers against 285 with 59 for the stream.
 
+What the session has to show about the link, beside the records, is read from
+both boards twice: once as late as possible before the capture starts and
+once as soon as it has finished. Every figure the case matches is the
+movement between those two readings, so it belongs to the capture's own
+window rather than to the whole life of a board
+([#264](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/264)).
+Each board reports the frames its application sent and received, its send
+errors and damaged frames, and the controller's own count of synchronous
+packets - the packets that were on the air, as against what the two
+applications made of them. A board whose controller sent or received nothing,
+or received packets and not one of them correct, fails: frames handled over a
+link the air never carried would describe a capture of nothing.
+
+`link 0 opened 0 dropped` on each board is the case's assertion that this was
+one link throughout. A link that went down and came back leaves both boards
+reading `on` either side of the capture and is still two links with a gap in
+the middle, which no record in the file would show; the firmware counts the
+links a profile has had so that a session can tell the difference, and the
+connection handle is compared as a second witness for a link renegotiated
+without a drop being counted.
+
+The link is taken down with `sco stop` on both boards before they are
+released, and both the stop and the release are checked. A board that refuses
+to stop, or that does not come back to its boot state, fails the case - and
+the measurements above are reported first either way, because a spent
+30-second capture whose figures were thrown away because of what happened
+afterwards is the worst of both outcomes.
+
 One thing a record does not carry is a clock, so this test asserts nothing
 about one; see the known limits.
 
@@ -1921,9 +1949,9 @@ error in either shows up instead of agreeing with itself.
 **Hardware and arguments.** As `Capture known Classic device`: one `Ubertooth`
 and two ESP32 Classic peers as `acceptor` and `initiator`, `coverage:`, a
 required `duration:`, Linux only. The comprehensive profile's audio case needs
-the peers on `utesp-1.4.0` or a later 1.x image, which is where `sco type`
-arrived; preflight reports the version either way, and the case fails naming
-it on anything older.
+the peers on `utesp-1.5.0` or a later 1.x image: `sco type` arrived in
+`utesp-1.4.0` and the two link counters in `utesp-1.5.0`. Preflight reports
+the version either way, and the case fails naming it on anything older.
 
 **Expected outcome.** Smoke runs 2 cases. `-l <central LAP> -u <central UAP>`
 with both `-q` and `-r`, after which each file must hold at least ten records,
@@ -1933,7 +1961,9 @@ passed and ten carrying the reference UAP, and the PCAPNG must name the
 central's LAP and UAP, with a full UAP mask, as the address it was following; then the same with the roles swapped,
 where every record must carry the other board's LAP instead.
 Comprehensive runs 4, adding the EV3 audio link, whose records must include at
-least one `HV3/EV3/3-EV3` packet, and a survey (`-z -r`), whose records must
+least one `HV3/EV3/3-EV3` packet and whose session must report one unbroken
+link, both applications' frame counters, and both controllers' packet
+counters, all measured across the capture alone; and a survey (`-z -r`), whose records must
 include at least one carrying a UAP the survey recovered for itself. Each case
 keeps its capture files in the run directory. The cleanup is the same as the
 other two Classic tests: both peers reset to their boot state, the Ubertooth's

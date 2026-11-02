@@ -177,8 +177,12 @@ and different from the other one with no setup step.
 flashes a peer, so the driver asks for `utesp-1.0.0` or a later 1.x image
 rather than an exact version, and each board's own version goes in the run
 record. The audio link is the one thing that needs more: `sco type` arrived in
-`utesp-1.4.0`, so the `audio` mode asks for that and names the version a
-board reports when it is older. A peer is leased like a board, under `esp32-<bridge serial>`.
+`utesp-1.4.0` and the counters that say how many synchronous links a profile
+has had in `utesp-1.5.0`, so the `audio` mode asks for the later of those and
+names the version a board reports when it is older. Those counters are what
+let a session tell one link that lasted its whole capture from a second link
+that replaced the first part way through
+([#264](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/264)). A peer is leased like a board, under `esp32-<bridge serial>`.
 
 By hand, [`scripts/lab/peer`](../scripts/lab/README.md) names the boards by
 their registry aliases, holds them, and runs that module, which is how a
@@ -291,7 +295,7 @@ nothing in the harness can catch it.
 |---|---|---|---|---|
 | Ubertooth One | the [fork's](https://github.com/SqueakyFloors/ubertooth) `firmware/bluetooth_rxtx` | the resolved commit under test | `arm-none-eabi-gcc` | `ubertooth-dfu` |
 | nRF52840 DK | [`firmware/nrf52840dk`](../firmware/nrf52840dk/README.md) | `utdk-1.4.0`, and `utdk-1.4.0-chansel1` for the algorithm 1 image | nRF Connect SDK v3.4.1 and its toolchain bundle | `nrfutil device program` |
-| ESP32 peer | [`firmware/esp32-classic-peer`](../firmware/esp32-classic-peer/README.md) | `utesp-1.4.0` | ESP-IDF v5.5.6 | `esptool`, through `idf.py flash` |
+| ESP32 peer | [`firmware/esp32-classic-peer`](../firmware/esp32-classic-peer/README.md) | `utesp-1.5.0` | ESP-IDF v5.5.6 | `esptool`, through `idf.py flash` |
 
 Each firmware README holds the full build and flash procedure, the pinned
 toolchain versions, and the shell command reference. Images are built outside
@@ -349,7 +353,7 @@ so each is recorded with where its sources come from and its SHA-256.
 | `kgv.dfu` | the known-good Ubertooth firmware that `Flash reliability` alternates against the run's own build | `2020-12-R1` | upstream Ubertooth release `2020-12-R1` | `e3fcb486c6e0ce7cc991bf6439f6dbc0156ed1229c2b95ebfd02198f9675bb11` |
 | `zephyr.hex` | the nRF52840 DK role firmware | `utdk-1.4.0` | this repository, `firmware/nrf52840dk` at that version ([the change that built this image](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/242)) | `f98bb7b7a08eca4ab9999be6b00bface5e441e3de7592ebb7959ad64205f55c0` |
 | `zephyr.hex` (algorithm 1) | the same roles on a controller without channel selection algorithm 2, built with `chan-sel-1.conf` and `chan-sel-1.overlay` | `utdk-1.4.0-chansel1` | the same sources and the same change | `9fac198b2bdb7a46cb63219070f220cbb82fd0507fc369bae79b69fe3451f21b` |
-| `esp32-classic-peer.bin` | the ESP32 Classic peer firmware | `utesp-1.4.0` | this repository at `6c9a4ea`, which is where `firmware/esp32-classic-peer` carries that version | `5bbe35d332c8ca68485382b074f0436c0ae6a0ec3174cef76b1d21f418c1c45b` |
+| `esp32-classic-peer.bin` | the ESP32 Classic peer firmware | `utesp-1.5.0` | this repository, `firmware/esp32-classic-peer` at that version ([the change that built this image](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/268)) | `dc4d1c545d151e9e4aedd00375745a04c1fc9a7ba028da225c22b688c5d3dbad` |
 
 The KGV is the one the repository pins: the plan carries its revision and its
 hash ([`testplans/slow.yaml`](../testplans/slow.yaml),
@@ -365,7 +369,10 @@ flashes an ESP32 peer, so a run fails instead when one reports a version
 older than the test needs. The hashes above let a bench confirm it holds the
 same image this repository's sources produce. Each was built as its firmware
 README says; a reproducible build is not claimed, so compare the version
-first and the hash second.
+first and the hash second. The same sources do build the same peer image
+twice, but the ESP32 image holds the line numbers its error checks report,
+so even a comment added above one of them gives a different hash for the
+same version.
 
 Record any other image a bench keeps the same way, in its own private notes:
 
