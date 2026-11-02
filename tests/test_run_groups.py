@@ -290,6 +290,41 @@ class StepModelTests(unittest.TestCase):
                          [item["status"] for item in test["items"]])
         self.assertEqual("failed", test["status"])
 
+    def test_a_blocked_test_has_a_step_of_its_own(self):
+        """A required test the planner could not compile here (#273).
+
+        It has no invocation, so without a step of its own the host would
+        show nothing for a test that fails its run.
+        """
+        run = "run-8"
+        events = [
+            manifest(run, 1, LINUX, [(SHARED_TEST, {"hosts": "each"})]),
+            record(run, 2, "blocked", "blocked", host=LINUX,
+                   test_name="Flash reliability",
+                   reason="alternate Ubertooths needs a second board"),
+            *test_records(run, LINUX, [(SHARED_TEST, "passed")]),
+        ]
+        steps = host_steps(events, run_status="failed")
+        rows = {step["key"]: step for step in steps}
+        self.assertEqual("blocked", rows["Flash reliability"]["status"])
+        self.assertIn("second board", rows["Flash reliability"]["reason"])
+        self.assertEqual("passed", rows[SHARED_TEST]["status"])
+        # A blocked test ranks worse than a pass, so a host where one board
+        # ran and another was blocked does not read as passed.
+        both = host_steps(
+            [record(run, 1, "blocked", "blocked", host=LINUX,
+                    test_name=SHARED_TEST, reason="no switchable port"),
+             *test_records(run, LINUX, [(SHARED_TEST, "passed")])],
+            run_status="failed",
+        )
+        self.assertEqual("blocked", both[-1]["status"])
+
+    def test_a_status_out_of_a_record_is_bounded(self):
+        events = [record("run-9", 1, "preflight_started"),
+                  record("run-9", 2, "preflight_finished", "P" * 5000)]
+        (preflight,) = host_steps(events, run_status="running")
+        self.assertEqual("error", preflight["status"])
+
     def test_a_step_that_starts_again_has_not_finished(self):
         run = "run-7"
         events = [
@@ -435,6 +470,9 @@ class GroupRecordTests(unittest.TestCase):
             # Every other field is checked too: a record this side would
             # read and then trip over is not readable.
             {"group_id": "grp-1", "created_at": 17},
+            # One entry per host, or a host's run could never be recorded.
+            {"group_id": "grp-1", "hosts": [LINUX, LINUX],
+             "members": [{"host": LINUX}, {"host": LINUX}]},
             {"group_id": "grp-1", "build": "yes"},
             {"group_id": "grp-1", "plan": ["fast"]},
             {"group_id": "grp-1", "hosts": [LINUX],
@@ -981,6 +1019,47 @@ class GroupStartTests(RunGroupTestCase):
                          [member["status"] for member in view["members"]])
         self.assertIsNotNone(view["finished_at"])
 
+    async def test_a_child_its_group_does_not_list_is_a_group_of_one(self):
+        """Only one of the two records was written before the stop."""
+        linux, mac = await self.runners()
+        group, _requests, _ids = await self.accepted_group([linux, mac])
+        group_id = group["group_id"]
+        # As a crash between the two writes leaves it: the run knows its
+        # group, the group does not know the run.
+        stored = self.results / GROUPS_DIR / f"{group_id}.json"
+        record_data = json.loads(stored.read_text())
+        record_data["members"][1]["run_id"] = None
+        stored.write_text(json.dumps(record_data))
+        await self.server.stop()
+        await self.start_controller()
+        self.assertEqual(group_id, self.controller.runs["run-2"].group_id)
+        # Listed as its own group of one, and reachable as one.
+        status, payload, _ = await self.http("GET", "/api/run-groups")
+        self.assertIn("run-2", [view["group_id"] for view in payload["groups"]])
+        detail = await self.group("run-2")
+        self.assertEqual((True, [MAC]),
+                         (detail["group"]["implicit"], detail["group"]["hosts"]))
+        # And the group it was started by says that host never started.
+        view = (await self.group(group_id))["group"]
+        self.assertEqual("its run was never started", view["members"][1]["error"])
+
+    async def test_the_watchdog_outlives_a_results_directory_it_cannot_write(self):
+        linux, _mac = await self.runners()
+        self.controller.reply_timeout_s = 0.3
+        self.controller.late_reply_grace_s = 0.1
+        post = await self.start_group([LINUX])
+        await linux.recv()
+        self.assertEqual(504, (await post)[0])
+        with patch.object(
+            Controller, "_persist_group", side_effect=OSError("read-only")
+        ):
+            await wait_until(lambda: any(
+                "could not expire pending requests" in line for line in self.logs
+            ))
+        # Still watching: the target goes offline when its heartbeats stop.
+        self.assertFalse(self.server._monitor_task.done())
+        await wait_until(lambda: not self.controller.targets[LINUX].online)
+
     async def test_an_unreadable_group_record_is_logged_and_left(self):
         directory = self.results / GROUPS_DIR
         directory.mkdir(parents=True)
@@ -1282,6 +1361,29 @@ class GroupLiveTests(RunGroupTestCase):
                          event=record("run-1", 1, "run_started"))
         message = await self.received(ws, {"event", "group"})
         self.assertEqual(("event", "run-1"), (message["type"], message["run_id"]))
+
+    async def test_a_group_that_is_forgotten_says_so_on_the_stream(self):
+        """A browser must not keep a group the history no longer lists."""
+        linux, mac = await self.runners()
+        self.controller.reply_timeout_s = 0.3
+        self.controller.late_reply_grace_s = 0.1
+        ws = await self.live()
+        await asyncio.wait_for(ws.recv(), TIMEOUT_S)  # the snapshot
+        post = await self.start_group([LINUX, MAC])
+        requests = {runner.host: await runner.recv() for runner in (linux, mac)}
+        self.assertEqual(504, (await post)[0])
+        await mac.send(
+            "run_rejected", request_id=requests[MAC]["request_id"],
+            reason="builds disabled",
+        )
+        message = await self.received(ws, {"group"})
+        group_id = message["group"]["group_id"]
+        while True:
+            message = await self.received(ws, {"group"}, limit=200)
+            if message.get("removed"):
+                break
+        self.assertEqual(group_id, message["group"]["group_id"])
+        self.assertEqual({}, self.controller.groups)
 
     async def test_a_lone_run_streams_as_its_own_group(self):
         (linux,) = await self.runners([LINUX])

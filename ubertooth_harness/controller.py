@@ -581,9 +581,16 @@ class Controller:
         os.replace(temporary, destination)
 
     def group_of(self, run: Run) -> RunGroup:
-        """The group a run belongs to, or the group of one it is shown as."""
+        """The group a run belongs to, or the group of one it is shown as.
+
+        A run whose group is gone, or whose group does not list it (only one
+        of the two records was written before the controller stopped), is its
+        own group of one, which is how the history lists it too.
+        """
         group = self.groups.get(run.group_id) if run.group_id else None
-        return group if group is not None else implicit_group(run.view())
+        if group is None or run.run_id not in group.run_ids():
+            return implicit_group(run.view())
+        return group
 
     def get_group(self, group_id: str) -> RunGroup:
         """One group by ID: a stored group, or a run shown as a group of one."""
@@ -593,8 +600,8 @@ class Controller:
         if group is not None:
             return group
         run = self.runs.get(group_id)
-        if run is None or (run.group_id and run.group_id in self.groups):
-            # A run that belongs to a stored group is not a group of its own.
+        if run is None or self.group_of(run).group_id != run.run_id:
+            # A run a stored group lists is not a group of its own.
             raise ControllerError(f"unknown run group {group_id!r}", 404)
         return implicit_group(run.view())
 
@@ -1316,8 +1323,14 @@ class Controller:
             self.log(f"could not learn from stored runs: {error}")
         while True:
             await asyncio.sleep(self.monitor_interval_s)
-            self.check_heartbeats()
-            self.expire_pending()
+            try:
+                self.check_heartbeats()
+                self.expire_pending()
+            except Exception as error:  # noqa: BLE001 - the watchdog must run
+                # Expiry writes group records now, so a results directory
+                # that cannot be written must not take the heartbeat and
+                # offline detection down with it.
+                self.log(f"could not expire pending requests: {error}")
 
     def check_heartbeats(self) -> None:
         now = self.clock()
@@ -1697,11 +1710,19 @@ class Controller:
         persists it, and so does a refusal that arrives for one host while
         the others are still being asked.
         """
+        view = self.view_group(group)
         self.groups.pop(group.group_id, None)
         try:
             (self.groups_dir / f"{group.group_id}.json").unlink(missing_ok=True)
         except OSError as error:
             self.log(f"could not remove group {group.group_id}: {error}")
+        # A browser may have been sent this group already (a refusal that
+        # arrived for one host publishes it), so say it is gone rather than
+        # leave a group in a page that the history no longer lists.
+        message = {"type": "group", "group": view, "removed": True}
+        for subscriber in list(self._subscribers):
+            if subscriber.wants_group(group.group_id):
+                subscriber.offer(message)
 
     async def cancel_group(self, group_id: str, reason: str) -> tuple[RunGroup, list[dict]]:
         """Cancel every active run of a group; returns the group and each host's outcome.
@@ -1766,7 +1787,13 @@ class Controller:
                 outcomes.append({
                     "host": host, "run_id": run_id, "canceled": True, "error": None,
                 })
-        if active and len(failures) == len(active) and not starting:
+        if (
+            active and len(failures) == len(active)
+            # Read again: a request that was outstanding when this cancel
+            # began may have expired while the runners were being asked, and
+            # then no child can arrive under the cancel after all.
+            and not self._pending_hosts(group.group_id)
+        ):
             if asked:
                 # Nothing was cancelled and nothing can be: with a request
                 # still outstanding the cancel stands, because the child it

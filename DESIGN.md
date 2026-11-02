@@ -1137,7 +1137,9 @@ shape whatever started a run.
   cell carries the status, when it started and finished, the elapsed seconds,
   the reason it failed, the estimate learned for that host, and its parts (a
   test's invocations, one per board; a flash's boards), which is what a pill
-  that doubles as a progress bar needs. `progress` counts the cells, so a
+  that doubles as a progress bar needs. A required test the planner could not
+  compile on a host (`blocked`, #273) has no invocation, so its cell is that
+  planning record and ranks worse than a pass. `progress` counts the cells, so a
   group of two hosts counts each host's preflight; its summed estimate needs
   every cell to have one, which a run that flashes its boards has not got,
   since flashing the run's build is not learned as a stage (4a).

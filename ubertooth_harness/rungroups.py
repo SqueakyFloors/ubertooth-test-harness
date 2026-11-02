@@ -63,6 +63,9 @@ STEP_NAMES = {
 # any real name (the protocol's own limit on a test name is 200).
 MAX_LABEL_CHARS = 256
 MAX_REASON_CHARS = 2000
+# A status is one word; a record carrying anything longer is not reporting a
+# status at all.
+MAX_STATUS_CHARS = 64
 # A plan takes at most 100 tests (the protocol's ``tests`` limit), and a test
 # runs once per selected board on a bench of a handful, so these leave room
 # and still bound what one host's records can turn into.
@@ -82,6 +85,9 @@ STARTING = "starting"
 NOT_REACHED = "not_reached"
 PASSED = "passed"
 FAILED = "failed"
+# A required test the planner could not compile on that host: the hardware it
+# needs is not registered there, which fails the run (planner.py, #273).
+BLOCKED = "blocked"
 CANCELED = "canceled"
 ERROR = "error"
 LOST = "lost"
@@ -96,8 +102,8 @@ NOT_APPLICABLE = "not_applicable"
 # that passed on one board and did not apply on another passed as far as it
 # could.
 RANK_ORDER = (
-    RUNNING, ERROR, FAILED, LOST, CANCELED, SKIPPED, NOT_REACHED, PENDING,
-    PASSED, NOT_APPLICABLE,
+    RUNNING, ERROR, FAILED, BLOCKED, LOST, CANCELED, SKIPPED, NOT_REACHED,
+    PENDING, PASSED, NOT_APPLICABLE,
 )
 RANK = {status: index for index, status in enumerate(RANK_ORDER)}
 # A status a run or step has not reached an answer for.
@@ -151,7 +157,14 @@ def _seconds(started_at, finished_at) -> float | None:
 
 
 def _status(value) -> str:
-    return value if isinstance(value, str) and value else ERROR
+    """One status out of a record; anything unusable is an error.
+
+    Bounded like the other text taken from records: a status is one word, and
+    it ends up in every part, step and row of what the API returns.
+    """
+    if not isinstance(value, str) or not value or len(value) > MAX_STATUS_CHARS:
+        return ERROR
+    return value
 
 
 def _reason(details: Mapping) -> str:
@@ -258,6 +271,10 @@ def group_from_record(data: Mapping) -> RunGroup:
         isinstance(host, str) for host in group.hosts
     ):
         raise ValueError("hosts must be a list of host names")
+    if len(set(group.hosts)) != len(group.hosts):
+        # As a group may not be started: one entry per host, or a host's run
+        # could never be recorded against its own entry.
+        raise ValueError("hosts must not name a target twice")
     if not isinstance(group.members, list) or not all(
         isinstance(entry, dict) and isinstance(entry.get("host"), str)
         for entry in group.members
@@ -578,6 +595,22 @@ def host_steps(
                 _open(part, timestamp)
             else:
                 _close(part, status, timestamp, _reason(details))
+        elif kind == "blocked":
+            # A required test the planner could not compile on this host. It
+            # is in no invocation, so the record is the step: without one the
+            # host would show nothing for a test that fails its run.
+            name = _label(details.get("test_name"))
+            if not name or (name not in tests and len(tests) >= MAX_TEST_STEPS):
+                continue
+            parts = tests.setdefault(name, [])
+            if any(part["id"] == name for part in parts):
+                continue
+            if len(parts) >= MAX_STEP_PARTS or len(by_invocation) >= MAX_HOST_PARTS:
+                continue
+            part = _part(name, name)
+            _close(part, BLOCKED, timestamp, _reason(details))
+            by_invocation.setdefault(name, part)
+            parts.append(part)
         elif kind in ("test_started", "test_finished"):
             name = _label(details.get("test_name"))
             identifier = _label(details.get("invocation_id"))
