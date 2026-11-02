@@ -603,11 +603,10 @@ class AudioTests(unittest.TestCase):
                         firmwares=(acceptor, initiator))
 
     def test_the_role_change_is_sent_with_the_deadline_it_needs(self):
-        # `role` takes an audio link and its profile down first, which the
-        # firmware allows about 18 seconds for, so that command itself has to
-        # carry the longer deadline. A stream session has just reset both
-        # boards by opening their bridges, so there is no link to take down
-        # and it keeps the ordinary one.
+        # `role` stops the audio link, then the SPP side, then starts the SPP
+        # server again, which the firmware's README allows about 18 seconds
+        # for whichever of those it has to do. So that command carries the
+        # longer deadline in both sessions, not the ordinary five seconds.
         self.assertGreaterEqual(esp32peer.ROLE_TIMEOUT_S, 18.0)
         original = esp32peer.Shell.command
         seen = []
@@ -621,12 +620,14 @@ class AudioTests(unittest.TestCase):
         self.assertIn((esp32peer.ROLE_INITIATOR, esp32peer.ROLE_TIMEOUT_S),
                       seen)
 
+        # The firmware allows that long for `role` whatever the board was
+        # doing, so the stream session sends it with the same deadline.
         seen.clear()
         acceptor, initiator = _peers(*_pair())
         with unittest.mock.patch.object(esp32peer.Shell, "command", record):
             esp32peer.stream(acceptor, initiator, TRUE, out=io.StringIO(),
                              settle_s=0.0, min_writes=1)
-        self.assertIn((esp32peer.ROLE_INITIATOR, esp32peer.COMMAND_TIMEOUT_S),
+        self.assertIn((esp32peer.ROLE_INITIATOR, esp32peer.ROLE_TIMEOUT_S),
                       seen)
 
     def test_a_pair_that_carried_too_few_frames_fails_the_run(self):

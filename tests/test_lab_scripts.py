@@ -937,6 +937,18 @@ class PeerArguments(Bench):
             ])
         self.assertEqual(2, caught.exception.code)
 
+    def test_the_script_refuses_a_negative_frame_floor(self):
+        # Refused before anything is held, so no board is taken and reset for
+        # a command line that cannot check anything.
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as caught, redirect_stderr(err):
+            peer.parse_args([
+                "audio", "ESP0", "ESP1", "--hardware", str(self.registry),
+                "--min-frames", "-1", "--", "true",
+            ])
+        self.assertEqual(2, caught.exception.code)
+        self.assertIn("--min-frames cannot be negative", err.getvalue())
+
     def test_audio_holds_the_pair_and_the_capturing_board_together(self):
         args, _command = peer.parse_args([
             "audio", "ESP0", "ESP1", "--hardware", str(self.registry),

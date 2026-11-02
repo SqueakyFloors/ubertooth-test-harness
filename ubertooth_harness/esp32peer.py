@@ -998,9 +998,7 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
     print(f"stream: {payload} bytes every {period} ms", file=out)
     samples: list[dict] = []
     try:
-        # The ordinary deadline: opening the bridges has just reset both
-        # boards, so there is no audio link here for `role` to take down.
-        initiator_shell.command(ROLE_INITIATOR)
+        initiator_shell.command(ROLE_INITIATOR, ROLE_TIMEOUT_S)
         initiator_shell.command(f"spp peer {acceptor_status['address']}")
         initiator_shell.command(f"stream period {period}")
         initiator_shell.command(f"stream payload {payload}")
@@ -1088,10 +1086,11 @@ def audio(acceptor: Peer, initiator: Peer, command: Sequence[str], *,
           settle_s: float = SETTLE_S) -> int:
     """Hold a synchronous audio link up between the pair while ``command`` runs.
 
-    The air then carries reserved-slot voice packets as well as the data the
-    SPP stream puts there, and an ``ev3`` link's payload is at the basic
-    rate, so a receive-only capture can decode it. As with ``stream``, both
-    ports are opened first, which resets both boards.
+    The air then carries reserved-slot voice packets, and the Hands-Free
+    service level connection beside them; this session starts no SPP stream.
+    An ``ev3`` link's payload is at the basic rate, so a receive-only capture
+    can decode it. As with ``stream``, both ports are opened first, which
+    resets both boards.
     """
     out = out or sys.stderr
     if packet_type not in AUDIO_TYPES:
@@ -1408,9 +1407,6 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         if packet_type != AUDIO_TYPE_STACK:
             acceptor_shell.command(f"{SCO_TYPE} {packet_type}")
         acceptor_shell.command(SCO_START, AUDIO_CONNECT_TIMEOUT_S)
-        # `role` takes an audio link down first, which the firmware asks
-        # about 18 seconds for, so this one command gets a deadline of its
-        # own rather than the ordinary one.
         initiator_shell.command(ROLE_INITIATOR, ROLE_TIMEOUT_S)
         initiator_shell.command(f"spp peer {acceptor_status['address']}")
         if packet_type != AUDIO_TYPE_STACK:
@@ -1489,10 +1485,22 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
             end = after.get(peer.label)
             if end is None or end["status"].get("sco") != AUDIO_ON:
                 continue
-            was = settled.get(peer.label)
+            # settled holds both boards: it is filled before the command
+            # runs, from the same two.
+            was = settled[peer.label]
             now = (end["status"].get("sco_link"),
                    end["status"].get("sco_pkt_type"))
-            if was is not None and now != was:
+            if now == was:
+                continue
+            if AUDIO_UNNAMED in now or now[1] is None:
+                # The board says the link is up but cannot read it back, so
+                # it cannot say what is on the air either way.
+                problems.append(
+                    f"after the command ran, the {peer.label} cannot say what "
+                    f"its audio link carries (link {now[0]}, packet type "
+                    f"{now[1]}), where it carried {was[0]} {was[1]} when the "
+                    "command started")
+            else:
                 problems.append(
                     f"after the command ran, the {peer.label}'s audio link "
                     f"reads {now[0]} {now[1]}, not the {was[0]} {was[1]} it "

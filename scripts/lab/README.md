@@ -137,12 +137,17 @@ link uses a type both of them allowed:
 | `2ev3` | 2-EV3: the same payload as enhanced rate, which is what the stack asks for by itself |
 | `default` | whatever the stack's own table picks, which is 2-EV3 |
 
-A link that is not eSCO, or whose packet type is not the one asked for, fails
-rather than being reported as a pass, so a test that wants a basic-rate
-payload cannot quietly be handed the enhanced-rate type. Both boards are
-checked, because each works out what its link carries from the types it
-allowed and the packet length its own controller reported; nothing in HCI
-reports the packet type itself.
+A link that is not eSCO fails rather than being reported as a pass, and so
+does one a board cannot name at all (`sco_link` or `sco_pkt_type` reading
+`unknown`, or no packet length), which is all there is to go on under
+`default`. With `ev3` or `2ev3` the type has to be the one asked for, so a
+test that wants a basic-rate payload cannot quietly be handed the
+enhanced-rate type. Both boards are checked, because each works out what its
+link carries from the types it allowed and the packet length its own
+controller reported; nothing in HCI reports the packet type itself. The link
+is checked again when the command has finished, against what each board
+reported at the start, so a capture taken while the two ends renegotiated is
+reported rather than passed.
 
 `--min-frames` is how many frames each board must report, and `--min-seconds`
 and `--timeout` work as they do for `stream`. The module reports the link it

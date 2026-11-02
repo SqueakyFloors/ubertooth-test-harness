@@ -148,14 +148,9 @@ ask for; only `defaults` puts that back.
 [`esp32peer.py`](../ubertooth_harness/esp32peer.py)'s `audio` mode does the
 whole sequence in one invocation, as `stream` does for the data link.
 
-What the two packet types put on the air, both measured on the bench:
-
-| Type | Packets | Interval | Retransmission window |
-|---|---|---|---|
-| EV3 | 30 bytes | 6 slots, 3.75 ms | 4 slots |
-| 2-EV3 | 60 bytes | 12 slots, 7.5 ms | 2 slots |
-
-An EV3 link halves the payload per packet and halves the interval to carry the
+What the two packet types put on the air, measured on the bench, is in
+[the peer firmware's README](../firmware/esp32-classic-peer/README.md): an
+EV3 link halves the payload per packet and halves the interval to carry the
 same 64 kbit/s, so it is about twice the packet rate and the busiest traffic
 the pair can make. What a capture reads from either is the packet types, the
 timing, and the count; the audio pattern the firmware sends does not reach the

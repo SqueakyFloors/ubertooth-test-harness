@@ -92,31 +92,42 @@ MIN_WRITES = 50
 # Everything the driver does around the capture, taken from its own
 # deadlines, so a slow boot or a page that goes unanswered ends in
 # esp32peer.py's own message rather than in the harness calling the step
-# hung: two bridges opened (each resets its board and waits for the boot
-# notice), the settings written, the page and the SDP lookup, the settle,
-# and then both boards reset again to release them.
+# hung. Each term is one thing the driver waits for, counted from
+# esp32peer.py's `_stream`: two bridges opened (each resets its board and
+# waits for the boot notice), the ten statuses and ordinary commands it
+# sends (two statuses, `spp peer`, the period and the payload, `stream on`,
+# a status, `stream off`, and two statuses), `role initiator` on its own
+# deadline, the page and the SDP lookup of `spp start`, the settle, and both
+# boards reset again to release them.
 PAIR_SETUP_S = (
     2 * esp32peer.BOOT_TIMEOUT_S                      # both boards boot
-    + 8 * esp32peer.COMMAND_TIMEOUT_S                 # settings and statuses
+    + 10 * esp32peer.COMMAND_TIMEOUT_S                # settings and statuses
+    + esp32peer.ROLE_TIMEOUT_S                        # `role initiator`
     + esp32peer.CONNECT_TIMEOUT_S                     # page and SDP lookup
     + esp32peer.SETTLE_S
     + 2 * (esp32peer.BOOT_TIMEOUT_S                   # the two releases
            + 2 * esp32peer.COMMAND_TIMEOUT_S)
 )
-# The audio bring-up sends more commands than the stream's and reads more
-# statuses, and three of its commands have deadlines of their own. So, on
-# top of the stream session's budget: the three ordinary commands the
-# bring-up adds, the eight readings the session takes (a status and the
-# controller's packet counters on each board, before the command and after
-# it, where the old one took two statuses), the two `sco stop` calls on
-# their longer deadline, both `sco start` calls on theirs (the initiator's
-# pages and opens the link, and the acceptor's waits for the far end on the
-# same deadline), and `role initiator`, which here may have an audio link
-# and its profile to take down first.
-AUDIO_SETUP_S = (PAIR_SETUP_S + (3 + 8) * esp32peer.COMMAND_TIMEOUT_S
-                 + 2 * esp32peer.AUDIO_STOP_TIMEOUT_S
-                 + 2 * esp32peer.AUDIO_CONNECT_TIMEOUT_S
-                 + (esp32peer.ROLE_TIMEOUT_S - esp32peer.COMMAND_TIMEOUT_S))
+# The audio session's own budget, counted the same way from `_audio` rather
+# than built on the stream's: it sends no `spp start`, so it waits for no
+# page, and the rest differs. Seventeen statuses and ordinary commands (two
+# statuses, `sco type` and `spp peer`, the second `sco type`, the status of
+# each board and one more read of the far end that has not caught up, and
+# the four readings on each side of the command, each a status and the
+# controller's packet counters), `role initiator` and both `sco start` calls
+# on their own deadlines (the initiator's pages and opens the link; the
+# acceptor's waits for the far end on the same one), the two `sco stop`
+# calls on theirs, the two settles, and the two releases.
+AUDIO_SETUP_S = (
+    2 * esp32peer.BOOT_TIMEOUT_S
+    + 17 * esp32peer.COMMAND_TIMEOUT_S
+    + esp32peer.ROLE_TIMEOUT_S
+    + 2 * esp32peer.AUDIO_CONNECT_TIMEOUT_S
+    + 2 * esp32peer.AUDIO_STOP_TIMEOUT_S
+    + 2 * esp32peer.SETTLE_S
+    + 2 * (esp32peer.BOOT_TIMEOUT_S
+           + 2 * esp32peer.COMMAND_TIMEOUT_S)
+)
 # One identify or reset: an open with its reset, then a status read.
 PEER_TIMEOUT_S = esp32peer.BOOT_TIMEOUT_S + 4 * esp32peer.COMMAND_TIMEOUT_S
 
