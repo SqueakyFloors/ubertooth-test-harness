@@ -172,6 +172,11 @@ class TerminalEventSink:
                 f"[not applicable] {what}: not applicable on "
                 f"{details.get('host', '')}: {details.get('reason', '')}\n"
             )
+        elif event.event_type == "blocked":
+            self.stream.write(
+                f"[blocked] {details.get('test_name', '')}: blocked on "
+                f"{details.get('host', '')}: {details.get('reason', '')}\n"
+            )
         elif event.event_type == "preflight_started":
             self.stream.write("\n== mandatory preflight ==\n")
         elif event.event_type == "check_started":

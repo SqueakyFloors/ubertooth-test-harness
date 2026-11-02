@@ -204,11 +204,6 @@ recorded in the runs of the hosts that are here, and `run-suite --dry-run`
 lists it; one record per test, so a host that runs that test, or has its own
 reason for leaving it out, keeps its own.
 
-Two absences still end the compile, for now: `alternate Ubertooths` on a host
-with one registered Ubertooth, and `exclusive Ubertooth` where another board
-has no `power:` mapping
-([#269](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/269)).
-
 What a host here cannot run is decided first, and has not changed: a platform
 the step does not list, and a board placed differently from what the test
 needs, leave that host out, and a step whose every named host is here and
@@ -219,7 +214,8 @@ that would have run it is not here to be judged.
 
 `validate-plan --hardware <registry>` is the strict one: there the registry
 is named on purpose, so the same absence fails, which is what catches a plan
-entry for hardware a bench is meant to provide. Every committed suite is
+entry for hardware a bench is meant to provide; it refuses a blocked step the
+same way. Every committed suite is
 compiled that way against [`hardware.example.yaml`](hardware.example.yaml) in
 the unit suite (`tests/test_runnable_plans.py`), bar `range-weak-link`, which
 asks for a board behind an attenuator that the example registry carries
@@ -239,6 +235,47 @@ Host`, `resource DK_Linux0 is not a Ubertooth attached to Host_Linux`,
 `resource DK_Linux1 declares the role(s) peripheral, not advertiser`). A role
 or argument name the test does not have is refused when the plan loads, with
 no registry at all.
+
+### Hardware a step is about: blocked, not left out
+
+Two absences are not quietly left out, because the hardware that is missing is
+the subject of the test rather than something it merely binds:
+
+- `alternate Ubertooths: true` on a host with one registered Ubertooth
+  (`alternate Ubertooths needs at least two registered Ubertooths on
+  Host_Linux, which has one`);
+- `exclusive Ubertooth: true` where another registered board on the host is on
+  no power controller (`extra Ubertooth UT_Linux1 has no power mapping, so it
+  cannot be switched off to leave UT_Linux0 alone`).
+
+Such a step is recorded as **blocked** before anything runs, and it is left
+out of the invocations so every unrelated step in the suite still compiles and
+runs. The run then finishes `failed`: a gate like these is named on purpose on
+the bench that has the hub or the second board, so a quiet "not applicable"
+would read as a pass for something nobody measured. The record
+is a `blocked` event in run.jsonl, a `Blocked` section in report.md,
+`blocked_tests` in the run summary, and `blocked` in the web GUI's failures;
+`run-suite --dry-run` lists them and exits 1, because a dry run that exits 0
+says this host can run the suite. Each record belongs to the host it is
+about, so another bench's missing hub does not fail this run.
+`validate-plan --hardware` refuses both outright, as it does every other
+absence.
+
+A suite left with nothing at all to run is still refused at planning, as it
+was: the refusal names the blocked step, and there is no run to fail. That is
+what `mac-polling` does on a bench with an unmapped board, since it names one
+step and one board (`Ubertooth: default`). `testplans/exclusive.yaml` names
+one step but `Ubertooth: each`, so the step runs for every board that can be
+left alone, is blocked for the rest, and the run fails — which is also what a
+mixed suite does, the release plan included.
+
+A `power:` mapping that is present but wrong (an unknown controller, a port
+the controller has not got, a controller that cannot switch one) is a registry
+to correct rather than a bench without hardware, so it is refused rather than
+recorded: when the registry loads, where the driver is one the registry knows
+how to check, and otherwise when the plan compiles. A serial too short to
+select an alternated board with is likewise a registry to correct, and fails
+planning.
 
 ### RF placement: where a board sits on the bench
 
@@ -686,7 +723,9 @@ names can run (no case applies on any of them) fails planning, unless what
 the hosts lack is the hardware it binds, which is recorded instead (see
 [Hardware a registry has not got](#hardware-a-registry-has-not-got)). A test
 whose every case is not applicable finishes `not_applicable` and does not
-fail the run.
+fail the run. A test the bench has not got the hardware the test is *about*
+is `blocked` instead and does fail the run (see
+[Hardware a step is about](#hardware-a-step-is-about-blocked-not-left-out)).
 
 | Needs | Cases | Not applicable when |
 |---|---|---|
@@ -818,7 +857,8 @@ first (`-c2426 -c` reports 2426; fork 5b45b3e,
 `failed_guard_checks` (see [Guard Ubertooths](#guard-ubertooths)), `skipped_cases`, and `not_applicable_cases`
 (see [Host requirements](#host-requirements)); the run summary (`run_finished`
 in run.jsonl, and report.md) reports the run's `skipped_cases`,
-`not_applicable_cases`, and `not_applicable_tests`, so neither is hidden by an
+`not_applicable_cases`, `not_applicable_tests`, and `blocked_tests`, so none
+of them is hidden by an
 overall pass. Event schema version 1 is pre-release
 and has no stable consumers yet; field changes before the controller lands do
 not bump it.
@@ -2168,11 +2208,14 @@ boards that start on different images get different images in the same round,
 and a board's final image depends on whether its own flash count is even.
 `flashes` is the total across boards and must divide evenly by the board count
 (for example, 100 flashes on two boards gives each 50). The step must list its
-hosts (`hosts: [Host_Linux]`, not `each`), because planning covers every
-selected host and one host that cannot alternate would stop the run
-everywhere; `validate-plan` reports this without a registry. Planning refuses `Ubertooth: each` with `alternate Ubertooths` (it
-would rotate once per board), a host with only one registered Ubertooth, and
-any board without a full 32-hex-digit serial. Every registered Ubertooth on
+hosts (`hosts: [Host_Linux]`, not `each`), so the plan says which benches are
+expected to have two boards; `validate-plan` reports this without a registry.
+Planning refuses `Ubertooth: each` with `alternate Ubertooths` (it
+would rotate once per board) and any board without a full 32-hex-digit serial.
+A named host with only one registered Ubertooth has nothing to alternate
+across, so the step is blocked there and the run fails, while the other hosts
+and the rest of the suite still run (see
+[Hardware a step is about](#hardware-a-step-is-about-blocked-not-left-out)). Every registered Ubertooth on
 the host is written, including boards the plan does not otherwise use. After every flash the target is read back and every
 other board must still report the revision it had when last verified. The
 report names the board for each flash and the per-board count, and

@@ -672,6 +672,13 @@ def failure_summary(run: Mapping, events: Sequence[Mapping]) -> list[dict]:
                 "step": step, "status": _text(status),
                 "reason": _text(details.get("reason")), "log": log,
             })
+        elif kind == "blocked":
+            # Never ran: the hardware this test is about is not registered
+            # here. It fails the run, so the GUI shows it with the failures.
+            failures.append({
+                "step": _text(details.get("test_name")), "status": "blocked",
+                "reason": _text(details.get("reason")), "log": [],
+            })
         elif kind == "test_finished" and status not in ("passed", "skipped", "not_applicable"):
             invocation = _text(details.get("invocation_id"))
             rest = partials.pop(invocation, "")

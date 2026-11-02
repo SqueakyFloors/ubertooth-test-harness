@@ -109,8 +109,16 @@ class AlternatePlanningTests(unittest.TestCase):
         # 3 queries per flash (target + 2 others) and once for the baselines.
         self.assertEqual(5.0 * 3 + 6 * (25.0 + 5.0 * 3), request.total_timeout_s)
 
-    def test_a_single_board_is_refused(self):
-        with self.assertRaisesRegex(PlanningError, "at least two registered"):
+    def test_a_single_board_blocks_the_step(self):
+        """The only step in the suite, so nothing is left to run and the
+        refusal names it as blocked (tests/test_required_hardware.py covers
+        a suite that keeps running)."""
+        with self.assertRaisesRegex(
+            PlanningError,
+            "Flash reliability: blocked on Host_Linux: alternate Ubertooths "
+            "needs at least two registered Ubertooths on Host_Linux, which "
+            "has one",
+        ):
             self.compile(plan(2), serials=(A,))
 
     def test_short_serials_are_refused(self):
