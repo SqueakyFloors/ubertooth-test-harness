@@ -1116,8 +1116,8 @@ class DfuReadbackRunTests(unittest.TestCase):
         self.assertIn("vector checksum at 0x0401c", summary.failure_reason)
         self.assertIn("flash still differs after the rewrite", summary.failure_reason)
 
-    def restore_with(self, **flags):
-        image = firmware(image_check=True)
+    def restore_with(self, image_check=True, **flags):
+        image = firmware(image_check=image_check)
         board = FakeDfuBoard(image, **flags)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1155,11 +1155,13 @@ class DfuReadbackRunTests(unittest.TestCase):
         self.assertEqual(1, len([command for command in board.commands
                                  if command[0] == "ubertooth-dfu" and "-d" in command]))
 
-    def test_a_build_older_than_both_changes_rewrites_once_and_then_fails(self):
+    def test_a_build_older_than_the_range_line_rewrites_once_and_then_fails(self):
         """A tool from before fork 10c3381 prints no range and fills in
-        neither field, so the flash really does differ from the image as
-        today's -d writes it: the cleanup rewrites once and fails on both."""
-        board, code, output = self.restore_with(no_plan_line=True,
+        nothing, so the flash really does differ from the image as today's -d
+        writes it: the cleanup rewrites once and fails on both. The image of
+        that era carries no image check block either (it arrived with the
+        host's own filling in d91bb06), so the test uses one without."""
+        board, code, output = self.restore_with(image_check=False, no_plan_line=True,
                                                 no_first_block_fill=True)
         self.assertEqual(1, code)
         self.assertIn("Flash differs from the test image; rewriting it", output)
@@ -1168,6 +1170,16 @@ class DfuReadbackRunTests(unittest.TestCase):
         self.assertIn("Restore: flash still differs after the rewrite: the read-back "
                       "did not report the range it covers; vector checksum at "
                       "0x0401c is 0x00000000", output)
+
+    def test_an_image_from_before_the_check_block_passes_on_its_own_tool(self):
+        """Between fork 31228b0 and d91bb06 the checksum is filled in and
+        there is no image check block on either side, so the case passes with
+        the vector checksum as the only field checked."""
+        image = firmware(image_check=False)
+        board = FakeDfuBoard(image)
+        summary, _events = run_dfu(board, image, coverage="smoke")
+        self.assertTrue(summary.passed, summary.failure_reason)
+        self.assertEqual([], flash_problems(board, image))
 
     def test_a_tool_that_reports_no_range_fails_the_read_back_step(self):
         """An earlier -u said nothing about what it was reading. The step

@@ -2414,18 +2414,19 @@ vector checksum in `31228b0`
 ([ubertooth#1037](https://github.com/SqueakyFloors/ubertooth/issues/1037)),
 and the image check record in `d91bb06`
 ([ubertooth#1048](https://github.com/SqueakyFloors/ubertooth/issues/1048)).
-Against an older build the case fails, and which way says which commit is
-missing. Before `10c3381` no range is printed, so the `read-back` step fails
-with `read-back range was not reported`; the cleanup then finds flash that
-really does differ from the image as today's `-d` writes it, rewrites the
-image once, and fails with `flash still differs after the rewrite: the
-read-back did not report the range it covers; vector checksum at 0x0401c is
-0x00000000`. Between `10c3381` and `31228b0` the range is reported but neither
-field is filled in, so the dump equals the file and only the vector checksum
-is named. Between `31228b0` and `d91bb06` the checksum is filled in and the
-record is not, so the four image check fields are named instead. A field is
-checked against what the writer should have worked out, so a dump that merely
-equals the file is not enough.
+Against a build older than `31228b0` the case fails, and which way says what
+is missing. Before `10c3381` no range is printed, so the `read-back` step
+fails with `read-back range was not reported`; the cleanup then finds flash
+that really does differ from the image as today's `-d` writes it, rewrites
+the image once with that same tool, and fails with `flash still differs after
+the rewrite: the read-back did not report the range it covers; vector
+checksum at 0x0401c is 0x00000000`. Between `10c3381` and `31228b0` the range
+is reported but the checksum is not filled in, so the dump equals the file
+and the comparison fails on that field alone: it is checked against what the
+writer should have worked out, so a dump that merely equals the file is not
+enough. Between `31228b0` and `d91bb06` the case passes, because the image
+check block arrived in `d91bb06` on both sides at once -- an image from that
+window carries none, so there is no record to fill in or to check.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial, with
 every other registered board as guards. `coverage:`. Needs the firmware build
