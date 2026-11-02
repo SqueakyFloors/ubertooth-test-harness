@@ -20,8 +20,10 @@ from ubertooth_harness.rf import (
 
 _ALIAS_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 
+DEBUG_PROGRAMMER = "Debug programmer"
+
 # Resource types with no radio, which may not record an RF placement.
-PLACELESS_TYPES = ("Host", "USB power controller")
+PLACELESS_TYPES = ("Host", "USB power controller", DEBUG_PROGRAMMER)
 
 
 class RegistryError(ValueError):
@@ -149,6 +151,49 @@ def _validate_peer(resource) -> None:
         )
 
 
+# A debug programmer: a USB serial adapter, SWD probe, or anything else wired
+# to one device's debug or in-system programming header and left there. It is
+# not a radio and no test binds it; it exists in the registry so that it and
+# the device it is wired to are held together (see pair_members).
+PROGRAMS_FIELD = "programs"
+_PROGRAMMER_IDENTITY_KEYS = ("serial", "serial device")
+# The programmer's own serial, as its USB descriptor reports it. Taken
+# verbatim, as a peer's bridge serial is: the same string names its lease
+# file, so one spelling is one device. Only the characters a file name can
+# hold are allowed.
+_PROGRAMMER_SERIAL = re.compile(r"^[0-9A-Za-z_.:+-]{1,64}$")
+
+
+def _validate_programmer(resource) -> None:
+    """A debug programmer: its own serial, and the one device it programs."""
+    alias = resource.alias
+    unknown = sorted(set(resource.identity) - set(_PROGRAMMER_IDENTITY_KEYS))
+    if unknown:
+        raise RegistryError(
+            f"{DEBUG_PROGRAMMER} {alias} identity has unknown key(s) "
+            f"{', '.join(unknown)}; use {', '.join(_PROGRAMMER_IDENTITY_KEYS)}"
+        )
+    if not _PROGRAMMER_SERIAL.fullmatch(resource.identity.get("serial", "")):
+        raise RegistryError(
+            f"{DEBUG_PROGRAMMER} {alias} requires a 'serial' identity: the serial "
+            "its USB descriptor reports, which is also what its lease file is "
+            "named after (letters, digits, and _.:+- only)"
+        )
+    device = resource.identity.get("serial device")
+    if device is not None and not is_stable_serial_device(device):
+        raise RegistryError(
+            f"{DEBUG_PROGRAMMER} {alias} serial device must be a "
+            "/dev/serial/by-id/ path: /dev/ttyUSB<n> is assignment order, so it "
+            "names another adapter after a re-plug"
+        )
+    if resource.programs is None:
+        raise RegistryError(
+            f"{DEBUG_PROGRAMMER} {alias} requires '{PROGRAMS_FIELD}: <alias>', the "
+            "device it is wired to; the two are held together, and a programmer "
+            "wired to nothing is a registry half filled in"
+        )
+
+
 def _validate_dk(resource) -> None:
     """An nRF52840 DK: J-Link serial, optional BLE address and VCOM0 path."""
     alias = resource.alias
@@ -198,6 +243,11 @@ class Resource:
     # The unit's RF placement from ``rf:``; None when the registry does not
     # record one, which rf.py reads as an ordinary unit on the bench.
     rf: Placement | None = None
+    # The device this one is permanently wired to, from ``programs:``: the
+    # alias of a debug programmer's target. None for everything else. The
+    # value is whatever the registry held, so validation can report a list
+    # (more than one target) as the mistake it is.
+    programs: object | None = None
 
 
 @dataclass(frozen=True)
@@ -213,6 +263,10 @@ class ResourceRegistry(Protocol):
 
     def get(self, alias: str) -> Resource:
         """Return one registered resource."""
+
+    def pair_members(self, alias: str) -> tuple[str, ...]:
+        """Every device permanently wired to this one (a debug programmer and
+        the device it programs), which is held with it."""
 
     def hardware(self, host: str, resource_type: str) -> tuple[str, ...]:
         """Every resource of this type attached to the host, by alias."""
@@ -302,6 +356,7 @@ class FileResourceRegistry:
                 power=MappingProxyType(dict(power)),
                 driver=value.get("driver"),
                 rf=placement,
+                programs=value.get(PROGRAMS_FIELD),
             )
         return cls(resources)
 
@@ -360,6 +415,9 @@ class FileResourceRegistry:
                 _validate_dk(resource)
             if resource.type == ESP32_CLASSIC_PEER:
                 _validate_peer(resource)
+            if resource.type == DEBUG_PROGRAMMER:
+                _validate_programmer(resource)
+        self._validate_pairs()
         used_power_ports = {}
         for resource in self.resources.values():
             if (
@@ -433,6 +491,163 @@ class FileResourceRegistry:
                         f"{used_power_ports[key]} and {resource.alias}"
                     )
                 used_power_ports[key] = resource.alias
+
+    def _validate_pairs(self) -> None:
+        """Permanently wired pairs: one target each, on one host, no loop.
+
+        A pair is held as one device (see ``pair_members``), so a registry
+        that describes an impossible pairing has to be refused here rather
+        than leave a command holding half of one.
+        """
+        programmer_of: dict[str, str] = {}
+        for resource in sorted(self.resources.values(), key=lambda r: r.alias):
+            target = resource.programs
+            if target is None:
+                continue
+            alias = resource.alias
+            # Checked before any lookup: a YAML list or mapping is not even
+            # hashable, and is the mistake of naming more than one target.
+            if not isinstance(target, str) or not target:
+                raise RegistryError(
+                    f"resource {alias} must name the one device it "
+                    f"{PROGRAMS_FIELD} by alias"
+                )
+            if resource.type != DEBUG_PROGRAMMER:
+                raise RegistryError(
+                    f"resource {alias} is a {resource.type}, which does not "
+                    f"'{PROGRAMS_FIELD}' another device; only a "
+                    f"{DEBUG_PROGRAMMER} is wired to one"
+                )
+            if target == alias:
+                raise RegistryError(
+                    f"{DEBUG_PROGRAMMER} {alias} cannot program itself"
+                )
+            if target not in self.resources:
+                raise RegistryError(
+                    f"{DEBUG_PROGRAMMER} {alias} programs unknown device '{target}'"
+                )
+            if self.resources[target].type == "Host":
+                raise RegistryError(
+                    f"{DEBUG_PROGRAMMER} {alias} programs {target}, which is a "
+                    "Host; a pair is two devices attached to one host"
+                )
+            if self.resources[target].attached_to != resource.attached_to:
+                raise RegistryError(
+                    f"{DEBUG_PROGRAMMER} {alias} and {target} are not attached to "
+                    "one host; a pair is held through that host's leases, which "
+                    "are local to it"
+                )
+            if target in programmer_of:
+                raise RegistryError(
+                    f"{DEBUG_PROGRAMMER}s {programmer_of[target]} and {alias} both "
+                    f"program {target}; a device has one programmer"
+                )
+            programmer_of[target] = alias
+        self._refuse_pair_loop()
+
+    def _refuse_pair_loop(self) -> None:
+        """Refuse a ring of programmers, each programming the next.
+
+        Every programmer has one target and every target one programmer (the
+        checks above), so a loop is a ring: following ``programs`` from one
+        of its members comes back to it. Expansion survives a loop anyway
+        (``pair_members`` keeps a visited set), but a ring would hold every
+        member of itself for one command, which no bench means.
+        """
+        targets = {
+            resource.alias: resource.programs
+            for resource in self.resources.values()
+            if isinstance(resource.programs, str)
+        }
+        for start in sorted(targets):
+            path, current = [start], targets[start]
+            while isinstance(current, str) and current in targets:
+                if current in path:
+                    raise RegistryError(
+                        f"{DEBUG_PROGRAMMER} pairing loops back on itself: "
+                        + ", ".join(
+                            f"{alias} {PROGRAMS_FIELD} {targets[alias]}"
+                            for alias in path
+                        )
+                    )
+                path.append(current)
+                current = targets[current]
+
+    def _pair_neighbors(self) -> dict[str, set[str]]:
+        """Who is wired to whom, both ways, by alias.
+
+        Undirected: a command that names either member of a pair holds both,
+        so the walk below does not care which side is the programmer.
+        """
+        neighbors: dict[str, set[str]] = {}
+        for resource in self.resources.values():
+            target = resource.programs
+            if not isinstance(target, str) or target not in self.resources:
+                continue
+            neighbors.setdefault(resource.alias, set()).add(target)
+            neighbors.setdefault(target, set()).add(resource.alias)
+        return neighbors
+
+    def pair_members(self, alias: str) -> tuple[str, ...]:
+        """Every device permanently wired to this one, in alias order.
+
+        A debug programmer and the device it programs are one piece of
+        hardware as far as using either is concerned: programming the target
+        while another command owns it, or using the target while it is being
+        programmed, corrupts a test or leaves the board needing hands on it.
+        So every command that takes one takes the other (leases.expand_pairs).
+
+        The whole connected set, so a chain of pairs is covered too, and
+        never the alias itself. The walk keeps a visited set, so a registry
+        built with a loop in it (validation refuses one, a registry made in
+        code need not have passed it) still terminates.
+        """
+        neighbors = self._pair_neighbors()
+        seen, queue = {alias}, [alias]
+        while queue:
+            for other in sorted(neighbors.get(queue.pop(), ())):
+                if other not in seen:
+                    seen.add(other)
+                    queue.append(other)
+        return tuple(sorted(seen - {alias}))
+
+    def describe_pairing(self, alias: str, named: str) -> str:
+        """Why ``alias`` comes with ``named``, as a clause for a message.
+
+        One wording, so a note from ``hold``, a power change, and a listing
+        all explain the pair the same way. Callers add their own tail.
+        """
+        this = self.resources.get(alias)
+        other = self.resources.get(named)
+        if this is not None and this.programs == named:
+            return f"{alias} is the programmer wired to {named}"
+        if other is not None and other.programs == alias:
+            return f"{alias} is the device {named} programs"
+        # A chain: neither is the other's own pair, but they are connected
+        # through one, and holding either holds both.
+        return f"{alias} is wired to {named} through a programmer pair"
+
+    def expand_pairs(self, aliases: Sequence[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The aliases to hold for these, and why each added one is there.
+
+        Every alias given, deduplicated and in the order given, followed by
+        each one's pair members in alias order. Naming both members is
+        harmless: the result holds each device once. The second tuple is one
+        clause per added alias (``describe_pairing``), for the note a command
+        prints before it takes the locks.
+        """
+        held = list(dict.fromkeys(aliases))
+        named = set(held)
+        added: dict[str, str] = {}
+        for alias in held:
+            for other in self.pair_members(alias):
+                if other not in named:
+                    added.setdefault(other, alias)
+        extra = sorted(added)
+        return (
+            tuple(held + extra),
+            tuple(self.describe_pairing(other, added[other]) for other in extra),
+        )
 
     def get(self, alias: str) -> Resource:
         try:
