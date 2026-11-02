@@ -141,8 +141,12 @@ Every test accepts `platforms:` (`linux`, `macos`, no duplicates) beside its
 
 Every test that binds hardware also accepts `rf:`, which asks for a board by
 where it sits on the bench, one requirement per hardware role, and
-`weak link:`, the shorthand for an attenuation in dB per role (see
-[RF placement](#rf-placement-where-a-board-sits-on-the-bench)).
+`weak link:`, the shorthand for one role at an attenuation in dB (see
+[RF placement](#rf-placement-where-a-board-sits-on-the-bench)). It also
+accepts `required hardware: true`, which says the hardware that step names is
+what the step is there to measure: a registry without it blocks the step and
+fails the run instead of leaving it out (see
+[Hardware a step is about](#hardware-a-step-is-about-blocked-not-left-out)).
 
 The two select separately: `hosts:` says which registered hosts the step may
 run on, `platforms:` which of them can run it. A host whose platform the step
@@ -196,14 +200,27 @@ a host whose platform the step does not list:
 - an explicit device alias this registry does not have (`this registry has no
   Ubertooth 'UT_Lab7'`).
 
-So the release plan, which every registered host runs, can hold a step for
-hardware only the bench host has: the other hosts, and the other registries,
-record it and run the rest. A suite with nothing this registry can run is
-still an error, and it names the first few steps it left out. A host this
-registry has not got never runs anything of its own, so what it left out is
-recorded in the runs of the hosts that are here, and `run-suite --dry-run`
-lists it; one record per test, so a host that runs that test, or has its own
-reason for leaving it out, keeps its own.
+So a plan every registered host runs can hold a step for hardware only the
+bench host has: the other hosts, and the other registries, record it and run
+the rest. Where such a step is a gate rather than a convenience, the plan
+says `required hardware: true` and the record fails the run instead (the next
+section); the release plan's one peer step does.
+
+A suite with nothing this registry can run is still an error, and it names
+the first few steps it left out. A host this registry has not got never runs
+anything of its own, so what it left out is recorded in the runs of the hosts
+that are here, and `run-suite --dry-run` lists it; one record per test, so a
+host that runs that test, or has its own reason for leaving it out, keeps its
+own. A blocked record for such a host is carried the same way, by the runs of
+the hosts that are here, unless one of them runs that test: that run measures
+what the step is about, so none of them fails on the absent host's part of it.
+
+A record for a host the registry *does* have belongs to that host's run
+alone, which is the rule for every blocked record. So a bench whose gate host
+is registered but has lost the hardware fails that host's run, and a run of
+the same plan on another of its hosts passes without the gate: the release is
+run on the gate host, or as a run group over the bench, which is where the
+measurement is.
 
 What a host here cannot run is decided first, and has not changed: a platform
 the step does not list, and a board placed differently from what the test
@@ -247,7 +264,19 @@ the subject of the test rather than something it merely binds:
   Host_Linux, which has one`);
 - `exclusive Ubertooth: true` where another registered board on the host is on
   no power controller (`extra Ubertooth UT_Linux1 has no power mapping, so it
-  cannot be switched off to leave UT_Linux0 alone`).
+  cannot be switched off to leave UT_Linux0 alone`);
+- a step that says so itself with `required hardware: true`, for the hardware
+  it binds. That is how a gate suite holds a test for peer hardware: a host
+  with no peer registered (`host Host_Linux has no default ESP32 Classic peer
+  for the acceptor role`), and a registry without that host at all
+  (`Host_Linux is not a host in this registry`), are both blocked rather than
+  left out. `testplans/release.yaml` uses it for `Recover AFH map`, the one
+  entry there that names a bench host. A step without the argument, or with
+  it written `false`, is left out as before.
+
+The argument is about absence only. What a host here cannot run at all — its
+platform, or a board placed differently from what the test needs — is decided
+first and is unchanged by it.
 
 Such a step is recorded as **blocked** before anything runs, and it is left
 out of the invocations so every unrelated step in the suite still compiles and
@@ -269,10 +298,11 @@ was: the refusal names the blocked step, and there is no run to fail. That is
 what `mac-polling` does on a bench with an unmapped board, since it names one
 step and one board (`Ubertooth: default`). `testplans/exclusive.yaml` names
 one step but `Ubertooth: each`, so the step runs for every board that can be
-left alone, is blocked for the rest, and the run fails. A mixed suite — one
-holding a blocked step beside steps that run — behaves the same way; no
-committed plan is one today, since `exclusive Ubertooth` appears only in those
-two and `alternate Ubertooths` in none.
+left alone, is blocked for the rest, and the run fails. A mixed suite, one
+holding a blocked step beside steps that run, behaves the same way:
+`testplans/release.yaml` is that suite on a bench without the ESP32 Classic
+peers, where every other release test runs and the run fails on the one gate
+it could not measure.
 
 A `power:` mapping that is present but wrong (an unknown controller, a port
 the controller has not got, a controller that cannot switch one) is a registry
@@ -811,15 +841,30 @@ python -m ubertooth_harness validate-plan testplans/release.yaml \
   --hardware hardware.yaml --suite release
 python -m ubertooth_harness run-suite \
   --plan testplans/release.yaml --suite release \
-  --hardware hardware.yaml --host Host_Mac \
+  --hardware hardware.yaml --host Host_Linux \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref main --output runs
 ```
 
-Every test in that plan runs on any target, so the tests that need a peer
-device are not in it: run the `ble`, `connection`, `classic`, and `btbr`
-suites as well, wherever those devices are registered. The `btbr` suite is the
-only coverage of `ubertooth-btbr` and of the `btbr` firmware image, and it
-needs `--build --with-firmware --with-python`.
+All but one test in that plan runs on any target. The exception is
+`Recover AFH map`, which needs the two ESP32 Classic peers and so names the
+Linux host they are on; it carries `required hardware: true`, so a bench
+without them runs the rest of the plan and the run fails on it rather than
+passing with that gate unmeasured (see
+[Hardware a step is about](#hardware-a-step-is-about-blocked-not-left-out)).
+It runs the `smoke` profile there, about 520 s of the plan's roughly 1175 s.
+A target that is not the host it names plans about 655 s of the suite: the
+total counts every step, whichever host it is for (#284).
+
+That step leases both ESP32 Classic bridges for the length of the run, so the
+peer suites below run before or after the release plan, not beside it.
+
+The other tests that need a peer device are not in the plan: run the `ble`,
+`connection`, `classic`, and `btbr` suites as well, wherever those devices
+are registered. The `btbr` suite is the only coverage of `ubertooth-btbr` and
+of the `btbr` firmware image, and it needs `--build --with-firmware
+--with-python`. The `classic` suite repeats the gate's two AFH captures;
+`classic-comprehensive` runs them with the third, `-t` detection case as
+well, so it is the one to run after the gate.
 
 | Test | `smoke` (fast plan) | `comprehensive` (release plan) |
 |------|---------------------|--------------------------------|
@@ -853,7 +898,7 @@ needs `--build --with-firmware --with-python`.
 | `Follow Classic Bluetooth piconet` | `classic` plan; the same two peers and the same bring-up: `ubertooth-rx -l <central LAP> -u <central UAP>` must report at least ten packet lines and none of another LAP (libbtbb is asked for one access code), and `-l`/`-u` for the peer that is *not* the central must report no packet at all | adds `-l` without `-u` (the UAP is recovered from the air) and `-l -u -q` (PCAP with link type 255) |
 | `Classic capture record fields` | `classic` plan; the same two peers and the same bring-up, but the check is inside the capture files: `bredrrecord.py` decodes every `LINKTYPE_BLUETOOTH_BREDR_BB` record of a `-l <central LAP> -u <central UAP> -q -r` capture, and each must carry the central's LAP and that LAP and UAP as its reference address, with every flag that describes a field in the record agreeing with that field, its access-code errors inside the limit the run allowed, and, where it holds a payload, that payload's length field agreeing with the bytes it holds and its CRC, recomputed with the reference UAP, agreeing with the one it carries (the bench's own traffic records no payload, so what fires live is the headers, addresses and flags), and the PCAPNG naming the central's LAP and UAP as the address it was following; the same with the peers' roles swapped must carry the other board's LAP instead | adds an EV3 audio link (`sco type ev3`, so the voice payload is on the air at the basic rate), whose records must include an `HV3/EV3/3-EV3` packet, and a survey, whose records must include one carrying a UAP the survey recovered for itself |
 | `Classic btbr console` | writes the selected board's firmware and transmits (`allow RF transmission: true`); `classic` plan, `btbr` suite, which a release runs alongside the release plan; an Ubertooth and one ESP32 Classic peer with the `acceptor` role on one host, and a run carrying both firmware images and the Python tools (`--build --with-firmware --with-python`). The run's `btbr` image is written and the board must report `btbr` and that revision by name (`bluetooth_rxtx` is a mismatch, and so is the revision alone), the peer is reset to its discoverable boot state and must report the device name its own address gives, and one `ubertooth-btbr` session then comes up — the startup the `btbr` image answers, and the prompt — and decides eleven checks down that prompt: `?` and `? inquiry`, a word that is no command, `?` on one, three addresses that are not ones and `page` with no address (each one `error:` line with the prompt up), `bdaddr` taking an address, an inquiry hearing the peer by BD_ADDR and by the name in its Extended Inquiry Response, a page reaching `LMP setup complete` with the peer's `LMP_NAME_RES` on the air, `idle` inside each of those two, an LMP request with no handler named once per opcode, and the capture on standard output with the progress on standard error. The cleanup always writes `bluetooth_rxtx` back, reads it, and resets the peer. The capture never leaves the driver: an inquiry hears every discoverable device in range, so only the records matched for the registered peer are reported and the rest are counted | adds paging an address nothing answers: `paging timeout` after the firmware's whole attempt, with no connection. `sessions: <n>` repeats the whole flash-and-session cycle (the `btbr-long` suite runs five) |
-| `Recover AFH map` | `classic` plan; the same two peers, with the initiator's controller told to keep a chosen set of channels before the link comes up, so the piconet's Adaptive Frequency Hopping map is known: `ubertooth-afh -e 0 -r` then runs for `duration` and must work that map out from the air. The map the link is really hopping over is read from the leader's controller at the start, the middle and the end of the capture and must be the same all three times; the recovered map must hold at least 90% of the channels in force and mark at most 70% of the channels out of force used. Two maps: channels 0 to 39, and the 20-channel minimum. Afterwards both peers are reset and the Ubertooth restored, as above | adds the tool's other path, `-t <duration>`, whose `AFH map:` line is judged on the channels it found, its stray channels reported with a looser ceiling because that map fills channel gaps and never drops a channel |
+| `Recover AFH map` | `release` plan (smoke, `required hardware: true`) and `classic` plan; the same two peers, with the initiator's controller told to keep a chosen set of channels before the link comes up, so the piconet's Adaptive Frequency Hopping map is known: `ubertooth-afh -e 0 -r` then runs for `duration` and must work that map out from the air. The map the link is really hopping over is read from the leader's controller at the start, the middle and the end of the capture and must be the same all three times; the recovered map must hold at least 90% of the channels in force and mark at most 70% of the channels out of force used. Two maps: channels 0 to 39, and the 20-channel minimum. Afterwards both peers are reset and the Ubertooth restored, as above | adds the tool's other path, `-t <duration>`, whose `AFH map:` line is judged on the channels it found, its stray channels reported with a looser ceiling because that map fills channel gaps and never drops a channel |
 | `DFU images` | writes the selected board's firmware; slow plan (not fast): `-d <test image> -r`, then `-u -r` reads back the image padded with 0xff; `-s` on the image without its suffix gives the build's `.dfu` | `firmware` plan (not release): adds `-s` refusing a `.dfu`; seven bad images (wrong CRC, truncated, no suffix, text, no `UFD`, wrong vendor, wrong product) refused before a device is opened (fork #198, #199, fixed in e8edd15), the board still in its application with the same flash (read back); `-s` refuses a suffixed `.bin` and accepts a read-only one (fork #200, fixed in 9d710fe). At 6fee30c `-d <image> -r` exits 1 after a good flash (fork #267, fixed in 89d9197), so the write cases fail there |
 | `BLE mode conflicts` | no `coverage` argument; release plan | every combination of `ubertooth-btle -f -n -p` must be rejected before sniffing |
 | `Ubertooth util conflicts` | no `coverage` argument; requires `allow RF transmission: true`; release plan | every pair of `-q -n -e -t -x -I` must be rejected with the fork's `error: options ... cannot be combined` before a mode starts |
@@ -2632,6 +2677,77 @@ frame-ancestors 'none'; ...` (no inline script or style),
 controller and runner text only as text, never as HTML. Static files are
 served from memory by exact name, so no request path reaches the filesystem.
 
+### Run groups: one plan on several hosts
+
+A run on several hosts is a **run group**: `POST /api/run-groups` takes the
+same run request with a `hosts` list and starts **one child run per host**,
+together. Each child is an ordinary run of its own host, with its own runner,
+boards, leases and run directory, and records the group it belongs to as
+`group_id` in its `run.json`; the runner protocol is unchanged, so a target
+needs nothing new. The GUI side of this (choosing several hosts, a pill per
+host on every row, a transcript tab per host) is the next step and is not
+built yet, so for now a group is started through the API.
+
+The ref is resolved once and every child is sent that commit, so a branch
+that moves while the runs are starting cannot leave one host on another
+revision. Each host then stands on its own: one that is offline, busy, or
+whose runner rejects the run leaves its reason on that member while the
+others run, and the group says it did not run everywhere (`complete: false`,
+and `error` once nothing is running). A group not one host of which started
+is no group at all: nothing is stored and the answer names, host by host,
+why. The exception is a request that timed out: it stays pending and may
+still be accepted, so that group is stored and a child that arrives late is
+still one of its hosts, while the answer still says nothing started. Such a
+host reads `starting` until its request is answered or expires, so a group
+whose child may still arrive does not read as finished and then run again.
+Once the last of those requests is gone, no child can arrive: the host says
+the runner never answered, and a group with no child at all is forgotten,
+record and all. Such a request cannot outlive the controller,
+though: a controller restarted while one was pending has no record of it, so
+a run the runner reports afterwards is adopted as a run of its own.
+
+A group's status is read from its children, so it cannot drift from them:
+`running` while any child is active (including one still being started,
+whose member reads `starting`), `passed` only when every host asked for ran
+and passed, otherwise the worst outcome among them — an error, then a
+failure, then a [lost](#controller) run, then a cancel, and a status this
+code does not know ranks as an error.
+`POST /api/run-groups/{group_id}/cancel` cancels every active child and
+reports each host's outcome. A host that is still starting has nothing to
+cancel yet; its outcome says so, and the child its runner may still accept
+is cancelled as it arrives.
+
+`GET /api/run-groups/{group_id}` is the per-host result: one row per step —
+build, flash, preflight, then the tests in planned order — each with one cell
+**per host that runs that step, and only those**, so a Linux-only test has a
+Linux cell and no macOS one. Which steps a host runs comes from that run's
+own manifest record, which is what its planner compiled there. Each cell
+carries the status, when it started and finished, how long it took, why it
+failed, the estimate [learned for that host](#learned-durations), and its
+parts (a test's invocations, one per board; a flash's boards). A required test
+the planner could not compile on a host ([blocked, not left
+out](#hardware-a-step-is-about-blocked-not-left-out)) has no invocation, so
+its cell is that planning record and reads `blocked`, which ranks worse than
+a pass: a host where one board ran and another was blocked does not read as
+passed.
+
+A run started on one target of its own (`POST /api/targets/{host}/runs`)
+stores no group record and is listed as a **group of one** whose ID is the
+run's own, so `GET /api/run-groups` is the whole history whatever started a
+run. Group records live in `groups/` beside the run directories, one JSON
+file each, holding only what was asked for, which run each host got, and
+whether a cancel was asked for.
+
+```sh
+# Start the release suite on the Linux lab host and a Mac, as one group.
+curl -s -X POST http://127.0.0.1:8765/api/run-groups \
+  -H 'Content-Type: application/json' \
+  -d '{"hosts": ["Host_Linux", "Host_Mac"], "ref": "main",
+       "plan": "release", "suite": "release", "build": true}'
+# Follow it: one stream carries both hosts' runs and events.
+# ws://127.0.0.1:8765/ws/live?group_id=<group_id>
+```
+
 Endpoints (JSON unless noted; `GET /` lists them):
 
 | Endpoint | |
@@ -2641,13 +2757,17 @@ Endpoints (JSON unless noted; `GET /` lists them):
 | `GET /api/plans[?target=HOST]` | every `<plan>.yaml` in `--plans-dir` with its suites, test names, per-test `estimated_s` (one invocation with the step's arguments, else null) and `per_board` (runs once per selected board), the build options each test and suite needs (`needs_firmware_build` and `needs_python_tools`: cases are left out without it; `requires_firmware_build` and `requires_python_tools`: the test cannot run without it at all) and `needs_artifacts` (image labels the step names that no build produces, so only `run-suite --artifact` can pass them), the suite total when every test has one, `per_board_tests`, and `runnable` (the plan's `runnable` flag; false for plans of planned tests and for a plan that does not load); a plan that does not load is listed with its `error`. With a `target`, `estimated_s` is what that host's own runs measured when enough of them did; `catalog_estimated_s`, `estimate_source` (`learned`, `catalog` or `none`), `estimate_samples` and `estimate_scaled` say which, and `stages` lists the build, preflight and flash durations learned for it (see [Learned durations](#learned-durations)). Without one, nothing is learned and the catalog estimate stands. A `target` whose name is not a host name is refused with 422; the registry is not consulted, so a name no target has registered is answered with whatever has been learned under it, which is normally nothing |
 | `GET /api/targets`, `GET /api/targets/{host}` | registry: host, hostname, OS, Python, Ubertooth serials, last heartbeat, `online`/`offline`, connected, active run |
 | `POST /api/targets/{host}/runs` | start a run with the protocol `run` fields: `{"ref", "commit": null, "plan", "suite", "tests": [], "build": false, "flash_build": true, "with_firmware": false, "with_python": false}` (`commit`, optional, is the full commit the caller saw listed for `ref`; `flash_build` applies only with `build` and is recorded false without it; `with_firmware` and `with_python` add `--with-firmware` and `--with-python` to the run's build, and either one without `build` is refused with 422 naming it); 201 with the run (including the `commit` sent to the runner), 409 busy, offline, rejected by the runner, or `ref` moved away from `commit`, 422 invalid, a ref not in `/api/refs` (full commit IDs are accepted), or a name listing several commits, 504 no answer |
+| `POST /api/run-groups` | start a [run group](#run-groups-one-plan-on-several-hosts): the same body as a run plus `{"hosts": ["Host_Linux", "Host_Mac"]}` (at least one, each named once, at most 16). 201 with the group, each member carrying its `run_id` or the `error` that host's start gave; 422 for an unusable request, a ref not in `/api/refs`, or an option that needs `build` without it; when no host started, the one status every host gave (404 an unknown target, 409 busy, 503 a runner away, 504 no answer in time) or 409 where they differ |
+| `GET /api/run-groups[?target=HOST]` | groups, newest first, each with its members; a run of its own is listed as a group of one (`implicit: true`, its ID the run's own) |
+| `GET /api/run-groups/{group_id}` | the group, each member's run with its failure summary, stage estimates and planned invocations (at most 600 of them, since this answer carries one list per host; the whole list stays at `GET /api/runs/{run_id}`), `steps` (one row per build, flash, preflight and test, with one cell per host that runs it) and `progress` (cells planned, cells done, and the summed estimate when every cell has one, which a run that flashes its boards has not got: flashing the run's build is not a learned stage) |
+| `POST /api/run-groups/{group_id}/cancel` | `{"reason": ""}`; 202 with each host's outcome once at least one child was cancelled, or once a host is still starting (its outcome says so, and the child its runner may still accept is cancelled as it arrives); 409 when nothing is running and nothing is starting; when no child could be cancelled, the one status every host gave (409 busy, 503 runner away, 504 no answer) or 409 where they differ |
 | `GET /api/runs[?target=HOST]` | runs, newest first |
 | `GET /api/runs/{run_id}` | status, every event, the failure summary (`failures`), `invocations` (from the run's manifest, every planned invocation on the target with `invocation_id`, `test_name`, `estimated_s`, `catalog_estimated_s`, `estimate_source`, `estimate_samples` and `estimate_scaled`; null before the manifest record), and `stages`: the run's build and preflight estimates where its host has learned them |
 | `GET /api/runs/{run_id}/report.md` | the run's report (Markdown) |
 | `GET /api/runs/{run_id}/files` | the output files the run recorded, each with its path, stream, size, line count, SHA-256, where it came from (`owner`), the checks that read it, and `readable`: whether this host holds the file itself |
 | `GET /api/runs/{run_id}/file?path=&offset=&limit=` | one bounded page of a saved output file, with what the run recorded about it and where the page sits in it. Only a path that run's own `run.jsonl` records is served, and only from inside the run directory, with no symbolic link followed; a page is 64 KiB by default and 1 MiB at most. A file that stayed on the target is asked of that run's runner (256 KiB at most, since the page travels in one protocol message, and `page_bytes` says what a page was); 503 while that runner is not connected, 504 if it does not answer in time, 400 or 404 for a path that may not be served, naming the path only |
 | `POST /api/runs/{run_id}/cancel` | `{"reason": ""}`; 202 once the runner accepts |
-| `WS /ws/live[?run_id=ID]` | browser stream: a `snapshot`, then `target` and `run` updates, plus that run's `event` records; a browser 1000 updates behind is closed with 1013 `live stream overflowed` (reconnect for a new snapshot) |
+| `WS /ws/live[?run_id=ID\|?group_id=ID]` | browser stream: a `snapshot`, then `target`, `run` and `group` updates. With `run_id`, that one run's `event` records too (and its group in the snapshot); with `group_id`, every member run's updates and `event` records, one stream for the whole group. Name one or the other, not both. A `group` update carries `"removed": true` when that group is forgotten (it started no run and no request can still be accepted), so a page does not keep a group the history no longer lists. A browser 1000 updates behind is closed with 1013 `live stream overflowed` (reconnect for a new snapshot); a group stream carries every member's traffic, so it reaches that mark sooner than one run's does |
 | `WS /ws/runner` | target runner protocol v5 |
 
 Every request and WebSocket handshake must carry `Host: 127.0.0.1:PORT` or
@@ -2729,10 +2849,13 @@ decodes as protocol v5 resets the offline timer, and malformed messages do
 not. The controller allows one
 outstanding start request per target and refuses a target whose runner reports
 an active run. Each run is a flat directory `<results dir>/<run_id>/` with
-`run.json` (the controller's record: target, request, status, exit code),
+`run.json` (the controller's record: target, request, status, exit code, and
+the `group_id` of a run started as one host of a
+[run group](#run-groups-one-plan-on-several-hosts)),
 `run.jsonl` (the runner's records, deduplicated by `(run_id, sequence)` across
 reconnects and controller restarts), and `report.md`, compiled from that
-run.jsonl when the run ends. The default results directory is
+run.jsonl when the run ends. Group records are one JSON file each in `groups/`
+beside those directories. The default results directory is
 `$XDG_DATA_HOME/ubertooth-harness/controller/runs` (else
 `~/.local/share/...`), outside the repository. A run still executing when the
 controller restarts is picked up again when its runner reconnects. A stored run

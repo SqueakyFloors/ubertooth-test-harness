@@ -7,7 +7,11 @@ from types import MappingProxyType
 from typing import Mapping
 
 from ubertooth_harness.cases import ALTERNATED_ROLE_PREFIX, GUARD_ROLE_PREFIX
-from ubertooth_harness.catalog import CatalogError, TestCatalog
+from ubertooth_harness.catalog import (
+    REQUIRED_HARDWARE_ARGUMENT,
+    CatalogError,
+    TestCatalog,
+)
 from ubertooth_harness.hostneeds import (
     Blocked,
     NotApplicable,
@@ -39,6 +43,23 @@ ANY_PLACEMENT = PlacementRequirement()
 
 class PlanningError(ValueError):
     """A valid plan cannot be satisfied by registered resources."""
+
+
+def _record_blocked(
+    records: list[Blocked], seen: set[tuple[str, str]], host: str,
+    test_name: str, reason: str,
+) -> None:
+    """Add one ``Blocked`` record per host and test.
+
+    One per pair: a step may hit the same absence for every board
+    ``Ubertooth: each`` tries, and two steps may name the same test, while
+    the live run view matches a planning record to its test by name, so a
+    second record would show the test twice.
+    """
+    if (host, test_name) in seen:
+        return
+    seen.add((host, test_name))
+    records.append(Blocked(host, test_name, reason))
 
 
 _FULL_SERIAL = re.compile(r"[0-9a-f]{32}")
@@ -97,15 +118,16 @@ class CompiledSuite:
     # Required tests this bench cannot run because the hardware they are
     # about is not registered (hostneeds.Blocked). Not applicable would read
     # as a pass, so they are recorded and the run that would have run them
-    # fails; every other step still compiles.
+    # fails; every other step still compiles. A record's host is a host the
+    # registry has, or an alias in ``absent_hosts`` for a required step whose
+    # host is not here at all.
     blocked: tuple[Blocked, ...] = ()
 
     def blocked_for_host(self, host: str) -> tuple[Blocked, ...]:
         """What this host's run cannot run and must not pass without.
 
-        Each record is for a host the registry has, so it belongs to that
-        host's run alone: another bench's missing hub is not this run's
-        failure.
+        A record for a host the registry has belongs to that host's run
+        alone: another bench's missing hub is not this run's failure.
 
         A record is kept even where the host runs the same test: with
         ``Ubertooth: each`` on a bench where only some boards can be
@@ -113,8 +135,33 @@ class CompiledSuite:
         for the rest, and a run that measured one board of three must not
         pass as though it had measured all three. That is why the live run
         view leaves such a test's own row alone and logs the record instead.
+
+        A required step naming a host this registry has not got is in every
+        run of the suite, as ``for_host`` puts that host's not-applicable
+        records in every run: no run of its own will ever carry it, and a
+        release gate nobody could measure must not pass anywhere. One record
+        per test, and nothing for a test any host here runs: that run
+        measures the gate, so an absent host's part of the step is not what
+        another run should fail on.
+
+        A test this host was left out of does carry the record, even though
+        it has a not-applicable reason of its own, as long as no host here
+        runs it: neither this host nor the one that is not here could
+        measure the gate, so no run of this suite would fail on it
+        otherwise, and the absence would read as a pass. ``for_host`` then
+        leaves its own record out, as it does for any test blocked on this
+        host.
         """
-        return tuple(item for item in self.blocked if item.host == host)
+        mine = tuple(item for item in self.blocked if item.host == host)
+        covered = {item.test_name for item in mine}
+        covered |= {item.test_name for item in self.invocations}
+        absent = []
+        for item in self.blocked:
+            if item.host not in self.absent_hosts or item.test_name in covered:
+                continue
+            covered.add(item.test_name)
+            absent.append(item)
+        return mine + tuple(absent)
 
     def for_host(self, host: str) -> tuple[NotApplicable, ...]:
         """What this host's run records: what this host was left out of, and
@@ -330,7 +377,13 @@ class PlanCompiler:
         still left out of the invocations, so every unrelated step compiles
         and runs, but the run it belonged to fails. That is what tells a
         plan written for another bench from a gate this bench meant to
-        measure and cannot.
+        measure and cannot. A step can say so itself with
+        ``required hardware: true``, which is how a gate suite holds a test
+        for peer hardware: without the peers, or without the host they are
+        on, the step is blocked rather than quietly left out. It says that
+        about absence only; what a host here cannot run at all (its platform,
+        a board placed differently from what the test needs) is decided
+        first and is unchanged by it.
 
         ``strict_hardware`` makes either absence an error, which is what
         ``validate-plan --hardware`` wants: there a registry is named on
@@ -366,17 +419,27 @@ class PlanCompiler:
                 )
                 hosts, absent = self._selected_hosts(host_selector, strict_hardware)
                 absent_hosts.update(absent)
+                # The plan says this step's hardware is what it measures, so
+                # its absence is blocked rather than left out (`blocked`).
+                required_hardware = (
+                    arguments.get(REQUIRED_HARDWARE_ARGUMENT) is True
+                )
                 # The reason names the host itself: the live run view shows a
                 # planning record by its reason alone, and "this registry has
                 # no such host" there would read as being about the host the
                 # run is on.
-                left_out = [
-                    NotApplicable(
-                        alias, step.test_name,
-                        f"{alias} is not a host in this registry",
-                    )
-                    for alias in absent
-                ]
+                left_out: list[NotApplicable] = []
+                for alias in absent:
+                    reason = f"{alias} is not a host in this registry"
+                    if required_hardware:
+                        _record_blocked(
+                            blocked_tests, recorded_blocked, alias,
+                            step.test_name, reason,
+                        )
+                    else:
+                        left_out.append(
+                            NotApplicable(alias, step.test_name, reason)
+                        )
                 # First what the hosts that are here can run at all: the
                 # plan's platforms: and the definition's needs, then the RF
                 # placement each role must have. A host is left out as not
@@ -433,25 +496,33 @@ class PlanCompiler:
                     except MissingResource as error:
                         if strict_hardware:
                             raise
-                        left_out.append(
-                            NotApplicable(alias, step.test_name, str(error))
-                        )
+                        if required_hardware:
+                            # The device this role binds is what the step
+                            # measures, so this host's run must fail on it.
+                            _record_blocked(
+                                blocked_tests, recorded_blocked, alias,
+                                step.test_name, str(error),
+                            )
+                        else:
+                            left_out.append(
+                                NotApplicable(alias, step.test_name, str(error))
+                            )
                         continue
                     bound.append((alias, choices))
                 not_applicable.extend(left_out)
                 if not bound:
                     continue
-                # Required hardware this bench has not got, for this step.
-                # Recorded per host, and the step produces no invocation for
-                # that host, so the rest of the suite still compiles.
-                step_blocked: list[Blocked] = []
-                # The hosts that hit such an absence, which is not the same
-                # as the hosts a record was added for: a second step of the
-                # same test on the same host adds none, and the step must
-                # still not be read as one whose resources could not be
-                # assigned.
+                # Hardware this step is about that the bench has not got is
+                # recorded per host below, and the step produces no
+                # invocation for that host, so the rest of the suite still
+                # compiles. These are the hosts that hit such an absence,
+                # which is not the same as the hosts a record was added for:
+                # a second step of the same test on the same host adds none,
+                # and the step must still not be read as one whose resources
+                # could not be assigned.
                 absent_on: set[str] = set()
                 for host, choices in bound:
+                    host_start = len(invocations)
                     host_choices[host] = dict(zip(role_names, choices))
                     combinations = itertools.product(*choices) if choices else [()]
                     for selected in combinations:
@@ -493,16 +564,10 @@ class PlanCompiler:
                                     f"{step.test_name}: {error}"
                                 ) from error
                             absent_on.add(host)
-                            # One record per test and host. `Ubertooth: each`
-                            # tries every board and each combination may hit
-                            # the same absence, and the live run view matches
-                            # a planning record to its test by name, so a
-                            # second record would show the test twice.
-                            if (host, step.test_name) not in recorded_blocked:
-                                recorded_blocked.add((host, step.test_name))
-                                step_blocked.append(
-                                    Blocked(host, step.test_name, str(error))
-                                )
+                            _record_blocked(
+                                blocked_tests, recorded_blocked, host,
+                                step.test_name, str(error),
+                            )
                             continue
                         # Numbered only once it is an invocation, so the IDs
                         # of a suite with a blocked step stay consecutive.
@@ -524,7 +589,42 @@ class PlanCompiler:
                                 exclusive_ubertooth=exclusive,
                             )
                         )
-                blocked_tests.extend(step_blocked)
+                    if (required_hardware and host not in absent_on
+                            and len(invocations) == host_start):
+                        # Every combination put one device in two roles, so
+                        # this host has not got a device of its own for each
+                        # role: one ESP32 Classic peer where the test needs
+                        # two is that bench. For a required step that is
+                        # missing hardware, not a plan to correct, so it is
+                        # recorded and the rest of the suite still compiles.
+                        # The aliases say which bench this is: the same one
+                        # named twice is a host with one device where the
+                        # test needs two, or one whose roles have no default
+                        # of their own and fall back to the same device. Both
+                        # remedies are named, because planning cannot tell
+                        # which was meant.
+                        reason = (
+                            "no device of its own for each role ("
+                            + ", ".join(
+                                f"{role} from "
+                                + " or ".join(host_choices[host][role])
+                                for role in role_names
+                            )
+                            + "); register another, or give the host a "
+                            "default for each role"
+                        )
+                        if strict_hardware:
+                            # The bench is named on purpose here, so this is
+                            # a refusal, as every other absence is. Named,
+                            # because a plan author reads it.
+                            raise MissingRequiredHardware(
+                                f"{step.test_name}: {host} has {reason}"
+                            )
+                        absent_on.add(host)
+                        _record_blocked(
+                            blocked_tests, recorded_blocked, host,
+                            step.test_name, reason,
+                        )
                 if len(invocations) == step_start and not absent_on:
                     # Every combination put one device in two roles. The
                     # message names what each role could have taken, since
@@ -535,7 +635,9 @@ class PlanCompiler:
                     # why it bound nothing. As before, a step that did bind
                     # something somewhere is not refused for the hosts that
                     # did not, so a host whose roles collide while another
-                    # host runs is still left out silently.
+                    # host runs is still left out silently, unless the step
+                    # says `required hardware: true`, where that host is
+                    # recorded blocked just above.
                     raise PlanningError(
                         f"{step.test_name}: no valid distinct resource "
                         "assignment: "

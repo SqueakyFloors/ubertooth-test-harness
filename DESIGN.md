@@ -56,11 +56,16 @@ checkoff, and a countdown/ETA in a web GUI.
   `/api/runs/{id}` (status and events), `/api/runs/{id}/report.md`,
   `/api/runs/{id}/files` and `/api/runs/{id}/file` (the output files the run
   saved, and one bounded page of one; a file that stayed on the target is
-  asked of that run's runner), `/api/runs/{id}/cancel`. `/ws/live` fans out target status changes, run
-  updates, and (with `?run_id=`) one run's events to browsers, best effort: a
+  asked of that run's runner), `/api/runs/{id}/cancel`, and `/api/run-groups`
+  for a run on several hosts at once ([section
+  4b](#4b-run-groups-one-plan-on-several-hosts)). `/ws/live` fans out target
+  status changes, run and group
+  updates, and (with `?run_id=`) one run's events or (with `?group_id=`) a
+  whole group's, to browsers, best effort: a
   browser that falls behind is disconnected, never the runner. `/ws/runner`
   speaks protocol v5. Each run is a flat directory
-  `<results dir>/<run_id>/` (`run.json`, `run.jsonl`, `report.md`), with the
+  `<results dir>/<run_id>/` (`run.json`, `run.jsonl`, `report.md`), with group
+  records in `groups/` beside them and the
   results directory outside the repository by default
   (`$XDG_DATA_HOME/ubertooth-harness/controller/runs`). `GET /` returns a
   JSON summary; the GUI is at `/ui/` ([section 4](#4-web-gui-controller)).
@@ -754,7 +759,22 @@ differently.
 Hardware a step is *about*, rather than hardware it binds, is a third
 outcome: `resources.MissingRequiredHardware`, raised for `alternate
 Ubertooths` on a host with one registered Ubertooth and for `exclusive
-Ubertooth` where another registered board is on no power controller. The step
+Ubertooth` where another registered board is on no power controller. A step
+may also claim that outcome for the hardware it binds, with
+`required hardware: true` (every test that binds hardware accepts it): the
+absence is usually the registry's own `MissingResource`, for the host or for
+a role, and the planner records it as blocked rather than not applicable. A
+host that can offer only one device for two roles is the planner's own
+finding, since no single lookup failed: it writes that reason itself, and
+raises `MissingRequiredHardware` for it only under `strict_hardware`.
+That is what lets a gate suite name one bench's hardware honestly,
+and `testplans/release.yaml` uses it for `Recover AFH map`; a record for a
+host the registry has not got is carried by the runs of the hosts that are
+here, as `for_host` carries that host's not-applicable records, unless some
+host here runs that test, in which case a run of this suite measures the
+gate and none of them fails on it. The argument decides
+absence only: what a host here cannot run at all is judged first, unchanged.
+The step
 is recorded as `hostneeds.Blocked` (`CompiledSuite.blocked`,
 `blocked_for_host`) and produces no invocation, so the rest of the suite
 compiles and runs; the sequencer emits a `blocked` event per record, counts
@@ -1012,7 +1032,9 @@ by the REST API and `/ws/live`.
   the refs again), and the runner runs exactly that commit, recording the
   ref name and the commit in the manifest and report. A branch and a tag of
   one name are separate entries, labelled, each with its own commit. When the list cannot be fetched it passes the ref
-  on unchecked and logs a warning. One target per run; a multiselect is a later step.
+  on unchecked and logs a warning. One target per run in the GUI; the API
+already takes several as a run group (4b), and the multiselect is the next
+step.
 - **Live run:** the suite rendered as a checklist that ticks in real time
   from the run's events (✓ passed / ✗ failed / … running / ○ pending, always
   with text, in an `aria-live` region), the stage, elapsed time, Cancel, and a
@@ -1101,6 +1123,78 @@ together in the event loop afterwards, so an API lookup never reads a
 half-updated store and a cancelled learn leaves no samples behind; a learning
 failure costs the countdown accuracy and nothing else. Marking a learned
 estimate in the GUI ("4s, from 10 runs") is the remaining step of issue #137.
+
+### 4b. Run groups: one plan on several hosts
+
+Implemented in the controller: `ubertooth_harness/rungroups.py`, issue #154.
+The GUI side (a host multiselect, a pill per host on every row, a transcript
+tab per host) is the next slice and is not built yet.
+
+A run on several hosts is a **run group**: `POST /api/run-groups` with the
+run request and a `hosts` list starts **one child run per host**, together.
+Each child is an ordinary run with its own runner, boards, leases, run
+directory and `run.jsonl`, so neither the runner protocol nor anything on a
+target changes; `group_id` in the child's `run.json` is the only addition. A
+single-host run (`POST /api/targets/{host}/runs`) stores no group and is
+presented as a **group of one** whose ID is the run's own, so history has one
+shape whatever started a run.
+
+- **One revision.** The ref is resolved once, before any child is started,
+  and every child is sent that commit. A branch that moves while the runs are
+  starting cannot split a group across two commits.
+- **Each host stands on its own.** The requests are sent and awaited
+  concurrently, and a host that is offline, busy, or whose runner rejects the
+  run leaves its reason on that member while the others run. The group then
+  reports `complete: false` and, once nothing is running, `error`: a group
+  that ran on two hosts of three did not do what was asked. A member whose
+  start request has not been answered yet reads `starting`, and the group
+  reads `running`: nothing has gone wrong with that host yet. A group not one
+  host of which started is no group at all — nothing is stored and the caller
+  is told, host by host, why (409, or the one status every host gave) — unless
+  a request timed out, which stays pending and may still be accepted: that
+  group is stored, its host reads `starting` until the request is answered or
+  expires, and a group with no child at all is forgotten once the last such
+  request is gone. A group cancelled while a request was outstanding cancels
+  the child that arrives afterwards as well. A pending request does not
+  survive a controller restart, so a child reported after one is adopted as a
+  run of its own; a late refusal or a lost connection, in the same window,
+  does reach the group and is recorded as that host's reason.
+- **Status is derived, never stored.** `running` while any child is active,
+  `passed` only when every host the group asked for ran and passed, otherwise
+  the worst child outcome (`error` over `failed` over `lost` over `canceled`
+  over `passed`, with a status the code does not know ranking as an error). A
+  stored group record holds only the request, which run each host got, and
+  whether a cancel was asked for, so nothing has to be kept in step with the
+  children.
+- **Cancel applies to the group.** `POST /api/run-groups/{id}/cancel` cancels
+  every active child and reports each host's outcome; a host whose runner is
+  away keeps its own reason and the others are still cancelled, and a host
+  that is still starting has nothing to cancel yet but has the child it
+  accepts next cancelled as it arrives. Only when not one child could be
+  cancelled, and none is starting, is it a refusal.
+- **Per-host step results.** `GET /api/run-groups/{id}` returns one row per
+  step — build, flash, preflight, then the tests in planned order — each with
+  one cell **per host that runs it, and only those**: a step a host does not
+  plan has no cell, which is how a Linux-only test ends up with a Linux cell
+  and no macOS one. What a host plans comes from that run's own `manifest`
+  record, so the planner on each target decides, not the controller. Each
+  cell carries the status, when it started and finished, the elapsed seconds,
+  the reason it failed, the estimate learned for that host, and its parts (a
+  test's invocations, one per board; a flash's boards), which is what a pill
+  that doubles as a progress bar needs. A required test the planner could not
+  compile on a host (`blocked`, #273) has no invocation, so its cell is that
+  planning record and ranks worse than a pass. `progress` counts the cells, so a
+  group of two hosts counts each host's preflight; its summed estimate needs
+  every cell to have one, which a run that flashes its boards has not got,
+  since flashing the run's build is not learned as a stage (4a).
+- **Live.** `/ws/live?group_id=ID` carries every member run's updates and
+  events on one stream (one transcript per host) plus the group's own
+  updates; `?run_id=ID` is unchanged and still carries that one run, with the
+  group it belongs to in its snapshot.
+
+Still open on #154: a plan step no selected host can run fails planning on
+that host instead of being left out there (the plan side of the issue), and
+the GUI slice above.
 
 ---
 

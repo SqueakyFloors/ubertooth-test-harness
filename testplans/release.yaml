@@ -136,11 +136,40 @@ suites:
         hosts: each
         coverage: comprehensive
 
+    # The one entry that names a bench host, and the one that needs a peer:
+    # the two ESP32 Classic peers hold a piconet to a chosen channel map, and
+    # a release has to carry the measurement that `ubertooth-afh` still
+    # recovers that map from the air.
+    #
+    # `required hardware: true` is what makes naming one host honest here. A
+    # registry without `Host_Linux`, or with it but without the peers, still
+    # compiles the plan and runs every other test (#265), and this step is
+    # recorded as blocked rather than quietly left out (#269): the run then
+    # finishes failed, so the gate cannot pass unmeasured. Register the peers,
+    # or run a suite that does not hold it.
+    #
+    # Smoke, two captures of two minutes: 520.0 s, taking the release
+    # estimate from 654.5 s to 1174.5 s (about 20 min), inside the 30-minute
+    # target. The comprehensive profile's third case (`-t`, the detection
+    # path) stays in the `classic-comprehensive` suite, which a release runs
+    # alongside this plan.
+    - Recover AFH map:
+        hosts: [Host_Linux]
+        required hardware: true
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        coverage: smoke
+        duration: 2m
+
     # `Classic btbr console` is deliberately not here, although it is the only
-    # coverage of `ubertooth-btbr` and of the `btbr` firmware image. Every
-    # test in this plan runs on any host, and that one needs a Linux host with
-    # a registered ESP32 Classic peer: naming one host alias here would make
-    # the whole plan refuse to compile against a registry without it. It lives
-    # in the `btbr` suite of `testplans/classic.yaml` with the other
-    # peer tests, and a release runs that suite as well (README, "Before a
-    # release").
+    # coverage of `ubertooth-btbr` and of the `btbr` firmware image. It cannot
+    # run at all without a run carrying both firmware images and the Python
+    # tools (`--build --with-firmware --with-python`), which a release run of
+    # this plan need not carry, and because it writes the board's firmware
+    # nothing may run on that board after it: mandatory preflight refuses a
+    # test that would run on an image this run put there. It lives in the
+    # `btbr` suite of
+    # `testplans/classic.yaml` with the other peer tests, and a release runs
+    # that suite as well (README, "Option compositions and stateful
+    # transitions").

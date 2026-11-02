@@ -3,7 +3,9 @@
 One section per test in the harness catalog
 ([`ubertooth_harness/catalog.py`](../ubertooth_harness/catalog.py)), in catalog
 order. Each heading is the exact catalog name, which is also the name a plan
-writes, so a test without a section here is easy to spot.
+writes, so a test without a section here is easy to spot. The last section,
+`Out of scope: ...`, is the exception: it records what the harness has decided
+not to test, so a missing catalog entry is not mistaken for an oversight.
 
 Each section says what the test does, how it produces a known answer, what
 hardware and arguments it needs, what passes and fails, and what it cannot
@@ -45,13 +47,18 @@ self-reset counter into a pass/fail measure for that step; without it a
 self-reset is reported and judged by a person, not failed
 ([`watchdog.py`](../ubertooth_harness/watchdog.py)). `Flash reliability`,
 `Exclusive Ubertooth topology`, and `MAC polling soak` must state their
-platforms.
+platforms. Every test that binds hardware also accepts `rf:`, one placement
+requirement per role, and `required hardware: true`, which says the hardware
+that step names is what the step measures: a registry without it blocks the
+step and fails the run rather than leaving it out ("Hardware a step is
+about", below).
 
 **Hardware the bench has not got.** A step whose `hosts:` name a host this
 registry does not have, or whose hardware roles no selected host can bind (no
 ESP32 Classic peer, no DK, no default for the role, none declaring the role),
 is left out before the run as not applicable, the same way a platform
-mismatch is. So a plan every host runs may still hold a step for hardware
+mismatch is, unless the step carries `required hardware: true`, where it is
+blocked instead. So a plan every host runs may still hold a step for hardware
 only one bench has. What a host that is here cannot run is still a plan
 error: a platform it does not have, and a board placed differently from what
 the test needs, fail planning when every host the step names is here and none
@@ -60,10 +67,14 @@ left out instead).
 `validate-plan --hardware <registry>` refuses the absence too, since there
 the bench is named on purpose (README, "Hardware a registry has not got").
 
-**Hardware a step is about.** Two absences are not left out quietly, because
-the missing hardware is the subject of the test: `alternate Ubertooths` on a
-host with one registered Ubertooth, and `exclusive Ubertooth` where another
-registered board is on no power controller. Such a step is recorded as
+**Hardware a step is about.** Three absences are not left out quietly,
+because the missing hardware is the subject of the test: `alternate
+Ubertooths` on a host with one registered Ubertooth, `exclusive Ubertooth`
+where another registered board is on no power controller, and a step that
+says so itself with `required hardware: true` for the hardware it binds (a
+host with no peer registered, one peer where the test needs two, or a
+registry without that host at all). `testplans/release.yaml` uses the last
+of those for `Recover AFH map`. Such a step is recorded as
 **blocked** before the run; every unrelated step still compiles and runs, and
 the run finishes failed, so a gate nobody measured never reads as a pass.
 `run-suite --dry-run` lists the blocked steps and exits 1. A suite whose only
@@ -1056,9 +1067,10 @@ alternates BLE and BR/EDR five times and requires zero packets from the
 previous mode in every dump and every capture.
 
 **Known limits.** No peer: the E-GO cases print nothing with no skateboard in
-range, so they check that the tool runs and reports nothing malformed. The
-dump cases check record structure and rate, not that the symbols mean
-anything.
+range, so they check that the tool runs and reports nothing malformed. That is
+as far as the harness goes with E-GO on purpose, not for want of a fixture
+(see `Out of scope: Uberducky and E-GO devices`). The dump cases check record
+structure and rate, not that the symbols mean anything.
 
 ## Board state between runs
 
@@ -2340,9 +2352,18 @@ peers must run `utesp-1.3.0` or a later 1.x image, which is where `afh` and
 the link map arrived; an older one fails the case naming what it found. The
 Ubertooth defaults to needing an ordinary link, as the other two Classic
 tests do, so a plan asking for the attenuated receiver has to say so; two
-minutes is the capture window the classic plan uses. The release plan does not name it:
-every entry there runs on each registered host, and naming the one host the
-peers are attached to would fail planning on the others.
+minutes is the capture window both plans that hold it use.
+
+The release plan holds it too, as the `smoke` profile, and it is the one
+entry there that names a bench host, because the peers are on one host. It
+carries `required hardware: true`, so the naming costs the other benches
+nothing and hides nothing either: a registry without those peers, or without
+that host, runs every other release test and records this one as blocked, and
+the run finishes failed rather than passing with the recovery unmeasured. Its
+smoke estimate is about 520 s, which takes the release suite to about 1175 s
+(roughly 20 minutes) on the host it names; a target without the peers plans
+about 655 s of the suite and fails on this step. The third, `-t` case stays in the
+`classic-comprehensive` suite, which a release runs alongside the gate.
 
 **Expected outcome.** Smoke runs 2 cases, one per map: channels 0 to 39, and
 channels 30 to 49, the twenty the spec allows at least and the firmware's own
@@ -2522,6 +2543,50 @@ a bad image is refused, the read-back must still find the test image, which
 proves the refusal happened before the write rather than after a partial one.
 `-s` is checked against the build's own `.dfu` byte for byte, so the host-side
 suffixing has an exact right answer.
+
+A read-back is compared with the image as `-d` writes it, which is not quite
+the file. `ubertooth-dfu` fills in two things in the image's first block for
+the bootloader's own checks: the LPC vector checksum at 0x1c, and, in an
+image that carries an image check block, the record of the download at
+0xea-0xf7 inside it. Those fields are checked against what the writer should
+have worked out -- the eight vector words adding up to zero, the flags, the
+length of the region written and its complement, and the checksum that makes
+the whole region add up to zero -- rather than passed over, so a board that
+kept the file's empty values fails. Every other byte has to match the file.
+How long a dump is follows the part: 114688 bytes above the bootloader on a
+128 KiB part, 245760 on a 256 KiB one, and the size the firmware is linked
+for when the part cannot be read, which includes every board already in the
+bootloader. The `read-back` step records the range the command printed
+(`Reading back 114688 bytes, 0x4000-0x1ffff: part 0x25011722 (LPC1754) has
+128 KiB of flash`) and the comparison takes the length from there, so no part
+is assumed; a tool that prints no range fails that step rather than having
+its dump measured against a guess.
+
+All three arrived on the fork's main after the earlier releases, so the case
+expects them: the range line in `10c3381`
+([ubertooth#257](https://github.com/SqueakyFloors/ubertooth/pull/257)), the
+vector checksum in `31228b0`
+([ubertooth#1037](https://github.com/SqueakyFloors/ubertooth/pull/1037)) and
+the image check record in `d91bb06`
+([ubertooth#1048](https://github.com/SqueakyFloors/ubertooth/pull/1048)), the
+last two for the bootloader checks of
+[ubertooth#242](https://github.com/SqueakyFloors/ubertooth/issues/242).
+Against a build between `31228b0` and `d91bb06` the case still passes: the
+image check block arrived in `d91bb06` on both sides at once, so an image
+from that window carries none and there is no record to fill in or to check.
+Against one between `10c3381` and `31228b0` it fails on the vector checksum
+alone (`vector checksum at 0x0401c is 0x00000000, expected 0x...`): the dump
+equals the file, and that field is checked against what the writer should
+have worked out, so equalling the file is not enough.
+
+**Do not run this case against a build older than `10c3381` on an Ubertooth
+One.** Such a `-u` reads a fixed 0x4000-0x3ffff whatever the part has, and on
+the 128 KiB part the board is built from that asks for flash above the end of
+it, which faults the bootloader until the board is power-cycled
+([ubertooth#233](https://github.com/SqueakyFloors/ubertooth/issues/233), which
+`10c3381` closed). The
+case reports it as a failed `-u` and a cleanup that cannot reach the board,
+not as a comparison it could make.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial, with
 every other registered board as guards. `coverage:`. Needs the firmware build
@@ -2732,37 +2797,25 @@ name it.
 **Known limits.** Needs a firmware image other than the usual one, so it would
 write firmware and have to be the last test on its board.
 
-## Uberducky HID
+## Out of scope: Uberducky and E-GO devices
 
-**What it does.** Nothing yet: a catalog entry for exercising an Uberducky HID
-fixture.
+Device-level testing of `ubertooth-ducky` and `ubertooth-ego` is out of scope
+([#89](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/89)), by
+the maintainer's scope decision. There is no catalog test and no backlog entry
+for either, and neither is waiting on a fixture: the harness will not drive an
+Uberducky HID peer or a registered E-GO skateboard. So `ubertooth-ducky -q`
+and `-b`, which transmit, `ubertooth-ego -i` and `-j`, which transmit, and
+`ubertooth-ego -f`, which needs a skateboard to follow, all stay untested.
 
-**Theory of operation.** Not established.
+What the harness does keep for both tools needs no peer and no transmission:
 
-**Hardware and arguments.** A required `Uberducky:` resource; no Ubertooth
-role.
+- `Host CLI surface` runs `ubertooth-ducky -h` and `ubertooth-ego -h` and
+  requires exit 0 with the tool's own name in the output.
+- `Argument validation` covers their refusals: `ducky -A36`, `-A40`, a
+  malformed `-a` address, `ego -l0`, `-l49`, and a stray word on each, every
+  one refused with exit 1 and no device change.
+- `Raw receive` runs `ubertooth-ego -r -c 2440` with nothing in range, along
+  with `-l 1`, `-l 48`, and `-a 630f9ffe` accepted and `-a zz` refused, so the
+  receive path and its parsing are exercised without an E-GO present.
 
-**Expected outcome.** No implementation; only a `runnable: false` plan may
-name it.
-
-**Known limits.** Needs an Uberducky fixture
-([#89](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/89)), and
-`ubertooth-ducky` transmits, so a plan would have to allow RF.
-
-## E-GO skateboard capture
-
-**What it does.** Nothing yet: a catalog entry for capturing a registered E-GO
-skateboard.
-
-**Theory of operation.** Not established. `Raw receive` covers
-`ubertooth-ego -r` with nothing in range, where the expected answer is that it
-runs and prints nothing malformed.
-
-**Hardware and arguments.** A required `skateboard:` resource; no Ubertooth
-role.
-
-**Expected outcome.** No implementation; only a `runnable: false` plan may
-name it.
-
-**Known limits.** Needs an E-GO skateboard as a fixture
-([#89](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/89)).
+[`COVERAGE.md`](../COVERAGE.md) carries the per-option status for both tools.

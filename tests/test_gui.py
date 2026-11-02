@@ -538,7 +538,7 @@ class PlanTests(ControllerTestCase):
                 "    - Spectrum analyzer:\n        coverage: smoke\n        duration: 2m\n"
                 "  partial:\n"
                 "    - Host CLI surface: {}\n"
-                "    - Uberducky HID:\n        Uberducky: x\n",
+                "    - Receive-only firmware:\n        Ubertooth: default\n",
                 encoding="utf-8",
             )
             (root / "broken.yaml").write_text("plan: Broken\nsuites: []\n", encoding="utf-8")

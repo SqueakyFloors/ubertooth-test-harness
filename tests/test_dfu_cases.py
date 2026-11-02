@@ -32,12 +32,49 @@ def signed(payload: bytes, vendor=dfuimage.VENDOR, product=dfuimage.PRODUCT) -> 
     return body + struct.pack("<I", dfuimage.dfu_crc(body))
 
 
-def firmware(revision=REVISION, size=3000) -> bytes:
-    """Filler carrying the firmware info block -d reads the revision from."""
+def firmware(revision=REVISION, size=3000, image_check=False) -> bytes:
+    """Filler carrying the firmware info block -d reads the revision from.
+
+    ``image_check`` adds the image check block an image from the fork's
+    current tree carries, which -d fills in as it writes the first block.
+    """
     body = bytearray(bytes(range(256)) * (size // 256))
+    # An image this tree builds leaves the vector checksum word empty: the
+    # application's vector table does not fill it in and no build step does
+    # either, so -d is what puts a value there.
+    body[dfuimage.VECTOR_CHECKSUM_OFFSET:dfuimage.VECTOR_CHECKSUM_OFFSET + 4] = bytes(4)
     block = dfuimage.fw_info_block(revision=revision)
     body[dfuimage.FW_INFO_OFFSET:dfuimage.FW_INFO_OFFSET + len(block)] = block
+    if image_check:
+        offset = dfuimage.IMAGE_CHECK_OFFSET
+        body[offset:offset + dfuimage.IMAGE_CHECK_LENGTH] = (
+            dfuimage.IMAGE_CHECK_MAGIC
+            + struct.pack("<HHIII", dfuimage.IMAGE_CHECK_FORMAT, 0, 0, 0, 0)
+            + bytes(8))
     return signed(bytes(body))
+
+
+# Two parts from the fork's table (host/ubertooth-tools/src/dfu_recovery.c),
+# so a fake board can answer as a 128 KiB part and as a 256 KiB one.
+PARTS = {128 * 1024: (0x25011722, "LPC1754"), 256 * 1024: (0x25011723, "LPC1756")}
+# What a -u covers on the Ubertooth One's own part, which is also what the
+# tool assumes for a board already in the bootloader.
+READBACK_LENGTH = dfuimage.upload_length(128 * 1024)
+
+
+def plan_line(flash_size=128 * 1024, *, identified=True) -> str:
+    """plan_upload()'s line. A board already in the bootloader cannot report
+    its part, so the tool assumes the size the firmware is linked for."""
+    length = dfuimage.upload_length(flash_size if identified else 0)
+    start = dfuimage.APPLICATION_OFFSET
+    line = f"Reading back {length} bytes, 0x{start:x}-0x{start + length - 1:x}: "
+    if not identified:
+        return line + (f"the part could not be read, so assuming the "
+                       f"{dfuimage.ASSUMED_FLASH_SIZE // 1024} KiB part this "
+                       "firmware is linked for\n")
+    part_id, name = PARTS[flash_size]
+    return line + (f"part 0x{part_id:08x} ({name}) has "
+                   f"{flash_size // 1024} KiB of flash\n")
 
 
 class FakeDfuBoard:
@@ -49,14 +86,23 @@ class FakeDfuBoard:
     (#198: refused only after entering DFU, and left there), ``accept_wrong_id``
     (#199), ``double_suffix`` and ``needs_write_access`` (#200),
     ``detach_exit_1`` (#267: -d -r exits 1 after a good flash), and ``bad_readback``,
-    ``partial_write_on_reject``, ``reject_exit_zero``, ``stays_in_dfu_after_upload``,
-    ``wrong_sign_vendor``, ``dfu_count_extra`` for failures no fork has shown.
+    ``bad_vector_checksum``, ``no_plan_line`` (a -u that says nothing about
+    the range it covers, as earlier builds did), ``no_first_block_fill`` (a -d
+    that fills in neither field, as builds before fork 31228b0 did),
+    ``odd_plan_line`` (a -u that reports a range no part has),
+    ``partial_write_on_reject``,
+    ``reject_exit_zero``, ``stays_in_dfu_after_upload``, ``wrong_sign_vendor``,
+    ``dfu_count_extra`` for failures no fork has shown.
+
+    ``flash_size`` is the part's whole flash, which decides how much a -u
+    read-back covers and what the command says it is reading.
     """
 
-    def __init__(self, image: bytes, **flags):
+    def __init__(self, image: bytes, flash_size=128 * 1024, **flags):
         self.flags = flags
         self.mode = "app"
-        self.flash = bytearray(b"\xff" * dfuimage.APPLICATION_SIZE)
+        self.flash_size = flash_size
+        self.flash = bytearray(b"\xff" * dfuimage.upload_length(flash_size))
         self._program(image)
         self.revision = REVISION
         self.commands = []
@@ -65,8 +111,20 @@ class FakeDfuBoard:
 
     # -- helpers -------------------------------------------------------
     def _program(self, data: bytes):
-        padded = -(-len(data) // 256) * 256
-        self.flash[:padded] = data + b"\xff" * (padded - len(data))
+        """Write ``data`` as -d does: whole blocks, the last one padded, and
+        the first block's vector checksum and image check record filled in."""
+        written = data if self.flags.get("no_first_block_fill") else \
+            dfuimage.written_image(data)
+        padded = -(-len(written) // 256) * 256
+        self.flash[:padded] = written + b"\xff" * (padded - len(written))
+
+    def plan_line(self, selected) -> str:
+        """What this board's -u says it is about to read. Without a selector
+        the board is already in DFU, where its part cannot be read."""
+        if self.flags.get("odd_plan_line"):
+            return ("Reading back 1024 bytes, 0x4000-0x43ff: part 0x25011722 "
+                    "(LPC1754) has 128 KiB of flash\n")
+        return plan_line(self.flash_size, identified=selected is not None)
 
     def _board(self, serial, guards=()):
         def run(argv, timeout_s):
@@ -132,6 +190,10 @@ class FakeDfuBoard:
         stderr = "DFU +0.000s: operation started\n"
         self.mode = "dfu"
         if "-u" in options:
+            # plan_upload() says what it is about to read before it reads it,
+            # so the line is there whether or not the transfer then fails.
+            if not self.flags.get("no_plan_line"):
+                stderr += self.plan_line(selected)
             if selected is not None:
                 self.selected_uploads += 1
                 if self.selected_uploads in self.flags.get("failing_uploads", ()):
@@ -139,7 +201,7 @@ class FakeDfuBoard:
                     Path(options[options.index("-u") + 1]).write_bytes(b"\xff" * 512)
                     return self._result(command, 157, "....\n",
                                         stderr + "LIBUSB_ERROR_OTHER\nFirmware upload failed\n")
-            Path(options[options.index("-u") + 1]).write_bytes(self._read())
+            Path(options[options.index("-u") + 1]).write_bytes(self._read(selected))
         if "-d" in options:
             data = path.read_bytes()
             refusal = self._refusal(path, data)
@@ -164,10 +226,15 @@ class FakeDfuBoard:
                 stderr += f"Verified firmware revision: {self.revision}\n"
         return self._result(command, 0, "", stderr)
 
-    def _read(self):
-        data = bytearray(self.flash)
+    def _read(self, selected=SERIAL):
+        """The dump -u writes: as much of the region as the command asked
+        for, which on a board in the bootloader is the assumed size."""
+        length = dfuimage.upload_length(self.flash_size if selected is not None else 0)
+        data = bytearray(self.flash[:length])
         if self.flags.get("bad_readback"):
             data[100] ^= 0xFF
+        if self.flags.get("bad_vector_checksum"):
+            data[dfuimage.VECTOR_CHECKSUM_OFFSET] ^= 0xFF
         return bytes(data)
 
     @staticmethod
@@ -292,6 +359,14 @@ def failed(events):
 ALL_REJECTS = [f"reject-{kind}" for kind in dfuimage.BAD_KINDS]
 
 
+def flash_problems(board, image=None):
+    """readback_problems() over the fake's whole flash, with the range a -u
+    on the selected board reports."""
+    return dfuimage.readback_problems(
+        bytes(board.flash), firmware() if image is None else image,
+        plan=dfuimage.readback_plan(board.plan_line(SERIAL)))
+
+
 class DfuImageFileTests(unittest.TestCase):
 
     def test_every_bad_kind_is_invalid_and_the_source_valid(self):
@@ -313,25 +388,30 @@ class DfuImageFileTests(unittest.TestCase):
     def test_readback_comparison(self):
         image = firmware()
         board = FakeDfuBoard(image)
-        self.assertEqual([], dfuimage.readback_problems(board._read(), image))
+        plan = dfuimage.readback_plan(board.plan_line(SERIAL))
+        self.assertEqual([], dfuimage.readback_problems(board._read(), image, plan=plan))
         board.flags["bad_readback"] = True
         self.assertIn("differs from the image at 0x04064",
-                      dfuimage.readback_problems(board._read(), image)[0])
+                      dfuimage.readback_problems(board._read(), image, plan=plan)[0])
         padded = bytearray(FakeDfuBoard(image)._read())
         padded[len(image)] = 0
-        self.assertIn("padding", dfuimage.readback_problems(bytes(padded), image)[0])
-        self.assertIn("bytes, expected 245760", dfuimage.readback_problems(image, image)[0])
+        self.assertIn("padding",
+                      dfuimage.readback_problems(bytes(padded), image, plan=plan)[0])
+        self.assertIn("bytes, not the 114688 the command reported",
+                      dfuimage.readback_problems(image, image, plan=plan)[0])
 
     def test_leave_dfu_refuses_without_a_unique_dfu_device_or_with_a_silent_guard(self):
         board = FakeDfuBoard(firmware(), dfu_count_extra=1)
         board.mode = "dfu"
         with redirect_stdout(io.StringIO()):
-            self.assertIn("2 DFU devices", board._board(SERIAL).leave_dfu(Path("/nonexistent")))
+            self.assertIn("2 DFU devices",
+                          board._board(SERIAL).leave_dfu(Path("/nonexistent")).failure)
         board = FakeDfuBoard(firmware())
         board.mode = "dfu"
         helper = board._board(SERIAL, ("silent",))
         with redirect_stdout(io.StringIO()):
-            self.assertIn("guard board silent does not answer", helper.leave_dfu(Path("/x")))
+            self.assertIn("guard board silent does not answer",
+                          helper.leave_dfu(Path("/x")).failure)
         self.assertEqual("dfu", board.mode)
         self.assertFalse(any(c[0] == "ubertooth-dfu" for c in board.commands))
 
@@ -339,7 +419,11 @@ class DfuImageFileTests(unittest.TestCase):
         board = FakeDfuBoard(firmware())
         board.mode = "dfu"
         with tempfile.TemporaryDirectory() as d, redirect_stdout(io.StringIO()):
-            self.assertEqual("", board._board(SERIAL, (GUARD,)).leave_dfu(Path(d) / "r.bin"))
+            left = board._board(SERIAL, (GUARD,)).leave_dfu(Path(d) / "r.bin")
+        self.assertEqual("", left.failure)
+        # The part cannot be read in the bootloader, so the dump is the
+        # assumed length rather than the part's own.
+        self.assertEqual(READBACK_LENGTH, left.plan.length)
         dfu = [c for c in board.commands if c[0] == "ubertooth-dfu"]
         self.assertEqual([("ubertooth-dfu", "-u", dfu[0][2], "-r")], dfu)
         self.assertEqual("app", board.mode)
@@ -355,7 +439,8 @@ class DfuCaseShapeTests(unittest.TestCase):
 
     def test_device_commands_select_the_board_and_never_omit_reset(self):
         context = {"artifact test_build": "/t.dfu", "expected firmware revision": REVISION,
-                   "capture dir": "/cap"}
+                   "capture dir": "/cap",
+                   dfu_cases.READBACK_RANGE_KEY: plan_line().strip()}
         for case in cases_for("comprehensive", guard=True):
             for step in case.steps + case.cleanup:
                 argv = step.resolve_argv(context)
@@ -393,7 +478,7 @@ class DfuRunTests(unittest.TestCase):
         board, summary, events = self.run_with(**CORRECT)
         self.assertTrue(summary.passed, summary.failure_reason)
         self.assertEqual(("app", REVISION), (board.mode, board.revision))
-        self.assertEqual([], dfuimage.readback_problems(bytes(board.flash), firmware()))
+        self.assertEqual([], flash_problems(board))
 
     def test_fork_main_6fee30c_fails_only_the_write_on_267(self):
         # SqueakyFloors/ubertooth#267: -d -r exits 1 after a good flash. Only
@@ -414,7 +499,7 @@ class DfuRunTests(unittest.TestCase):
         # restored, so the whole test ran and the board is back.
         self.assertIn("operation started' was found", summary.failure_reason)
         self.assertEqual(("app", REVISION), (board.mode, board.revision))
-        self.assertEqual([], dfuimage.readback_problems(bytes(board.flash), firmware()))
+        self.assertEqual([], flash_problems(board))
         _board, smoke, _events = self.run_with("smoke", **OLD_FORK)
         self.assertTrue(smoke.passed, smoke.failure_reason)
 
@@ -451,7 +536,7 @@ class DfuRunTests(unittest.TestCase):
         board, summary, events = self.run_with(**CORRECT, partial_write_on_reject=True)
         # The attempt fails first (it opened the device); cleanup repairs flash.
         self.assertIn("operation started' was found", summary.failure_reason)
-        self.assertEqual([], dfuimage.readback_problems(bytes(board.flash), firmware()))
+        self.assertEqual([], flash_problems(board))
         rewrites = [c for c in board.commands if c[0] == "ubertooth-dfu" and "-d" in c
                     and c[c.index("-d") + 1].endswith("bluetooth_rxtx.dfu")]
         self.assertEqual(1 + 7, len(rewrites))  # the first write, then one per reject case
@@ -620,8 +705,15 @@ class DfuHelperRecordTests(unittest.TestCase):
         # harness's own command records.
         self.assertRegex(board.report, r"\[O\] \d{4}-\d\d-\d\dT[\d:.]+ \[C\] ubertooth-dfu "
                                        r"-U abc123 -u \S+restore-readback\.bin -r\n")
+        # Two stderr lines, so the record puts each on its own: the DFU stage
+        # and the range the read-back reported.
+        self.assertRegex(board.report, r"\[O\] \d{4}-\d\d-\d\dT[\d:.]+ \[E\] DFU "
+                                       r"\+0\.000s: operation started\n")
+        self.assertRegex(board.report, r"\[O\] \d{4}-\d\d-\d\dT[\d:.]+ \[E\] Reading back "
+                                       r"114688 bytes, 0x4000-0x1ffff: part 0x25011722 "
+                                       r"\(LPC1754\) has 128 KiB of flash\n")
         self.assertRegex(board.report, r"\[O\] \d{4}-\d\d-\d\dT[\d:.]+ \[R\] ubertooth-dfu "
-                                       r"exit 0 in 0\.010s; \[E\] DFU \+0\.000s: operation started")
+                                       r"exit 0 in 0\.010s\n")
         self.assertRegex(board.report, r"\[O\] \d{4}-\d\d-\d\dT[\d:.]+ \[R\] ubertooth-util "
                                        r"exit 0 in 0\.010s; \[O\] Firmware version: git-test")
 
@@ -692,12 +784,16 @@ class DfuTimeoutTests(unittest.TestCase):
                                      if answers else "", "", timeout, False)
             path = Path(argv[argv.index("-u") + 1]) if "-u" in argv else None
             calls["dfu"] += 1
+            # Every -u says what it is about to read before it reads it,
+            # including the one that then fails.
+            reported = plan_line(identified="-U" in argv) if path is not None else ""
             if calls["dfu"] == 1:
-                return CommandResult(tuple(argv), 157, "", "failed\n", timeout, False)
+                return CommandResult(tuple(argv), 157, "", reported + "failed\n",
+                                     timeout, False)
             if path is not None:
-                flash = image if calls["dfu"] == 4 else b"\0" * 16
-                path.write_bytes(flash + b"\xff" * (dfuimage.APPLICATION_SIZE - len(flash)))
-            return CommandResult(tuple(argv), 0, "", "", timeout, False)
+                flash = dfuimage.written_image(image) if calls["dfu"] == 4 else b"\0" * 16
+                path.write_bytes(flash + b"\xff" * (READBACK_LENGTH - len(flash)))
+            return CommandResult(tuple(argv), 0, "", reported, timeout, False)
 
         def dfu_count():
             now[0] += dfuimage.DFU_COUNT_TIMEOUT_S
@@ -726,6 +822,391 @@ class DfuTimeoutTests(unittest.TestCase):
                         with self.subTest(case.case_id, step=step.step_id, guard=guard):
                             self.assertEqual(dfuimage.step_timeout_s(command, count),
                                              step.timeout_s)
+
+
+class DfuWrittenImageTests(unittest.TestCase):
+    """What -d fills in as it writes an image's first block (#278).
+
+    The checks here are the criteria the board applies, not a second copy of
+    the harness's arithmetic: the eight vector words have to add up to zero
+    (NXP UM10360), the record has to describe this download, and the whole
+    region written has to add up to zero as well
+    (firmware/bootloader/app_image.h).
+    """
+
+    def test_the_vector_checksum_makes_the_eight_words_add_up_to_zero(self):
+        for image_check in (False, True):
+            with self.subTest(image_check=image_check):
+                image = firmware(image_check=image_check)
+                block = dfuimage.written_first_block(image)
+                self.assertEqual(0, sum(struct.unpack_from("<8I", block)) & 0xFFFFFFFF)
+                # The file leaves the word zero, so this one was filled in.
+                self.assertEqual(0, struct.unpack_from(
+                    "<I", image, dfuimage.VECTOR_CHECKSUM_OFFSET)[0])
+                self.assertNotEqual(0, struct.unpack_from(
+                    "<I", block, dfuimage.VECTOR_CHECKSUM_OFFSET)[0])
+
+    def test_the_image_check_record_describes_the_download(self):
+        image = firmware(image_check=True)
+        block = dfuimage.written_first_block(image)
+        blocks = dfuimage.image_block_count(image)
+        flags, length, complement, checksum = struct.unpack_from(
+            "<HIII", block, dfuimage.IMAGE_CHECK_OFFSET + dfuimage.IMAGE_CHECK_OFF_FLAGS)
+        self.assertEqual(0x0003, flags)  # the vector check and the region check
+        self.assertEqual(blocks * 256, length)  # whole blocks, the last padded
+        self.assertEqual(length ^ 0xFFFFFFFF, complement)
+        self.assertNotEqual(0, checksum)
+        # What the download writes adds up to zero, the record included.
+        region = block + b"".join(dfuimage.image_block(image, index)
+                                  for index in range(1, blocks))
+        self.assertEqual(blocks * 256, len(region))
+        self.assertEqual(0, dfuimage.image_check_sum(region))
+
+    def test_an_image_with_no_check_block_keeps_those_bytes(self):
+        """Only an image from a tree that has the block carries it, and the
+        tool writes over those 32 bytes in no other image."""
+        image = firmware()
+        self.assertFalse(dfuimage.carries_image_check(dfuimage.image_block(image, 0)))
+        self.assertEqual((dfuimage.VECTOR_CHECKSUM_FIELD,), dfuimage.written_fields(image))
+        offset = dfuimage.IMAGE_CHECK_OFFSET
+        written = dfuimage.written_image(image)
+        self.assertEqual(image[offset:offset + dfuimage.IMAGE_CHECK_LENGTH],
+                         written[offset:offset + dfuimage.IMAGE_CHECK_LENGTH])
+
+    def test_only_the_two_documented_ranges_differ_from_the_file(self):
+        """ubertooth-dfu(1): a read-back can differ from the file only inside
+        the four bytes at 0x1c and the fourteen from 0xea to 0xf8."""
+        vector = set(range(0x1C, 0x20))
+        record = set(range(0xEA, 0xF8))
+        for image_check, allowed in ((False, vector), (True, vector | record)):
+            with self.subTest(image_check=image_check):
+                image = firmware(image_check=image_check)
+                written = dfuimage.written_image(image)
+                self.assertEqual(len(image), len(written))
+                differ = {index for index, (a, b) in enumerate(zip(written, image))
+                          if a != b}
+                self.assertEqual(set(), differ - allowed)
+                self.assertTrue(differ)  # something really was filled in
+
+    def test_the_written_fields_are_the_fourteen_bytes_from_0xea(self):
+        fields = dfuimage.written_fields(firmware(image_check=True))
+        self.assertEqual((dfuimage.VECTOR_CHECKSUM_FIELD,) + dfuimage.IMAGE_CHECK_FIELDS,
+                         fields)
+        record = dfuimage.IMAGE_CHECK_FIELDS
+        self.assertEqual(0xEA, record[0].offset)
+        self.assertEqual(0xF8, record[-1].offset + record[-1].size)
+        self.assertEqual(14, sum(field.size for field in record))
+        # No gaps: each field starts where the one before it ended.
+        self.assertEqual([field.offset for field in record[1:]],
+                         [field.offset + field.size for field in record[:-1]])
+
+    def test_a_block_in_a_format_this_reader_does_not_know_is_left_alone(self):
+        """A reader that cannot read the block makes no check, which is what
+        lets a bootloader tolerate an image newer than itself. The tool fills
+        in nothing it cannot read either, so those bytes stay the file's."""
+        body = bytearray(firmware(image_check=True))
+        struct.pack_into("<H", body,
+                         dfuimage.IMAGE_CHECK_OFFSET + dfuimage.IMAGE_CHECK_OFF_FORMAT, 2)
+        image = signed(bytes(body[:-dfuimage.SUFFIX_LENGTH]))
+        self.assertFalse(dfuimage.carries_image_check(dfuimage.image_block(image, 0)))
+        self.assertEqual((dfuimage.VECTOR_CHECKSUM_FIELD,), dfuimage.written_fields(image))
+        written = dfuimage.written_image(image)
+        self.assertEqual(image[0xE0:0x100], written[0xE0:0x100])
+
+    def test_an_image_that_already_carries_the_right_checksum_keeps_it(self):
+        """ubertooth-dfu(1): the word is written over rather than checked, so
+        an image carrying the right one is unchanged by it."""
+        body = bytearray(firmware())
+        block = dfuimage.image_block(bytes(body), 0)
+        struct.pack_into("<I", body, dfuimage.VECTOR_CHECKSUM_OFFSET,
+                         dfuimage.vector_checksum(block))
+        image = signed(bytes(body[:-dfuimage.SUFFIX_LENGTH]))
+        self.assertEqual([], dfuimage.suffix_problems(image))
+        self.assertEqual(image, dfuimage.written_image(image))
+
+    def test_a_short_image_has_no_field_to_compare(self):
+        """The tool pads the block it writes, so a file that ends before a
+        field has nothing to compare there. Such an image is refused by -d
+        anyway; the comparison must not read past the file either way."""
+        short = dfuimage.with_suffix(b"")
+        self.assertEqual(16, len(short))
+        self.assertEqual((), dfuimage.written_fields(short))
+        self.assertEqual(short, dfuimage.written_image(short))
+        self.assertEqual(b"", dfuimage.written_image(b""))
+
+
+class DfuReadbackLengthTests(unittest.TestCase):
+    """The read-back length follows the part, and comes from what the
+    command reported rather than from an assumed part (#278)."""
+
+    def test_the_part_table_gives_each_length(self):
+        self.assertEqual(114688, dfuimage.upload_length(128 * 1024))
+        self.assertEqual(245760, dfuimage.upload_length(256 * 1024))
+        self.assertEqual(507904, dfuimage.upload_length(512 * 1024))
+        # An unidentified part is read as the size the firmware is linked for.
+        self.assertEqual(114688, dfuimage.upload_length(0))
+        self.assertEqual((16384, 49152, 114688, 245760, 507904),
+                         dfuimage.READBACK_LENGTHS)
+
+    def test_the_reported_line_is_read_the_way_the_tool_prints_it(self):
+        for line, length, part in (
+            (plan_line(128 * 1024), 114688,
+             "part 0x25011722 (LPC1754) has 128 KiB of flash"),
+            (plan_line(256 * 1024), 245760,
+             "part 0x25011723 (LPC1756) has 256 KiB of flash"),
+            (plan_line(identified=False), 114688,
+             "the part could not be read, so assuming the 128 KiB part this "
+             "firmware is linked for"),
+            # An ID the fork's table has no entry for, so the tool falls back
+            # to the size the firmware is linked for.
+            ("Reading back 114688 bytes, 0x4000-0x1ffff: part 0x25001122 is not "
+             "known here, so assuming the 128 KiB part this firmware is linked "
+             "for\n", 114688,
+             "part 0x25001122 is not known here, so assuming the 128 KiB part "
+             "this firmware is linked for"),
+        ):
+            with self.subTest(part):
+                plan = dfuimage.readback_plan("DFU +0.000s: operation started\n" + line)
+                self.assertEqual((length, 0x4000, 0x4000 + length - 1, part), tuple(plan))
+                self.assertEqual([], plan.problems())
+
+    def test_both_part_sizes_pass_with_the_length_the_command_reported(self):
+        image = firmware(image_check=True)
+        for flash_size, length in ((128 * 1024, 114688), (256 * 1024, 245760)):
+            with self.subTest(flash_size=flash_size):
+                board = FakeDfuBoard(image, flash_size=flash_size)
+                plan = dfuimage.readback_plan(board.plan_line(SERIAL))
+                dump = board._read()
+                self.assertEqual((length, length), (plan.length, len(dump)))
+                self.assertEqual([], dfuimage.readback_problems(dump, image, plan=plan))
+
+    def test_neither_part_size_is_accepted_for_the_other(self):
+        image = firmware(image_check=True)
+        small = FakeDfuBoard(image, flash_size=128 * 1024)
+        large = FakeDfuBoard(image, flash_size=256 * 1024)
+        self.assertEqual(
+            ["read-back is 245760 bytes, not the 114688 the command reported"],
+            dfuimage.readback_problems(
+                large._read(), image, plan=dfuimage.readback_plan(small.plan_line(SERIAL))))
+        self.assertEqual(
+            ["read-back is 114688 bytes, not the 245760 the command reported"],
+            dfuimage.readback_problems(
+                small._read(), image, plan=dfuimage.readback_plan(large.plan_line(SERIAL))))
+
+    def test_a_read_back_that_reported_no_range_is_refused(self):
+        image = firmware(image_check=True)
+        board = FakeDfuBoard(image)
+        self.assertIsNone(dfuimage.readback_plan("DFU +0.000s: operation started\n"))
+        self.assertEqual(["the read-back did not report the range it covers"],
+                         dfuimage.readback_problems(board._read(), image, plan=None))
+
+    def test_a_reported_range_that_does_not_add_up_is_refused(self):
+        plan = dfuimage.readback_plan(
+            "Reading back 114688 bytes, 0x4100-0x1fffe: part 0x25011722 (LPC1754) "
+            "has 128 KiB of flash\n")
+        self.assertEqual(
+            ["the read-back starts at 0x4100, not the application region's 0x4000",
+             "0x4100-0x1fffe is not 114688 bytes"], plan.problems())
+        odd = dfuimage.readback_plan("Reading back 1024 bytes, 0x4000-0x43ff: part "
+                                     "0x25011722 (LPC1754) has 128 KiB of flash\n")
+        self.assertEqual(
+            ["the read-back covers 1024 bytes, which is no application region "
+             "in the fork's part table (16384, 49152, 114688, 245760, 507904)"],
+            odd.problems())
+        # A plan that does not add up fails the comparison as well.
+        self.assertIn("0x4100-0x1fffe is not 114688 bytes",
+                      dfuimage.readback_problems(FakeDfuBoard(firmware())._read(),
+                                                 firmware(), plan=plan))
+
+
+class DfuReadbackComparisonTests(unittest.TestCase):
+    """What the comparison names when a read-back differs (#278): a field -d
+    fills in, by field, and anything else by offset."""
+
+    def setUp(self):
+        self.image = firmware(image_check=True)
+        self.board = FakeDfuBoard(self.image)
+        self.plan = dfuimage.readback_plan(self.board.plan_line(SERIAL))
+        self.good = self.board._read()
+        self.assertEqual([], self.problems(self.good))
+
+    def problems(self, dump):
+        return dfuimage.readback_problems(bytes(dump), self.image, plan=self.plan)
+
+    def test_corruption_in_each_written_field_names_that_field(self):
+        fields = dfuimage.written_fields(self.image)
+        self.assertEqual(5, len(fields))
+        for field in fields:
+            with self.subTest(field.name):
+                dump = bytearray(self.good)
+                dump[field.offset] ^= 0xFF
+                problems = self.problems(dump)
+                self.assertEqual(1, len(problems), problems)
+                self.assertIn(field.name, problems[0])
+                self.assertIn(f"at 0x{0x4000 + field.offset:05x} is", problems[0])
+
+    def test_a_field_left_as_the_file_carries_it_is_refused(self):
+        """The fields are checked against what the writer should have worked
+        out. A board holding the file's own empty values fails, rather than
+        passing because those bytes are allowed to differ from the file."""
+        dump = bytearray(self.good)
+        dump[:len(self.image)] = self.image
+        problems = self.problems(dump)
+        self.assertEqual([field.name for field in dfuimage.written_fields(self.image)],
+                         [problem.split(" at 0x")[0] for problem in problems])
+        self.assertTrue(all("is 0x0" in problem for problem in problems), problems)
+
+    def test_corruption_outside_those_fields_is_named_by_offset(self):
+        # Around the vector checksum, inside the image check magic and format
+        # version, just past the record, and in a later block.
+        for offset in (0x00, 0x1B, 0x20, 0xE0, 0xE9, 0xF8, 0xFF, 0x100,
+                       len(self.image) - 1):
+            with self.subTest(offset=hex(offset)):
+                dump = bytearray(self.good)
+                dump[offset] ^= 0xFF
+                self.assertEqual(
+                    ["application flash differs from the image at "
+                     f"0x{0x4000 + offset:05x}"], self.problems(dump))
+
+    def test_a_field_and_a_byte_elsewhere_are_both_reported(self):
+        offset = dfuimage.VECTOR_CHECKSUM_OFFSET
+        dump = bytearray(self.good)
+        dump[offset] ^= 0xFF
+        dump[0x200] ^= 0xFF
+        found = int.from_bytes(dump[offset:offset + 4], "little")
+        want = int.from_bytes(self.good[offset:offset + 4], "little")
+        self.assertEqual(
+            [f"vector checksum at 0x0401c is 0x{found:08x}, expected 0x{want:08x}",
+             "application flash differs from the image at 0x04200"],
+            self.problems(dump))
+
+    def test_a_short_dump_is_reported_rather_than_read_past(self):
+        problems = self.problems(self.good[:1000])
+        self.assertIn("read-back is 1000 bytes, not the 114688 the command reported",
+                      problems)
+        self.assertIn(f"read-back holds 1000 of the image's {len(self.image)} bytes",
+                      problems)
+
+    def test_padding_and_the_rest_of_the_region_are_unchanged(self):
+        dump = bytearray(self.good)
+        dump[len(self.image)] = 0
+        self.assertEqual(["last block padding is not 0xff"], self.problems(dump))
+
+
+class DfuReadbackRunTests(unittest.TestCase):
+    """The DFU images test against boards whose parts and tools differ (#278)."""
+
+    def test_a_256_kib_part_passes_the_whole_test(self):
+        image = firmware(image_check=True)
+        board = FakeDfuBoard(image, flash_size=256 * 1024)
+        summary, _events = run_dfu(board, image, coverage="smoke")
+        self.assertTrue(summary.passed, summary.failure_reason)
+        self.assertEqual(245760, len(board.flash))
+
+    def test_a_128_kib_part_passes_the_whole_test(self):
+        image = firmware(image_check=True)
+        board = FakeDfuBoard(image, flash_size=128 * 1024)
+        summary, _events = run_dfu(board, image, coverage="comprehensive")
+        self.assertTrue(summary.passed, summary.failure_reason)
+        self.assertEqual(114688, len(board.flash))
+
+    def test_a_board_that_kept_the_wrong_vector_checksum_fails(self):
+        image = firmware(image_check=True)
+        board = FakeDfuBoard(image, bad_vector_checksum=True)
+        summary, events = run_dfu(board, image, coverage="smoke")
+        self.assertEqual(["write-read-back"], failed(events))
+        self.assertIn("vector checksum at 0x0401c", summary.failure_reason)
+        self.assertIn("flash still differs after the rewrite", summary.failure_reason)
+
+    def restore_with(self, image_check=True, **flags):
+        image = firmware(image_check=image_check)
+        board = FakeDfuBoard(image, **flags)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "test.dfu"
+            path.write_bytes(image)
+            with redirect_stdout(io.StringIO()) as out:
+                code = dfuimage.restore(board._board(SERIAL), path, REVISION,
+                                        root / "r.bin")
+        return board, code, out.getvalue()
+
+    def test_a_cleanup_whose_read_back_describes_itself_oddly_does_not_rewrite(self):
+        """The flash holds the image either way, so there is nothing a
+        rewrite could fix and another read-back would say the same: the
+        cleanup fails without spending a flash cycle on a shared board."""
+        for flags, reason in (
+            ({"no_plan_line": True}, "the read-back did not report the range it covers"),
+            ({"odd_plan_line": True},
+             "the read-back covers 1024 bytes, which is no application region "
+             "in the fork's part table"),
+        ):
+            with self.subTest(**flags):
+                board, code, output = self.restore_with(**flags)
+                self.assertEqual(1, code)
+                self.assertIn(f"Restore: {reason}", output)
+                self.assertEqual([], [command for command in board.commands
+                                      if command[0] == "ubertooth-dfu"
+                                      and "-d" in command])
+
+    def test_a_cleanup_whose_flash_differs_does_rewrite(self):
+        board, code, output = self.restore_with(bad_vector_checksum=True)
+        self.assertEqual(1, code)
+        self.assertIn("Flash differs from the test image; rewriting it", output)
+        self.assertIn("Restore: flash still differs after the rewrite: vector "
+                      "checksum at 0x0401c is ", output)
+        self.assertEqual(1, len([command for command in board.commands
+                                 if command[0] == "ubertooth-dfu" and "-d" in command]))
+
+    def test_a_build_that_reports_the_range_and_fills_nothing_in_fails_on_the_field(self):
+        """Fork 10c3381 to 31228b0: the range is reported, the fields are not
+        filled in, so the dump equals the file and the vector checksum alone
+        is named. An image of that era carries no image check block."""
+        board, code, output = self.restore_with(image_check=False,
+                                                no_first_block_fill=True)
+        self.assertEqual(1, code)
+        self.assertIn("Flash differs from the test image; rewriting it", output)
+        self.assertIn("Restore: flash still differs after the rewrite: vector "
+                      "checksum at 0x0401c is 0x00000000, expected 0x", output)
+
+    def test_a_tool_that_reports_nothing_and_fills_nothing_in_rewrites_once(self):
+        """A -u that says nothing about its range, with a -d that fills in
+        nothing: the flash really does differ from the image as today's -d
+        writes it, so the cleanup rewrites once and then fails on both.
+
+        No fork build is this pair -- one older than 10c3381 fills nothing in
+        but cannot read a 128 KiB part back at all (ubertooth#233) -- so this
+        pins the cleanup's own arithmetic rather than a build's behavior.
+        """
+        board, code, output = self.restore_with(image_check=False, no_plan_line=True,
+                                                no_first_block_fill=True)
+        self.assertEqual(1, code)
+        self.assertIn("Flash differs from the test image; rewriting it", output)
+        self.assertEqual(1, len([command for command in board.commands
+                                 if command[0] == "ubertooth-dfu" and "-d" in command]))
+        self.assertIn("Restore: flash still differs after the rewrite: the read-back "
+                      "did not report the range it covers; vector checksum at "
+                      "0x0401c is 0x00000000", output)
+
+    def test_an_image_from_before_the_check_block_passes_on_its_own_tool(self):
+        """Between fork 31228b0 and d91bb06 the checksum is filled in and
+        there is no image check block on either side, so the case passes with
+        the vector checksum as the only field checked."""
+        image = firmware(image_check=False)
+        board = FakeDfuBoard(image)
+        summary, _events = run_dfu(board, image, coverage="smoke")
+        self.assertTrue(summary.passed, summary.failure_reason)
+        self.assertEqual([], flash_problems(board, image))
+
+    def test_a_tool_that_reports_no_range_fails_the_read_back_step(self):
+        """An earlier -u said nothing about what it was reading. The step
+        records the line, so a tool that prints none fails there rather than
+        having its dump compared against an assumed part."""
+        image = firmware(image_check=True)
+        board = FakeDfuBoard(image, no_plan_line=True)
+        summary, events = run_dfu(board, image, coverage="smoke")
+        self.assertEqual(["write-read-back"], failed(events))
+        self.assertIn(f"{dfu_cases.READBACK_RANGE_KEY} was not reported",
+                      summary.failure_reason)
 
 
 class DfuNitTests(unittest.TestCase):
