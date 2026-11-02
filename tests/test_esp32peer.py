@@ -5,6 +5,7 @@ import json
 import re
 import sys
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from ubertooth_harness import esp32peer
@@ -414,12 +415,12 @@ class AudioTests(unittest.TestCase):
         self.assertIn("command exit: 0", report)
         # Every figure is the command's own window: two readings each side
         # of it, each worth one tick of the fixture's counters.
-        self.assertIn("initiator audio: on ev3, sent 200 received 200 frames, "
+        self.assertIn("initiator audio: on ev3, sent 100 received 100 frames, "
                       "0 send errors, 0 damaged, link 0 opened 0 dropped",
                       report)
-        self.assertIn("initiator packets: controller sent 220 received 220, "
-                      "220 good, 0 bad, 0 missing, 0 lost, 0 discarded", report)
-        self.assertIn("acceptor audio: on ev3, sent 200 received 200 frames, ",
+        self.assertIn("initiator packets: controller sent 110 received 110, "
+                      "110 good, 0 bad, 0 missing, 0 lost, 0 discarded", report)
+        self.assertIn("acceptor audio: on ev3, sent 100 received 100 frames, ",
                       report)
         self.assertIn("pair carried audio: ev3", report)
         # The acceptor's profile starts before the initiator pages it, both
@@ -489,7 +490,7 @@ class AudioTests(unittest.TestCase):
     def test_a_pair_that_carried_too_few_frames_fails_the_run(self):
         with self.assertRaisesRegex(
                 esp32peer.PeerError,
-                "sent 200 audio frames while the command ran, fewer than the 500"):
+                "sent 100 audio frames while the command ran, fewer than the 500"):
             self._audio(min_frames=500)
 
     def test_a_capture_that_stopped_early_fails_the_run(self):
@@ -528,18 +529,21 @@ class AudioWindowTests(unittest.TestCase):
             board.sco_rx_frames = 50_000
         with self.assertRaisesRegex(
                 esp32peer.PeerError,
-                "the initiator sent 200 audio frames while the command ran, "
+                "the initiator sent 100 audio frames while the command ran, "
                 "fewer than the 500"):
             self._audio(firmwares=(acceptor, initiator), min_frames=500)
 
     def test_a_link_that_dropped_and_came_back_is_not_one_link(self):
         acceptor, initiator = _audio_pair()
-        initiator.during_the_command(initiator.flap)
-        with self.assertRaisesRegex(
-                esp32peer.PeerError,
-                r"the initiator's audio link did not stay up while the command "
-                r"ran: 1 opened, 1 went down"):
+        acceptor.during_the_command(acceptor.flap)
+        with self.assertRaises(esp32peer.PeerError) as raised:
             self._audio(firmwares=(acceptor, initiator), min_frames=10)
+
+        # Both ends of the link saw it, and both say so.
+        for label in ("initiator", "acceptor"):
+            self.assertIn(f"the {label}'s audio link did not stay up while the "
+                          "command ran: 1 opened, 1 went down",
+                          str(raised.exception))
 
     def test_a_link_replaced_without_a_drop_being_counted_is_caught(self):
         """A renegotiated link keeps both boards reading `on` throughout.
@@ -562,8 +566,8 @@ class AudioWindowTests(unittest.TestCase):
     def test_both_controllers_packet_counters_are_read_and_compared(self):
         _status, report, acceptor, initiator = self._audio(min_frames=10)
         for label in ("initiator", "acceptor"):
-            self.assertIn(f"{label} packets: controller sent 220 received 220, "
-                          "220 good, 0 bad, 0 missing, 0 lost, 0 discarded",
+            self.assertIn(f"{label} packets: controller sent 110 received 110, "
+                          "110 good, 0 bad, 0 missing, 0 lost, 0 discarded",
                           report)
         # Read from both boards, before the command and after it.
         for board in (acceptor, initiator):
@@ -589,7 +593,7 @@ class AudioWindowTests(unittest.TestCase):
             board.during_the_command(goes_bad)
         with self.assertRaisesRegex(
                 esp32peer.PeerError,
-                "the initiator's controller received 220 synchronous packets "
+                "the initiator's controller received 110 synchronous packets "
                 "while the command ran and not one of them correct"):
             self._audio(firmwares=(acceptor, initiator), min_frames=10)
 
@@ -642,6 +646,59 @@ class AudioWindowTests(unittest.TestCase):
                 "initiator: 'sco stats' refused: no audio link to count packets"):
             self._audio(firmwares=(acceptor, initiator), min_frames=10)
 
+    def test_a_link_that_dropped_and_stayed_down_still_reports_what_it_carried(self):
+        """The failure the whole check exists for keeps its measurements.
+
+        A board with no link refuses the controller's counters, so asking
+        for them is not allowed to lose the frame counters and the drop
+        that the same reading already holds.
+        """
+        acceptor, initiator = _audio_pair()
+        acceptor.during_the_command(acceptor.drop)
+        report = io.StringIO()
+        acceptor_peer, initiator_peer = _peers(acceptor, initiator)
+        with self.assertRaises(esp32peer.PeerError) as raised:
+            esp32peer.audio(acceptor_peer, initiator_peer, TRUE, out=report,
+                            settle_s=0.0, min_frames=10)
+        error, text = str(raised.exception), report.getvalue()
+
+        # The drop is named, on both boards ...
+        for label in ("initiator", "acceptor"):
+            self.assertIn(f"the {label}'s audio link did not stay up while the "
+                          "command ran: 0 opened, 1 went down", error)
+            self.assertIn(f"the {label}'s audio link read ready afterwards, "
+                          "not on", error)
+            self.assertIn(f"{label}: 'sco stats' refused: no audio link to "
+                          "count packets on", error)
+        # ... and what the capture's own window carried is still reported,
+        # without the controller's counters, which no longer exist.
+        self.assertIn("initiator audio: ready none, sent 0 received 0 "
+                      "frames, 0 send errors, 0 damaged, link 0 opened 1 "
+                      "dropped", text)
+        self.assertNotIn("initiator packets:", text)
+
+    def test_a_window_that_carried_no_frames_fails_the_run(self):
+        acceptor, initiator = _audio_pair()
+        for board in (acceptor, initiator):
+            board.frames_per_read = 0
+        with self.assertRaisesRegex(
+                esp32peer.PeerError,
+                "the initiator sent 0 audio frames while the command ran, "
+                "fewer than the 10"):
+            self._audio(firmwares=(acceptor, initiator), min_frames=10)
+
+    def test_a_window_whose_frames_only_went_one_way_fails_the_run(self):
+        acceptor, initiator = _audio_pair()
+
+        # The far end never answers: frames go out, none come back.
+        for board in (acceptor, initiator):
+            board.frames_advance = ("tx",)
+        with self.assertRaisesRegex(
+                esp32peer.PeerError,
+                "the initiator counted no audio frames from the far end while "
+                "the command ran"):
+            self._audio(firmwares=(acceptor, initiator), min_frames=0)
+
 
 class AudioCleanupTests(unittest.TestCase):
     """A session that measured something reports it, then says what failed.
@@ -668,9 +725,9 @@ class AudioCleanupTests(unittest.TestCase):
         self.assertIn("the initiator did not stop its audio link: initiator: "
                       "'sco stop' refused: the audio link did not stop", error)
         # Everything the capture was taken for is still in the report.
-        self.assertIn("initiator audio: on ev3, sent 200 received 200 frames",
+        self.assertIn("initiator audio: on ev3, sent 100 received 100 frames",
                       report)
-        self.assertIn("initiator packets: controller sent 220 received 220",
+        self.assertIn("initiator packets: controller sent 110 received 110",
                       report)
         self.assertIn("command exit: 0", report)
 
@@ -699,7 +756,7 @@ class AudioCleanupTests(unittest.TestCase):
                       "reset: sco 'ready', not 'off'", error)
         self.assertIn("sco_profile 'hf', not 'none'", error)
         # ... and the session still said what it measured.
-        self.assertIn("acceptor audio: on ev3, sent 200 received 200 frames",
+        self.assertIn("acceptor audio: on ev3, sent 100 received 100 frames",
                       report)
 
     def test_a_board_that_cannot_be_reset_at_all_is_reported(self):
@@ -717,6 +774,40 @@ class AudioCleanupTests(unittest.TestCase):
         error, _report = self._audio((acceptor, initiator))
 
         self.assertIn("the acceptor was not released to its boot state", error)
+
+    def test_a_cancelled_session_still_releases_both_boards(self):
+        """Cancellation does not raise PeerError, and must still clean up.
+
+        The harness cancels a run by interrupting it, which arrives here as
+        KeyboardInterrupt out of the command. A session that caught only
+        PeerError would leave both boards with the link up and the
+        initiator in the initiator role.
+        """
+        for failure in (KeyboardInterrupt, RuntimeError):
+            with self.subTest(failure=failure.__name__):
+                acceptor, initiator = _audio_pair()
+                acceptor_peer, initiator_peer = _peers(acceptor, initiator)
+                raiser = (sys.executable, "-c", "pass")
+                with unittest.mock.patch.object(
+                        esp32peer, "_run_command", side_effect=failure):
+                    with self.assertRaises(failure):
+                        esp32peer.audio(acceptor_peer, initiator_peer, raiser,
+                                        out=io.StringIO(), settle_s=0.0,
+                                        min_frames=10)
+                for board in (acceptor, initiator):
+                    self.assertEqual(2, board.resets)
+                    self.assertEqual("off", board.sco)
+                    self.assertEqual(esp32peer.BOOT_ROLE, board.role)
+
+    def test_a_board_is_not_reset_twice_on_the_ordinary_path(self):
+        acceptor, initiator = _audio_pair()
+        acceptor_peer, initiator_peer = _peers(acceptor, initiator)
+        esp32peer.audio(acceptor_peer, initiator_peer, TRUE,
+                        out=io.StringIO(), settle_s=0.0, min_frames=10)
+
+        # The open's reset and the release's, and no third.
+        for board in (acceptor, initiator):
+            self.assertEqual(2, board.resets)
 
     def test_the_link_is_taken_down_before_the_boards_are_released(self):
         acceptor, initiator = _audio_pair()
@@ -795,15 +886,59 @@ class PeerShellArityTests(unittest.TestCase):
         self.firmware = FakePeerFirmware(version=esp32peer.AUDIO_FIRMWARE)
         self.shell = fake_esp32.shell(self.firmware)
         self.shell.wait_ready()
-        self.before = self.firmware.status()
+
+    @staticmethod
+    def _board(live: bool):
+        """A board to send a malformed line to, idle or with a link up.
+
+        Returns the board, its shell, and the far end of the link or None.
+        Fresh boards each time, so one case cannot leave a profile running
+        for the next.
+        """
+        firmware = FakePeerFirmware(version=esp32peer.AUDIO_FIRMWARE)
+        shell = fake_esp32.shell(firmware)
+        shell.wait_ready()
+        if not live:
+            return firmware, shell, None
+        far = FakePeerFirmware("20:50:0D:E9:C5:BA",
+                               version=esp32peer.AUDIO_FIRMWARE)
+        far.link(firmware)
+        far_shell = fake_esp32.shell(far)
+        far_shell.wait_ready()
+        shell.command(f"{esp32peer.SCO_TYPE} ev3")
+        shell.command(esp32peer.SCO_START)
+        far_shell.command(f"{esp32peer.SCO_TYPE} ev3")
+        far_shell.command(esp32peer.ROLE_INITIATOR)
+        far_shell.command(f"spp peer {firmware.address}")
+        far_shell.command(esp32peer.SCO_START)
+        return firmware, shell, far
 
     def _refused(self, line: str) -> str:
-        with self.assertRaises(esp32peer.PeerError) as raised:
-            self.shell.command(line)
-        # Nothing of the board moved: not the role, the profile, the link,
-        # the chosen packet type, or any counter.
-        self.assertEqual(self.before, self.firmware.status())
-        return str(raised.exception)
+        """The line is refused, idle and with a link up, changing nothing.
+
+        Every case runs both ways: idle, and with a synchronous link up,
+        which is the only state where "no counter moved" and "the link is
+        untouched" have any content at all. The same refusal has to come
+        back either way, which is what "one stable usage line" means.
+        """
+        reasons = []
+        for live in (False, True):
+            firmware, shell, far = self._board(live)
+            self.assertEqual(esp32peer.AUDIO_ON if live else "off",
+                             firmware.status()["sco"])
+            before = firmware.status()
+            far_before = far.status() if far is not None else None
+            with self.assertRaises(esp32peer.PeerError) as raised:
+                shell.command(line)
+            # Nothing of the board moved: not the role, the profile, the
+            # link, the chosen packet type, or any counter. Nor the far
+            # end's, which shares the link.
+            self.assertEqual(before, firmware.status())
+            if far is not None:
+                self.assertEqual(far_before, far.status())
+            reasons.append(str(raised.exception))
+        self.assertEqual(reasons[0], reasons[1])
+        return reasons[0]
 
     def test_a_bare_sco_line_is_refused_with_the_commands_usage(self):
         self.assertIn(fake_esp32.SCO_USAGE, self._refused("sco"))

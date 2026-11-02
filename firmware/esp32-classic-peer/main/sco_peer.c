@@ -639,6 +639,16 @@ static const char *profile_start(enum peer_role role)
 {
     const char *err;
 
+    /* Before anything is registered, so that a link the controller reports
+     * while this profile is coming up is counted and kept. Zeroing them
+     * afterwards would erase exactly the event a session needs to see. */
+    LOCK();
+    sc.tx_frames = sc.tx_errors = sc.rx_frames = sc.rx_bad = 0;
+    sc.connects = sc.disconnects = 0;
+    sc.stats_ok = false;
+    sc.stats_wanted = false;
+    UNLOCK();
+
     xSemaphoreTake(prof_ev, 0);
 
     if (role == PEER_ROLE_INITIATOR) {
@@ -670,15 +680,6 @@ static const char *profile_start(enum peer_role role)
             return "audio callback registration failed";
         }
     }
-    LOCK();
-    sc.tx_frames = sc.tx_errors = sc.rx_frames = sc.rx_bad = 0;
-    /* The link counters belong to the profile that is starting: they count
-     * the links it has, so a session reads the first one as zero and a
-     * later reading tells it how many links there have been since. */
-    sc.connects = sc.disconnects = 0;
-    sc.stats_ok = false;
-    sc.stats_wanted = false;
-    UNLOCK();
     return NULL;
 }
 

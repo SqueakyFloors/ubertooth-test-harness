@@ -108,10 +108,11 @@ PAIR_SETUP_S = (
 # hands-free profile, and opens the audio link, which the firmware allows
 # much longer than an ordinary command. The session then reads each board
 # twice either side of the command - a status and the controller's packet
-# counters each time - and takes the link down on both before releasing
-# them, which is nine more commands again.
-AUDIO_SETUP_S = (PAIR_SETUP_S + 12 * esp32peer.COMMAND_TIMEOUT_S
-                 + 2 * esp32peer.STOP_TIMEOUT_S
+# counters each time, eight reads where the old one took two - and takes
+# the link down on both before releasing them: ten commands more than the
+# stream session's budget allows for.
+AUDIO_SETUP_S = (PAIR_SETUP_S + 13 * esp32peer.COMMAND_TIMEOUT_S
+                 + 2 * esp32peer.AUDIO_STOP_TIMEOUT_S
                  + esp32peer.AUDIO_CONNECT_TIMEOUT_S)
 # One identify or reset: an open with its reset, then a status read.
 PEER_TIMEOUT_S = esp32peer.BOOT_TIMEOUT_S + 4 * esp32peer.COMMAND_TIMEOUT_S

@@ -161,11 +161,13 @@ expects answers `ERR` from the same refusal as any other malformed line and
 touches nothing. `sco` is where that mattered: before `utesp-1.5.0` a bare
 `sco` line tested a word that had never been parsed
 ([#262](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/262)).
-Each `sco` line that is not one of the four it knows answers
-`ERR sco takes start, stop, stats, or type <ev3|2ev3|default>`, except
-`sco type` with the wrong number of operands, which answers
-`ERR sco type takes ev3, 2ev3, or default`; neither changes the role, the
-profile, the link, the chosen packet type, or any counter.
+A `sco` line that is not one of the four it knows answers
+`ERR sco takes start, stop, stats, or type <ev3|2ev3|default>`. A `sco type`
+whose operand is missing, doubled, or not one of the three answers
+`ERR sco type takes ev3, 2ev3, or default`. Neither changes the role, the
+profile, the link, the chosen packet type, or any counter. (A `sco type`
+that is well formed but sent while the audio profile is running has its own
+answer, which says to stop the profile first.)
 
 The Bluetooth device name is not settable, and does not need to be: it holds
 the board's own LAP, so it is fixed for the life of the board and different
@@ -334,7 +336,7 @@ decodes CVSD, so no test compares payloads today.
 | `sco_frame_len` | the frame size the controller asked for, in bytes |
 | `sco_tx_frames`, `sco_tx_errors` | frames the stack took, and frames it refused |
 | `sco_rx_frames`, `sco_rx_bad` | frames received, and how many of those the controller marked damaged |
-| `sco_connects`, `sco_disconnects` | synchronous links this profile has had, and how many went down again; both zero while one link has been up throughout |
+| `sco_connects`, `sco_disconnects` | synchronous links this profile has had, and how many of them went down again, both zeroed when the profile starts; one link that is still up reads `1` and `0`, and it is the movement between two readings that is zero while that link lasts |
 | `sco_type` | the packet type the next link will ask for: `default`, `ev3`, or `2ev3` |
 | `sco_link` | `none` (no link), `sco`, `esco`, or `unknown` |
 | `sco_pkt_type` | the packet type the live link is using (see below) |

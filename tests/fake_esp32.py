@@ -44,9 +44,18 @@ class FakePeerFirmware:
         # a real board counts frames and packets while a session reads it,
         # so each reading here advances the counters once and a session's
         # before and after readings differ (see _tick). A session takes two
-        # readings each side of its command, so its deltas are twice these.
+        # readings each side of its command, so its deltas are these.
         self.frames_per_read = 100
         self.packets_per_read = 110
+        # Which of the controller's counters a reading advances. The
+        # default is a link that is working: every packet sent, received,
+        # and correct. A test moves the correct ones to the error count to
+        # make a link that is not. Which way this board's frames go, the
+        # same way: a test drops "rx" for a far end that never answers.
+        # Both are the fixture's own settings, not board state, so neither
+        # a reset nor `defaults` puts them back.
+        self.packets_advance = ("rx_total", "rx_correct", "tx_total")
+        self.frames_advance = ("tx", "rx")
         # Readings of the controller's counters this board has answered,
         # and a test's hook to run after the first of them, which is where
         # a session's command runs (`during_the_command`).
@@ -98,10 +107,6 @@ class FakePeerFirmware:
         # counting across a link going down and coming back as the real
         # ones do.
         self.sco_packets = dict.fromkeys(esp32peer.AUDIO_PKT_COUNTERS, 0)
-        # Which of those a reading advances. The default is a link that is
-        # working: every packet sent, received, and correct. A test moves
-        # the correct ones to the error count to make a link that is not.
-        self.packets_advance = ("rx_total", "rx_correct", "tx_total")
 
     def link(self, other: "FakePeerFirmware") -> None:
         """Let `spp start` on this board connect to ``other``."""
@@ -268,27 +273,46 @@ class FakePeerFirmware:
     def _tick(self):
         """What the link carried since this board was last read.
 
-        A board counts while a session is reading it, so a reading of
-        either kind advances the counters here; that is what gives a
-        session's before and after readings something to differ by. The
-        controller's packet counters advance with the frames: on this link
-        one packet carries one frame.
+        A board counts while a session is reading it, so each reading
+        advances the counters once - the status read, which is where a
+        reading begins; that is what gives a session's before and after
+        readings something to differ by. The controller's packet counters
+        advance with the frames: on this link one packet carries one frame.
+
+        Reads standing in for elapsed time is a deliberate simplification -
+        there is no clock here to count against, and a session's command
+        takes no measurable time in a test. A window that carried nothing
+        is modelled by setting `frames_per_read` and `packets_per_read` to
+        zero, which is what the tests for an empty window do.
         """
         if self.sco != esp32peer.AUDIO_ON:
             return
-        self.sco_tx_frames += self.frames_per_read
-        self.sco_rx_frames += self.frames_per_read
+        if "tx" in self.frames_advance:
+            self.sco_tx_frames += self.frames_per_read
+        if "rx" in self.frames_advance:
+            self.sco_rx_frames += self.frames_per_read
         for key in self.packets_advance:
             self.sco_packets[key] += self.packets_per_read
 
     def during_the_command(self, hook) -> None:
         """Run ``hook`` once, where a session's command runs.
 
-        A session reads the controller's counters exactly twice, just
-        before its command and just after it, so firing after the first of
-        those puts whatever the hook does inside the command's own window.
+        A session reads the controller's counters on both boards just
+        before its command and again just after it, so the hook fires once
+        both boards have answered the first of those. Whatever it does then
+        happened while the command was running, whichever board of the pair
+        it was registered on.
         """
         self._hook = hook
+
+    def _fire_hook(self):
+        far = self.peer_firmware
+        if self._hook is None or self.stats_reads < 1:
+            return
+        if far is not None and far.stats_reads < 1:
+            return
+        hook, self._hook = self._hook, None
+        hook()
 
     def flap(self):
         """The link goes down and comes straight back, counted as the
@@ -299,6 +323,21 @@ class FakePeerFirmware:
                 board.sco_connects += 1
                 board.sco_disconnects += 1
                 board.sco_handle += 1
+
+    def drop(self):
+        """The link goes down and stays down, on both boards.
+
+        Each keeps the profile it started, so each reads `ready` and
+        refuses `sco stats`, which needs a live link.
+        """
+        for board in (self, self.peer_firmware):
+            if board is not None and board.sco == esp32peer.AUDIO_ON:
+                board.sco = "ready"
+                board.sco_disconnects += 1
+                board.sco_codec = "none"
+                board.sco_link = "none"
+                board.sco_pkt_type = "none"
+                board.sco_handle = 0
 
     def _sco(self, words):
         """The firmware's `sco` branch, with every arity it refuses.
@@ -334,11 +373,16 @@ class FakePeerFirmware:
     def _sco_stats(self):
         if self.sco != esp32peer.AUDIO_ON:
             return ["ERR no audio link to count packets on"]
-        self._tick()
+        # No advance here: a reading is a status and then these counters,
+        # and the two belong to the same moment. Asking twice in a row does
+        # not make a board's counters jump.
         answer = [json.dumps(self.sco_packets, separators=(",", ":")), "OK"]
         self.stats_reads += 1
-        if self._hook is not None and self.stats_reads == 1:
-            self._hook()
+        # Either board's reading may be the one that completes the pair's,
+        # so both are offered the chance to fire.
+        self._fire_hook()
+        if self.peer_firmware is not None:
+            self.peer_firmware._fire_hook()
         return answer
 
     def _sco_start(self):
