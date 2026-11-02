@@ -512,6 +512,7 @@ class PlanCompiler:
                 # could not be assigned.
                 absent_on: set[str] = set()
                 for host, choices in bound:
+                    host_start = len(invocations)
                     host_choices[host] = dict(zip(role_names, choices))
                     combinations = itertools.product(*choices) if choices else [()]
                     for selected in combinations:
@@ -578,6 +579,25 @@ class PlanCompiler:
                                 exclusive_ubertooth=exclusive,
                             )
                         )
+                    if (required_hardware and host not in absent_on
+                            and len(invocations) == host_start):
+                        # Every combination put one device in two roles, so
+                        # this host has not got a device of its own for each
+                        # role: one ESP32 Classic peer where the test needs
+                        # two is that bench. For a required step that is
+                        # missing hardware, not a plan to correct, so it is
+                        # recorded and the rest of the suite still compiles.
+                        absent_on.add(host)
+                        _record_blocked(
+                            blocked_tests, recorded_blocked, host,
+                            step.test_name,
+                            "no device of its own for each role: "
+                            + ", ".join(
+                                f"{role} from "
+                                + " or ".join(host_choices[host][role])
+                                for role in role_names
+                            ),
+                        )
                 if len(invocations) == step_start and not absent_on:
                     # Every combination put one device in two roles. The
                     # message names what each role could have taken, since
@@ -588,7 +608,9 @@ class PlanCompiler:
                     # why it bound nothing. As before, a step that did bind
                     # something somewhere is not refused for the hosts that
                     # did not, so a host whose roles collide while another
-                    # host runs is still left out silently.
+                    # host runs is still left out silently, unless the step
+                    # says `required hardware: true`, where that host is
+                    # recorded blocked just above.
                     raise PlanningError(
                         f"{step.test_name}: no valid distinct resource "
                         "assignment: "

@@ -43,8 +43,9 @@ class CatalogError(ValueError):
 WATCHDOG_LIMIT_ARGUMENT = "max_watchdog_resets"
 
 # The plan argument that makes one step's hardware part of what the step
-# measures: without it the step is blocked and the run fails, rather than
-# being left out as not applicable (planner.py, hostneeds.Blocked).
+# measures. Where a step carries it and this registry has not got that
+# hardware, the step is recorded blocked and the run fails, rather than being
+# left out as not applicable (planner.py, hostneeds.Blocked).
 REQUIRED_HARDWARE_ARGUMENT = "required hardware"
 
 _MISSING = object()

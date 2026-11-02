@@ -78,6 +78,32 @@ resources:
     identity: {serial: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
 """
 
+# One peer declaring both roles, and named as the default for both, as the
+# example registry names each of its two. Both roles resolve, to the same
+# board, so the test has no second device to hold the link with.
+ONE_PEER_BOTH_ROLES = """
+resources:
+  Host_Linux:
+    type: Host
+    platform: linux
+    roles: [controller, test target]
+    defaults:
+      Ubertooth: UT_Linux0
+      acceptor: ESP32_Linux0
+      initiator: ESP32_Linux0
+  UT_Linux0:
+    type: Ubertooth
+    attached to: Host_Linux
+    identity: {serial: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+  ESP32_Linux0:
+    type: ESP32 Classic peer
+    attached to: Host_Linux
+    roles: [acceptor, initiator]
+    identity:
+      bridge serial: "0123456789abcdef0123456789abcdef"
+      BD_ADDR: "C8:00:00:00:00:01"
+"""
+
 # One peer, registered for one role only: the initiator has nowhere to go.
 ONE_PEER = """
 resources:
@@ -236,6 +262,24 @@ class ReleaseGateTests(unittest.TestCase):
             "initiator role",
             blocked.reason,
         )
+
+    def test_one_peer_taking_both_roles_is_blocked_not_a_plan_error(self):
+        """A bench with one peer registered for both roles resolves both
+        roles to it, and the test needs two devices. That is hardware this
+        bench has not got, not a plan to correct, so the gate is blocked and
+        the rest of the suite still compiles: raising here would stop every
+        other release test from running."""
+        compiled = self.compile(ONE_PEER_BOTH_ROLES)
+
+        (blocked,) = compiled.blocked
+        self.assertEqual(("Host_Linux", AFH), (blocked.host, blocked.test_name))
+        self.assertEqual(
+            "no device of its own for each role: Ubertooth from UT_Linux0, "
+            "acceptor from ESP32_Linux0, initiator from ESP32_Linux0",
+            blocked.reason,
+        )
+        self.assertNotIn(AFH, [item.test_name for item in compiled.invocations])
+        self.assertGreater(len(compiled.invocations), 20)
 
     def test_a_registry_without_that_host_blocks_it_in_the_runs_it_has(self):
         """No run of `Host_Linux` will ever happen here, so the record goes
@@ -415,6 +459,17 @@ class RequiredHardwareArgumentTests(unittest.TestCase):
         self.assertEqual((), compiled.not_applicable)
         (blocked,) = compiled.blocked
         self.assertEqual(AFH, blocked.test_name)
+
+    def test_without_it_one_device_in_two_roles_still_fails_planning(self):
+        """Unchanged for a step that does not claim its hardware: a host
+        that cannot give each role its own device is a plan to correct, so
+        the refusal names what each role could have taken."""
+        with self.assertRaisesRegex(
+            PlanningError,
+            "no valid distinct resource assignment: Host_Linux: .*"
+            "acceptor from ESP32_Linux0, initiator from ESP32_Linux0",
+        ):
+            self.compile(None, ONE_PEER_BOTH_ROLES)
 
     def test_it_must_be_a_boolean(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -148,8 +148,8 @@ suites:
     # finishes failed, so the gate cannot pass unmeasured. Register the peers,
     # or run a suite that does not hold it.
     #
-    # Smoke, two captures of two minutes: about 520 s, taking the release
-    # estimate from about 636 s to about 1156 s (19 min), inside the 30-minute
+    # Smoke, two captures of two minutes: 520.0 s, taking the release
+    # estimate from 654.5 s to 1174.5 s (about 20 min), inside the 30-minute
     # target. The comprehensive profile's third case (`-t`, the detection
     # path) stays in the `classic-comprehensive` suite, which a release runs
     # alongside this plan.
