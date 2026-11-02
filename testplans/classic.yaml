@@ -37,6 +37,19 @@ suites:
         coverage: smoke
         duration: 25s
 
+    # Two minutes per capture, which is what the channel map needs rather
+    # than what the link does: the Ubertooth has to meet the piconet on
+    # every channel the map keeps, and the bench found all 40 of a
+    # 40-channel map inside a minute. Two minutes gives that margin and two
+    # whole minutes of the per-minute series.
+    - Recover AFH map:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        coverage: smoke
+        duration: 2m
+
   classic-comprehensive:
     - Capture known Classic device:
         hosts: [Host_Linux]
@@ -63,6 +76,19 @@ suites:
         initiator: default
         coverage: comprehensive
         duration: 25s
+
+    # Two minutes per capture, which is what the channel map needs rather
+    # than what the link does: the Ubertooth has to meet the piconet on
+    # every channel the map keeps, and the bench found all 40 of a
+    # 40-channel map inside a minute. Two minutes gives that margin and two
+    # whole minutes of the per-minute series.
+    - Recover AFH map:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        coverage: comprehensive
+        duration: 2m
 
   # The bounded long variant: the same two smoke cases over a capture long
   # enough to show that a receive run holds up, rather than that it starts.

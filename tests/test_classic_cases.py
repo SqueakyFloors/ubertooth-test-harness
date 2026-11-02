@@ -522,8 +522,10 @@ class RegistryTests(unittest.TestCase):
         registry = FileResourceRegistry.load(ROOT / "hardware.example.yaml")
         plan = load_plan(ROOT / "testplans" / "classic.yaml")
         catalog = builtin_catalog()
-        for suite, counts in (("classic", (2, 2, 2)),
-                              ("classic-comprehensive", (4, 4, 4)),
+        # The last entry of each suite is Recover AFH map (afh_cases.py):
+        # two capture cases, and a third for the detection phase.
+        for suite, counts in (("classic", (2, 2, 2, 2)),
+                              ("classic-comprehensive", (4, 4, 4, 3)),
                               ("classic-long", (2,))):
             invocations = PlanCompiler(catalog, registry).compile(plan, suite)
             self.assertEqual(len(counts), len(invocations))

@@ -25,10 +25,11 @@ from ubertooth_harness.patterns import (
 from ubertooth_harness.resources import ESP32_CLASSIC_PEER
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
-    advertiser_cases, boardstate_cases, btbr_cases, capture_failure_cases,
-    classic_cases, connection_cases, dfu_cases, dfu_host_cases,
-    interrupt_cases, python_cases, receive_cases, refusal_cases, tool_cases,
-    transitions, tshark_cases, util_cases, util_refusal_cases,
+    advertiser_cases, afh_cases, boardstate_cases, btbr_cases,
+    capture_failure_cases, classic_cases, connection_cases, dfu_cases,
+    dfu_host_cases, interrupt_cases, python_cases, receive_cases,
+    refusal_cases, tool_cases, transitions, tshark_cases, util_cases,
+    util_refusal_cases,
 )
 
 
@@ -909,6 +910,16 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
         Estimate(0, per_count=("sessions", 60.0)),
         Estimate(0, per_count=("sessions", 115.0)),
     ),
+    # ESTIMATE_PENDING_HW
+    # Each case brings the pair up, sets the channel map, captures for the
+    # duration, and judges the recovery: about 20 s around a capture, and the
+    # capture itself may run twice, because whether a channel was heard
+    # depends on where the sweep and the hop sequence met (afh_cases.py,
+    # attempts). Two capture cases in smoke, three comprehensive, so the
+    # duration counts four times and six.
+    "Recover AFH map": _profiles(
+        Estimate(40.0, per_duration=4), Estimate(60.0, per_duration=6)
+    ),
 })
 
 
@@ -1441,6 +1452,27 @@ def builtin_catalog() -> TestCatalog:
             writes_firmware=True,
         ),
         TestDefinition(
+            "Recover AFH map",
+            "ubertooth-afh recovers the Adaptive Frequency Hopping map of a "
+            "piconet two registered ESP32 Classic peers are held to: a "
+            "40-channel map and the 20-channel minimum, each compared with the "
+            "map the leader's controller reports the link hopping over at the "
+            "start, the middle, and the end of the capture",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH,
+                "acceptor": ArgumentRule(_selector, default="default"),
+                "initiator": ArgumentRule(_selector, default="default"),
+                "coverage": COVERAGE, "duration": DURATION,
+            }),
+            MappingProxyType({
+                "Ubertooth": "Ubertooth",
+                "acceptor": ESP32_CLASSIC_PEER, "initiator": ESP32_CLASSIC_PEER,
+            }),
+            command_builder=afh_cases.afh_map_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+        ),
+        TestDefinition(
             "CLI usage smoke",
             "Exercise host tool usage paths",
             MappingProxyType({"hosts": HOSTS}),
@@ -1544,10 +1576,6 @@ def builtin_catalog() -> TestCatalog:
             _device_test(
                 "Capture eero setup beacon", "Trigger and capture an eero setup beacon",
                 extra={"eero": ArgumentRule(_required_text, required=True)},
-            ),
-            _device_test(
-                "Recover AFH map", "Recover a Classic Bluetooth AFH map",
-                extra={"piconet": ArgumentRule(_required_text, required=True)},
             ),
             TestDefinition(
                 "Recover a BLE connection promiscuously",

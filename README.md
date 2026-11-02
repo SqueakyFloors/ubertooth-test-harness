@@ -756,6 +756,7 @@ needs `--build --with-firmware --with-python`.
 | `Follow Classic Bluetooth piconet` | `classic` plan; the same two peers and the same bring-up: `ubertooth-rx -l <central LAP> -u <central UAP>` must report at least ten packet lines and none of another LAP (libbtbb is asked for one access code), and `-l`/`-u` for the peer that is *not* the central must report no packet at all | adds `-l` without `-u` (the UAP is recovered from the air) and `-l -u -q` (PCAP with link type 255) |
 | `Classic capture record fields` | `classic` plan; the same two peers and the same bring-up, but the check is inside the capture files: `bredrrecord.py` decodes every `LINKTYPE_BLUETOOTH_BREDR_BB` record of a `-l <central LAP> -u <central UAP> -q -r` capture, and each must carry the central's LAP and that LAP and UAP as its reference address, with every flag that describes a field in the record agreeing with that field, its access-code errors inside the limit the run allowed, and, where it holds a payload, that payload's length field agreeing with the bytes it holds and its CRC, recomputed with the reference UAP, agreeing with the one it carries (the bench's own traffic records no payload, so what fires live is the headers, addresses and flags), and the PCAPNG naming the central's LAP and UAP as the address it was following; the same with the peers' roles swapped must carry the other board's LAP instead | adds an EV3 audio link (`sco type ev3`, so the voice payload is on the air at the basic rate), whose records must include an `HV3/EV3/3-EV3` packet, and a survey, whose records must include one carrying a UAP the survey recovered for itself |
 | `Classic btbr console` | writes the selected board's firmware and transmits (`allow RF transmission: true`); `classic` plan, `btbr` suite, which a release runs alongside the release plan; an Ubertooth and one ESP32 Classic peer with the `acceptor` role on one host, and a run carrying both firmware images and the Python tools (`--build --with-firmware --with-python`). The run's `btbr` image is written and the board must report `btbr` and that revision by name (`bluetooth_rxtx` is a mismatch, and so is the revision alone), the peer is reset to its discoverable boot state and must report the device name its own address gives, and one `ubertooth-btbr` session then comes up — the startup the `btbr` image answers, and the prompt — and decides eleven checks down that prompt: `?` and `? inquiry`, a word that is no command, `?` on one, three addresses that are not ones and `page` with no address (each one `error:` line with the prompt up), `bdaddr` taking an address, an inquiry hearing the peer by BD_ADDR and by the name in its Extended Inquiry Response, a page reaching `LMP setup complete` with the peer's `LMP_NAME_RES` on the air, `idle` inside each of those two, an LMP request with no handler named once per opcode, and the capture on standard output with the progress on standard error. The cleanup always writes `bluetooth_rxtx` back, reads it, and resets the peer. The capture never leaves the driver: an inquiry hears every discoverable device in range, so only the records matched for the registered peer are reported and the rest are counted | adds paging an address nothing answers: `paging timeout` after the firmware's whole attempt, with no connection. `sessions: <n>` repeats the whole flash-and-session cycle (the `btbr-long` suite runs five) |
+| `Recover AFH map` | `classic` plan; the same two peers, with the initiator's controller told to keep a chosen set of channels before the link comes up, so the piconet's Adaptive Frequency Hopping map is known: `ubertooth-afh -e 0 -r` then runs for `duration` and must work that map out from the air. The map the link is really hopping over is read from the leader's controller at the start, the middle and the end of the capture and must be the same all three times; the recovered map must hold at least 90% of the channels in force and mark at most 70% of the channels out of force used. Two maps: channels 0 to 39, and the 20-channel minimum. Afterwards both peers are reset and the Ubertooth restored, as above | adds the tool's other path, `-t <duration>`, whose `AFH map:` line is judged on the channels it found, its stray channels reported with a looser ceiling because that map fills channel gaps and never drops a channel |
 | `DFU images` | writes the selected board's firmware; slow plan (not fast): `-d <test image> -r`, then `-u -r` reads back the image padded with 0xff; `-s` on the image without its suffix gives the build's `.dfu` | `firmware` plan (not release): adds `-s` refusing a `.dfu`; seven bad images (wrong CRC, truncated, no suffix, text, no `UFD`, wrong vendor, wrong product) refused before a device is opened (fork #198, #199, fixed in e8edd15), the board still in its application with the same flash (read back); `-s` refuses a suffixed `.bin` and accepts a read-only one (fork #200, fixed in 9d710fe). At 6fee30c `-d <image> -r` exits 1 after a good flash (fork #267, fixed in 89d9197), so the write cases fail there |
 | `BLE mode conflicts` | no `coverage` argument; release plan | every combination of `ubertooth-btle -f -n -p` must be rejected before sniffing |
 | `Ubertooth util conflicts` | no `coverage` argument; requires `allow RF transmission: true`; release plan | every pair of `-q -n -e -t -x -I` must be rejected with the fork's `error: options ... cannot be combined` before a mode starts |
@@ -1391,7 +1392,7 @@ stable path (`/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Cont
 derived from the bridge serial unless the identity names a `serial device`),
 waits for the firmware's boot notice, and speaks its line shell: `status`
 (one JSON line with the BD_ADDR, LAP and UAP), `role`, `spp peer`,
-`spp start`, `stream`, `spp stop`. `reset` restarts the board with the
+`spp start`, `stream`, `spp stop`, `afh`. `reset` restarts the board with the
 bridge's own RTS line, which is how a case releases one. Every command fails
 closed with an `error:` line.
 
@@ -1421,13 +1422,26 @@ version each board reported. An older image, or another major version,
 fails mandatory preflight naming what it found; build and flash it from
 `firmware/esp32-classic-peer` at this harness commit.
 
+`stream` also holds the piconet to part of the band. `--map <20 hex digits>`
+(or `off`) is set on the initiator, which leads the piconet, before the link
+comes up, so a whole capture runs on one map; `--map-report` writes the map
+asked for and the map the live link is really hopping over, read from the
+leader's controller at the start, the middle, and the end of the capture;
+`--command-output` saves the tool's output for a later step; and
+`--interrupt-after` stops a tool that runs until it is signalled. That is what
+`Recover AFH map` is built from, and
+[`ubertooth_harness/afhmap.py`](ubertooth_harness/afhmap.py) is the step that
+compares the two maps. The map commands need `utesp-1.3.0` or a later image,
+where the rest of the driver needs only `utesp-1.0.0`.
+
 The `classic` suite of [`testplans/classic.yaml`](testplans/classic.yaml) is
-the smoke run above, `classic-comprehensive` adds the capture files and the
-role exchange, and `classic-long` is the bounded long variant: the same two
-follow cases over a five-minute capture each, which is what shows that a
-receive run and the pair's link hold up for minutes rather than seconds. The
-sampling soak, `Classic Bluetooth receive soak`, is still a backlog entry;
-sampling is what it waits for, not traffic.
+the smoke run above plus `Recover AFH map`, `classic-comprehensive` adds the
+capture files, the role exchange, and the AFH detection phase, and
+`classic-long` is the bounded long variant: the same two follow cases over a
+five-minute capture each, which is what shows that a receive run and the
+pair's link hold up for minutes rather than seconds. The sampling
+soak, `Classic Bluetooth receive soak`, is still a backlog entry; sampling is
+what it waits for, not traffic.
 
 One peer on its own is also a device an Ubertooth can discover and connect to,
 because the boot role is discoverable and connectable. That is what the same
