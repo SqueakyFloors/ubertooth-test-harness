@@ -22,8 +22,10 @@ from ubertooth_harness.gui import (
     GitRefSource,
     failure_summary,
     list_plans,
+    omitted_reason,
     parse_ls_remote,
     run_git,
+    step_hosts,
 )
 from ubertooth_harness.gui import _build_needs as build_needs
 from ubertooth_harness.plan import load_plan
@@ -415,6 +417,111 @@ class PlanTests(ControllerTestCase):
         self.assertAlmostEqual(sum(estimates.values()), suite["estimated_s"], places=6)
         self.assertEqual(0, suite["unestimated_tests"])
 
+    async def test_a_target_is_only_shown_the_steps_it_would_run(self):
+        # The release suite holds one step that names the bench host its
+        # ESP32 Classic peers are on (#282). Another target compiles no
+        # invocation for it, so it is not that target's time and not in its
+        # total; what it would add where it does run is reported beside it
+        # (#284).
+        named, other = "Host_Linux", "Host_Mac"
+        async def release(target=None):
+            query = f"?target={target}" if target else ""
+            status, payload, _ = await self.http("GET", f"/api/plans{query}")
+            self.assertEqual(200, status)
+            plans = {plan["name"]: plan for plan in payload["plans"]}
+            (suite,) = plans["release"]["suites"]
+            return suite
+
+        suite = await release(other)
+        self.assertAlmostEqual(654.5, suite["estimated_s"], delta=0.2)
+        self.assertEqual(
+            [{"name": "Recover AFH map",
+              "reason": f"runs on {named}, not on {other}",
+              "estimated_s": 520.0}],
+            suite["omitted_tests"],
+        )
+        self.assertEqual(520.0, suite["omitted_estimated_s"])
+        # Every step is still listed, each saying whether it runs there.
+        self.assertEqual(
+            ["Recover AFH map"],
+            [test["name"] for test in suite["tests"] if not test["runs_on_target"]],
+        )
+        self.assertEqual(0, suite["unestimated_tests"])
+        # The host the step names, and no target at all, count every step.
+        for suite in (await release(named), await release()):
+            self.assertAlmostEqual(1174.5, suite["estimated_s"], delta=0.2)
+            self.assertEqual([], suite["omitted_tests"])
+            self.assertEqual(0.0, suite["omitted_estimated_s"])
+            self.assertEqual(
+                [], [t["name"] for t in suite["tests"] if not t["runs_on_target"]])
+
+    def test_a_step_for_another_host_asks_that_targets_run_for_nothing(self):
+        # The build options and the images only --artifact can pass are the
+        # suite's as the chosen target would run it: a step the target does
+        # not run must not tick a build option or warn about an image.
+        plan = (
+            "plan: Mixed\nsuites:\n  mixed:\n"
+            "    - Host CLI surface:\n        hosts: each\n"
+            "    - Flash reliability:\n"
+            "        hosts: [Host_Linux]\n"
+            "        platforms: [linux]\n"
+            "        Ubertooth: default\n"
+            "        flashes: 2\n"
+            "        image sequence: [test build, KGV]\n"
+            "        KGV sha256: " + "a" * 64 + "\n"
+            "        KGV revision: 2020-12-R1\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "mixed.yaml").write_text(plan, encoding="utf-8")
+            elsewhere = list_plans(root, target="Host_Mac")[0]["suites"][0]
+            named = list_plans(root, target="Host_Linux")[0]["suites"][0]
+            every = list_plans(root)[0]["suites"][0]
+        self.assertEqual(
+            (False, False, []),
+            (elsewhere["needs_firmware_build"], elsewhere["requires_firmware_build"],
+             elsewhere["needs_artifacts"]),
+        )
+        self.assertEqual(0, elsewhere["per_board_tests"])
+        for suite in (named, every):
+            self.assertEqual(
+                (True, True, ["KGV"]),
+                (suite["needs_firmware_build"], suite["requires_firmware_build"],
+                 suite["needs_artifacts"]),
+            )
+
+    def test_a_suite_no_step_of_which_runs_on_the_target(self):
+        # Nothing to run is no estimate rather than a total of zero: the
+        # target would refuse such a run.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "bench.yaml").write_text(
+                "plan: Bench\nsuites:\n  bench:\n"
+                "    - Host CLI surface:\n        hosts: [Host_Linux]\n"
+                "    - Refused command lines:\n        hosts: [Host_Linux]\n"
+                "        coverage: smoke\n",
+                encoding="utf-8",
+            )
+            (suite,) = list_plans(root, target="Host_Mac")[0]["suites"]
+        self.assertIsNone(suite["estimated_s"])
+        self.assertEqual(0, suite["unestimated_tests"])
+        self.assertEqual(2, len(suite["omitted_tests"]))
+        self.assertGreater(suite["omitted_estimated_s"], 0)
+
+    def test_which_hosts_a_step_names(self):
+        # `hosts: each` names none, so every target runs it; the planner
+        # reads a singular `host` first, so this does too.
+        self.assertEqual((), step_hosts({"hosts": "each"}))
+        self.assertEqual((), step_hosts({}))
+        self.assertEqual(("Host_Linux",), step_hosts({"hosts": ("Host_Linux",)}))
+        self.assertEqual(("A", "B"), step_hosts({"hosts": ["A", "B"]}))
+        self.assertEqual(("A",), step_hosts({"host": "A", "hosts": ("B",)}))
+        # No target: nothing is left out, whatever the step names.
+        self.assertEqual("", omitted_reason({"hosts": ("Host_Linux",)}, None))
+        self.assertEqual("", omitted_reason({"hosts": ("A", "B")}, "B"))
+        self.assertEqual(
+            "runs on A, B, not on C", omitted_reason({"hosts": ("A", "B")}, "C"))
+
     async def test_plans_say_which_build_options_a_suite_needs(self):
         # So the GUI can ask for the image or the Python tools the chosen
         # suite's tests need, instead of the run being refused or those
@@ -715,7 +822,7 @@ class PageWiringTests(unittest.TestCase):
 
     def test_script_wires_to_the_controller_endpoints(self):
         for endpoint in (
-            '"/api/refs"', '"/api/plans"', '"/api/runs"', "/api/targets/${",
+            '"/api/refs"', "`/api/plans${query}`", '"/api/runs"', "/api/targets/${",
             "/ws/live", "/report.md", "/cancel", "`/api/runs/${encodeURIComponent(runId)}`",
         ):
             self.assertIn(endpoint, self.js)
@@ -733,6 +840,42 @@ class PageWiringTests(unittest.TestCase):
         self.assertIn("select.replaceChildren(...usable.map(", body)
         self.assertEqual(1, body.count("select.replaceChildren("))
         self.assertIn("Not runnable (planned tests)", body)
+
+    def test_the_plan_list_is_loaded_for_the_chosen_target(self):
+        # Estimates and omitted steps belong to one target, so the list is
+        # fetched for the chosen one and again whenever it changes, and a
+        # slower answer for a target already left cannot replace it.
+        body = self.js[self.js.index("async function loadPlans()"):
+                       self.js.index("function findSuite(")]
+        self.assertIn("const target = $(\"target\").value;", body)
+        self.assertIn("?target=${encodeURIComponent(target)}", body)
+        self.assertIn("const token = ++state.plansToken;", body)
+        self.assertIn("if (token !== state.plansToken) return;", body)
+        # The operator's plan and suite survive a reload for another target.
+        self.assertIn('const keep = [current, "fast"].find(', body)
+        suites = self.js[self.js.index("function renderSuites()"):
+                         self.js.index("function renderSuiteTests()")]
+        self.assertIn("suites.find((suite) => suite.name === current)", suites)
+        select = self.js[self.js.index("function renderTargetSelect()"):
+                         self.js.index("// ----- run setup")]
+        self.assertIn("if (select.value !== state.plansTarget) loadPlans();", select)
+
+    def test_the_estimate_says_what_the_target_does_not_run(self):
+        body = self.js[self.js.index("function estimateText(suite)"):
+                       self.js.index("async function submitRun(")]
+        # The target the figure is for, and the steps it leaves out with the
+        # time they take where they run.
+        self.assertIn("const target = state.plansTarget;", body)
+        self.assertIn("Estimated test time${on}", body)
+        self.assertIn("suite.omitted_tests", body)
+        self.assertIn("run on other hosts", body)
+        self.assertIn("not counted above", body)
+        self.assertIn("No test of this suite runs${on}", body)
+        # The checklist a run starts with leaves out what its target does
+        # not run, but only while the list belongs to that target.
+        checklist = self.js[self.js.index("function rebuildChecklist()"):]
+        self.assertIn("run.target === state.plansTarget", checklist)
+        self.assertIn("test.runs_on_target !== false", checklist)
 
     def test_the_build_options_are_offered_explained_and_sent(self):
         # Both options are on the form, each with the note the operator reads
