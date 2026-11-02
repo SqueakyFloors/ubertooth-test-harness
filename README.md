@@ -176,6 +176,70 @@ roles may name each one by alias or narrow it by RF placement, but not with
 discovery is reconciled as present/missing/unknown before execution and never
 silently reassigns an alias.
 
+### Hardware a registry has not got
+
+One plan is compiled against every bench's registry, so a step may name a
+host this registry has not got, or a device no host here has. Run planning
+records that as not applicable and leaves the step out, the way it leaves out
+a host whose platform the step does not list:
+
+- a `hosts:` alias this registry does not have (`not applicable on Host_Lab:
+  Host_Lab is not a host in this registry`);
+- a host with no device for a hardware role the test binds: no default for
+  the role (`host Host_Mac has no default ESP32 Classic peer for the acceptor
+  role`), no device of the type at all (`host Host_Mac has no nRF52840 DK
+  resources`), or no device that declares the role (`host Host_Mac has no
+  nRF52840 DK for the advertiser role (DK_Mac0 declares peripheral)`) — when
+  the host's default cannot take the role but another device of its can, that
+  one takes it, as it does for a placement the default cannot satisfy;
+- an explicit device alias this registry does not have (`this registry has no
+  Ubertooth 'UT_Lab7'`).
+
+So the release plan, which every registered host runs, can hold a step for
+hardware only the bench host has: the other hosts, and the other registries,
+record it and run the rest. A suite with nothing this registry can run is
+still an error, and it names the first few steps it left out. A host this
+registry has not got never runs anything of its own, so what it left out is
+recorded in the runs of the hosts that are here, and `run-suite --dry-run`
+lists it; one record per test, so a host that runs that test, or has its own
+reason for leaving it out, keeps its own.
+
+Two absences still end the compile, for now: `alternate Ubertooths` on a host
+with one registered Ubertooth, and `exclusive Ubertooth` where another board
+has no `power:` mapping
+([#269](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/269)).
+
+What a host here cannot run is decided first, and has not changed: a platform
+the step does not list, and a board placed differently from what the test
+needs, leave that host out, and a step whose every named host is here and
+cannot run it this way still fails planning. Only when the hosts that could
+have run it have not got the hardware is the step left out — and a step that
+names a host this registry has not got is left out either way, since the host
+that would have run it is not here to be judged.
+
+`validate-plan --hardware <registry>` is the strict one: there the registry
+is named on purpose, so the same absence fails, which is what catches a plan
+entry for hardware a bench is meant to provide. Every committed suite is
+compiled that way against [`hardware.example.yaml`](hardware.example.yaml) in
+the unit suite (`tests/test_runnable_plans.py`), bar `range-weak-link`, which
+asks for a board behind an attenuator that the example registry carries
+commented out; CI validates the main suites with it as well.
+
+Because it is the stricter of the two, `validate-plan --hardware` refuses a
+plan on a bench that has only some of the hardware it names, where the run
+itself would leave those steps out. On such a bench, check a run with
+`run-suite --dry-run`, which lists exactly what would run and what would be
+left out.
+
+Two refusals are mistakes in the plan rather than absence, and fail wherever
+the plan is compiled: an alias that differs from a registered one only in
+case (`it has 'Host_Linux', so check the spelling in the plan`), and a
+registered alias used as something it is not (`resource UT_Linux0 is not a
+Host`, `resource DK_Linux0 is not a Ubertooth attached to Host_Linux`,
+`resource DK_Linux1 declares the role(s) peripheral, not advertiser`). A role
+or argument name the test does not have is refused when the plan loads, with
+no registry at all.
+
 ### RF placement: where a board sits on the bench
 
 A unit may record its RF placement, so a test can ask for a weak link and a
@@ -618,9 +682,11 @@ section, a `Not applicable cases` column, and a `Host can run` row in report.md,
 `not_applicable_cases` and `not_applicable_tests` in the run summary, and
 `not applicable` in the web GUI. `run-suite --dry-run` prints the same decision
 for every case before any build, lease, or run. A plan entry that no host it
-names can run (no case applies on any of them) fails planning. A test whose
-every case is not applicable finishes `not_applicable` and does not fail the
-run.
+names can run (no case applies on any of them) fails planning, unless what
+the hosts lack is the hardware it binds, which is recorded instead (see
+[Hardware a registry has not got](#hardware-a-registry-has-not-got)). A test
+whose every case is not applicable finishes `not_applicable` and does not
+fail the run.
 
 | Needs | Cases | Not applicable when |
 |---|---|---|
@@ -684,6 +750,7 @@ python -m ubertooth_harness run-suite \
 | `Capture known Classic device` | `classic` plan; an Ubertooth and two ESP32 Classic peers with the `acceptor` and `initiator` roles on one host (see [Classic test devices](#classic-test-devices-esp32-classic-peers)): both peers must already run `firmware/esp32-classic-peer`, which mandatory preflight checks by asking each one to identify itself; `esp32peer.py stream` then brings a Serial Port Profile link up between them, streams 200 bytes every 20 ms, and runs `ubertooth-rx` for `duration` while it holds. `ubertooth-rx -z` must list the piconet central's LAP in its survey results, and a run with no target must report at least ten packet lines carrying that LAP; the central is whichever peer pages, so its LAP is the initiator's. Afterwards the pair must report a link that never went down and at least fifty writes, both peers are reset to the firmware's boot state, the Ubertooth's channel, squelch and LEDs are restored, and other registered boards are guarded | adds `-z -r` (PCAPNG with link type 255) and the same survey with the peers' roles swapped, which must list the other board's LAP and not the first one's |
 | `Follow Classic Bluetooth piconet` | `classic` plan; the same two peers and the same bring-up: `ubertooth-rx -l <central LAP> -u <central UAP>` must report at least ten packet lines and none of another LAP (libbtbb is asked for one access code), and `-l`/`-u` for the peer that is *not* the central must report no packet at all | adds `-l` without `-u` (the UAP is recovered from the air) and `-l -u -q` (PCAP with link type 255) |
 | `Classic capture record fields` | `classic` plan; the same two peers and the same bring-up, but the check is inside the capture files: `bredrrecord.py` decodes every `LINKTYPE_BLUETOOTH_BREDR_BB` record of a `-l <central LAP> -u <central UAP> -q -r` capture, and each must carry the central's LAP and that LAP and UAP as its reference address, with every flag that describes a field in the record agreeing with that field, its access-code errors inside the limit the run allowed, and, where it holds a payload, that payload's length field agreeing with the bytes it holds and its CRC, recomputed with the reference UAP, agreeing with the one it carries (the bench's own traffic records no payload, so what fires live is the headers, addresses and flags), and the PCAPNG naming the central's LAP and UAP as the address it was following; the same with the peers' roles swapped must carry the other board's LAP instead | adds an EV3 audio link (`sco type ev3`, so the voice payload is on the air at the basic rate), whose records must include an `HV3/EV3/3-EV3` packet, and a survey, whose records must include one carrying a UAP the survey recovered for itself |
+| `Recover AFH map` | `classic` plan; the same two peers, with the initiator's controller told to keep a chosen set of channels before the link comes up, so the piconet's Adaptive Frequency Hopping map is known: `ubertooth-afh -e 0 -r` then runs for `duration` and must work that map out from the air. The map the link is really hopping over is read from the leader's controller at the start, the middle and the end of the capture and must be the same all three times; the recovered map must hold at least 90% of the channels in force and mark at most 70% of the channels out of force used. Two maps: channels 0 to 39, and the 20-channel minimum. Afterwards both peers are reset and the Ubertooth restored, as above | adds the tool's other path, `-t <duration>`, whose `AFH map:` line is judged on the channels it found, its stray channels reported with a looser ceiling because that map fills channel gaps and never drops a channel |
 | `DFU images` | writes the selected board's firmware; slow plan (not fast): `-d <test image> -r`, then `-u -r` reads back the image padded with 0xff; `-s` on the image without its suffix gives the build's `.dfu` | `firmware` plan (not release): adds `-s` refusing a `.dfu`; seven bad images (wrong CRC, truncated, no suffix, text, no `UFD`, wrong vendor, wrong product) refused before a device is opened (fork #198, #199, fixed in e8edd15), the board still in its application with the same flash (read back); `-s` refuses a suffixed `.bin` and accepts a read-only one (fork #200, fixed in 9d710fe). At 6fee30c `-d <image> -r` exits 1 after a good flash (fork #267, fixed in 89d9197), so the write cases fail there |
 | `BLE mode conflicts` | no `coverage` argument; release plan | every combination of `ubertooth-btle -f -n -p` must be rejected before sniffing |
 | `Ubertooth util conflicts` | no `coverage` argument; requires `allow RF transmission: true`; release plan | every pair of `-q -n -e -t -x -I` must be rejected with the fork's `error: options ... cannot be combined` before a mode starts |
@@ -1314,7 +1381,7 @@ stable path (`/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Cont
 derived from the bridge serial unless the identity names a `serial device`),
 waits for the firmware's boot notice, and speaks its line shell: `status`
 (one JSON line with the BD_ADDR, LAP and UAP), `role`, `spp peer`,
-`spp start`, `stream`, `spp stop`. `reset` restarts the board with the
+`spp start`, `stream`, `spp stop`, `afh`. `reset` restarts the board with the
 bridge's own RTS line, which is how a case releases one. Every command fails
 closed with an `error:` line.
 
@@ -1344,13 +1411,26 @@ version each board reported. An older image, or another major version,
 fails mandatory preflight naming what it found; build and flash it from
 `firmware/esp32-classic-peer` at this harness commit.
 
+`stream` also holds the piconet to part of the band. `--map <20 hex digits>`
+(or `off`) is set on the initiator, which leads the piconet, before the link
+comes up, so a whole capture runs on one map; `--map-report` writes the map
+asked for and the map the live link is really hopping over, read from the
+leader's controller at the start, the middle, and the end of the capture;
+`--command-output` saves the tool's output for a later step; and
+`--interrupt-after` stops a tool that runs until it is signalled. That is what
+`Recover AFH map` is built from, and
+[`ubertooth_harness/afhmap.py`](ubertooth_harness/afhmap.py) is the step that
+compares the two maps. The map commands need `utesp-1.3.0` or a later image,
+where the rest of the driver needs only `utesp-1.0.0`.
+
 The `classic` suite of [`testplans/classic.yaml`](testplans/classic.yaml) is
-the smoke run above, `classic-comprehensive` adds the capture files and the
-role exchange, and `classic-long` is the bounded long variant: the same two
-follow cases over a five-minute capture each, which is what shows that a
-receive run and the pair's link hold up for minutes rather than seconds. The
-sampling soak, `Classic Bluetooth receive soak`, is still a backlog entry;
-sampling is what it waits for, not traffic.
+the smoke run above plus `Recover AFH map`, `classic-comprehensive` adds the
+capture files, the role exchange, and the AFH detection phase, and
+`classic-long` is the bounded long variant: the same two follow cases over a
+five-minute capture each, which is what shows that a receive run and the
+pair's link hold up for minutes rather than seconds. The sampling
+soak, `Classic Bluetooth receive soak`, is still a backlog entry; sampling is
+what it waits for, not traffic.
 
 Because the comprehensive coverage exchanges the two roles, both peers a plan
 binds must declare both: the registry's role list is what a plan picks a board
@@ -1950,7 +2030,7 @@ GUI both show what it says:
 - a **Known targets** section gives the whole line per test, for example
   `Run against known target: nRF52840 DK advertiser DK_Linux0
   (J-Link 000123456789, /dev/serial/by-id/usb-SEGGER_J-Link_000123456789-if00),
-  requires firmware utdk-1.3.0, BLE address C0:00:00:00:00:01`, and a test
+  requires firmware utdk-1.4.0, BLE address C0:00:00:00:00:01`, and a test
   with no known target says `No known target: the harness drove no device for
   this test`, which the GUI shortens to `no known target`;
 - the transcript carries the same line as an `[M]` record where the test
@@ -2357,8 +2437,8 @@ word and symbol (colour only reinforces it).
   and "Build the Python tools too" (`--with-python`); Run starts the whole suite.
   Each of those two carries a note saying what it costs and follows what the
   chosen suite needs. A suite with a test that cannot run without the option
-  (`DFU images` and `Flash reliability` without the run's image) has it
-  ticked and held there. A suite that would only leave cases out without it
+  (`DFU images`, and `Flash reliability` where its plan entry's `image
+  sequence:` names the run's own image) has it ticked and held there. A suite that would only leave cases out without it
   (`DFU image checks` without the image, `Python tools` without the Python
   build) is named in the note, which invites the tick but does not tick it:
   a build nobody asked for costs time, and the firmware build needs
@@ -2879,16 +2959,18 @@ scripts/local-ci.sh -r <sha> -s "ssh lab-host.example"
 A second workflow (`.github/workflows/firmware.yml`) compiles the nRF52840 DK
 role firmware, which the test and build jobs do not: it needs the nRF Connect
 SDK, so it builds in Nordic's toolchain image for the version
-`firmware/nrf52840dk/NCS_VERSION` pins, and checks that the image carries the
-firmware version string the harness flashes by. On a pull request it also
-builds the sources of the commit the request is against and fails when the
-image changed while `UTDK_FW_VERSION` did not: `nrfdk.py ensure` flashes a DK
-only when the board reports another version, so that change would never reach
-a board that already runs this one. The images decide and not the files, so a
-comment or formatting change leaves the image identical and asks for no bump;
-a build that does not repeat itself is reported as that rather than as a
-missing bump; and a bump of `NCS_VERSION`, which both builds would use and
-the comparison could not see, asks for the version bump by itself.
+`firmware/nrf52840dk/NCS_VERSION` pins. It builds both images the sources
+hold, the default one and the one whose connections hop with channel
+selection algorithm 1, and checks that each carries the firmware version
+string the harness flashes it by. On a pull request it also builds both
+images of the commit the request is against and fails when either changed
+while `UTDK_FW_VERSION` did not: `nrfdk.py ensure` flashes a DK only when the
+board reports another version, so that change would never reach a board that
+already runs this one, whichever image it carries. The images decide and not
+the files, so a comment or formatting change leaves them identical and asks
+for no bump; a build that does not repeat itself is reported as that rather
+than as a missing bump; and a bump of `NCS_VERSION`, which every build would
+use and the comparison could not see, asks for the version bump by itself.
 
 That image and the SDK workspace are gigabytes, so the workflow runs only on
 a change under `firmware/nrf52840dk` (or to `scripts/ci.sh` or the workflow

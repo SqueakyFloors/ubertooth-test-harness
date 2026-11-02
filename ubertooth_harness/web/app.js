@@ -293,8 +293,8 @@
     return ` This suite also needs ${wanted.join(", ")},`
       + ` ${wanted.length > 1 ? "images" : "an image"} no build makes,`
       + ` for ${tests.join(", ")}: run it on the target with run-suite`
-      + ` ${artifacts}. A run started here builds, flashes the boards, and is`
-      + " then refused before its tests.";
+      + ` ${artifacts}. A run started here builds first, and flashes whatever`
+      + " it would flash, before it is refused without running a test.";
   }
 
   function estimateText(suite) {
@@ -560,7 +560,8 @@
       const item = live.byInvocation.get(String(details.invocation_id));
       if (item) item.target = found ? String(details.summary ?? "") : "no known target";
     } else if (kind === "not_applicable") {
-      // Left out before the run: the host cannot run it (not a skip or failure).
+      // Left out before the run: the host named cannot run it, or this bench
+      // has not got the hardware it binds (not a skip or a failure).
       const name = String(details.test_name ?? "");
       if (!details.invocation_id) {
         let item = live.items.find((entry) => entry.name === name && entry.status === "pending");

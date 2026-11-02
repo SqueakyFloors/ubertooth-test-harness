@@ -807,7 +807,7 @@ class PageWiringTests(unittest.TestCase):
         self.assertIn('--artifact "${label}=PATH"', body)
         # What such a run costs before it is refused, so Run is not pressed
         # expecting a quick refusal.
-        self.assertIn("builds, flashes the boards, and is", body)
+        self.assertIn("builds first, and flashes whatever", body)
         self.assertIn("+ artifactWarning(suite)", self.js)
 
     def test_script_has_no_html_injection_sinks(self):
