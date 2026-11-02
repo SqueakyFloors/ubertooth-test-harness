@@ -30,11 +30,11 @@ from ubertooth_harness.power import (
     snapshot_ports,
 )
 from ubertooth_harness.resources import (
-    STARTECH_DRIVER,
-    STARTECH_PORTS,
     MissingResource,
     RegistryError,
     ResourceRegistry,
+    STARTECH_DRIVER,
+    STARTECH_PORTS,
 )
 
 
@@ -85,8 +85,12 @@ def plan_power_cycle(
     registered port anyway would take down whatever is really on it.
 
     A board with no power mapping, or one behind a controller that cannot
-    switch VBUS per port, is absence rather than a mistake: another bench
-    may have it mapped, so the test is left out there (MissingResource).
+    switch VBUS per port, raises MissingResource rather than RegistryError,
+    because another bench may well have it mapped. The planner does not yet
+    turn that into "not applicable" for this test, so today it fails
+    planning there, exactly as an unmapped board does for exclusive
+    isolation; leaving both out instead is
+    [#269](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/269).
     """
     selected = registry.get(selected_alias)
     if selected.type != "Ubertooth" or selected.attached_to != host:

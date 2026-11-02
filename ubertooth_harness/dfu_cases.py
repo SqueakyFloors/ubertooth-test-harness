@@ -66,6 +66,8 @@ _DEVICE_OPENED = r"DFU \+\d+\.\d+s: operation started"
 # guard count), so a slow cleanup is never killed mid-flash.
 WRITE_TIMEOUT_S = 45.0
 READ_TIMEOUT_S = 35.0
+
+
 def _refused(file_name: str, reason: str) -> str:
     """check_download_image(): a refused image gets one line naming the file,
     what is wrong with it, and that the board was left alone. ``reason`` is a

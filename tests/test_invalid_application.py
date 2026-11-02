@@ -218,6 +218,21 @@ class UnstartableImageTests(unittest.TestCase):
         self.assertFalse(startable(STACK_POINTER, (dfuimage.FLASH_TOP) | 1))
         self.assertTrue(startable(STACK_POINTER, 0x70001 | 1, flash_top=0x80000))
 
+    def test_what_ubertooth_dfu_fills_in_cannot_rescue_the_image(self):
+        """The host writes a vector checksum over the first block as it
+        downloads it (ubertooth-dfu.c, fill_vector_checksum), so the board's
+        copy of the image has a correct checksum. The two words are asked
+        first and still refuse it (app_image_region_startable())."""
+        for kind in dfuimage.UNSTARTABLE_KINDS:
+            with self.subTest(kind):
+                bad = bytearray(dfuimage.make_unstartable(kind, firmware()))
+                words = list(struct.unpack("<8I", bytes(bad[:32])))
+                words[7] = (-sum(words[:7])) & 0xFFFFFFFF
+                struct.pack_into("<8I", bad, 0, *words)
+                self.assertEqual(0, sum(struct.unpack("<8I", bytes(bad[:32])))
+                                 & 0xFFFFFFFF)
+                self.assertNotEqual([], dfuimage.startable_problems(bytes(bad)))
+
     def test_an_unknown_kind_and_a_short_image_are_refused(self):
         with self.assertRaisesRegex(ValueError, "unknown unstartable image kind"):
             dfuimage.make_unstartable("no-such-kind", firmware())
@@ -298,8 +313,10 @@ class PowerCycleTests(unittest.TestCase):
         self.bus.faulted = True
         code, output = cycle(self.controller, self.bus)
         self.assertEqual(1, code)
-        self.assertIn("not on the bus at all", output)
+        self.assertIn("on no bus at all", output)
         self.assertIn("entry pin bridged by hand", output)
+        # The port is read before the board is blamed for being gone.
+        self.assertIn("port 1 is powered", output)
         self.assert_powered()
 
     def test_nothing_is_switched_when_the_board_is_in_its_application(self):
@@ -494,7 +511,11 @@ class PortCommandTests(unittest.TestCase):
         )
         code, output = self.run_port(controller)
         self.assertEqual(1, code)
-        self.assertIn("PORT 1 STILL OFF", output)
+        # This command switched nothing off, so it says what it knows: the
+        # port could not be confirmed powered. "STILL OFF" belongs to the
+        # cycle, which did switch it off.
+        self.assertIn("PORT 1 NOT CONFIRMED POWERED", output)
+        self.assertIn("Nothing was switched off here", output)
 
     def test_it_does_nothing_without_the_opt_in(self):
         controller = hub()
@@ -589,8 +610,7 @@ class RecoverTests(unittest.TestCase):
             image = root / "test_build.dfu"
             image.write_bytes(image_bytes)
             argv = ["recover", "--serial", SERIAL, "--image", str(image),
-                    "--revision", REVISION,
-                    "--readback", str(root / "readback.bin")]
+                    "--revision", REVISION]
             for guard in guards:
                 argv += ["--guard", guard]
             out = io.StringIO()
@@ -598,33 +618,60 @@ class RecoverTests(unittest.TestCase):
                 code = invalidapp.main(argv, board_factory=board._board)
             return code, out.getvalue()
 
+    def written(self, board):
+        """The write commands the recovery ran, with the image path cut."""
+        return [tuple(part for part in command if not part.endswith(".dfu"))
+                for command in board.commands
+                if command[0] == "ubertooth-dfu" and "-d" in command]
+
     def test_a_board_in_its_bootloader_is_written_without_a_selector(self):
         board = dfu_board()
         code, output = self.run_recover(board, firmware())
         self.assertEqual(0, code, output)
         self.assertIn("looking for its DFU bootloader", output)
-        self.assertIn("Recovered: application flash holds the test image", output)
+        self.assertIn("Recovered: the board started the test image", output)
         self.assertEqual("app", board.mode)
-        self.assertIn(("ubertooth-dfu", "-d", mock.ANY, "-r"),
-                      [tuple(c[:2]) + (mock.ANY, c[3]) if len(c) == 4 else c
-                       for c in board.commands])
+        # No -U: a board in DFU has no serial to select it by.
+        self.assertEqual([("ubertooth-dfu", "-d", "-r")], self.written(board))
 
-    def test_a_board_already_running_the_test_image_is_left_alone(self):
+    def test_a_board_that_answers_is_written_again_by_serial(self):
+        """A board that came back running the unstartable image answers with
+        the test image's revision, because that is the block the unstartable
+        image carries. So the image goes on whatever it answers."""
         image = firmware()
         board = app_board(image)
+        board._program(dfuimage.make_unstartable(invalidapp.UNSTARTABLE_KIND, image))
         code, output = self.run_recover(board, image)
         self.assertEqual(0, code, output)
-        self.assertIn("already runs the test image", output)
-        self.assertNotIn("-d", [part for command in board.commands for part in command])
+        self.assertIn("which both it and the unstartable image report", output)
+        self.assertEqual([("ubertooth-dfu", "-U", SERIAL, "-d", "-r")],
+                         self.written(board))
+        self.assertTrue(board.startable)
 
     def test_a_board_running_another_image_is_rewritten_by_serial(self):
         board = app_board(firmware(revision="git-other"))
         board.revision = "git-other"
         code, output = self.run_recover(board, firmware())
         self.assertEqual(0, code, output)
-        self.assertIn("writing it", output)
-        self.assertIn("Recovered: application flash holds the test image", output)
-        self.assertTrue(any("-U" in command for command in board.commands))
+        self.assertIn("Recovered: the board started the test image", output)
+        self.assertEqual([("ubertooth-dfu", "-U", SERIAL, "-d", "-r")],
+                         self.written(board))
+
+    def test_a_board_that_does_not_come_back_fails_the_recovery(self):
+        board = dfu_board(stays_in_dfu_after_upload=True)
+        board.flags["checks_vectors"] = True
+        # The write lands but the board does not return to its application.
+        original = board._dfu
+
+        def never_returns(command):
+            result = original(command)
+            board.mode = "dfu"
+            return result
+
+        board._dfu = never_returns
+        code, output = self.run_recover(board, firmware())
+        self.assertEqual(1, code)
+        self.assertIn("Recovery: board", output)
 
     def test_two_dfu_devices_stop_the_recovery_rather_than_guess(self):
         board = dfu_board(dfu_count_extra=1)
@@ -684,6 +731,7 @@ class CaseTests(unittest.TestCase):
         self.assertEqual("restore-port-power", self.case.cleanup[0].step_id)
         self.assertIn("port", self.argv("restore-port-power"))
         self.assertIn("recover", self.argv("restore-image"))
+        self.assertNotIn("--readback", self.argv("restore-image"))
 
     def test_the_power_steps_read_the_bench_from_the_registry(self):
         for step_id in ("cycle", "restore-port-power"):

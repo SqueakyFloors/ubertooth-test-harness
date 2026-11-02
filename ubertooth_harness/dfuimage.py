@@ -77,12 +77,20 @@ BLOCK_SIZE = 256
 APPLICATION_OFFSET = 0x4000
 APPLICATION_SIZE = 0x40000 - APPLICATION_OFFSET
 
-# The two words the bootloader reads before it starts an image, and the
-# bounds it puts them in (firmware/bootloader/app_image.h,
-# app_image_startable(); the flash bound is LPC_FLASH_SIZE_FALLBACK in
-# firmware/bootloader/flash.h). An image whose first two words fall outside
-# these is one the bootloader must refuse to start, leaving itself running so
-# the next image can be written over USB.
+# The first two words of an image and the bounds the bootloader puts them in
+# (firmware/bootloader/app_image.h, app_image_startable(); the flash bound is
+# LPC_FLASH_SIZE_FALLBACK in firmware/bootloader/flash.h). An image whose
+# first two words fall outside these is one the bootloader must refuse to
+# start, leaving itself running so the next image can be written over USB.
+#
+# This is the first of the checks the bootloader makes, not all of them:
+# app_image_region_startable() goes on to ask for the LPC vector checksum at
+# offset 0x1c and, when the image carries an image check block, a checksum
+# over the whole region. Both of those are filled in by ubertooth-dfu as it
+# writes the image's first block, so they say whether what was written is
+# still all there rather than anything about the file. The harness models
+# this check alone, which is enough for what it builds images for: an image
+# refused here is refused before either checksum is read.
 APP_VECTORS_LENGTH = 8
 APP_RAM_BASE = 0x10000000
 APP_RAM_LIMIT = 0x10010000
@@ -94,6 +102,11 @@ FLASH_TOP = 0x80000
 # Every one keeps a valid DFU suffix and the firmware info block, so
 # ubertooth-dfu accepts and writes it: what is wrong is in the two words
 # above, which only the bootloader reads.
+#
+# The first is what the hardware case uses. The others are checked on the
+# host only (tests/test_invalid_application.py): each is another way of
+# failing the same check, so running them on a board would be another cold
+# boot with the same risk behind the same decision.
 UNSTARTABLE_KINDS = (
     # Both words erased, which is what an interrupted download leaves at the
     # start of the region (ubertooth-dfu.c, download()); the case on hardware
@@ -314,17 +327,22 @@ def app_vectors(image: bytes) -> tuple[int, int]:
 
 
 def startable_problems(image: bytes, flash_top: int = FLASH_TOP) -> list[str]:
-    """Why the bootloader will not start this image ([] when it will).
+    """Why app_image_startable() will not start this image ([] when it will).
 
-    The same question app_image_startable() asks of the two words at the
-    start of the application region, read here so a test can say what it
-    built and what it expects the board to do with it. The bootloader asks
-    for a stack pointer inside RAM and word-aligned, and a reset vector with
-    the Thumb bit set pointing above the bootloader and below ``flash_top``.
-    It deliberately asks no more: it tells an image from no image, not a good
-    image from a bad one, and the LPC vector checksum at offset 0x1c is not
-    part of it (no host tool writes that word, so requiring it would refuse
-    every image this tree builds).
+    The question the bootloader asks first, of the two words at the start of
+    the application region, read here so a test can say what it built and
+    what it expects the board to do with it: a stack pointer inside RAM and
+    word-aligned, and a reset vector with the Thumb bit set pointing above
+    the bootloader and below ``flash_top``. That much tells an image from no
+    image, which is what the images below are built to be.
+
+    It is not the whole of what the bootloader asks, and "[]" is therefore
+    not a promise that a board would start the image: the two checksums
+    app_image_region_startable() goes on to make are over what was written to
+    the flash, and ubertooth-dfu fills both in as it writes, so neither can
+    be judged from a file. What "[]" does mean is that this check does not
+    refuse it, and a non-empty list means the board refuses it here, before
+    either checksum is read.
     """
     stack_pointer, reset_vector = app_vectors(image)
     problems = []
@@ -358,10 +376,16 @@ def startable_problems(image: bytes, flash_top: int = FLASH_TOP) -> list[str]:
 def make_unstartable(kind: str, image: bytes) -> bytes:
     """An image the bootloader must refuse to start, from a valid one.
 
-    Only the two words the bootloader reads are changed, and the suffix is
-    written again over the result, so the file stays a valid Ubertooth DFU
-    image carrying the same firmware info block: the host writes it, and the
-    board is left with an application it must not start.
+    Only the first two words are changed, and the suffix is written again
+    over the result, so the file stays a valid Ubertooth DFU image carrying
+    the same firmware info block: the host writes it, and the board is left
+    with an application it must not start.
+
+    What ubertooth-dfu then fills in cannot rescue such an image. It writes a
+    vector checksum over these words and an image check block describing what
+    it wrote, so both checksums are correct on the board -- and
+    app_image_startable() still refuses the two words, which it is asked
+    before either of them.
     """
     if kind not in UNSTARTABLE_KINDS:
         raise ValueError(f"unknown unstartable image kind '{kind}'")

@@ -481,10 +481,12 @@ if the bootloader does start the unstartable image, the board faults on every
 power-up and needs its P4 entry pin bridged by hand, which no harness command
 can do. That is why it is in a plan of its own and not in `release.yaml` or
 any other unattended plan. The case's cleanup powers the port on and writes
-the run's image back whatever happened, so an ordinary failure still ends with
-a usable board; only a run killed outright (SIGKILL) between the switch-off
-and the restore leaves the port off, and the next run's cleanup, or the manual
-recovery above, switches it back on.
+the run's image back whatever happened, including when the cycle command
+itself is killed, so an ordinary failure still ends with a usable board. A
+run killed outright (SIGKILL) between the switch-off and the restore is the
+exception: the port stays off and is switched back on by hand, as after a
+killed power-isolation run (above). The next run cannot do it for you —
+preflight reads the board's serial before any case runs, so it fails first.
 
 ```sh
 python -m ubertooth_harness run-suite \

@@ -254,12 +254,37 @@ def _close_quietly(controller: PowerController) -> None:
         pass
 
 
-def _diagnose(enumerator: UbertoothEnumerator, state: BoardState) -> str:
+def _port_state(controller: PowerController, port: int) -> str:
+    """What the controller says about the port, for a diagnosis to quote.
+
+    A StarTech hub cannot measure VBUS, so "powered" there is the
+    controller's own report and not a measurement; the diagnosis says which
+    it is rather than letting a board be blamed for a port.
+    """
+    try:
+        controller.connect()
+        state = controller.snapshot(port)
+    except Exception as error:  # noqa: BLE001 - a diagnosis never raises
+        return f"the port could not be read ({error})"
+    powered = "powered" if state.power_enabled else "off"
+    if state.vbus_microvolts is None:
+        return f"the controller reports port {port} {powered}, and cannot measure VBUS"
+    return (f"port {port} is {powered}, {state.vbus_microvolts / 1e6:.2f} V, "
+            f"{state.vbus_microamps} uA")
+
+
+def _diagnose(
+    enumerator: UbertoothEnumerator,
+    state: BoardState,
+    controller: PowerController,
+    port: int,
+) -> str:
     """What the bus shows now, in the words the next person needs.
 
-    Read after the wait for the bootloader ran out, so the record says which
-    of the two bad outcomes it was: the board started the image it should
-    have refused, or it is not on the bus at all.
+    Read after a wait for the bootloader ran out, so the record says which of
+    the bad outcomes it was: the board started the image it should have
+    refused, or it is not on the bus at all. The port is read too, because
+    "the board is gone" and "the port is off" look the same from the bus.
     """
     try:
         seen = enumerator.serials()
@@ -273,9 +298,10 @@ def _diagnose(enumerator: UbertoothEnumerator, state: BoardState) -> str:
         )
     if not any(is_unidentified(serial) for serial in seen):
         return (
-            "the board is not on the bus at all, in its application or its "
-            "bootloader. A board that faults on every power-up needs the P4 "
-            "entry pin bridged by hand at the bench"
+            "the board is on no bus at all, in its application or its "
+            f"bootloader ({_port_state(controller, port)}). If the port is "
+            "powered, the board is faulting on every power-up and needs its "
+            "P4 entry pin bridged by hand at the bench"
         )
     return "the bus shows: " + ", ".join(sorted(seen))
 
@@ -332,9 +358,13 @@ def power_cycle(
                 **timing
             )
         except EnumerationError as error:
+            # The write's own -r already reset the board into the unstartable
+            # image, so this is where a board that faults on it is found:
+            # the same diagnosis belongs here as after the cycle.
             raise InvalidAppError(
                 "the board is not sitting in its DFU bootloader before the "
-                f"power cycle: {error}"
+                f"power cycle: {error}; "
+                + _diagnose(enumerator, state, controller, target.port)
             ) from error
         log(f"Before the cycle: {_describe(state)}")
         with preserved_power_state(controller, (target.port,)):
@@ -357,7 +387,8 @@ def power_cycle(
             )
         except EnumerationError as error:
             raise InvalidAppError(
-                f"{error}; {_diagnose(enumerator, state)}"
+                f"{error}; "
+                + _diagnose(enumerator, state, controller, target.port)
             ) from error
         log(f"Board back on the bus after {waited:.1f}s as a DFU bootloader "
             "device, not as its application")
@@ -441,44 +472,35 @@ def recover(
     board: dfuimage.Board,
     image: Path,
     revision: str,
-    readback: Path,
     *,
     log: Callable[[str], None] = print,
 ) -> int:
     """Leave the board in its application running ``image``.
 
-    Three states are handled, so the same command is the case's recovery step
-    and its cleanup. A board that already runs the test image is left alone.
-    A board in its application running something else is written with ``-U``.
-    A board in its bootloader has no serial, so it is identified by
-    elimination and written without a selector.
+    It always writes, and that is deliberate. The unstartable image carries
+    the same firmware info block as the image it was made from, so a board
+    that did start it reports the revision this is recovering to: a check of
+    the revision alone cannot tell the two apart, and a board left with the
+    unstartable image in its flash is one that waits in DFU at its next
+    power-up. One write costs about as long as the read-back a comparison
+    would need, and the board coming back into its application afterwards is
+    itself proof that what is in the flash now is startable.
 
-    One failure is not handled here, as it is not in the DFU images test: a
-    read-back that fails and leaves the board in DFU despite ``-r``
-    (SqueakyFloors/ubertooth#208, seen about once in twenty). In the case's
-    own step that fails the case and the cleanup writes the board back; in
-    the cleanup it fails the cleanup, which stops the run on the record
-    rather than leaving a board nobody knows the state of.
+    Two states, so the same command is the case's recovery step and its
+    cleanup: a board that answers is written with ``-U``, and a board in its
+    bootloader has no serial, so it is identified by elimination (one DFU
+    device attached, every guard answering) and written without a selector.
+
+    The flash is not read back. ``ubertooth-dfu`` fills in the LPC vector
+    checksum and the image check block as it writes the first block, so a
+    read-back differs from the file in those bytes by design
+    (ubertooth-dfu(1)), and the read-back itself fails about once in twenty
+    and leaves the board in DFU (SqueakyFloors/ubertooth#208). What the
+    recovery needs is the revision the board answers with, which is what the
+    issue asks for and what `Flash reliability` verifies a write by.
     """
     seen = board.revision()
-    if seen is not None:
-        log(f"Board answers in its application: {seen}")
-        failure = board.read_back(readback)
-        if failure:
-            log(f"Recovery: {failure}")
-            return 1
-        data = image.read_bytes()
-        if seen == revision and not dfuimage.readback_problems(
-            readback.read_bytes(), data
-        ):
-            log("Recovered: the board already runs the test image")
-            return 0
-        log("Flash or revision differs from the test image; writing it")
-        failure = board.write(image)
-        if failure:
-            log(f"Recovery: {failure}")
-            return 1
-    else:
+    if seen is None:
         log("Board does not answer in its application; looking for its "
             "DFU bootloader")
         failure = board.adopt_dfu_device()
@@ -486,27 +508,23 @@ def recover(
             log(f"Recovery: {failure}")
             return 1
         failure = board.write_unselected(image)
-        if failure:
-            log(f"Recovery: {failure}")
-            return 1
+    else:
+        # It may be running the test image, or the unstartable one: both
+        # report the same revision, so the image goes on either way.
+        log(f"Board answers in its application: {seen}; writing the test "
+            "image, which both it and the unstartable image report")
+        failure = board.write(image)
+    if failure:
+        log(f"Recovery: {failure}")
+        return 1
     returned = board.wait_revision()
     if returned != revision:
         log(f"Recovery: board answers {returned}, expected {revision}"
             if returned else
             "Recovery: board did not return to its application")
         return 1
-    failure = board.read_back(readback)
-    if failure:
-        log(f"Recovery: {failure}")
-        return 1
-    problems = dfuimage.readback_problems(
-        readback.read_bytes(), image.read_bytes()
-    )
-    if problems:
-        log("Recovery: flash still differs from the test image: "
-            + "; ".join(problems))
-        return 1
-    log(f"Recovered: application flash holds the test image, firmware {returned}")
+    log(f"Recovered: the board started the test image it was written, "
+        f"firmware {returned}")
     return 0
 
 
@@ -517,18 +535,22 @@ def recover(
 # own accord mid-flash or mid-cycle.
 
 def cycle_worst_s() -> float:
-    # Two controller reads and a write before the cycle, the removal wait,
-    # the restoration (a read, a write, a read), the return wait, and the
-    # power check on the way out. The controller calls are milliseconds on
-    # both drivers; the waits are what this costs.
-    return REMOVAL_DEADLINE_S + RETURN_DEADLINE_S + 5.0
+    """Three bounded waits and the controller calls around them.
+
+    The waits are what this costs: the board's state before the cycle (up to
+    the return deadline), the removal, and the return. The controller reads
+    and writes, including the restoration and the power check on the way out,
+    are milliseconds on both drivers; 5 s covers them.
+    """
+    return RETURN_DEADLINE_S + REMOVAL_DEADLINE_S + RETURN_DEADLINE_S + 5.0
 
 
 def recover_worst_s(guards: int) -> float:
+    """A revision read, the DFU elimination, a write, and the wait after it."""
     return (dfuimage.REVISION_TIMEOUT_S
-            + dfuimage.leave_dfu_worst_s(guards)
+            + dfuimage.DFU_COUNT_TIMEOUT_S
+            + guards * dfuimage.REVISION_TIMEOUT_S
             + dfuimage.DFU_WRITE_TIMEOUT_S
-            + dfuimage.DFU_READ_TIMEOUT_S * 2
             + dfuimage.wait_worst_s())
 
 
@@ -596,7 +618,6 @@ def _parser() -> argparse.ArgumentParser:
     recover_parser.add_argument("--guard", action="append", default=[])
     recover_parser.add_argument("--image", required=True)
     recover_parser.add_argument("--revision", required=True)
-    recover_parser.add_argument("--readback", required=True)
     return parser
 
 
@@ -617,7 +638,8 @@ def main(
     try:
         return _main(args, board_factory, enumerator_factory, controller_factory,
                      install_handlers, timing or {})
-    except (InvalidAppError, RegistryError, EnumerationError) as error:
+    except (InvalidAppError, RegistryError, EnumerationError,
+            PowerControllerError) as error:
         print(f"{args.command}: {error}")
         return 1
     except OSError as error:
@@ -634,8 +656,7 @@ def _main(args, board_factory, enumerator_factory, controller_factory,
     if args.command == "recover":
         board = board_factory(args.serial.lower(),
                               [guard.lower() for guard in args.guard])
-        return recover(board, Path(args.image), args.revision,
-                       Path(args.readback))
+        return recover(board, Path(args.image), args.revision)
     registry, target = _registry_target(args.hardware, args.board, args.controller)
     controller = _controller(
         registry, target,
@@ -644,7 +665,8 @@ def _main(args, board_factory, enumerator_factory, controller_factory,
     )
     if args.command == "port":
         try:
-            unpowered = ensure_power_on(controller, target.port, print)
+            unpowered = ensure_power_on(controller, target.port, print,
+                                        switched_off=False)
         finally:
             _close_quietly(controller)
         if unpowered:

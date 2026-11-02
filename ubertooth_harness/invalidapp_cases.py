@@ -17,13 +17,16 @@ board someone can get to, and the maintainer's agreement, before it runs.
 The image is written to the board's flash on purpose, so the case must be the
 last one on its board, like the DFU images test.
 
-What makes the image refusable is the two words the bootloader reads, not the
-LPC vector checksum at offset 0x1c: the fork's bootloader does not ask for
-that word, and no host tool writes it (firmware/bootloader/app_image.h). The
-image this case writes has both words erased, which is the state an
-interrupted download leaves at the start of the application region, and keeps
-a valid DFU suffix and firmware info block, so ubertooth-dfu has no reason to
-refuse the file.
+What makes the image refusable is the first of the bootloader's checks, the
+two words at the start of the application region: this image has both of them
+erased, the state an interrupted download leaves there. It is not the LPC
+vector checksum at offset 0x1c, nor the checksum over the whole region. The
+bootloader does ask for both of those, but ubertooth-dfu fills both in as it
+writes the first block, so an image can only fail them by not reaching the
+flash whole -- and an image that fails the two words is refused before either
+is read (firmware/bootloader/app_image.h, app_image_region_startable()).
+Everything else about the file stays valid, suffix and firmware info block
+included, so ubertooth-dfu has no reason to refuse it.
 """
 
 from __future__ import annotations
@@ -89,12 +92,11 @@ def _power_args(board_alias, controller_alias):
             "--controller", controller_alias, "--allow-power-changes")
 
 
-def _recover_args(serial, guards, readback):
+def _recover_args(serial, guards):
     args = ("recover", "--serial", serial)
     for guard in guards:
         args += ("--guard", guard)
-    return args + ("--image", _image, "--revision", _revision,
-                   "--readback", case_file(readback))
+    return args + ("--image", _image, "--revision", _revision)
 
 
 def _steps(serial, guards, board_alias, controller_alias):
@@ -125,8 +127,8 @@ def _steps(serial, guards, board_alias, controller_alias):
                     pattern=r"Power cycle: the bootloader refused",
                     timeout_s=invalidapp.step_timeout_s("cycle"), mutates=True),
         helper_step("recover", "Write the test image back and check the revision",
-                    _HELPER, *_recover_args(serial, guards, "recover-readback.bin"),
-                    pattern=r"Recovered: application flash holds the test image",
+                    _HELPER, *_recover_args(serial, guards),
+                    pattern=r"Recovered: the board started the test image",
                     timeout_s=invalidapp.step_timeout_s("recover", len(guards)),
                     mutates=True),
     )
@@ -136,10 +138,17 @@ def _cleanup(serial, guards, board_alias, controller_alias):
     """Always: the port powered, then the board back on the test image.
 
     The port comes first, because a board whose port is off cannot be
-    recovered, and because this is what restores power after a run that was
-    killed outright (SIGKILL) during the cycle. Both steps read before they
-    write, so the ordinary path, where the case already put everything back,
-    changes nothing.
+    recovered, and because this is what restores power when the cycle step's
+    own command was killed outright -- which the harness itself does, with
+    SIGKILL, if that command outlives its deadline. (A SIGKILL of the whole
+    run is different: no cleanup runs then, and the port is switched on by
+    hand, as it is after a killed power-isolation run. The next run cannot do
+    it, because preflight reads the board's serial before any case.)
+
+    The port step reads before it writes, so the ordinary path changes
+    nothing; the image step always writes, since a board that started the
+    unstartable image reports the same revision as the test image and the
+    two cannot be told apart by a revision.
     """
     return (
         helper_step("restore-port-power", "Board's port is powered",
@@ -147,7 +156,7 @@ def _cleanup(serial, guards, board_alias, controller_alias):
                     pattern=r"Port: \S+ port \d+ is powered",
                     timeout_s=invalidapp.step_timeout_s("port"), mutates=True),
         helper_step("restore-image", "Board in its application with the test image",
-                    _HELPER, *_recover_args(serial, guards, "restore-readback.bin"),
+                    _HELPER, *_recover_args(serial, guards),
                     pattern=r"Recovered: ",
                     timeout_s=invalidapp.step_timeout_s("recover", len(guards)),
                     mutates=True),

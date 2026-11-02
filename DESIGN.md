@@ -583,9 +583,16 @@ reads the registry again for the port: the path comes from the case context
 restored on every exit — a failed check, a controller or bus error, SIGTERM,
 SIGINT, or SIGHUP, each turned into an exception so the restoration unwinds —
 and the command's last act is to read the port back and say whether it is
-powered. Restoration still runs in-process, so the case's first cleanup step
-reads the port and switches it on if a killed run (SIGKILL) left it off,
-before the second cleanup step writes the run's image back to the board.
+powered. Restoration still runs in-process, so the case's first cleanup step reads the
+port and switches it on before the second writes the run's image back; that
+covers the step's own command being killed, which the executor does with
+SIGKILL when a command outlives its deadline. A SIGKILL of the run itself
+leaves the port off and someone switches it on by hand, as for isolation: the
+next run cannot, because preflight reads the board's serial before any case.
+The recovery writes the image rather than comparing the flash, because a
+board that started the unstartable image reports the same revision as the
+test image, and a read-back differs from the file in the bytes ubertooth-dfu
+fills in as it writes (the LPC vector checksum and the image check block).
 
 The exclusive-topology btle case runs `timeout --foreground -k 2 -s INT`, so
 [`timeout`](https://www.gnu.org/software/coreutils/manual/html_node/timeout-invocation.html) and btle stay in the command's own process group (the executor
