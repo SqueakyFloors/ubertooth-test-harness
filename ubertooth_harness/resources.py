@@ -128,6 +128,49 @@ def _validate_peer(resource) -> None:
         )
 
 
+BLUETOOTH_ADAPTER = "Bluetooth adapter"
+# A host Bluetooth controller BlueZ drives. The two tools the fork builds only
+# with libbluetooth, ubertooth-scan and ubertooth-follow, name it with -b: the
+# first runs its inquiry, the second reads its clock and the channel map of a
+# link it makes. An Ubertooth cannot stand in for either, which is why the
+# adapter is a resource of its own.
+_ADAPTER_IDENTITY_KEYS = ("hci device", "BD_ADDR", "description")
+# hciN, as BlueZ numbers its controllers and as -b takes it. The number is the
+# order the kernel attached them, not a property of the adapter, so a case
+# checks the address the device reports against the one registered here
+# (bluez_cases.py): an adapter that came back as another hciN then fails with
+# what it found rather than driving whatever took the name.
+_HCI_DEVICE = re.compile(r"^hci[0-9]{1,3}$")
+
+
+def _validate_adapter(resource) -> None:
+    """A host Bluetooth adapter: its HCI device name and its own address."""
+    alias = resource.alias
+    unknown = sorted(set(resource.identity) - set(_ADAPTER_IDENTITY_KEYS))
+    if unknown:
+        raise RegistryError(
+            f"{BLUETOOTH_ADAPTER} {alias} identity has unknown key(s) "
+            f"{', '.join(unknown)}; use {', '.join(_ADAPTER_IDENTITY_KEYS)}"
+        )
+    if not _HCI_DEVICE.fullmatch(resource.identity.get("hci device", "")):
+        raise RegistryError(
+            f"{BLUETOOTH_ADAPTER} {alias} requires an 'hci device' identity "
+            "like hci0 (the name BlueZ gave it, which -b takes)"
+        )
+    if not _ADDRESS_48.fullmatch(resource.identity.get("BD_ADDR", "")):
+        raise RegistryError(
+            f"{BLUETOOTH_ADAPTER} {alias} requires a 'BD_ADDR' identity (the "
+            "address hciconfig reports for it), like 00:1A:7D:DA:71:13"
+        )
+    if resource.roles:
+        # Nothing binds an adapter by role: one host has one controller for
+        # these tools, and a declared role would only keep the test from
+        # finding it.
+        raise RegistryError(
+            f"{BLUETOOTH_ADAPTER} {alias} takes no roles; it is bound by type"
+        )
+
+
 def _validate_dk(resource) -> None:
     """An nRF52840 DK: J-Link serial, optional BLE address and VCOM0 path."""
     alias = resource.alias
@@ -331,6 +374,8 @@ class FileResourceRegistry:
                 _validate_dk(resource)
             if resource.type == ESP32_CLASSIC_PEER:
                 _validate_peer(resource)
+            if resource.type == BLUETOOTH_ADAPTER:
+                _validate_adapter(resource)
         used_power_ports = {}
         for resource in self.resources.values():
             if (

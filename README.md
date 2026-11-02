@@ -671,7 +671,7 @@ printed, never another device's address.
 A case or a whole test declares what it needs from the host in one place
 (`ubertooth_harness/hostneeds.py`, `Needs`): a host platform (also the plan's
 `platforms:` argument, which every test accepts), a tool built only with
-BlueZ, the Python tools build,
+BlueZ, a host program the harness does not install, the Python tools build,
 or a firmware build. It is resolved before anything runs, from the host's
 registry platform and the run's options and build manifest. What the host
 cannot run is left out and recorded as `not applicable on <host>: <reason>`,
@@ -689,7 +689,8 @@ fail the run.
 
 | Needs | Cases | Not applicable when |
 |---|---|---|
-| BlueZ (`ubertooth-scan`, `ubertooth-follow`) | `Host CLI surface` scan and follow `-h`; every `follow` and `scan` case of `Refused command lines` | macOS (no BlueZ): Linux only; on Linux, a run that uses installed tools without them on `PATH` (a Linux `--build` configures with `REQUIRE_ALL=ON` and fails unless both are in the run prefix, so its cases are required) |
+| BlueZ (`ubertooth-scan`, `ubertooth-follow`) | `Host CLI surface` scan and follow `-h`; every `follow` and `scan` case of `Refused command lines`; every case of `Bluetooth inquiry scan` and `Follow Classic piconet over HCI` | macOS (no BlueZ): Linux only; on Linux, a run that uses installed tools without them on `PATH` (a Linux `--build` configures with `REQUIRE_ALL=ON` and fails unless both are in the run prefix, so its cases are required) |
+| host tools the harness does not install (`tshark`, `hciconfig`, `hcitool`) | `BLE extcap in tshark`; every case of `Bluetooth inquiry scan` and `Follow Classic piconet over HCI` | the program is not on the host's `PATH` |
 | Python tools build | `Python tools` `ubertooth-specan-ui -h` | the run has no `--build --with-python` |
 | firmware build | `DFU image checks` `sign-test-build` | the run has no `--build --with-firmware` and no `--artifact "test build=PATH"` (a `--build` run that flashes its boards builds the firmware anyway, so the case applies there) |
 | platform | any plan entry with `platforms:`, which every test accepts (the `exclusive` and `mac-polling` plans list Linux only; `Flash reliability`, `Exclusive Ubertooth topology`, and `MAC polling soak` must state it) | the host's platform is not listed |
@@ -1444,6 +1445,50 @@ harness takes external board locks
 
 The peers have no switchable power on this bench, so nothing power-cycles
 one: a board that stops answering needs someone at it.
+
+### The host Bluetooth adapter and the BlueZ-only tools
+
+Two of the fork's host tools, `ubertooth-scan` and `ubertooth-follow`, are
+built only when libbluetooth is found, and both drive a Bluetooth controller
+of the host's as well as an Ubertooth: the scan runs that controller's
+inquiry, and the follow reads its clock, pages a target for the target's
+clock offset, and with `-a` reads the channel map of the link it made. An
+Ubertooth cannot stand in for one. Register the controller as a
+`Bluetooth adapter`:
+
+```yaml
+  BT_Linux0:
+    type: Bluetooth adapter
+    attached to: Host_Linux
+    identity:
+      hci device: hci0
+      BD_ADDR: "00:1A:7D:DA:71:13"
+```
+
+`hci device` is the name BlueZ gave it, which the tools take with `-b`, and
+`BD_ADDR` is the address `hciconfig <device>` reports. The `hciN` number is
+attach order rather than a property of the adapter, so the address is what
+identifies it: every case reads the device first and fails, naming what it
+found, if the address is not the registered one. An adapter takes no roles
+and is leased like a board, under `bluez-<hci device>`. The cases need
+`hciconfig` and `hcitool` on the host, declared as host tools the harness
+does not install.
+
+[`testplans/hci.yaml`](testplans/hci.yaml) holds the two tests that bind it,
+`Bluetooth inquiry scan` and `Follow Classic piconet over HCI`, on the same
+ESP32 pair: the pair gives the adapter a discoverable device to find and the
+Ubertooth a piconet to sweep for.
+
+**No bench has an adapter yet**
+([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)),
+so neither test has run. Their checks are written to what the two tools
+document and print, and the `hci` plan is deliberately not in
+`release.yaml`: it moves into the release suites once a real run passes.
+What the first real run has to settle is in
+[`docs/tests.md`](docs/tests.md), per case. Every step of the plan binds the
+adapter, so running it on a bench without one is refused, naming the missing
+resource; in a suite that holds other work the two tests are left out as not
+applicable, like any other hardware a registry has not got.
 
 ## Sharing boards: leases
 

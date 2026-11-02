@@ -412,21 +412,36 @@ def board_key(alias: str, identity: Mapping) -> str:
     return serial
 
 
-# nRF52840 DKs (BLE test devices) and ESP32 Classic peers are leased too, by
-# J-Link serial and by USB bridge serial. Both keys are prefixed, so neither
-# can clash with an Ubertooth's bare 32 hex digits, with the host lock, or
-# with `takeover`, which would name the takeover lock's own file; a CP2102N
-# bridge serial is 32 hex digits itself.
+# nRF52840 DKs (BLE test devices), ESP32 Classic peers, and the host
+# Bluetooth adapter are leased too, by J-Link serial, by USB bridge serial,
+# and by HCI device name. Every one of those keys is prefixed, so none can
+# clash with an Ubertooth's bare 32 hex digits, with the host lock, or with
+# `takeover`, which would name the takeover lock's own file; a CP2102N bridge
+# serial is 32 hex digits itself.
 # A key becomes a file name, so it may hold nothing that would reach
 # another directory or need quoting.
 _LOCK_NAME = re.compile(r"^[0-9A-Za-z_.:+-]{1,64}$")
 DK_TYPE = "nRF52840 DK"
 PEER_TYPE = "ESP32 Classic peer"
-LEASED_TYPES = ("Ubertooth", DK_TYPE, PEER_TYPE)
+ADAPTER_TYPE = "Bluetooth adapter"
+LEASED_TYPES = ("Ubertooth", DK_TYPE, PEER_TYPE, ADAPTER_TYPE)
 
 
 def resource_key(resource) -> str:
-    """Lock-file key of a leasable resource (Ubertooth, DK, or ESP32 peer)."""
+    """Lock-file key of a leasable resource (Ubertooth, DK, ESP32 peer, or
+    host Bluetooth adapter)."""
+    if resource.type == ADAPTER_TYPE:
+        # The HCI device name, which is what a tool is pointed at with -b.
+        # One adapter answers one inquiry at a time and holds one link to a
+        # target, so two tests using it at once would read each other's
+        # results.
+        device = str(resource.identity.get("hci device", "") or "").strip()
+        if not device or not _LOCK_NAME.fullmatch(device):
+            raise LeaseError(
+                f"{resource.alias} needs an 'hci device' in the hardware registry "
+                f"to be leased; registered '{device}'"
+            )
+        return f"bluez-{device}"
     if resource.type == DK_TYPE:
         serial = str(resource.identity.get("jlink serial", "") or "").strip()
         if not serial.isdigit():

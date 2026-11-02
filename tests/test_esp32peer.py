@@ -56,6 +56,23 @@ class AddressTests(unittest.TestCase):
         self.assertEqual(ACCEPTOR_ADDRESS,
                          esp32peer.normalize_address(" c8:85:41:2a:1b:2a "))
 
+    def test_the_device_name_is_the_one_the_firmware_builds(self):
+        """Derived from the address, and in step with the firmware source.
+
+        A BlueZ inquiry reads this name back from the board, so a case that
+        checks what the inquiry found needs it without reading the board.
+        """
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "firmware" / "esp32-classic-peer" / "main"
+                  / "bt_peer.c").read_text(encoding="utf-8")
+        self.assertIn(f'"{esp32peer.DEVICE_NAME_PREFIX}%02X%02X%02X"', source)
+        self.assertEqual("UT-ESP32-2A1B2A",
+                         esp32peer.device_name(ACCEPTOR_ADDRESS))
+        self.assertEqual("UT-ESP32-E9C5BA",
+                         esp32peer.device_name(INITIATOR_ADDRESS))
+        with self.assertRaisesRegex(esp32peer.PeerError, "BD_ADDR must look like"):
+            esp32peer.device_name("nope")
+
     def test_the_by_id_path_is_derived_from_the_bridge_serial(self):
         path = esp32peer.default_device("abc123")
         self.assertEqual("/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_"
