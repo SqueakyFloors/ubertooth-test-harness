@@ -513,7 +513,7 @@ class PlanCompiler:
                                 # as not applicable.
                                 power_cycle = plan_power_cycle(
                                     self.registry, host, selected_board,
-                                    resources.get("USB power controller"),
+                                    arguments.get("USB power controller"),
                                 )
                         except MissingRequiredHardware as error:
                             if strict_hardware:

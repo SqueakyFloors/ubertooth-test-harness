@@ -20,7 +20,8 @@ suites:
   #
   # Requires: --allow-destructive (a person passes it; the runner service
   # never does, so no dispatched run and no GUI click can start this test),
-  # --allow-power-changes, the run's own firmware image
+  # --allow-power-changes, `platforms: [linux]` and
+  # `USB power controller:` in the step, the run's own firmware image
   # (--build --with-firmware, or --artifact "test build=PATH"), and a board
   # with a `power:` mapping on a controller that can switch VBUS per port.
   # The plan names the hub so a bench whose wiring moved fails planning

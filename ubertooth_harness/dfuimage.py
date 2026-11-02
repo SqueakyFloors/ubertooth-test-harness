@@ -644,7 +644,14 @@ class Board:
         return "" if code == 0 else f"write exited {code}: {_last_line(output)}"
 
     def changed_guards(self, revisions: dict) -> list[str]:
-        """Guards no longer running what ``revisions`` recorded for them."""
+        """Guards no longer running what ``revisions`` recorded for them.
+
+        A revision is all there is to compare, so a guard that was already
+        running the image that was written cannot be told from one that was
+        not written at all. That is the ordinary case on a bench whose
+        boards all carry the run's build, so this catches the write that
+        went astray only where it changed something.
+        """
         changed = []
         for guard, before in revisions.items():
             now = self.revision(guard)

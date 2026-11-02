@@ -47,7 +47,7 @@ from ubertooth_harness.preflight import PreflightCheck
 from ubertooth_harness.resources import FileResourceRegistry, RegistryError
 from ubertooth_harness.sequencer import NamedTestSequencer
 from ubertooth_harness.stateful import REGISTRY_PATH_KEY
-from ubertooth_harness.topology import PowerCycleTarget, plan_power_cycle
+from ubertooth_harness.topology import plan_power_cycle
 
 from tests.test_dfu_cases import FakeDfuBoard, signed
 from tests.test_run_isolation import HARDWARE, SERIALS
@@ -60,6 +60,12 @@ SERIAL = SERIALS[BOARD]
 GUARDS = (SERIALS["UT_Linux1"], SERIALS["UT_Linux2"])
 REVISION = "git-test"
 DFU_ENTRY = f"{UNIDENTIFIED_PREFIX}3-2.4.1:6003"
+# What the run records for the port, as the sequencer passes it to a step:
+# the hub, its driver and identity, and the port (PowerCycleTarget.describe).
+RECORDED_PORT = (
+    f"{CONTROLLER} port {PORT} (startech managed USB hub, "
+    "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_X-if00-port0)"
+)
 # Waits short enough for a unit test; the production values are measured
 # enumeration timings (enumeration.py).
 FAST = {
@@ -136,6 +142,12 @@ class FakeBus:
                 for index in range(self.bootloaders)
             )
         return frozenset(seen)
+
+
+def registry_target(directory: Path):
+    """The power-cycle target as the planner resolves it from the registry."""
+    registry = FileResourceRegistry.load(registry_file(directory))
+    return plan_power_cycle(registry, "Host_Linux", BOARD, CONTROLLER)
 
 
 def hub(port=PORT, powered=True):
@@ -362,7 +374,8 @@ class PowerCycleTests(unittest.TestCase):
         controller = hub(powered=False)
         code, output = cycle(controller, FakeBus(controller, self.board))
         self.assertEqual(1, code)
-        self.assertIn("is already off", output)
+        self.assertIn("was already off", output)
+        self.assertIn("nothing is cycled", output)
         self.assertTrue(controller.physical_power(PORT))
 
     def test_a_bus_that_cannot_be_read_while_the_port_is_off_restores_power(self):
@@ -684,14 +697,31 @@ class RecordedPortTests(unittest.TestCase):
 
     def test_the_recorded_port_is_what_the_registry_says(self):
         controller = hub()
-        code, output = self.run_port(f"{CONTROLLER} {PORT}", controller)
+        code, output = self.run_port(RECORDED_PORT, controller)
         self.assertEqual(0, code, output)
+        with tempfile.TemporaryDirectory() as directory:
+            # The string the sequencer passes is this one.
+            self.assertEqual(RECORDED_PORT,
+                             registry_target(Path(directory)).describe())
 
     def test_a_registry_that_now_says_another_port_switches_nothing(self):
         controller = hub(powered=False)
-        code, output = self.run_port(f"{CONTROLLER} 3", controller)
+        code, output = self.run_port(
+            RECORDED_PORT.replace(f"port {PORT}", "port 3"), controller)
         self.assertEqual(1, code)
         self.assertIn("the run recorded", output)
+        self.assertIn("nothing was switched", output)
+        self.assertFalse(controller.physical_power(PORT))
+
+    def test_a_registry_whose_hub_is_another_hub_switches_nothing(self):
+        """An alias says which entry in the registry; the entry can be
+        pointed at another hub after the run was planned, so the hub's own
+        driver and identity are part of what is checked."""
+        controller = hub(powered=False)
+        code, output = self.run_port(
+            RECORDED_PORT.replace("FTDI_FT232R_USB_UART_X", "SOME_OTHER_HUB"),
+            controller)
+        self.assertEqual(1, code)
         self.assertIn("nothing was switched", output)
         self.assertFalse(controller.physical_power(PORT))
 
@@ -860,7 +890,7 @@ class CaseTests(unittest.TestCase):
         self.case = self.cases[0]
         self.context = {
             REGISTRY_PATH_KEY: "/bench/hardware.yaml",
-            "power cycle port": f"{CONTROLLER} {PORT}",
+            "power cycle port": RECORDED_PORT,
             "capture dir": "/run/captures/001",
             f"artifact {invalidapp_cases.TEST_IMAGE}": "/run/build/test.dfu",
             "expected firmware revision": REVISION,
@@ -903,7 +933,7 @@ class CaseTests(unittest.TestCase):
                 # The port is a check on the registry, never where the step
                 # takes it from: the registry decides, and a registry that
                 # now says another port is refused.
-                self.assertEqual(f"{CONTROLLER} {PORT}",
+                self.assertEqual(RECORDED_PORT,
                                  argv[argv.index("--expect-port") + 1])
                 self.assertNotIn("--port", argv)
 
@@ -960,10 +990,14 @@ class CaseTests(unittest.TestCase):
         self.assertTrue(self.definition.establishes_firmware)
         self.assertTrue(self.definition.build_required.firmware_build)
         self.assertTrue(self.definition.guards_other_ubertooths)
-        self.assertEqual(
-            {"Ubertooth": "Ubertooth", "USB power controller": "USB power controller"},
-            dict(self.definition.hardware_roles),
-        )
+        # The hub is an argument, not a bound role: a role the registry has
+        # not got is left out as not applicable, and a missing hub has to
+        # block this test instead.
+        self.assertEqual({"Ubertooth": "Ubertooth"},
+                         dict(self.definition.hardware_roles))
+        self.assertTrue(self.definition.arguments["platforms"].required)
+        self.assertTrue(
+            self.definition.arguments["USB power controller"].required)
 
 
 class RunRequirementTests(unittest.TestCase):
@@ -1020,6 +1054,22 @@ class RunRequirementTests(unittest.TestCase):
             self.catalog, self.registry).compile_suite(
                 load_plan(self.plan, self.catalog), "power").blocked)
 
+    def test_a_bench_without_the_hub_the_plan_names_blocks_the_step(self):
+        """A hub the registry has not got is not "not applicable": the hub
+        is what the test is about, so the step is blocked and the run it
+        belonged to fails."""
+        text = HARDWARE.replace("Hub_StarTech", "Hub_Elsewhere")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "hardware.yaml"
+            path.write_text(text, encoding="utf-8")
+            registry = FileResourceRegistry.load(path)
+            with self.assertRaises(PlanningError) as caught:
+                PlanCompiler(self.catalog, registry).compile_suite(
+                    load_plan(self.plan, self.catalog), "power")
+        message = str(caught.exception)
+        self.assertIn("blocked on Host_Linux", message)
+        self.assertIn("has no USB power controller 'Hub_StarTech'", message)
+
     def test_the_run_holds_the_host_lock(self):
         self.assertTrue(leases.needs_host_lock(self.invocations, self.catalog))
 
@@ -1067,7 +1117,9 @@ class RunRequirementTests(unittest.TestCase):
     def test_the_manifest_records_the_port_the_run_may_switch(self):
         identity = InvocationIdentity.from_invocation(self.invocations[0])
         self.assertEqual(
-            {"resource": BOARD, "controller": CONTROLLER, "port": PORT},
+            {"resource": BOARD, "controller": CONTROLLER, "port": PORT,
+             "driver": "startech managed USB hub",
+             "identity": "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_X-if00-port0"},
             dict(identity.power_cycle),
         )
         self.assertEqual(dict(identity.power_cycle),
@@ -1219,7 +1271,7 @@ class FullCaseTests(unittest.TestCase):
                 "001-invalid", invalidapp_cases.TEST_NAME, "Host_Linux", arguments,
                 {"Ubertooth": BOARD, "USB power controller": CONTROLLER},
                 {"Ubertooth": {"serial": SERIAL}},
-                power_cycle=PowerCycleTarget(BOARD, CONTROLLER, PORT),
+                power_cycle=registry_target(root),
             )
             manifest = build_run_manifest(
                 run_id="run-141", plan_name="power", suite="power",

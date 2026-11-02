@@ -56,7 +56,7 @@ from ubertooth_harness.transitions import _serial, _util
 TEST_NAME = "Reset into invalid application"
 TEST_IMAGE = APPLICATION_IMAGE_LABEL
 BAD_IMAGE = "unstartable.dfu"
-CONTROLLER_ROLE = "USB power controller"
+CONTROLLER_ARGUMENT = "USB power controller"
 
 _HELPER = script_path(invalidapp)
 _REVISION_PATTERN = (
@@ -190,14 +190,17 @@ def _cleanup(serial, guards, board_alias, controller_alias):
     )
 
 
-def invalid_application_cases(_arguments, resources, resource_identities):
+def invalid_application_cases(arguments, resources, resource_identities):
     serial = _serial(resource_identities, TEST_NAME)
     guards = tuple(
         resource_identities[role]["serial"].lower()
         for role in guard_roles(resource_identities)
     )
     board_alias = resources["Ubertooth"]
-    controller_alias = resources[CONTROLLER_ROLE]
+    # The hub the plan names. The planner has already checked it is the one
+    # the board is registered on (topology.plan_power_cycle); the helper
+    # checks it again against the registry as it reads it.
+    controller_alias = arguments[CONTROLLER_ARGUMENT]
     return (
         StateCase(
             "unstartable-application",

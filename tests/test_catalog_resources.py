@@ -150,10 +150,10 @@ class CatalogTests(unittest.TestCase):
 
     def test_every_test_accepts_platforms_with_the_same_values(self):
         catalog = builtin_catalog()
-        # The three tests that must state their platforms keep their own
-        # required rule; everywhere else the argument is optional.
+        # The tests that must state their platforms keep their own required
+        # rule; everywhere else the argument is optional.
         required = {"Flash reliability", "Exclusive Ubertooth topology",
-                    "MAC polling soak"}
+                    "MAC polling soak", "Reset into invalid application"}
 
         for name in catalog.names:
             rule = catalog.get(name).arguments.get("platforms")

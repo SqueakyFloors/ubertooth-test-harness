@@ -763,10 +763,7 @@ class NamedTestSequencer:
         if self.registry_path is not None:
             context[REGISTRY_PATH_KEY] = str(self.registry_path)
         if invocation.power_cycle is not None:
-            target = invocation.power_cycle
-            context[POWER_CYCLE_PORT_KEY] = (
-                f"{target.controller_alias} {target.port}"
-            )
+            context[POWER_CYCLE_PORT_KEY] = invocation.power_cycle.describe()
         if case.artifacts or case.optional_artifacts:
             # Checked when the run was planned; hashed again here. Nothing
             # has run yet, so a refusal leaves the device as it was.

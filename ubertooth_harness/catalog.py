@@ -1733,14 +1733,19 @@ def builtin_catalog() -> TestCatalog:
                 invalidapp_cases.invalid_application_cases,
                 coverage=False,
                 extra={
-                    # The plan names the hub, so a bench whose wiring moved
-                    # fails planning instead of switching the wrong port; the
-                    # port itself comes from the board's registry mapping.
-                    "USB power controller": ArgumentRule(_selector, required=True),
-                },
-                hardware_roles={
-                    "Ubertooth": "Ubertooth",
-                    "USB power controller": "USB power controller",
+                    # The hub the board must be on. It is not a bound role:
+                    # a role the registry has not got is left out as not
+                    # applicable, and a missing hub must block this test
+                    # instead (the planner records it, #269). So the alias
+                    # is an argument, and plan_power_cycle resolves it
+                    # against the board's own `power:` mapping, which is
+                    # where the port comes from.
+                    "USB power controller": ArgumentRule(_required_text, required=True),
+                    # Its verdict is a USB enumeration check, which is
+                    # fail-closed on Linux only, like the other tests that
+                    # switch power; a plan says so rather than relying on
+                    # which bench it runs on.
+                    "platforms": ArgumentRule(_platforms, required=True),
                 },
                 # It leaves an unstartable image in the board's flash until
                 # its own recovery step writes the test image back, so it

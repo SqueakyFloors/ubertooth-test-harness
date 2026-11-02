@@ -54,7 +54,13 @@ Identifying the board. A board in its DFU bootloader reports no serial, so
 ``-U`` cannot reach it and USB enumeration cannot name it. It is identified
 by elimination, as the DFU images test does it: exactly one serial-less
 Ubertooth device attached, and every other registered board enumerated by
-its own serial. Anything else refuses before a port is switched.
+its own serial. Anything else switches no port off; the port is still left
+powered, which is the one thing every exit from here does.
+
+What elimination cannot tell: an Ubertooth nobody registered. A stranger in
+its own DFU bootloader, attached while the board under test is off the bus,
+looks exactly like the board. The run assumes the registry describes the
+bench, as leases and power isolation do.
 """
 
 from __future__ import annotations
@@ -366,9 +372,15 @@ def power_cycle(
         controller.connect()
         before = controller.snapshot(target.port)
         if not before.power_enabled:
+            # Switched on by the restoration below, like any other exit from
+            # here; what this refuses is the cycle, because a board whose
+            # port was already off has not been seen in the state the test
+            # starts from.
             raise InvalidAppError(
-                f"{target.controller_alias} port {target.port} is already off, "
-                "so this board's state is not known; power it on and rerun"
+                f"{target.controller_alias} port {target.port} was already "
+                "off, so this board has not been seen in its bootloader; the "
+                "port is switched on and nothing is cycled. Rerun once the "
+                "board is back"
             )
         try:
             # Bounded, not a single scan: the reset that ubertooth-dfu made
@@ -700,13 +712,14 @@ def _main(args, board_factory, enumerator_factory, controller_factory,
                               [guard.lower() for guard in args.guard])
         return recover(board, Path(args.image), args.revision)
     registry, target = _registry_target(args.hardware, args.board, args.controller)
-    if args.expect_port:
-        recorded = f"{target.controller_alias} {target.port}"
-        if args.expect_port != recorded:
-            raise InvalidAppError(
-                f"the run recorded {args.expect_port} for {args.board}, and "
-                f"the registry now says {recorded}; nothing was switched"
-            )
+    if args.expect_port and args.expect_port != target.describe():
+        # The hub's own driver and identity are in both strings, so an alias
+        # pointed at another hub since the run was planned is refused here
+        # as well as a board moved to another port.
+        raise InvalidAppError(
+            f"the run recorded {args.expect_port} for {args.board}, and the "
+            f"registry now says {target.describe()}; nothing was switched"
+        )
     if install_handlers:
         # Both commands switch power, so both unwind through their
         # restoration when the run cancels them rather than stopping where

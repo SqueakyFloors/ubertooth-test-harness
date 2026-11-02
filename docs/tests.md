@@ -44,8 +44,8 @@ the run as not applicable. `max_watchdog_resets:` turns the firmware's
 self-reset counter into a pass/fail measure for that step; without it a
 self-reset is reported and judged by a person, not failed
 ([`watchdog.py`](../ubertooth_harness/watchdog.py)). `Flash reliability`,
-`Exclusive Ubertooth topology`, and `MAC polling soak` must state their
-platforms.
+`Exclusive Ubertooth topology`, `MAC polling soak`, and `Reset into invalid
+application` must state their platforms.
 
 **Hardware the bench has not got.** A step whose `hosts:` name a host this
 registry does not have, or whose hardware roles no selected host can bind (no
@@ -2599,22 +2599,20 @@ it is identified by elimination, as the DFU images test does it: exactly one
 serial-less Ubertooth device attached, and every guard board enumerated by
 its own serial.
 
-Neither checksum is what the image gets wrong, because neither can be: a file
-cannot fail them. `ubertooth-dfu` works both out as it writes the image's
-first block and puts them on the board, so what they catch is an image that
-did not reach the flash whole.
-
 **Hardware and arguments.** One `Ubertooth` with a `power:` mapping in the
 registry, on a `USB power controller` that can switch VBUS per port, plus
-every other registered board as guards. The plan names the controller
-(`USB power controller:`), which must be the one the board is registered on,
-so a plan pointed at the wrong hub fails planning rather than switching
-whatever is on that hub's registered port. The port itself is only ever read
-from the registry, and the port the planner resolved goes into the run record
-and is passed back to the step as a check, so a registry edited mid-run
-switches nothing. A board moved to another port of the same hub is still
-switched where the registry says it is: keeping the registry in step with the
-bench is the bench's job. The run
+every other registered board as guards. Required: `platforms:`, because the verdict is a USB
+enumeration check and that is fail-closed on Linux only, and
+`USB power controller:`, the hub the board must be on. A plan pointed at the
+wrong hub fails planning rather than switching whatever is on that hub's
+registered port, and a bench that has not got the named hub, or whose board
+has no `power:` mapping, blocks the step: the run it belonged to fails
+instead of passing without the check. The port itself is only ever read from
+the registry; what the planner resolved — the hub, its driver and identity,
+and the port — goes into the run record and is passed back to the step, which
+refuses if the registry now says anything else. So a registry edited after
+the run was planned switches nothing, whether the board moved port or the
+alias was pointed at another hub. The run
 needs `--allow-destructive` and `--allow-power-changes` and the run's own
 firmware image (`--build --with-firmware`, or a `test build` artifact), holds
 the host lock throughout, and leases the board and its guards.
@@ -2626,7 +2624,10 @@ be the last one on that board.
 **Expected outcome.** One case. The write must reach the flash and must not
 report a verified revision afterwards: the board stays in its bootloader, so
 `ubertooth-dfu -d <image> -r` ends with an error and exit 1, and that is the
-expected outcome here. The cycle must then show, after the port comes back,
+expected outcome here. The step accepts exit 0 as well, deliberately: a board
+that did come back running the image would exit 0, and it must fail on the
+`Verified firmware revision` line it then prints, which says what happened,
+rather than on an exit status that does not. The cycle must then show, after the port comes back,
 the board's serial absent and exactly one DFU bootloader device, with every
 guard where it was. A board that comes back running the image, or that does
 not come back at all, fails the case and the message says which. The
@@ -2666,13 +2667,25 @@ the same risk and the same bootloader check behind it. The recovery writes
 without a selector, because a board in its bootloader has no serial and `-U`
 takes no bus path, so if that board left the bus between the check and the
 write, `ubertooth-dfu` writes whichever board a no-selector command would
-reach. The harness cannot prevent that; it catches it instead, by requiring
-every guard board to still run what it ran before the write, and by the run's
-own guard checks afterwards. What neither covers is an Ubertooth nobody
-registered: a stranger in its own DFU bootloader, attached while the board
-under test is off the bus, is indistinguishable from the board and would be
-written. The run assumes the registry describes the bench, as leases and
-isolation do. The hardware run is
+reach. The harness cannot prevent that; it catches it where it can, by
+requiring every guard board to still run what it ran before the write, and by
+the run's own guard checks afterwards. A revision is all there is to compare,
+so a guard that was already running the image that was written cannot be told
+from one that was not written at all — the ordinary case on a bench whose
+boards all carry the run's build; there the run still fails, on the board
+under test not answering, but names that rather than the guard. And none of
+it covers an Ubertooth nobody registered: a stranger in its own DFU
+bootloader, attached while the board under test is off the bus, looks exactly
+like the board. The run assumes the registry describes the bench, as leases
+and isolation do.
+
+The cold boot is read from the bus, not measured at the board: what the case
+requires is that the board leaves USB enumeration and stays gone for a second
+before the port comes back. The committed plan's hub cannot measure VBUS at
+all, and the test does not read it where a hub can; a hub that reported a
+port off without cutting it would make the board's disappearance the only
+evidence, which is why the disappearance is what is required rather than the
+port's reported state. The hardware run is
 still outstanding
 ([#141](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/141)).
 
