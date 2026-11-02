@@ -2216,12 +2216,17 @@ the peers are reached through `/dev/serial/by-id`. The cases also need
 **Expected outcome.** Smoke runs two cases: `-s` alone, where the inquiry
 must report the acceptor at its registered address under its firmware name,
 and no `-s`, where the scan results must name the central's LAP and carry at
-least one `AFH map:` line. Comprehensive adds both halves in one run, and
+least one `AFH map:` line. Comprehensive adds
 `-s -x`, where the extended report must hold the acceptor's address, its
-name, and an LMP version line. That case takes either exit status, and says
-so: `-x` exits 1 when any part of any device's report could not be fetched,
-and the devices it asks include whatever else in range answered the inquiry,
-so the acceptor's own three lines are what decide it. Every case also
+name, and an LMP version line, **in the acceptor's own report block** — the
+scan reports every device the inquiry answered, each with a report of its
+own, so three patterns over the whole output would let another device's
+`LMP Version:` line stand in for a missing one. That case takes either exit
+status: `-x` exits 1 when any part of any device's report could not be
+fetched, and the devices it asks include whatever else in range answered the
+inquiry. Because the tool also exits 1 when its own capture stream died or
+the board refused the teardown, that case requires the piconet in the survey
+results as well, so a dead capture cannot pass it. Every case also
 requires the driver's own
 report — both peers' addresses, the central's LAP and UAP, a link that came
 up, and a pair that streamed — so a capture of nothing cannot pass as a
@@ -2248,6 +2253,14 @@ Classic traffic is sparse, and `-x` is comprehensive-only for this reason,
 but a run on a busy site will transmit to strangers' devices. That is the
 tool's design, not something the harness chooses. The addresses of such
 devices land in the run record, which is why no run output is committed.
+
+`-x` is also the one case whose deadline is not a worst case. The tool calls
+its per-device report for every device the inquiry answered, and per device
+that is a connect (25 s), a name read (25 s), a version read (20 s) and up to
+two feature pages (20 s each): about 113 seconds if a device fails every
+read, times however many devices are in range. The case allows four minutes,
+which covers two or three devices behaving normally with a wide margin; a run
+that needs more fails on the driver's deadline, with its message.
 
 One more thing the first run may meet. The name read the survey results go
 through passes a **zero timeout** (`print_name_and_class()` in
@@ -2298,17 +2311,26 @@ every packet line must carry the central's LAP and a line with another LAP
 fails the case.
 
 `ubertooth-follow` has no capture timeout — its `-t` is the target address —
-so it captures until it is signalled. The driver is therefore given
-`--interrupt-after`, which is the planned end of the capture, and
-`--min-seconds`, so a run that ended early fails rather than passing on a
-shorter capture. The adapter is read before each case and checked for a
+so it captures until it is signalled, and the driver is what signals it.
+
+**The window the driver gives it is not the capture.** Everything the tool
+does before it starts capturing happens inside that window: the page, which
+BlueZ is allowed 25 seconds for, the clock and clock-offset reads at a second
+each, and with `-a` up to three channel-map reads a fifth of a second apart.
+Those are the tool's own deadlines, so the setup cannot take longer without
+failing instead, and the window is therefore the `duration:` **plus** that
+setup — which is what makes the capture at least as long as the plan asked
+for. A window of the duration alone would have left a slow page no capture at
+all, and `--min-seconds` could not have caught it, because the page would
+have satisfied the floor on its own. The floor is the whole window, less half
+a second, so a command that returned sooner stopped for a reason of its own. The adapter is read before each case and checked for a
 leftover link afterwards: the tool drops the link to the target before the
 capture starts, so a link still up at the end is one this host is holding.
 
 **Hardware and arguments.** The same four roles, arguments, platform, and
 host tools as `Bluetooth inquiry scan`, and the same `hci` plan. The
-`duration:` is the capture window the driver enforces, not an option of the
-tool's.
+`duration:` is the capture, not an option of the tool's and not the length of
+the command: the driver adds the setup above to the window it interrupts at.
 
 **Expected outcome.** Smoke runs two cases: `-t <central>`, where the tool
 must report following that piconet, say it is not using AFH, and print at
@@ -2352,6 +2374,21 @@ channels it holds — the ESP32's `afh` command sets the board's own channel
 classification, which is advice to whichever device leads a link, so it
 cannot be used to predict this map. Comparing a recovered map with a known
 one is `Recover AFH map`'s job, from the air.
+
+Whether `-a` finds a map to read. The tool treats a remote that reports AFH
+**off** as a documented outcome: it says "the remote device is not using AFH;
+following without it", clears `-a`, follows anyway, and exits 0. The `-a`
+case fails on that, which is intended — `-a` was asked for and did not
+happen — but whether the adapter's link to the peer runs with AFH on is the
+adapter's choice and is not known here. The retry loop in the tool covers an
+empty map, not a mode of off.
+
+What "applied" means in that case is also narrower than it sounds: the map is
+read, printed, and handed to the board, and nothing reads the board back, so
+what is checked is that the request was made and accepted. The board keeps
+that map until something clears it (a follow without `-a` does), and this
+test's cleanup does not: it restores channel, squelch, and LEDs, as the
+other capture tests do.
 
 Whether following the target's clock yields that piconet's packets at all.
 The clock arithmetic gives the target's native clock, and the piconet the

@@ -245,7 +245,8 @@ The `hciN` number is the order the kernel attached controllers in, not a
 property of the adapter, so the address is what identifies it. Every case
 reads `hciconfig <device>` first and fails, naming what it found, if the
 address is not the registered one, rather than driving whatever took the
-name. An adapter is leased like a board, under `bluez-<hci device>`: one
+name, and what names its lock. An adapter is leased like a board, under
+`bluez-<address without its colons>`: one
 controller answers one inquiry at a time and holds one link to a target, so
 two tests using it at once would read each other's results.
 

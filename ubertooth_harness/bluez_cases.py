@@ -62,7 +62,9 @@ from ubertooth_harness.classic_cases import (
     ACCEPTOR_ROLE,
     DEFAULT_MAX_AC_ERRORS,
     INITIATOR_ROLE,
+    MIN_HEC_VALID_RECORDS,
     MIN_PACKETS,
+    MIN_REFERENCE_UAP_RECORDS,
     MIN_WRITES,
     PAIR_SETUP_S,
     STREAM_PAYLOAD,
@@ -119,10 +121,35 @@ INQUIRY_S = 11.0
 # half and once per survey result. The read the survey results go through
 # passes a zero timeout, which BlueZ takes as "no deadline", so a device that
 # answers the page and then says nothing can hold the tool for as long as its
-# controller allows. This is an allowance, not a bound: the driver's own
-# deadline is the backstop, and a run that overruns it fails with the driver's
-# message rather than hanging.
+# controller allows (fork #1090). This is an allowance, not a bound: the
+# driver's own deadline is the backstop, and a run that overruns it fails with
+# the driver's message rather than hanging.
 NAME_READS_S = 30.0
+# What -x adds, which is the one allowance here that is not a worst case.
+# `extra_info()` is called for every device the inquiry answered and, per
+# device, connects (25 s), sleeps a second, and reads the name (25 s), the
+# version (20 s) and up to two feature pages (20 s each): about 113 s if a
+# device fails every read. The number of devices is whatever is in range, so
+# no figure bounds it. This covers two or three devices behaving normally with
+# a wide margin; a run that needs more fails on the driver's deadline, with
+# its message, rather than being left to the harness's own.
+EXTENDED_REPORT_S = 240.0
+
+# What `ubertooth-follow` spends before its capture starts, all of it inside
+# the window the driver interrupts at, so the window has to be the capture
+# plus this or the capture is shorter than the plan asked for -- and with a
+# slow page there is no capture at all.
+#
+# Every figure is the tool's own deadline, so the setup cannot take longer
+# than this without failing instead: the page BlueZ is given 25 s
+# (`hci_create_connection(..., 25000)` in ubertooth-follow.c), and the clock
+# and the clock offset 1 s each (`HCI_TIMEOUT_MS`).
+PAGE_S = 25.0
+HCI_READ_S = 1.0
+FOLLOW_SETUP_S = PAGE_S + 2 * HCI_READ_S
+# -a reads the channel map first, up to three times 1 s apart
+# (`FOLLOW_AFH_READ_ATTEMPTS`, `FOLLOW_AFH_RETRY_DELAY_US`).
+AFH_READ_S = 3 * (HCI_READ_S + 0.2)
 
 # Both tools and both ESP32 bridges are Linux's: libbluetooth is BlueZ, and
 # the peers are reached through /dev/serial/by-id.
@@ -145,14 +172,15 @@ INQUIRY_LINE = re.compile(
 SCAN_RESULT_LINE = re.compile(
     r"^\?\?:\?\?:(?P<uap>\?\?|[0-9A-F]{2}):"
     r"(?P<lap>[0-9A-F]{2}:[0-9A-F]{2}:[0-9A-F]{2})(?:\t(?P<name>.*))?$")
-# The extended report of -x, which is indented under the device it belongs to
-# (extra_info() in ubertooth-scan.c). Only the three lines a reachable device
-# always answers are checked: the address it was reached at, its name, and
-# its LMP version. The features, the clock offset and the channel map depend
-# on the controller.
-EXTENDED_ADDRESS = r"(?m)^\tBD Address:  {address}$"
-EXTENDED_NAME = r"(?m)^\tDevice Name: {name}$"
-EXTENDED_LMP = r"(?m)^\tLMP Version: .+ \(0x[0-9a-f]+\) LMP Subversion: 0x[0-9a-f]+$"
+# The lines of the extended report of -x, which are indented under the device
+# they belong to (extra_info() in ubertooth-scan.c). Only the three a
+# reachable device always answers are checked: the address it was reached at,
+# its name, and its LMP version. The features, the clock offset and the
+# channel map depend on the controller.
+_EXTENDED_ADDRESS = re.compile(r"^\tBD Address:  (?P<address>\S+)$")
+_EXTENDED_NAME = re.compile(r"^\tDevice Name: (?P<name>.*)$")
+_EXTENDED_LMP = re.compile(
+    r"^\tLMP Version: .+ \(0x[0-9a-f]+\) LMP Subversion: 0x[0-9a-f]+$")
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +342,51 @@ def maps_reported(minimum: int = 1) -> Check:
     return check
 
 
+def extended_report(address: str, name: str) -> Check:
+    """``-x``'s report of this device holds its address, name and version.
+
+    The three are checked together, inside the one device's block, and not as
+    three patterns over the whole output: the scan reports every device the
+    inquiry answered, each with a report of its own, so another device's
+    ``LMP Version:`` line would otherwise stand in for a missing one here.
+
+    A block is the device's own line (``<address>\t<name>``, or a survey
+    result) followed by the indented lines of its report.
+    """
+    def check(output) -> str:
+        blocks: dict[str, list[str]] = {}
+        current: list[str] | None = None
+        for line in text_lines(output):
+            if line.startswith("\t"):
+                if current is not None:
+                    current.append(line)
+                continue
+            match = INQUIRY_LINE.match(line) or SCAN_RESULT_LINE.match(line)
+            current = blocks.setdefault(line, []) if match else None
+        mine = next(
+            (lines for device, lines in blocks.items()
+             if device.split("\t")[0] == address), None)
+        if mine is None:
+            return (f"no device line for {address}, so it has no extended "
+                    "report either")
+        reported = next(
+            (found["address"] for found in map(_EXTENDED_ADDRESS.match, mine)
+             if found), None)
+        if reported != address:
+            return (f"the extended report under {address} gives its address as "
+                    f"{reported or 'nothing'}")
+        found_name = next(
+            (found["name"] for found in map(_EXTENDED_NAME.match, mine)
+             if found), None)
+        if found_name != name:
+            return (f"the extended report of {address} names it "
+                    f"{found_name!r}, and the peer firmware names it {name!r}")
+        if not any(_EXTENDED_LMP.match(line) for line in mine):
+            return f"the extended report of {address} holds no LMP version"
+        return ""
+    return check
+
+
 # ---------------------------------------------------------------------------
 # The session that runs a tool while the pair streams
 
@@ -356,13 +429,21 @@ def _tool_case(*, case_id, name, serial, hci, acceptor, initiator, command,
     ``extra_s`` is what the tool spends outside that window and which the
     deadline has to allow for as well.
     """
-    # The driver's deadline covers the window, what the tool does outside it,
-    # and slack for a host under load. The floor is the window, less half a
-    # second, so a run that ended early fails instead of passing on a shorter
-    # capture; what the tool does outside the window only makes it longer.
+    # The driver's deadline covers the window, what the tool spends outside
+    # it, and slack for a host under load.
     timeout = seconds + extra_s + EXIT_SLACK_S
-    interrupt_after = float(seconds) + extra_s if interrupt else None
-    min_seconds = seconds - EARLY_EXIT_S
+    if interrupt:
+        # The driver decides when the command ends, so the window it is given
+        # is the capture plus the setup that happens inside it, and the floor
+        # is that whole length: a command that returned sooner stopped for a
+        # reason of its own.
+        interrupt_after = float(seconds) + extra_s
+        min_seconds = interrupt_after - EARLY_EXIT_S
+    else:
+        # The tool bounds its own capture, and what it does outside that
+        # window only makes the run longer, so the window is the floor.
+        interrupt_after = None
+        min_seconds = seconds - EARLY_EXIT_S
     argv = _session_argv(acceptor, initiator, command, timeout=timeout,
                          min_seconds=min_seconds,
                          interrupt_after=interrupt_after, files=files)
@@ -440,12 +521,12 @@ def inquiry_scan_cases(arguments, resources, resource_identities):
         # every case; -s adds a whole inquiry before the window opens, and a
         # name read per device it found.
         inquiry = INQUIRY_S if "-s" in options else 0.0
+        case.setdefault("extra_s", inquiry + NAME_READS_S)
         return _tool_case(
             serial=serial, hci=hci, acceptor=acceptor, initiator=initiator,
             command=("ubertooth-scan", "-U", serial, "-b", device,
                      "-t", str(seconds)) + options,
-            seconds=seconds, extra_s=inquiry + NAME_READS_S,
-            needs=_SCAN_NEEDS, **case)
+            seconds=seconds, needs=_SCAN_NEEDS, **case)
 
     cases = [
         # -s adds the adapter's own half: an inquiry, and the name of each
@@ -471,40 +552,31 @@ def inquiry_scan_cases(arguments, resources, resource_identities):
                             "'AFH map:' line for it"),
     ]
     if arguments["coverage"] == "comprehensive":
-        # The same command line as `inquiry`, with both halves required
-        # rather than one: the stricter check a bench where the adapter and
-        # the sweep both work has to pass. Kept apart from `inquiry` so that
-        # a sweep which heard nothing fails this case and not that one.
-        cases.append(scan(
-            "-s", case_id="inquiry-and-survey",
-            name=f"ubertooth-scan -s reports the acceptor and the piconet LAP "
-                 f"{central}",
-            check=_all(inquiry_found(acceptor["address"], acceptor_name),
-                       scan_results_list(central), maps_reported()),
-            expected_state=(f"the inquiry reported {acceptor['address']} and "
-                            f"the scan results listed LAP {central}")))
         # -x asks each device found for its name, version and features over a
         # connection the scan makes itself. It is comprehensive-only because
         # it is the one part of this tool that transmits to whatever the
         # inquiry answered, rather than only listening.
         #
-        # Either exit status is accepted: the tool exits 1 when any part of
-        # any device's report could not be fetched, and the devices it asks
-        # include whatever else in range answered the inquiry. What decides
-        # the case is the acceptor's own three lines below.
+        # Either exit status is accepted, because the tool exits 1 when any
+        # part of any device's report could not be fetched and the devices it
+        # asks include whatever else in range answered the inquiry. But it
+        # also exits 1 when its own capture stream died or the board refused
+        # the teardown, so this case requires both halves of the scan to have
+        # worked -- the acceptor's report and the piconet in the survey
+        # results -- rather than the report alone.
         cases.append(scan(
             "-s", "-x", case_id="extended-report",
             name=f"ubertooth-scan -s -x reports the acceptor's name and LMP "
-                 "version over a connection",
-            check=inquiry_found(acceptor["address"], acceptor_name),
+                 f"version over a connection, and the piconet LAP {central}",
+            check=_all(inquiry_found(acceptor["address"], acceptor_name),
+                       extended_report(acceptor["address"], acceptor_name),
+                       scan_results_list(central), maps_reported()),
             returncodes=(0, 1),
-            patterns=_pair_report(acceptor, initiator, exit_status="[01]") + (
-                EXTENDED_ADDRESS.format(address=re.escape(acceptor["address"])),
-                EXTENDED_NAME.format(name=re.escape(acceptor_name)),
-                EXTENDED_LMP,
-            ),
-            expected_state=(f"the extended report held {acceptor['address']}, "
-                            f"{acceptor_name}, and an LMP version")))
+            extra_s=INQUIRY_S + NAME_READS_S + EXTENDED_REPORT_S,
+            patterns=_pair_report(acceptor, initiator, exit_status="[01]"),
+            expected_state=(f"the extended report of {acceptor['address']} held "
+                            f"{acceptor_name} and an LMP version, and the scan "
+                            f"results listed LAP {central}")))
     return tuple(cases)
 
 
@@ -532,6 +604,12 @@ def follow_over_hci_cases(arguments, resources, resource_identities):
                 rf"UAP={central_uap}$",)
 
     def follow(*options, **case):
+        # Everything the tool does before it captures -- the page, the clock
+        # reads, and with -a the channel map read -- happens inside the window
+        # the driver interrupts at, so the window is the capture plus that.
+        case.setdefault(
+            "extra_s",
+            FOLLOW_SETUP_S + (AFH_READ_S if "-a" in options else 0.0))
         return _tool_case(
             serial=serial, hci=hci, acceptor=acceptor, initiator=initiator,
             command=("ubertooth-follow", "-U", serial, "-b", device,
@@ -559,7 +637,8 @@ def follow_over_hci_cases(arguments, resources, resource_identities):
                check=_all(piconet_packets(central, MIN_PACKETS, only=True),
                           maps_reported()),
                expected_state=(f"{MIN_PACKETS}+ packet lines with LAP {central}, "
-                               "and one 'AFH map:' line from the link's map")),
+                               "and one 'AFH map:' line read from the link's "
+                               "map and handed to the board")),
     ]
     if arguments["coverage"] == "comprehensive":
         # The file is decoded as well as counted: a BR/EDR capture holding
@@ -586,8 +665,15 @@ def follow_over_hci_cases(arguments, resources, resource_identities):
                     "verify-records",
                     f"Every record in the -q file carries LAP {central}",
                     "follow.pcap",
+                    # -t gives the tool the UAP as well as the LAP, so the
+                    # reference address is knowable in full, and a header
+                    # only passes its HEC when it decoded at this piconet's
+                    # clock and gave this UAP.
                     ("--lap", central,
                      "--reference-lap", central,
+                     "--reference-uap", central_uap,
+                     "--min-reference-uap", str(MIN_REFERENCE_UAP_RECORDS),
+                     "--min-hec-valid", str(MIN_HEC_VALID_RECORDS),
                      "--min-packets", str(MIN_PACKETS),
                      "--max-access-code-errors", str(DEFAULT_MAX_AC_ERRORS))),
             )))

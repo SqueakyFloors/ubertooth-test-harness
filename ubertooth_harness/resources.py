@@ -369,6 +369,7 @@ class FileResourceRegistry:
                     raise RegistryError(
                         f"default {alias} is not attached to {host.alias}"
                     )
+        adapter_devices: dict[tuple, str] = {}
         for resource in self.resources.values():
             if resource.type == NRF52840_DK:
                 _validate_dk(resource)
@@ -376,6 +377,20 @@ class FileResourceRegistry:
                 _validate_peer(resource)
             if resource.type == BLUETOOTH_ADAPTER:
                 _validate_adapter(resource)
+                # One hciN names one controller on one host. Two adapters
+                # registered under the same name would take two leases and
+                # drive the same device; the duplicate-identity check above
+                # does not catch it, because it compares whole identities and
+                # the two addresses differ.
+                key = (resource.attached_to, resource.identity["hci device"])
+                if key in adapter_devices:
+                    raise RegistryError(
+                        f"{BLUETOOTH_ADAPTER} {adapter_devices[key]} and "
+                        f"{resource.alias} are both "
+                        f"{resource.identity['hci device']} on "
+                        f"{resource.attached_to}"
+                    )
+                adapter_devices[key] = resource.alias
         used_power_ports = {}
         for resource in self.resources.values():
             if (

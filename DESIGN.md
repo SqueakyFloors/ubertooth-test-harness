@@ -958,7 +958,8 @@ which is why it has no driver module and no firmware:
   and every case checks the address first, so an adapter that came back as
   another `hciN` fails naming what was found instead of the test driving
   whatever took the name.
-- **It is leased anyway**, under `bluez-<hci device>`: one controller answers
+- **It is leased anyway**, under `bluez-<address without its colons>`,
+  for the reason above and not under its name: one controller answers
   one inquiry at a time and holds one link to a target.
 
 The traffic still comes from the ESP32 pair, so `bluez_cases.py` builds its

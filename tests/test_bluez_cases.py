@@ -19,8 +19,12 @@ from ubertooth_harness.bluez_cases import (
     INQUIRY_TEST_NAME,
     adapter,
     follow_over_hci_cases,
+    AFH_READ_S,
+    EXTENDED_REPORT_S,
+    FOLLOW_SETUP_S,
     INQUIRY_S,
     NAME_READS_S,
+    extended_report,
     inquiry_found,
     inquiry_scan_cases,
     maps_reported,
@@ -256,7 +260,7 @@ class PlanTests(unittest.TestCase):
         registry = FileResourceRegistry.load(ROOT / "hardware.example.yaml")
         catalog = builtin_catalog()
         plan = load_plan(PLAN, catalog)
-        for suite, counts in (("hci", (2, 2)), ("hci-comprehensive", (4, 3))):
+        for suite, counts in (("hci", (2, 2)), ("hci-comprehensive", (3, 3))):
             invocations = PlanCompiler(catalog, registry).compile(plan, suite)
             self.assertEqual(len(counts), len(invocations))
             for invocation, count in zip(invocations, counts):
@@ -297,9 +301,8 @@ class InquiryCaseTests(unittest.TestCase):
     def test_smoke_runs_the_two_halves_separately(self):
         self.assertEqual(["inquiry", "survey"], list(scan_cases()))
 
-    def test_comprehensive_adds_both_halves_at_once_and_the_extended_report(self):
-        self.assertEqual(["inquiry", "survey", "inquiry-and-survey",
-                          "extended-report"],
+    def test_comprehensive_adds_the_extended_report(self):
+        self.assertEqual(["inquiry", "survey", "extended-report"],
                          list(scan_cases("comprehensive")))
 
     def test_the_tool_is_pointed_at_both_radios_and_bounds_its_own_capture(self):
@@ -334,6 +337,16 @@ class InquiryCaseTests(unittest.TestCase):
                          without[without.index("--timeout") + 1])
         self.assertGreater(float(with_s[with_s.index("--timeout") + 1]),
                            float(without[without.index("--timeout") + 1]))
+
+    def test_the_extended_report_gets_its_own_much_longer_deadline(self):
+        """-x fetches a report over a connection per device it found."""
+        argv = driver_argv(scan_cases("comprehensive")["extended-report"])
+        self.assertEqual(
+            str(25 + INQUIRY_S + NAME_READS_S + EXTENDED_REPORT_S + 5.0),
+            argv[argv.index("--timeout") + 1])
+        plain = driver_argv(scan_cases()["inquiry"])
+        self.assertGreater(float(argv[argv.index("--timeout") + 1]),
+                           float(plain[plain.index("--timeout") + 1]))
 
     def test_every_case_reads_the_adapter_first(self):
         for case_id, case in scan_cases("comprehensive").items():
@@ -388,15 +401,30 @@ class FollowCaseTests(unittest.TestCase):
              "-t", INITIATOR_ADDRESS, "-a"],
             tool_argv(follow_cases()["follow-target-afh"]))
 
-    def test_the_capture_is_stopped_on_time_because_the_tool_has_no_timeout(self):
-        # ubertooth-follow's -t is the target address: the capture runs until
-        # it is signalled, so the driver ends it.
+    def test_the_window_is_the_capture_plus_what_the_tool_does_before_it(self):
+        """The page and the clock reads are inside the window the driver
+        interrupts at, so a window of the duration alone would leave a slow
+        page no capture, and the floor could not catch it."""
         argv = driver_argv(follow_cases()["follow-target"])
-        self.assertEqual("25.0", argv[argv.index("--interrupt-after") + 1])
-        self.assertEqual("24.5", argv[argv.index("--min-seconds") + 1])
+        window = 25 + FOLLOW_SETUP_S
+        self.assertEqual(str(window), argv[argv.index("--interrupt-after") + 1])
+        # The floor is the whole window: the driver decides when it ends, so
+        # a command that returned sooner stopped for a reason of its own.
+        self.assertEqual(str(window - 0.5),
+                         argv[argv.index("--min-seconds") + 1])
+        self.assertGreater(window, 25.0)
         step = steps(follow_cases()["follow-target"])["pair-and-run"]
         self.assertTrue(step.mutates)
-        self.assertGreater(step.timeout_s, 25.0)
+        self.assertGreater(step.timeout_s, window)
+
+    def test_the_afh_case_also_allows_for_the_channel_map_read(self):
+        plain = driver_argv(follow_cases()["follow-target"])
+        with_afh = driver_argv(follow_cases()["follow-target-afh"])
+        self.assertEqual(str(25 + FOLLOW_SETUP_S + AFH_READ_S),
+                         with_afh[with_afh.index("--interrupt-after") + 1])
+        self.assertGreater(
+            float(with_afh[with_afh.index("--interrupt-after") + 1]),
+            float(plain[plain.index("--interrupt-after") + 1]))
 
     def test_the_pcap_case_names_the_file_in_the_case_directory(self):
         case = follow_cases("comprehensive")["follow-target-pcap"]
@@ -417,6 +445,8 @@ class FollowCaseTests(unittest.TestCase):
         self.assertEqual("/run/captures/hci/follow.pcap", argv[2])
         self.assertEqual(CENTRAL_LAP, argv[argv.index("--lap") + 1])
         self.assertEqual(CENTRAL_LAP, argv[argv.index("--reference-lap") + 1])
+        self.assertEqual(CENTRAL_UAP, argv[argv.index("--reference-uap") + 1])
+        self.assertIn("--min-hec-valid", argv)
 
     def test_no_case_runs_l_and_u_without_t(self):
         """The page then goes to a guessed 00:00: address, and whether it
@@ -526,15 +556,41 @@ class OutputCheckTests(unittest.TestCase):
         self.assertEqual("", maps_reported(2)(
             fake_bluez.scan_survey() + fake_bluez.scan_survey(lap="2a1b2a")))
 
-    def test_the_inquiry_and_survey_case_checks_both_halves(self):
-        case = scan_cases("comprehensive")["inquiry-and-survey"]
+    def test_the_extended_report_case_checks_both_halves_and_the_block(self):
+        """-x also exits 1 for a dead capture stream, so the case requires
+        the piconet in the survey results too."""
+        case = scan_cases("comprehensive")["extended-report"]
         check = steps(case)["pair-and-run"].output_check
         whole = (fake_bluez.scan_inquiry((ACCEPTOR_ADDRESS, ACCEPTOR_NAME))
+                 + fake_bluez.scan_extended()
                  + fake_bluez.scan_survey())
         self.assertEqual("", check(whole))
-        self.assertIn("not " + ACCEPTOR_ADDRESS, check(fake_bluez.scan_survey()))
         self.assertIn("not LAP " + CENTRAL_LAP, check(
-            fake_bluez.scan_inquiry((ACCEPTOR_ADDRESS, ACCEPTOR_NAME))))
+            fake_bluez.scan_inquiry((ACCEPTOR_ADDRESS, ACCEPTOR_NAME))
+            + fake_bluez.scan_extended()))
+        self.assertIn("holds no LMP version", check(
+            fake_bluez.scan_inquiry((ACCEPTOR_ADDRESS, ACCEPTOR_NAME))
+            + "\tBD Address:  " + ACCEPTOR_ADDRESS + "\n"
+            + "\tDevice Name: " + ACCEPTOR_NAME + "\n"
+            + fake_bluez.scan_survey()))
+
+    def test_the_extended_report_is_read_inside_the_right_devices_block(self):
+        """Another device's report must not stand in for a missing line."""
+        check = extended_report(ACCEPTOR_ADDRESS, ACCEPTOR_NAME)
+        self.assertEqual("", check(
+            fake_bluez.scan_inquiry((fake_bluez.OTHER_ADDRESS, "A speaker"))
+            + fake_bluez.scan_extended(fake_bluez.OTHER_ADDRESS, "A speaker")
+            + fake_bluez.scan_inquiry((ACCEPTOR_ADDRESS, ACCEPTOR_NAME))
+            + fake_bluez.scan_extended()))
+        # The acceptor is listed, another device has the only full report.
+        self.assertIn("gives its address as nothing", check(
+            fake_bluez.scan_inquiry((ACCEPTOR_ADDRESS, ACCEPTOR_NAME))
+            + fake_bluez.scan_inquiry((fake_bluez.OTHER_ADDRESS, "A speaker"))
+            + fake_bluez.scan_extended(fake_bluez.OTHER_ADDRESS, "A speaker")))
+        self.assertIn("no device line", check(fake_bluez.scan_extended()))
+        self.assertIn("names it", check(
+            fake_bluez.scan_inquiry((ACCEPTOR_ADDRESS, ACCEPTOR_NAME))
+            + fake_bluez.scan_extended(ACCEPTOR_ADDRESS, "Someone else")))
 
     def test_the_follow_check_wants_the_centrals_packets_and_nothing_else(self):
         check = steps(follow_cases()["follow-target"])["pair-and-run"].output_check
@@ -584,15 +640,11 @@ class ToolPatternTests(unittest.TestCase):
         self.assertNotRegex(plain,
                             re.compile(r"(?m)^AFH map read: \d+ of 79 "))
 
-    def test_the_extended_report_patterns_match_what_x_prints(self):
-        case = scan_cases("comprehensive")["extended-report"]
-        self.matched(case, fake_bluez.scan_extended(), skip=self.DRIVER)
-        # The report of another device is not this peer's.
-        step = steps(case)["pair-and-run"]
-        name = next(pattern for pattern in step.output_patterns
-                    if "Device Name" in pattern)
-        self.assertNotRegex(fake_bluez.scan_extended(name="Someone's speaker"),
-                            re.compile(name))
+    def test_the_extended_report_case_has_no_patterns_of_its_own(self):
+        """Its three lines are read as one device's block, by the check."""
+        step = steps(scan_cases("comprehensive")["extended-report"])["pair-and-run"]
+        self.assertTrue(all(any(mark in pattern for mark in self.DRIVER)
+                            for pattern in step.output_patterns))
 
     def test_every_driver_pattern_matches_the_drivers_own_report(self):
         """The pair's report, built by the real driver against the firmware fake.
