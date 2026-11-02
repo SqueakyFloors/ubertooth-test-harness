@@ -180,6 +180,25 @@ class ReleaseGateTests(unittest.TestCase):
                  if item.test_name == AFH]
         )
 
+    def test_another_host_of_the_same_bench_neither_runs_nor_fails_on_it(self):
+        """The step names the host the peers are on, and that host is here,
+        so a second host of the bench has nothing to say about it: its own
+        run does not carry the test, and does not fail on it. A run group of
+        the release plan across the bench runs the gate once."""
+        compiled = self.compile(BENCH + MAC_HOST)
+
+        self.assertEqual((), compiled.blocked)
+        self.assertEqual((), compiled.blocked_for_host("Host_Mac"))
+        self.assertEqual(
+            ["Host_Linux"],
+            [item.host for item in compiled.invocations
+             if item.test_name == AFH],
+        )
+        self.assertEqual(
+            [], [item for item in compiled.for_host("Host_Mac")
+                 if item.test_name == AFH]
+        )
+
     def test_the_same_bench_without_its_peers_is_blocked_and_the_rest_runs(self):
         compiled = self.compile(NO_PEERS)
 
