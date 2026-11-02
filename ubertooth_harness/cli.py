@@ -818,10 +818,18 @@ def _run_suite(args: argparse.Namespace) -> int:
         item for item in compiled.for_host(args.host)
         if not selected_names or item.test_name in selected_names
     )
+    # Required tests this host has not got the hardware for (planner.py):
+    # recorded, everything else runs, and the run ends failed.
+    blocked = tuple(
+        item for item in compiled.blocked_for_host(args.host)
+        if not selected_names or item.test_name in selected_names
+    )
     if not invocations:
         raise HarnessError(
             f"suite {args.suite} has no selected invocation for {args.host}"
-            + "".join(f"; {item.describe()}" for item in not_applicable)
+            + "".join(
+                f"; {item.describe()}" for item in blocked + not_applicable
+            )
         )
     for invocation in invocations:
         # Guards need unambiguous -U selectors; fail before any build or device access.
@@ -873,7 +881,9 @@ def _run_suite(args: argparse.Namespace) -> int:
                 "boards' firmware"
             )
     if args.dry_run:
-        return _dry_run(args, catalog, plan, host, invocations, not_applicable)
+        return _dry_run(
+            args, catalog, plan, host, invocations, not_applicable, blocked
+        )
     artifacts = _parse_artifacts(args.artifact)
     run_id = validate_run_id(args.run_id) if args.run_id else generate_run_id()
     # Power isolation and firmware-writing tests hold the host lock for the
@@ -894,17 +904,20 @@ def _run_suite(args: argparse.Namespace) -> int:
     try:
         return _run_leased(
             args, catalog, plan, registry, invocations, sources, artifacts,
-            run_id, leases, not_applicable,
+            run_id, leases, not_applicable, blocked,
         )
     finally:
         leases.release()
 
 
-def _dry_run(args, catalog, plan, host, invocations, not_applicable) -> int:
+def _dry_run(args, catalog, plan, host, invocations, not_applicable, blocked=()) -> int:
     """What run-suite would run on this host and what is not applicable.
 
     Capabilities come from the platform and the run options (hostneeds.py
     planned_capabilities); nothing is built, leased or run.
+
+    Exits 1 when a required test is blocked, because that is what the real
+    run would do: a dry run that exits 0 says this host can run the suite.
     """
     labels = []
     for value in args.artifact:
@@ -945,18 +958,29 @@ def _dry_run(args, catalog, plan, host, invocations, not_applicable) -> int:
             print(f"    run: {case.name}")
         for case, reason in left_out:
             print(f"    not applicable on {args.host}: {case.name}: {reason}")
+    for item in blocked:
+        print(f"  {item.describe()}")
     for item in not_applicable:
         print(f"  {item.describe()}")
     # Not "on this host": a step left out because this registry has no such
     # host is not this host's doing, and each line above names its own host.
     print(f"total: {len(invocations)} test(s), {runs} case(s) to run, {omitted} case(s) "
-          f"and {len(not_applicable)} test(s) not applicable")
+          f"and {len(not_applicable)} test(s) not applicable"
+          + (f", {len(blocked)} test(s) blocked" if blocked else ""))
+    if blocked:
+        print(
+            f"error: {len(blocked)} required test(s) cannot run on {args.host}; "
+            "the run would fail. Register the hardware they need, or run a "
+            "suite without them.",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
 def _run_leased(
     args, catalog, plan, registry, invocations, sources, artifacts, run_id, leases,
-    not_applicable=(),
+    not_applicable=(), blocked=(),
 ) -> int:
     """run-suite once every board the run touches is leased to this process."""
     preflight_policy = PreflightPolicy(registry, catalog)
@@ -1043,6 +1067,7 @@ def _run_leased(
             cancellation=cancellation,
             publisher=publisher,
             not_applicable=not_applicable,
+            blocked=blocked,
         )
     finally:
         for signum, handler in previous_handlers.items():

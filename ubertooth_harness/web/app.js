@@ -33,6 +33,7 @@
     canceled: ["■", "canceled"],
     skipped: ["–", "skipped"],
     "not applicable": ["–", "not applicable"],
+    blocked: ["✗", "blocked"],
     error: ["✗", "error"],
     lost: ["?", "lost"],
     "not run": ["○", "not run"],
@@ -577,6 +578,29 @@
       }
       const what = details.case_name ? `${name} / ${details.case_name}` : name;
       pushLog(`[not applicable on ${details.host ?? ""}] ${what}: ${details.reason ?? ""}`);
+    } else if (kind === "blocked") {
+      // Also left out before the run, but the hardware it is about is what
+      // is missing, so the run fails: shown as blocked, not as a skip.
+      const name = String(details.test_name ?? "");
+      // A test this run also runs keeps its own row: with `Ubertooth: each`
+      // on a partly switchable bench the step runs for some boards and is
+      // blocked for the rest, and a row cannot say both. The log line and
+      // the failure summary carry the record instead.
+      const running = Array.isArray(live.invocations)
+        && live.invocations.some((invocation) => invocation.test_name === name);
+      if (!running) {
+        let item = live.items.find((entry) => entry.name === name && entry.status === "pending");
+        if (!item && Array.isArray(live.invocations)) {
+          // Not in the manifest, and it takes no time.
+          item = { name, estimated_s: 0, status: "pending", reason: "" };
+          live.items.push(item);
+        }
+        if (item) {
+          item.status = "blocked";
+          item.reason = String(details.reason || "");
+        }
+      }
+      pushLog(`[blocked on ${details.host ?? ""}] ${name}: ${details.reason ?? ""}`);
     } else if (kind === "test_finished") {
       const item = live.byInvocation.get(String(details.invocation_id));
       if (item) {
