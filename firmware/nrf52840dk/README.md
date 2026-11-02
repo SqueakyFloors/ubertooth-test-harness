@@ -112,14 +112,15 @@ workspace, so a difference in an image is a difference in the sources; two
 builds of one tree gave byte-identical images when this was measured in CI on
 2026-10-31. When an image does differ, each side builds it once more, and a
 difference there is reported as a build that does not repeat itself rather
-than as a missing bump.
+than as a missing bump. The first image that fails ends the step: one version
+string names both images, so the bump it asks for is the same either way.
 
 That costs four builds where the versions match: both images on each side.
 One build takes 32 to 48 seconds of a job of about four and a half minutes,
 most of which is pulling the toolchain image and making the SDK workspace, so
 comparing both images rather than the default one alone costs about 40
-seconds; a run that has to repeat both images on both sides takes up to eight
-builds, about two minutes more. A base commit from before the algorithm 1 image existed
+seconds; a failing run takes six builds at most, about two minutes more. A
+base commit from before the algorithm 1 image existed
 has none to compare, and needs none: that image's version string arrived with
 it, so every board asked for it is flashed anyway.
 

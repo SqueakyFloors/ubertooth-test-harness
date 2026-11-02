@@ -313,10 +313,9 @@ run_firmware_dk() {
     ncs 'west update --narrow -o=--depth=1'
 
     # The app sources, in the one place every build of them is compiled from.
+    # Chained, so a copy that failed is reported and not built over.
     dk_sources() {
-        rm -rf "$src"
-        mkdir -p "$src"
-        cp -R "$1/." "$src/"
+        rm -rf "$src" && mkdir -p "$src" && cp -R "$1/." "$src/"
     }
 
     # These sources build two images, named `default` and `chansel1` here.
@@ -326,6 +325,7 @@ run_firmware_dk() {
         case $1 in
             default) echo "$build" ;;
             chansel1) echo "$chansel1" ;;
+            *) echo "error: no such DK image: $1" >&2; return 1 ;;
         esac
     }
 
@@ -334,21 +334,28 @@ run_firmware_dk() {
         case $1 in
             default) echo "default" ;;
             chansel1) echo "algorithm 1" ;;
+            *) echo "$1" ;;
         esac
     }
 
     # Build image $2 from the sources in $1. The two images differ only in
     # which controller is compiled, which the Kconfig fragment and the
-    # devicetree overlay select.
+    # devicetree overlay select. Every step is checked here, because callers
+    # run this where set -e does not end the script, and a copy or a build
+    # that failed would otherwise leave the last build's image to be read as
+    # this one's.
     dk_build() {
+        extra=
         case $2 in
-            default) extra= ;;
+            default) ;;
             chansel1) extra=" -- -DEXTRA_CONF_FILE=chan-sel-1.conf \
                          -DEXTRA_DTC_OVERLAY_FILE=chan-sel-1.overlay" ;;
+            *) echo "error: no such DK image: $2" >&2; return 1 ;;
         esac
-        dk_sources "$1"
+        where=$(dk_build_dir "$2") || return 1
+        dk_sources "$1" || return 1
         ncs "west build -p always --no-sysbuild -b $NCS_BOARD \
-             -d $(dk_build_dir "$2") -s $src$extra"
+             -d $where -s $src$extra"
     }
 
     dk_fw_version() {
@@ -408,13 +415,21 @@ run_firmware_dk() {
         # can be carrying one: that image's version string arrived with it,
         # so `ensure` flashes every board asked for it whatever a comparison
         # would say.
-        if [ "$name" = chansel1 ] && [ ! -f "$base/chan-sel-1.conf" ]; then
+        if [ "$name" = chansel1 ] &&
+           { [ ! -f "$base/chan-sel-1.conf" ] ||
+             [ ! -f "$base/chan-sel-1.overlay" ]; }; then
             echo "$label builds no $human image, so no board carries one and" \
                  "there is nothing to compare"
             return 0
         fi
-        dk_build "$base" "$name"
-        cp "$(dk_build_dir "$name")/zephyr/zephyr.hex" "$there_hex"
+        # Checked, because this runs where set -e does not end the script.
+        if ! dk_build "$base" "$name" ||
+           ! cp "$(dk_build_dir "$name")/zephyr/zephyr.hex" "$there_hex"
+        then
+            echo "error: $label did not build its $human image, so the images" \
+                 "cannot be compared" >&2
+            return 1
+        fi
         if cmp -s "$here_hex" "$there_hex"; then
             echo "the $human image is the one $label builds, so $here still" \
                  "describes it"
@@ -476,9 +491,12 @@ run_firmware_dk() {
         # Both images are compared. A board carries one or the other, and
         # `ensure` leaves either in place while the version is unchanged, so
         # a change that reaches only the algorithm 1 image needs the bump as
-        # much as one that reaches the default image.
+        # much as one that reaches the default image. The first image that
+        # fails ends the step: the remedy is the same bump either way, since
+        # one version string names both images, so building the second pair
+        # would only cost time.
         for name in default chansel1; do
-            compare_one_dk_image "$name"
+            compare_one_dk_image "$name" || return 1
         done
         # Each image is the one the base builds, so every build directory
         # holds this tree's image whichever build wrote it last. Leave the

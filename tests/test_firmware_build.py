@@ -331,6 +331,25 @@ class FirmwareStepTests(unittest.TestCase):
         self.assertIn("./src/base-only.c", self.compiled(6))
         self.assertNotIn("firmware-dk passed", result.stdout)
 
+    def test_the_first_image_that_differs_ends_the_step(self):
+        # One version string names both images, so the bump the step asks for
+        # is the same either way and building the second pair would only cost
+        # time. This pins the worst case at six builds.
+        base = self.base_sources()
+        other = self.image("other", filler=b"\x11")
+
+        result = self.run_step(DK_BASE_SRC=str(base),
+                               FAKE_HEX_PAYLOAD_3=other,
+                               FAKE_HEX_PAYLOAD_5=other)
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("the default image differs from the one", result.stderr)
+        self.assertNotIn("the algorithm 1 image differs", result.stderr)
+        # Three default builds and two repeats of it; the algorithm 1 image
+        # was built once, for this tree, and never compared.
+        self.assertEqual(4, len(self.builds()), self.builds())
+        self.assertEqual(1, len(self.chansel1_builds()), self.chansel1_builds())
+
     def test_an_algorithm_1_image_the_base_also_builds_passes(self):
         base = self.base_sources()
 

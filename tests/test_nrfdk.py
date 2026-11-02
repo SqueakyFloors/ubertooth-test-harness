@@ -8,7 +8,7 @@ import threading
 import unittest
 
 from tests.fake_dk import FakeClock, FakeFirmware, FakePort, nrfutil_runner
-from ubertooth_harness import nrfdk
+from ubertooth_harness import nrfdk, targets
 
 ROOT = Path(__file__).resolve().parents[1]
 FIRMWARE = ROOT / "firmware" / "nrf52840dk"
@@ -591,6 +591,27 @@ class RoleTests(unittest.TestCase):
         self.assertEqual(3, status["data_map_used"])
         self.assertIn("channel map: 0110000010 (3 of 37 channels, set 1 time(s))",
                       out)
+
+    def test_the_report_says_which_channel_selection_the_link_uses(self):
+        # What the two images look like to a reader: the one that cannot do
+        # algorithm 2 states the algorithm as a fact, the other cannot know
+        # it, and neither says "algorithm none" before there is a link.
+        board = Board()
+        _status, idle = self.run_quiet(nrfdk.status_command, board.dk)
+        self.assertIn("channel selection: no link, algorithm 2 supported", idle)
+
+        _status, out = self.run_quiet(
+            nrfdk.central, board.dk, "C1:92:EC:E7:71:BC", 30)
+        self.assertIn("channel selection: algorithm unknown on the link, "
+                      "algorithm 2 supported", out)
+
+        chansel1 = Board(firmware=FakeFirmware(
+            version=targets.DK_FIRMWARE_CHAN_SEL_1))
+        chansel1.firmware.chan_sel_2 = False
+        _status, out = self.run_quiet(
+            nrfdk.central, chansel1.dk, "C1:92:EC:E7:71:BC", 30)
+        self.assertIn("channel selection: algorithm 1 on the link, "
+                      "algorithm 2 not built in", out)
 
     def test_datamap_takes_the_smallest_map_and_all(self):
         board = Board()

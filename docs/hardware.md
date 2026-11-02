@@ -290,17 +290,17 @@ nothing in the harness can catch it.
 | Device | Source | Version | Built with | Flashed with |
 |---|---|---|---|---|
 | Ubertooth One | the [fork's](https://github.com/SqueakyFloors/ubertooth) `firmware/bluetooth_rxtx` | the resolved commit under test | `arm-none-eabi-gcc` | `ubertooth-dfu` |
-| nRF52840 DK | [`firmware/nrf52840dk`](../firmware/nrf52840dk/README.md) | `utdk-1.4.0` | nRF Connect SDK v3.4.1 and its toolchain bundle | `nrfutil device program` |
+| nRF52840 DK | [`firmware/nrf52840dk`](../firmware/nrf52840dk/README.md) | `utdk-1.4.0`, and `utdk-1.4.0-chansel1` for the algorithm 1 image | nRF Connect SDK v3.4.1 and its toolchain bundle | `nrfutil device program` |
 | ESP32 peer | [`firmware/esp32-classic-peer`](../firmware/esp32-classic-peer/README.md) | `utesp-1.4.0` | ESP-IDF v5.5.6 | `esptool`, through `idf.py flash` |
 
 Each firmware README holds the full build and flash procedure, the pinned
 toolchain versions, and the shell command reference. Images are built outside
 the repository and never committed; nothing under `firmware/` is generated.
 
-A device is reflashed when it reports a version other than the one in this
-table, so a change to the DK or peer sources that changes the image has to
-move that version, here and in the driver, or the boards keep the image they
-have. For the DK, CI builds both of the pull request's images and both images
+A device is reflashed when it reports a version other than the one the run
+asks it for, which for a DK is one of the two in this table, so a change to
+the DK or peer sources that changes an image has to move that version, here
+and in the driver, or the boards keep the image they have. For the DK, CI builds both of the pull request's images and both images
 of the commit it is against, and fails when either pair differs with
 `UTDK_FW_VERSION` unchanged
 ([#210](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/210)).

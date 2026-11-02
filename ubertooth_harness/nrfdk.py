@@ -7,7 +7,7 @@ port (VCOM0, the DK's uart0). Run as a script by the advertiser cases::
 
     python nrfdk.py identify   --jlink SERIAL [--port PATH]
     python nrfdk.py ensure     --jlink SERIAL [--port PATH] [--hex IMAGE]
-                               [--address ADDR] [--role ROLE]
+                               [--address ADDR] [--role ROLE] [--version V]
     python nrfdk.py role       --jlink SERIAL --role advertiser|central|peripheral
     python nrfdk.py advertise  --jlink SERIAL [--port PATH] --chmap 37|38|39|all
                                --interval MS --payload HEX|none [--type nonconn|conn]
@@ -21,11 +21,14 @@ port (VCOM0, the DK's uart0). Run as a script by the advertiser cases::
     python nrfdk.py stop       --jlink SERIAL [--port PATH]
     python nrfdk.py idle       --jlink SERIAL [--port PATH]
     python nrfdk.py status     --jlink SERIAL [--port PATH]
-    python nrfdk.py check-image IMAGE
+    python nrfdk.py check-image [--version V] IMAGE
 
 ``check-image`` is the one command that touches no board: it makes the check
-``ensure`` makes before it flashes, that an image carries FIRMWARE_VERSION, so
-a build can be checked where it is made (scripts/ci.sh firmware-dk).
+``ensure`` makes before it flashes, that an image carries the version asked
+for (FIRMWARE_VERSION by default, and no other known version), so a build can
+be checked where it is made (scripts/ci.sh firmware-dk). ``--version`` on
+either command names the algorithm 1 image instead
+(FIRMWARE_VERSIONS holds both).
 
 ``idle`` is the release command: it leaves the board in the advertiser role
 with every setting back to its boot value, whatever it was doing.
@@ -591,8 +594,9 @@ def _report_connection(status: dict, out) -> None:
         # Firmware older than utdk-1.4.0 reports neither. "1" is a fact about
         # the link: a controller without algorithm 2 settles every link it is
         # part of on algorithm 1, whatever the peer can do.
-        print(f"channel selection: algorithm {status['chan_sel']} on the link, "
-              f"algorithm 2 "
+        link = ("no link" if status['chan_sel'] == "none"
+                else f"algorithm {status['chan_sel']} on the link")
+        print(f"channel selection: {link}, algorithm 2 "
               f"{'supported' if status['chan_sel_2'] else 'not built in'}", file=out)
     print(f"traffic: writes {status['writes']} received {status['received']} bytes "
           f"updates {status['updates']} connects {status['connects']} "

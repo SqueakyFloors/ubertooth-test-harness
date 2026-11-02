@@ -27,6 +27,11 @@ class FakeFirmware:
         # restore, which leaves the narrow map in place.
         self.data_map = nrfdk.DATA_MAP_ALL
         self.data_map_sets = 0
+        # Which image this stands for: the default one, whose controller has
+        # channel selection algorithm 2, or the algorithm 1 one, which has
+        # not. Set it to False with version=DK_FIRMWARE_CHAN_SEL_1 for that
+        # image.
+        self.chan_sel_2 = True
         # True until a command has reached the controller, as the firmware's
         # data_map_at starts at 0. A test that wants another map sets it
         # again, standing for the second having passed.
@@ -88,6 +93,11 @@ class FakeFirmware:
             "timeout_units": self.timeout_units, "tx_octets": tx,
             "rx_octets": self.rx_octets, "mtu": self.mtu, "phy": self.phy,
             "payload_len": self.payload_len, "period_ms": self.period_ms,
+            # The real firmware of this version always reports both: the
+            # image's controller, and what the live link settled on.
+            "chan_sel_2": self.chan_sel_2,
+            "chan_sel": ("none" if not self.connected
+                         else "unknown" if self.chan_sel_2 else "1"),
             "conn_chmap": self.conn_chmap, "data_map": self.data_map,
             "data_map_used": bin(int(self.data_map, 16)).count("1"),
             "data_map_sets": self.data_map_sets,

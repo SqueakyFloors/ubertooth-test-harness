@@ -39,11 +39,12 @@ jobs:
   nrf52840dk:
     runs-on: ubuntu-24.04
     # Two images are built and each is compared with the base commit's, so
-    # four builds where the versions match, and eight at most: a repeat of
-    # each side of an image whose two builds differ. The whole job, with the
-    # SDK workspace made from scratch and two builds, took about 4 minutes
-    # when it was measured on 2026-11-01 and 2026-11-02; a build is 32 to 48
-    # seconds of that, and the workspace most of the rest.
+    # four builds where the versions match, and six at most: the first image
+    # whose two builds differ is built once more on each side and ends the
+    # step. The whole job, with the SDK workspace made from scratch and two
+    # builds, took about 4 minutes when it was measured on 2026-11-01 and
+    # 2026-11-02; a build is 32 to 48 seconds of that, and the workspace most
+    # of the rest.
     timeout-minutes: 60
     steps:
     # The whole history, so the commit a pull request is against is there to
