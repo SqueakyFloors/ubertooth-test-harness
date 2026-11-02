@@ -18,7 +18,9 @@ One declaration, ``Needs``, sits on a case (``CommandCase.needs``,
   or ``--artifact "test build=PATH"``).
 
 What a host lacks is not run, and is recorded as "not applicable on <host>:
-<reason>", apart from skips and failures. Runtime skips stay only for what
+<reason>", apart from skips and failures. A required test that lacks the
+hardware it is about is recorded as ``Blocked`` instead and fails the run
+(see that class). Runtime skips stay only for what
 cannot be known before a command runs (for example a built libubertooth that
 predates UBERTOOTH_TEST_NO_DEVICES, or a Python interpreter without numpy).
 
@@ -261,6 +263,35 @@ class NotApplicable:
             "host": self.host, "test_name": self.test_name,
             "invocation_id": self.invocation_id, "case_id": self.case_id,
             "case_name": self.case_name, "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class Blocked:
+    """A required test that could not run: hardware it must have is not
+    registered on the host that would have run it (planner.py).
+
+    Told apart from ``NotApplicable`` by what the missing hardware is. A
+    test left out as not applicable can still say something without it; a
+    blocked one cannot, because the hardware is the subject of the test (a
+    second Ubertooth to alternate flashes across, a switchable port to power
+    another board off). So it is recorded, every unrelated test still runs,
+    and the run fails at the end rather than passing with the gate unmeasured.
+
+    Decided at planning, before anything runs, so there is no invocation and
+    no case: the whole test is blocked for that host.
+    """
+
+    host: str
+    test_name: str
+    reason: str
+
+    def describe(self) -> str:
+        return f"{self.test_name}: blocked on {self.host}: {self.reason}"
+
+    def to_dict(self) -> dict:
+        return {
+            "host": self.host, "test_name": self.test_name, "reason": self.reason,
         }
 
 

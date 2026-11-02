@@ -9,13 +9,19 @@ from typing import Mapping
 from ubertooth_harness.cases import ALTERNATED_ROLE_PREFIX, GUARD_ROLE_PREFIX
 from ubertooth_harness.catalog import CatalogError, TestCatalog
 from ubertooth_harness.hostneeds import (
+    Blocked,
     NotApplicable,
     platform_capabilities,
     split_cases,
     unmet,
 )
 from ubertooth_harness.plan import Plan
-from ubertooth_harness.resources import MissingResource, RegistryError, ResourceRegistry
+from ubertooth_harness.resources import (
+    MissingRequiredHardware,
+    MissingResource,
+    RegistryError,
+    ResourceRegistry,
+)
 from ubertooth_harness.rf import (
     PlacementRequirement,
     describe as describe_placement,
@@ -88,6 +94,20 @@ class CompiledSuite:
     # ever made for them, so what they left out belongs to the record of
     # every run of the suite rather than to no record at all.
     absent_hosts: tuple[str, ...] = ()
+    # Required tests this bench cannot run because the hardware they are
+    # about is not registered (hostneeds.Blocked). Not applicable would read
+    # as a pass, so they are recorded and the run that would have run them
+    # fails; every other step still compiles.
+    blocked: tuple[Blocked, ...] = ()
+
+    def blocked_for_host(self, host: str) -> tuple[Blocked, ...]:
+        """What this host's run cannot run and must not pass without.
+
+        Each record is for a host the registry has, so it belongs to that
+        host's run alone: another bench's missing hub is not this run's
+        failure.
+        """
+        return tuple(item for item in self.blocked if item.host == host)
 
     def for_host(self, host: str) -> tuple[NotApplicable, ...]:
         """What this host's run records: what this host was left out of, and
@@ -137,9 +157,12 @@ class PlanCompiler:
             if alias != selected
         )
         if not others:
-            raise PlanningError(
-                f"{name}: alternate Ubertooths needs at least two registered "
-                f"Ubertooths on {host}"
+            # The second board is what the test is about, so this bench has
+            # not got the hardware for it; compile_suite records the step as
+            # blocked rather than ending the compile.
+            raise MissingRequiredHardware(
+                f"alternate Ubertooths needs at least two registered "
+                f"Ubertooths on {host}, which has one"
             )
         boards = (selected, *others)
         for alias in boards:
@@ -287,7 +310,14 @@ class PlanCompiler:
         mismatch is, rather than ending the compile: otherwise one step for
         one bench's hardware stops every other bench running the plan at all.
 
-        ``strict_hardware`` makes the same absence an error, which is what
+        Hardware a step is *about*, rather than hardware it merely binds, is
+        recorded as blocked instead (``CompiledSuite.blocked``): the step is
+        still left out of the invocations, so every unrelated step compiles
+        and runs, but the run it belonged to fails. That is what tells a
+        plan written for another bench from a gate this bench meant to
+        measure and cannot.
+
+        ``strict_hardware`` makes either absence an error, which is what
         ``validate-plan --hardware`` wants: there a registry is named on
         purpose, so a host or a role it cannot provide is either a typo in
         the plan or a bench that is not set up as the plan expects.
@@ -295,6 +325,7 @@ class PlanCompiler:
         invocations = []
         not_applicable: list[NotApplicable] = []
         absent_hosts: set[str] = set()
+        blocked_tests: list[Blocked] = []
         sequence = 0
         try:
             for step in plan.steps(suite):
@@ -387,13 +418,16 @@ class PlanCompiler:
                 not_applicable.extend(left_out)
                 if not bound:
                     continue
+                # Required hardware this bench has not got, for this step.
+                # Recorded per host, and the step produces no invocation for
+                # that host, so the rest of the suite still compiles.
+                step_blocked: list[Blocked] = []
                 for host, choices in bound:
                     host_choices[host] = dict(zip(role_names, choices))
                     combinations = itertools.product(*choices) if choices else [()]
                     for selected in combinations:
                         if len(set(selected)) != len(selected):
                             continue
-                        sequence += 1
                         resources = MappingProxyType(dict(zip(role_names, selected)))
                         identities = MappingProxyType({
                             role: MappingProxyType(
@@ -401,26 +435,37 @@ class PlanCompiler:
                             )
                             for role, alias in resources.items()
                         })
-                        if arguments.get("alternate Ubertooths") is True:
-                            resources, identities = self._alternated(
-                                step, host, arguments, resources, identities
-                            )
-                        if definition.guards_other_ubertooths:
-                            resources, identities = self._guarded(
-                                host, resources, identities
-                            )
                         power_isolation = ()
                         exclusive = arguments.get("exclusive Ubertooth") is True
-                        if exclusive:
-                            selected_ubertooth = resources.get("Ubertooth")
-                            if selected_ubertooth is None:
-                                raise PlanningError(
-                                    f"{step.test_name}: exclusive topology requires "
-                                    "an Ubertooth role"
+                        try:
+                            if arguments.get("alternate Ubertooths") is True:
+                                resources, identities = self._alternated(
+                                    step, host, arguments, resources, identities
                                 )
-                            power_isolation = plan_exclusive_ubertooth(
-                                self.registry, host, selected_ubertooth
+                            if definition.guards_other_ubertooths:
+                                resources, identities = self._guarded(
+                                    host, resources, identities
+                                )
+                            if exclusive:
+                                selected_ubertooth = resources.get("Ubertooth")
+                                if selected_ubertooth is None:
+                                    raise PlanningError(
+                                        f"{step.test_name}: exclusive topology requires "
+                                        "an Ubertooth role"
+                                    )
+                                power_isolation = plan_exclusive_ubertooth(
+                                    self.registry, host, selected_ubertooth
+                                )
+                        except MissingRequiredHardware as error:
+                            if strict_hardware:
+                                raise
+                            step_blocked.append(
+                                Blocked(host, step.test_name, str(error))
                             )
+                            continue
+                        # Numbered only once it is an invocation, so the IDs
+                        # of a suite with a blocked step stay consecutive.
+                        sequence += 1
                         invocations.append(
                             TestInvocation(
                                 invocation_id=f"{sequence:03d}-{step.test_name}",
@@ -438,7 +483,8 @@ class PlanCompiler:
                                 exclusive_ubertooth=exclusive,
                             )
                         )
-                if len(invocations) == step_start:
+                blocked_tests.extend(step_blocked)
+                if len(invocations) == step_start and not step_blocked:
                     # Every combination put one device in two roles. The
                     # message names what each role could have taken, since
                     # that is what has to change: the plan's selectors, or
@@ -463,16 +509,19 @@ class PlanCompiler:
         if not invocations:
             # Asking to run a suite this bench has nothing for is still an
             # error: the caller gets told why, test by test, rather than an
-            # empty run that looks like a pass.
-            shown = not_applicable[:5]
-            rest = len(not_applicable) - len(shown)
+            # empty run that looks like a pass. A blocked step is named
+            # first, since it is the one this bench was meant to measure.
+            left_out = blocked_tests + not_applicable
+            shown = left_out[:5]
+            rest = len(left_out) - len(shown)
             raise PlanningError(
                 f"suite '{suite}' produced no runnable invocations"
                 + "".join(f"; {item.describe()}" for item in shown)
                 + (f"; and {rest} more left out" if rest > 0 else "")
             )
         return CompiledSuite(
-            tuple(invocations), tuple(not_applicable), tuple(sorted(absent_hosts))
+            tuple(invocations), tuple(not_applicable), tuple(sorted(absent_hosts)),
+            tuple(blocked_tests),
         )
 
     def compile(

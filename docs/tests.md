@@ -56,12 +56,20 @@ only one bench has. What a host that is here cannot run is still a plan
 error: a platform it does not have, and a board placed differently from what
 the test needs, fail planning when every host the step names is here and none
 can run it (with a host this registry has not got among them, the step is
-left out instead); so
-do two absences that are still to be decided, `alternate Ubertooths` on a
-one-board host and `exclusive Ubertooth` with an unmapped board
-([#269](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/269)).
+left out instead).
 `validate-plan --hardware <registry>` refuses the absence too, since there
 the bench is named on purpose (README, "Hardware a registry has not got").
+
+**Hardware a step is about.** Two absences are not left out quietly, because
+the missing hardware is the subject of the test: `alternate Ubertooths` on a
+host with one registered Ubertooth, and `exclusive Ubertooth` where another
+registered board is on no power controller. Such a step is recorded as
+**blocked** before the run; every unrelated step still compiles and runs, and
+the run finishes failed, so a gate nobody measured never reads as a pass.
+`run-suite --dry-run` lists the blocked steps and exits 1. A `power:` mapping
+that is present but wrong (an unknown controller, a port the controller has
+not got, a controller that cannot switch one) is a registry to correct and is
+refused when the registry loads, before any plan is compiled.
 
 **RF placement.** Every test with a hardware role also accepts `rf:`, one
 requirement per role, which says what the role's placement on the bench must
@@ -2234,7 +2242,9 @@ command line passes, so this test runs from the command line; the GUI says so
 for any suite that names it. `alternate Ubertooths: true` rotates the writes across every
 registered Ubertooth on the host, in alias order; then `flashes` must divide
 evenly by the board count, `hosts:` must name its hosts rather than `each`,
-and `Ubertooth: each` is refused. The test establishes the firmware it
+and `Ubertooth: each` is refused. A named host with only one registered
+Ubertooth cannot alternate anything, so the step is blocked there and the run
+fails rather than passing without it (see "Hardware a step is about"). The test establishes the firmware it
 verifies, so preflight checks only the board's serial and not its revision,
 and the test must be the last one on that board in the suite.
 
@@ -2325,9 +2335,10 @@ no-selector serial, and restores and reads back every original power state on
 success, failure, or cancellation.
 
 **Known limits.** It needs a switchable hub, so it is Linux-and-power-control
-only. Unknown or unpowerable extra Ubertooths fail closed rather than being
-ignored. The follow case proves the mode kept running, not that it captured
-anything.
+only. Extra Ubertooths fail closed rather than being ignored: one the registry
+has on no power controller blocks the step and fails the run, and one that
+turns up unregistered during the run fails the isolation check. The follow
+case proves the mode kept running, not that it captured anything.
 
 ## MAC polling soak
 
@@ -2353,7 +2364,8 @@ consecutive misses:`, and `maximum restarts:`.
 
 **Expected outcome.** No implementation; only a `runnable: false` plan may
 name it. Its resource and power manifest already compiles, including every
-required power-off action.
+required power-off action; on a host where another registered board is on no
+power controller the step is blocked, as `Exclusive Ubertooth topology` is.
 
 **Known limits.** What counts as a pass is not established beyond the bounds
 the arguments name.

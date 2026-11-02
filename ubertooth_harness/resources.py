@@ -45,6 +45,19 @@ class MissingResource(RegistryError):
     """
 
 
+class MissingRequiredHardware(RegistryError):
+    """Hardware a step must have to mean anything, which this bench has not got.
+
+    Absence again, as ``MissingResource`` is, but of the very thing the step
+    exists to exercise: a second Ubertooth to alternate flashes across, or a
+    switchable port to power another board off. Leaving such a step out
+    quietly would read as a pass for a gate that was never measured, so run
+    planning records the step as blocked (``hostneeds.Blocked``), runs
+    everything unrelated, and fails the run. ``validate-plan --hardware``
+    refuses it outright, as it does every other absence.
+    """
+
+
 STARTECH_DRIVER = "startech managed USB hub"
 # Port 4 carries the hub's management controller; only 1-3 are DUT ports.
 STARTECH_PORTS = (1, 2, 3)

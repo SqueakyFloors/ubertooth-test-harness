@@ -204,11 +204,6 @@ recorded in the runs of the hosts that are here, and `run-suite --dry-run`
 lists it; one record per test, so a host that runs that test, or has its own
 reason for leaving it out, keeps its own.
 
-Two absences still end the compile, for now: `alternate Ubertooths` on a host
-with one registered Ubertooth, and `exclusive Ubertooth` where another board
-has no `power:` mapping
-([#269](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/269)).
-
 What a host here cannot run is decided first, and has not changed: a platform
 the step does not list, and a board placed differently from what the test
 needs, leave that host out, and a step whose every named host is here and
@@ -219,7 +214,8 @@ that would have run it is not here to be judged.
 
 `validate-plan --hardware <registry>` is the strict one: there the registry
 is named on purpose, so the same absence fails, which is what catches a plan
-entry for hardware a bench is meant to provide. Every committed suite is
+entry for hardware a bench is meant to provide; it refuses a blocked step the
+same way. Every committed suite is
 compiled that way against [`hardware.example.yaml`](hardware.example.yaml) in
 the unit suite (`tests/test_runnable_plans.py`), bar `range-weak-link`, which
 asks for a board behind an attenuator that the example registry carries
@@ -239,6 +235,37 @@ Host`, `resource DK_Linux0 is not a Ubertooth attached to Host_Linux`,
 `resource DK_Linux1 declares the role(s) peripheral, not advertiser`). A role
 or argument name the test does not have is refused when the plan loads, with
 no registry at all.
+
+### Hardware a step is about: blocked, not left out
+
+Two absences are not quietly left out, because the hardware that is missing is
+the subject of the test rather than something it merely binds:
+
+- `alternate Ubertooths: true` on a host with one registered Ubertooth
+  (`alternate Ubertooths needs at least two registered Ubertooths on
+  Host_Linux, which has one`);
+- `exclusive Ubertooth: true` where another registered board on the host is on
+  no power controller (`extra Ubertooth UT_Linux1 has no power mapping, so it
+  cannot be switched off to leave UT_Linux0 alone`).
+
+Such a step is recorded as **blocked** before anything runs, and it is left
+out of the invocations so every unrelated step in the suite still compiles and
+runs. The run then finishes `failed`: `exclusive.yaml` and the `mac-polling`
+plan are run deliberately on the bench that has the hub, so a quiet "not
+applicable" there would read as a pass for a gate nobody measured. The record
+is a `blocked` event in run.jsonl, a `Blocked` section in report.md,
+`blocked_tests` in the run summary, and `blocked` in the web GUI's failures;
+`run-suite --dry-run` lists them and exits 1, because a dry run that exits 0
+says this host can run the suite. Each record belongs to the host it is
+about, so another bench's missing hub does not fail this run.
+`validate-plan --hardware` refuses both outright, as it does every other
+absence.
+
+A `power:` mapping that is present but wrong (an unknown controller, a port
+the controller has not got, a controller that cannot switch one) is a registry
+to correct rather than a bench without hardware, and is refused when the
+registry loads, before any plan is compiled. A serial too short to select an
+alternated board with is likewise a registry to correct, and fails planning.
 
 ### RF placement: where a board sits on the bench
 
@@ -686,7 +713,9 @@ names can run (no case applies on any of them) fails planning, unless what
 the hosts lack is the hardware it binds, which is recorded instead (see
 [Hardware a registry has not got](#hardware-a-registry-has-not-got)). A test
 whose every case is not applicable finishes `not_applicable` and does not
-fail the run.
+fail the run. A test the bench has not got the hardware the test is *about*
+is `blocked` instead and does fail the run (see
+[Hardware a step is about](#hardware-a-step-is-about-blocked-not-left-out)).
 
 | Needs | Cases | Not applicable when |
 |---|---|---|
@@ -818,7 +847,8 @@ first (`-c2426 -c` reports 2426; fork 5b45b3e,
 `failed_guard_checks` (see [Guard Ubertooths](#guard-ubertooths)), `skipped_cases`, and `not_applicable_cases`
 (see [Host requirements](#host-requirements)); the run summary (`run_finished`
 in run.jsonl, and report.md) reports the run's `skipped_cases`,
-`not_applicable_cases`, and `not_applicable_tests`, so neither is hidden by an
+`not_applicable_cases`, `not_applicable_tests`, and `blocked_tests`, so none
+of them is hidden by an
 overall pass. Event schema version 1 is pre-release
 and has no stable consumers yet; field changes before the controller lands do
 not bump it.

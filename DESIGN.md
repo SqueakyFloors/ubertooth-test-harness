@@ -720,7 +720,22 @@ by name. `PlanCompiler.compile_suite(strict_hardware=True)` makes
 the same absence a `PlanningError` instead, and `validate-plan --hardware`
 uses it: a registry named on the command line is the bench being checked
 against, so a host or role it cannot provide is a typo or a bench set up
-differently. A name the registry does have, used as something it is not, and
+differently.
+
+Hardware a step is *about*, rather than hardware it binds, is a third
+outcome: `resources.MissingRequiredHardware`, raised for `alternate
+Ubertooths` on a host with one registered Ubertooth and for `exclusive
+Ubertooth` where another registered board is on no power controller. The step
+is recorded as `hostneeds.Blocked` (`CompiledSuite.blocked`,
+`blocked_for_host`) and produces no invocation, so the rest of the suite
+compiles and runs; the sequencer emits a `blocked` event per record, counts
+them as `blocked_tests`, and finishes the run `failed`, since a gate that was
+never measured must not read as a pass. A blocked step takes no sequence
+number, so the invocation IDs of the steps that do run stay consecutive.
+`strict_hardware=True` refuses it as it refuses the other absences. A `power:`
+mapping that is present but wrong stays a `RegistryError`, and the registry
+refuses it at load, before any plan is compiled. A name the registry does
+have, used as something it is not, and
 a name that differs from a registered one only in case, stay plan errors
 everywhere; so does a role or argument name the catalog does not know, which
 is refused at load with no registry at all.

@@ -204,7 +204,8 @@ code { overflow-wrap: anywhere; }
 .status-passed, .status-online {
   color: var(--ok-fg); background: var(--ok-bg); border-color: var(--ok-line);
 }
-.status-failed, .status-error, .status-did-not-finish, .status-lost {
+.status-failed, .status-error, .status-did-not-finish, .status-lost,
+.status-blocked {
   color: var(--bad-fg); background: var(--bad-bg); border-color: var(--bad-line);
 }
 .status-running {

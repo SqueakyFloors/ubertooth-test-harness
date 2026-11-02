@@ -161,6 +161,13 @@ class _Run:
             e.get("details", {}) for e in self.events
             if e["event_type"] == "not_applicable"
         ]
+        # Required tests this bench has not got the hardware for
+        # (planner.py): also left out before the run, but the run fails
+        # rather than passing with the gate unmeasured.
+        self.blocked = [
+            e.get("details", {}) for e in self.events
+            if e["event_type"] == "blocked"
+        ]
         self.capabilities = next(
             (e.get("details", {}).get("capabilities") for e in self.events
              if e["event_type"] == "host_capabilities"), None
@@ -328,6 +335,10 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
             result += (
                 f", {summary.get('not_applicable_cases', 0)} cases and "
                 f"{summary.get('not_applicable_tests', 0)} tests not applicable"
+            )
+        if summary.get("blocked_tests"):
+            result += (
+                f", {summary['blocked_tests']} tests blocked (see Blocked)"
             )
         if summary.get("watchdog_resets"):
             result += (
@@ -582,6 +593,26 @@ def _flash_board_text(item: Mapping) -> str:
 
 def _known(value) -> str:
     return "not known" if value is None else "yes" if value else "no"
+
+
+def _blocked_section(run: _Run) -> list[str]:
+    """Required tests that never ran: this bench has not got the hardware
+    they are about, so the run cannot pass without them."""
+    if not run.blocked:
+        return []
+    lines = [
+        "", "## Blocked", "",
+        "Required tests this bench has not got the hardware for. They never "
+        "ran, so the run fails: unlike a not-applicable test, each one is "
+        "about the hardware that is missing.", "",
+        "| Test | Host | Reason |", "|---|---|---|",
+    ]
+    for item in run.blocked:
+        lines.append(
+            f"| {_cell(item.get('test_name', ''))} "
+            f"| {_cell(item.get('host', ''))} | {_cell(item.get('reason', ''))} |"
+        )
+    return lines
 
 
 def _not_applicable_section(run: _Run) -> list[str]:
@@ -1193,6 +1224,10 @@ def _transcript(run: _Run) -> list[str]:
                 what += f" / {details['case_name']}"
             line(event, f"[M] not applicable on {details.get('host', '')}: {what}: "
                         f"{details.get('reason', '')}")
+        elif kind == "blocked":
+            line(event, f"[M] blocked on {details.get('host', '')}: "
+                        f"{details.get('test_name', '')}: "
+                        f"{details.get('reason', '')}")
         elif kind == "build_started":
             line(event, "=== BUILD ===")
         elif kind == "build_step_started":
@@ -1717,7 +1752,8 @@ def render_run(events: Sequence[Mapping], *, redact_serials: bool = False, trans
     lines = [f"# Ubertooth test run `{run.run_id}`", "", "| | |", "|---|---|"]
     lines += [f"| {_cell(key)} | {_cell(value)} |" for key, value in _setup_rows(run)]
     lines += ["", "## Results", ""] + _results_table(run)
-    lines += _known_target_section(run) + _not_applicable_section(run)
+    lines += _known_target_section(run) + _blocked_section(run)
+    lines += _not_applicable_section(run)
     lines += _watchdog_section(run)
     lines += _output_files_section(run)
     if transcript:
