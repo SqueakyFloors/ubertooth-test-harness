@@ -30,6 +30,7 @@ from ubertooth_harness.learned import (
     STORE_FILE,
     EstimateStore,
     Key,
+    build_profile,
     invocation_key,
 )
 from ubertooth_harness.plan import load_plan
@@ -50,6 +51,9 @@ HOST = "Host_A"
 RAW_RECEIVE = {"coverage": "comprehensive", "duration": "3s"}
 # A test with a fixed estimate (15.8 s) and no scaling argument.
 VALIDATION = {"coverage": "smoke"}
+# The build options, as (with_firmware, with_python): the four builds a run
+# can make, each its own learned profile.
+BUILD_OPTIONS = ((False, False), (False, True), (True, False), (True, True))
 
 
 def stamp(offset: float) -> str:
@@ -410,6 +414,45 @@ class StageTests(StoreTestCase):
                     record("build_finished", "passed", 900.0)])
         self.assertEqual("with firmware", self.store.keys()[0].profile)
 
+    def test_each_combination_of_build_options_is_learned_apart(self):
+        # Four builds, four amounts of work: the host tools alone, the host
+        # tools with the Python tools, the firmware image as well, and both
+        # (#271). Mixing any two of them would make one estimate too long
+        # and the other too short.
+        for index, (firmware, python) in enumerate(BUILD_OPTIONS):
+            self.learn([
+                record("build_started", "running", 0.0,
+                       with_firmware=firmware, with_python=python),
+                record("build_finished", "passed", 100.0 * (index + 1)),
+            ])
+        self.assertEqual(
+            {"host tools": [100.0], "host tools and Python tools": [200.0],
+             "with firmware": [300.0], "with firmware and Python tools": [400.0]},
+            {key.profile: self.store.samples(key) for key in self.store.keys()},
+        )
+
+    def test_an_option_a_build_record_does_not_name_reads_as_off(self):
+        # A record written before the Python tools were recorded names only
+        # the firmware, which reads as off: its sample stays under the
+        # profile it was learned with, where a run that asks for neither
+        # extra joins it.
+        self.learn([record("build_started", "running", 0.0, with_firmware=False),
+                    record("build_finished", "passed", 100.0)])
+        self.learn([record("build_started", "running", 0.0, with_firmware=True),
+                    record("build_finished", "passed", 300.0)])
+        self.learn([record("build_started", "running", 0.0, with_firmware=False,
+                           with_python=False),
+                    record("build_finished", "passed", 110.0)])
+        self.assertEqual(
+            {"host tools": [100.0, 110.0], "with firmware": [300.0]},
+            {key.profile: self.store.samples(key) for key in self.store.keys()},
+        )
+        # What a record carries for an option says only whether it was
+        # built, whatever the value is: a build emits a boolean, and
+        # anything else a reader finds there is read the same way.
+        self.assertEqual("host tools and Python tools",
+                         build_profile(None, "python3.12"))
+
     def test_a_flash_run_without_a_usable_count_is_not_learned(self):
         for count in (None, 0, -2, True, "four"):
             with self.subTest(count):
@@ -503,6 +546,39 @@ class PersistenceTests(StoreTestCase):
         self.assertIsInstance(data["updated_at"], str)
         # No temporary file left beside it.
         self.assertEqual([STORE_FILE], [path.name for path in self.root.iterdir()])
+
+    def test_a_store_written_before_the_python_profiles_is_read_as_it_was(self):
+        # A file from before a build recorded the Python tools holds its
+        # build keys under the two profile names there were. Those keep
+        # answering for the builds they measured, the two new profiles start
+        # empty, and a sample of a new one is stored beside them (#271).
+        self.path.write_text(json.dumps({
+            "version": 1, "updated_at": "2026-01-01T00:00:00+00:00",
+            "entries": [
+                {"stage": "build", "name": "", "host": HOST, "profile": profile,
+                 "units": None, "samples": samples}
+                for profile, samples in (("host tools", [300.0, 310.0, 320.0]),
+                                         ("with firmware", [600.0, 610.0, 620.0]))
+            ],
+        }), encoding="utf-8")
+        store = EstimateStore.load(self.path, log=self.logs.append)
+        self.assertEqual([], self.logs)
+        self.assertEqual(310.0, store.lookup_stage(
+            "build", HOST, profile=build_profile(False, False)).seconds)
+        self.assertEqual(610.0, store.lookup_stage(
+            "build", HOST, profile=build_profile(True, False)).seconds)
+        for firmware in (False, True):
+            self.assertIsNone(store.lookup_stage(
+                "build", HOST, profile=build_profile(firmware, True)))
+        store.add(Key("build", "", HOST, build_profile(False, True), None), 400.0)
+        self.assertTrue(store.save())
+        reread = EstimateStore.load(self.path, log=self.logs.append)
+        self.assertEqual(
+            {"host tools": [300.0, 310.0, 320.0],
+             "host tools and Python tools": [400.0],
+             "with firmware": [600.0, 610.0, 620.0]},
+            {key.profile: reread.samples(key) for key in reread.keys()},
+        )
 
     def test_nothing_is_written_when_nothing_was_learned(self):
         self.assertEqual(0, self.learn(passed_records(
@@ -668,6 +744,48 @@ class PlanEstimateTests(StoreTestCase):
              for s in run_stage_estimates(self.store, started, HOST)],
         )
 
+    def test_a_build_is_estimated_for_the_options_the_run_selected(self):
+        # Each of the four builds is estimated from the runs that made the
+        # same one (#271), so asking for the Python tools no longer reads a
+        # host-tools estimate and no longer lengthens it either.
+        expected = {}
+        for index, options in enumerate(BUILD_OPTIONS):
+            median = 300.0 + 100.0 * index
+            expected[options] = (build_profile(*options), median)
+            for seconds in (median - 10.0, median, median + 10.0):
+                self.store.add(
+                    Key("build", "", HOST, build_profile(*options), None), seconds)
+        for (firmware, python), wanted in expected.items():
+            with self.subTest(with_firmware=firmware, with_python=python):
+                self.assertEqual(
+                    [wanted],
+                    [(stage["profile"], stage["estimated_s"])
+                     for stage in run_stage_estimates(
+                         self.store, [], HOST, build=True,
+                         with_firmware=firmware, with_python=python)],
+                )
+        # The run's own build_started record wins over what it was asked for.
+        started = [{"event_type": "build_started", "status": "running",
+                    "details": {"with_firmware": True, "with_python": True}}]
+        self.assertEqual(
+            [("with firmware and Python tools", 600.0)],
+            [(stage["profile"], stage["estimated_s"])
+             for stage in run_stage_estimates(self.store, started, HOST)],
+        )
+        # Option by option: a record from before the Python tools were
+        # recorded, or one that is not a mapping at all, leaves that option
+        # to what the run asked for.
+        older = [{"event_type": "build_started", "status": "running",
+                  "details": "not a mapping"},
+                 {"event_type": "build_started", "status": "running",
+                  "details": {"with_firmware": False}}]
+        self.assertEqual(
+            [("host tools and Python tools", 400.0)],
+            [(stage["profile"], stage["estimated_s"])
+             for stage in run_stage_estimates(self.store, older, HOST,
+                                              with_firmware=True, with_python=True)],
+        )
+
 
 class ControllerLearningTests(ControllerTestCase):
     """The controller learns when a run ends, and reports it over the API."""
@@ -707,18 +825,24 @@ class ControllerLearningTests(ControllerTestCase):
         # A run that flashes its boards builds the firmware for that, whether
         # it asked for the image or not, so its build estimate is the
         # firmware one from the start; a run that keeps the boards' firmware
-        # and asks for nothing more gets the host-tools one (#257).
-        for seconds in (300.0, 310.0, 320.0):
-            self.controller.estimates.add(
-                Key("build", "", HOST, "host tools", None), seconds)
-        for seconds in (600.0, 610.0, 620.0):
-            self.controller.estimates.add(
-                Key("build", "", HOST, "with firmware", None), seconds)
+        # and asks for nothing more gets the host-tools one (#257). Asking
+        # for the Python tools picks the profile that includes them (#271).
+        for profile, median in (("host tools", 310.0),
+                                ("host tools and Python tools", 410.0),
+                                ("with firmware", 610.0),
+                                ("with firmware and Python tools", 710.0)):
+            for seconds in (median - 10.0, median, median + 10.0):
+                self.controller.estimates.add(
+                    Key("build", "", HOST, profile, None), seconds)
         cases = (
             ({"build": True}, "with firmware"),
             ({"build": True, "flash_build": False}, "host tools"),
             ({"build": True, "flash_build": False, "with_firmware": True},
              "with firmware"),
+            ({"build": True, "flash_build": False, "with_python": True},
+             "host tools and Python tools"),
+            ({"build": True, "with_python": True},
+             "with firmware and Python tools"),
         )
         async with FakeRunner(self.port) as runner:
             await self.registered(runner)

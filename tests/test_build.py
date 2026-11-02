@@ -229,6 +229,12 @@ class BuilderTests(unittest.TestCase):
             )
             events = load_events(Path(work) / "run.jsonl")
             self.assertEqual("build_started", events[0]["event_type"])
+            # What the build included, which the learned build estimate reads.
+            self.assertEqual(
+                {"with_firmware": True, "with_python": False},
+                {name: events[0]["details"][name]
+                 for name in ("with_firmware", "with_python")},
+            )
             self.assertEqual("build_finished", events[-1]["event_type"])
             report = render_run(events)
             self.assertIn("    === BUILD ===", report)

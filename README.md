@@ -2559,12 +2559,17 @@ the runs that follow rather than from everything on disk at once.
 A sample is keyed by the stage, the test name, the target host (a Linux host
 and a Mac differ, as do two Linux hosts), the coverage profile, and the value
 of the argument the duration scales with. For a build the profile slot holds
-which kind of build it was, `host tools` or `with firmware`, since a firmware
-build takes much the longer of the two; a run's `stages` therefore asks for
-the kind that run builds, which is what its own `build_started` record says,
-or, before that record arrives, whether it asked for the image or will flash
-its boards with it. For a test the profile is its coverage profile and the value
-of the argument the duration scales with (`duration`, `capture duration`,
+what the build made, since the firmware image and the Python tools each add
+real work to it (the firmware much the more of it): `host tools`, `host tools
+and Python tools`, `with firmware`, or `with firmware and Python tools`. A
+run's `stages` asks for the combination that run builds, each option taken
+from its own `build_started` record when that record names it, and otherwise
+from what the run asked for: the image (or flashing its boards with it), and
+the Python tools. The two profiles without the Python tools are named as they
+always were, so the samples already learned stay where they are and the two
+new profiles fill from the runs that follow.
+For a test the profile is its coverage profile and the value of the argument
+the duration scales with (`duration`, `capture duration`,
 `flashes`, or preflight's number of checks), so a 5 s capture and a 30 s
 capture are not mixed. The last 10 samples of each key are kept, and at most
 1000 keys (when it is full, the key with the fewest samples makes room), so
