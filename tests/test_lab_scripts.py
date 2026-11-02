@@ -933,6 +933,15 @@ class HubPortSwitches(Bench):
         self.assertIn("--force", err)
         self.assertIn("UT0", err)
 
+    def test_force_names_every_device_it_leaves_unheld(self):
+        """A pair member is unheld too, so the warning has to name it."""
+        status, _, err = self.run_hub_port(["Hub0", "off", "2", "--force"])
+        self.assertEqual(0, status, err)
+        self.assertEqual([("power", 2, False)], self.controller.calls)
+        self.assertIn("UT_Dbg", err)
+        self.assertIn("Prog0", err)
+        self.assertIn("--force", err)
+
     def test_an_empty_port_is_switched_with_no_holder_check(self):
         status, _, err = self.run_hub_port(["Hub0", "off", "7"])
         self.assertEqual(0, status, err)

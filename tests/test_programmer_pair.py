@@ -178,15 +178,52 @@ class PairRegistry(PairTestCase):
                 self.assertIn("a pair is two devices the harness leases", reason)
 
     def test_every_leasable_type_may_be_a_target(self):
-        """The refusal above is about the lock, not about the board."""
-        self.assertIn("Ubertooth", leases.LEASED_TYPES)
-        registry = self.load(
-            PROGRAMMER.replace("Prog0", "Prog1")
-            .replace("programs: UT_Debug", "programs: Prog0")
-            .replace(PROGRAMMER_SERIAL, "B111BB11")
-            + PROGRAMMER
+        """The refusal above is about the lock, not about the board.
+
+        Each type the harness leases is wired to in turn, so the membership
+        check cannot be passing only for the type the bench happens to use.
+        """
+        self.assertEqual(
+            ("Ubertooth", "nRF52840 DK", "ESP32 Classic peer", DEBUG_PROGRAMMER),
+            leases.LEASED_TYPES,
         )
-        self.assertEqual(("Prog1", "UT_Debug"), registry.pair_members("Prog0"))
+        extra = (
+            "  DK_Pair:\n"
+            "    type: nRF52840 DK\n"
+            "    attached to: Host_Linux\n"
+            "    roles: [advertiser]\n"
+            "    identity:\n"
+            '      jlink serial: "000123456789"\n'
+            '      BLE address: "C0:00:00:00:00:01"\n'
+            "  ESP_Pair:\n"
+            "    type: ESP32 Classic peer\n"
+            "    attached to: Host_Linux\n"
+            "    roles: [acceptor, initiator]\n"
+            "    identity:\n"
+            "      bridge serial: a1b2c3d400000000a1b2c3d400000000\n"
+            '      BD_ADDR: "C8:00:00:00:00:01"\n'
+        )
+        for target in ("UT_Debug", "UT_Free", "DK_Pair", "ESP_Pair", "Prog1"):
+            with self.subTest(target=target):
+                second = (
+                    PROGRAMMER.replace("Prog0", "Prog1")
+                    .replace("programs: UT_Debug", "programs: UT_Free")
+                    .replace(PROGRAMMER_SERIAL, "B111BB11")
+                )
+                registry = self.load(
+                    PROGRAMMER.replace("programs: UT_Debug", f"programs: {target}")
+                    + (second if target != "UT_Free" else "")
+                    + extra
+                )
+                self.assertIn("Prog0", registry.pair_members(target))
+
+    def test_a_programmer_may_not_take_a_board_s_serial(self):
+        """The bench's older lock name for it is that serial on its own, so
+        it would be the lease file of an Ubertooth of that serial."""
+        self.refuse(
+            PROGRAMMER.replace(f'"{PROGRAMMER_SERIAL}"', TARGET),
+            "Ubertooth UT_Debug are registered with the same serial",
+        )
 
     def test_a_programs_line_with_nothing_after_it_is_refused(self):
         """Present and empty is a pairing left half written, not no pairing.

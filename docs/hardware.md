@@ -274,8 +274,10 @@ holds the other.
   harness's own lock order, whichever one was named; naming both is harmless.
   That covers `scripts/lab/hold`, `ubertooth-harness lease`, a run that uses
   or power-cycles the board, and `scripts/lab/hub-port` on either member's
-  port. Each says on standard error which device the pairing brought in and
-  why, and `ubertooth-harness boards` prints the pairing under both.
+  port. The three by-hand commands say on standard error which device the
+  pairing brought in and why, and `ubertooth-harness boards` prints the
+  pairing under both. A run takes the pair without saying so in its record
+  yet ([#289](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/289)).
 - The programmer appears in `ubertooth-harness boards` like any other leased
   device, so a holder a reader did not expect is explained where they see it.
 

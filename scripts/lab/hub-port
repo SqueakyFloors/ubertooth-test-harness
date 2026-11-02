@@ -268,9 +268,14 @@ def main(argv: list[str] | None = None, *, sleep=time.sleep) -> int:
                 file=sys.stderr,
             )
         if device is not None and args.force:
+            # Every device the switch leaves unprotected, not only the one on
+            # the port: a member of a pair is held with it, so --force leaves
+            # the other one unheld too.
+            unheld, _why = leases.expand_pairs(registry, [device.alias])
             print(
                 f"note: switching port {args.port} without holding "
-                f"{device.alias}, which may be in use (--force)",
+                + ", ".join(unheld)
+                + ", which may be in use (--force)",
                 file=sys.stderr,
             )
         controller = controller_from_resource(resource, allow_real_changes=True)

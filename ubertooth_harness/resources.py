@@ -522,7 +522,7 @@ class FileResourceRegistry:
                 used_power_ports[key] = resource.alias
 
     def _validate_programmer_serials(self) -> None:
-        """One serial is one programmer.
+        """One serial is one programmer, and is nobody else's.
 
         The identity check above compares whole identity mappings, so two
         programmers differing only in an optional ``serial device`` would
@@ -531,18 +531,38 @@ class FileResourceRegistry:
         target of its own. Compared without regard to case, because a serial
         written two ways is still one adapter, while the two spellings would
         name two lock files.
+
+        A programmer's serial is chosen by whoever labels the adapter, and
+        the bench's older lock name for it is that serial on its own
+        (``scripts/lab/_bench.plain_serial``), which is also the lock file
+        name of an Ubertooth of that serial. So a programmer may not take
+        the serial of a registered Ubertooth either: holding one would hold
+        the other's lease and report it as the programmer's.
         """
+        boards = {
+            str(resource.identity.get("serial", "")).strip().lower(): resource.alias
+            for resource in sorted(self.resources.values(), key=lambda r: r.alias)
+            if resource.type == "Ubertooth" and resource.identity.get("serial")
+        }
         seen: dict[str, str] = {}
         for resource in sorted(self.resources.values(), key=lambda r: r.alias):
             if resource.type != DEBUG_PROGRAMMER:
                 continue
-            serial = str(resource.identity.get("serial", "")).strip().lower()
+            written = resource.identity.get("serial")
+            serial = str(written or "").strip().lower()
             if serial in seen:
                 raise RegistryError(
                     f"{DEBUG_PROGRAMMER}s {seen[serial]} and {resource.alias} are "
-                    f"registered with the same serial "
-                    f"'{resource.identity.get('serial')}'; one serial is one "
-                    "programmer, whichever way it is written"
+                    f"registered with the same serial '{written}'; one serial is "
+                    "one programmer, whichever way it is written"
+                )
+            if serial in boards:
+                raise RegistryError(
+                    f"{DEBUG_PROGRAMMER} {resource.alias} and Ubertooth "
+                    f"{boards[serial]} are registered with the same serial "
+                    f"'{written}'; a lock of one would be read as a lock of the "
+                    "other, so give the programmer the serial its own USB "
+                    "descriptor reports"
                 )
             seen[serial] = resource.alias
 

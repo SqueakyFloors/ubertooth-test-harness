@@ -1936,11 +1936,13 @@ Whichever member a command names, both are taken in the same all-or-nothing
 attempt, in the usual lock order, and naming both is harmless. That holds for
 `ubertooth-harness lease`, [`scripts/lab/hold`](scripts/lab/README.md), a
 `run-suite` that binds or power-cycles the board, and
-`scripts/lab/hub-port` on either member's port. Each one says on standard
-error which device the pairing brought in and why
+`scripts/lab/hub-port` on either member's port. The three commands a person
+runs by hand say on standard error which device the pairing brought in and why
 (`note: Prog_Linux0 is the programmer wired to UT_Linux1, so it is held
 too`), so a holder nobody asked for is never a mystery, and `boards` prints
-the pairing under both devices:
+the pairing under both devices. A run holds the pair the same way, and its
+record does not yet say why it took the programmer
+([#289](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/289)):
 
 ```
 Prog_Linux0  free

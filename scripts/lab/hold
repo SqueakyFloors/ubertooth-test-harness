@@ -209,9 +209,10 @@ def main(argv: list[str] | None = None) -> int:
     except (RegistryError, leases.LeaseError) as error:
         return _fail(error)
 
-    # Said here, whichever way the locks are taken below: the delegate is
-    # given the expanded devices, so it has nothing left to explain. Before
-    # the attempt, which is also when a wait for any of them starts.
+    # Said here, whichever way the locks are taken below, and before the
+    # attempt, which is also when a wait for any of them starts. The
+    # delegate is handed the expanded devices, so its own expansion adds
+    # nothing and it says nothing either: one note, in one place.
     for clause in pairing:
         print(f"note: {clause}, so it is held too", file=sys.stderr)
 
