@@ -2389,6 +2389,50 @@ proves the refusal happened before the write rather than after a partial one.
 `-s` is checked against the build's own `.dfu` byte for byte, so the host-side
 suffixing has an exact right answer.
 
+A read-back is compared with the image as `-d` writes it, which is not quite
+the file. `ubertooth-dfu` fills in two things in the image's first block for
+the bootloader's own checks: the LPC vector checksum at 0x1c, and, in an
+image that carries an image check block, the record of the download at
+0xea-0xf7 inside it. Those fields are checked against what the writer should
+have worked out -- the eight vector words adding up to zero, the flags, the
+length of the region written and its complement, and the checksum that makes
+the whole region add up to zero -- rather than passed over, so a board that
+kept the file's empty values fails. Every other byte has to match the file.
+How long a dump is follows the part: 114688 bytes above the bootloader on a
+128 KiB part, 245760 on a 256 KiB one, and the size the firmware is linked
+for when the part cannot be read, which includes every board already in the
+bootloader. The `read-back` step records the range the command printed
+(`Reading back 114688 bytes, 0x4000-0x1ffff: part 0x25011722 (LPC1754) has
+128 KiB of flash`) and the comparison takes the length from there, so no part
+is assumed; a tool that prints no range fails that step rather than having
+its dump measured against a guess.
+
+All three arrived on the fork's main after the earlier releases, so the case
+expects them: the range line in `10c3381`
+([ubertooth#257](https://github.com/SqueakyFloors/ubertooth/pull/257)), the
+vector checksum in `31228b0`
+([ubertooth#1037](https://github.com/SqueakyFloors/ubertooth/pull/1037)) and
+the image check record in `d91bb06`
+([ubertooth#1048](https://github.com/SqueakyFloors/ubertooth/pull/1048)), the
+last two for the bootloader checks of
+[ubertooth#242](https://github.com/SqueakyFloors/ubertooth/issues/242).
+Against a build between `31228b0` and `d91bb06` the case still passes: the
+image check block arrived in `d91bb06` on both sides at once, so an image
+from that window carries none and there is no record to fill in or to check.
+Against one between `10c3381` and `31228b0` it fails on the vector checksum
+alone (`vector checksum at 0x0401c is 0x00000000, expected 0x...`): the dump
+equals the file, and that field is checked against what the writer should
+have worked out, so equalling the file is not enough.
+
+**Do not run this case against a build older than `10c3381` on an Ubertooth
+One.** Such a `-u` reads a fixed 0x4000-0x3ffff whatever the part has, and on
+the 128 KiB part the board is built from that asks for flash above the end of
+it, which faults the bootloader until the board is power-cycled
+([ubertooth#233](https://github.com/SqueakyFloors/ubertooth/issues/233), which
+`10c3381` closed). The
+case reports it as a failed `-u` and a cleanup that cannot reach the board,
+not as a comparison it could make.
+
 **Hardware and arguments.** One `Ubertooth`, selected by full serial, with
 every other registered board as guards. `coverage:`. Needs the firmware build
 as the test image, which must report the resolved Ubertooth revision; a run
