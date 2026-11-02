@@ -2407,6 +2407,19 @@ bootloader. The `read-back` step records the range the command printed
 is assumed; a tool that prints no range fails that step rather than having
 its dump measured against a guess.
 
+All three arrived on the fork's main after the earlier releases, so the case
+expects them: the range line in `10c3381`
+([ubertooth#257](https://github.com/SqueakyFloors/ubertooth/issues/257)), the
+vector checksum in `31228b0`
+([ubertooth#1037](https://github.com/SqueakyFloors/ubertooth/issues/1037)),
+and the image check record in `d91bb06`
+([ubertooth#1048](https://github.com/SqueakyFloors/ubertooth/issues/1048)).
+Against a build older than `10c3381` the `read-back` step fails with
+`read-back range was not reported`, and the cleanup fails with `the read-back
+did not report the range it covers` without rewriting the image. Against one
+between `10c3381` and `31228b0` the dump matches the file, so the case passes
+for a different reason than it does now.
+
 **Hardware and arguments.** One `Ubertooth`, selected by full serial, with
 every other registered board as guards. `coverage:`. Needs the firmware build
 as the test image, which must report the resolved Ubertooth revision; a run

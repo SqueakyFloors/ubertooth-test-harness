@@ -82,14 +82,15 @@ ACCEPTED_BCD_DFU = (0x0100, 0x0101)
 SIGNATURE = b"UFD"
 BLOCK_SIZE = 256
 APPLICATION_OFFSET = 0x4000
-# How much flash a -u read-back covers. It follows the part, which differs
-# between boards: dfu_upload_length() in host/ubertooth-tools/src/
-# dfu_recovery.c takes the flash size behind the part identification number
-# and subtracts the bootloader's region. The part number is readable only
-# while the board is still running its application, so a board already in the
-# bootloader, and a part the host has no entry for, get the size the firmware
-# is linked for instead (DFU_ASSUMED_FLASH_SIZE). The sizes below are the
-# LPC175x/176x flash sizes in that file's part table.
+# How much flash a -u read-back covers (fork 10c3381, #257). It follows the
+# part, which differs between boards: dfu_upload_length() in
+# host/ubertooth-tools/src/dfu_recovery.c takes the flash size behind the
+# part identification number and subtracts the bootloader's region. That
+# number is readable only while the board is still running its application,
+# so a board already in the bootloader, and a part the host has no entry
+# for, get the size the firmware is linked for instead
+# (DFU_ASSUMED_FLASH_SIZE). The sizes below are the LPC175x/176x flash sizes
+# in that file's part table.
 PART_FLASH_SIZES = (32 * 1024, 64 * 1024, 128 * 1024, 256 * 1024, 512 * 1024)
 ASSUMED_FLASH_SIZE = 128 * 1024
 
@@ -111,8 +112,9 @@ READBACK_LENGTHS = tuple(sorted(
     {upload_length(size) for size in PART_FLASH_SIZES} - {0}))
 
 # What ubertooth-dfu fills in as it writes an image's first block, for the
-# bootloader's checks (fork #1037 and #1048): prepare_first_block() in
-# host/ubertooth-tools/src/ubertooth-dfu.c, and the image check block's
+# bootloader's checks (fork 31228b0, #1037, and d91bb06, #1048):
+# prepare_first_block() in host/ubertooth-tools/src/ubertooth-dfu.c, and the
+# image check block's
 # layout in host/libubertooth/src/ubertooth_interface.h. An image this tree
 # builds leaves both empty, and these are the only bytes the tool writes
 # over, so a read-back holds the file everywhere else.
@@ -868,10 +870,11 @@ def restore(board: Board, image: Path, revision: str, readback: Path) -> int:
         return 1
     data = image.read_bytes()
     problems = readback_problems(readback.read_bytes(), data, plan=read.plan)
-    if problems and read.plan is None:
+    if read.plan is None:
         # A read-back that said nothing about what it covers cannot be
-        # compared at all, and the next one will say no more, so a rewrite
-        # would spend a flash cycle on a shared board for nothing.
+        # compared at all (so there is always something in problems), and the
+        # next one would say no more: a rewrite would spend a flash cycle on
+        # a shared board for nothing.
         print(f"Restore: {'; '.join(problems)}")
         return 1
     if problems:
@@ -880,9 +883,16 @@ def restore(board: Board, image: Path, revision: str, readback: Path) -> int:
         if failure:
             print(f"Restore: {failure}")
             return 1
+        # The rewrite may have been fine and the second read-back the thing
+        # that failed, so the two are told apart and the reason is named.
         read = board.read_back(readback)
-        if read.failure or readback_problems(readback.read_bytes(), data, plan=read.plan):
-            print(f"Restore: flash still differs after the rewrite {read.failure}".rstrip())
+        if read.failure:
+            print(f"Restore: the read-back after the rewrite failed: {read.failure}")
+            return 1
+        remaining = readback_problems(readback.read_bytes(), data, plan=read.plan)
+        if remaining:
+            print("Restore: flash still differs after the rewrite: "
+                  + "; ".join(remaining))
             return 1
     seen = board.wait_revision()
     if seen != revision:
@@ -1090,8 +1100,12 @@ def _main(args, board_factory) -> int:
         # A --reported that named no range is one of those problems, so by
         # here the command did report one and the verdict can quote it.
         print(f"Read-back covers 0x{plan.start:x}-0x{plan.end:x}: {plan.part}")
-        print(f"Read-back: {len(data)} bytes, image and 0xff padding match, with the "
-              "vector checksum and image check record -d fills in")
+        # Name the fields really checked: an image carrying no image check
+        # block has only the vector checksum written over.
+        checked = ", ".join(field.name
+                            for field in written_fields(Path(args.image).read_bytes()))
+        print(f"Read-back: {len(data)} bytes, image and 0xff padding match, with "
+              f"{checked or 'no field'} as -d fills in")
         return 0
     if command == "answers":
         board = board_factory(args.serial)
