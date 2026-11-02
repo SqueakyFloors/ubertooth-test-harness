@@ -1114,7 +1114,9 @@ void bt_status_json(char *out, size_t len)
                  "\"sco\":\"%s\",\"sco_profile\":\"%s\",\"sco_codec\":\"%s\","
                  "\"sco_handle\":%u,\"sco_frame_len\":%u,\"sco_tx_frames\":%" PRIu32 ","
                  "\"sco_tx_errors\":%" PRIu32 ",\"sco_rx_frames\":%" PRIu32 ","
-                 "\"sco_rx_bad\":%" PRIu32 ",\"sco_type\":\"%s\",\"sco_link\":\"%s\","
+                 "\"sco_rx_bad\":%" PRIu32 ",\"sco_connects\":%" PRIu32 ","
+                 "\"sco_disconnects\":%" PRIu32 ","
+                 "\"sco_type\":\"%s\",\"sco_link\":\"%s\","
                  "\"sco_pkt_type\":\"%s\",\"sco_tx_len\":%u,\"sco_rx_len\":%u,"
                  "\"sco_interval\":%u,\"sco_retrans_window\":%u,"
                  "\"sco_types_supported\":\"%04x\",%s}",
@@ -1127,6 +1129,7 @@ void bt_status_json(char *out, size_t len)
                  st.writes, st.write_errors, st.rx_bytes, st.connects, st.disconnects,
                  st.last_err, sco.state, sco.profile, sco.codec, sco.handle,
                  sco.frame_len, sco.tx_frames, sco.tx_errors, sco.rx_frames, sco.rx_bad,
+                 sco.connects, sco.disconnects,
                  sco.type, sco.link, sco.pkt_type, sco.tx_len, sco.rx_len,
                  sco.interval, sco.retrans, sco.supported, afh_fields);
     UNLOCK();

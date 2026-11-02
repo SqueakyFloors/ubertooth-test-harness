@@ -149,7 +149,7 @@ Combinations to test:
 | `-h` | help | Covered | Host CLI surface (exit 0 since fork `e4f1dc5`, fork #377; it was 1) |
 | `-f` | follow connections | Covered | BLE CRC transitions (smoke: CRC on, channel 37; comprehensive: every CRC value × channel and capture format). Exclusive topology runs it without `-U`. Capture known BLE connection (`ble` plan, `connection` suite): a real connection between two registered nRF52840 DKs is followed, and the capture's CONNECT_IND, data packets and recorded connection information are checked. Follow a BLE connection across its end (same plan and suite) takes one capture across several of the central's reconnections: the capture must hold a CONNECT_IND for at least two distinct connections with packets on each, no packet on an access address no CONNECT_IND in the file handed out, and a packet with a correct CRC past the parameter update, and the board must read back idle with no new unrequested watchdog reset |
 | `-n` | advertisements only | Covered | BLE CRC transitions and capture cases (smoke, comprehensive). Packet content is not checked. Raw receive (comprehensive): `-n -A37 -q` after a `dump -d` captures no basic-rate packet (every packet on RF channel 0; [ubertooth#318](https://github.com/SqueakyFloors/ubertooth/issues/318)) |
-| `-p` | promiscuous | Partial | BLE settings (comprehensive): a bounded receive-only run, then `-S`, resets LEDs, channel 2441 MHz, and squelch -120 (PA kept); access address and CRC are restored afterwards. BLE mode conflicts (release). Following a connection needs a peer |
+| `-p` | promiscuous | Partial | BLE settings (comprehensive): a bounded receive-only run, then `-S`, resets LEDs, channel 2441 MHz, and squelch -120 (PA kept); access address and CRC are restored afterwards. BLE mode conflicts (release). Recovering a connection needs one that hops with channel selection algorithm 1, which the bench has since the second nRF52840 DK image (`firmware/nrf52840dk`, `chan-sel-1.conf`); the case for it, `Recover a BLE connection promiscuously`, is named in the backlog and not implemented, because on the bench `-p` recovered the access address and the CRC init of such a connection and went no further |
 | `-a[addr]` | get/set access address | Covered | BLE settings (smoke: set/read back, attached and as the next word; comprehensive: reset by `util -r`, `-a -k` reports both, and `-azzzz` is refused with no change; [ubertooth#171](https://github.com/SqueakyFloors/ubertooth/issues/171), fixed in `09e9a46`). `-a zzzz` rejected and `-a -` refused as a stray: Argument validation (comprehensive) |
 | `-s<mac>` | faux peripheral mode | Hard | Transmits RF; needs a central peer |
 | `-t<mac[/mask]>`, `-tnone` | set/unset follow target | Partial | Set, masked, and cleared: BLE settings (smoke); malformed MAC rejected: Argument validation. The filter itself needs a peer |
@@ -282,17 +282,17 @@ Combinations: `-c` with `-l`: last one wins. Covered (Raw receive, comprehensive
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
 | `-h` | help | Covered | Host CLI surface |
-| `-l <LAP>` | target LAP | Hard | Needs a BR/EDR piconet using AFH (Recover AFH map is in the backlog) |
-| `-u <UAP>` | target UAP | Hard | Same |
-| `-m <n>` | channel-removal threshold | Hard | Same |
-| `-r` | print the map every second | Partial | Classic Bluetooth receive (comprehensive): one `<time> <80 bits>` line per second without a piconet. Map content needs a piconet |
-| `-t <s>` | initial detection timeout | Covered | Classic Bluetooth receive (smoke): with no piconet in range it exits 2 after about N s with `error: no packets from ??:??:<UAP>:<LAP> within N s; AFH map unknown, not monitoring` and prints no map (since `3b22c95`, [ubertooth#187](https://github.com/SqueakyFloors/ubertooth/issues/187); before, an all-zero map and monitoring). The map and monitoring with packets need a piconet |
-| `-e <0-4>` | max access-code errors | Partial | Classic Bluetooth receive (comprehensive): `-t N -e 2` accepted (exit 2, no packets). No range check ([ubertooth#155](https://github.com/SqueakyFloors/ubertooth/issues/155)) |
+| `-l <LAP>` | target LAP | Covered | Recover AFH map (`classic` plan): the piconet's LAP, against two ESP32 Classic peers held to a chosen channel map |
+| `-u <UAP>` | target UAP | Covered | Same |
+| `-m <n>` | channel-removal threshold | Hard | Left at its default by Recover AFH map: a channel the piconet stops using inside one capture is not something the peers make happen |
+| `-r` | print the map every second | Covered | Recover AFH map (smoke): one `<time> <80 bits>` line per second, and the last of them is the recovered map, judged against the map the link is hopping over. Classic Bluetooth receive (comprehensive) covers the line format with no piconet |
+| `-t <s>` | initial detection timeout | Covered | Classic Bluetooth receive (smoke): with no piconet in range it exits 2 after about N s with `error: no packets from ??:??:<UAP>:<LAP> within N s; AFH map unknown, not monitoring` and prints no map (since `3b22c95`, [ubertooth#187](https://github.com/SqueakyFloors/ubertooth/issues/187); before, an all-zero map and monitoring). With a piconet, Recover AFH map (comprehensive) checks the `AFH map: 0x...` line it prints after the detection phase |
+| `-e <0-4>` | max access-code errors | Partial | Recover AFH map runs every case with `-e 0`, which is what makes the recovered map selective: with the default of 2 the bench marked the whole band used. Classic Bluetooth receive (comprehensive) covers `-t N -e 2` being accepted with no piconet. No range check ([ubertooth#155](https://github.com/SqueakyFloors/ubertooth/issues/155)) |
 | `-a <map>` | initial AFH map (undocumented) | N/A | Removed in fork `5ac22a8` ([ubertooth#350](https://github.com/SqueakyFloors/ubertooth/issues/350)) |
 | `-V` | version | Covered | Host CLI surface (fast, release): host version line |
 | `-U <index\|serial>` | select device | Covered | Classic Bluetooth receive by serial; an unknown serial exits 1 with `no Ubertooth found with serial matching` (comprehensive; it segfaulted before `219a5b0`, [ubertooth#185](https://github.com/SqueakyFloors/ubertooth/issues/185)) |
 
-The receive transfer is given back between the detection and monitoring phases (libubertooth, fork `553b8b8`, [ubertooth#307](https://github.com/SqueakyFloors/ubertooth/issues/307)): Hard, the monitoring phase needs a piconet; with none, `-t N` ends after the detection phase.
+The receive transfer is given back between the detection and monitoring phases (libubertooth, fork `553b8b8`, [ubertooth#307](https://github.com/SqueakyFloors/ubertooth/issues/307)): Covered by Recover AFH map (comprehensive), whose `-t` case runs on into the monitoring phase and is stopped there, with the map it detected checked against the one the link was hopping over; with no piconet, `-t N` ends after the detection phase.
 
 ## ubertooth-ego
 
@@ -445,10 +445,11 @@ A test that fails cleanly (device verified restored, guards unchanged) no longer
 - **Leaves the application firmware:** `ubertooth-util -i` and
   `ubertooth-dfu -d` or `-u` without `-r`. They need a recovery path (USB power cycle,
   DFU/ISP reflash). The Reset into invalid application backlog item covers part of this.
-- **Needs an RF peer:** `ubertooth-afh` and `ubertooth-follow` against a
-  piconet (the two ESP32 Classic peers now make one, so live `ubertooth-rx
-  -l -u` is covered by Follow Classic Bluetooth piconet; no AFH or follow case
-  is written yet, [#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)),
+- **Needs an RF peer:** `ubertooth-follow` against a piconet (the two ESP32
+  Classic peers make one, so live `ubertooth-rx -l -u` is covered by Follow
+  Classic Bluetooth piconet and `ubertooth-afh` by Recover AFH map; follow
+  needs a host Bluetooth adapter as well,
+  [#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)),
   BLE connection (`ubertooth-btle -f/-p` with real traffic, `-t`), E-GO
   skateboard, Uberducky.
 - **Needs a host Bluetooth adapter / BlueZ:** `ubertooth-scan`, `ubertooth-follow` (Linux).
@@ -492,9 +493,12 @@ Next, harness work:
     ([ubertooth#677](https://github.com/SqueakyFloors/ubertooth/issues/677)).
     Implemented (#88): Capture known Classic device and Follow Classic
     Bluetooth piconet (`classic` plan) with two ESP32 Classic peers running
-    `firmware/esp32-classic-peer`. Recover AFH map and Bluetooth inquiry scan
-    are still backlog entries: the piconet is there now, but `ubertooth-afh`
-    needs a case and `ubertooth-scan` needs a host Bluetooth adapter.
+    `firmware/esp32-classic-peer`. Implemented
+    ([#250](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/250)):
+    Recover AFH map, on the same pair held to a chosen channel map
+    (`utesp-1.3.0` or later).
+    Bluetooth inquiry scan is still a backlog entry: `ubertooth-scan` needs a
+    host Bluetooth adapter.
     The fixtures each needs are tracked as `hardware needed` issues: BLE
     advertiser [#86](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/86),
     BLE connection [#87](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/87),

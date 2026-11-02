@@ -763,6 +763,28 @@ static const char *phy_name(uint8_t phy)
 	}
 }
 
+/*
+ * The channel selection algorithm the live link uses, as far as this board
+ * can say.
+ *
+ * Algorithm 2 needs both ends to support it, so an image whose controller has
+ * no algorithm 2 settles every link it is part of on algorithm 1, whatever
+ * the peer can do: "1" is then a fact about the link, not a guess.
+ *
+ * With a controller that does have algorithm 2 the answer is not readable
+ * here. The two ends agree it with the ChSel bit of the ADV_IND and the
+ * CONNECT_IND, which is on the air; neither the SoftDevice Controller nor
+ * Zephyr's host reports what was agreed. A receiver reads it off the air; this
+ * board says "unknown" rather than guess.
+ */
+static const char *chan_sel_name(bool connected)
+{
+	if (!connected) {
+		return "none";
+	}
+	return UTDK_CHAN_SEL_2 ? "unknown" : "1";
+}
+
 static const char *conn_chmap_name(uint8_t chmap)
 {
 	switch (chmap) {
@@ -798,6 +820,7 @@ void conn_status(char *buf, size_t len)
 		 "\"interval_units\":%u,\"latency\":%u,\"timeout_units\":%u,"
 		 "\"tx_octets\":%u,\"rx_octets\":%u,\"mtu\":%u,\"phy\":\"%s\","
 		 "\"payload_len\":%u,\"period_ms\":%u,\"conn_chmap\":\"%s\","
+		 "\"chan_sel\":\"%s\","
 		 "\"data_map\":\"%s\",\"data_map_used\":%u,\"data_map_sets\":%u,"
 		 "\"cycle_ms\":%u,"
 		 "\"autoupdate_ms\":%u,\"writes\":%u,"
@@ -808,6 +831,7 @@ void conn_status(char *buf, size_t len)
 		 cn.interval_units, cn.latency, cn.timeout_units,
 		 cn.tx_octets, cn.rx_octets, cn.mtu, phy_name(cn.phy),
 		 cn.payload_len, cn.period_ms, conn_chmap_name(cn.chmap),
+		 chan_sel_name(cn.conn != NULL),
 		 data_map, data_map_used(cn.data_map), cn.data_map_sets,
 		 cn.cycle_ms, cn.autoupdate_ms,
 		 cn.writes, cn.write_errors,

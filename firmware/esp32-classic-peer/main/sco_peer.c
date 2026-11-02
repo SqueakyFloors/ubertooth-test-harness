@@ -88,6 +88,7 @@ static struct {
     bool msbc; /* the codec the controller settled on */
     uint32_t counter;
     uint32_t tx_frames, tx_errors, rx_frames, rx_bad;
+    uint32_t connects, disconnects; /* links this profile has had, and lost */
     esp_bd_addr_t peer;   /* who the gateway calls */
     esp_bd_addr_t remote; /* the far end of the live link, either role */
     bool stats_wanted; /* a packet-counter request is outstanding */
@@ -395,6 +396,18 @@ static void audio_changed(int state, uint16_t handle, uint16_t frame_len,
     LOCK();
     was_up = sc.audio;
     sc.audio = up;
+    /* Count the links, so a reader can tell one link that lasted from a
+     * second that took its place. A connect the controller refused never
+     * reaches here as "up", and only a link that was up can go down, so
+     * neither counter moves for a link that never existed. A link
+     * renegotiated into another "connected" without a disconnection in
+     * between steps the connect counter alone, which still says the link a
+     * reader saw before is not the one it sees now. */
+    if (up) {
+        sc.connects++;
+    } else if (was_up) {
+        sc.disconnects++;
+    }
     /* Keep the handle and the frame size only while there is a link to use
      * them on, so a status line never describes one that has gone. The size
      * is checked here, once, rather than on every frame: a link whose frame
@@ -626,6 +639,19 @@ static const char *profile_start(enum peer_role role)
 {
     const char *err;
 
+    /* Before anything is registered, so that a link the controller reports
+     * while this profile is coming up is counted and kept. Zeroing them
+     * afterwards would erase exactly the event a session needs to see. A
+     * start that then fails leaves them zeroed, which is right: there is
+     * no link, and counts from a profile that has gone describe nothing a
+     * reader can line up against. */
+    LOCK();
+    sc.tx_frames = sc.tx_errors = sc.rx_frames = sc.rx_bad = 0;
+    sc.connects = sc.disconnects = 0;
+    sc.stats_ok = false;
+    sc.stats_wanted = false;
+    UNLOCK();
+
     xSemaphoreTake(prof_ev, 0);
 
     if (role == PEER_ROLE_INITIATOR) {
@@ -657,11 +683,6 @@ static const char *profile_start(enum peer_role role)
             return "audio callback registration failed";
         }
     }
-    LOCK();
-    sc.tx_frames = sc.tx_errors = sc.rx_frames = sc.rx_bad = 0;
-    sc.stats_ok = false;
-    sc.stats_wanted = false;
-    UNLOCK();
     return NULL;
 }
 
@@ -906,7 +927,7 @@ const char *sco_set_type(const char *name)
     } else if (strcmp(name, "default") == 0) {
         type = UTESP_SCO_TYPE_DEFAULT;
     } else {
-        return "sco type takes ev3, 2ev3, or default";
+        return SCO_TYPE_USAGE;
     }
 
     LOCK();
@@ -934,6 +955,7 @@ void sco_zero_counters(void)
 {
     LOCK();
     sc.tx_frames = sc.tx_errors = sc.rx_frames = sc.rx_bad = 0;
+    sc.connects = sc.disconnects = 0;
     sc.counter = 0;
     UNLOCK();
 }
@@ -1016,6 +1038,8 @@ void sco_get(struct sco_view *out)
     out->tx_errors = sc.tx_errors;
     out->rx_frames = sc.rx_frames;
     out->rx_bad = sc.rx_bad;
+    out->connects = sc.connects;
+    out->disconnects = sc.disconnects;
     audio = sc.audio;
     memcpy(remote, sc.remote, ESP_BD_ADDR_LEN);
     UNLOCK();
