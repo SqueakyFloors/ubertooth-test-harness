@@ -2,11 +2,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ubertooth_harness.catalog import CatalogError, builtin_catalog
-from ubertooth_harness.hostneeds import Needs
+from types import MappingProxyType
+
+from ubertooth_harness.catalog import CatalogError, TestDefinition, builtin_catalog
+from ubertooth_harness.hostneeds import NO_NEEDS, TEST_BUILD_LABEL, Needs
 from ubertooth_harness.planner import PlanCompiler, PlanningError
 from ubertooth_harness.plan import PlanError, load_plan
 from ubertooth_harness.resources import FileResourceRegistry, RegistryError
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 HARDWARE = """
@@ -214,6 +218,171 @@ class CatalogTests(unittest.TestCase):
 
         with self.assertRaisesRegex(CatalogError, "maximum consecutive misses"):
             definition.normalize_arguments(arguments)
+
+
+class BuildNeedsTests(unittest.TestCase):
+    """What a test needs from the run's build, which a client with no resource
+    registry (the controller's plan listing, and so the GUI) reads off the
+    catalog to choose a run's build options (#257)."""
+
+    def test_the_tests_that_need_the_runs_build_declare_which_part(self):
+        catalog = builtin_catalog()
+        needed = {name: catalog.get(name).build_options() for name in catalog.names}
+        required = {
+            name: catalog.get(name).required_build_options() for name in catalog.names
+        }
+        self.assertEqual(
+            {"DFU images", "DFU image checks"},
+            {name for name, need in needed.items() if need.firmware_build},
+        )
+        self.assertEqual(
+            {"Python tools"},
+            {name for name, need in needed.items() if need.python_tools},
+        )
+        # Refused without the image, rather than leaving a case out: every
+        # case of it writes the run's own image and reads it back.
+        self.assertEqual(
+            {"DFU images"},
+            {name for name, need in required.items() if need.firmware_build},
+        )
+        self.assertEqual(
+            set(), {name for name, need in required.items() if need.python_tools}
+        )
+
+    def test_the_images_a_step_names_come_from_the_plan_entry(self):
+        # Flash reliability flashes the images its plan entry lists, so what
+        # the run must carry follows that entry rather than a declaration
+        # that could disagree with it.
+        definition = builtin_catalog().get("Flash reliability")
+        self.assertEqual("image sequence", definition.image_labels_argument)
+        self.assertEqual(
+            ("test build", "KGV"),
+            definition.image_labels({"image sequence": ["test build", "KGV"]}),
+        )
+        # Two published images and no build: nothing here says the run must
+        # build an image.
+        self.assertEqual(
+            ("2020-12-R1", "KGV"),
+            definition.image_labels({"image sequence": ["2020-12-R1", "KGV"]}),
+        )
+        # No entry, or one that carries no sequence, names no image; so does
+        # a test whose images do not come from an argument.
+        for arguments in (None, {}, {"image sequence": "test build"},
+                          {"image sequence": [None, 7]}):
+            with self.subTest(arguments=arguments):
+                self.assertEqual((), definition.image_labels(arguments))
+        self.assertEqual(
+            (), builtin_catalog().get("DFU images").image_labels(
+                {"image sequence": ["test build"]})
+        )
+
+    def test_every_case_need_a_plan_can_reach_is_declared_on_its_test(self):
+        """A case that needs the firmware image or the Python tools belongs to
+        a test that says so.
+
+        Found by compiling the committed plans against the example registry:
+        a case's own needs are only known once the cases are built from a
+        host's resources, which is why the test declares them as well. Steps
+        whose cases that registry cannot build (its placeholder serials) are
+        left out of the comparison; they are named if the assertion fails.
+        """
+        catalog = builtin_catalog()
+        registry = FileResourceRegistry.load(ROOT / "hardware.example.yaml")
+        compiler = PlanCompiler(catalog, registry)
+        undeclared, unbuildable, compared = [], [], set()
+        for path in sorted((ROOT / "testplans").glob("*.yaml")):
+            plan = load_plan(path, catalog)
+            for suite in plan.suites:
+                try:
+                    compiled = compiler.compile_suite(plan, suite)
+                except PlanningError as error:
+                    unbuildable.append(f"{path.stem}/{suite}: {error}")
+                    continue
+                for invocation in compiled.invocations:
+                    definition = catalog.get(invocation.test_name)
+                    if not definition.implemented:
+                        continue
+                    try:
+                        cases = definition.command_cases(
+                            invocation.arguments, invocation.resources,
+                            invocation.resource_identities,
+                        )
+                    except CatalogError as error:
+                        unbuildable.append(f"{path.stem}/{suite}: {error}")
+                        continue
+                    declared = definition.build_options()
+                    required = definition.required_build_options()
+                    compared.add(definition.name)
+                    for case in cases:
+                        needs = getattr(case, "needs", NO_NEEDS)
+                        artifacts = getattr(case, "artifacts", ())
+                        where = f"{definition.name} / {case.case_id}"
+                        if needs.firmware_build and not declared.firmware_build:
+                            undeclared.append(f"{where}: build_needs firmware build")
+                        if needs.python_tools and not declared.python_tools:
+                            undeclared.append(f"{where}: build_needs Python tools")
+                        # A case that names the run's image among its
+                        # artifacts without declaring it as a need is refused
+                        # without one, so its test cannot run without it.
+                        if (TEST_BUILD_LABEL in artifacts and not needs.firmware_build
+                                and not required.firmware_build):
+                            undeclared.append(
+                                f"{where}: build_required firmware build")
+        self.assertEqual(
+            [], sorted(set(undeclared)),
+            "declare these on the test as build_needs or build_required; "
+            "steps not compared: " + "; ".join(sorted(set(unbuildable))),
+        )
+        # The cases of the tests this is about were among those compared, so
+        # a comparison that reached nothing cannot pass as a clean result.
+        # Flash reliability is not among them: its images come from the plan
+        # entry (test_the_images_a_step_names_come_from_the_plan_entry), and
+        # a FlashCase declares no artifacts of its own.
+        self.assertEqual(
+            set(),
+            {"DFU images", "DFU image checks", "Python tools"} - compared,
+            f"compared {len(compared)} test(s); not compared: "
+            + "; ".join(sorted(set(unbuildable))),
+        )
+
+    def test_build_needs_carries_build_options_only(self):
+        # An argument name that is not the test's own would silently name no
+        # image at all, so it is refused where the test is defined.
+        with self.assertRaisesRegex(ValueError, "is not one of its arguments"):
+            TestDefinition(
+                "Elsewhere", "", MappingProxyType({}), MappingProxyType({}),
+                image_labels_argument="image sequence",
+            )
+        for field in ("build_needs", "build_required"):
+            for other in (Needs(platforms=("linux",)), Needs(host_tools=("tshark",)),
+                          Needs(bluez_tools=("ubertooth-scan",))):
+                with self.subTest(field=field, other=other.describe()):
+                    with self.assertRaisesRegex(ValueError, "build options only"):
+                        TestDefinition(
+                            "Elsewhere", "", MappingProxyType({}),
+                            MappingProxyType({}), **{field: other},
+                        )
+
+    def test_what_a_test_cannot_run_without_is_also_what_it_needs(self):
+        definition = TestDefinition(
+            "Elsewhere", "", MappingProxyType({}), MappingProxyType({}),
+            build_required=Needs(firmware_build=True),
+        )
+        self.assertTrue(definition.build_options().firmware_build)
+        self.assertTrue(definition.required_build_options().firmware_build)
+
+    def test_a_test_wide_need_is_a_build_option_of_the_test(self):
+        # Needs(python_tools=True) on the whole test, which leaves it out
+        # where the host has no such build, counts as needing the option.
+        definition = TestDefinition(
+            "Elsewhere", "", MappingProxyType({}), MappingProxyType({}),
+            needs=Needs(python_tools=True),
+        )
+        self.assertEqual(
+            (True, False),
+            (definition.build_options().python_tools,
+             definition.build_options().firmware_build),
+        )
 
 
 class NamedPlanTests(unittest.TestCase):

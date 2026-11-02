@@ -640,6 +640,34 @@ class PlanEstimateTests(StoreTestCase):
         self.assertEqual([], learned_stages(None, HOST))
         self.assertEqual([], learned_stages(self.store, None))
 
+    def test_a_firmware_build_is_estimated_as_a_firmware_build(self):
+        # The two kinds of build are learned apart, and a run that asks for
+        # the firmware image (#257) takes much the longer of them.
+        for seconds in (300.0, 310.0, 320.0):
+            self.store.add(Key("build", "", HOST, "host tools", None), seconds)
+        for seconds in (600.0, 610.0, 620.0):
+            self.store.add(Key("build", "", HOST, "with firmware", None), seconds)
+        host_tools = run_stage_estimates(self.store, [], HOST, build=True)
+        # A run that only asks to flash its boards builds the firmware too
+        # (run-suite turns --with-firmware on for it), which the controller
+        # passes as with_firmware; see ControllerLearningTests.
+        firmware = run_stage_estimates(
+            self.store, [], HOST, build=True, with_firmware=True)
+        self.assertEqual([("host tools", 310.0)],
+                         [(s["profile"], s["estimated_s"]) for s in host_tools])
+        self.assertEqual([("with firmware", 610.0)],
+                         [(s["profile"], s["estimated_s"]) for s in firmware])
+        # A run's own build_started record is the better answer than what it
+        # was asked for: a run that builds the firmware only because it
+        # flashes its boards says so there, and an adopted run has no request.
+        started = [{"event_type": "build_started", "status": "running",
+                    "details": {"with_firmware": True}}]
+        self.assertEqual(
+            [("with firmware", 610.0)],
+            [(s["profile"], s["estimated_s"])
+             for s in run_stage_estimates(self.store, started, HOST)],
+        )
+
 
 class ControllerLearningTests(ControllerTestCase):
     """The controller learns when a run ends, and reports it over the API."""
@@ -674,6 +702,42 @@ class ControllerLearningTests(ControllerTestCase):
         learned = restarted.estimates.lookup(key_of("Argument validation", VALIDATION))
         self.assertEqual(11.0, learned.seconds)
         self.assertEqual(3, learned.samples)
+
+    async def test_a_runs_build_estimate_is_for_the_build_it_does(self):
+        # A run that flashes its boards builds the firmware for that, whether
+        # it asked for the image or not, so its build estimate is the
+        # firmware one from the start; a run that keeps the boards' firmware
+        # and asks for nothing more gets the host-tools one (#257).
+        for seconds in (300.0, 310.0, 320.0):
+            self.controller.estimates.add(
+                Key("build", "", HOST, "host tools", None), seconds)
+        for seconds in (600.0, 610.0, 620.0):
+            self.controller.estimates.add(
+                Key("build", "", HOST, "with firmware", None), seconds)
+        cases = (
+            ({"build": True}, "with firmware"),
+            ({"build": True, "flash_build": False}, "host tools"),
+            ({"build": True, "flash_build": False, "with_firmware": True},
+             "with firmware"),
+        )
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner)
+            for index, (body, profile) in enumerate(cases):
+                with self.subTest(body):
+                    run_id = f"stage-{index}"
+                    post, message = await self.start_run(runner, **body)
+                    await runner.send("run_accepted",
+                                      request_id=message["request_id"], run_id=run_id)
+                    self.assertEqual(201, (await post)[0])
+                    payload = (await self.http("GET", f"/api/runs/{run_id}"))[1]
+                    self.assertEqual(
+                        [profile], [stage["profile"] for stage in payload["stages"]]
+                    )
+                    await runner.send("run_error", request_id=message["request_id"],
+                                      run_id=run_id, exit_code=2, reason="test")
+                    await wait_until(
+                        lambda: self.controller.targets[HOST].active_run_id is None
+                    )
 
     async def test_a_run_reported_finished_twice_is_learned_once(self):
         async with FakeRunner(self.port) as runner:

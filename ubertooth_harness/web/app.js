@@ -7,6 +7,24 @@
 (function () {
   const LOG_LINES = 200;
   const LOG_LINE_CHARS = 500;
+  // The two build options beyond Build itself: the run's firmware image and
+  // the Python tools. `need` and `require` are the flags /api/plans sets on
+  // a test that leaves cases out without the option, and on one that cannot
+  // run without it at all. `cost` is the page's own note for the option,
+  // read once at start and kept as the first sentence of the note; `chosen`
+  // is the operator's own tick, which a suite's need never sets.
+  const BUILD_OPTIONS = [
+    {
+      id: "with-firmware", what: "the run's firmware image",
+      need: "needs_firmware_build", require: "requires_firmware_build",
+      // run-suite builds this anyway when the run flashes a board.
+      builtByFlash: true,
+    },
+    {
+      id: "with-python", what: "the Python tools build",
+      need: "needs_python_tools", require: "requires_python_tools",
+    },
+  ];
   const STATUS_TEXT = {
     pending: ["○", "pending"],
     running: ["…", "running"],
@@ -253,7 +271,30 @@
     const suite = findSuite($("plan").value, $("suite").value);
     $("suite-tests").textContent = suite
       ? `${suite.tests.map((test) => test.name).join(", ")}. ${estimateText(suite)}`
+        + artifactWarning(suite)
       : "";
+    // This suite may need build options the last one did not.
+    syncBuildOptions();
+  }
+
+  // A suite with a test that needs an image no build makes (a published
+  // release image) cannot be run from here at all: only the command line
+  // passes one, with --artifact. Such a run is refused where the cases are
+  // built, which is after it has built the commits and flashed the boards,
+  // so the warning says that too. Said here rather than hidden, because the
+  // build options below now cover every other image a run needs.
+  function artifactWarning(suite) {
+    const wanted = Array.isArray(suite.needs_artifacts) ? suite.needs_artifacts : [];
+    if (!wanted.length) return "";
+    const tests = suite.tests
+      .filter((test) => (test.needs_artifacts || []).length)
+      .map((test) => test.name);
+    const artifacts = wanted.map((label) => `--artifact "${label}=PATH"`).join(" ");
+    return ` This suite also needs ${wanted.join(", ")},`
+      + ` ${wanted.length > 1 ? "images" : "an image"} no build makes,`
+      + ` for ${tests.join(", ")}: run it on the target with run-suite`
+      + ` ${artifacts}. A run started here builds first, and flashes whatever`
+      + " it would flash, before it is refused without running a test.";
   }
 
   function estimateText(suite) {
@@ -280,8 +321,11 @@
       suite: $("suite").value,
       tests: [],
       build: $("build").checked,
-      // Flashing applies only to a run that builds.
+      // Flashing and the two extra build options apply only to a run that
+      // builds; the controller refuses either extra without Build.
       flash_build: $("build").checked && $("flash-build").checked,
+      with_firmware: $("build").checked && $("with-firmware").checked,
+      with_python: $("build").checked && $("with-python").checked,
     };
     if (!host || !body.ref || !body.plan || !body.suite) {
       status.textContent = "Choose a ref, plan, suite and target first.";
@@ -968,17 +1012,76 @@
     });
   }
 
-  // Flash needs Build: disabled, with a note, while Build is unticked.
-  function syncFlashBuild() {
+  function neededBy(suite, need) {
+    return suite ? suite.tests.filter((test) => test[need]).map((test) => test.name) : [];
+  }
+
+  // Flash and the two build options need Build: each is disabled, with a
+  // note, while Build is unticked. Then, for each build option and the
+  // chosen suite:
+  //
+  // - a suite with a test that cannot run without the option has it ticked
+  //   and held there, since the run would be refused otherwise;
+  // - a suite that would only leave cases out says which, and invites the
+  //   tick, but does not tick it: an option ticked for the operator costs
+  //   build time they did not ask for, and the firmware build also needs a
+  //   toolchain the target may not have, which would turn a run that used
+  //   to pass with those cases left out into one that fails;
+  // - a box the operator has set keeps what they set.
+  //
+  // Called whenever Build, Flash, a box, the plan, the suite or the plan
+  // list changes.
+  function syncBuildOptions() {
     const build = $("build").checked;
+    const flashing = build && $("flash-build").checked;
     $("flash-build").disabled = !build;
     $("flash-build-note").hidden = build;
+    const suite = findSuite($("plan").value, $("suite").value);
+    const suiteName = $("suite").value;
+    for (const option of BUILD_OPTIONS) {
+      const box = $(option.id);
+      const required = neededBy(suite, option.require);
+      const needed = neededBy(suite, option.need);
+      // What the operator set, remembered apart from the box: a tick this
+      // suite forces must not follow them to the next suite, which would
+      // build what they never asked for.
+      box.checked = required.length > 0 || option.chosen;
+      box.disabled = !build || required.length > 0;
+      const sentences = [option.cost];
+      if (required.length) {
+        sentences.push(`The ${suiteName} suite cannot run without ${option.what}: `
+          + `${required.join(", ")}, so it is ticked for this suite.`);
+      } else if (needed.length && !box.checked) {
+        sentences.push(`Without ${option.what} the ${suiteName} suite leaves cases `
+          + `out: ${needed.join(", ")}. Tick it to run them.`);
+        if (option.builtByFlash && flashing) {
+          // run-suite builds the image anyway when the run flashes a board.
+          sentences.push("A run that flashes a board builds the image for that"
+            + " anyway, and records it, so those cases may run without this.");
+        }
+      }
+      if (!build) sentences.push("Needs Build.");
+      $(`${option.id}-note`).textContent = sentences.join(" ");
+    }
   }
 
   function start() {
     $("run-form").addEventListener("submit", submitRun);
-    $("build").addEventListener("change", syncFlashBuild);
-    syncFlashBuild();
+    for (const option of BUILD_OPTIONS) {
+      option.cost = $(`${option.id}-note`).textContent;
+      option.chosen = $(option.id).checked;
+      // Only the operator fires this (a held box is disabled), so it is
+      // their choice that is remembered, and the note says different things
+      // for a ticked and an unticked box.
+      $(option.id).addEventListener("change", () => {
+        option.chosen = $(option.id).checked;
+        syncBuildOptions();
+      });
+    }
+    $("build").addEventListener("change", syncBuildOptions);
+    // Flashing builds the firmware image anyway, which the note says.
+    $("flash-build").addEventListener("change", syncBuildOptions);
+    syncBuildOptions();
     $("refs-reload").addEventListener("click", loadRefs);
     $("plan").addEventListener("change", renderSuites);
     $("suite").addEventListener("change", renderSuiteTests);

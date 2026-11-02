@@ -68,6 +68,16 @@
           <label for="flash-build">Flash the firmware to the boards first</label>
         </div>
         <p id="flash-build-note" class="hint" hidden>Flashing needs Build: without it the boards keep their firmware, which must already be the ref's.</p>
+        <div class="field field-check">
+          <input type="checkbox" id="with-firmware" name="with_firmware" aria-describedby="with-firmware-note">
+          <label for="with-firmware">Build the firmware image too</label>
+        </div>
+        <p id="with-firmware-note" class="hint">Costs extra build time and needs arm-none-eabi-gcc on the target; the run then records its own firmware image, which every test that writes or checks an image needs.</p>
+        <div class="field field-check">
+          <input type="checkbox" id="with-python" name="with_python" aria-describedby="with-python-note">
+          <label for="with-python">Build the Python tools too</label>
+        </div>
+        <p id="with-python-note" class="hint">Costs extra build time; builds ubertooth-btbr and ubertooth-specan-ui with python3 on the target, where specan-ui also needs numpy, qtpy and a Qt binding.</p>
         <div class="form-actions">
           <button type="submit" id="run-button" class="primary">Run</button>
           <p id="run-status" class="hint" role="status" aria-live="polite"></p>

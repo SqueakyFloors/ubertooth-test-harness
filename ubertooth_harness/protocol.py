@@ -2,13 +2,14 @@
 
 Every message is one JSON object in one WebSocket text frame:
 
-    {"version": 4, "type": "<type>", ...fields}
+    {"version": 5, "type": "<type>", ...fields}
 
 Each type has an exact field set. Decoding is strict: a message that is not a
-JSON object, has an unknown version or type, lacks a field, carries an extra
-field, or has a field of the wrong type or shape is rejected with
-ProtocolError and never acted on. Encoding applies the same schema, so the
-runner cannot emit a message the controller would reject.
+JSON object, has an unknown version or type, lacks a field, has a field of the
+wrong type or shape, carries an extra field, or combines its fields in a way
+the receiver could not act on, is rejected with ProtocolError and never acted
+on. Encoding applies the same schema, so the runner cannot emit a message the
+controller would reject.
 
 Run events are carried unchanged in the ``event`` message: the object is the
 run's ``RunEvent`` record exactly as written to run.jsonl, with its own
@@ -23,8 +24,11 @@ from typing import Any, Callable, Mapping
 
 # Version 2 added ``commit`` to the run message (version 1 runners resolved
 # the ref name in their own checkout); version 3 added ``flash_build``;
-# version 4 added the ``run_file`` request and its two answers.
-PROTOCOL_VERSION = 4
+# version 4 added the ``run_file`` request and its two answers; version 5
+# added ``with_firmware`` and ``with_python`` to the run message. There is no
+# negotiation: a message of any other version is refused, so a controller and
+# a runner of different versions never work together (DESIGN.md section 2).
+PROTOCOL_VERSION = 5
 # Bounds what the runner accepts from the controller. Outbound events may be
 # larger (the manifest record is bounded at 1 MiB).
 MAX_INBOUND_MESSAGE_BYTES = 64 * 1024
@@ -232,6 +236,10 @@ CONTROLLER_MESSAGES: Mapping[str, Mapping[str, Validator]] = {
     # whole suite); ``build`` builds the resolved commits into the run
     # directory first; ``flash_build`` (meaningful only with ``build``) then
     # flashes the run's boards with that build's firmware before preflight.
+    # ``with_firmware`` and ``with_python`` are the two further build options:
+    # each one true adds that option to the run's build (run-suite
+    # ``--with-firmware``, ``--with-python``), and each requires ``build``,
+    # exactly as run-suite requires ``--build`` for them (see _run_options).
     "run": {
         "request_id": _identifier,
         "ref": _git_ref,
@@ -241,6 +249,8 @@ CONTROLLER_MESSAGES: Mapping[str, Mapping[str, Validator]] = {
         "tests": _test_names,
         "build": _boolean,
         "flash_build": _boolean,
+        "with_firmware": _boolean,
+        "with_python": _boolean,
     },
     # Cooperatively cancel the active run.
     "cancel": {
@@ -344,7 +354,35 @@ RUNNER_MESSAGES: Mapping[str, Mapping[str, Validator]] = {
 }
 
 
-def _validate(message, schemas: Mapping[str, Mapping[str, Validator]]) -> dict:
+def _run_options(message: Mapping) -> str:
+    """Why a run message's build options cannot be acted on, or ''.
+
+    ``run-suite`` refuses ``--with-firmware`` and ``--with-python`` without
+    ``--build``, so a request that asks for either without ``build`` names a
+    command line that cannot run. It is refused here, in both directions:
+    the controller cannot encode it, and a runner that is sent one rejects it
+    with ``protocol_error`` rather than starting a run that fails at once.
+    """
+    for field in ("with_firmware", "with_python"):
+        if message[field] and not message["build"]:
+            return f"{field} requires build"
+    return ""
+
+
+# Checks across the fields of one message type, applied after every field of
+# that type validated on its own. One map per direction, so a runner message
+# type can never pick up a controller-only check.
+CONTROLLER_COMBINATIONS: Mapping[str, Callable[[Mapping], str]] = {
+    "run": _run_options,
+}
+RUNNER_COMBINATIONS: Mapping[str, Callable[[Mapping], str]] = {}
+
+
+def _validate(
+    message,
+    schemas: Mapping[str, Mapping[str, Validator]],
+    combinations: Mapping[str, Callable[[Mapping], str]],
+) -> dict:
     if not isinstance(message, dict):
         raise ProtocolError("message must be a JSON object")
     version = message.get("version")
@@ -366,10 +404,15 @@ def _validate(message, schemas: Mapping[str, Mapping[str, Validator]]) -> dict:
     for field, check in schema.items():
         if not check(message[field]):
             raise ProtocolError(f"{message_type}: invalid {field}")
+    combination = combinations.get(message_type)
+    if combination is not None:
+        problem = combination(message)
+        if problem:
+            raise ProtocolError(f"{message_type}: {problem}")
     return message
 
 
-def _decode(text, schemas, max_bytes: int) -> dict:
+def _decode(text, schemas, max_bytes: int, combinations) -> dict:
     if isinstance(text, (bytes, bytearray)):
         raise ProtocolError("binary frames are not accepted")
     if not isinstance(text, str):
@@ -380,7 +423,7 @@ def _decode(text, schemas, max_bytes: int) -> dict:
         message = json.loads(text, parse_constant=_reject_constant)
     except (ValueError, RecursionError) as error:
         raise ProtocolError(f"message is not valid JSON: {error}") from error
-    return _validate(message, schemas)
+    return _validate(message, schemas, combinations)
 
 
 def _reject_constant(name):
@@ -389,25 +432,31 @@ def _reject_constant(name):
 
 def decode_controller_message(text) -> dict:
     """Strictly decode one controller -> runner message."""
-    return _decode(text, CONTROLLER_MESSAGES, MAX_INBOUND_MESSAGE_BYTES)
+    return _decode(
+        text, CONTROLLER_MESSAGES, MAX_INBOUND_MESSAGE_BYTES, CONTROLLER_COMBINATIONS
+    )
 
 
 def decode_runner_message(text) -> dict:
     """Strictly decode one runner -> controller message (controller side)."""
-    return _decode(text, RUNNER_MESSAGES, MAX_RUNNER_MESSAGE_BYTES)
+    return _decode(
+        text, RUNNER_MESSAGES, MAX_RUNNER_MESSAGE_BYTES, RUNNER_COMBINATIONS
+    )
 
 
-def _encode(message_type: str, fields: Mapping, schemas) -> str:
+def _encode(message_type: str, fields: Mapping, schemas, combinations) -> str:
     message = {"version": PROTOCOL_VERSION, "type": message_type, **fields}
-    _validate(message, schemas)
+    _validate(message, schemas, combinations)
     return json.dumps(message, sort_keys=True, allow_nan=False)
 
 
 def encode_runner_message(message_type: str, **fields) -> str:
     """Encode one runner -> controller message, validated against the schema."""
-    return _encode(message_type, fields, RUNNER_MESSAGES)
+    return _encode(message_type, fields, RUNNER_MESSAGES, RUNNER_COMBINATIONS)
 
 
 def encode_controller_message(message_type: str, **fields) -> str:
     """Encode one controller -> runner message (controller side and tests)."""
-    return _encode(message_type, fields, CONTROLLER_MESSAGES)
+    return _encode(
+        message_type, fields, CONTROLLER_MESSAGES, CONTROLLER_COMBINATIONS
+    )
