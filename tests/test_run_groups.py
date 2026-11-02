@@ -273,6 +273,40 @@ class StepModelTests(unittest.TestCase):
         self.assertEqual("canceled", test["status"])
         self.assertEqual("canceled", test["items"][0]["status"])
 
+    def test_a_test_that_failed_before_the_cancel_still_reads_as_failed(self):
+        """A step is the worst of its parts, settled ones included."""
+        run = "run-6"
+        events = [
+            record(run, 1, "test_started", "running",
+                   invocation_id="001-Raw receive", test_name="Raw receive"),
+            record(run, 2, "test_finished", "failed",
+                   invocation_id="001-Raw receive", test_name="Raw receive",
+                   reason="no packets"),
+            record(run, 3, "test_started", "running",
+                   invocation_id="002-Raw receive", test_name="Raw receive"),
+        ]
+        (_preflight, test) = host_steps(events, run_status="canceled")
+        self.assertEqual(["failed", "canceled"],
+                         [item["status"] for item in test["items"]])
+        self.assertEqual("failed", test["status"])
+
+    def test_a_step_that_starts_again_has_not_finished(self):
+        run = "run-7"
+        events = [
+            record(run, 1, "test_started", "running",
+                   invocation_id=f"001-{SHARED_TEST}", test_name=SHARED_TEST),
+            record(run, 2, "test_finished", "failed",
+                   invocation_id=f"001-{SHARED_TEST}", test_name=SHARED_TEST,
+                   reason="first try"),
+            record(run, 3, "test_started", "running",
+                   invocation_id=f"001-{SHARED_TEST}", test_name=SHARED_TEST),
+        ]
+        (_preflight, test) = host_steps(events, run_status="running")
+        (part,) = test["items"]
+        self.assertEqual(("running", None, None, ""),
+                         (part["status"], part["finished_at"], part["elapsed_s"],
+                          part["reason"]))
+
     def test_what_records_can_turn_into_is_bounded(self):
         """The records are data: a runner's message may be megabytes."""
         long_name = "N" * 5000
@@ -398,6 +432,13 @@ class GroupRecordTests(unittest.TestCase):
              "members": [{"host": LINUX, "run_id": None, "error": None}]},
             {"group_id": "grp-1", "hosts": [LINUX, MAC],
              "members": [{"host": MAC}, {"host": LINUX}]},
+            # Every other field is checked too: a record this side would
+            # read and then trip over is not readable.
+            {"group_id": "grp-1", "created_at": 17},
+            {"group_id": "grp-1", "build": "yes"},
+            {"group_id": "grp-1", "plan": ["fast"]},
+            {"group_id": "grp-1", "hosts": [LINUX],
+             "members": [{"host": LINUX, "run_id": 7}]},
         ):
             with self.subTest(broken), self.assertRaises(ValueError):
                 group_from_record(broken)
@@ -630,14 +671,18 @@ class GroupStartTests(RunGroupTestCase):
         self.assertEqual(504, status, payload)
         self.assertIn("no run started", payload["detail"])
         self.assertIn("did not answer in time", payload["detail"])
-        # Stored, because both requests are still pending.
+        # Stored, because both requests are still pending. The group is not
+        # finished while a child of it may still arrive.
         (group_id,) = list(self.controller.groups)
         self.assertTrue(
             (self.results / GROUPS_DIR / f"{group_id}.json").is_file()
         )
         view = (await self.group(group_id))["group"]
-        self.assertEqual(("error", 0, False),
-                         (view["status"], view["hosts_started"], view["complete"]))
+        self.assertEqual(("running", 0, False, None),
+                         (view["status"], view["hosts_started"], view["complete"],
+                          view["finished_at"]))
+        self.assertEqual(["starting", "starting"],
+                         [member["status"] for member in view["members"]])
         # The Mac's runner answers late: its run is still one of the group's.
         await mac.send(
             "run_accepted", request_id=requests[MAC]["request_id"], run_id="run-2"
@@ -647,7 +692,7 @@ class GroupStartTests(RunGroupTestCase):
         view = (await self.group(group_id))["group"]
         self.assertEqual(("running", 1, False),
                          (view["status"], view["hosts_started"], view["complete"]))
-        self.assertEqual(["error", "running"],
+        self.assertEqual(["starting", "running"],
                          [member["status"] for member in view["members"]])
 
     async def test_a_group_no_child_can_join_any_more_is_forgotten(self):
@@ -671,6 +716,79 @@ class GroupStartTests(RunGroupTestCase):
         self.assertTrue(
             any("started no run; forgotten" in line for line in self.logs), self.logs
         )
+
+    async def test_a_request_that_expires_says_so_on_the_group(self):
+        """The last word on a host whose runner never answered."""
+        linux, mac = await self.runners()
+        self.controller.reply_timeout_s = 0.3
+        self.controller.late_reply_grace_s = 0.2
+        post = await self.start_group([LINUX, MAC])
+        requests = {runner.host: await runner.recv() for runner in (linux, mac)}
+        await linux.send(
+            "run_accepted", request_id=requests[LINUX]["request_id"], run_id="run-1"
+        )
+        self.assertEqual(201, (await post)[0])
+        group_id = self.controller.runs["run-1"].group_id
+        # The Mac's request is still outstanding, so that host is starting.
+        self.assertEqual(
+            "starting",
+            self.controller.view_group(
+                self.controller.groups[group_id]
+            )["members"][1]["status"],
+        )
+        await wait_until(
+            lambda: self.controller.groups[group_id].member(MAC)["error"]
+        )
+        view = (await self.group(group_id))["group"]
+        self.assertIn("did not answer the start request",
+                      view["members"][1]["error"])
+        self.assertEqual(("running", 1, False),
+                         (view["status"], view["hosts_started"], view["complete"]))
+
+    async def test_a_refused_group_leaves_no_record_behind(self):
+        """Every host refuses, including one whose refusal wrote the record."""
+        linux, mac = await self.runners()
+        post = await self.start_group([LINUX, MAC])
+        for runner in (linux, mac):
+            message = await runner.recv()
+            await runner.send(
+                "run_rejected", request_id=message["request_id"],
+                reason="builds disabled: no libbtbb source",
+            )
+        status, payload, _ = await post
+        self.assertEqual(409, status, payload)
+        self.assertIn("builds disabled", payload["detail"])
+        self.assertEqual({}, self.controller.groups)
+        self.assertEqual([], list((self.results / GROUPS_DIR).glob("*.json")))
+        status, payload, _ = await self.http("GET", "/api/run-groups")
+        self.assertEqual([], payload["groups"])
+
+    async def test_a_child_accepted_after_the_cancel_is_cancelled_too(self):
+        """A host that answered late must not run on by itself."""
+        linux, mac = await self.runners()
+        self.controller.reply_timeout_s = 0.3
+        post = await self.start_group([LINUX, MAC])
+        requests = {runner.host: await runner.recv() for runner in (linux, mac)}
+        await linux.send(
+            "run_accepted", request_id=requests[LINUX]["request_id"], run_id="run-1"
+        )
+        self.assertEqual(201, (await post)[0])
+        group_id = self.controller.runs["run-1"].group_id
+        cancel = asyncio.create_task(self.http(
+            "POST", f"/api/run-groups/{group_id}/cancel", {"reason": "bench needed"},
+        ))
+        asked = await linux.recv()
+        await linux.send("cancel_accepted", run_id=asked["run_id"])
+        self.assertEqual(202, (await cancel)[0])
+        # The Mac's runner accepts its run after the group was cancelled.
+        await mac.send(
+            "run_accepted", request_id=requests[MAC]["request_id"], run_id="run-2"
+        )
+        late = await mac.recv()
+        self.assertEqual(("cancel", "run-2", "bench needed"),
+                         (late["type"], late["run_id"], late["reason"]))
+        await mac.send("cancel_accepted", run_id="run-2")
+        await wait_until(lambda: self.controller.runs["run-2"].cancel_requested)
 
     async def test_a_late_refusal_is_recorded_on_the_group(self):
         """The runner's own reason, not "its run was never started"."""

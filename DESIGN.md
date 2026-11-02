@@ -1108,8 +1108,10 @@ shape whatever started a run.
   host of which started is no group at all — nothing is stored and the caller
   is told, host by host, why (409, or the one status every host gave) — unless
   a request timed out, which stays pending and may still be accepted: that
-  group is stored, so a late child is still one of its hosts, and it is
-  forgotten once the last such request is gone. A pending request does not
+  group is stored, its host reads `starting` until the request is answered or
+  expires, and a group with no child at all is forgotten once the last such
+  request is gone. A group cancelled while a request was outstanding cancels
+  the child that arrives afterwards as well. A pending request does not
   survive a controller restart, so a child reported after one is adopted as a
   run of its own; a late refusal or a lost connection, in the same window,
   does reach the group and is recorded as that host's reason.

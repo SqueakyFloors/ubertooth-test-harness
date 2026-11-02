@@ -89,6 +89,7 @@ from ubertooth_harness.protocol import (
 from ubertooth_harness.rungroups import (
     GROUPS_DIR,
     MAX_GROUP_HOSTS,
+    MAX_HOST_PARTS,
     MAX_REASON_CHARS,
     RunGroup,
     group_from_record,
@@ -740,13 +741,19 @@ class Controller:
             subscriber.offer(message)
 
     def view_group(self, group: RunGroup) -> dict:
-        """One group as the API and the live stream report it."""
+        """One group as the API and the live stream report it.
+
+        A host whose start request is still outstanding is reported as
+        starting, so a group does not read as finished while one of its
+        children may still arrive.
+        """
         return group_view(
             group,
             {
                 run_id: self.runs[run_id].view()
                 for run_id in group.run_ids() if run_id in self.runs
             },
+            pending=self._pending_hosts(group.group_id),
         )
 
     async def live_session(
@@ -983,6 +990,13 @@ class Controller:
             for key, pending in list(table.items()):
                 if pending.expires_at is not None and now >= pending.expires_at:
                     del table[key]
+                    if table is self._pending_runs:
+                        # The last word on that host: nothing can accept the
+                        # request any more, so the group says why it has no
+                        # run there.
+                        self._note_group_failure(
+                            pending, "the runner did not answer the start request"
+                        )
                     pending.future.cancel()  # no waiters remain
         self._drop_empty_groups()
 
@@ -997,16 +1011,9 @@ class Controller:
         for group in list(self.groups.values()):
             if group.run_ids() or not group.dispatched_at:
                 continue
-            if any(
-                pending.group_id == group.group_id
-                for pending in self._pending_runs.values()
-            ):
+            if self._pending_hosts(group.group_id):
                 continue
-            del self.groups[group.group_id]
-            try:
-                (self.groups_dir / f"{group.group_id}.json").unlink(missing_ok=True)
-            except OSError as error:
-                self.log(f"could not remove group {group.group_id}: {error}")
+            self._forget_group(group)
             self.log(f"group {group.group_id} started no run; forgotten")
 
     def _note_group_failure(self, pending: _Pending, reason: str) -> None:
@@ -1086,9 +1093,17 @@ class Controller:
                 group_id=group.group_id if group is not None else None,
             )
             self.runs[run_id] = run
+            # The run first, then the group it belongs to: if only one of the
+            # two writes lands, the run itself is the one worth keeping, and
+            # it is then shown as a group of one.
             self._persist(run)
             if group is not None and group.set_member_run(target.host, run_id):
                 self._persist_group(group)
+            if group is not None and group.cancel_requested:
+                # The group was cancelled while this host's request was
+                # still outstanding: a child that arrives afterwards is
+                # cancelled too, or it would run on alone.
+                asyncio.ensure_future(self._cancel_late_child(group, run))
             target.active_run_id = run_id
             pending.resolve(run)
             self._publish_run(run)
@@ -1584,7 +1599,12 @@ class Controller:
                 # A cancelled request among the results is one child's own
                 # cancellation, not this caller's: gather would have raised.
                 failures.append((host, result))
-                group.set_member_error(host, self._failure_detail(host, result))
+                if host not in self._pending_hosts(group.group_id):
+                    # A request that is still outstanding has not failed:
+                    # this caller gave up waiting, and the runner may yet
+                    # accept it. Its reason is recorded when it really ends
+                    # (a refusal, a lost connection, or expiry).
+                    group.set_member_error(host, self._failure_detail(host, result))
             else:
                 group.set_member_run(host, result.run_id)
         if self._settle_dispatch(group):
@@ -1632,16 +1652,48 @@ class Controller:
         for it. Returns whether the group was kept.
         """
         group.dispatched_at = _now()
-        outstanding = any(
-            pending.group_id == group.group_id
-            for pending in self._pending_runs.values()
-        )
-        if not group.run_ids() and not outstanding:
-            del self.groups[group.group_id]
+        if not group.run_ids() and not self._pending_hosts(group.group_id):
+            self._forget_group(group)
             return False
         self._persist_group(group)
         self._publish_group(group)
         return bool(group.run_ids())
+
+    async def _cancel_late_child(self, group: RunGroup, run: Run) -> None:
+        """Cancel a child accepted after its group was cancelled.
+
+        Never raises: the cancel is already recorded on the group, and a
+        runner that refuses this one leaves the run going, which the log and
+        the run's own record both say.
+        """
+        reason = group.cancel_reason or f"run group {group.group_id} was canceled"
+        try:
+            await self.cancel_run(run.run_id, reason)
+        except Exception as error:  # noqa: BLE001 - nothing waits on this
+            self.log(
+                f"run {run.run_id} started after group {group.group_id} was "
+                f"canceled and could not be canceled: {self._failure_detail(run.target, error)}"
+            )
+
+    def _pending_hosts(self, group_id: str) -> set[str]:
+        """The group's hosts whose start request has not been answered yet."""
+        return {
+            pending.host for pending in self._pending_runs.values()
+            if pending.group_id == group_id
+        }
+
+    def _forget_group(self, group: RunGroup) -> None:
+        """Drop a group that has no child and never will, record and all.
+
+        The record may already be on disk: the first child's acceptance
+        persists it, and so does a refusal that arrives for one host while
+        the others are still being asked.
+        """
+        self.groups.pop(group.group_id, None)
+        try:
+            (self.groups_dir / f"{group.group_id}.json").unlink(missing_ok=True)
+        except OSError as error:
+            self.log(f"could not remove group {group.group_id}: {error}")
 
     async def cancel_group(self, group_id: str, reason: str) -> tuple[RunGroup, list[dict]]:
         """Cancel every active run of a group; returns the group and each host's outcome.
@@ -1754,7 +1806,13 @@ class Controller:
             )
             members.append({
                 **member, "failures": failure_summary(member["run"], events),
-                "invocations": invocations, "stages": stages,
+                # Bounded as the steps are: this answer carries one of these
+                # per host, where a run's own answer carries one. The whole
+                # list is still at GET /api/runs/{run_id}.
+                "invocations": (
+                    invocations[:MAX_HOST_PARTS] if invocations is not None else None
+                ),
+                "stages": stages,
             })
         steps = merge_steps(per_host, view["hosts"])
         return {

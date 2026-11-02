@@ -22,7 +22,7 @@ which stay the source of truth; nothing here reaches a target.
 
 import dataclasses
 import datetime
-from typing import Mapping, Sequence
+from typing import Collection, Mapping, Sequence
 import uuid
 
 # The run records' timestamps are read the way the estimate store reads them,
@@ -242,7 +242,7 @@ class RunGroup:
         entry = self.member(host)
         if entry is None or entry.get("run_id"):
             return False
-        entry["error"] = str(error)[:2000]
+        entry["error"] = str(error)[:MAX_REASON_CHARS]
         return True
 
 
@@ -267,8 +267,27 @@ def group_from_record(data: Mapping) -> RunGroup:
         # One entry per host asked for, in that order: a record whose two
         # lists disagree would report one count as the other.
         raise ValueError("members must be the hosts, in the order asked for")
-    if not isinstance(group.tests, list):
-        raise ValueError("tests must be a list")
+    if not isinstance(group.tests, list) or not all(
+        isinstance(name, str) for name in group.tests
+    ):
+        raise ValueError("tests must be a list of test names")
+    # Every other field as well: a record is a file on disk, and one whose
+    # created_at is a number would be read as a group and then break the
+    # history list it is sorted into.
+    if not isinstance(group.created_at, str) or not group.created_at:
+        raise ValueError("created_at must be a timestamp")
+    for name in ("dispatched_at", "ref", "commit", "plan", "suite", "cancel_reason"):
+        if not isinstance(getattr(group, name), (str, type(None))):
+            raise ValueError(f"{name} must be a string or null")
+    for name in (
+        "build", "flash_build", "with_firmware", "with_python", "cancel_requested"
+    ):
+        if not isinstance(getattr(group, name), bool):
+            raise ValueError(f"{name} must be true or false")
+    for entry in group.members:
+        for name in ("run_id", "error"):
+            if not isinstance(entry.get(name), (str, type(None))):
+                raise ValueError(f"a member's {name} must be a string or null")
     return group
 
 
@@ -327,14 +346,18 @@ NO_RUN = "its run was never started"
 RUN_GONE = "its run is no longer stored"
 
 
-def member_views(group: RunGroup, runs: Mapping[str, Mapping]) -> list[dict]:
+def member_views(
+    group: RunGroup, runs: Mapping[str, Mapping], pending: Collection[str] = ()
+) -> list[dict]:
     """One entry per host the group asked for, with that host's run.
 
     ``runs`` maps run ID to the run's own view. A host with no run, or whose
     run is no longer stored, is an ``error`` of the group: it did not do what
-    the group asked for. While the children are still being started
-    (``dispatched_at`` is not set yet) a host that has neither a run nor a
-    reason is ``starting``, because nothing has gone wrong with it yet.
+    the group asked for. A host that has neither a run nor a reason is
+    ``starting`` while its start request is outstanding (``pending``) or
+    before the children have all been asked for (``dispatched_at``): nothing
+    has gone wrong with it yet, and a group whose child may still arrive must
+    not read as finished and then run again.
     """
     views = []
     for entry in group.members:
@@ -342,7 +365,8 @@ def member_views(group: RunGroup, runs: Mapping[str, Mapping]) -> list[dict]:
         run = runs.get(run_id) if run_id else None
         error = entry.get("error")
         starting = (
-            run is None and not run_id and not error and not group.dispatched_at
+            run is None and not run_id and not error
+            and (not group.dispatched_at or entry.get("host") in pending)
         )
         if run is None and not starting:
             error = error or (RUN_GONE if run_id else NO_RUN)
@@ -386,9 +410,15 @@ def _finished_at(group: RunGroup, members: Sequence[Mapping]) -> str | None:
     return group.dispatched_at
 
 
-def group_view(group: RunGroup, runs: Mapping[str, Mapping]) -> dict:
-    """The group as the history list and the run card read it."""
-    members = member_views(group, runs)
+def group_view(
+    group: RunGroup, runs: Mapping[str, Mapping], pending: Collection[str] = ()
+) -> dict:
+    """The group as the history list and the run card read it.
+
+    ``pending`` names the hosts whose start request is still outstanding
+    (see ``member_views``).
+    """
+    members = member_views(group, runs, pending)
     status = group_status(members)
     started = [member for member in members if member["run"] is not None]
     return {
@@ -435,6 +465,11 @@ def _part(identifier: str, name: str) -> dict:
 def _open(part: dict, timestamp) -> None:
     part["status"] = RUNNING
     part["started_at"] = timestamp if isinstance(timestamp, str) else None
+    # A step that starts again (a second test_started for one invocation)
+    # is running, and nothing about it has finished.
+    part["finished_at"] = None
+    part["elapsed_s"] = None
+    part["reason"] = ""
 
 
 def _close(part: dict, status: str, timestamp, reason: str = "") -> None:
@@ -612,18 +647,29 @@ def host_steps(
 def _settle(steps: Sequence[dict], run_status: str) -> None:
     """Close the steps of a run that has ended.
 
-    A step the run never reached is ``not_reached``; a step still open when
+    A part the run never reached is ``not_reached``; a part still open when
     the run ended takes the run's own outcome (a cancel during a test is why
     that test has no result), except that a passed run cannot have left one
-    open, so such a step is an error of the records.
+    open, so such a part is an error of the records.
+
+    A test step is then the worst of its settled parts, so an invocation that
+    failed before the run was cancelled is what its host's pill shows.
     """
     open_status = ERROR if run_status == PASSED else run_status
+
+    def settle(part: dict) -> None:
+        if part["status"] == PENDING:
+            part["status"] = NOT_REACHED
+        elif part["status"] == RUNNING:
+            part["status"] = open_status
+
     for step in steps:
-        for part in (*step["items"], step):
-            if part["status"] == PENDING:
-                part["status"] = NOT_REACHED
-            elif part["status"] == RUNNING:
-                part["status"] = open_status
+        for part in step["items"]:
+            settle(part)
+        if step["kind"] == TEST_STEP and step["items"]:
+            step["status"] = combine([part["status"] for part in step["items"]])
+        else:
+            settle(step)
 
 
 # ----- the group's steps ---------------------------------------------------
