@@ -232,7 +232,7 @@ class BuildNeedsTests(unittest.TestCase):
             name: catalog.get(name).required_build_options() for name in catalog.names
         }
         self.assertEqual(
-            {"DFU images", "DFU image checks"},
+            {"DFU images", "DFU image checks", "Reset into invalid application"},
             {name for name, need in needed.items() if need.firmware_build},
         )
         self.assertEqual(
@@ -242,7 +242,7 @@ class BuildNeedsTests(unittest.TestCase):
         # Refused without the image, rather than leaving a case out: every
         # case of it writes the run's own image and reads it back.
         self.assertEqual(
-            {"DFU images"},
+            {"DFU images", "Reset into invalid application"},
             {name for name, need in required.items() if need.firmware_build},
         )
         self.assertEqual(

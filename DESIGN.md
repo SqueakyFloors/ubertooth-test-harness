@@ -566,6 +566,27 @@ takeover of a lease whose command is gone holds that file exclusively
 README "Stale leases"); it locks no resource and nothing ever blocks on it,
 so it is in no cycle.
 
+Power-cycling the board under test is the other use of the same boundary, for
+`Reset into invalid application` ([#141](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/141)).
+It is not isolation: nothing is switched around the test, and the port goes off
+and on inside one case step. A test definition declares `switches_power`, and
+the planner then resolves a `PowerCycleTarget` (board alias, controller alias,
+port) with `plan_power_cycle` from the selected board's own `power:` mapping,
+refusing a plan that names a different controller from the one the board is
+registered on; `run-suite` requires `--allow-power-changes` before anything is
+built, and such a run holds the host lock for the whole test like an isolating
+one. The step itself runs
+[`ubertooth_harness/invalidapp.py`](ubertooth_harness/invalidapp.py), which
+reads the registry again for the port: the path comes from the case context
+(`stateful.REGISTRY_PATH_KEY`, set by the sequencer from the run's
+`--hardware`), so no port number travels on a command line. The port is
+restored on every exit — a failed check, a controller or bus error, SIGTERM,
+SIGINT, or SIGHUP, each turned into an exception so the restoration unwinds —
+and the command's last act is to read the port back and say whether it is
+powered. Restoration still runs in-process, so the case's first cleanup step
+reads the port and switches it on if a killed run (SIGKILL) left it off,
+before the second cleanup step writes the run's image back to the board.
+
 The exclusive-topology btle case runs `timeout --foreground -k 2 -s INT`, so
 [`timeout`](https://www.gnu.org/software/coreutils/manual/html_node/timeout-invocation.html) and btle stay in the command's own process group (the executor
 starts each command in a new session and signals that group on cancellation

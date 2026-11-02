@@ -77,6 +77,32 @@ BLOCK_SIZE = 256
 APPLICATION_OFFSET = 0x4000
 APPLICATION_SIZE = 0x40000 - APPLICATION_OFFSET
 
+# The two words the bootloader reads before it starts an image, and the
+# bounds it puts them in (firmware/bootloader/app_image.h,
+# app_image_startable(); the flash bound is LPC_FLASH_SIZE_FALLBACK in
+# firmware/bootloader/flash.h). An image whose first two words fall outside
+# these is one the bootloader must refuse to start, leaving itself running so
+# the next image can be written over USB.
+APP_VECTORS_LENGTH = 8
+APP_RAM_BASE = 0x10000000
+APP_RAM_LIMIT = 0x10010000
+APP_AHB_RAM_BASE = 0x2007C000
+APP_AHB_RAM_LIMIT = 0x20084000
+FLASH_TOP = 0x80000
+
+# Images the bootloader must refuse to start, each made from a valid image.
+# Every one keeps a valid DFU suffix and the firmware info block, so
+# ubertooth-dfu accepts and writes it: what is wrong is in the two words
+# above, which only the bootloader reads.
+UNSTARTABLE_KINDS = (
+    # Both words erased, which is what an interrupted download leaves at the
+    # start of the region (ubertooth-dfu.c, download()); the case on hardware
+    # uses this one.
+    "erased-vectors",
+    "misaligned-stack", "stack-outside-ram", "arm-reset-vector",
+    "reset-vector-in-bootloader",
+)
+
 # Bad images ``make`` writes, each from a valid image.
 BAD_KINDS = (
     "corrupt", "truncated", "no-suffix", "text", "bad-signature",
@@ -278,6 +304,88 @@ def make_bad(kind: str, image: bytes) -> bytes:
     raise ValueError(f"unknown bad image kind '{kind}'")
 
 
+def app_vectors(image: bytes) -> tuple[int, int]:
+    """The initial stack pointer and reset vector at the start of an image."""
+    if len(image) < APP_VECTORS_LENGTH:
+        raise ValueError(
+            f"{len(image)} bytes is shorter than the two vector words"
+        )
+    return struct.unpack("<II", image[:APP_VECTORS_LENGTH])
+
+
+def startable_problems(image: bytes, flash_top: int = FLASH_TOP) -> list[str]:
+    """Why the bootloader will not start this image ([] when it will).
+
+    The same question app_image_startable() asks of the two words at the
+    start of the application region, read here so a test can say what it
+    built and what it expects the board to do with it. The bootloader asks
+    for a stack pointer inside RAM and word-aligned, and a reset vector with
+    the Thumb bit set pointing above the bootloader and below ``flash_top``.
+    It deliberately asks no more: it tells an image from no image, not a good
+    image from a bad one, and the LPC vector checksum at offset 0x1c is not
+    part of it (no host tool writes that word, so requiring it would refuse
+    every image this tree builds).
+    """
+    stack_pointer, reset_vector = app_vectors(image)
+    problems = []
+    in_local_ram = APP_RAM_BASE < stack_pointer <= APP_RAM_LIMIT
+    in_ahb_ram = APP_AHB_RAM_BASE < stack_pointer <= APP_AHB_RAM_LIMIT
+    if not in_local_ram and not in_ahb_ram:
+        problems.append(
+            f"stack pointer 0x{stack_pointer:08x} is outside RAM "
+            f"(0x{APP_RAM_BASE:08x}-0x{APP_RAM_LIMIT:08x} and "
+            f"0x{APP_AHB_RAM_BASE:08x}-0x{APP_AHB_RAM_LIMIT:08x})"
+        )
+    elif stack_pointer % 4:
+        problems.append(
+            f"stack pointer 0x{stack_pointer:08x} is not word-aligned"
+        )
+    if not reset_vector & 1:
+        problems.append(
+            f"reset vector 0x{reset_vector:08x} is not a Thumb address "
+            "(bit 0 clear)"
+        )
+    else:
+        entry = reset_vector & ~1
+        if not APPLICATION_OFFSET <= entry < flash_top:
+            problems.append(
+                f"reset vector entry 0x{entry:08x} is outside the application "
+                f"flash (0x{APPLICATION_OFFSET:05x}-0x{flash_top:05x})"
+            )
+    return problems
+
+
+def make_unstartable(kind: str, image: bytes) -> bytes:
+    """An image the bootloader must refuse to start, from a valid one.
+
+    Only the two words the bootloader reads are changed, and the suffix is
+    written again over the result, so the file stays a valid Ubertooth DFU
+    image carrying the same firmware info block: the host writes it, and the
+    board is left with an application it must not start.
+    """
+    if kind not in UNSTARTABLE_KINDS:
+        raise ValueError(f"unknown unstartable image kind '{kind}'")
+    body = bytearray(image[:-SUFFIX_LENGTH])
+    if len(body) < APP_VECTORS_LENGTH:
+        raise ValueError("source image is shorter than the two vector words")
+    stack_pointer, reset_vector = app_vectors(bytes(body))
+    if kind == "erased-vectors":
+        stack_pointer = reset_vector = 0xFFFFFFFF
+    elif kind == "misaligned-stack":
+        # Inside RAM, two bytes off the word boundary the processor needs.
+        stack_pointer = APP_RAM_BASE + 0x3FFE
+    elif kind == "stack-outside-ram":
+        # A peripheral address: in range for nothing the check accepts.
+        stack_pointer = 0x40000000
+    elif kind == "arm-reset-vector":
+        reset_vector &= ~1
+    else:  # reset-vector-in-bootloader
+        # An entry inside the bootloader's own flash, below the application.
+        reset_vector = 0x00000201
+    struct.pack_into("<II", body, 0, stack_pointer, reset_vector)
+    return with_suffix(bytes(body))
+
+
 def readback_problems(readback: bytes, image: bytes) -> list[str]:
     """Why ``readback`` (from -u) does not hold ``image`` as -d writes it."""
     problems = []
@@ -473,6 +581,34 @@ class Board:
         )
         return "" if code == 0 else f"read-back exited {code}: {_last_line(output)}"
 
+    def adopt_dfu_device(self) -> str:
+        """"" when the one attached DFU device must be this board, else why not.
+
+        DFU mode has no serial, so the board is identified by elimination:
+        exactly one DFU device attached and every guard answering in its own
+        application. A command without -U can then be aimed at it.
+        """
+        count = self.dfu_count()
+        if count != 1:
+            return f"{count} DFU devices attached; recover the board by hand"
+        for guard in self.guards:
+            if self.revision(guard) is None:
+                return (f"guard board {guard} does not answer, so the DFU device may be it; "
+                        "recover by hand")
+        return ""
+
+    def write_unselected(self, image: Path) -> str:
+        """``-d IMAGE -r`` with no -U: write the one attached DFU device.
+
+        For a board whose flash holds an application it cannot start, which
+        is why it has no serial to select it by. Call adopt_dfu_device()
+        first: without -U this writes whichever device answers DFU.
+        """
+        code, output = self._dfu(
+            ("ubertooth-dfu", "-d", str(image), "-r"), DFU_WRITE_TIMEOUT_S
+        )
+        return "" if code == 0 else f"write exited {code}: {_last_line(output)}"
+
     def leave_dfu(self, path: Path) -> str:
         """Return a board stuck in the DFU bootloader without writing.
 
@@ -482,13 +618,9 @@ class Board:
         device, reads it back, and detaches it; it writes nothing, even if the
         device vanished in between and it opened an application instead.
         """
-        count = self.dfu_count()
-        if count != 1:
-            return f"{count} DFU devices attached; recover the board by hand"
-        for guard in self.guards:
-            if self.revision(guard) is None:
-                return (f"guard board {guard} does not answer, so the DFU device may be it; "
-                        "recover by hand")
+        failure = self.adopt_dfu_device()
+        if failure:
+            return failure
         code, output = self._dfu(("ubertooth-dfu", "-u", str(path), "-r"), DFU_READ_TIMEOUT_S)
         if code != 0:
             return f"DFU read-back and reset exited {code}: {_last_line(output)}"

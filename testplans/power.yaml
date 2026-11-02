@@ -1,0 +1,33 @@
+plan: Ubertooth board power
+suites:
+  # Run by hand, with someone who can reach the bench.
+  #
+  #   run-suite --hardware <registry> --plan testplans/power.yaml \
+  #       --suite power --host Host_Linux --allow-power-changes \
+  #       --build --with-firmware
+  #
+  # The test writes an image the bootloader must refuse to start, cuts the
+  # board's USB power through its registered port, turns it back on, and
+  # requires the board to come up as a DFU bootloader device rather than
+  # running the image. Its own step, and then its cleanup, write the run's
+  # image back and check the revision.
+  #
+  # Why it is not in an unattended plan: if the bootloader does start the
+  # image, the board faults on every power-up and needs the P4 entry pin
+  # bridged by hand at the bench. Nothing the harness can do reaches such a
+  # board, so a run nobody is watching could leave one unusable.
+  #
+  # Requires: --allow-power-changes, the run's own firmware image
+  # (--build --with-firmware, or --artifact "test build=PATH"), and a board
+  # with a `power:` mapping on a controller that can switch VBUS per port.
+  # The plan names the hub so a bench whose wiring moved fails planning
+  # rather than switching whatever is on the registered port; the port itself
+  # comes from the board's registry entry. It writes the board's firmware, so
+  # it must be the last test on that board, and the run holds the host lock
+  # throughout.
+  power:
+    - Reset into invalid application:
+        hosts: [Host_Linux]
+        platforms: [linux]
+        Ubertooth: default
+        USB power controller: Hub_Linux0

@@ -465,6 +465,38 @@ python -m ubertooth_harness run-suite \
   --output runs --allow-power-changes
 ```
 
+[`testplans/power.yaml`](testplans/power.yaml) runs the `Reset into invalid
+application` test, which uses a hub port the other way round: instead of
+switching other boards off, it power-cycles the board under test. It writes an
+image the bootloader must refuse to start (a valid Ubertooth DFU file whose
+two vector words are erased), cuts the board's registered port, turns it back
+on, and requires the board to come up as a DFU bootloader device rather than
+running the image; then it writes the run's own image back and checks the
+revision. The port comes from the board's `power:` mapping, and the plan names
+the controller it must be on, so a bench whose wiring moved fails planning
+rather than switching whatever is on that port.
+
+**Run it by hand, with someone who can reach the bench.** It is destructive:
+if the bootloader does start the unstartable image, the board faults on every
+power-up and needs its P4 entry pin bridged by hand, which no harness command
+can do. That is why it is in a plan of its own and not in `release.yaml` or
+any other unattended plan. The case's cleanup powers the port on and writes
+the run's image back whatever happened, so an ordinary failure still ends with
+a usable board; only a run killed outright (SIGKILL) between the switch-off
+and the restore leaves the port off, and the next run's cleanup, or the manual
+recovery above, switches it back on.
+
+```sh
+python -m ubertooth_harness run-suite \
+  --plan testplans/power.yaml --suite power \
+  --hardware hardware.yaml --host Host_Linux \
+  --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
+  --build --with-firmware --output runs --allow-power-changes
+```
+
+It writes the board's firmware, so it must be the last test on that board, and
+the run holds the [host lock](#sharing-boards-leases) throughout.
+
 [`testplans/mac.yaml`](testplans/mac.yaml) is the macOS plan, for a Mac
 host (`Host_Mac` in the registry). The firmware and radio are the same on every
 host, so it leaves out what the Linux plans already prove about a board pair

@@ -32,6 +32,7 @@ from ubertooth_harness.power import (
 from ubertooth_harness.resources import (
     STARTECH_DRIVER,
     STARTECH_PORTS,
+    MissingResource,
     RegistryError,
     ResourceRegistry,
 )
@@ -51,6 +52,74 @@ class PowerIsolationAction:
             "port": self.port,
             "power_enabled": self.power_enabled,
         }
+
+
+@dataclass(frozen=True)
+class PowerCycleTarget:
+    """The port a test may switch to power-cycle the board it selected."""
+
+    resource_alias: str
+    controller_alias: str
+    port: int
+
+    def to_dict(self) -> dict:
+        return {
+            "resource": self.resource_alias,
+            "controller": self.controller_alias,
+            "port": self.port,
+        }
+
+
+def plan_power_cycle(
+    registry: ResourceRegistry,
+    host: str,
+    selected_alias: str,
+    controller_alias: str | None = None,
+) -> PowerCycleTarget:
+    """The registered port of the board a test power-cycles.
+
+    The port comes from the board's own ``power:`` mapping, so a test can
+    never cut a port the registry does not give that board.
+    ``controller_alias``, when a plan names one, must be that controller:
+    a plan that names another hub has the bench wrong, and switching the
+    registered port anyway would take down whatever is really on it.
+
+    A board with no power mapping, or one behind a controller that cannot
+    switch VBUS per port, is absence rather than a mistake: another bench
+    may have it mapped, so the test is left out there (MissingResource).
+    """
+    selected = registry.get(selected_alias)
+    if selected.type != "Ubertooth" or selected.attached_to != host:
+        raise RegistryError(
+            f"selected resource {selected_alias} is not an Ubertooth on {host}"
+        )
+    mapped = selected.power.get("controller")
+    port = selected.power.get("port")
+    if mapped is None or port is None:
+        raise MissingResource(
+            f"Ubertooth {selected_alias} has no power mapping, so its port "
+            "cannot be switched"
+        )
+    if controller_alias is not None and controller_alias != mapped:
+        raise RegistryError(
+            f"{selected_alias} is registered on {mapped} port {port}, not on "
+            f"{controller_alias}; the plan names the wrong controller"
+        )
+    controller = registry.get(mapped)
+    if controller.type != "USB power controller":
+        raise RegistryError(f"resource {mapped} is not a USB power controller")
+    if controller.attached_to != host:
+        raise RegistryError(f"power controller {mapped} is not attached to {host}")
+    if "per-port VBUS switching" not in controller.capabilities:
+        raise MissingResource(
+            f"controller {mapped} lacks per-port VBUS switching, so "
+            f"{selected_alias} cannot be power-cycled"
+        )
+    if controller.driver == ACRONAME_DRIVER and port not in USBHUB3P_PORTS:
+        raise RegistryError(f"controller {mapped} port must be 0-7")
+    if controller.driver == STARTECH_DRIVER and port not in STARTECH_PORTS:
+        raise RegistryError(f"controller {mapped} port must be 1-3")
+    return PowerCycleTarget(selected_alias, mapped, port)
 
 
 def plan_exclusive_ubertooth(

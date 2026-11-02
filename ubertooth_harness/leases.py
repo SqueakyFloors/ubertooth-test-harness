@@ -481,13 +481,17 @@ def needs_host_lock(invocations: Iterable, catalog) -> bool:
     """True when the run switches USB power or writes firmware on its host.
 
     Power isolation (and the exclusive-Ubertooth check, which scans USB while
-    another run could be switching it) and tests that write firmware hold the
-    host lock for the whole run.
+    another run could be switching it), a test that power-cycles the board it
+    selected, and tests that write firmware hold the host lock for the whole
+    run.
     """
     for invocation in invocations:
         if invocation.power_isolation or getattr(invocation, "exclusive_ubertooth", False):
             return True
-        if catalog.get(invocation.test_name).writes_firmware:
+        if getattr(invocation, "power_cycle", None) is not None:
+            return True
+        definition = catalog.get(invocation.test_name)
+        if definition.writes_firmware or definition.switches_power:
             return True
     return False
 
