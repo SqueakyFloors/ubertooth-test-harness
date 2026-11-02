@@ -491,6 +491,145 @@ class AudioTests(unittest.TestCase):
         self.assertEqual(esp32peer.BOOT_ROLE, initiator_firmware.role)
         self.assertEqual("off", initiator_firmware.sco)
 
+    def test_a_link_of_another_type_than_the_one_asked_for_fails(self):
+        # A test asks for ev3 because it wants the payload on the air at the
+        # basic rate; being handed the enhanced-rate type instead must fail
+        # rather than be reported as a pass.
+        class Stubborn(FakePeerFirmware):
+            def _sco_start(self):
+                answer = super()._sco_start()
+                for board in (self, self.peer_firmware):
+                    if board is not None and board.sco_pkt_type != "none":
+                        board.sco_pkt_type = "2-ev3"
+                        board.sco_tx_len = 60
+                return answer
+
+        acceptor = Stubborn(ACCEPTOR_ADDRESS, version=esp32peer.AUDIO_FIRMWARE)
+        initiator = Stubborn(INITIATOR_ADDRESS, version=esp32peer.AUDIO_FIRMWARE)
+        acceptor.link(initiator)
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "reports an audio link using 2-ev3, not the ev3 both boards were "
+            "told to ask for"
+        ):
+            self._audio(firmwares=(acceptor, initiator), packet_type="ev3")
+
+    def test_a_link_that_is_not_esco_fails(self):
+        # Both EV3 and 2-EV3 are eSCO types, and everything this session is
+        # called says eSCO, so a plain SCO link is not what it carries.
+        class Plain(FakePeerFirmware):
+            def _sco_start(self):
+                answer = super()._sco_start()
+                self.sco_link = "sco"
+                return answer
+
+        acceptor = FakePeerFirmware(ACCEPTOR_ADDRESS,
+                                    version=esp32peer.AUDIO_FIRMWARE)
+        initiator = Plain(INITIATOR_ADDRESS, version=esp32peer.AUDIO_FIRMWARE)
+        acceptor.link(initiator)
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "the initiator reports the link as sco, not esco"
+        ):
+            self._audio(firmwares=(acceptor, initiator))
+
+    def test_a_board_that_cannot_name_its_link_fails(self):
+        # `default` promises no particular type, so a board reporting one it
+        # could not work out is all that is left to check, and it proves
+        # nothing about what is on the air.
+        class Vague(FakePeerFirmware):
+            def status(self):
+                state = super().status()
+                if state["sco"] == esp32peer.AUDIO_ON:
+                    state["sco_pkt_type"] = "unknown"
+                    state["sco_tx_len"] = 0
+                return state
+
+        acceptor = Vague(ACCEPTOR_ADDRESS, version=esp32peer.AUDIO_FIRMWARE)
+        initiator = FakePeerFirmware(INITIATOR_ADDRESS,
+                                     version=esp32peer.AUDIO_FIRMWARE)
+        acceptor.link(initiator)
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            r"the acceptor cannot say what its audio link carries \(link esco, "
+            r"packet type unknown, 0 bytes a packet\)"
+        ):
+            self._audio(firmwares=(acceptor, initiator), packet_type="default")
+
+    def test_a_negative_frame_floor_is_refused(self):
+        with self.assertRaisesRegex(esp32peer.PeerError,
+                                    "the frame floor cannot be negative"):
+            self._audio(min_frames=-1)
+
+    def test_a_link_renegotiated_while_the_command_ran_fails(self):
+        # The link the capture was taken against has to be the one the
+        # session checked at the start. A board that came up on ev3 and
+        # finished on 2-ev3 carried something else on the air for part of
+        # the window.
+        acceptor, initiator = _audio_pair()
+
+        def renegotiate():
+            for board in (acceptor, initiator):
+                board.sco_pkt_type = "2-ev3"
+                board.sco_tx_len = 60
+
+        initiator.during_the_command(renegotiate)
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "after the command ran, the initiator's audio link reads esco "
+            "2-ev3, not the esco ev3 it carried when the command started"
+        ):
+            self._audio(min_frames=10, firmwares=(acceptor, initiator))
+
+    def test_a_renegotiated_link_fails_even_with_no_type_asked_for(self):
+        # `default` pins no type at bring-up, so the reading taken then is
+        # the only thing the end of the session can be held to.
+        acceptor, initiator = _audio_pair()
+
+        # With no type asked for the stack settles this link on 2-EV3, so
+        # the move under test is the other way.
+        def renegotiate():
+            for board in (acceptor, initiator):
+                board.sco_pkt_type = "ev3"
+                board.sco_tx_len = 30
+
+        initiator.during_the_command(renegotiate)
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "after the command ran, the initiator's audio link reads esco "
+            "ev3, not the esco 2-ev3 it carried when the command started"
+        ):
+            self._audio(min_frames=10, packet_type="default",
+                        firmwares=(acceptor, initiator))
+
+    def test_the_role_change_is_sent_with_the_deadline_it_needs(self):
+        # `role` stops the audio link, then the SPP side, then starts the SPP
+        # server again, which the firmware's README allows about 18 seconds
+        # for whichever of those it has to do. So that command carries the
+        # longer deadline in both sessions, not the ordinary five seconds.
+        self.assertGreaterEqual(esp32peer.ROLE_TIMEOUT_S, 18.0)
+        original = esp32peer.Shell.command
+        seen = []
+
+        def record(shell, text, timeout=esp32peer.COMMAND_TIMEOUT_S):
+            seen.append((text, timeout))
+            return original(shell, text, timeout)
+
+        with unittest.mock.patch.object(esp32peer.Shell, "command", record):
+            self._audio(min_frames=10)
+        self.assertIn((esp32peer.ROLE_INITIATOR, esp32peer.ROLE_TIMEOUT_S),
+                      seen)
+
+        # The firmware allows that long for `role` whatever the board was
+        # doing, so the stream session sends it with the same deadline.
+        seen.clear()
+        acceptor, initiator = _peers(*_pair())
+        with unittest.mock.patch.object(esp32peer.Shell, "command", record):
+            esp32peer.stream(acceptor, initiator, TRUE, out=io.StringIO(),
+                             settle_s=0.0, min_writes=1)
+        self.assertIn((esp32peer.ROLE_INITIATOR, esp32peer.ROLE_TIMEOUT_S),
+                      seen)
+
     def test_a_pair_that_carried_too_few_frames_fails_the_run(self):
         with self.assertRaisesRegex(
                 esp32peer.PeerError,

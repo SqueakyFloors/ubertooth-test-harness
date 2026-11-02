@@ -116,25 +116,28 @@ answers into the run's transcript.
 
 Two ESP32-WROOM-32E boards (ESP32-D0WD-V3, 4 MB flash) are the Classic
 Bluetooth pair, the BR/EDR answer to the DKs. They hold a Serial Port Profile
-link and push data across it, so `ubertooth-rx`, `ubertooth-rx -l`/`-u`,
-`ubertooth-follow`, and `ubertooth-btbr` have BR/EDR traffic from a known
-address on demand, with no third-party device in the capture.
+link and push data across it, and they hold a synchronous (eSCO) voice link,
+so `ubertooth-rx`, `ubertooth-rx -l`/`-u`, `ubertooth-follow`, and
+`ubertooth-btbr` have BR/EDR traffic from a known address on demand, with no
+third-party device in the capture.
 
 One image holds both roles:
 
 | Role | What it does |
 |---|---|
-| `acceptor` (the boot role) | discoverable and connectable, with an SPP server listening |
-| `initiator` | looks the peer's SPP channel up over SDP, connects, and streams a counted payload |
+| `acceptor` (the boot role) | discoverable and connectable, with an SPP server listening; for an audio link, the hands-free unit, which waits to be paged |
+| `initiator` | looks the peer's SPP channel up over SDP, connects, and streams a counted payload; for an audio link, the audio gateway, which pages |
 
 The link is opened with no security, so it needs no pairing and a capture holds
 only the SDP lookup, the connection, and the data. Nothing in it is encrypted,
 which is what lets a capture's payload lengths and CRCs be checked against the
 bytes beside them.
 
-**Voice traffic too.** `sco start` adds a synchronous (eSCO) link over the
-Hands-Free Profile alongside the data stream, so the air carries
-reserved-slot voice packets as well. `sco type ev3` asks for a plain EV3
+**Voice traffic too.** `sco start` opens a synchronous (eSCO) link over the
+Hands-Free Profile, so the air carries reserved-slot voice packets. An audio
+session is that link and the profile's own service level connection, an ACL
+link; it starts no data stream, and a board can hold both at once if a test
+asks for them. `sco type ev3` asks for a plain EV3
 link, whose payload is on the air at the basic rate a receive-only Ubertooth
 can decode; the 2-EV3 link the stack chooses by default carries the same
 payload as enhanced rate, which a basic-rate decoder cannot read. The
@@ -144,6 +147,23 @@ runs `sco start` on the acceptor first and `sco start` on the initiator last.
 ask for; only `defaults` puts that back.
 [`esp32peer.py`](../ubertooth_harness/esp32peer.py)'s `audio` mode does the
 whole sequence in one invocation, as `stream` does for the data link.
+
+What the two packet types put on the air, measured on the bench, is in
+[the peer firmware's README](../firmware/esp32-classic-peer/README.md): an
+EV3 link halves the payload per packet and halves the interval to carry the
+same 64 kbit/s, so it is about twice the packet rate and the busiest traffic
+the pair can make. What a capture reads from either is the packet types, the
+timing, and the count; the audio pattern the firmware sends does not reach the
+air as it was sent, because the controller codes the samples to CVSD on the
+way out. The Hands-Free service level connection, an ACL link, stays up for as
+long as the session does, so a capture holds that traffic beside the
+reserved-slot packets.
+
+A board has carried the link, and counted its frames, since `utesp-1.1.0`; the
+packet-type choice and the fields reporting what a link settled on came with
+`utesp-1.4.0`, and the counters that say how many links a profile has had with
+`utesp-1.5.0`, which is what an audio session asks for (below). Every other
+command works on any 1.x image.
 
 Registered with the bridge serial and the BD_ADDR its `status` reports (the
 factory MAC plus two in the last byte, so it too is fixed per board). Those
@@ -186,7 +206,8 @@ that replaced the first part way through
 
 By hand, [`scripts/lab/peer`](../scripts/lab/README.md) names the boards by
 their registry aliases, holds them, and runs that module, which is how a
-capture against the pair is taken outside a run.
+capture against the pair is taken outside a run: `peer stream` for the data
+link and `peer audio` for the voice link.
 
 ### Acroname USBHub3+
 
@@ -657,7 +678,7 @@ plan.
 
 ### Reading a Classic capture of the peer pair
 
-Two protocol facts that look like harness or tool faults and are not:
+Three protocol facts that look like harness or tool faults and are not:
 
 - **The LAP on the air is the initiator's**, because it pages and the piconet
   takes its address and clock from it. `-l <the acceptor's LAP>` sees nothing
@@ -665,6 +686,11 @@ Two protocol facts that look like harness or tool faults and are not:
 - **A survey's UAP is a guess** and is often wrong when few packets have been
   heard. Take the UAP from the board's `status` or the registry and pass it
   with `-u`, rather than trusting a short survey.
+- **An audio link's packets carry their type in the header, which needs no
+  clock.** `ubertooth-rx` has not been seen to settle on this pair's clock from
+  a voice link, so a follow-mode capture of one is not something to count on
+  yet; the packet type, the timing, and the count are read from the records a
+  capture writes without it.
 
 ## A worked bench layout
 

@@ -82,11 +82,13 @@ it runs:
 It looks up what [`ubertooth_harness/esp32peer.py`](../../ubertooth_harness/esp32peer.py)
 needs — the bridge's stable `by-id` path and the board's registered `BD_ADDR` —
 wraps the call in `hold`, and runs it. The module does the work: it opens the
-bridges, checks the firmware and the address, brings the Serial Port Profile
-link up, stops the pair, reports what both boards did, and fails closed.
+bridges, checks the firmware and the address, brings a link up between the two
+boards, takes it down afterwards, reports what both boards did, and fails
+closed.
 
 **Opening a bridge resets the board**, so one invocation has to be one session
-and the command under test runs *inside* it. That is what `stream` is for:
+and the command under test runs *inside* it. That is what `stream`, for a
+Serial Port Profile data link, and `audio`, for a voice link, are for:
 
 ```sh
 .venv/bin/python scripts/lab/peer stream ESP32_Linux0 ESP32_Linux1 \
@@ -114,12 +116,60 @@ peer stream ESP32_Linux1 ESP32_Linux0 --with UT_Linux1 -- \
 `--period`, `--payload`, `--min-writes`, `--min-seconds`, and `--timeout` are
 passed through; left out, the module's own defaults apply.
 
+`audio` is the same session with a synchronous (eSCO) voice link instead of
+the data link. A synchronous link carries its packets in reserved slots, so it
+is a different thing on the air and in a decoder; the Hands-Free service level
+connection the link is opened through, an ACL link, stays up for the whole
+session, so a capture holds both:
+
+```sh
+.venv/bin/python scripts/lab/peer audio ESP32_Linux0 ESP32_Linux1 \
+    --type ev3 --with UT_Linux1 -- \
+    ubertooth-rx -U <serial> -l <ESP32_Linux1's LAP> -u <its UAP> -t 30
+```
+
+`--type` picks the packet type the link asks for, on both boards, because a
+link uses a type both of them allowed:
+
+| `--type` | What the link carries |
+|---|---|
+| `ev3` (the default) | EV3: the payload goes out at the basic rate, so a basic-rate decoder can read it |
+| `2ev3` | 2-EV3: the same payload as enhanced rate, which is what the stack asks for by itself |
+| `default` | whatever the stack's own table picks, which is 2-EV3 |
+
+A link that is not eSCO fails rather than being reported as a pass, and so
+does one a board cannot name at all (`sco_link` or `sco_pkt_type` reading
+`unknown`, or no packet length), which is all there is to go on under
+`default`. With `ev3` or `2ev3` the type has to be the one asked for, so a
+test that wants a basic-rate payload cannot quietly be handed the
+enhanced-rate type. Both boards are checked, because each works out what its
+link carries from the types it allowed and the packet length its own
+controller reported; nothing in HCI reports the packet type itself. The link
+is checked again when the command has finished, against what each board
+reported at the start, so a capture taken while the two ends renegotiated is
+reported rather than passed.
+
+`--min-frames` is how many frames each board must report, and `--min-seconds`
+and `--timeout` work as they do for `stream`. The module reports the link it
+opened, both boards' frame counters, and the type the link settled on, and
+fails when either end does not read the link as up afterwards.
+
+`ubertooth-rx` has not been seen to settle on this pair's clock from a voice
+link, so do not expect it to enter follow mode and print packet detail. What
+a run like that gives is the records it writes without a clock, where each
+packet's header carries its type code: that is what tells an EV3 link from a
+2-EV3 one on the air ([`docs/hardware.md`](../../docs/hardware.md), "Reading a
+Classic capture of the peer pair").
+
+The audio link needs a newer peer image than the other commands,
+`utesp-1.5.0` or a later 1.x: the packet-type choice and the fields reporting
+what a link settled on arrived in `utesp-1.4.0`, and the counters that say how
+many links a profile has had, which is how the session tells one link from a
+link that flapped, in `utesp-1.5.0`. The link itself and its frame counters are
+older. A board on an older image is told so.
+
 Inside an outer `hold` that already has these devices, add `--no-hold`: holding
 them twice would wait for a lock this process already holds.
-
-There is no audio (eSCO) session here. The firmware has one, but
-`esp32peer.py` does not drive it yet, so there is nothing to wrap; it belongs
-in the module when a test needs it.
 
 ## `hub-port`
 
