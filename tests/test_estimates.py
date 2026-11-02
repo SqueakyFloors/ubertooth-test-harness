@@ -125,8 +125,10 @@ class EstimateTests(unittest.TestCase):
         soak = self.catalog.get("BLE soak")
         self.assertEqual(1800, soak.estimated_seconds(
             arguments(soak, duration="30m", **{"sample every": "5s"})))
-        hid = self.catalog.get("Uberducky HID")
-        self.assertIsNone(hid.estimated_seconds(arguments(hid, Uberducky="x")))
+        # One with no duration to scale by has no estimate at all.
+        firmware = self.catalog.get("Receive-only firmware")
+        self.assertIsNone(firmware.estimated_seconds(
+            arguments(firmware, **{"Ubertooth": "default"})))
 
     def test_missing_scaling_argument_is_no_estimate_not_an_error(self):
         # A per-duration estimate on a call without a duration argument, and

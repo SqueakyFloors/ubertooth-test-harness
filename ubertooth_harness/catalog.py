@@ -1712,16 +1712,10 @@ def builtin_catalog() -> TestCatalog:
                 MappingProxyType({"Ubertooth": "Ubertooth"}),
             ),
             _device_test("Receive-only firmware", "Exercise a receive-only build"),
-            TestDefinition(
-                "Uberducky HID", "Exercise an Uberducky HID fixture",
-                MappingProxyType({"Uberducky": ArgumentRule(_required_text, required=True)}),
-                MappingProxyType({}),
-            ),
-            TestDefinition(
-                "E-GO skateboard capture", "Capture a registered E-GO skateboard",
-                MappingProxyType({"skateboard": ArgumentRule(_required_text, required=True)}),
-                MappingProxyType({}),
-            ),
+            # No Uberducky or E-GO device test: exercising those fixtures is
+            # out of scope (#89). `Host CLI surface` covers ubertooth-ducky
+            # and ubertooth-ego help, `Argument validation` their refusals,
+            # and `Raw receive` runs `ubertooth-ego -r` with nothing in range.
         ]
     )
     return TestCatalog(
