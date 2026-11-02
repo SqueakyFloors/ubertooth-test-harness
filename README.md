@@ -175,6 +175,70 @@ roles may name each one by alias or narrow it by RF placement, but not with
 discovery is reconciled as present/missing/unknown before execution and never
 silently reassigns an alias.
 
+### Hardware a registry has not got
+
+One plan is compiled against every bench's registry, so a step may name a
+host this registry has not got, or a device no host here has. Run planning
+records that as not applicable and leaves the step out, the way it leaves out
+a host whose platform the step does not list:
+
+- a `hosts:` alias this registry does not have (`not applicable on Host_Lab:
+  Host_Lab is not a host in this registry`);
+- a host with no device for a hardware role the test binds: no default for
+  the role (`host Host_Mac has no default ESP32 Classic peer for the acceptor
+  role`), no device of the type at all (`host Host_Mac has no nRF52840 DK
+  resources`), or no device that declares the role (`host Host_Mac has no
+  nRF52840 DK for the advertiser role (DK_Mac0 declares peripheral)`) — when
+  the host's default cannot take the role but another device of its can, that
+  one takes it, as it does for a placement the default cannot satisfy;
+- an explicit device alias this registry does not have (`this registry has no
+  Ubertooth 'UT_Lab7'`).
+
+So the release plan, which every registered host runs, can hold a step for
+hardware only the bench host has: the other hosts, and the other registries,
+record it and run the rest. A suite with nothing this registry can run is
+still an error, and it names the first few steps it left out. A host this
+registry has not got never runs anything of its own, so what it left out is
+recorded in the runs of the hosts that are here, and `run-suite --dry-run`
+lists it; one record per test, so a host that runs that test, or has its own
+reason for leaving it out, keeps its own.
+
+Two absences still end the compile, for now: `alternate Ubertooths` on a host
+with one registered Ubertooth, and `exclusive Ubertooth` where another board
+has no `power:` mapping
+([#269](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/269)).
+
+What a host here cannot run is decided first, and has not changed: a platform
+the step does not list, and a board placed differently from what the test
+needs, leave that host out, and a step whose every named host is here and
+cannot run it this way still fails planning. Only when the hosts that could
+have run it have not got the hardware is the step left out — and a step that
+names a host this registry has not got is left out either way, since the host
+that would have run it is not here to be judged.
+
+`validate-plan --hardware <registry>` is the strict one: there the registry
+is named on purpose, so the same absence fails, which is what catches a plan
+entry for hardware a bench is meant to provide. Every committed suite is
+compiled that way against [`hardware.example.yaml`](hardware.example.yaml) in
+the unit suite (`tests/test_runnable_plans.py`), bar `range-weak-link`, which
+asks for a board behind an attenuator that the example registry carries
+commented out; CI validates the main suites with it as well.
+
+Because it is the stricter of the two, `validate-plan --hardware` refuses a
+plan on a bench that has only some of the hardware it names, where the run
+itself would leave those steps out. On such a bench, check a run with
+`run-suite --dry-run`, which lists exactly what would run and what would be
+left out.
+
+Two refusals are mistakes in the plan rather than absence, and fail wherever
+the plan is compiled: an alias that differs from a registered one only in
+case (`it has 'Host_Linux', so check the spelling in the plan`), and a
+registered alias used as something it is not (`resource UT_Linux0 is not a
+Host`, `resource DK_Linux0 is not a Ubertooth attached to Host_Linux`,
+`resource DK_Linux1 declares the role(s) peripheral, not advertiser`). A role
+or argument name the test does not have is refused when the plan loads, with
+no registry at all.
+
 ### RF placement: where a board sits on the bench
 
 A unit may record its RF placement, so a test can ask for a weak link and a
@@ -617,9 +681,11 @@ section, a `Not applicable cases` column, and a `Host can run` row in report.md,
 `not_applicable_cases` and `not_applicable_tests` in the run summary, and
 `not applicable` in the web GUI. `run-suite --dry-run` prints the same decision
 for every case before any build, lease, or run. A plan entry that no host it
-names can run (no case applies on any of them) fails planning. A test whose
-every case is not applicable finishes `not_applicable` and does not fail the
-run.
+names can run (no case applies on any of them) fails planning, unless what
+the hosts lack is the hardware it binds, which is recorded instead (see
+[Hardware a registry has not got](#hardware-a-registry-has-not-got)). A test
+whose every case is not applicable finishes `not_applicable` and does not
+fail the run.
 
 | Needs | Cases | Not applicable when |
 |---|---|---|

@@ -47,6 +47,22 @@ self-reset is reported and judged by a person, not failed
 `Exclusive Ubertooth topology`, and `MAC polling soak` must state their
 platforms.
 
+**Hardware the bench has not got.** A step whose `hosts:` name a host this
+registry does not have, or whose hardware roles no selected host can bind (no
+ESP32 Classic peer, no DK, no default for the role, none declaring the role),
+is left out before the run as not applicable, the same way a platform
+mismatch is. So a plan every host runs may still hold a step for hardware
+only one bench has. What a host that is here cannot run is still a plan
+error: a platform it does not have, and a board placed differently from what
+the test needs, fail planning when every host the step names is here and none
+can run it (with a host this registry has not got among them, the step is
+left out instead); so
+do two absences that are still to be decided, `alternate Ubertooths` on a
+one-board host and `exclusive Ubertooth` with an unmapped board
+([#269](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/269)).
+`validate-plan --hardware <registry>` refuses the absence too, since there
+the bench is named on purpose (README, "Hardware a registry has not got").
+
 **RF placement.** Every test with a hardware role also accepts `rf:`, one
 requirement per role, which says what the role's placement on the bench must
 be: `antenna`, `min_attenuation_db`, and `max_attenuation_db`
