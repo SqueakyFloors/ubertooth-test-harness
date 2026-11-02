@@ -41,7 +41,13 @@ PEER_BY_ID = ("/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_"
 # else, so its ready case is what proves the board runs this
 # (firmware/nrf52840dk/src/roles.h and firmware/esp32-classic-peer/main/peer.h;
 # tests/test_targets.py keeps them in step with those sources).
-DK_FIRMWARE = "utdk-1.3.0"
+DK_FIRMWARE = "utdk-1.4.0"
+# The second DK image, built from the same sources with chan-sel-1.conf and
+# chan-sel-1.overlay: the same roles on a controller without Channel Selection
+# Algorithm #2, so its connections hop with algorithm 1. It reports this
+# version, so `nrfdk.py ensure` flashes a board that carries the other image
+# rather than running a test against a link layer the test did not ask for.
+DK_FIRMWARE_CHAN_SEL_1 = f"{DK_FIRMWARE}-chansel1"
 PEER_FIRMWARE = "utesp-1.4.0"
 
 

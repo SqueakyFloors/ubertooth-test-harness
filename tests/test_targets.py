@@ -39,6 +39,44 @@ class FirmwareVersionTests(unittest.TestCase):
         header = (ROOT / "firmware" / "nrf52840dk" / "src" / "roles.h").read_text()
         self.assertIn(f'#define UTDK_FW_VERSION "{targets.DK_FIRMWARE}"', header)
 
+    def test_the_algorithm_1_image_reports_the_version_the_harness_expects(self):
+        # The two images are told apart by this string, so the suffix the
+        # firmware appends and the one the harness pins have to be the same
+        # one: otherwise `ensure` would flash a board in a loop, or accept the
+        # wrong image.
+        header = (ROOT / "firmware" / "nrf52840dk" / "src" / "roles.h").read_text()
+        suffix = targets.DK_FIRMWARE_CHAN_SEL_1.removeprefix(targets.DK_FIRMWARE)
+        self.assertIn(f'#define UTDK_FW_REPORTED UTDK_FW_VERSION "{suffix}"', header)
+        self.assertIn(targets.DK_FIRMWARE_CHAN_SEL_1, nrfdk.FIRMWARE_VERSIONS)
+
+    def test_one_image_is_not_accepted_for_the_other(self):
+        # The default version is the start of the algorithm 1 one, so finding
+        # the string is not enough: an image carrying the other version is
+        # refused, or `ensure --version` would flash the wrong link layer and
+        # then pass.
+        with tempfile.TemporaryDirectory() as directory:
+            def image(text):
+                path = Path(directory) / "image.hex"
+                body = text.encode()
+                record = bytes([len(body), 0, 0, 0]) + body
+                path.write_text(
+                    ":%s%02X\n:00000001FF\n"
+                    % (record.hex().upper(), (-sum(record)) & 0xFF))
+                return path
+
+            nrfdk.check_image(image(targets.DK_FIRMWARE), targets.DK_FIRMWARE)
+            nrfdk.check_image(image(targets.DK_FIRMWARE_CHAN_SEL_1),
+                              targets.DK_FIRMWARE_CHAN_SEL_1)
+            with self.assertRaisesRegex(nrfdk.NrfDkError, "carries firmware version"):
+                nrfdk.check_image(image(targets.DK_FIRMWARE_CHAN_SEL_1),
+                                  targets.DK_FIRMWARE)
+
+    def test_the_algorithm_1_image_is_built_by_the_files_its_readme_names(self):
+        readme = (ROOT / "firmware" / "nrf52840dk" / "README.md").read_text()
+        for name in ("chan-sel-1.conf", "chan-sel-1.overlay"):
+            self.assertTrue((ROOT / "firmware" / "nrf52840dk" / name).is_file(), name)
+            self.assertIn(name, readme)
+
     def test_peer_firmware_is_the_version_the_peer_firmware_reports(self):
         header = (ROOT / "firmware" / "esp32-classic-peer" / "main" / "peer.h").read_text()
         self.assertIn(f'#define UTESP_FW_VERSION "{targets.PEER_FIRMWARE}"', header)
