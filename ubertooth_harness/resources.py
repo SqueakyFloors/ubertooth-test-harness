@@ -39,9 +39,9 @@ class MissingResource(RegistryError):
     the registry is named on purpose.
 
     A name this registry does have, used wrongly (an Ubertooth asked for as a
-    host, a DK asked for a role it does not declare), and a name that differs
-    from a registered one only in case, are mistakes in the plan: they stay
-    plain ``RegistryError`` and fail everywhere.
+    host, an alias the plan names for a role it does not declare), and a name
+    that differs from a registered one only in case, are mistakes in the
+    plan: they stay plain ``RegistryError`` and fail everywhere.
     """
 
 
@@ -508,6 +508,22 @@ class FileResourceRegistry:
                 f"{placement.describe()} ({self._placements(eligible)})"
             )
 
+        def refuse_roleless():
+            """The host has units of the type, none of them for this role.
+
+            Absence: the plan left the choice to the harness, so there is
+            nothing to correct in it; this bench has no such unit.
+            """
+            declared = "; ".join(
+                f"{alias} declares {', '.join(self.get(alias).roles)}"
+                for alias in eligible
+                if self.get(alias).roles
+            )
+            raise MissingResource(
+                f"host {host} has no {resource_type} for the {role} role"
+                + (f" ({declared})" if declared else "")
+            )
+
         if selector == "default":
             # A test that binds several resources of one type (the connection
             # pair's central and peripheral) needs a default per role, so the
@@ -532,13 +548,20 @@ class FileResourceRegistry:
                 # run record and the report name the resource used and the
                 # requirement it was chosen for.
                 alias = matching[0]
-            self._declares_role(self.get(alias), role)
+            if not self._takes_role(self.get(alias), role):
+                refuse_roleless()
             return (alias,)
         if selector == "each":
             if not eligible:
                 raise MissingResource(f"host {host} has no {resource_type} resources")
             if not placement:
-                return eligible
+                for_role = tuple(
+                    alias for alias in eligible
+                    if self._takes_role(self.get(alias), role)
+                )
+                if not for_role:
+                    refuse_roleless()
+                return for_role
             if not matching:
                 refuse_unplaced()
             return matching

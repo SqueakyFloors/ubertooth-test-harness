@@ -701,7 +701,13 @@ has not got is the one refusal that says nothing about the plan: a `hosts:`
 alias this registry does not have, and a host with no device for a role the
 test binds (`resources.MissingResource`), are recorded as not applicable and
 left out, so a step for one bench's hardware does not stop every other bench
-running the plan. `PlanCompiler.compile_suite(strict_hardware=True)` makes
+running the plan. The order matters: each selected host is first judged on
+what it can run at all (`platforms:`, the definition's needs, and the RF
+placement each role must have), and a step no host that is here can run that
+way is still a `PlanningError`; only the hosts left after that are asked for
+the hardware, and a step none of them has it for is left out. A host alias
+the registry has not got runs nothing at all, so `CompiledSuite.for_host`
+reports what it left out to every host. `PlanCompiler.compile_suite(strict_hardware=True)` makes
 the same absence a `PlanningError` instead, and `validate-plan --hardware`
 uses it: a registry named on the command line is the bench being checked
 against, so a host or role it cannot provide is a typo or a bench set up

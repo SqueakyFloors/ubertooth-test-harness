@@ -9,8 +9,11 @@ from pathlib import Path
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.cli import main
 from ubertooth_harness.plan import PlanError, check_runnable, load_plan, unimplemented_tests
+from ubertooth_harness.planner import PlanCompiler
+from ubertooth_harness.resources import FileResourceRegistry
 
-PLANS = Path(__file__).resolve().parents[1] / "testplans"
+ROOT = Path(__file__).resolve().parents[1]
+PLANS = ROOT / "testplans"
 
 # BLE soak has no implementation (catalog entry only).
 _PLAN = """plan: Planned
@@ -86,6 +89,31 @@ class RunnablePlanTests(unittest.TestCase):
                 code, out, err = _validate(path)
                 self.assertEqual(0, code, err)
                 self.assertIn("plan: ", out)
+
+    def test_every_committed_suite_compiles_against_the_example_bench(self):
+        """Run planning leaves out hardware a registry has not got, so this
+        is where a plan naming a host or role the bench should provide is
+        caught (#265): every suite compiles strictly against
+        `hardware.example.yaml`, which documents the whole bench.
+
+        `range-weak-link` is the exception: it asks for a board behind a
+        20 dB attenuator, and the example registry carries that `rf:` block
+        commented out, as the optional setup it is.
+        """
+        catalog = builtin_catalog()
+        registry = FileResourceRegistry.load(ROOT / "hardware.example.yaml")
+        compiled = 0
+        for path in sorted(PLANS.glob("*.yaml")):
+            plan = load_plan(path, catalog)
+            for suite in plan.suites:
+                if suite == "range-weak-link":
+                    continue
+                with self.subTest(f"{path.name}:{suite}"):
+                    PlanCompiler(catalog, registry).compile_suite(
+                        plan, suite, strict_hardware=True
+                    )
+                    compiled += 1
+        self.assertGreaterEqual(compiled, 16)
 
     def test_the_fast_plan_runs_spectrum_rssi_sanity_and_not_ble_monitor(self):
         names = [step.test_name for step in load_plan(PLANS / "fast.yaml").steps("fast")]

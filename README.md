@@ -182,29 +182,44 @@ host this registry has not got, or a device no host here has. Run planning
 records that as not applicable and leaves the step out, the way it leaves out
 a host whose platform the step does not list:
 
-- a `hosts:` alias this registry does not have (`this registry has no host
-  'Host_Linux'`);
-- a host with no device for a hardware role the test binds (`host Host_Mac
-  has no default ESP32 Classic peer for the acceptor role`, `host Host_Mac
-  has no nRF52840 DK resources`).
+- a `hosts:` alias this registry does not have (`not applicable on Host_Lab:
+  no such host in this registry`);
+- a host with no device for a hardware role the test binds: no default for
+  the role (`host Host_Mac has no default ESP32 Classic peer for the acceptor
+  role`), no device of the type at all (`host Host_Mac has no nRF52840 DK
+  resources`), or none that declares the role (`host Host_Mac has no
+  nRF52840 DK for the advertiser role (DK_Mac0 declares peripheral)`);
+- an explicit device alias this registry does not have (`this registry has no
+  Ubertooth 'UT_Lab7'`).
 
 So the release plan, which every registered host runs, can hold a step for
 hardware only the bench host has: the other hosts, and the other registries,
 record it and run the rest. A suite with nothing this registry can run is
-still an error, and it names each step it left out.
+still an error, and it names each step it left out. A host this registry has
+not got never runs anything, so what it left out is recorded in every run of
+the suite rather than in none; `run-suite --dry-run` lists it.
+
+What a host here cannot run is decided first, and has not changed: a platform
+the step does not list, and a board placed differently from what the test
+needs, leave that host out, and a step no host that is here can run this way
+still fails planning. Only when the hosts that could have run it have not got
+the hardware is the step left out.
 
 `validate-plan --hardware <registry>` is the strict one: there the registry
-is named on purpose, so the same absence fails. That is what catches a plan
-entry for hardware a bench is meant to provide, and CI validates every plan
-against [`hardware.example.yaml`](hardware.example.yaml) that way.
+is named on purpose, so the same absence fails, which is what catches a plan
+entry for hardware a bench is meant to provide. Every committed plan is
+compiled that way against [`hardware.example.yaml`](hardware.example.yaml) in
+the unit suite (`tests/test_runnable_plans.py`), and CI validates the main
+suites with it as well.
 
 Two refusals are mistakes in the plan rather than absence, and fail wherever
 the plan is compiled: an alias that differs from a registered one only in
 case (`it has 'Host_Linux', so check the spelling in the plan`), and a
 registered alias used as something it is not (`resource UT_Linux0 is not a
-Host`, `resource DK_Linux0 is not a Ubertooth attached to Host_Linux`). A
-role or argument name the test does not have is refused when the plan loads,
-with no registry at all.
+Host`, `resource DK_Linux0 is not a Ubertooth attached to Host_Linux`,
+`resource DK_Linux1 declares the role(s) peripheral, not advertiser`). A role
+or argument name the test does not have is refused when the plan loads, with
+no registry at all.
 
 ### RF placement: where a board sits on the bench
 

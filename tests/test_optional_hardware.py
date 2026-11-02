@@ -7,11 +7,15 @@ records that as not applicable and leaves the step out;
 on purpose (#265).
 """
 
+import io
+import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
+from tests.test_cli import make_source
 from ubertooth_harness import cli
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.plan import load_plan
@@ -109,9 +113,12 @@ class OptionalHardwarePlanningTests(unittest.TestCase):
             (left_out,) = compiled.not_applicable
             self.assertEqual("Host_Lab", left_out.host)
             self.assertEqual("Ubertooth identity", left_out.test_name)
-            self.assertEqual(
-                "this registry has no host 'Host_Lab'", left_out.reason
-            )
+            self.assertEqual("no such host in this registry", left_out.reason)
+            self.assertEqual(("Host_Lab",), compiled.absent_hosts)
+            # No run is ever made for Host_Lab, so the step is part of the
+            # record of whichever host does run the suite.
+            self.assertEqual((left_out,), compiled.for_host("Host_Mac"))
+            self.assertEqual((left_out,), compiled.for_host("Host_Linux"))
 
     def test_a_host_without_the_device_a_role_binds_leaves_the_step_out(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -154,6 +161,114 @@ class OptionalHardwarePlanningTests(unittest.TestCase):
             )
             self.assertEqual((left_out,), compiled.for_host("Host_Mac"))
             self.assertEqual((), compiled.for_host("Host_Linux"))
+
+    def test_a_host_with_no_board_at_all_is_recorded_as_absent(self):
+        """A capture test asks its Ubertooth for an ordinary link, so a host
+        with no Ubertooth must still be reported as having none, not as
+        having one placed wrongly."""
+        step = """    - Classic Bluetooth receive:
+        hosts: each
+        Ubertooth: default
+        coverage: smoke
+        duration: 3s
+"""
+        hardware = HARDWARE + """  Host_Spare:
+    type: Host
+    platform: linux
+    roles: [test target]
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            compiled = self.compile(directory, (step,), hardware)
+
+            self.assertEqual(
+                ("Host_Linux", "Host_Mac"),
+                tuple(item.host for item in compiled.invocations),
+            )
+            (left_out,) = compiled.not_applicable
+            self.assertEqual("Host_Spare", left_out.host)
+            self.assertEqual(
+                "host Host_Spare has no default Ubertooth for the Ubertooth role",
+                left_out.reason,
+            )
+
+    def test_a_host_whose_devices_all_declare_another_role_is_absent(self):
+        """The plan named no alias, so a bench whose only DK is a peripheral
+        has no advertiser rather than a plan to correct."""
+        step = """    - Capture known BLE advertiser:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        advertiser: default
+        coverage: smoke
+        duration: 5s
+"""
+        hardware = HARDWARE.replace(
+            "      advertiser: DK_Linux0", "      nRF52840 DK: DK_Linux0"
+        ).replace("    roles: [advertiser]", "    roles: [peripheral]")
+        with tempfile.TemporaryDirectory() as directory:
+            # The only step in the suite, so the skip leaves nothing to run
+            # and the reason is reported rather than lost.
+            with self.assertRaisesRegex(
+                PlanningError,
+                "host Host_Linux has no nRF52840 DK for the advertiser role "
+                r"\(DK_Linux0 declares peripheral\)",
+            ):
+                self.compile(directory, (step,), hardware)
+            registry = FileResourceRegistry.load(
+                Path(directory) / "hardware.yaml"
+            )
+            # `each` answers the same way: a device registered for another
+            # role is not offered for this one.
+            with self.assertRaisesRegex(
+                MissingResource,
+                "host Host_Linux has no nRF52840 DK for the advertiser role",
+            ):
+                registry.resolve_hardware(
+                    "Host_Linux", "nRF52840 DK", "each", "advertiser"
+                )
+
+    def test_an_explicit_device_alias_this_registry_has_not_got_is_absent(self):
+        step = """    - Ubertooth identity:
+        hosts: [Host_Linux]
+        Ubertooth: UT_Lab7
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            compiled = self.compile(directory, (HOST_STEP, step))
+
+            (left_out,) = compiled.not_applicable
+            self.assertEqual(
+                "this registry has no Ubertooth 'UT_Lab7'", left_out.reason
+            )
+
+    def test_a_host_blocked_by_its_platform_does_not_make_absence_fatal(self):
+        """The Mac cannot run a Linux-only step and the Linux host has no
+        peers: the step belongs to another bench either way."""
+        step = """    - Capture known Classic device:
+        hosts: each
+        platforms: [linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        coverage: smoke
+        duration: 25s
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            compiled = self.compile(directory, (HOST_STEP, step))
+
+            self.assertEqual(
+                ("Ubertooth identity", "Ubertooth identity"),
+                tuple(item.test_name for item in compiled.invocations),
+            )
+            self.assertEqual(
+                [
+                    ("Host_Mac", "runs only on Linux, and Host_Mac is macOS"),
+                    (
+                        "Host_Linux",
+                        "host Host_Linux has no default ESP32 Classic peer for "
+                        "the acceptor role",
+                    ),
+                ],
+                [(item.host, item.reason) for item in compiled.not_applicable],
+            )
 
     def test_a_suite_with_nothing_this_registry_can_run_is_still_an_error(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -251,6 +366,60 @@ class OptionalHardwarePlanningTests(unittest.TestCase):
                     self.assertNotIsInstance(caught.exception, MissingResource)
 
 
+class DryRunTests(unittest.TestCase):
+    """What run-suite would do: the step is left out, and it says so."""
+
+    def dry_run(self, *steps, hardware=HARDWARE):
+        platform = "macos" if sys.platform == "darwin" else "linux"
+        host = "Host_Mac" if platform == "macos" else "Host_Linux"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, _short = make_source(root)
+            (root / "plan.yaml").write_text(plan_text(*steps))
+            (root / "hardware.yaml").write_text(hardware)
+            out = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                code = cli.main([
+                    "run-suite", "--dry-run", "--plan", str(root / "plan.yaml"),
+                    "--suite", "release", "--hardware", str(root / "hardware.yaml"),
+                    "--host", host, "--ubertooth-source", str(source),
+                    "--ubertooth-ref", "HEAD", "--output", str(root / "runs"),
+                    "--lease-dir", str(root / "leases"),
+                ])
+            return code, out.getvalue(), host
+
+    def test_a_step_for_a_host_this_registry_has_not_got_is_reported(self):
+        step = """    - Ubertooth identity:
+        hosts: [Host_Lab]
+        Ubertooth: default
+"""
+        code, text, host = self.dry_run(HOST_STEP, step)
+
+        self.assertEqual(0, code)
+        self.assertIn(
+            "Ubertooth identity: not applicable on Host_Lab: no such host in "
+            "this registry",
+            text,
+        )
+        self.assertIn(f"1 test(s) not applicable on {host}", text)
+
+    def test_a_step_whose_hardware_this_host_has_not_got_is_reported(self):
+        code, text, host = self.dry_run(HOST_STEP, CLASSIC_STEP)
+
+        self.assertEqual(0, code)
+        if host == "Host_Linux":
+            self.assertIn(
+                "Capture known Classic device: not applicable on Host_Linux: "
+                "host Host_Linux has no default ESP32 Classic peer",
+                text,
+            )
+            self.assertIn("1 test(s) not applicable", text)
+        else:
+            # The step names the Linux host only, so the Mac's run never had
+            # it: the Linux run is where it is recorded.
+            self.assertNotIn("Capture known Classic device", text)
+
+
 class ValidatePlanTests(unittest.TestCase):
     """`validate-plan --hardware` is the strict one: it is given the bench."""
 
@@ -287,6 +456,18 @@ class ValidatePlanTests(unittest.TestCase):
 
         self.assertEqual(2, code)
         self.assertIn("error: this registry has no host 'Host_Lab'", errors)
+
+    def test_every_absent_host_is_named_in_one_refusal(self):
+        step = """    - Ubertooth identity:
+        hosts: [Host_Lab, Host_Linux, Host_Bench]
+        Ubertooth: default
+"""
+        code, _printed, errors = self.validate((step,))
+
+        self.assertEqual(2, code)
+        self.assertIn(
+            "error: this registry has no host 'Host_Lab', 'Host_Bench'", errors
+        )
 
     def test_without_a_registry_the_plan_alone_is_validated(self):
         code, printed, _errors = self.validate(

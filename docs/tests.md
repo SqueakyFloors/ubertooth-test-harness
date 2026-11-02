@@ -48,13 +48,15 @@ self-reset is reported and judged by a person, not failed
 platforms.
 
 **Hardware the bench has not got.** A step whose `hosts:` name a host this
-registry does not have, or whose hardware roles no selected host can bind
-(no ESP32 Classic peer, no DK, no default for the role), is left out before
-the run as not applicable, the same way a platform mismatch is. So a plan
-every host runs may still hold a step for hardware only one bench has.
-`validate-plan --hardware <registry>` refuses the same absence instead, since
-there the bench is named on purpose (README, "Hardware a registry has not
-got").
+registry does not have, or whose hardware roles no selected host can bind (no
+ESP32 Classic peer, no DK, no default for the role, none declaring the role),
+is left out before the run as not applicable, the same way a platform
+mismatch is. So a plan every host runs may still hold a step for hardware
+only one bench has. What a host that is here cannot run is still a plan
+error: a platform it does not have, and a board placed differently from what
+the test needs, fail planning when no other named host can run the step.
+`validate-plan --hardware <registry>` refuses the absence too, since there
+the bench is named on purpose (README, "Hardware a registry has not got").
 
 **RF placement.** Every test with a hardware role also accepts `rf:`, one
 requirement per role, which says what the role's placement on the bench must
