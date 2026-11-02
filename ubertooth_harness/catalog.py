@@ -1536,6 +1536,12 @@ def builtin_catalog() -> TestCatalog:
             # the last one on its board.
             establishes_firmware=True,
             writes_firmware=True,
+            # Every case names both firmware images and runs a Python tool
+            # (`ubertooth-btbr` is installed by a --with-python build), so a
+            # run that carries neither is refused rather than leaving the
+            # case out: a board flashed with the alternate image needs the
+            # application image to put back.
+            build_required=Needs(firmware_build=True, python_tools=True),
         ),
         TestDefinition(
             "Recover AFH map",
