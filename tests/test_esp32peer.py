@@ -45,6 +45,21 @@ class AddressTests(unittest.TestCase):
         self.assertEqual(("2a1b2a", "41"), esp32peer.address_parts(ACCEPTOR_ADDRESS))
         self.assertEqual(("e9c5ba", "0d"), esp32peer.address_parts(INITIATOR_ADDRESS))
 
+    def test_the_device_name_follows_from_the_address(self):
+        # main/bt_peer.c builds it as UT-ESP32- and the LAP in upper case, and
+        # the shell cannot set it, so a case derives it rather than asking a
+        # registry for it. Read out of that source here, so the two cannot
+        # drift: `Bluetooth inquiry scan` checks what an inquiry reported
+        # against this name without reading the board.
+        source = (Path(__file__).resolve().parents[1] / "firmware"
+                  / "esp32-classic-peer" / "main" / "bt_peer.c").read_text(
+                      encoding="utf-8")
+        self.assertIn('"UT-ESP32-%02X%02X%02X"', source)
+        self.assertEqual("UT-ESP32-2A1B2A", esp32peer.device_name(ACCEPTOR_ADDRESS))
+        self.assertEqual("UT-ESP32-E9C5BA", esp32peer.device_name(INITIATOR_ADDRESS))
+        with self.assertRaisesRegex(esp32peer.PeerError, "BD_ADDR must look like"):
+            esp32peer.device_name("not an address")
+
     def test_a_malformed_address_is_refused(self):
         for value in ("", "1:2:3:4:5:6", "C8:85:41:2A:1B", "zz:85:41:2a:1b:2a"):
             with self.subTest(value), self.assertRaisesRegex(
@@ -55,23 +70,6 @@ class AddressTests(unittest.TestCase):
     def test_an_address_is_normalized_to_upper_case(self):
         self.assertEqual(ACCEPTOR_ADDRESS,
                          esp32peer.normalize_address(" c8:85:41:2a:1b:2a "))
-
-    def test_the_device_name_is_the_one_the_firmware_builds(self):
-        """Derived from the address, and in step with the firmware source.
-
-        A BlueZ inquiry reads this name back from the board, so a case that
-        checks what the inquiry found needs it without reading the board.
-        """
-        root = Path(__file__).resolve().parents[1]
-        source = (root / "firmware" / "esp32-classic-peer" / "main"
-                  / "bt_peer.c").read_text(encoding="utf-8")
-        self.assertIn(f'"{esp32peer.DEVICE_NAME_PREFIX}%02X%02X%02X"', source)
-        self.assertEqual("UT-ESP32-2A1B2A",
-                         esp32peer.device_name(ACCEPTOR_ADDRESS))
-        self.assertEqual("UT-ESP32-E9C5BA",
-                         esp32peer.device_name(INITIATOR_ADDRESS))
-        with self.assertRaisesRegex(esp32peer.PeerError, "BD_ADDR must look like"):
-            esp32peer.device_name("nope")
 
     def test_the_by_id_path_is_derived_from_the_bridge_serial(self):
         path = esp32peer.default_device("abc123")

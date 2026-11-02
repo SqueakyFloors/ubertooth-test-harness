@@ -43,6 +43,7 @@ from ubertooth_harness.topology import IsolationCancelled, applied_power_isolati
 from ubertooth_harness.report import write_report
 from ubertooth_harness.cases import FlashCase
 from ubertooth_harness.hostneeds import (
+    Blocked,
     HostCapabilities,
     NotApplicable,
     run_capabilities,
@@ -91,6 +92,10 @@ class SequencerSummary:
     # skipped nor failed. Tests: every case, or the whole test.
     not_applicable_cases: int = 0
     not_applicable_tests: int = 0
+    # Required tests that never ran because the hardware they are about is
+    # not registered on this host (hostneeds.Blocked). The run fails: an
+    # unmeasured gate is not a pass.
+    blocked_tests: int = 0
     # Times a board reset itself during the run, as the firmware counts them
     # (watchdog.py). Reported, not failed.
     watchdog_resets: int = 0
@@ -1104,6 +1109,7 @@ class NamedTestSequencer:
         publisher: EventPublisher | None = None,
         capabilities: HostCapabilities | None = None,
         not_applicable: Sequence[NotApplicable] = (),
+        blocked: Sequence[Blocked] = (),
     ) -> SequencerSummary:
         """Run the suite, streaming every record to ``output_dir/run.jsonl``.
 
@@ -1117,6 +1123,12 @@ class NamedTestSequencer:
         recorded as not applicable, with ``not_applicable`` (whole tests the
         planner left out of this run: what this host cannot run, and what
         this bench has not got the hardware for).
+
+        ``blocked`` is the required tests the planner could not compile for
+        this host because the hardware they are about is not registered
+        (hostneeds.Blocked). They are recorded before anything runs, every
+        other test runs as usual, and the run finishes failed: a gate that
+        was never measured must not read as a pass.
         """
         run_id = validate_run_id(run_id)
         manifest = self._validate_run_contract(
@@ -1210,7 +1222,7 @@ class NamedTestSequencer:
             return self._run(
                 invocations, output_dir, manifest, preflight_checks,
                 cancellation, publisher, planned_cases, started_externally,
-                planned_guards, capabilities, tuple(left_out),
+                planned_guards, capabilities, tuple(left_out), tuple(blocked),
             )
         finally:
             write_report(output_dir)
@@ -1228,6 +1240,7 @@ class NamedTestSequencer:
         planned_guards=None,
         capabilities: HostCapabilities | None = None,
         not_applicable: tuple[NotApplicable, ...] = (),
+        blocked: tuple[Blocked, ...] = (),
     ) -> SequencerSummary:
         run_id = publisher.run_id
         token = cancellation or CancellationToken()
@@ -1287,11 +1300,16 @@ class NamedTestSequencer:
             {
                 "capabilities": capabilities.to_dict() if capabilities else None,
                 "not_applicable": len(not_applicable),
+                "blocked": len(blocked),
             },
         )
         for item in not_applicable:
             # Decided before anything runs: neither a skip nor a failure.
             publisher.emit("not_applicable", "not_applicable", item.to_dict())
+        for item in blocked:
+            # Also decided before anything runs, but this one fails the run
+            # at the end: the hardware it is about is not registered here.
+            publisher.emit("blocked", "blocked", item.to_dict())
         publisher.emit(
             "preflight_started",
             "running",
@@ -1747,6 +1765,19 @@ class NamedTestSequencer:
             if status == "canceled":
                 reason += f"; then {failure or 'canceled'}"
             status, failure = "failed", reason
+        if blocked:
+            # Known before the run started, and reported at the end so the
+            # one line a reader looks at says the suite did not measure
+            # everything it was asked to. A cancellation is still the
+            # outcome: nothing after it ran either.
+            more = len(blocked) - 1
+            reason = blocked[0].describe() + (
+                f" (and {more} more blocked test{'s' if more > 1 else ''})"
+                if more else ""
+            )
+            if status != "canceled":
+                status = "failed"
+            failure = f"{failure}; {reason}" if failure else reason
         if monitor is not None:
             # The last read of every board, and the run's watchdog summary:
             # the per-board reset count, and a fork issue to file for each
@@ -1773,6 +1804,7 @@ class NamedTestSequencer:
             skipped_cases=run_skipped_cases,
             not_applicable_cases=sum(1 for item in not_applicable if item.case_id),
             not_applicable_tests=not_applicable_tests,
+            blocked_tests=len(blocked),
             watchdog_resets=monitor.total_resets if monitor is not None else 0,
         )
         publisher.emit("run_finished", status, asdict(summary))

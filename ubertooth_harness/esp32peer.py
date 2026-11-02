@@ -108,9 +108,6 @@ AFH_MINIMUM_FIRMWARE = "utesp-1.3.0"
 BAUD = 115200
 ROLES = ("acceptor", "initiator")
 BOOT_ROLE = "acceptor"
-# What the firmware names a board, before the LAP it ends with; see
-# device_name() below.
-DEVICE_NAME_PREFIX = "UT-ESP32-"
 # What the firmware's status reports after a reset, from its README: the
 # acceptor role with its server listening and discoverable, no link, nothing
 # streaming, the default stream settings, and every counter zero. The
@@ -319,16 +316,18 @@ def address_parts(address: str) -> tuple[str, str]:
 
 
 def device_name(address: str) -> str:
-    """The Bluetooth device name the firmware gives a board at this address.
+    """The name the firmware gives a board with this address.
 
-    The firmware builds it from the LAP, the lowest three bytes of the
-    address (`UT-ESP32-%02X%02X%02X` of bytes 3 to 5 in
-    firmware/esp32-classic-peer/main/bt_peer.c), so a test that asks an
-    inquiry what it found knows the answer in advance without reading the
-    board. tests/test_esp32peer.py keeps this in step with that source.
+    `main/bt_peer.c` builds it as `UT-ESP32-` and the LAP in upper case, and
+    the shell cannot set it, so it follows from the
+    address and is unique per board. It is the name the board answers an
+    inquiry and an LMP name request with, which is how a capture says which
+    board replied. A registry may write it down beside the address for a
+    person reading it; `reset` reports the board's own, so a run checks the
+    two agree rather than trusting either.
     """
     lap, _uap = address_parts(address)
-    return f"{DEVICE_NAME_PREFIX}{lap.upper()}"
+    return f"UT-ESP32-{lap.upper()}"
 
 
 def default_device(bridge_serial: str) -> str:

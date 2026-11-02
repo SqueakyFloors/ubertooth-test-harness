@@ -75,6 +75,21 @@ class NeedsTests(unittest.TestCase):
                       unmet(Needs(platforms=("linux",)), MAC))
         self.assertIn("Python tools build", unmet(Needs(python_tools=True), MAC))
         self.assertIn("firmware build", unmet(Needs(firmware_build=True), MAC))
+        # A run carrying the application image alone can still not run the
+        # case that needs the alternate one.
+        application_only = planned_capabilities(
+            "H", "linux", build=True, with_python=True, with_firmware=True,
+            with_btbr=False)
+        self.assertEqual("", unmet(Needs(firmware_build=True), application_only))
+        self.assertIn("alternate btbr firmware image",
+                      unmet(Needs(btbr_build=True), application_only))
+        both = planned_capabilities("H", "linux", build=True, with_python=True,
+                                    with_firmware=True)
+        self.assertEqual("", unmet(Needs(btbr_build=True), both))
+        by_artifact = planned_capabilities(
+            "H", "linux", build=False, with_python=False, with_firmware=False,
+            artifact_labels=("btbr_build",))
+        self.assertEqual("", unmet(Needs(btbr_build=True), by_artifact))
         self.assertEqual("", unmet(Needs(python_tools=True, firmware_build=True), LINUX))
         self.assertEqual("", unmet(follow, None))
 
@@ -133,6 +148,7 @@ class NeedsTests(unittest.TestCase):
         self.assertEqual(
             {"host": "Host_Mac", "platform": "macos", "basis": "build", "bluez_tools": [],
              "python_tools": False, "firmware_build": False,
+             "btbr_build": False,
              "host_tools": sorted(mac.host_tools)}, mac.to_dict())
 
     def test_a_host_without_a_host_tool_runs_none_of_its_cases(self):

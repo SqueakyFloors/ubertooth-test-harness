@@ -204,11 +204,6 @@ recorded in the runs of the hosts that are here, and `run-suite --dry-run`
 lists it; one record per test, so a host that runs that test, or has its own
 reason for leaving it out, keeps its own.
 
-Two absences still end the compile, for now: `alternate Ubertooths` on a host
-with one registered Ubertooth, and `exclusive Ubertooth` where another board
-has no `power:` mapping
-([#269](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/269)).
-
 What a host here cannot run is decided first, and has not changed: a platform
 the step does not list, and a board placed differently from what the test
 needs, leave that host out, and a step whose every named host is here and
@@ -219,7 +214,8 @@ that would have run it is not here to be judged.
 
 `validate-plan --hardware <registry>` is the strict one: there the registry
 is named on purpose, so the same absence fails, which is what catches a plan
-entry for hardware a bench is meant to provide. Every committed suite is
+entry for hardware a bench is meant to provide; it refuses a blocked step the
+same way. Every committed suite is
 compiled that way against [`hardware.example.yaml`](hardware.example.yaml) in
 the unit suite (`tests/test_runnable_plans.py`), bar `range-weak-link`, which
 asks for a board behind an attenuator that the example registry carries
@@ -239,6 +235,53 @@ Host`, `resource DK_Linux0 is not a Ubertooth attached to Host_Linux`,
 `resource DK_Linux1 declares the role(s) peripheral, not advertiser`). A role
 or argument name the test does not have is refused when the plan loads, with
 no registry at all.
+
+### Hardware a step is about: blocked, not left out
+
+Two absences are not quietly left out, because the hardware that is missing is
+the subject of the test rather than something it merely binds:
+
+- `alternate Ubertooths: true` on a host with one registered Ubertooth
+  (`alternate Ubertooths needs at least two registered Ubertooths on
+  Host_Linux, which has one`);
+- `exclusive Ubertooth: true` where another registered board on the host is on
+  no power controller (`extra Ubertooth UT_Linux1 has no power mapping, so it
+  cannot be switched off to leave UT_Linux0 alone`).
+
+Such a step is recorded as **blocked** before anything runs, and it is left
+out of the invocations so every unrelated step in the suite still compiles and
+runs. The run then finishes `failed`: a gate like these is named on purpose on
+the bench that has the hub or the second board, so a quiet "not applicable"
+would read as a pass for something nobody measured. The record
+is a `blocked` event in run.jsonl, a `Blocked` section in report.md,
+`blocked_tests` in the run summary, and `blocked` in the web GUI's failures.
+A run that was canceled still ends `canceled`, with the blocked test named in
+its reason: nothing after the cancellation ran either.
+`run-suite --dry-run` lists them and exits 1, because a dry run that exits 0
+says this host can run the suite. Each record belongs to the host it is
+about, so another bench's missing hub does not fail this run.
+`validate-plan --hardware` refuses both outright, as it does every other
+absence.
+
+A suite left with nothing at all to run is still refused at planning, as it
+was: the refusal names the blocked step, and there is no run to fail. That is
+what `mac-polling` does on a bench with an unmapped board, since it names one
+step and one board (`Ubertooth: default`). `testplans/exclusive.yaml` names
+one step but `Ubertooth: each`, so the step runs for every board that can be
+left alone, is blocked for the rest, and the run fails. A mixed suite — one
+holding a blocked step beside steps that run — behaves the same way; no
+committed plan is one today, since `exclusive Ubertooth` appears only in those
+two and `alternate Ubertooths` in none.
+
+A `power:` mapping that is present but wrong (an unknown controller, a port
+the controller has not got, a controller that cannot switch one) is a registry
+to correct rather than a bench without hardware, so it is refused rather than
+recorded. Where, depends on how far the registry can be judged on its own:
+when it loads, for the drivers it knows how to check; otherwise when the plan
+compiles; and for a `driver` no controller is written for, when the run builds
+its controller, before any port is switched (`unsupported power-controller
+driver`). A serial too short to select an alternated board with is likewise a
+registry to correct, and fails planning.
 
 ### RF placement: where a board sits on the bench
 
@@ -380,8 +423,11 @@ come back after restoration. See [DESIGN.md, "Power-controller boundary"](DESIGN
 the exact rules and error precedence.
 
 Plans requiring `exclusive Ubertooth: true` compile deterministic power-off
-actions for every other registered Ubertooth on the host. Compilation fails if
-an extra board lacks a valid controller mapping or per-port VBUS capability.
+actions for every other registered Ubertooth on the host. An extra board on no
+power controller blocks the step and fails the run (see
+[Hardware a step is about](#hardware-a-step-is-about-blocked-not-left-out));
+a mapping that is there and wrong, including a controller without per-port
+VBUS switching, is refused instead.
 `run-suite` applies those actions only with `--allow-power-changes`; without
 it, the run fails before anything executes. A host with only the selected
 board registered switches nothing and needs no flag (see the read-only check
@@ -688,7 +734,9 @@ names can run (no case applies on any of them) fails planning, unless what
 the hosts lack is the hardware it binds, which is recorded instead (see
 [Hardware a registry has not got](#hardware-a-registry-has-not-got)). A test
 whose every case is not applicable finishes `not_applicable` and does not
-fail the run.
+fail the run. A test the bench has not got the hardware the test is *about*
+is `blocked` instead and does fail the run (see
+[Hardware a step is about](#hardware-a-step-is-about-blocked-not-left-out)).
 
 | Needs | Cases | Not applicable when |
 |---|---|---|
@@ -722,6 +770,12 @@ python -m ubertooth_harness run-suite \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref main --output runs
 ```
 
+Every test in that plan runs on any target, so the tests that need a peer
+device are not in it: run the `ble`, `connection`, `classic`, and `btbr`
+suites as well, wherever those devices are registered. The `btbr` suite is the
+only coverage of `ubertooth-btbr` and of the `btbr` firmware image, and it
+needs `--build --with-firmware --with-python`.
+
 | Test | `smoke` (fast plan) | `comprehensive` (release plan) |
 |------|---------------------|--------------------------------|
 | `Ubertooth util compositions` | `-V -s` and `-s -V` (the version answer's four lines in order, and no serial line, since `-V` ends the command whichever order it was written in) and every composable read-only report in one command | adds every other compatible read-only pair and a repeated `-U` (refused: two boards for one command) |
@@ -753,6 +807,7 @@ python -m ubertooth_harness run-suite \
 | `Capture known Classic device` | `classic` plan; an Ubertooth and two ESP32 Classic peers with the `acceptor` and `initiator` roles on one host (see [Classic test devices](#classic-test-devices-esp32-classic-peers)): both peers must already run `firmware/esp32-classic-peer`, which mandatory preflight checks by asking each one to identify itself; `esp32peer.py stream` then brings a Serial Port Profile link up between them, streams 200 bytes every 20 ms, and runs `ubertooth-rx` for `duration` while it holds. `ubertooth-rx -z` must list the piconet central's LAP in its survey results, and a run with no target must report at least ten packet lines carrying that LAP; the central is whichever peer pages, so its LAP is the initiator's. Afterwards the pair must report a link that never went down and at least fifty writes, both peers are reset to the firmware's boot state, the Ubertooth's channel, squelch and LEDs are restored, and other registered boards are guarded | adds `-z -r` (PCAPNG with link type 255) and the same survey with the peers' roles swapped, which must list the other board's LAP and not the first one's |
 | `Follow Classic Bluetooth piconet` | `classic` plan; the same two peers and the same bring-up: `ubertooth-rx -l <central LAP> -u <central UAP>` must report at least ten packet lines and none of another LAP (libbtbb is asked for one access code), and `-l`/`-u` for the peer that is *not* the central must report no packet at all | adds `-l` without `-u` (the UAP is recovered from the air) and `-l -u -q` (PCAP with link type 255) |
 | `Classic capture record fields` | `classic` plan; the same two peers and the same bring-up, but the check is inside the capture files: `bredrrecord.py` decodes every `LINKTYPE_BLUETOOTH_BREDR_BB` record of a `-l <central LAP> -u <central UAP> -q -r` capture, and each must carry the central's LAP and that LAP and UAP as its reference address, with every flag that describes a field in the record agreeing with that field, its access-code errors inside the limit the run allowed, and, where it holds a payload, that payload's length field agreeing with the bytes it holds and its CRC, recomputed with the reference UAP, agreeing with the one it carries (the bench's own traffic records no payload, so what fires live is the headers, addresses and flags), and the PCAPNG naming the central's LAP and UAP as the address it was following; the same with the peers' roles swapped must carry the other board's LAP instead | adds an EV3 audio link (`sco type ev3`, so the voice payload is on the air at the basic rate), whose records must include an `HV3/EV3/3-EV3` packet, and a survey, whose records must include one carrying a UAP the survey recovered for itself |
+| `Classic btbr console` | writes the selected board's firmware and transmits (`allow RF transmission: true`); `classic` plan, `btbr` suite, which a release runs alongside the release plan; an Ubertooth and one ESP32 Classic peer with the `acceptor` role on one host, and a run carrying both firmware images and the Python tools (`--build --with-firmware --with-python`). The run's `btbr` image is written and the board must report `btbr` and that revision by name (`bluetooth_rxtx` is a mismatch, and so is the revision alone), the peer is reset to its discoverable boot state and must report the device name its own address gives, and one `ubertooth-btbr` session then comes up — the startup the `btbr` image answers, and the prompt — and decides eleven checks down that prompt: `?` and `? inquiry`, a word that is no command, `?` on one, three addresses that are not ones and `page` with no address (each one `error:` line with the prompt up), `bdaddr` taking an address, an inquiry hearing the peer by BD_ADDR and by the name in its Extended Inquiry Response, a page reaching `LMP setup complete` with the peer's `LMP_NAME_RES` on the air, `idle` inside each of those two, an LMP request with no handler named once per opcode, and the capture on standard output with the progress on standard error. The cleanup always writes `bluetooth_rxtx` back, reads it, and resets the peer. The capture never leaves the driver: an inquiry hears every discoverable device in range, so only the records matched for the registered peer are reported and the rest are counted | adds paging an address nothing answers: `paging timeout` after the firmware's whole attempt, with no connection. `sessions: <n>` repeats the whole flash-and-session cycle (the `btbr-long` suite runs five) |
 | `Recover AFH map` | `classic` plan; the same two peers, with the initiator's controller told to keep a chosen set of channels before the link comes up, so the piconet's Adaptive Frequency Hopping map is known: `ubertooth-afh -e 0 -r` then runs for `duration` and must work that map out from the air. The map the link is really hopping over is read from the leader's controller at the start, the middle and the end of the capture and must be the same all three times; the recovered map must hold at least 90% of the channels in force and mark at most 70% of the channels out of force used. Two maps: channels 0 to 39, and the 20-channel minimum. Afterwards both peers are reset and the Ubertooth restored, as above | adds the tool's other path, `-t <duration>`, whose `AFH map:` line is judged on the channels it found, its stray channels reported with a looser ceiling because that map fills channel gaps and never drops a channel |
 | `Bluetooth inquiry scan` | `hci` plan, **never run on hardware** (no bench has a `Bluetooth adapter`, [#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)), so this describes what the cases check rather than a measured result: an Ubertooth, a `Bluetooth adapter`, and the two ESP32 Classic peers on one host. The adapter is read with `hciconfig` (up, and at the registered address: `hciN` is attach order) and `hcitool con` (no link at all), before the tool and first thing in the cleanup. `esp32peer.py stream` then holds the pair's link while `ubertooth-scan -b <device> -t <duration>` runs. `-s` must make the adapter's inquiry report the acceptor at its registered address under the name the peer firmware derives from its LAP; without `-s` the Ubertooth's sweep must report the piconet by the central's LAP with the `AFH map:` line that follows each result. `-t` bounds the sweep only -- the tool arms that alarm after the inquiry -- so the deadline allows for a whole inquiry and a name page per device | adds `-s -x`, which must hold the acceptor's address, name and LMP version in its own report block, and the piconet in the survey results; either exit status, because `-x` exits 1 when any device's report fails and it asks every device in range |
 | `Follow Classic piconet over HCI` | `hci` plan, **never run on hardware** (same adapter, same issue): `ubertooth-follow -t <central address> -b <device>` pages the piconet's leader from the adapter, reads its clock offset, and follows it; at least ten packet lines, all with the central's LAP. `-a` must additionally report `AFH map read: <n> of 79 channels in use` and print the map. The tool has no capture timeout (its `-t` is the target address), so the driver interrupts it, and the window it is given is the `duration` plus an allowance for everything the tool does before its capture starts: the page (25 s), the two clock reads, dropping the link it made again (10 s), and opening and setting up the board. The `duration` is therefore a floor on the capture, and a case costs about three times it. `-l`/`-u` without `-t` is deliberately not exercised | adds `-q`, whose PCAP every record of must carry the central's LAP as its own and that LAP and UAP as its reference address, with at least five records whose header HEC passed |
@@ -826,7 +881,8 @@ first (`-c2426 -c` reports 2426; fork 5b45b3e,
 `failed_guard_checks` (see [Guard Ubertooths](#guard-ubertooths)), `skipped_cases`, and `not_applicable_cases`
 (see [Host requirements](#host-requirements)); the run summary (`run_finished`
 in run.jsonl, and report.md) reports the run's `skipped_cases`,
-`not_applicable_cases`, and `not_applicable_tests`, so neither is hidden by an
+`not_applicable_cases`, `not_applicable_tests`, and `blocked_tests`, so none
+of them is hidden by an
 overall pass. Event schema version 1 is pre-release
 and has no stable consumers yet; field changes before the controller lands do
 not bump it.
@@ -1129,9 +1185,13 @@ its packages are used). The installed `ubertooth-specan-ui` and
 `ubertooth-btbr` must name that interpreter on their first line, and the
 manifest records its path and version. specan-ui itself needs numpy, qtpy, and
 a Qt binding (PyQt5/6 or PySide2/6) in that interpreter. `--with-firmware`
-also builds `bluetooth_rxtx.dfu` with the built `ubertooth-dfu`; the image is
-hashed into the manifest (a run that flashes its boards builds it even
-without the option). The built `ubertooth-util -V` must report both resolved
+also builds two firmware images with the built `ubertooth-dfu`:
+`bluetooth_rxtx.dfu`, the application image every other test needs on its
+board, and `btbr.dfu`, the alternate image `ubertooth-btbr` needs and nothing
+else runs. Both are hashed into the manifest, as the artifacts `test build`
+and `btbr build`, so `Classic btbr console` writes the alternate image and
+puts the application image back from the same commit (a run that flashes its
+boards builds them even without the option). The built `ubertooth-util -V` must report both resolved
 revisions on its `Host tools version:` line, without a modified-source `*`.
 
 The manifest records the toolchain (CMake, C compiler, pkg-config, libusb,
@@ -1239,7 +1299,8 @@ entries:
   Ubertooth, always selected by serial. The firmware version must be the
   application image (`bluetooth_rxtx`) built from the resolved commit, or the
   bare revision older firmware prints; a board left on another image, such as
-  `btbr`, is a mismatch.
+  `btbr`, is a mismatch, and the reason names the image it found, because that
+  board runs none of the other tools.
 
 Checks are deduplicated by host/resource and emit normal check/command events.
 Any mismatch prevents the first `test_started` event. This local slice verifies
@@ -1439,6 +1500,14 @@ five-minute capture each, which is what shows that a receive run and the
 pair's link hold up for minutes rather than seconds. The sampling
 soak, `Classic Bluetooth receive soak`, is still a backlog entry; sampling is
 what it waits for, not traffic.
+
+One peer on its own is also a device an Ubertooth can discover and connect to,
+because the boot role is discoverable and connectable. That is what the same
+plan's `btbr` suite uses: `Classic btbr console` writes the alternate `btbr`
+firmware image and pages the peer from the board. It is a suite of its own
+because it writes the board's firmware, so no test may follow it on that
+board; `btbr-comprehensive` adds the page nothing answers, and `btbr-long`
+repeats the flash-and-session cycle five times.
 
 Because the comprehensive coverage exchanges the two roles, both peers a plan
 binds must declare both: the registry's role list is what a plan picks a board
@@ -2229,11 +2298,14 @@ boards that start on different images get different images in the same round,
 and a board's final image depends on whether its own flash count is even.
 `flashes` is the total across boards and must divide evenly by the board count
 (for example, 100 flashes on two boards gives each 50). The step must list its
-hosts (`hosts: [Host_Linux]`, not `each`), because planning covers every
-selected host and one host that cannot alternate would stop the run
-everywhere; `validate-plan` reports this without a registry. Planning refuses `Ubertooth: each` with `alternate Ubertooths` (it
-would rotate once per board), a host with only one registered Ubertooth, and
-any board without a full 32-hex-digit serial. Every registered Ubertooth on
+hosts (`hosts: [Host_Linux]`, not `each`), so the plan says which benches are
+expected to have two boards; `validate-plan` reports this without a registry.
+Planning refuses `Ubertooth: each` with `alternate Ubertooths` (it
+would rotate once per board) and any board without a full 32-hex-digit serial.
+A named host with only one registered Ubertooth has nothing to alternate
+across, so the step is blocked there and the run fails, while the other hosts
+and the rest of the suite still run (see
+[Hardware a step is about](#hardware-a-step-is-about-blocked-not-left-out)). Every registered Ubertooth on
 the host is written, including boards the plan does not otherwise use. After every flash the target is read back and every
 other board must still report the revision it had when last verified. The
 report names the board for each flash and the per-board count, and

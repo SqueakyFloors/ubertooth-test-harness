@@ -56,12 +56,25 @@ only one bench has. What a host that is here cannot run is still a plan
 error: a platform it does not have, and a board placed differently from what
 the test needs, fail planning when every host the step names is here and none
 can run it (with a host this registry has not got among them, the step is
-left out instead); so
-do two absences that are still to be decided, `alternate Ubertooths` on a
-one-board host and `exclusive Ubertooth` with an unmapped board
-([#269](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/269)).
+left out instead).
 `validate-plan --hardware <registry>` refuses the absence too, since there
 the bench is named on purpose (README, "Hardware a registry has not got").
+
+**Hardware a step is about.** Two absences are not left out quietly, because
+the missing hardware is the subject of the test: `alternate Ubertooths` on a
+host with one registered Ubertooth, and `exclusive Ubertooth` where another
+registered board is on no power controller. Such a step is recorded as
+**blocked** before the run; every unrelated step still compiles and runs, and
+the run finishes failed, so a gate nobody measured never reads as a pass.
+`run-suite --dry-run` lists the blocked steps and exits 1. A suite whose only
+step is blocked is still refused at planning, naming it, since there is
+nothing left to run. A `power:` mapping
+that is present but wrong (an unknown controller, a port the controller has
+not got, a controller that cannot switch one) is a registry to correct, so it
+is refused rather than recorded: when the registry loads where it can be
+checked there, when the plan compiles where planning can tell, and for a
+`driver` no controller is written for, when the run builds its controller,
+before any port is switched.
 
 **RF placement.** Every test with a hardware role also accepts `rf:`, one
 requirement per role, which says what the role's placement on the bench must
@@ -2040,6 +2053,106 @@ access code that matched and a record's header decodes without a clock of the
 piconet. Whether the clock recovery should manage it is the fork's question,
 not this test's.
 
+## Classic btbr console
+
+**What it does.** Writes the `btbr` firmware image to the board, checks the
+board reports that image, drives one `ubertooth-btbr` console session against
+a registered ESP32 Classic peer, and always writes the application image back.
+It is the only test that puts a firmware image other than `bluetooth_rxtx` on
+a board, and the only one that runs `ubertooth-btbr`.
+
+**Theory of operation.** `ubertooth-btbr` needs the separate `btbr` image and
+nothing else runs it, so a board is set up for one tool or for all the others.
+Three things make the answers knowable in advance.
+
+The image identity: `ubertooth-util -v` names the image the firmware was built
+from ahead of the revision, so the board must report `btbr` and the run's
+revision after the write and `bluetooth_rxtx` and the same revision after the
+restore. Reading the revision alone would pass a board on either image, and
+the application-image check every other board gets would turn this board down.
+
+The peer: the ESP32 Classic peer is discoverable and connectable from boot
+(see [`hardware.md`](hardware.md)), its BD_ADDR is in the registry, and the
+firmware builds its device name from that address, so both are known before
+the run. An inquiry therefore has to hear it, and a page has to reach a device
+that is in page scan. The peer answers the central's LMP name request with that
+same name, which says on the air which device replied rather than that
+something did. The reset before the session reads the board's own name and
+checks it is the one the address gives, so the session is not left looking for
+a name no board on the bench answers with.
+
+The prompt: a word that is no command, `?` on a word that is no command, and
+an address that is empty, not hex, or too long are each one `error:` line with
+the prompt left up, and none of them reaches the radio. That is the half of
+malformed input a shared bench can produce safely.
+
+The session is driven by
+[`btbrconsole.py`](../ubertooth_harness/btbrconsole.py), which starts the tool
+once, runs every check down the same prompt, and reports one line per check:
+the board has to be flashed before the session and restored after it, so a
+second session would cost two more firmware writes.
+
+**Hardware and arguments.** One `Ubertooth` and one ESP32 Classic peer as
+`acceptor`; a required `allow RF transmission: true`, because the board
+transmits an inquiry train, a page train, and then holds a connection as the
+piconet central; `coverage:`; and `sessions:` (default 1) for how many
+flash-and-session cycles to run. The default RF placement is an ordinary link,
+so the planner keeps it off an attenuated board, and other registered
+Ubertooths on the host are guarded.
+
+The case needs a Linux host (the peer is reached through `/dev/serial/by-id`),
+the Python tools, and both firmware images, and says so as needs, so a host or
+a run that cannot do it leaves the case out before anything is flashed.
+`run-suite --build --with-firmware --with-python` is the run that satisfies it;
+`--artifact "btbr build=PATH"` and `--artifact "test build=PATH"` name the
+images by hand. A controller or GUI run cannot ask for those build options yet
+([#257](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/257)).
+
+**Expected outcome.** One case per session. The startup and the prompt come
+first, and a session that does not reach the prompt fails there. Then smoke
+decides 11 checks: `?`, `? <command>`, a word that is no command, `?` on one,
+three addresses that are not ones, `page` with no address, `bdaddr`, the
+inquiry, the page and the LMP exchange, the once-per-opcode report of an LMP
+request with no handler, and the split between the capture on standard output
+and the progress on standard error (`idle` is checked inside the inquiry and
+the page). Comprehensive decides a twelfth: paging an address nothing answers
+must end in `paging timeout` with no connection. The report says how many checks passed,
+how many failed, and how many never ran, so a session that stopped early is not
+read as a pass. The cleanup always writes the application image back, reads it,
+and resets the peer; a cleanup failure fails the case, so the board cannot be
+left on `btbr` quietly.
+
+The capture itself never leaves the driver. An inquiry hears every discoverable
+device in range, so passing it on would put third-party addresses and device
+names into the run record; the checks read it in memory and report only the
+records they matched for the registered peer, with the other devices counted
+and not named.
+
+Measured on the lab bench at fork `b2cd6c68`: each firmware write took 4 s,
+the prompt came up in about 2 s, an inquiry heard the peer in about 2 s, a page
+connected in about 7 s, and a page nothing answers reported its timeout after
+the firmware's whole attempt of about 45 s. The catalog estimate is 60 s per
+session for smoke and 115 s for comprehensive.
+
+**Known limits.** A pass says the image runs, the prompt answers, and the
+board can run an inquiry and hold a connection with one peer. It says nothing
+about `inquiry_scan`, `page_scan`, `discoverable`, `l2ping`, or `monitor`:
+answering an inquiry or a page needs something on the bench to make one, and
+`monitor` is a race against a real peripheral that often takes several
+attempts. The refusals leave out an address shorter than six bytes, which the
+tool takes today and acts on as a different address
+([ubertooth#1075](https://github.com/SqueakyFloors/ubertooth/issues/1075)); a
+case for it would pin that rather than check it. Encryption is not reachable:
+`btbr` does not implement it.
+
+The unhandled-opcode check leans on the peer. Measured on the bench on
+2026-11-01: with the link up, the peer sent `LMP_DECR_POWER_REQ` about four
+times a second for the whole connection, this link layer refused each one, and
+the tool named the opcode in exactly one `warning:` line. So a connection held
+for the hold brings one, and the check requires that, because a check that
+decided nothing should not read as a pass; a peer firmware that stopped asking
+would fail it, and the reason says why.
+
 ## Recover AFH map
 
 **What it does.** The same two peers hold a piconet whose Adaptive Frequency
@@ -2524,7 +2637,9 @@ command line passes, so this test runs from the command line; the GUI says so
 for any suite that names it. `alternate Ubertooths: true` rotates the writes across every
 registered Ubertooth on the host, in alias order; then `flashes` must divide
 evenly by the board count, `hosts:` must name its hosts rather than `each`,
-and `Ubertooth: each` is refused. The test establishes the firmware it
+and `Ubertooth: each` is refused. A named host with only one registered
+Ubertooth cannot alternate anything, so the step is blocked there and the run
+fails rather than passing without it (see "Hardware a step is about"). The test establishes the firmware it
 verifies, so preflight checks only the board's serial and not its revision,
 and the test must be the last one on that board in the suite.
 
@@ -2615,9 +2730,14 @@ no-selector serial, and restores and reads back every original power state on
 success, failure, or cancellation.
 
 **Known limits.** It needs a switchable hub, so it is Linux-and-power-control
-only. Unknown or unpowerable extra Ubertooths fail closed rather than being
-ignored. The follow case proves the mode kept running, not that it captured
-anything.
+only. Extra Ubertooths fail closed rather than being ignored: one the registry
+has on no power controller blocks the step, and one that turns up unregistered
+during the run fails the isolation check. `testplans/exclusive.yaml` selects
+`Ubertooth: each`, so on a bench with one unmapped board the step runs for
+every board that can be left alone, is blocked for the rest, and the run
+fails; with no board that can be left alone there is nothing to run and the
+suite is refused at planning. The follow case proves the mode kept running,
+not that it captured anything.
 
 ## MAC polling soak
 
@@ -2643,7 +2763,11 @@ consecutive misses:`, and `maximum restarts:`.
 
 **Expected outcome.** No implementation; only a `runnable: false` plan may
 name it. Its resource and power manifest already compiles, including every
-required power-off action.
+required power-off action. On a host where another registered board is on no
+power controller the step is blocked, as `Exclusive Ubertooth topology` is;
+since `mac-polling.yaml` holds this one step and selects `Ubertooth: default`,
+that leaves the suite nothing to run and planning refuses it, naming the
+blocked step.
 
 **Known limits.** What counts as a pass is not established beyond the bounds
 the arguments name.
