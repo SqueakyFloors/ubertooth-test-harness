@@ -17,6 +17,7 @@ from typing import Callable, Mapping, Sequence
 from ubertooth_harness.cancellation import CancellationToken
 from ubertooth_harness.executor import CommandExecutor, CommandResult
 from ubertooth_harness.manifest import FileIdentity, SourceRevision
+from ubertooth_harness.patterns import APPLICATION_IMAGE, BTBR_IMAGE
 from ubertooth_harness.preflight import HOST_VERSION_LABEL, host_version_patterns
 from ubertooth_harness.pytools import PYTHON_ENV, PYTHON_TOOLS_ENV
 from ubertooth_harness.rawlog import record_output
@@ -39,6 +40,19 @@ _FIRMWARE_HINTS = {
     "macos": "brew install --cask gcc-arm-embedded",
     "linux": "sudo apt install gcc-arm-none-eabi make",
 }
+
+# The firmware directories a --with-firmware build makes a .dfu from. The
+# application image is what every other test needs on its board; `btbr` is
+# the image ubertooth-btbr needs and nothing else runs, so a board is set up
+# for one or the other (host/doc/ubertooth-btbr.md, FIRMWARE). Building both
+# here is what lets a test flash btbr and put the application back from
+# artifacts of the same commit.
+FIRMWARE_IMAGES = (APPLICATION_IMAGE, BTBR_IMAGE)
+# Run-manifest artifact names of the two images, as a plan and --artifact
+# write them. "test build" is the application image every other test needs;
+# plan.image_label() turns either into the label a case asks for.
+TEST_BUILD_ARTIFACT = "test build"
+BTBR_BUILD_ARTIFACT = "btbr build"
 
 
 @dataclass(frozen=True)
@@ -68,17 +82,32 @@ class BuildPlan:
     commands: tuple[BuildCommand, ...]
     # Interpreter the Python tools are built for (ENABLE_PYTHON=ON), or None.
     python: str | None = None
+    # The firmware directories this plan makes a .dfu from, when it builds
+    # firmware at all. A run that asked for --with-firmware builds both; a
+    # run that only needs to flash its boards builds the application image
+    # alone, so a plan that never touches the alternate one does not depend
+    # on it building.
+    firmware_images: tuple[str, ...] = FIRMWARE_IMAGES
 
     @property
     def bin_dir(self) -> Path:
         return self.prefix / "bin"
 
+    def image(self, name: str) -> Path:
+        """The .dfu a firmware image's own directory builds."""
+        return (
+            self.work_dir / "src" / "ubertooth" / "firmware" / name / f"{name}.dfu"
+        )
+
     @property
     def firmware_image(self) -> Path:
-        return (
-            self.work_dir / "src" / "ubertooth" / "firmware" / "bluetooth_rxtx"
-            / "bluetooth_rxtx.dfu"
-        )
+        """The application image every other test needs on its board."""
+        return self.image(APPLICATION_IMAGE)
+
+    @property
+    def btbr_image(self) -> Path:
+        """The alternate image ubertooth-btbr needs, and nothing else runs."""
+        return self.image(BTBR_IMAGE)
 
     def environment(self, base: Mapping[str, str] | None = None) -> dict:
         """Process environment for build commands and for testing the build."""
@@ -198,6 +227,7 @@ def plan_build(
     extra_include_dir: str | None = None,
     jobs: int | None = None,
     python: str | None = None,
+    firmware_images: Sequence[str] = FIRMWARE_IMAGES,
 ) -> BuildPlan:
     if platform not in ("macos", "linux"):
         raise BuildError(f"unsupported build platform: {platform}")
@@ -308,15 +338,22 @@ def plan_build(
         ),
     ]
     if with_firmware:
-        commands.append(
-            BuildCommand(
-                "firmware-build",
-                "Build bluetooth_rxtx firmware",
-                ("make", "-C",
-                 str(work / "src" / "ubertooth" / "firmware" / "bluetooth_rxtx"),
-                 f"DFU_TOOL={prefix / 'bin' / 'ubertooth-dfu'}"),
+        for image in firmware_images:
+            # The application image keeps the step ID it has always had, so
+            # a transcript of an older run reads the same.
+            step_id = (
+                "firmware-build" if image == APPLICATION_IMAGE
+                else f"firmware-build-{image}"
             )
-        )
+            commands.append(
+                BuildCommand(
+                    step_id,
+                    f"Build {image} firmware",
+                    ("make", "-C",
+                     str(work / "src" / "ubertooth" / "firmware" / image),
+                     f"DFU_TOOL={prefix / 'bin' / 'ubertooth-dfu'}"),
+                )
+            )
     commands.append(
         BuildCommand(
             "verify-host-version",
@@ -328,7 +365,7 @@ def plan_build(
     )
     return BuildPlan(
         work, prefix, platform, ubertooth, libbtbb, with_firmware,
-        host_flags, tuple(commands), python,
+        host_flags, tuple(commands), python, tuple(firmware_images),
     )
 
 
@@ -703,9 +740,10 @@ class Builder:
             FileIdentity.from_path(f"built {path.name}", path) for path in libraries
         ]
         if plan.with_firmware:
-            artifacts.append(
-                FileIdentity.from_path("built bluetooth_rxtx.dfu", plan.firmware_image)
-            )
+            artifacts += [
+                FileIdentity.from_path(f"built {image}.dfu", plan.image(image))
+                for image in plan.firmware_images
+            ]
         return tuple(artifacts)
 
 
