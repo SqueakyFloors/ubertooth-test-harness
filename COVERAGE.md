@@ -15,7 +15,8 @@ from the harness catalog (`ubertooth_harness/catalog.py`,
 `ubertooth_harness/transitions.py`, `ubertooth_harness/util_cases.py`,
 `ubertooth_harness/receive_cases.py`, `ubertooth_harness/dfu_cases.py`,
 `ubertooth_harness/refusal_cases.py`, `ubertooth_harness/dfu_host_cases.py`,
-`ubertooth_harness/util_refusal_cases.py`), its plans (`testplans/*.yaml`) and its
+`ubertooth_harness/util_refusal_cases.py`, `ubertooth_harness/btbr_cases.py`),
+its plans (`testplans/*.yaml`) and its
 preflight, flash, and guard code. Profiles: **smoke** runs in the `fast` plan,
 **comprehensive** in the `release` plan; tests without a profile name their
 plan. The `mac` plan picks per test what a Mac host changes (see the README),
@@ -355,10 +356,44 @@ A stray word with no file option, `-h stray`, a bare `-`, and `-- -x` are refuse
 
 ## ubertooth-btbr (Python)
 
+Needs the separate `btbr` firmware image, which no other tool runs.
+`Classic btbr console` (the `btbr` suite of the `classic` plan, which a
+release runs alongside the `release` plan) writes that image to the board,
+drives one console session against a registered ESP32 Classic peer, and
+writes `bluetooth_rxtx` back in its cleanup. Linux only, and the run must
+carry both images and the Python tools
+(`--build --with-firmware --with-python`).
+
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
-| `-f <n>` | frequency offset | Hard | Needs the `btbr` firmware, not `bluetooth_rxtx`; interactive console |
-| `-b <n>` | max access-code errors | Hard | Same |
+| `-U <index\|serial>` | device selection | Covered | Classic btbr console: the session opens the board the case selected by serial, and the report names it |
+| `-f <n>` | frequency offset | Not covered | The session leaves the radio's `MOD_OFFSET` as the firmware set it; nothing a capture shows would say the register was written |
+| `-b <n>` | max access-code errors | Not covered | A higher value finds more packets and more noise, so a count over the air would not say whether it took effect |
+| `-h` | usage | Not covered | No case runs it; `Host CLI surface` covers the C tools' `-h`, not this one |
+| `-V` | version | Not covered | It answers from whatever image the board carries, by running `ubertooth-util -V`; no case asks it |
+
+Prompt commands (`Classic btbr console`, one session, smoke unless noted):
+
+| Command | Status | Harness test / notes |
+|---|---|---|
+| `?`, `? <command>` | Covered | `?` lists the ten commands the test names; `? inquiry` describes it |
+| `inquiry` | Covered | The registered peer answers with its BD_ADDR, and its name is in the Extended Inquiry Response |
+| `page <BD_ADDR>` | Covered | Connects to the peer, reaches `LMP setup complete`, and the peer's `LMP_NAME_RES` on the air carries its registered name. Comprehensive also pages an address nothing answers: `paging timeout`, no connection |
+| `bdaddr <BD_ADDR>` | Partial | A good address is set and echoed with the sync word; an empty, non-hex, or too-long one is refused. An address shorter than six bytes is left out: the tool takes one and acts on a different address ([ubertooth#1075](https://github.com/SqueakyFloors/ubertooth/issues/1075)) |
+| `idle` | Covered | Stops the inquiry and then the connection; the firmware reports it and the prompt comes back |
+| a word that is no command | Covered | `error: no such command '<word>'`, prompt up |
+| `? <no such command>` | Covered | `error: no help on '<word>'`, prompt up |
+| `inquiry_scan`, `page_scan`, `discoverable` | Hard | Answering an inquiry or a page needs something on the bench to make one; the ESP32 peer's shell cannot |
+| `l2ping <BD_ADDR>` | Not covered | Would page and then exchange L2CAP echo packets; no case yet |
+| `monitor <BD_ADDR>` | Hard | A race against the real peripheral, which often takes several attempts |
+| `exit`, `q`, `x`, Ctrl-D | Partial | `exit` must end the session with status 0; `q`, `x`, and Ctrl-D are not run |
+
+| Behavior | Status | Harness test / notes |
+|---|---|---|
+| the `btbr` image is on the board | Covered | `ubertooth-util -v` must name `btbr` at the run's revision after the write, and `bluetooth_rxtx` at the same revision after the cleanup; `-V`'s build string is checked too |
+| output streams | Covered | The capture records are on standard output and the prompt and progress on standard error, with nothing of either on the other |
+| an LMP request with no handler | Covered | Refused and named in one `warning:` line per opcode, not one per packet |
+| encryption | N/A | `btbr` does not implement it |
 
 ## btle-extcap (Python, Wireshark extcap; not installed by CMake)
 
@@ -456,7 +491,12 @@ A test that fails cleanly (device verified restored, guards unchanged) no longer
 - **Needs a second Ubertooth:** the `ubertooth-util -n`/`-e`/`-m` range test
   (Two-device range test, `range` plan), `-U all` and no-selector listing
   (Multi-board selection).
-- **Other firmware:** `ubertooth-btbr`.
+- **Other firmware:** done (#249): `Classic btbr console` builds the `btbr`
+  image beside the application one, writes it, runs `ubertooth-btbr` against a
+  registered ESP32 Classic peer, and writes the application image back. Still
+  out of reach there: `inquiry_scan`, `page_scan`, and `discoverable` (nothing
+  on the bench makes an inquiry or a page), and `monitor` (a race against a
+  real peripheral).
 - **Does nothing:** `ubertooth-tx`.
 
 ## Suggested next tests

@@ -63,11 +63,27 @@ class EstimateTests(unittest.TestCase):
         self.assertLessEqual(set(ESTIMATES), set(self.catalog.names))
 
     def test_comprehensive_takes_longer_than_smoke(self):
+        def rate(estimate):
+            return estimate.per_count[1] if estimate.per_count else 0.0
+
         for name, profiles in ESTIMATES.items():
-            if "smoke" in profiles:
-                with self.subTest(name):
-                    self.assertLess(profiles["smoke"].fixed_s,
-                                    profiles["comprehensive"].fixed_s)
+            if "smoke" not in profiles:
+                continue
+            smoke, comprehensive = profiles["smoke"], profiles["comprehensive"]
+            with self.subTest(name):
+                # Each part against its own, so a profile cannot pay for a
+                # larger fixed cost out of a smaller rate: the fixed part, the
+                # per-second rate, and the per-count rate.
+                self.assertLessEqual(smoke.fixed_s, comprehensive.fixed_s)
+                self.assertLessEqual(smoke.per_duration,
+                                     comprehensive.per_duration)
+                self.assertLessEqual(rate(smoke), rate(comprehensive))
+                # And comprehensive must cost more somewhere.
+                self.assertTrue(
+                    smoke.fixed_s < comprehensive.fixed_s
+                    or smoke.per_duration < comprehensive.per_duration
+                    or rate(smoke) < rate(comprehensive),
+                    "comprehensive is no dearer than smoke anywhere")
 
     def test_coverage_selects_the_profile(self):
         definition = self.catalog.get("Argument validation")

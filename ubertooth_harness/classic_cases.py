@@ -191,17 +191,27 @@ def _peer(resource_identities: Mapping, role: str, test_name: str,
     except esp32peer.PeerError as error:
         raise StateCaseError(f"{test_name}: {role} {error}") from error
     lap, uap = esp32peer.address_parts(address)
-    # A registry may write the LAP and UAP down beside the address, for a
-    # person reading it. A note that disagrees would send this test looking
-    # for the wrong piconet, so it is refused rather than ignored.
-    for key, derived in (("LAP", lap), ("UAP", uap)):
+    name = esp32peer.device_name(address)
+    # A registry may write the LAP, the UAP and the name down beside the
+    # address, for a person reading it. All three follow from the address, so
+    # a note that disagrees would send this test looking for the wrong piconet
+    # or the wrong name: it is refused rather than ignored.
+    for key, derived in (("LAP", lap), ("UAP", uap), ("name", name)):
         written = identity.get(key)
-        if written is not None and str(written).lower() != derived:
+        if written is None:
+            continue
+        if str(written).strip().lower() != derived.lower():
             raise StateCaseError(
                 f"{test_name}: the {role}'s registered {key} is {written}, but "
                 f"its BD_ADDR {address} gives {derived}")
     return {"serial": serial, "address": address, "device": device,
-            "lap": lap, "uap": uap, "alias": resources.get(role, "")}
+            "lap": lap, "uap": uap, "alias": resources.get(role, ""),
+            # The name the board's Extended Inquiry Response and its answer to
+            # an LMP name request carry; the firmware builds it from the
+            # board's own LAP, so it identifies the board on the air.
+            "name": name,
+            # The address as the btbr capture writes it, with no separators.
+            "bdaddr": address.replace(":", "").lower()}
 
 
 def _pair(resource_identities: Mapping, test_name: str,

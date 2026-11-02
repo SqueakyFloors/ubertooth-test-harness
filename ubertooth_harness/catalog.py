@@ -25,9 +25,9 @@ from ubertooth_harness.patterns import (
 from ubertooth_harness.resources import ESP32_CLASSIC_PEER
 from ubertooth_harness.stateful import StateCaseError, coverage_profile
 from ubertooth_harness import (
-    advertiser_cases, afh_cases, boardstate_cases, capture_failure_cases,
-    classic_cases, connection_cases, dfu_cases, dfu_host_cases,
-    interrupt_cases, python_cases, receive_cases,
+    advertiser_cases, afh_cases, boardstate_cases, btbr_cases,
+    capture_failure_cases, classic_cases, connection_cases, dfu_cases,
+    dfu_host_cases, interrupt_cases, python_cases, receive_cases,
     refusal_cases, tool_cases, transitions, tshark_cases, util_cases,
     util_refusal_cases,
 )
@@ -72,6 +72,21 @@ def _platforms(value):
     if len(set(normalized)) != len(normalized):
         raise CatalogError("platforms must not contain duplicates")
     return normalized
+
+
+# Flash-and-session cycles `Classic btbr console` will run. Each writes the
+# board's firmware twice, so the ceiling is what the `btbr-long` suite needs
+# with room above it, not a limit of the code.
+MAX_BTBR_SESSIONS = 20
+
+
+def _btbr_sessions(value):
+    count = _positive_integer(value)
+    if count > MAX_BTBR_SESSIONS:
+        raise CatalogError(
+            f"sessions must be 1-{MAX_BTBR_SESSIONS} (got {count}): each one "
+            "writes the board's firmware twice")
+    return count
 
 
 def _positive_integer(value):
@@ -886,6 +901,15 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     "Classic capture record fields": _profiles(
         Estimate(45.0, per_duration=2), Estimate(95.0, per_duration=4)
     ),
+    # Per flash-and-session cycle, measured on the lab bench: two firmware
+    # writes of about 4 s, the version reads, the peer reset, and a console
+    # session whose radio checks end as soon as their answer arrives.
+    # Comprehensive adds the page nothing answers, which costs the firmware's
+    # whole 45 s page attempt.
+    "Classic btbr console": _profiles(
+        Estimate(0, per_count=("sessions", 60.0)),
+        Estimate(0, per_count=("sessions", 115.0)),
+    ),
     # ESTIMATE_PENDING_HW
     # Each case brings the pair up, sets the channel map, captures for the
     # duration, and judges the recovery: about 20 s around a capture, and the
@@ -912,6 +936,7 @@ RF_DEFAULTS: Mapping[str, Mapping[str, PlacementRequirement]] = MappingProxyType
         "BLE extcap in tshark",
         "Capture known BLE advertiser",
         "Capture known BLE connection",
+        "Classic btbr console",
         "Follow a BLE connection across its end",
     )
 })
@@ -1392,6 +1417,39 @@ def builtin_catalog() -> TestCatalog:
             command_builder=classic_cases.record_fields_cases,
             continue_on_case_failure=True,
             guards_other_ubertooths=True,
+        ),
+        TestDefinition(
+            "Classic btbr console",
+            "ubertooth-btbr on the separate btbr firmware image: the board "
+            "reports that image by name, the prompt answers its refusals, an "
+            "inquiry hears a registered ESP32 Classic peer by address and by "
+            "name, a page connects to it and completes the LMP exchange, and "
+            "the cleanup always writes the application image back",
+            MappingProxyType({
+                "hosts": HOSTS, "Ubertooth": UBERTOOTH,
+                "acceptor": ArgumentRule(_selector, default="default"),
+                # Flash-and-session cycles, for a long suite; one by
+                # default, because each costs two firmware writes. Bounded,
+                # for the same reason: a plan asking for a hundred would
+                # write the board's flash two hundred times.
+                "sessions": ArgumentRule(_btbr_sessions, default=1),
+                # The board transmits: an inquiry train, a page train, and
+                # then a live connection it holds as the piconet central.
+                "allow RF transmission": ArgumentRule(_required_true,
+                                                      required=True),
+                "coverage": COVERAGE,
+            }),
+            MappingProxyType({
+                "Ubertooth": "Ubertooth", "acceptor": ESP32_CLASSIC_PEER,
+            }),
+            command_builder=btbr_cases.btbr_console_cases,
+            continue_on_case_failure=True,
+            guards_other_ubertooths=True,
+            # Every case writes the board's firmware and ends with the
+            # application image written back and read, so the test must be
+            # the last one on its board.
+            establishes_firmware=True,
+            writes_firmware=True,
         ),
         TestDefinition(
             "Recover AFH map",

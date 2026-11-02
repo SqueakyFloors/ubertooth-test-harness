@@ -8,6 +8,7 @@ from unittest import mock
 from ubertooth_harness import cli
 from ubertooth_harness.cancellation import CancellationToken
 from ubertooth_harness.build import (
+    APPLICATION_IMAGE,
     BUILT_TOOLS,
     BuildError,
     Builder,
@@ -88,9 +89,13 @@ class FakeBuildExecutor:
                 (bin_dir / tool).write_text(f"{tool} binary")
             (lib / "libubertooth.so.1.1").write_text("lib")
             (lib / "libubertooth.so").symlink_to("libubertooth.so.1.1")
-        if step.step_id == "firmware-build":
-            self.plan.firmware_image.parent.mkdir(parents=True, exist_ok=True)
-            self.plan.firmware_image.write_text("dfu")
+        if step.step_id.startswith("firmware-build"):
+            # One .dfu per firmware directory the plan builds.
+            image = self.plan.image(
+                step.step_id.removeprefix("firmware-build").lstrip("-")
+                or APPLICATION_IMAGE)
+            image.parent.mkdir(parents=True, exist_ok=True)
+            image.write_text("dfu")
         if step.step_id == "verify-host-version":
             if on_output:
                 on_output("stdout", self.host_version)
@@ -224,7 +229,8 @@ class BuilderTests(unittest.TestCase):
             )
             self.assertEqual(
                 [f"built {tool}" for tool in sorted(BUILT_TOOLS + BLUEZ_TOOLS)]
-                + ["built libubertooth.so.1.1", "built bluetooth_rxtx.dfu"],
+                + ["built libubertooth.so.1.1", "built bluetooth_rxtx.dfu",
+                   "built btbr.dfu"],
                 [item.name for item in result.artifacts],
             )
             events = load_events(Path(work) / "run.jsonl")

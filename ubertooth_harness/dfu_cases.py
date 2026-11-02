@@ -39,6 +39,7 @@ from ubertooth_harness.cases import guard_roles
 from ubertooth_harness.outputfiles import search_lines, text_lines
 from ubertooth_harness.patterns import IMAGE_NAME_PATTERN
 from ubertooth_harness.stateful import (
+    APPLICATION_IMAGE_LABEL,
     CAPTURE_DIR_KEY,
     EXPECTED_REVISION_KEY,
     Observation,
@@ -49,7 +50,7 @@ from ubertooth_harness.stateful import (
 )
 from ubertooth_harness.transitions import _serial, _util
 
-TEST_IMAGE = "test_build"
+TEST_IMAGE = APPLICATION_IMAGE_LABEL
 _CHECKER = str(Path(dfuimage.__file__).resolve())
 _REVISION_PATTERN = (
     rf"Firmware version:\s+{IMAGE_NAME_PATTERN}(?P<value>\S+)\s+\(API:"

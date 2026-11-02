@@ -13,6 +13,11 @@ import subprocess
 import sys
 
 from ubertooth_harness.build import (
+    APPLICATION_IMAGE,
+    BTBR_BUILD_ARTIFACT,
+    BTBR_IMAGE,
+    FIRMWARE_IMAGES,
+    TEST_BUILD_ARTIFACT,
     BuildError,
     Builder,
     homebrew_include_dir,
@@ -98,9 +103,11 @@ def _add_build_options(parser: argparse.ArgumentParser, *, optional: bool) -> No
     parser.add_argument(
         "--with-firmware",
         action="store_true",
-        help="also build bluetooth_rxtx firmware (needs arm-none-eabi-gcc) and "
-        "record the image; run-suite --build builds it anyway when it flashes "
-        "the boards, which it does unless its --no-flash-build is given",
+        help="also build both firmware images (needs arm-none-eabi-gcc) and "
+        "record them: bluetooth_rxtx, which every test but the btbr one needs "
+        "on its board, and btbr, the alternate image ubertooth-btbr needs; "
+        "run-suite --build builds them anyway when it flashes the boards, "
+        "which it does unless its --no-flash-build is given",
     )
     parser.add_argument(
         "--with-python",
@@ -170,7 +177,8 @@ def _signals_cancel(token: CancellationToken):
 
 
 def _build(
-    sources, work_dir: Path, with_firmware: bool, publisher, with_python=None, *, run_dir: Path
+    sources, work_dir: Path, with_firmware: bool, publisher, with_python=None, *,
+    run_dir: Path, firmware_images=FIRMWARE_IMAGES,
 ):
     """Build resolved sources into work_dir, recording into the run's publisher
     (long command output goes to run_dir's output/)."""
@@ -184,6 +192,7 @@ def _build(
         libbtbb=by_name["libbtbb"],
         work_dir=work_dir,
         platform=platform,
+        firmware_images=firmware_images,
         with_firmware=with_firmware,
         extra_include_dir=homebrew_include_dir(probe) if platform == "macos" else None,
         python=python,
@@ -694,12 +703,23 @@ def _prepare_run(
         built = _build(
             sources, run_dir / "build", args.with_firmware, publisher, args.with_python,
             run_dir=run_dir,
+            firmware_images=args.firmware_images,
         )
         artifacts = artifacts + built.artifacts
         names = {item.name for item in artifacts}
-        if built.plan.with_firmware and "test build" not in names:
+        if built.plan.with_firmware and TEST_BUILD_ARTIFACT not in names:
             # The firmware just built is the plan's test image.
-            artifacts += (FileIdentity.from_path("test build", built.plan.firmware_image),)
+            artifacts += (
+                FileIdentity.from_path(TEST_BUILD_ARTIFACT, built.plan.firmware_image),
+            )
+        if (built.plan.with_firmware
+                and BTBR_IMAGE in built.plan.firmware_images
+                and BTBR_BUILD_ARTIFACT not in names):
+            # The alternate image a case flashes to run ubertooth-btbr, from
+            # the same commit as the application image beside it.
+            artifacts += (
+                FileIdentity.from_path(BTBR_BUILD_ARTIFACT, built.plan.btbr_image),
+            )
         # Every test command runs the tools just built, not installed ones.
         executor = SubprocessCommandExecutor(_test_environment(sources, built.plan))
         _flash_build(args, sources, built, executor, publisher, run_dir, leases)
@@ -851,6 +871,8 @@ def _run_suite(args: argparse.Namespace) -> int:
     if args.no_flash_build and not args.build:
         raise HarnessError("--no-flash-build requires --build")
     args.flash_boards = ()
+    # Both images unless the firmware build is turned on only to flash.
+    args.firmware_images = FIRMWARE_IMAGES
     if args.build and not args.no_flash_build:
         # The boards whose firmware preflight requires get the run's own
         # firmware first; that needs the firmware build.
@@ -862,7 +884,11 @@ def _run_suite(args: argparse.Namespace) -> int:
             for alias in PreflightPolicy(registry, catalog).boards_needing_firmware(invocations)
         )
     if args.flash_boards and not args.with_firmware:
+        # Flashing needs the firmware build, but only the image it writes:
+        # a plan that never runs the alternate one must not fail because
+        # that one did not build.
         args.with_firmware = True
+        args.firmware_images = (APPLICATION_IMAGE,)
         if not args.dry_run and "arm-none-eabi-gcc" in missing_tools(
             _detected_platform(), True
         ):
@@ -915,6 +941,7 @@ def _dry_run(args, catalog, plan, host, invocations, not_applicable) -> int:
     capabilities = planned_capabilities(
         args.host, host.platform, build=args.build,
         with_python=bool(args.with_python), with_firmware=args.with_firmware,
+        with_btbr=BTBR_IMAGE in args.firmware_images,
         artifact_labels=labels,
     )
     print(f"dry run: {plan.name} / {args.suite} on {args.host}; nothing is built or run")

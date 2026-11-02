@@ -40,6 +40,9 @@ BLUEZ_TOOLS = ("ubertooth-scan", "ubertooth-follow")
 # install: present or not on the host (#148).
 HOST_TOOLS = ("tshark",)
 TEST_BUILD_LABEL = "test_build"
+# The alternate `btbr` firmware image, which only the ubertooth-btbr case
+# needs and only a run that asked for --with-firmware builds.
+BTBR_BUILD_LABEL = "btbr_build"
 _PLATFORM_NAMES = {"linux": "Linux", "macos": "macOS"}
 
 
@@ -55,6 +58,11 @@ class Needs:
     python_tools: bool = False
     # The run's firmware test build ("test build" image).
     firmware_build: bool = False
+    # The run's alternate firmware image ("btbr build"), which no other test
+    # needs: without this, a run carrying the test build alone would be
+    # judged able to run the btbr case and then stop at case planning for
+    # want of the image.
+    btbr_build: bool = False
     # Host programs it runs that nothing here installs (HOST_TOOLS).
     host_tools: tuple[str, ...] = ()
 
@@ -71,7 +79,8 @@ class Needs:
 
     def __bool__(self) -> bool:
         return bool(self.platforms or self.bluez_tools or self.python_tools
-                    or self.firmware_build or self.host_tools)
+                    or self.firmware_build or self.btbr_build
+                    or self.host_tools)
 
     def describe(self) -> str:
         parts = []
@@ -83,6 +92,8 @@ class Needs:
             parts.append("Python tools build")
         if self.firmware_build:
             parts.append("firmware build")
+        if self.btbr_build:
+            parts.append("btbr firmware image")
         return ", ".join(parts) or "nothing"
 
 
@@ -107,6 +118,7 @@ class HostCapabilities:
     bluez_tools: frozenset | None = None
     python_tools: bool | None = None
     firmware_build: bool | None = None
+    btbr_build: bool | None = None
     # The HOST_TOOLS this host has; None: not known yet.
     host_tools: frozenset | None = None
     # Where the tools come from: "build", "installed tools", or "not known".
@@ -122,6 +134,7 @@ class HostCapabilities:
             "bluez_tools": known(self.bluez_tools),
             "python_tools": self.python_tools,
             "firmware_build": self.firmware_build,
+            "btbr_build": self.btbr_build,
             "host_tools": known(self.host_tools),
         }
 
@@ -135,6 +148,7 @@ class HostCapabilities:
         return (f"{self.host} ({self.platform}, {self.basis}): BlueZ tools {tools}; "
                 f"Python tools build {flag(self.python_tools)}; "
                 f"firmware build {flag(self.firmware_build)}; "
+                f"btbr image {flag(self.btbr_build)}; "
                 f"host tools {host_tools}")
 
 
@@ -165,6 +179,9 @@ def unmet(needs: Needs, capabilities: HostCapabilities | None) -> str:
     if needs.firmware_build and capabilities.firmware_build is False:
         return ("needs a firmware build (run-suite --build --with-firmware, or "
                 "--artifact \"test build=PATH\")")
+    if needs.btbr_build and capabilities.btbr_build is False:
+        return ("needs the alternate btbr firmware image (run-suite --build "
+                "--with-firmware, or --artifact \"btbr build=PATH\")")
     if capabilities.host_tools is not None:
         for tool in needs.host_tools:
             if tool not in capabilities.host_tools:
@@ -193,6 +210,7 @@ def _installed_bluez(platform: str, path: str | None) -> frozenset:
 def planned_capabilities(
     host: str, platform: str, *, build: bool, with_python: bool, with_firmware: bool,
     artifact_labels: Iterable[str] = (), path: str | None = None,
+    with_btbr: bool | None = None,
 ) -> HostCapabilities:
     """What a run with these options will have, before it builds anything.
 
@@ -200,6 +218,9 @@ def planned_capabilities(
     or fails to build.
     """
     labels = set(artifact_labels)
+    # Only a run that asked for --with-firmware builds the alternate image;
+    # one that turned the firmware build on just to flash its boards does not.
+    with_btbr = with_firmware if with_btbr is None else with_btbr
     if build:
         bluez = frozenset(BLUEZ_TOOLS) if platform == "linux" else frozenset()
     else:
@@ -208,6 +229,7 @@ def planned_capabilities(
         host, platform, bluez,
         python_tools=bool(build and with_python),
         firmware_build=bool(build and with_firmware) or TEST_BUILD_LABEL in labels,
+        btbr_build=bool(build and with_btbr) or BTBR_BUILD_LABEL in labels,
         host_tools=_installed_host_tools(),
         basis="build" if build else "installed tools",
     )
@@ -233,6 +255,7 @@ def run_capabilities(
         host, platform, bluez,
         python_tools=bool(build and build.get("python")),
         firmware_build=TEST_BUILD_LABEL in labels,
+        btbr_build=BTBR_BUILD_LABEL in labels,
         host_tools=_installed_host_tools(),
         basis="build" if build else "installed tools",
     )

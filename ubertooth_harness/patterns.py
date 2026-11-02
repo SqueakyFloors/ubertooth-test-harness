@@ -38,12 +38,39 @@ VERSION_ANSWER = (
 # the harness only reads the revision off a board.
 IMAGE_NAME_PATTERN = r"(?:\S+\s+)?"
 FIRMWARE_VERSION_RE = re.compile(
-    rf"Firmware version:\s+{IMAGE_NAME_PATTERN}(?P<revision>\S+)\s+\(API:"
+    rf"Firmware version:\s+(?:(?P<image>\S+)\s+)?(?P<revision>\S+)\s+\(API:"
 )
+# The image name every test but the ubertooth-btbr one needs on a board, and
+# the alternate image that one flashes. A board carrying `btbr` runs none of
+# the other tools (host/doc/ubertooth-btbr.md, FIRMWARE), which is why the
+# preflight check below names the image it found rather than only saying the
+# identity did not match.
+APPLICATION_IMAGE = "bluetooth_rxtx"
+BTBR_IMAGE = "btbr"
 # The preflight identity check is stricter than the reads above: the run's
 # tests need the application image, so a board on another image (btbr, a
 # bench image) is a mismatch even when it was built from the same commit.
-APPLICATION_IMAGE_PATTERN = r"(?:bluetooth_rxtx\s+)?"
+APPLICATION_IMAGE_PATTERN = rf"(?:{APPLICATION_IMAGE}\s+)?"
+
+
+def matched_image(match: re.Match | None) -> str | None:
+    """The image name a match of FIRMWARE_VERSION_RE names, if it names one.
+
+    None where the line carries no image name, which is firmware older than
+    the info block (`Firmware version: 2020-12-R1 (API:1.07)`), where there
+    was no match, and where the match came from a pattern with no image group
+    at all, as the compile-info one has none.
+    """
+    if match is None:
+        return None
+    return match.groupdict().get("image")
+
+
+def firmware_image(output: str) -> str | None:
+    """The image name a `ubertooth-util -v` line in ``output`` reports."""
+    return matched_image(FIRMWARE_VERSION_RE.search(output))
+
+
 PART_ID_PATTERN = r"Part ID:\s+[0-9A-Fa-f]+"
 BOARD_ID_PATTERN = r"Board ID Number:\s+\d+"
 
@@ -113,6 +140,19 @@ def firmware_version_pattern(expected: str) -> str:
         rf"Firmware version:\s+{APPLICATION_IMAGE_PATTERN}"
         rf"{revision_pattern(expected)}(?:\s|\()"
     )
+
+
+def image_name_pattern(image: str) -> str:
+    """`ubertooth-util -v` output for a board carrying ``image``, by name.
+
+    The revision is deliberately left out: a case knows the run's revision
+    only while it runs, so it compares that through an observation, and this
+    pattern is what says which of the two images answered. The name is
+    required, which is what the application-image pattern above cannot do:
+    firmware older than the firmware info block reports a bare revision, and
+    every image other than `bluetooth_rxtx` is newer than that block.
+    """
+    return rf"Firmware version:\s+{re.escape(image)}\s+\S+\s+\(API:"
 
 
 def compile_info_pattern(expected: str) -> str:

@@ -104,3 +104,50 @@ suites:
         initiator: default
         coverage: smoke
         duration: 5m
+
+  # The alternate firmware image, end to end. It writes the board's firmware,
+  # so it is the only test in this suite: a test after it would run on an
+  # image this one put there, which mandatory preflight refuses. One
+  # flash-and-session cycle, about a minute, and the cleanup always writes
+  # `bluetooth_rxtx` back.
+  #
+  # The run has to carry both firmware images and the Python tools, because
+  # `ubertooth-btbr` is one of them: `run-suite --build --with-firmware
+  # --with-python`. Passing the images by hand works too
+  # (`--artifact "btbr build=PATH" --artifact "test build=PATH"`), but the
+  # tool still needs `--with-python`, and without either the case is left out
+  # as not applicable rather than failing.
+  #
+  # This suite is release coverage as well: it is the only test of
+  # `ubertooth-btbr` and of the `btbr` image, and `testplans/release.yaml`
+  # cannot hold it, because every test there runs anywhere and this one needs
+  # a Linux target with a registered peer. Run it alongside the release plan.
+  btbr:
+    - Classic btbr console:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        allow RF transmission: true
+        coverage: smoke
+
+  # Comprehensive adds the page nothing answers, which costs the firmware's
+  # whole 45 s page attempt.
+  btbr-comprehensive:
+    - Classic btbr console:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        allow RF transmission: true
+        coverage: comprehensive
+
+  # The repetition suite: five flash-and-session cycles, about five minutes,
+  # so a flash that only works the first time or a page that only connects
+  # once shows up. Ten firmware writes, so it holds the board throughout.
+  btbr-long:
+    - Classic btbr console:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        allow RF transmission: true
+        coverage: smoke
+        sessions: 5

@@ -145,6 +145,20 @@ ask for; only `defaults` puts that back.
 [`esp32peer.py`](../ubertooth_harness/esp32peer.py)'s `audio` mode does the
 whole sequence in one invocation, as `stream` does for the data link.
 
+Because the boot role is discoverable and connectable, one peer on its own is
+also a device an Ubertooth can discover and connect to, which is what
+`Classic btbr console` pages. That test binds one peer as `acceptor` and resets
+it before the session, so an earlier test's role, link, or `disc off` cannot
+reach it.
+
+The device name is what the peer answers an inquiry and an LMP name request
+with, and the firmware builds it from the board's own address
+(`UT-ESP32-` and the LAP in upper case) and will not let the shell set it. So
+the harness derives it rather than asking a registry for it, and the reset
+before a session checks the board's own against it. A registry may still write
+it down beside the address, as it may the LAP and the UAP, and then all three
+have to agree with the address.
+
 Registered with the bridge serial and the BD_ADDR its `status` reports (the
 factory MAC plus two in the last byte, so it too is fixed per board). Those
 two identity keys are the ones a run's known-target record reads
@@ -294,6 +308,7 @@ nothing in the harness can catch it.
 | Device | Source | Version | Built with | Flashed with |
 |---|---|---|---|---|
 | Ubertooth One | the [fork's](https://github.com/SqueakyFloors/ubertooth) `firmware/bluetooth_rxtx` | the resolved commit under test | `arm-none-eabi-gcc` | `ubertooth-dfu` |
+| Ubertooth One, alternate | the fork's `firmware/btbr` | the resolved commit under test | `arm-none-eabi-gcc` | `ubertooth-dfu` |
 | nRF52840 DK | [`firmware/nrf52840dk`](../firmware/nrf52840dk/README.md) | `utdk-1.4.0`, and `utdk-1.4.0-chansel1` for the algorithm 1 image | nRF Connect SDK v3.4.1 and its toolchain bundle | `nrfutil device program` |
 | ESP32 peer | [`firmware/esp32-classic-peer`](../firmware/esp32-classic-peer/README.md) | `utesp-1.5.0` | ESP-IDF v5.5.6 | `esptool`, through `idf.py flash` |
 
@@ -326,13 +341,40 @@ needs `arm-none-eabi-gcc`, and is refused up front without it.
 
 Guard boards are not flashed: preflight only requires their firmware API to be
 no older than the host tools'. Boards that a firmware-writing test
-(`Flash reliability`, `DFU images`) writes itself are not flashed either.
+(`Flash reliability`, `DFU images`, `Classic btbr console`) writes itself are
+not flashed either.
+
+### The alternate `btbr` image
+
+One tool, `ubertooth-btbr`, needs a different firmware image, and nothing else
+runs it: a board is set up for that image or for every other tool, and
+switching means reflashing it. A `--build --with-firmware` run therefore builds
+both images from the same commit and records both in its manifest, as
+`test build` (the application image) and `btbr build`. `Classic btbr console`
+is the only test that writes the alternate one; it writes the application image
+back in its cleanup, which runs after a failure or a cancellation too.
+
+A board left on `btbr` runs none of the other tools, so preflight names the
+image it found rather than only saying the identity did not match:
+
+```
+Firmware version: UT_Linux5 runs the btbr image at git-b2cd6c68, not
+bluetooth_rxtx, which the other tools need: flash it with this build
+(the default when building)
+```
+
+`ubertooth-util -v`, `-V` and `-w`, and `ubertooth-dfu`, are the commands that
+work on either image: the `btbr` firmware answers the version, firmware info,
+serial and watchdog requests, which is what those read. Everything else needs
+the application image. The watchdog monitor therefore keeps working across the
+session, except that `btbr` records no mode, so the mode field of its
+breadcrumb is empty.
 
 ### How the harness checks the running version
 
 | Device | Check |
 |---|---|
-| Ubertooth One | `ubertooth-util -U <serial> -v` must report the resolved revision, read before the flash (a board already on it is not written) and again after, up to 3 reads while the board re-enumerates |
+| Ubertooth One | `ubertooth-util -U <serial> -v` must report the resolved revision, and the image name in front of it must be the one wanted, read before the flash (a board already on it is not written) and again after, up to 3 reads while the board re-enumerates |
 | nRF52840 DK | the shell's `status` must report the pinned version; a board reporting anything else, or nothing, is flashed, and the version and address are read again afterwards |
 | ESP32 peer | the shell's `version` and `status` report it; the version the driver requires is pinned in [`targets.py`](../ubertooth_harness/targets.py) and a unit test keeps it in step with `main/peer.h` |
 
