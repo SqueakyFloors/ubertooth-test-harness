@@ -41,6 +41,7 @@ from ubertooth_harness.helpersteps import (
 )
 from ubertooth_harness.patterns import IMAGE_NAME_PATTERN
 from ubertooth_harness.stateful import (
+    APPLICATION_IMAGE_LABEL,
     EXPECTED_REVISION_KEY,
     POWER_CYCLE_PORT_KEY,
     REGISTRY_PATH_KEY,
@@ -53,7 +54,7 @@ from ubertooth_harness.stateful import (
 from ubertooth_harness.transitions import _serial, _util
 
 TEST_NAME = "Reset into invalid application"
-TEST_IMAGE = "test_build"
+TEST_IMAGE = APPLICATION_IMAGE_LABEL
 BAD_IMAGE = "unstartable.dfu"
 CONTROLLER_ROLE = "USB power controller"
 

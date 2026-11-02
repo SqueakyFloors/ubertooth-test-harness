@@ -433,10 +433,16 @@ class PreflightTests(unittest.TestCase):
             self.assertFalse(
                 failure(f"Firmware version: bluetooth_rxtx {revision} (API:1.35)\n"))
             # Another image at the run's own commit: the revisions name no
-            # difference, so the reason says what the output had to match.
-            for other in (f"btbr {revision}", f"bluetooth_rxtx git-other {revision}"):
-                self.assertIn("identity mismatch",
-                              failure(f"Firmware version: {other} (API:1.35)\n"))
+            # difference, so the reason names the image instead, because the
+            # other tools do not run on it.
+            btbr = failure(f"Firmware version: btbr {revision} (API:1.35)\n")
+            self.assertIn(f"runs the btbr image at {revision}, not "
+                          "bluetooth_rxtx", btbr)
+            self.assertNotIn("identity mismatch", btbr)
+            # A line no version pattern reads at all says what had to match.
+            self.assertIn("identity mismatch", failure(
+                f"Firmware version: bluetooth_rxtx git-other {revision} "
+                "(API:1.35)\n"))
             # A different revision is named as one, with how to fix it.
             other_revision = failure(
                 f"Firmware version: bluetooth_rxtx {revision}x (API:1.35)\n")

@@ -135,3 +135,12 @@ suites:
     - Raw receive replay:
         hosts: each
         coverage: comprehensive
+
+    # `Classic btbr console` is deliberately not here, although it is the only
+    # coverage of `ubertooth-btbr` and of the `btbr` firmware image. Every
+    # test in this plan runs on any host, and that one needs a Linux host with
+    # a registered ESP32 Classic peer: naming one host alias here would make
+    # the whole plan refuse to compile against a registry without it. It lives
+    # in the `btbr` suite of `testplans/classic.yaml` with the other
+    # peer tests, and a release runs that suite as well (README, "Before a
+    # release").
