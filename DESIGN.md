@@ -924,7 +924,10 @@ by the REST API and `/ws/live`.
   off, and follows what the chosen suite needs: `/api/plans` marks each test
   and suite `needs_*` where a case would be left out without the option and
   `requires_*` where the test cannot run without it at all, so the box is
-  ticked for the first and ticked and held for the second) → "Run". The controller
+  ticked for the first and ticked and held for the second; a suite's
+  `needs_artifacts` names an image no build makes, which only `--artifact`
+  passes, and the suite line then says a run started here is refused before
+  its tests) → "Run". The controller
   refuses a ref that is not in the list or a full commit ID (422). The run
   request carries the commit listed for the ref (the GUI sends the commit it
   showed; a ref that has moved since is refused with 409 and the page lists

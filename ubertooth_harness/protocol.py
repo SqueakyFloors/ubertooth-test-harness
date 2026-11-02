@@ -370,13 +370,19 @@ def _run_options(message: Mapping) -> str:
 
 
 # Checks across the fields of one message type, applied after every field of
-# that type validated on its own. No runner message type is named "run".
-COMBINATION_CHECKS: Mapping[str, Callable[[Mapping], str]] = {
+# that type validated on its own. One map per direction, so a runner message
+# type can never pick up a controller-only check.
+CONTROLLER_COMBINATIONS: Mapping[str, Callable[[Mapping], str]] = {
     "run": _run_options,
 }
+RUNNER_COMBINATIONS: Mapping[str, Callable[[Mapping], str]] = {}
 
 
-def _validate(message, schemas: Mapping[str, Mapping[str, Validator]]) -> dict:
+def _validate(
+    message,
+    schemas: Mapping[str, Mapping[str, Validator]],
+    combinations: Mapping[str, Callable[[Mapping], str]],
+) -> dict:
     if not isinstance(message, dict):
         raise ProtocolError("message must be a JSON object")
     version = message.get("version")
@@ -398,7 +404,7 @@ def _validate(message, schemas: Mapping[str, Mapping[str, Validator]]) -> dict:
     for field, check in schema.items():
         if not check(message[field]):
             raise ProtocolError(f"{message_type}: invalid {field}")
-    combination = COMBINATION_CHECKS.get(message_type)
+    combination = combinations.get(message_type)
     if combination is not None:
         problem = combination(message)
         if problem:
@@ -406,7 +412,7 @@ def _validate(message, schemas: Mapping[str, Mapping[str, Validator]]) -> dict:
     return message
 
 
-def _decode(text, schemas, max_bytes: int) -> dict:
+def _decode(text, schemas, max_bytes: int, combinations) -> dict:
     if isinstance(text, (bytes, bytearray)):
         raise ProtocolError("binary frames are not accepted")
     if not isinstance(text, str):
@@ -417,7 +423,7 @@ def _decode(text, schemas, max_bytes: int) -> dict:
         message = json.loads(text, parse_constant=_reject_constant)
     except (ValueError, RecursionError) as error:
         raise ProtocolError(f"message is not valid JSON: {error}") from error
-    return _validate(message, schemas)
+    return _validate(message, schemas, combinations)
 
 
 def _reject_constant(name):
@@ -426,25 +432,31 @@ def _reject_constant(name):
 
 def decode_controller_message(text) -> dict:
     """Strictly decode one controller -> runner message."""
-    return _decode(text, CONTROLLER_MESSAGES, MAX_INBOUND_MESSAGE_BYTES)
+    return _decode(
+        text, CONTROLLER_MESSAGES, MAX_INBOUND_MESSAGE_BYTES, CONTROLLER_COMBINATIONS
+    )
 
 
 def decode_runner_message(text) -> dict:
     """Strictly decode one runner -> controller message (controller side)."""
-    return _decode(text, RUNNER_MESSAGES, MAX_RUNNER_MESSAGE_BYTES)
+    return _decode(
+        text, RUNNER_MESSAGES, MAX_RUNNER_MESSAGE_BYTES, RUNNER_COMBINATIONS
+    )
 
 
-def _encode(message_type: str, fields: Mapping, schemas) -> str:
+def _encode(message_type: str, fields: Mapping, schemas, combinations) -> str:
     message = {"version": PROTOCOL_VERSION, "type": message_type, **fields}
-    _validate(message, schemas)
+    _validate(message, schemas, combinations)
     return json.dumps(message, sort_keys=True, allow_nan=False)
 
 
 def encode_runner_message(message_type: str, **fields) -> str:
     """Encode one runner -> controller message, validated against the schema."""
-    return _encode(message_type, fields, RUNNER_MESSAGES)
+    return _encode(message_type, fields, RUNNER_MESSAGES, RUNNER_COMBINATIONS)
 
 
 def encode_controller_message(message_type: str, **fields) -> str:
     """Encode one controller -> runner message (controller side and tests)."""
-    return _encode(message_type, fields, CONTROLLER_MESSAGES)
+    return _encode(
+        message_type, fields, CONTROLLER_MESSAGES, CONTROLLER_COMBINATIONS
+    )

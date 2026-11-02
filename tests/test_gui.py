@@ -452,6 +452,15 @@ class PlanTests(ControllerTestCase):
             {"Python tools"},
             {test["name"] for test in host["tests"] if test["needs_python_tools"]},
         )
+        # slow also names Flash reliability, which needs a published image no
+        # build makes: the listing says which, so the GUI can say the run
+        # would be refused (nothing can send an artifact over the protocol).
+        self.assertEqual(["KGV"], slow["needs_artifacts"])
+        self.assertEqual(
+            {"Flash reliability"},
+            {test["name"] for test in slow["tests"] if test["needs_artifacts"]},
+        )
+        self.assertEqual([], host["needs_artifacts"])
         # A suite of tests that need neither says so, test by test.
         ble = suites[("ble", "ble")]
         self.assertEqual((False, False),
@@ -470,6 +479,8 @@ class PlanTests(ControllerTestCase):
     def test_a_suite_of_tests_that_need_nothing_built_says_so(self):
         fields = ("needs_firmware_build", "needs_python_tools",
                   "requires_firmware_build", "requires_python_tools")
+        self.assertEqual([], build_needs(builtin_catalog(), "Host version")
+                         ["needs_artifacts"])
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "elsewhere.yaml").write_text(
@@ -727,17 +738,36 @@ class PageWiringTests(unittest.TestCase):
         )
         self.assertIn("box.disabled = !build || required.length > 0;", body)
         self.assertIn("cannot run without ", body)
+        # The note follows the box, so it never invites an untick of a box
+        # the operator has already unticked.
+        self.assertIn("sentences.push(box.checked", body)
         self.assertIn("Untick to run it without them.", body)
         # The note keeps the page's own cost sentence, names the tests that
         # need the option, and says when Build is what is missing.
         self.assertIn("const sentences = [option.cost];", body)
         self.assertIn('needed.join(", ")', body)
         self.assertIn("Needs Build.", body)
+        # A suite change starts the boxes again from what that suite needs.
+        suite_tests = self.js[self.js.index("function renderSuiteTests()"):
+                              self.js.index("function artifactWarning(")]
+        self.assertIn("for (const option of BUILD_OPTIONS) option.chosen = null;",
+                      suite_tests)
         # Every path that can change what the suite needs syncs the options.
         for caller in ("function renderSuiteTests()", "function start()"):
             section = self.js[self.js.index(caller):]
             self.assertIn("syncBuildOptions()", section[:section.index("\n  }")])
         self.assertNotIn("syncFlashBuild", self.js)
+
+    def test_a_suite_needing_an_image_no_build_makes_says_so(self):
+        # The build options cover every image a run can build; an image only
+        # --artifact can pass is named instead of silently failing the run.
+        body = self.js[self.js.index("function artifactWarning(suite)"):
+                       self.js.index("function syncBuildOptions()")]
+        self.assertIn("suite.needs_artifacts", body)
+        self.assertIn("an image no build makes", body)
+        self.assertIn("run-suite --artifact", body)
+        self.assertIn("refused", body)
+        self.assertIn("+ artifactWarning(suite)", self.js)
 
     def test_script_has_no_html_injection_sinks(self):
         for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write",

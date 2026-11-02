@@ -262,7 +262,7 @@ class BuildNeedsTests(unittest.TestCase):
         catalog = builtin_catalog()
         registry = FileResourceRegistry.load(ROOT / "hardware.example.yaml")
         compiler = PlanCompiler(catalog, registry)
-        undeclared, unbuildable = [], []
+        undeclared, unbuildable, compared = [], [], set()
         for path in sorted((ROOT / "testplans").glob("*.yaml")):
             plan = load_plan(path, catalog)
             for suite in plan.suites:
@@ -285,6 +285,7 @@ class BuildNeedsTests(unittest.TestCase):
                         continue
                     declared = definition.build_options()
                     required = definition.required_build_options()
+                    compared.add(definition.name)
                     for case in cases:
                         needs = getattr(case, "needs", NO_NEEDS)
                         artifacts = getattr(case, "artifacts", ())
@@ -302,13 +303,16 @@ class BuildNeedsTests(unittest.TestCase):
                                 f"{where}: build_required firmware build")
         self.assertEqual(
             [], sorted(set(undeclared)),
-            "declare these on the test as build_needs; steps not compared: "
-            + "; ".join(sorted(set(unbuildable))),
+            "declare these on the test as build_needs or build_required; "
+            "steps not compared: " + "; ".join(sorted(set(unbuildable))),
         )
-        # The comparison did reach the two tests this is about.
-        self.assertTrue(
-            catalog.get("DFU images").build_options().firmware_build
-            and catalog.get("Python tools").build_options().python_tools
+        # The cases of the tests this is about were among those compared, so
+        # a comparison that reached nothing cannot pass as a clean result.
+        self.assertEqual(
+            set(),
+            {"DFU images", "DFU image checks", "Python tools"} - compared,
+            f"compared {len(compared)} test(s); not compared: "
+            + "; ".join(sorted(set(unbuildable))),
         )
 
     def test_build_needs_carries_build_options_only(self):

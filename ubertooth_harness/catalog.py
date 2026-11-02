@@ -330,6 +330,13 @@ class TestDefinition:
     # image in their artifacts (or its command needs one), so a run without
     # it is refused rather than leaving a case out. Implies build_needs.
     build_required: Needs = NO_NEEDS
+    # Image labels the test needs that no build produces, so only
+    # ``--artifact "LABEL=PATH"`` can pass them: a published image to compare
+    # against. A run that does not carry them is refused before its tests,
+    # and the controller's run request has no way to send one, so a client
+    # that dispatches runs (the GUI) says so rather than starting a run that
+    # cannot finish.
+    needs_artifacts: tuple[str, ...] = ()
     # Expected wall time by coverage profile (DEFAULT_PROFILE for a test
     # without a coverage argument); see ESTIMATES.
     estimates: Mapping[str, Estimate] | None = None
@@ -1479,10 +1486,11 @@ def builtin_catalog() -> TestCatalog:
             writes_firmware=True,
             check_arguments=_check_alternation,
             # Its image sequence names the run's test build in every plan
-            # here, and a run without that image is refused; the published
-            # KGV image beside it still has to come from --artifact, which
-            # only the command line can pass.
+            # here, and a run without that image is refused.
             build_required=Needs(firmware_build=True),
+            # The known-good image it flashes in turn is a published release
+            # image, which no build produces.
+            needs_artifacts=("KGV",),
         ),
         stateful_test(
             "DFU images",

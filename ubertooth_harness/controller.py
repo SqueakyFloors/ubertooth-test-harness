@@ -1512,8 +1512,8 @@ ENDPOINTS = {
     "GET /api/targets/{host}": "one target",
     "POST /api/targets/{host}/runs": (
         "start a run: {ref, commit, plan, suite, tests, build, flash_build, "
-        "with_firmware, with_python}; the three build options apply only with "
-        "build, and with_firmware or with_python without it is refused"
+        "with_firmware, with_python}; flash_build is recorded false without "
+        "build, and with_firmware or with_python without build is refused"
     ),
     "GET /api/runs": "runs, newest first (?target=HOST)",
     "GET /api/runs/{run_id}": (
@@ -1658,7 +1658,12 @@ def create_app(controller: Controller):
             "invocations": planned_invocations(events, estimates=estimates),
             "stages": run_stage_estimates(
                 estimates, events, run.target, build=run.build,
-                with_firmware=run.with_firmware,
+                # A run that flashes its boards builds the firmware for that
+                # whether it asked for the image or not (run-suite turns
+                # --with-firmware on for it), and a firmware build is the
+                # longer kind; the run's own build_started record replaces
+                # this guess as soon as it arrives.
+                with_firmware=run.with_firmware or run.flash_build,
             ),
         }
 

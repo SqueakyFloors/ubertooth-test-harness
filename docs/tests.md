@@ -2072,8 +2072,9 @@ number of writes), `image sequence:` (at least two distinct image labels),
 `KGV sha256:`, and `KGV revision:`. The images are supplied as artifacts named
 after the labels: the run's own build provides `test build` (`--build
 --with-firmware`, or the controller's and the GUI's `with_firmware` option),
-while the known-good image comes from `--artifact "kgv=PATH"`, which only the
-command line passes, so this test runs from the command line. `alternate Ubertooths: true` rotates the writes across every
+while the known-good image comes from `--artifact "KGV=PATH"`, which only the
+command line passes, so this test runs from the command line; the GUI says so
+for any suite that names it. `alternate Ubertooths: true` rotates the writes across every
 registered Ubertooth on the host, in alias order; then `flashes` must divide
 evenly by the board count, `hosts:` must name its hosts rather than `each`,
 and `Ubertooth: each` is refused. The test establishes the firmware it

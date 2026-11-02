@@ -314,6 +314,7 @@ _NO_BUILD_NEEDS = {
     "needs_firmware_build": False, "needs_python_tools": False,
     "requires_firmware_build": False, "requires_python_tools": False,
 }
+_BUILD_NEED_FIELDS = tuple(_NO_BUILD_NEEDS)
 
 
 def _build_needs(catalog: TestCatalog, test_name) -> dict:
@@ -331,7 +332,7 @@ def _build_needs(catalog: TestCatalog, test_name) -> dict:
     try:
         definition = catalog.get(test_name)
     except CatalogError:
-        return dict(_NO_BUILD_NEEDS)
+        return {**_NO_BUILD_NEEDS, "needs_artifacts": []}
     needed = definition.build_options()
     required = definition.required_build_options()
     return {
@@ -339,6 +340,9 @@ def _build_needs(catalog: TestCatalog, test_name) -> dict:
         "needs_python_tools": needed.python_tools,
         "requires_firmware_build": required.firmware_build,
         "requires_python_tools": required.python_tools,
+        # Images no build produces: only the command line can pass them, so
+        # a run started from here would be refused before its tests.
+        "needs_artifacts": list(definition.needs_artifacts),
     }
 
 
@@ -356,7 +360,9 @@ def list_plans(
     test, and each suite that holds one such test, carries
     ``needs_firmware_build``, ``needs_python_tools``,
     ``requires_firmware_build`` and ``requires_python_tools``: the build
-    options a run of it should or must ask for (see ``_build_needs``).
+    options a run of it should or must ask for, and ``needs_artifacts``: the
+    images no build produces, which only ``--artifact`` can pass (see
+    ``_build_needs``).
     Estimates are per invocation: a ``per_board`` test runs once for every
     board it selects on the target, which only the run's plan (its manifest)
     counts; see planned_invocations.
@@ -408,8 +414,12 @@ def list_plans(
                 # suite (the GUI) can ask for it.
                 **{
                     field: any(test[field] for test in tests)
-                    for field in _NO_BUILD_NEEDS
+                    for field in _BUILD_NEED_FIELDS
                 },
+                # Every image the suite needs that no build produces.
+                "needs_artifacts": sorted(
+                    {label for test in tests for label in test["needs_artifacts"]}
+                ),
             })
         plans.append({"name": path.stem, "title": plan.name, "error": None,
                       "runnable": plan.runnable, "suites": suites})

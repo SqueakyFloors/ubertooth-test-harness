@@ -269,9 +269,30 @@
     const suite = findSuite($("plan").value, $("suite").value);
     $("suite-tests").textContent = suite
       ? `${suite.tests.map((test) => test.name).join(", ")}. ${estimateText(suite)}`
+        + artifactWarning(suite)
       : "";
-    // This suite may need build options the last one did not.
+    // This suite may need build options the last one did not, and the boxes
+    // start again from what it needs rather than from the last suite's
+    // choice.
+    for (const option of BUILD_OPTIONS) option.chosen = null;
     syncBuildOptions();
+  }
+
+  // A suite with a test that needs an image no build makes (a published
+  // release image) cannot be run from here at all: only the command line
+  // passes one, with --artifact, and the run is refused before its tests.
+  // Said here rather than hidden, because the build options below now cover
+  // every other image a run needs.
+  function artifactWarning(suite) {
+    const wanted = Array.isArray(suite.needs_artifacts) ? suite.needs_artifacts : [];
+    if (!wanted.length) return "";
+    const tests = suite.tests
+      .filter((test) => (test.needs_artifacts || []).length)
+      .map((test) => test.name);
+    return ` This suite also needs ${wanted.join(", ")}, an image no build makes,`
+      + ` for ${tests.join(", ")}: pass it with run-suite --artifact`
+      + ` "${wanted[0]}=PATH" on the target. A run started here is refused`
+      + " before its tests.";
   }
 
   function estimateText(suite) {
@@ -996,8 +1017,9 @@
   // note, while Build is unticked. Then, for each build option and the
   // chosen suite: a suite with a test that cannot run without the option has
   // it ticked and held there; a suite that would only leave cases out has it
-  // ticked for the operator to untick; a suite that needs neither leaves the
-  // box as the operator last had it. Every note names the tests concerned.
+  // ticked for the operator to untick; a suite that needs neither has it as
+  // the operator left it for this suite (renderSuiteTests clears that when
+  // the suite changes). Every note names the tests concerned.
   // Called whenever Build, the plan, the suite or the plan list changes.
   function syncBuildOptions() {
     const build = $("build").checked;
@@ -1017,8 +1039,13 @@
         sentences.push(`The ${suiteName} suite cannot run without ${option.what}: `
           + `${required.join(", ")}.`);
       } else if (needed.length) {
-        sentences.push(`Ticked because the ${suiteName} suite would leave cases out `
-          + `without ${option.what}: ${needed.join(", ")}. Untick to run it without them.`);
+        // Which way round depends on the box: the operator may have
+        // unticked it, and a note must never describe a state it is not in.
+        sentences.push(box.checked
+          ? `Ticked because the ${suiteName} suite would leave cases out without `
+            + `${option.what}: ${needed.join(", ")}. Untick to run it without them.`
+          : `The ${suiteName} suite leaves cases out without ${option.what}: `
+            + `${needed.join(", ")}.`);
       }
       if (!build) {
         sentences.push(needed.length
@@ -1035,7 +1062,7 @@
       option.cost = $(`${option.id}-note`).textContent;
       option.chosen = null;
       // Only a tick of the operator's own: a suite's need never becomes one,
-      // and once they have ticked or unticked it, their choice stands.
+      // and their choice stands until they change the suite.
       $(option.id).addEventListener("change", () => {
         option.chosen = $(option.id).checked;
       });
