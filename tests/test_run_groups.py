@@ -1033,6 +1033,9 @@ class GroupStartTests(RunGroupTestCase):
         await self.server.stop()
         await self.start_controller()
         self.assertEqual(group_id, self.controller.runs["run-2"].group_id)
+        # Its updates and events belong to the group it is shown as, not to
+        # the one its record names.
+        self.assertEqual("run-2", self.controller._group_id_of("run-2"))
         # Listed as its own group of one, and reachable as one.
         status, payload, _ = await self.http("GET", "/api/run-groups")
         self.assertIn("run-2", [view["group_id"] for view in payload["groups"]])
@@ -1042,6 +1045,35 @@ class GroupStartTests(RunGroupTestCase):
         # And the group it was started by says that host never started.
         view = (await self.group(group_id))["group"]
         self.assertEqual("its run was never started", view["members"][1]["error"])
+
+    async def test_a_group_record_that_cannot_be_written_is_only_a_log_line(self):
+        """A runner session must not fall over on a write to a group record."""
+        linux, mac = await self.runners()
+        self.controller.reply_timeout_s = 0.3
+        post = await self.start_group([LINUX, MAC])
+        requests = {runner.host: await runner.recv() for runner in (linux, mac)}
+        await linux.send(
+            "run_accepted", request_id=requests[LINUX]["request_id"], run_id="run-1"
+        )
+        self.assertEqual(201, (await post)[0])
+        with patch.object(
+            Controller, "_persist_group", side_effect=OSError("read-only")
+        ):
+            await mac.send(
+                "run_rejected", request_id=requests[MAC]["request_id"],
+                reason="builds disabled",
+            )
+            await wait_until(lambda: any(
+                "could not record" in line for line in self.logs
+            ))
+        # The connection and the run are untouched, and the group still has
+        # the host that did start.
+        self.assertTrue(self.controller.targets[MAC].connected)
+        await mac.heartbeat()
+        await wait_until(lambda: self.controller.targets[MAC].online)
+        view = (await self.group(self.controller.runs["run-1"].group_id))["group"]
+        self.assertEqual(["running", "error"],
+                         [member["status"] for member in view["members"]])
 
     async def test_the_watchdog_outlives_a_results_directory_it_cannot_write(self):
         linux, _mac = await self.runners()
@@ -1053,12 +1085,15 @@ class GroupStartTests(RunGroupTestCase):
         with patch.object(
             Controller, "_persist_group", side_effect=OSError("read-only")
         ):
+            # The request expires in the watchdog, which writes the reason on
+            # the group: the write fails, the log says so, and the watchdog
+            # carries on.
             await wait_until(lambda: any(
-                "could not expire pending requests" in line for line in self.logs
+                "could not record" in line for line in self.logs
             ))
-        # Still watching: the target goes offline when its heartbeats stop.
-        self.assertFalse(self.server._monitor_task.done())
-        await wait_until(lambda: not self.controller.targets[LINUX].online)
+            self.assertFalse(self.server._monitor_task.done())
+            # Still watching: the target goes offline when its heartbeats stop.
+            await wait_until(lambda: not self.controller.targets[LINUX].online)
 
     async def test_an_unreadable_group_record_is_logged_and_left(self):
         directory = self.results / GROUPS_DIR
@@ -1384,6 +1419,26 @@ class GroupLiveTests(RunGroupTestCase):
                 break
         self.assertEqual(group_id, message["group"]["group_id"])
         self.assertEqual({}, self.controller.groups)
+
+    async def test_a_child_its_group_does_not_list_streams_as_its_own_group(self):
+        """The stream follows the same rule as the API and the history."""
+        linux, mac = await self.runners()
+        group, _requests, _ids = await self.accepted_group([linux, mac])
+        stored = self.results / GROUPS_DIR / f"{group['group_id']}.json"
+        record_data = json.loads(stored.read_text())
+        record_data["members"][1]["run_id"] = None
+        stored.write_text(json.dumps(record_data))
+        await self.server.stop()
+        await self.start_controller()
+        linux, mac = await self.runners()
+        await wait_until(lambda: self.controller.targets[MAC].connected)
+        ws = await self.live("?group_id=run-2")
+        snapshot = json.loads(await asyncio.wait_for(ws.recv(), TIMEOUT_S))
+        self.assertEqual(["run-2"], [run["run_id"] for run in snapshot["runs"]])
+        await mac.send("event", run_id="run-2",
+                       event=record("run-2", 1, "run_started"))
+        message = await self.received(ws, {"event"})
+        self.assertEqual("run-2", message["run_id"])
 
     async def test_a_lone_run_streams_as_its_own_group(self):
         (linux,) = await self.runners([LINUX])

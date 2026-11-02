@@ -710,15 +710,21 @@ class Controller:
     def _group_id_of(self, run_id: str) -> str | None:
         """The group whose stream a run's updates belong to.
 
-        A run of its own is its own group of one, so this costs a lookup: it
-        is on the path of every record a runner sends.
+        The same rule as ``group_of``, which is what decides where the group
+        updates go and what the API lists: the group must be stored and must
+        list this run, or the run is its own group of one. Written out here
+        rather than building a group object, because it is on the path of
+        every record a runner sends.
         """
         run = self.runs.get(run_id)
         if run is None:
             return None
-        if run.group_id and run.group_id in self.groups:
-            return run.group_id
-        return run.run_id
+        if not run.group_id:
+            return run.run_id
+        group = self.groups.get(run.group_id)
+        if group is None or run_id not in group.run_ids():
+            return run.run_id
+        return run.group_id
 
     def _publish(self, message: dict, run_id: str | None = None) -> None:
         group_id = None if run_id is None else self._group_id_of(run_id)
@@ -1036,9 +1042,17 @@ class Controller:
         "its run was never started".
         """
         group = self.groups.get(pending.group_id) if pending.group_id else None
-        if group is not None and group.set_member_error(pending.host, reason):
+        if group is None or not group.set_member_error(pending.host, reason):
+            return
+        try:
             self._persist_group(group)
-            self._publish_group(group)
+        except Exception as error:  # noqa: BLE001 - never the caller's failure
+            # This runs inside a runner session, a registration and the
+            # watchdog, none of which may fall over because a group record
+            # could not be written: the reason is then only in the log.
+            self.log(f"could not record {pending.host}'s reason on {group.group_id}: {error}")
+            return
+        self._publish_group(group)
 
     def _run_for(self, target: Target, run_id: str) -> Run:
         run = self.runs.get(run_id)
@@ -1109,7 +1123,16 @@ class Controller:
             # it is then shown as a group of one.
             self._persist(run)
             if group is not None and group.set_member_run(target.host, run_id):
-                self._persist_group(group)
+                try:
+                    self._persist_group(group)
+                except Exception as error:  # noqa: BLE001 - the run stands
+                    # The run is recorded and running; only its place in the
+                    # group could not be written. It is then shown as a
+                    # group of one, which is what a restart would find.
+                    self.log(
+                        f"run {run_id} started, but could not be recorded on "
+                        f"group {group.group_id}: {error}"
+                    )
             if group is not None and group.cancel_requested:
                 # The group was cancelled while this host's request was
                 # still outstanding: a child that arrives afterwards is
