@@ -388,7 +388,9 @@ button.primary:disabled:hover { background: var(--primary); }
   border-left-color: var(--run-fg);
 }
 .check-running .check-name { font-weight: 650; }
-.check-failed, .check-error, .check-did-not-finish { border-left-color: var(--bad-fg); }
+.check-failed, .check-error, .check-did-not-finish, .check-blocked {
+  border-left-color: var(--bad-fg);
+}
 .check-note { color: var(--muted); }
 .reason { color: var(--muted); }
 

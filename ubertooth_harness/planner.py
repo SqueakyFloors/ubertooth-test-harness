@@ -106,6 +106,13 @@ class CompiledSuite:
         Each record is for a host the registry has, so it belongs to that
         host's run alone: another bench's missing hub is not this run's
         failure.
+
+        A record is kept even where the host runs the same test: with
+        ``Ubertooth: each`` on a bench where only some boards can be
+        switched off, the step runs for the boards that can and is blocked
+        for the rest, and a run that measured one board of three must not
+        pass as though it had measured all three. That is why the live run
+        view leaves such a test's own row alone and logs the record instead.
         """
         return tuple(item for item in self.blocked if item.host == host)
 
@@ -423,6 +430,11 @@ class PlanCompiler:
                 # Recorded per host, and the step produces no invocation for
                 # that host, so the rest of the suite still compiles.
                 step_blocked: list[Blocked] = []
+                # Whether this step hit such an absence at all, which is not
+                # the same as whether it added a record: a second step of the
+                # same test on the same host adds none, and must still not be
+                # read as a step whose resources could not be assigned.
+                step_absent = False
                 for host, choices in bound:
                     host_choices[host] = dict(zip(role_names, choices))
                     combinations = itertools.product(*choices) if choices else [()]
@@ -459,11 +471,16 @@ class PlanCompiler:
                                 )
                         except MissingRequiredHardware as error:
                             if strict_hardware:
-                                raise
+                                # Named, as the refusal was before absence was
+                                # recorded: a plan author reads this one.
+                                raise MissingRequiredHardware(
+                                    f"{step.test_name}: {error}"
+                                ) from error
+                            step_absent = True
                             # One record per test and host. `Ubertooth: each`
-                            # tries every board and each combination hits the
-                            # same absence, and the live run view matches a
-                            # planning record to its test by name, so a
+                            # tries every board and each combination may hit
+                            # the same absence, and the live run view matches
+                            # a planning record to its test by name, so a
                             # second record would show the test twice.
                             if (host, step.test_name) not in recorded_blocked:
                                 recorded_blocked.add((host, step.test_name))
@@ -492,7 +509,7 @@ class PlanCompiler:
                             )
                         )
                 blocked_tests.extend(step_blocked)
-                if len(invocations) == step_start and not step_blocked:
+                if len(invocations) == step_start and not step_absent:
                     # Every combination put one device in two roles. The
                     # message names what each role could have taken, since
                     # that is what has to change: the plan's selectors, or

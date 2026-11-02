@@ -2198,11 +2198,14 @@ boards that start on different images get different images in the same round,
 and a board's final image depends on whether its own flash count is even.
 `flashes` is the total across boards and must divide evenly by the board count
 (for example, 100 flashes on two boards gives each 50). The step must list its
-hosts (`hosts: [Host_Linux]`, not `each`), because planning covers every
-selected host and one host that cannot alternate would stop the run
-everywhere; `validate-plan` reports this without a registry. Planning refuses `Ubertooth: each` with `alternate Ubertooths` (it
-would rotate once per board), a host with only one registered Ubertooth, and
-any board without a full 32-hex-digit serial. Every registered Ubertooth on
+hosts (`hosts: [Host_Linux]`, not `each`), so the plan says which benches are
+expected to have two boards; `validate-plan` reports this without a registry.
+Planning refuses `Ubertooth: each` with `alternate Ubertooths` (it
+would rotate once per board) and any board without a full 32-hex-digit serial.
+A named host with only one registered Ubertooth has nothing to alternate
+across, so the step is blocked there and the run fails, while the other hosts
+and the rest of the suite still run (see
+[Hardware a step is about](#hardware-a-step-is-about-blocked-not-left-out)). Every registered Ubertooth on
 the host is written, including boards the plan does not otherwise use. After every flash the target is read back and every
 other board must still report the revision it had when last verified. The
 report names the board for each flash and the per-board count, and

@@ -231,21 +231,75 @@ class BlockedPlanningTests(unittest.TestCase):
             )
 
     def test_every_board_each_tries_gives_one_record_for_the_test(self):
-        """`Ubertooth: each` tries both boards and each hits the same
-        absence; the live run view matches a record to its test by name, so
-        a second record would show the test twice."""
+        """Neither board can be switched off, so both combinations hit the
+        same absence. The live run view matches a planning record to its
+        test by name, so a second record would show the test twice."""
         step = EXCLUSIVE_STEP.replace(
             "        Ubertooth: default", "        Ubertooth: each"
         )
+        unmapped = ONE_BOARD.replace(
+            "    power: {controller: Hub_Linux0, port: 0}\n", ""
+        ) + UNMAPPED_SECOND_BOARD
         with tempfile.TemporaryDirectory() as directory:
-            compiled = self.compile(
-                directory, (HOST_STEP, step), ONE_BOARD + UNMAPPED_SECOND_BOARD
-            )
+            compiled = self.compile(directory, (HOST_STEP, step), unmapped)
 
+            self.assertEqual(
+                ["Host CLI surface", "Host CLI surface"],
+                [item.test_name for item in compiled.invocations],
+            )
             self.assertEqual(
                 [("Host_Linux", "Exclusive Ubertooth topology")],
                 [(item.host, item.test_name) for item in compiled.blocked],
             )
+
+    def test_a_second_step_of_a_blocked_test_does_not_end_the_compile(self):
+        """The second step adds no record, since one per test and host is
+        what the run view can show; that must not be read as a step whose
+        resources could not be assigned."""
+        longer = EXCLUSIVE_STEP.replace(
+            "        capture duration: 5s", "        capture duration: 6s"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            compiled = self.compile(
+                directory, (HOST_STEP, EXCLUSIVE_STEP, longer),
+                ONE_BOARD + UNMAPPED_SECOND_BOARD,
+            )
+
+            self.assertEqual(
+                ["Host CLI surface", "Host CLI surface"],
+                [item.test_name for item in compiled.invocations],
+            )
+            self.assertEqual(
+                [("Host_Linux", "Exclusive Ubertooth topology")],
+                [(item.host, item.test_name) for item in compiled.blocked],
+            )
+
+    def test_a_board_that_can_be_switched_off_runs_and_the_rest_are_blocked(self):
+        """`Ubertooth: each` on a bench where one board is on no controller:
+        the step runs for the board that can be left alone, and is recorded
+        blocked for the others, so the run does not pass as though it had
+        measured all three."""
+        step = EXCLUSIVE_STEP.replace(
+            "        Ubertooth: default", "        Ubertooth: each"
+        )
+        third = """  UT_Linux2:
+    type: Ubertooth
+    attached to: Host_Linux
+    identity: {serial: "dddddddddddddddddddddddddddddddd"}
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            compiled = self.compile(
+                directory, (step,),
+                ONE_BOARD + MAPPED_SECOND_BOARD + third,
+            )
+
+            # Only UT_Linux2 can be the selected board: it is the one whose
+            # every other board has a power mapping.
+            (invocation,) = compiled.invocations
+            self.assertEqual("UT_Linux2", invocation.resources["Ubertooth"])
+            (blocked,) = compiled.blocked
+            self.assertEqual("Exclusive Ubertooth topology", blocked.test_name)
+            self.assertIn("UT_Linux2 has no power mapping", blocked.reason)
 
     def test_a_mapped_second_board_compiles_as_before(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -531,6 +585,26 @@ class RunRecordTests(unittest.TestCase):
 class GuiTests(unittest.TestCase):
     """The live run view shows a blocked test with the failures."""
 
+    def test_the_live_view_leaves_a_test_the_run_also_runs_alone(self):
+        """A JS-free check: a partly blocked test keeps its own row, since a
+        row cannot say both that the test ran and that it was blocked, and
+        taking the row would also leave `test_started` without one."""
+        from ubertooth_harness.gui import WEB_DIR
+
+        script = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('kind === "blocked"', script)
+        self.assertIn(
+            "live.invocations.some((invocation) => invocation.test_name === name)",
+            script,
+        )
+        self.assertIn('item.status = "blocked";', script)
+        self.assertIn("blocked: [\"✗\", \"blocked\"],", script)
+        # And the row carries the same red edge as every other failing row.
+        css = (WEB_DIR / "app.css").read_text(encoding="utf-8")
+        self.assertIn(".check-blocked", css)
+        self.assertIn(".status-blocked", css)
+
     def test_a_blocked_test_is_listed_as_a_failure(self):
         from ubertooth_harness.gui import failure_summary
 
@@ -625,12 +699,13 @@ class ValidatePlanTests(unittest.TestCase):
             return code, printed, errors
 
     def test_a_one_board_host_fails_validation(self):
+        """Named: a plan author reads this refusal, so it says which step."""
         code, _printed, errors = self.validate((HOST_STEP, FLASH_STEP))
 
         self.assertEqual(2, code)
         self.assertIn(
-            "error: alternate Ubertooths needs at least two registered "
-            "Ubertooths on",
+            "error: Flash reliability: alternate Ubertooths needs at least "
+            "two registered Ubertooths on Host_Linux, which has one",
             errors,
         )
 
@@ -641,7 +716,9 @@ class ValidatePlanTests(unittest.TestCase):
 
         self.assertEqual(2, code)
         self.assertIn(
-            "error: extra Ubertooth UT_Linux1 has no power mapping", errors
+            "error: Exclusive Ubertooth topology: extra Ubertooth UT_Linux1 "
+            "has no power mapping",
+            errors,
         )
 
     def test_a_bench_with_the_hardware_validates(self):
