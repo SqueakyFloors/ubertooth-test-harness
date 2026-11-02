@@ -203,6 +203,8 @@ def ensure_power_on(
     port: int,
     log: Callable[[str], None],
     attempts: int = 2,
+    *,
+    switched_off: bool = True,
 ) -> str:
     """Leave the port powered, whatever state it is in; "" or why it is not.
 
@@ -234,8 +236,14 @@ def ensure_power_on(
             reason = f"port {port} is not powered: {error}"
             if attempt < attempts:
                 log(f"Port {port}: {error}; trying once more")
-    log(f"PORT {port} STILL OFF: {reason}. The board is off the bus until "
-        "someone switches it on by hand (README, \"USB power controllers\")")
+    if switched_off:
+        log(f"PORT {port} STILL OFF: {reason}. The board is off the bus until "
+            "someone switches it on by hand (README, \"USB power controllers\")")
+    else:
+        # Nothing was switched off here, so the port is as some earlier
+        # command left it; what is missing is the confirmation.
+        log(f"PORT {port} NOT CONFIRMED POWERED: {reason}. Nothing was "
+            "switched off here; read the port with ubertooth-harness power")
     return reason
 
 
@@ -306,6 +314,7 @@ def power_cycle(
     off = BoardState(state.selected, state.guards, 0)
     failure = ""
     unpowered = ""
+    switched_off = False
     try:
         controller.connect()
         before = controller.snapshot(target.port)
@@ -314,15 +323,26 @@ def power_cycle(
                 f"{target.controller_alias} port {target.port} is already off, "
                 "so this board's state is not known; power it on and rerun"
             )
-        problems = state.problems(enumerator.serials())
-        if problems:
+        try:
+            # Bounded, not a single scan: the reset that ubertooth-dfu made
+            # after writing the image may still be re-enumerating the
+            # bootloader when this step starts.
+            wait_for_enumeration(
+                enumerator, state, return_deadline_s, settle_s=settle_s,
+                **timing
+            )
+        except EnumerationError as error:
             raise InvalidAppError(
                 "the board is not sitting in its DFU bootloader before the "
-                "power cycle: " + "; ".join(problems)
-            )
+                f"power cycle: {error}"
+            ) from error
         log(f"Before the cycle: {_describe(state)}")
         with preserved_power_state(controller, (target.port,)):
             log(f"Switching {target.controller_alias} port {target.port} off")
+            # Before the call, not after: a write that failed on its
+            # read-back may still have cut the port, and the restoration
+            # below has to be reported as what it is either way.
+            switched_off = True
             controller.set_power_enabled(target.port, False)
             waited = wait_for_enumeration(
                 enumerator, off, removal_deadline_s, settle_s=settle_s, **timing
@@ -350,13 +370,17 @@ def power_cycle(
     finally:
         # Whatever happened above, including a signal: the port must be
         # powered when this returns, and the command must say so.
-        unpowered = ensure_power_on(controller, target.port, log)
+        unpowered = ensure_power_on(controller, target.port, log,
+                                    switched_off=switched_off)
         _close_quietly(controller)
-    if unpowered:
+    if unpowered and switched_off:
+        # A port this command switched off and could not switch back on is
+        # the worst outcome there is, so it is what the command reports.
         log(f"Power cycle: {unpowered}"
             + (f"; the check itself failed too: {failure}" if failure else ""))
         return 1
-    if failure:
+    if failure or unpowered:
+        failure = failure or unpowered
         log(f"Power cycle: {failure}")
         return 1
     log("Power cycle: the bootloader refused the unstartable image, as it must")
@@ -428,6 +452,13 @@ def recover(
     A board in its application running something else is written with ``-U``.
     A board in its bootloader has no serial, so it is identified by
     elimination and written without a selector.
+
+    One failure is not handled here, as it is not in the DFU images test: a
+    read-back that fails and leaves the board in DFU despite ``-r``
+    (SqueakyFloors/ubertooth#208, seen about once in twenty). In the case's
+    own step that fails the case and the cleanup writes the board back; in
+    the cleanup it fails the cleanup, which stops the run on the record
+    rather than leaving a board nobody knows the state of.
     """
     seen = board.revision()
     if seen is not None:
