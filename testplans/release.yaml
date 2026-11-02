@@ -13,6 +13,12 @@ suites:
         hosts: each
         coverage: comprehensive
 
+    # No Ubertooth: the board lookup with the no-devices switch, and
+    # ubertooth-rx -i for the capture writers.
+    - Failed capture files:
+        hosts: each
+        coverage: comprehensive
+
     # No Ubertooth. Follows fork main db5649b: -f is an unknown option and
     # -N prints the count, then runs the rest of the command.
     - Util mode refusals:
@@ -117,6 +123,13 @@ suites:
         Ubertooth: default
         coverage: comprehensive
         duration: 3s
+
+    # One board, no peer: a real SIGINT to a running capture, and one that
+    # arrives before the capture can be going.
+    - Interrupting a capture:
+        hosts: each
+        Ubertooth: default
+        coverage: comprehensive
 
     # No Ubertooth.
     - Raw receive replay:

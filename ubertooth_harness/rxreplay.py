@@ -22,10 +22,17 @@ A transition step runs ``python <this file> ...`` as an ordinary logged
 command. It imports only the standard library, so it runs from any working
 directory, and prints summaries only:
 
-    python rxreplay.py fixture PATH [--variant full|truncated|empty]
-    python rxreplay.py dump-check DUMP FIXTURE [--lap HEX]
+    python rxreplay.py fixture PATH [--variant full|truncated|empty|partial]
+    python rxreplay.py dump-check DUMP FIXTURE [--lap HEX] [--variant V]
     python rxreplay.py files DIR
     python rxreplay.py only-fixture DIR NAME --base-time T [--variant V]
+
+The ``partial`` variant is one record cut short and nothing else, so a replay
+of it reads no whole record at all, and ``skipped`` is one whole record the
+decoder skips followed by one cut short, so a replay of it read a record and
+made no packet of it. The Failed capture files cases use both: a failed replay
+keeps its capture files from the first whole record, whatever the decoder made
+of it, and takes them back before that.
 
 ``only-fixture`` passes when DIR holds NAME and nothing else, and NAME still
 holds the fixture written with that base time and variant: the directory as
@@ -229,9 +236,24 @@ def record_bytes(record: Record, host_time: int) -> bytes:
     return struct.pack(">I", host_time) + header + data
 
 
+VARIANTS = ("full", "truncated", "empty", "partial", "skipped")
+# The first record of RECORDS that cb_rx skips, for the "skipped" variant.
+SKIPPED_RECORD = next(index for index, record in enumerate(RECORDS) if record.decoy)
+
+
 def fixture_bytes(base_time: int, variant: str = "full") -> bytes:
     if variant == "empty":
         return b""
+    if variant == "partial":
+        # One record, short of its last bytes, and nothing before it: a file
+        # a replay reads no whole record from.
+        return record_bytes(RECORDS[0], base_time)[:RECORD - TRUNCATED_BYTES]
+    if variant == "skipped":
+        # One whole record the decoder skips, then a record cut short: a
+        # replay that read a record and made no packet of it.
+        skipped = RECORDS[SKIPPED_RECORD]
+        return (record_bytes(skipped, base_time)
+                + record_bytes(skipped, base_time + 1)[:RECORD - TRUNCATED_BYTES])
     data = b"".join(
         record_bytes(record, base_time + index) for index, record in enumerate(RECORDS)
     )
@@ -240,11 +262,30 @@ def fixture_bytes(base_time: int, variant: str = "full") -> bytes:
     return data
 
 
+# What a replay of each variant says about the bytes left over after the last
+# whole record (``ubertooth-rx``'s own wording, on standard error).
+PARTIAL_RECORD_BYTES = {
+    "truncated": RECORD - TRUNCATED_BYTES,
+    "partial": RECORD - TRUNCATED_BYTES,
+    "skipped": RECORD - TRUNCATED_BYTES,
+}
+
+
+def fixture_base_time(now=None) -> int:
+    """The record host time a fixture written now should carry.
+
+    FIXTURE_AGE_S before the fixture is written, which is inside rxdump.py's
+    window around the file time and far enough from the replay's own clock to
+    tell the two apart in a packet line.
+    """
+    return int(time.time() if now is None else now) - FIXTURE_AGE_S
+
+
 def expected_packets(variant: str = "full", lap: int | None = None,
                      max_errors: int = 2) -> list[tuple[int, int, int]]:
     """(LAP, access-code errors, channel) of each packet line, in order."""
     records = list(RECORDS)
-    if variant == "empty":
+    if variant in ("empty", "partial", "skipped"):
         records = []
     elif variant == "truncated":
         records = records[:-1]
@@ -261,9 +302,26 @@ def expected_packets(variant: str = "full", lap: int | None = None,
     return out
 
 
-def packet_record_indices(lap: int | None = None) -> list[int]:
+def fixture_records(variant: str = "full") -> list:
+    """The records a fixture of ``variant`` holds whole, in its own order."""
+    if variant == "truncated":
+        return list(RECORDS[:-1])      # the last record is cut short
+    if variant == "skipped":
+        return [RECORDS[SKIPPED_RECORD]]
+    if variant in ("empty", "partial"):
+        return []
+    return list(RECORDS)
+
+
+def packet_record_indices(lap: int | None = None,
+                          variant: str = "full") -> list[int]:
+    """Which of the fixture's own whole records the decoder makes a packet of.
+
+    The positions are into the fixture of that variant, so they are what a
+    ``-d`` dump of it should hold, in order.
+    """
     return [
-        index for index, record in enumerate(RECORDS)
+        index for index, record in enumerate(fixture_records(variant))
         if not record.decoy and (lap is None or record.lap == lap)
     ]
 
@@ -403,12 +461,14 @@ def _write_fixture(path: Path, variant: str, base_time: int) -> str:
             f"{len(data)} bytes, first systime={base_time}")
 
 
-def dump_check(dump: Path, fixture: Path, lap: int | None = None) -> str:
+def dump_check(dump: Path, fixture: Path, lap: int | None = None,
+               variant: str = "full") -> str:
     """'' when the -d output is the fixture's packet records, byte for byte."""
     data = dump.read_bytes()
     source = fixture.read_bytes()
     want = b"".join(
-        source[i * RECORD:(i + 1) * RECORD] for i in packet_record_indices(lap)
+        source[i * RECORD:(i + 1) * RECORD]
+        for i in packet_record_indices(lap, variant)
     )
     if data == want:
         return ""
@@ -443,19 +503,20 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     make = sub.add_parser("fixture", help="write the synthetic fixture")
     make.add_argument("path", type=Path)
-    make.add_argument("--variant", choices=("full", "truncated", "empty"), default="full")
+    make.add_argument("--variant", choices=VARIANTS, default="full")
     make.add_argument("--base-time", type=int, default=None)
     dump = sub.add_parser("dump-check", help="compare a -d file with the fixture")
     dump.add_argument("dump", type=Path)
     dump.add_argument("fixture", type=Path)
     dump.add_argument("--lap", type=lambda text: int(text, 16), default=None)
+    dump.add_argument("--variant", choices=VARIANTS, default="full")
     files = sub.add_parser("files", help="list a directory's files and sizes")
     files.add_argument("directory", type=Path)
     only = sub.add_parser("only-fixture", help="the directory holds only the fixture")
     only.add_argument("directory", type=Path)
     only.add_argument("name")
     only.add_argument("--base-time", type=int, required=True)
-    only.add_argument("--variant", choices=("full", "truncated", "empty"), default="full")
+    only.add_argument("--variant", choices=VARIANTS, default="full")
     args = parser.parse_args(argv)
 
     if args.command == "fixture":
@@ -469,11 +530,12 @@ def main(argv: list[str] | None = None) -> int:
             if not path.exists():
                 print(f"Replay dump problem: {path} does not exist")
                 return 1
-        problem = dump_check(args.dump, args.fixture, args.lap)
+        problem = dump_check(args.dump, args.fixture, args.lap, args.variant)
         if problem:
             print(f"Replay dump problem: {problem}")
             return 1
-        print(f"Replay dump: {len(packet_record_indices(args.lap))} records match the fixture")
+        print(f"Replay dump: {len(packet_record_indices(args.lap, args.variant))} "
+              "records match the fixture")
         return 0
     if args.command == "only-fixture":
         problem = only_fixture(args.directory, args.name, args.base_time, args.variant)

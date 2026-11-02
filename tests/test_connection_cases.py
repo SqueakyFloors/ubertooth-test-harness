@@ -7,10 +7,18 @@ from ubertooth_harness.advertiser_cases import FIRMWARE_LABEL
 from ubertooth_harness.catalog import CatalogError, builtin_catalog
 from ubertooth_harness.connection_cases import (
     ADV_CHANNEL,
+    AFTER_UPDATE_MS,
     CAPTURE_ATTEMPTS,
     CYCLE_MS,
+    FOLLOW_END_TEST_NAME,
+    MAX_QUIET_MS,
+    MIN_CONNECTION_PACKETS,
+    SPAN_ALLOWANCE_MS,
+    MIN_CONNECTIONS,
+    MIN_CYCLES,
     WRITE_PERIOD_MS,
     WRITE_BYTES,
+    follow_end_cases,
     known_connection_cases,
 )
 from ubertooth_harness.plan import load_plan
@@ -157,13 +165,17 @@ class CaseTests(unittest.TestCase):
     def test_the_central_must_have_connected_written_and_updated(self):
         case = known_connection_cases(arguments(), {}, IDENTITIES)[1]
         check = {step.step_id: step for step in case.steps}["central-report"].output_check
-        traffic = "traffic: writes 74 received 18300 bytes updates 3 connects 3\n"
+        traffic = ("traffic: writes 74 received 18300 bytes updates 3 connects 3 "
+                   "disconnects 2\n")
         update = f"update: asked {arguments()['update']} ms (48 units)\n"
         self.assertEqual("", check("role: central\n" + traffic + update))
         for text, reason in (
-            ("traffic: writes 0 received 0 bytes updates 1 connects 1", "wrote nothing"),
-            ("traffic: writes 5 received 5 bytes updates 0 connects 1", "never accepted"),
-            ("traffic: writes 0 received 0 bytes updates 0 connects 0", "no connection"),
+            ("traffic: writes 0 received 0 bytes updates 1 connects 1 "
+             "disconnects 0", "wrote nothing"),
+            ("traffic: writes 5 received 5 bytes updates 0 connects 1 "
+             "disconnects 0", "never accepted"),
+            ("traffic: writes 0 received 0 bytes updates 0 connects 0 "
+             "disconnects 0", "no connection"),
             ("role: central", "no traffic line"),
             (traffic, "no update line"),
             # An update was accepted, but not the one that was asked for.
@@ -258,15 +270,112 @@ class CaseTests(unittest.TestCase):
                 arguments(duration=f"{seconds}s")
 
 
+def follow_end_arguments(**extra):
+    raw = {"duration": "18s", **extra}
+    return builtin_catalog().get(FOLLOW_END_TEST_NAME).normalize_arguments(raw)
+
+
+class FollowEndTests(unittest.TestCase):
+    """Follow a BLE connection across its end: the multi-cycle capture."""
+
+    def cases(self, **extra):
+        return follow_end_cases(follow_end_arguments(**extra), {}, IDENTITIES)
+
+    def test_the_pair_is_made_ready_and_then_one_capture_runs(self):
+        self.assertEqual(["pair-ready", "follow-across-end"],
+                         [case.case_id for case in self.cases()])
+
+    def test_the_capture_spans_the_whole_duration_and_cycles_the_link(self):
+        steps = {step.step_id: step for step in self.cases()[1].steps}
+        context = {CAPTURE_DIR_KEY: "/c"}
+        self.assertEqual(
+            ("ubertooth-btle", "-U", SERIAL, "-f", f"-A{ADV_CHANNEL}", "-r",
+             "/c/capture-1.pcapng"),
+            steps["capture"].resolve_argv(context))
+        self.assertEqual(18.0, steps["capture"].timeout_s)
+        self.assertTrue(steps["capture"].continuous)
+        self.assertIn("--cycle", steps["central-start"].resolve_argv(context))
+        self.assertIn(str(CYCLE_MS), steps["central-start"].resolve_argv(context))
+
+    def test_the_capture_check_asks_for_the_cycle_requirements(self):
+        steps = {step.step_id: step for step in self.cases()[1].steps}
+        argv = list(steps["check-capture"].resolve_argv({CAPTURE_DIR_KEY: "/c"}))
+        for option, value in (("--min-connections", str(MIN_CONNECTIONS)),
+                              ("--min-connection-packets",
+                               str(MIN_CONNECTION_PACKETS)),
+                              ("--after-update-ms", str(AFTER_UPDATE_MS)),
+                              ("--max-quiet-ms", str(MAX_QUIET_MS)),
+                              # The span the records must cover comes from
+                              # the window the capture step runs for.
+                              ("--min-span-ms",
+                               str(18000 - SPAN_ALLOWANCE_MS))):
+            self.assertEqual(value, argv[argv.index(option) + 1])
+        # A capture may hold no connection the file does not also announce.
+        self.assertIn("--require-announced", argv)
+
+    def test_the_central_must_have_cycled_the_link(self):
+        """A window the central spent on one connection is not this test."""
+        check = {step.step_id: step for step in self.cases()[1].steps
+                 }["central-report"].output_check
+        update = f"update: asked {follow_end_arguments()['update']} ms (48 units)\n"
+        good = ("traffic: writes 300 received 70000 bytes updates 4 connects 4 "
+                "disconnects 3\n")
+        self.assertEqual("", check("role: central\n" + good + update))
+        for traffic, reason in (
+            # Three cycles' worth of writes, but the link never went down.
+            ("traffic: writes 300 received 70000 bytes updates 1 connects 1 "
+             "disconnects 0\n",
+             "made 1 connection(s), fewer than the 3 the capture window spans"),
+            # It connected enough times but reports no drops.
+            ("traffic: writes 300 received 70000 bytes updates 4 connects 4 "
+             "disconnects 1\n", "dropped 1 connection(s), fewer than the 2"),
+        ):
+            self.assertIn(reason, check("role: central\n" + traffic + update))
+
+    def test_the_board_is_read_back_after_the_capture_and_not_retried(self):
+        case = self.cases()[1]
+        steps = {step.step_id: step for step in case.steps}
+        # Reading the board back is outside the retry window: it has to see
+        # the board as the last capture left it.
+        self.assertEqual(("capture", "stop", "central-report", "check-capture"),
+                         case.retry_steps)
+        self.assertEqual(CAPTURE_ATTEMPTS, case.attempts)
+        self.assertIsNotNone(case.retry_window())
+        order = [step.step_id for step in case.steps]
+        self.assertLess(order.index("check-capture"), order.index("read-back"))
+        self.assertLess(order.index("read-back"), order.index("idle-after-capture"))
+        self.assertEqual(("ubertooth-util", "-U", SERIAL, "-s", "-C"),
+                         steps["read-back"].resolve_argv({}))
+        # The board must read as idle, with the self-reset count it started on.
+        self.assertEqual((r"(?m)^Now in idle mode\b",),
+                         steps["idle-after-capture"].output_patterns)
+        observed = steps["idle-after-capture"].observe
+        self.assertEqual("3", observed.expected_value({"watchdog resets": "3"}))
+
+    def test_the_duration_must_span_several_reconnections(self):
+        cycle = CYCLE_MS // 1000
+        follow_end_arguments(duration=f"{MIN_CYCLES * cycle + 1}s")
+        for seconds in (MIN_CYCLES * cycle, cycle, 1, 31):
+            with self.assertRaisesRegex(CatalogError, "duration must be longer"):
+                follow_end_arguments(duration=f"{seconds}s")
+
+    def test_it_needs_the_same_pair_and_says_so_by_its_own_name(self):
+        identities = {**IDENTITIES, "central": {}}
+        with self.assertRaisesRegex(StateCaseError, FOLLOW_END_TEST_NAME):
+            follow_end_cases(follow_end_arguments(), {}, identities)
+
+
 class RegistryTests(unittest.TestCase):
     def test_role_defaults_pick_a_dk_per_role(self):
         registry = registry_with(REGISTRY)
         invocations = PlanCompiler(builtin_catalog(), registry).compile(
             load_plan(ROOT / "testplans" / "ble.yaml"), "connection")
-        self.assertEqual(1, len(invocations))
-        self.assertEqual({"Ubertooth": "UT_Linux0", "central": "DK_Linux1",
-                          "peripheral": "DK_Linux2"},
-                         dict(invocations[0].resources))
+        self.assertEqual(["Capture known BLE connection", FOLLOW_END_TEST_NAME],
+                         [invocation.test_name for invocation in invocations])
+        for invocation in invocations:
+            self.assertEqual({"Ubertooth": "UT_Linux0", "central": "DK_Linux1",
+                              "peripheral": "DK_Linux2"},
+                             dict(invocation.resources))
 
     def test_a_role_default_must_declare_that_role(self):
         with self.assertRaisesRegex(RegistryError, "declares the central role"):

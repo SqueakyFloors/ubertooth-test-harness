@@ -128,7 +128,22 @@ One image holds both roles:
 | `initiator` | looks the peer's SPP channel up over SDP, connects, and streams a counted payload |
 
 The link is opened with no security, so it needs no pairing and a capture holds
-only the SDP lookup, the connection, and the data.
+only the SDP lookup, the connection, and the data. Nothing in it is encrypted,
+which is what lets a capture's payload lengths and CRCs be checked against the
+bytes beside them.
+
+**Voice traffic too.** `sco start` adds a synchronous (eSCO) link over the
+Hands-Free Profile alongside the data stream, so the air carries
+reserved-slot voice packets as well. `sco type ev3` asks for a plain EV3
+link, whose payload is on the air at the basic rate a receive-only Ubertooth
+can decode; the 2-EV3 link the stack chooses by default carries the same
+payload as enhanced rate, which a basic-rate decoder cannot read. The
+hands-free unit has to be listening before the gateway pages it, so a session
+runs `sco start` on the acceptor first and `sco start` on the initiator last.
+`role` takes an audio link down but keeps the packet type a board was told to
+ask for; only `defaults` puts that back.
+[`esp32peer.py`](../ubertooth_harness/esp32peer.py)'s `audio` mode does the
+whole sequence in one invocation, as `stream` does for the data link.
 
 Registered with the bridge serial and the BD_ADDR its `status` reports (the
 factory MAC plus two in the last byte, so it too is fixed per board). Those
@@ -156,11 +171,14 @@ The device name is not settable and does not need to be: it carries the
 board's own LAP (`UT-ESP32-<LAP>`), so it is fixed for the life of the board
 and different from the other one with no setup step.
 
-`Capture known Classic device` and `Follow Classic Bluetooth piconet` bind a
-pair, through [`esp32peer.py`](../ubertooth_harness/esp32peer.py). Nothing in
-the harness flashes a peer, so the driver asks for `utesp-1.0.0` or a later
-1.x image rather than an exact version, and each board's own version goes in
-the run record. A peer is leased like a board, under `esp32-<bridge serial>`.
+`Capture known Classic device`, `Follow Classic Bluetooth piconet`, and
+`Classic capture record fields` bind a pair, through
+[`esp32peer.py`](../ubertooth_harness/esp32peer.py). Nothing in the harness
+flashes a peer, so the driver asks for `utesp-1.0.0` or a later 1.x image
+rather than an exact version, and each board's own version goes in the run
+record. The audio link is the one thing that needs more: `sco type` arrived in
+`utesp-1.4.0`, so the `audio` mode asks for that and names the version a
+board reports when it is older. A peer is leased like a board, under `esp32-<bridge serial>`.
 
 By hand, [`scripts/lab/peer`](../scripts/lab/README.md) names the boards by
 their registry aliases, holds them, and runs that module, which is how a
@@ -273,7 +291,7 @@ nothing in the harness can catch it.
 |---|---|---|---|---|
 | Ubertooth One | the [fork's](https://github.com/SqueakyFloors/ubertooth) `firmware/bluetooth_rxtx` | the resolved commit under test | `arm-none-eabi-gcc` | `ubertooth-dfu` |
 | nRF52840 DK | [`firmware/nrf52840dk`](../firmware/nrf52840dk/README.md) | `utdk-1.4.0` | nRF Connect SDK v3.4.1 and its toolchain bundle | `nrfutil device program` |
-| ESP32 peer | [`firmware/esp32-classic-peer`](../firmware/esp32-classic-peer/README.md) | `utesp-1.3.0` | ESP-IDF v5.5.6 | `esptool`, through `idf.py flash` |
+| ESP32 peer | [`firmware/esp32-classic-peer`](../firmware/esp32-classic-peer/README.md) | `utesp-1.4.0` | ESP-IDF v5.5.6 | `esptool`, through `idf.py flash` |
 
 Each firmware README holds the full build and flash procedure, the pinned
 toolchain versions, and the shell command reference. Images are built outside
@@ -331,7 +349,7 @@ so each is recorded with where its sources come from and its SHA-256.
 | `kgv.dfu` | the known-good Ubertooth firmware that `Flash reliability` alternates against the run's own build | `2020-12-R1` | upstream Ubertooth release `2020-12-R1` | `e3fcb486c6e0ce7cc991bf6439f6dbc0156ed1229c2b95ebfd02198f9675bb11` |
 | `zephyr.hex` | the nRF52840 DK role firmware | `utdk-1.4.0` | this repository, `firmware/nrf52840dk` at that version ([the change that built this image](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/242)) | `f98bb7b7a08eca4ab9999be6b00bface5e441e3de7592ebb7959ad64205f55c0` |
 | `zephyr.hex` (algorithm 1) | the same roles on a controller without channel selection algorithm 2, built with `chan-sel-1.conf` and `chan-sel-1.overlay` | `utdk-1.4.0-chansel1` | the same sources and the same change | `9fac198b2bdb7a46cb63219070f220cbb82fd0507fc369bae79b69fe3451f21b` |
-| `esp32-classic-peer.bin` | the ESP32 Classic peer firmware | `utesp-1.3.0` | this repository at `9530765`, which is where `firmware/esp32-classic-peer` carries that version | `4893b30dea47896dd7b0e5cd174ee9e633a89362e5fe4505caed4c364f5c55f2` |
+| `esp32-classic-peer.bin` | the ESP32 Classic peer firmware | `utesp-1.4.0` | this repository at `6c9a4ea`, which is where `firmware/esp32-classic-peer` carries that version | `5bbe35d332c8ca68485382b074f0436c0ae6a0ec3174cef76b1d21f418c1c45b` |
 
 The KGV is the one the repository pins: the plan carries its revision and its
 hash ([`testplans/slow.yaml`](../testplans/slow.yaml),
@@ -340,12 +358,14 @@ with `--artifact "KGV=<path>"`. The harness checks every image's SHA-256
 before the run starts and again before each write, so a bench whose copy
 differs fails before it writes anything.
 
-The two peer images are not pinned, because the version string inside the
-image is what the harness checks: it refuses a DK image that does not contain
-the pinned version, and it flashes a board that reports another one. The
-hashes above let a bench confirm it holds the same image this repository's
-sources produce. Each was built as its firmware README says; a reproducible
-build is not claimed, so compare the version first and the hash second.
+The two peer images are not pinned, because what the harness checks is the
+version a board reports: a DK that reports another one is flashed, and
+`nrfdk.py` refuses a DK image that does not hold the pinned version. Nothing
+flashes an ESP32 peer, so a run fails instead when one reports a version
+older than the test needs. The hashes above let a bench confirm it holds the
+same image this repository's sources produce. Each was built as its firmware
+README says; a reproducible build is not claimed, so compare the version
+first and the hash second.
 
 Record any other image a bench keeps the same way, in its own private notes:
 
