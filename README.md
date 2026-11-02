@@ -2486,10 +2486,12 @@ run's `stages` asks for the combination that run builds, each option taken
 from its own `build_started` record when that record names it, and otherwise
 from what the run asked for: the image (or flashing its boards with it), and
 the Python tools. The two profiles without the Python tools are named as they
-always were, so the samples learned before a build recorded that option stay
-where they are and the two new profiles fill from the runs that follow.
-For a test the profile is its coverage profile and the value
-of the argument the duration scales with (`duration`, `capture duration`,
+always were, so the samples already learned stay where they are and the two
+new profiles fill from the runs that follow. A command-line run that built the
+Python tools before a build recorded that option therefore left its sample
+among the host-tools ones, where it stays until the newer samples replace it.
+For a test the profile is its coverage profile and the value of the argument
+the duration scales with (`duration`, `capture duration`,
 `flashes`, or preflight's number of checks), so a 5 s capture and a 30 s
 capture are not mixed. The last 10 samples of each key are kept, and at most
 1000 keys (when it is full, the key with the fewest samples makes room), so

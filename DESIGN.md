@@ -991,10 +991,10 @@ the run's target), coverage profile, and the value of the scaling argument —
 so a 5 s capture and a 30 s capture are separate. A build's profile slot holds
 what it made, because the firmware image and the Python tools each add work to
 it: `host tools`, `host tools and Python tools`, `with firmware`, and `with
-firmware and Python tools` are four keys. Each option is read from the build's
-own `build_started` record (`with_firmware`, `with_python`), and before that
-record arrives from what the run asked for; a record from before an option was
-recorded does not name it, which reads as off, as that build was.
+firmware and Python tools` are four keys, read from the build's own
+`build_started` record (`with_firmware`, `with_python`). An option that record
+does not name reads as off, so a sample from before an option was recorded
+stays under the profile it was learned with until the key's window turns over.
 
 **Estimate:** the median of the key's last 10 samples once there are 3, so one
 run that queued behind a busy board does not move it. With fewer, the rate learned
@@ -1012,7 +1012,10 @@ store keeps at most 1000 keys.
 `estimate_source` (`learned`, `catalog`, `none`), `estimate_samples` and
 `estimate_scaled` beside the unchanged `estimated_s`, plus
 `catalog_estimated_s`; learned build, preflight and flash durations come back
-as `stages`. A run is counted once (`learned_durations` in its `run.json`), so
+as `stages`. A run's own `stages` asks for the build it makes, option by
+option: what its `build_started` record names, and before that record arrives
+what the run was asked for. A run is counted once (`learned_durations` in its
+`run.json`), so
 neither a re-sent `run_finished` nor two overlapping reports of one end can
 double its samples, and a run whose learning never finished is taken at the
 next startup. A run that ends as `lost` is mined for what its records hold;

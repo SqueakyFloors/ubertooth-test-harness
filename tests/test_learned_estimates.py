@@ -431,11 +431,11 @@ class StageTests(StoreTestCase):
             {key.profile: self.store.samples(key) for key in self.store.keys()},
         )
 
-    def test_a_build_record_that_does_not_name_an_option_did_not_build_it(self):
+    def test_an_option_a_build_record_does_not_name_reads_as_off(self):
         # A record written before the Python tools were recorded names only
-        # the firmware, and such a build could not make the Python tools at
-        # all: its samples belong to the profiles they were learned under,
-        # which a run that asks for neither extra joins.
+        # the firmware, and nothing can say now whether such a build made
+        # them: its sample belongs to the profile it was learned under, where
+        # a run that asks for neither extra joins it.
         self.learn([record("build_started", "running", 0.0, with_firmware=False),
                     record("build_finished", "passed", 100.0)])
         self.learn([record("build_started", "running", 0.0, with_firmware=True),
@@ -563,9 +563,9 @@ class PersistenceTests(StoreTestCase):
         store = EstimateStore.load(self.path, log=self.logs.append)
         self.assertEqual([], self.logs)
         self.assertEqual(310.0, store.lookup_stage(
-            "build", HOST, profile=build_profile(False)).seconds)
+            "build", HOST, profile=build_profile(False, False)).seconds)
         self.assertEqual(610.0, store.lookup_stage(
-            "build", HOST, profile=build_profile(True)).seconds)
+            "build", HOST, profile=build_profile(True, False)).seconds)
         for firmware in (False, True):
             self.assertIsNone(store.lookup_stage(
                 "build", HOST, profile=build_profile(firmware, True)))

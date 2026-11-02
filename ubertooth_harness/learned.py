@@ -644,20 +644,24 @@ BUILD_PROFILES = {
 }
 
 
-def build_profile(with_firmware, with_python=False) -> str:
+def build_profile(with_firmware, with_python) -> str:
     """The profile a build is learned under.
 
     The firmware image and the Python tools are each real extra work (the
     firmware much the larger of the two), so all four combinations are
     learned apart and an estimate is only ever shown for the combination a
-    run actually builds.
+    run actually builds. Both options are asked for, with no default: a
+    caller that left one out would key a build that made it as one that did
+    not, which is the mistake this profile exists to avoid.
     """
     return BUILD_PROFILES[(bool(with_firmware), bool(with_python))]
 
 
 def _build_profile(details: Mapping) -> str:
-    # A record from before an option existed does not name it, which reads
-    # as false: that is what such a build did.
+    # An option a record does not name reads as off. A build that made the
+    # Python tools before they were recorded therefore left a sample among
+    # the host-tools ones, where it stays until the newer samples push it
+    # out; nothing can tell now which of the stored samples those were.
     return build_profile(details.get("with_firmware"), details.get("with_python"))
 
 
