@@ -89,6 +89,7 @@ from ubertooth_harness.protocol import (
 from ubertooth_harness.rungroups import (
     GROUPS_DIR,
     MAX_GROUP_HOSTS,
+    MAX_REASON_CHARS,
     RunGroup,
     group_from_record,
     group_progress,
@@ -558,6 +559,14 @@ class Controller:
             if group.group_id != path.stem:
                 self.log(f"skipping group {path.name}: group_id mismatch")
                 continue
+            if not group.dispatched_at:
+                # Saved while its children were still being asked for (the
+                # first acceptance persists the record). Nobody is asking
+                # any more: whatever requests were in flight went with the
+                # process that sent them, so the dispatch is over, and a
+                # host that never got a run is one that did not start rather
+                # than one still starting.
+                group.dispatched_at = group.created_at
             self.groups[group.group_id] = group
 
     def _persist_group(self, group: RunGroup) -> None:
@@ -959,6 +968,8 @@ class Controller:
             for key, pending in list(table.items()):
                 if pending.host == host:
                     del table[key]
+                    if table is self._pending_runs:
+                        self._note_group_failure(pending, reason)
                     pending.fail(ControllerError(reason, 503))
 
     def expire_pending(self) -> None:
@@ -973,6 +984,43 @@ class Controller:
                 if pending.expires_at is not None and now >= pending.expires_at:
                     del table[key]
                     pending.future.cancel()  # no waiters remain
+        self._drop_empty_groups()
+
+    def _drop_empty_groups(self) -> None:
+        """Forget a group that no child can join any more.
+
+        A group is stored with no children only while one of its start
+        requests may still be accepted. Once the last of those is gone, the
+        group has nothing and never will: a group with no child is not a
+        group, exactly as one that was refused outright is not.
+        """
+        for group in list(self.groups.values()):
+            if group.run_ids() or not group.dispatched_at:
+                continue
+            if any(
+                pending.group_id == group.group_id
+                for pending in self._pending_runs.values()
+            ):
+                continue
+            del self.groups[group.group_id]
+            try:
+                (self.groups_dir / f"{group.group_id}.json").unlink(missing_ok=True)
+            except OSError as error:
+                self.log(f"could not remove group {group.group_id}: {error}")
+            self.log(f"group {group.group_id} started no run; forgotten")
+
+    def _note_group_failure(self, pending: _Pending, reason: str) -> None:
+        """Record on a group why one host's start request came to nothing.
+
+        A request that outlived its caller (the POST already answered 504)
+        can still be rejected by the runner, or go down with its connection.
+        The group keeps the runner's own reason for that host rather than
+        "its run was never started".
+        """
+        group = self.groups.get(pending.group_id) if pending.group_id else None
+        if group is not None and group.set_member_error(pending.host, reason):
+            self._persist_group(group)
+            self._publish_group(group)
 
     def _run_for(self, target: Target, run_id: str) -> Run:
         run = self.runs.get(run_id)
@@ -1051,9 +1099,9 @@ class Controller:
             if pending is None or pending.host != target.host:
                 raise _Violation(f"run_rejected for unknown request {request_id}")
             del self._pending_runs[request_id]
-            pending.fail(
-                ControllerError(f"runner rejected the run: {message['reason']}", 409)
-            )
+            refusal = f"runner rejected the run: {message['reason']}"
+            self._note_group_failure(pending, refusal)
+            pending.fail(ControllerError(refusal, 409))
         elif kind in ("cancel_accepted", "cancel_rejected"):
             run_id = message["run_id"]
             self.expire_pending()
@@ -1486,10 +1534,6 @@ class Controller:
             raise ControllerError("each host must be a registry host name", 422)
         return chosen
 
-    @staticmethod
-    def _detail(error: BaseException) -> str:
-        return error.detail if isinstance(error, ControllerError) else str(error)
-
     async def start_group(
         self, hosts, *, ref: str, plan: str, suite: str, tests: list[str],
         build: bool, commit: str | None = None, flash_build: bool = True,
@@ -1540,7 +1584,7 @@ class Controller:
                 # A cancelled request among the results is one child's own
                 # cancellation, not this caller's: gather would have raised.
                 failures.append((host, result))
-                group.set_member_error(host, self._start_error(host, result))
+                group.set_member_error(host, self._failure_detail(host, result))
             else:
                 group.set_member_run(host, result.run_id)
         if self._settle_dispatch(group):
@@ -1556,25 +1600,26 @@ class Controller:
         statuses = {error.status for _host, error in failures}
         raise ControllerError(
             "no run started: " + "; ".join(
-                f"{host}: {self._detail(error)}" for host, error in failures
+                f"{host}: {self._failure_detail(host, error)}"
+                for host, error in failures
             ),
             statuses.pop() if len(statuses) == 1 else 409,
         )
 
-    def _start_error(self, host: str, error: BaseException) -> str:
-        """What a member records about a start that failed.
+    def _failure_detail(self, host: str, error: BaseException) -> str:
+        """What is reported about one host's request that failed.
 
         A refusal says why in its own words. Anything else is a fault of this
-        controller's: the member says which kind it was and the log carries
+        controller's: the answer says which kind it was and the log carries
         the detail, rather than putting a message that may name a path on
-        this host into the group record.
+        this host into a group record or an API answer.
         """
         if isinstance(error, ControllerError):
             return error.detail
-        self.log(f"could not start a run on {host}: {error!r}")
+        self.log(f"request to {host} failed: {error!r}")
         return (
-            f"could not start the run on {host} ({type(error).__name__}); "
-            "the controller's log says why"
+            f"the request to {host} failed inside the controller "
+            f"({type(error).__name__}); its log says why"
         )
 
     def _settle_dispatch(self, group: RunGroup) -> bool:
@@ -1616,31 +1661,49 @@ class Controller:
             raise ControllerError(
                 f"run group {group.group_id} has no active run", 409
             )
+        asked = not group.implicit and not group.cancel_requested
+        if asked:
+            # Recorded before the runners are asked, and on the group as well
+            # as on each run: a group whose cancel reached only some hosts,
+            # or whose caller left while it was being asked, still asked for
+            # all of them.
+            group.cancel_requested = True
+            group.cancel_reason = reason[:MAX_REASON_CHARS] or None
+            self._persist_group(group)
         results = await asyncio.gather(
             *(self.cancel_run(run_id, reason) for _host, run_id in active),
             return_exceptions=True,
         )
         outcomes, failures = [], []
         for (host, run_id), result in zip(active, results):
-            if isinstance(result, asyncio.CancelledError):
-                raise result
+            # A cancelled result is one child's own cancellation, not this
+            # caller's: gather would have raised. It is that host's failure,
+            # and the hosts that were cancelled stay cancelled.
             if isinstance(result, BaseException):
                 failures.append(result)
                 outcomes.append({
                     "host": host, "run_id": run_id, "canceled": False,
-                    "error": self._detail(result),
+                    "error": self._failure_detail(host, result),
                 })
             else:
                 outcomes.append({
                     "host": host, "run_id": run_id, "canceled": True, "error": None,
                 })
         if len(failures) == len(active):
+            if asked:
+                # Nothing was cancelled after all.
+                group.cancel_requested = False
+                group.cancel_reason = None
+                self._persist_group(group)
+            unexpected = [
+                error for error in failures
+                if not isinstance(error, ControllerError)
+            ]
+            if unexpected:
+                raise unexpected[0]
             if len(failures) == 1:
                 raise failures[0]
-            statuses = {
-                error.status for error in failures
-                if isinstance(error, ControllerError)
-            }
+            statuses = {error.status for error in failures}
             raise ControllerError(
                 f"could not cancel any run in group {group.group_id}: " + "; ".join(
                     f"{outcome['host']}: {outcome['error']}" for outcome in outcomes
@@ -1651,12 +1714,6 @@ class Controller:
             # A group of one keeps nothing of its own: the cancel is on the
             # run, so the group is read again from it.
             group = self.get_group(group.group_id)
-        elif not group.cancel_requested:
-            # Recorded on the group as well as on each run: a group whose
-            # cancel reached only some hosts still asked for all of them.
-            group.cancel_requested = True
-            group.cancel_reason = reason[:2000] or None
-            self._persist_group(group)
         self._publish_group(group)
         return group, outcomes
 
@@ -1669,29 +1726,17 @@ class Controller:
         ``/api/runs/{run_id}`` reports them for a run on its own.
         """
         view = self.view_group(group)
-        runs = {
-            member["run_id"]: self.runs[member["run_id"]]
-            for member in view["members"]
-            if member["run_id"] and member["run_id"] in self.runs
-        }
-        # Every member's records are read together, before anything is read
-        # from them, so one group costs one read and not one after another.
-        # Each run's status is the one its view carries, taken with the
-        # records rather than after them: a run that ends while its records
-        # are being read would otherwise be settled against records that
-        # stop short of its end.
-        records = dict(zip(runs, await asyncio.gather(*(
-            asyncio.to_thread(self.read_events, run) for run in runs.values()
-        ))))
         members, per_host = [], {}
+        # One host at a time, as /api/runs/{run_id} reads one run: a group of
+        # sixteen hosts must not hold sixteen parsed run logs at once.
         for member in view["members"]:
-            run = runs.get(member["run_id"])
+            run = self.runs.get(member["run_id"]) if member["run_id"] else None
             if run is None:
                 members.append({
                     **member, "failures": [], "invocations": None, "stages": [],
                 })
                 continue
-            events = records[member["run_id"]]
+            events = await asyncio.to_thread(self.read_events, run)
             estimates = self.estimates
             invocations = planned_invocations(events, estimates=estimates)
             stages = run_stage_estimates(

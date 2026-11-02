@@ -57,10 +57,20 @@ STEP_NAMES = {
 # tests and a bench has a handful of boards, so these are past any real run
 # and keep a record that names something else from growing the answer: the
 # records are data, not something this side chose.
-MAX_LABEL_CHARS = 200
+# A name longer than this is not shortened but dropped, with the record it
+# came in: two invocations whose IDs differ past a cut would otherwise become
+# one part, and one of their results would stand for both. It is well past
+# any real name (the protocol's own limit on a test name is 200).
+MAX_LABEL_CHARS = 256
 MAX_REASON_CHARS = 2000
-MAX_TEST_STEPS = 200
-MAX_STEP_PARTS = 500
+# A plan takes at most 100 tests (the protocol's ``tests`` limit), and a test
+# runs once per selected board on a bench of a handful, so these leave room
+# and still bound what one host's records can turn into.
+MAX_TEST_STEPS = 150
+MAX_STEP_PARTS = 64
+# Parts over all of one host's steps, which is what bounds the answer: the
+# per-step limits alone would multiply.
+MAX_HOST_PARTS = 600
 
 RUNNING = "running"
 PENDING = "pending"
@@ -152,11 +162,16 @@ def _reason(details: Mapping) -> str:
 def _label(value) -> str:
     """A name out of a run record: a test, an invocation, or a board.
 
-    Bounded here, because every one of these becomes a step key or a part of
-    one in what the API returns, and a record is data: the runner's protocol
-    message may be megabytes.
+    Empty for anything that is not a usable name, including one longer than
+    ``MAX_LABEL_CHARS``, and the record it came in is then left out: every
+    one of these becomes a step key or a part of one in what the API
+    returns, and a record is data (a runner's protocol message may be
+    megabytes). Dropping such a name is safer than shortening it, which
+    would merge two invocations that differ past the cut.
     """
-    return str(value)[:MAX_LABEL_CHARS] if value else ""
+    if not isinstance(value, str) or not value or len(value) > MAX_LABEL_CHARS:
+        return ""
+    return value
 
 
 # ----- the group record ----------------------------------------------------
@@ -248,6 +263,10 @@ def group_from_record(data: Mapping) -> RunGroup:
         for entry in group.members
     ):
         raise ValueError("members must be a list of {host, run_id, error}")
+    if [entry["host"] for entry in group.members] != group.hosts:
+        # One entry per host asked for, in that order: a record whose two
+        # lists disagree would report one count as the other.
+        raise ValueError("members must be the hosts, in the order asked for")
     if not isinstance(group.tests, list):
         raise ValueError("tests must be a list")
     return group
@@ -434,6 +453,7 @@ def _planned_tests(invocations: Sequence[Mapping] | None) -> dict[str, list[dict
     and no macOS one.
     """
     planned: dict[str, list[dict]] = {}
+    total = 0
     for invocation in invocations or ():
         if not isinstance(invocation, Mapping):
             continue
@@ -443,8 +463,9 @@ def _planned_tests(invocations: Sequence[Mapping] | None) -> dict[str, list[dict
             continue
         if name not in planned and len(planned) >= MAX_TEST_STEPS:
             continue
-        if len(planned.get(name, ())) >= MAX_STEP_PARTS:
+        if len(planned.get(name, ())) >= MAX_STEP_PARTS or total >= MAX_HOST_PARTS:
             continue
+        total += 1
         part = _part(identifier, name)
         part["estimated_s"] = invocation.get("estimated_s")
         planned.setdefault(name, []).append(part)
@@ -535,7 +556,9 @@ def host_steps(
                 parts = tests.get(name)
                 if parts is None and len(tests) >= MAX_TEST_STEPS:
                     continue
-                if parts is not None and len(parts) >= MAX_STEP_PARTS:
+                if (parts is not None and len(parts) >= MAX_STEP_PARTS) or (
+                    len(by_invocation) >= MAX_HOST_PARTS
+                ):
                     continue
                 part = _part(identifier, name)
                 by_invocation[identifier] = part

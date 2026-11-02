@@ -2584,7 +2584,11 @@ and `error` once nothing is running). A group not one host of which started
 is no group at all: nothing is stored and the answer names, host by host,
 why. The exception is a request that timed out: it stays pending and may
 still be accepted, so that group is stored and a child that arrives late is
-still one of its hosts, while the answer still says nothing started.
+still one of its hosts, while the answer still says nothing started. Once
+the last of those requests is gone, no child can arrive and the group is
+forgotten, record and all. Such a request cannot outlive the controller,
+though: a controller restarted while one was pending has no record of it, so
+a run the runner reports afterwards is adopted as a run of its own.
 
 A group's status is read from its children, so it cannot drift from them:
 `running` while any child is active (including one still being started,

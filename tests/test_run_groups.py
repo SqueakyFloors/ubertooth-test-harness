@@ -22,6 +22,8 @@ from ubertooth_harness.rungroups import (
     FLASH_STEP,
     GROUPS_DIR,
     MAX_GROUP_HOSTS,
+    MAX_HOST_PARTS,
+    MAX_TEST_STEPS,
     NOT_REACHED,
     PREFLIGHT_STEP,
     TEST_STEP,
@@ -275,6 +277,8 @@ class StepModelTests(unittest.TestCase):
         """The records are data: a runner's message may be megabytes."""
         long_name = "N" * 5000
         events = [
+            # Dropped, not shortened: two invocations that differ past a cut
+            # must not become one part.
             record("run-5", index, "test_started", "running",
                    invocation_id=f"{index:03d}-{long_name}", test_name=long_name)
             for index in range(1, 4)
@@ -282,13 +286,30 @@ class StepModelTests(unittest.TestCase):
             record("run-5", 100 + index, "test_started", "running",
                    invocation_id=f"{index:03d}-T{index}", test_name=f"T{index}")
             for index in range(300)
+        ] + [
+            record("run-5", 500 + index, "test_started", "running",
+                   invocation_id=f"{index:03d}-many", test_name="many")
+            for index in range(200)
         ]
         steps = host_steps(events, run_status="running")
         tests = [step for step in steps if step["kind"] == TEST_STEP]
-        self.assertEqual(200, len(tests))
-        self.assertEqual(200, len(tests[0]["key"]))
-        self.assertEqual(3, len(tests[0]["items"]))
-        self.assertTrue(all(len(item["id"]) <= 200 for item in tests[0]["items"]))
+        self.assertEqual(MAX_TEST_STEPS, len(tests))
+        self.assertNotIn(long_name, [step["key"] for step in tests])
+        self.assertTrue(all(len(step["key"]) <= 256 for step in tests))
+        parts = sum(len(step["items"]) for step in tests)
+        self.assertLessEqual(parts, MAX_HOST_PARTS)
+        # The per-step limit holds as well, where one test has many boards.
+        self.assertTrue(all(len(step["items"]) <= 64 for step in tests))
+        # A planned list is bounded the same way.
+        planned = host_steps([], run_status="running", invocations=[
+            {"invocation_id": f"{index:03d}-P{index}", "test_name": f"P{index}",
+             "estimated_s": 1.0}
+            for index in range(MAX_TEST_STEPS + 50)
+        ])
+        self.assertEqual(
+            MAX_TEST_STEPS,
+            sum(step["kind"] == TEST_STEP for step in planned),
+        )
 
     def test_malformed_records_are_data_not_a_failure(self):
         steps = host_steps(
@@ -372,6 +393,11 @@ class GroupRecordTests(unittest.TestCase):
             {"group_id": "grp-1", "hosts": "Host_Linux"},
             {"group_id": "grp-1", "members": [{"run_id": "run-1"}]},
             {"group_id": "grp-1", "tests": "Host version"},
+            # The members must be the hosts asked for, in that order.
+            {"group_id": "grp-1", "hosts": [LINUX, MAC],
+             "members": [{"host": LINUX, "run_id": None, "error": None}]},
+            {"group_id": "grp-1", "hosts": [LINUX, MAC],
+             "members": [{"host": MAC}, {"host": LINUX}]},
         ):
             with self.subTest(broken), self.assertRaises(ValueError):
                 group_from_record(broken)
@@ -624,6 +650,56 @@ class GroupStartTests(RunGroupTestCase):
         self.assertEqual(["error", "running"],
                          [member["status"] for member in view["members"]])
 
+    async def test_a_group_no_child_can_join_any_more_is_forgotten(self):
+        """A group kept for a pending request goes when that request does."""
+        linux, mac = await self.runners()
+        self.controller.reply_timeout_s = 0.3
+        self.controller.late_reply_grace_s = 0.1
+        post = await self.start_group([LINUX, MAC])
+        for runner in (linux, mac):
+            await runner.recv()
+        self.assertEqual(504, (await post)[0])
+        (group_id,) = list(self.controller.groups)
+        path = self.results / GROUPS_DIR / f"{group_id}.json"
+        self.assertTrue(path.is_file())
+        # Once the last request has expired, no child can arrive: a group
+        # with none is not a group.
+        await wait_until(lambda: not self.controller.groups)
+        self.assertFalse(path.exists())
+        status, payload, _ = await self.http("GET", "/api/run-groups")
+        self.assertEqual([], payload["groups"])
+        self.assertTrue(
+            any("started no run; forgotten" in line for line in self.logs), self.logs
+        )
+
+    async def test_a_late_refusal_is_recorded_on_the_group(self):
+        """The runner's own reason, not "its run was never started"."""
+        linux, mac = await self.runners()
+        self.controller.reply_timeout_s = 0.3
+        post = await self.start_group([LINUX, MAC])
+        requests = {runner.host: await runner.recv() for runner in (linux, mac)}
+        self.assertEqual(504, (await post)[0])
+        await linux.send(
+            "run_accepted", request_id=requests[LINUX]["request_id"], run_id="run-1"
+        )
+        await mac.send(
+            "run_rejected", request_id=requests[MAC]["request_id"],
+            reason="builds disabled: no libbtbb source",
+        )
+        (group_id,) = list(self.controller.groups)
+        await wait_until(
+            lambda: self.controller.groups[group_id].member(MAC)["error"]
+        )
+        view = (await self.group(group_id))["group"]
+        self.assertIn(
+            "builds disabled", view["members"][1]["error"]
+        )
+        # Kept, because the Linux host did start; the reason is on disk too.
+        stored = json.loads(
+            (self.results / GROUPS_DIR / f"{group_id}.json").read_text()
+        )
+        self.assertIn("builds disabled", stored["members"][1]["error"])
+
     async def test_a_fault_in_the_controller_is_not_reported_as_a_refusal(self):
         await self.runners([LINUX])
         with patch.object(
@@ -727,6 +803,26 @@ class GroupStartTests(RunGroupTestCase):
         self.assertEqual("failed", view["status"])
         self.assertEqual(["run-1", "run-2"],
                          [member["run_id"] for member in view["members"]])
+
+    async def test_a_group_saved_mid_dispatch_is_not_starting_for_ever(self):
+        """Nobody is asking for its children once the process is gone."""
+        group = new_group([LINUX, MAC], {"plan": "fast", "suite": "fast"})
+        group.set_member_run(LINUX, "run-1")
+        directory = self.results / GROUPS_DIR
+        directory.mkdir(parents=True, exist_ok=True)
+        # As _dispatch saves it when the first child is accepted, before the
+        # other host's request has been answered.
+        self.assertIsNone(group.record()["dispatched_at"])
+        (directory / f"{group.group_id}.json").write_text(
+            json.dumps(group.record())
+        )
+        await self.server.stop()
+        await self.start_controller()
+        view = self.controller.view_group(self.controller.groups[group.group_id])
+        self.assertEqual("error", view["status"])
+        self.assertEqual(["error", "error"],
+                         [member["status"] for member in view["members"]])
+        self.assertIsNotNone(view["finished_at"])
 
     async def test_an_unreadable_group_record_is_logged_and_left(self):
         directory = self.results / GROUPS_DIR
