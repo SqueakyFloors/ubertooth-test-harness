@@ -261,14 +261,13 @@ about, so another bench's missing hub does not fail this run.
 `validate-plan --hardware` refuses both outright, as it does every other
 absence.
 
-A suite whose *only* step is blocked is still refused at planning, like any
-other suite this bench can run nothing of: the refusal names the blocked step,
-and there is no run to fail. So this matters for a mixed suite — the release
-plan, or a bench plan of its own — where the steps that can run do. The two
-committed plans that use `exclusive Ubertooth` hold one step each
-(`testplans/exclusive.yaml`, and `mac-polling`, which is `runnable: false`
-until the soak is implemented), so on a bench with an unmapped board they are
-refused rather than run and failed.
+A suite left with nothing at all to run is still refused at planning, as it
+was: the refusal names the blocked step, and there is no run to fail. That is
+what `mac-polling` does on a bench with an unmapped board, since it names one
+step and one board (`Ubertooth: default`). `testplans/exclusive.yaml` names
+one step but `Ubertooth: each`, so the step runs for every board that can be
+left alone, is blocked for the rest, and the run fails — which is also what a
+mixed suite does, the release plan included.
 
 A `power:` mapping that is present but wrong (an unknown controller, a port
 the controller has not got, a controller that cannot switch one) is a registry

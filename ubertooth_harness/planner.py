@@ -447,12 +447,10 @@ class PlanCompiler:
                 step_blocked: list[Blocked] = []
                 # The hosts that hit such an absence, which is not the same
                 # as the hosts a record was added for: a second step of the
-                # same test on the same host adds none, and must still not be
-                # read as a host whose resources could not be assigned. Per
-                # host, so another host of the same step that produced no
-                # invocation for its own reason still says so.
+                # same test on the same host adds none, and the step must
+                # still not be read as one whose resources could not be
+                # assigned.
                 absent_on: set[str] = set()
-                bound_invocations: set[str] = set()
                 for host, choices in bound:
                     host_choices[host] = dict(zip(role_names, choices))
                     combinations = itertools.product(*choices) if choices else [()]
@@ -509,7 +507,6 @@ class PlanCompiler:
                         # Numbered only once it is an invocation, so the IDs
                         # of a suite with a blocked step stay consecutive.
                         sequence += 1
-                        bound_invocations.add(host)
                         invocations.append(
                             TestInvocation(
                                 invocation_id=f"{sequence:03d}-{step.test_name}",
@@ -528,14 +525,17 @@ class PlanCompiler:
                             )
                         )
                 blocked_tests.extend(step_blocked)
-                unexplained = {
-                    host for host, _choices in bound
-                } - bound_invocations - absent_on
-                if unexplained:
+                if len(invocations) == step_start and not absent_on:
                     # Every combination put one device in two roles. The
                     # message names what each role could have taken, since
                     # that is what has to change: the plan's selectors, or
                     # the host's defaults.
+                    #
+                    # A step blocked on any host is not this: the absence is
+                    # why it bound nothing. As before, a step that did bind
+                    # something somewhere is not refused for the hosts that
+                    # did not, so a host whose roles collide while another
+                    # host runs is still left out silently.
                     raise PlanningError(
                         f"{step.test_name}: no valid distinct resource "
                         "assignment: "
@@ -546,7 +546,6 @@ class PlanCompiler:
                                 for role, aliases in roles.items()
                             )
                             for host, roles in host_choices.items()
-                            if host in unexplained
                         )
                     )
                 self._check_some_case_applies(

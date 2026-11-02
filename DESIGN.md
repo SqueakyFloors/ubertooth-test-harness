@@ -733,8 +733,8 @@ them as `blocked_tests`, and finishes the run `failed`, since a gate that was
 never measured must not read as a pass. A blocked step takes no sequence
 number, so the invocation IDs of the steps that do run stay consecutive.
 `strict_hardware=True` refuses it as it refuses the other absences, naming the
-step. A suite whose only step is blocked still raises `PlanningError`, as any
-suite with no runnable invocation does. A `power:`
+step. A suite left with no runnable invocation still raises `PlanningError`,
+naming the blocked step first. A `power:`
 mapping that is present but wrong stays a `RegistryError`: the registry
 refuses it at load where it knows the controller's driver, and
 `plan_exclusive_ubertooth` refuses it at compile otherwise. A name the

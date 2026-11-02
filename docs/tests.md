@@ -2340,11 +2340,12 @@ success, failure, or cancellation.
 **Known limits.** It needs a switchable hub, so it is Linux-and-power-control
 only. Extra Ubertooths fail closed rather than being ignored: one the registry
 has on no power controller blocks the step, and one that turns up unregistered
-during the run fails the isolation check. `testplans/exclusive.yaml` holds
-this step alone, so on a bench with an unmapped board the suite is refused at
-planning; in a mixed suite the step is blocked, the rest runs, and the run
-fails. The follow case proves the mode kept running, not that it captured
-anything.
+during the run fails the isolation check. `testplans/exclusive.yaml` selects
+`Ubertooth: each`, so on a bench with one unmapped board the step runs for
+every board that can be left alone, is blocked for the rest, and the run
+fails; with no board that can be left alone there is nothing to run and the
+suite is refused at planning. The follow case proves the mode kept running,
+not that it captured anything.
 
 ## MAC polling soak
 

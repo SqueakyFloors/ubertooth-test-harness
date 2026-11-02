@@ -384,6 +384,25 @@ class BlockedPlanningTests(unittest.TestCase):
                 [(item.host, item.reason) for item in compiled.not_applicable],
             )
 
+    def test_the_committed_exclusive_plan_runs_what_it_can(self):
+        """`testplans/exclusive.yaml` names one step but `Ubertooth: each`,
+        so one unmapped board leaves a board that can be left alone: the
+        suite compiles, runs it, and fails on the rest."""
+        root = Path(__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory() as directory:
+            hardware = Path(directory) / "hardware.yaml"
+            hardware.write_text(ONE_BOARD + UNMAPPED_SECOND_BOARD)
+            compiled = PlanCompiler(
+                builtin_catalog(), FileResourceRegistry.load(hardware)
+            ).compile_suite(
+                load_plan(root / "testplans" / "exclusive.yaml"), "exclusive"
+            )
+
+            (invocation,) = compiled.invocations
+            self.assertEqual("UT_Linux1", invocation.resources["Ubertooth"])
+            (blocked,) = compiled.blocked
+            self.assertIn("UT_Linux1 has no power mapping", blocked.reason)
+
     def test_a_suite_with_only_a_blocked_step_names_it(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(
