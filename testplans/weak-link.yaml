@@ -1,0 +1,131 @@
+plan: Weak-link receiver
+# The checks that need the bench's weak-link board
+# (SqueakyFloors/ubertooth-test-harness#168): one Ubertooth away from the
+# others with an inline attenuator between it and its antenna. `weak link:`
+# asks for a board at exactly that attenuation and an ordinary board for every
+# other role (ubertooth_harness/weaklink.py).
+#
+# Not runnable, and not because the code is missing. Seven of these nine
+# entries name a test that already exists and works on a strong link; what is
+# missing is one measurement per entry, so that the test's floors and
+# tolerances belong to the weak link rather than to the strong one they were
+# set on. weaklink.CHECKS names the measurement each one needs, and
+# docs/tests.md says per test what a weak link changes for it. An entry moves
+# into the plan it belongs to (ble.yaml, classic.yaml, range.yaml) once its
+# measurement exists and its figures are written down, not before.
+#
+# `range-weak-link` in range.yaml is the one weak-link suite that is runnable:
+# 20 dB at about a meter was measured there, and the suite keeps the bound the
+# ordinary suite already applies rather than claiming a tighter one.
+runnable: false
+suites:
+  # What the bench can measure today: the 20 dB attenuator is fitted, so these
+  # four need a session rather than a different attenuator. Each asks whether
+  # the test still passes with the receiver attenuated, and with what margin.
+  weak-link-20db:
+    # Does a capture of a known DK advertiser still work behind 20 dB? Until
+    # someone runs it, a plan asking for an attenuated receiver anywhere else
+    # would be a guess, so this is the first one to run.
+    - Capture known BLE advertiser:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        advertiser: default
+        weak link: {Ubertooth: 20}
+        coverage: smoke
+        duration: 5s
+
+    # Does follow survive lost packets and recover? The BLE half
+    # (ubertooth-btle -f across the central's reconnections) and the Classic
+    # half (ubertooth-rx -l -u over the ESP32 piconet).
+    - Follow a BLE connection across its end:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        central: default
+        peripheral: default
+        weak link: {Ubertooth: 20}
+        duration: 20s
+
+    - Follow Classic Bluetooth piconet:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        weak link: {Ubertooth: 20}
+        coverage: smoke
+        duration: 20s
+
+    # The two transmit-side entries have no implementation: the figure each
+    # would judge (RSSI per PA level, and the level at which packets stop
+    # arriving) has not been measured at any attenuation. A fixed attenuation
+    # is what makes either of them a figure rather than a bench artifact; a
+    # full-band specan mean moves about 1 dB between the attenuated board and
+    # an ordinary one, so ambient traffic cannot give it.
+    - Transmit power steps:
+        host: Host_Linux
+        sender: default
+        receiver: default
+        weak link: {receiver: 20}
+        allow RF transmission: true
+        PA levels: [0, 1, 2, 3, 4, 5, 6, 7]
+        duration: 10s
+
+    - Receiver sensitivity:
+        host: Host_Linux
+        sender: default
+        receiver: default
+        weak link: {receiver: 20}
+        allow RF transmission: true
+        PA level: 0
+        duration: 10s
+
+  # What needs a different attenuator. 20 dB at about a meter produced no bit
+  # errors at all: ten range-test round trips were clean. Error flags,
+  # recovery under errors, and an access-code error threshold all need
+  # packets that arrived damaged, so they wait for the 40 dB board the
+  # maintainer is fitting. Run the same entries at 30 dB too if that
+  # attenuator goes on first: two points make a curve, one makes a claim.
+  weak-link-40db:
+    # Do the HEC and CRC flags in BR/EDR records fire, and do the flagged
+    # records stay internally consistent? The test's floors (records with a
+    # header whose HEC passed, records carrying the reference UAP) were set on
+    # a strong link, so the run is what says what they should be here.
+    - Classic capture record fields:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        weak link: {Ubertooth: 40}
+        coverage: smoke
+        duration: 25s
+
+    # The same for the LE records' CRC flag.
+    - Capture known BLE connection:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        central: default
+        peripheral: default
+        weak link: {Ubertooth: 40}
+        coverage: smoke
+        duration: 8s
+
+    # How often does libbtbb settle on a wrong UAP when packets are marginal?
+    # The piconet's real UAP is known from the peers, so a wrong one is
+    # recognizable; what is unknown is how often it happens.
+    - Capture known Classic device:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        weak link: {Ubertooth: 40}
+        coverage: smoke
+        duration: 25s
+
+    # Does a higher `ubertooth-rx -e` find more packets without finding false
+    # ones? Only a link that produces packets with 1 to 5 access-code errors
+    # can say. Comprehensive, because the -e cases are comprehensive-only.
+    - Classic Bluetooth receive:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        weak link: {Ubertooth: 40}
+        coverage: comprehensive
+        duration: 25s

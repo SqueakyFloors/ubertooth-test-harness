@@ -15,6 +15,7 @@ from ubertooth_harness.rf import (
     requirement as rf_requirement,
     requirements as rf_requirements,
 )
+from ubertooth_harness import weaklink
 from ubertooth_harness.patterns import (
     BOARD_ID_PATTERN,
     FIRMWARE_PATTERN,
@@ -147,6 +148,18 @@ def _pa_level(value):
     return value
 
 
+def _pa_levels(value):
+    """An ascending list of distinct PA levels, as a power curve needs them."""
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        raise CatalogError("must be a list of at least two PA levels 0-7")
+    levels = tuple(_pa_level(item) for item in value)
+    if len(set(levels)) != len(levels):
+        raise CatalogError("must not repeat a PA level")
+    if list(levels) != sorted(levels):
+        raise CatalogError("must list PA levels in ascending order")
+    return levels
+
+
 def _advertising_interval(value):
     # Bluetooth Core: legacy advertising interval 20 ms to 10.24 s.
     if (not isinstance(value, int) or isinstance(value, bool)
@@ -232,6 +245,17 @@ def _rf(value):
     return MappingProxyType({
         role: MappingProxyType(want.to_dict()) for role, want in asked.items()
     })
+
+
+def _weak_link(value):
+    try:
+        asked = weaklink.weak_link(value)
+    except PlacementError as error:
+        raise CatalogError(str(error)) from error
+    # Kept as plain numbers for the same reason `rf:` is kept as plain
+    # records: the normalized arguments are written to the manifest and
+    # run.jsonl as JSON and read back from there.
+    return MappingProxyType(dict(asked))
 
 
 @dataclass(frozen=True)
@@ -407,10 +431,17 @@ class TestDefinition:
     ) -> Mapping[str, PlacementRequirement]:
         """The placement every hardware role must satisfy for these arguments.
 
-        The plan's ``rf:`` for a role, else the test's own default for it;
-        roles with neither are absent, and any resource may take them.
+        The plan's ``rf:`` for a role, else what its ``weak link:`` makes of
+        that role, else the test's own default for it; roles with none of the
+        three are absent, and any resource may take them.
+
+        ``rf:`` and ``weak link:`` cannot both be set (normalize_arguments
+        refuses it), so the first two are never in play at once.
         """
         requested = arguments.get("rf") or {}
+        weak = weaklink.placements(
+            arguments.get("weak link") or {}, self.hardware_roles
+        )
         defaults = self.rf_defaults or {}
         wanted = {}
         for role in self.hardware_roles or {}:
@@ -418,6 +449,8 @@ class TestDefinition:
                 # Normalizing the argument validated this record, so reading
                 # it back cannot fail.
                 placement = rf_requirement(requested[role])
+            elif role in weak:
+                placement = weak[role]
             else:
                 placement = defaults.get(role)
             if placement:
@@ -466,16 +499,27 @@ class TestDefinition:
                 normalized[name] = rule.default
             elif rule.required:
                 raise CatalogError(f"{self.name}: missing required argument '{name}'")
-        if "rf" in normalized:
-            # An rf requirement selects the resource bound to one hardware
-            # role, so a role the test does not have could never be applied.
-            unknown = sorted(set(normalized["rf"]) - set(self.hardware_roles or {}))
+        for name in ("rf", "weak link"):
+            if name not in normalized:
+                continue
+            # A placement requirement selects the resource bound to one
+            # hardware role, so a role the test does not have could never be
+            # applied.
+            unknown = sorted(set(normalized[name]) - set(self.hardware_roles or {}))
             if unknown:
                 raise CatalogError(
-                    f"{self.name}.rf: unknown hardware role(s) "
+                    f"{self.name}.{name}: unknown hardware role(s) "
                     f"{', '.join(unknown)}; this test binds "
                     + (", ".join(self.hardware_roles or {}) or "no hardware")
                 )
+        if "rf" in normalized and "weak link" in normalized:
+            # They say the same thing in two ways, and `weak link:` speaks for
+            # every role of the test, so which one wins per role would be a
+            # puzzle rather than a choice.
+            raise CatalogError(
+                f"{self.name}: set rf: or weak link:, not both; weak link: "
+                "already requires an ordinary board for every other role"
+            )
         if self.check_arguments is not None:
             try:
                 self.check_arguments(normalized)
@@ -579,6 +623,9 @@ PLATFORMS_ARGUMENT = ArgumentRule(_platforms)
 # Every test that binds hardware accepts `rf:` (builtin_catalog adds it), one
 # placement requirement per hardware role. Optional, like `platforms:`.
 RF_ARGUMENT = ArgumentRule(_rf)
+# ... and `weak link:`, the shorthand for it: an attenuation in dB per role,
+# with every other role an ordinary board (weaklink.py). Also optional.
+WEAK_LINK_ARGUMENT = ArgumentRule(_weak_link)
 DURATION = ArgumentRule(_duration, required=True)
 SAMPLE_EVERY = ArgumentRule(_duration, required=True)
 COVERAGE = ArgumentRule(_coverage, required=True)
@@ -1160,6 +1207,45 @@ def builtin_catalog() -> TestCatalog:
             command_builder=util_cases.range_test_cases,
             guards_other_ubertooths=True,
         ),
+        # The two transmit-side weak-link entries (#168). Both need a
+        # transmitter driven at a known PA level and a receiver behind a known
+        # attenuation, which the range test has not got: it reports only the
+        # level that got through, not a figure per level. Neither has an
+        # implementation, because the figure each would judge has not been
+        # measured yet; weaklink.CHECKS names the measurement.
+        TestDefinition(
+            "Transmit power steps",
+            "Nothing yet: the sender holds a continuous transmit at each of "
+            "the plan's PA levels while the attenuated receiver sweeps the "
+            "channel it transmits on, so the RSSI step per level is a figure "
+            "taken at a known attenuation",
+            MappingProxyType({
+                "host": ArgumentRule(_required_text, required=True),
+                "sender": ArgumentRule(_selector, required=True),
+                "receiver": ArgumentRule(_selector, required=True),
+                # The sender transmits at every level the plan lists.
+                "allow RF transmission": ArgumentRule(_required_true, required=True),
+                "PA levels": ArgumentRule(_pa_levels, required=True),
+                "duration": DURATION,
+            }),
+            MappingProxyType({"sender": "Ubertooth", "receiver": "Ubertooth"}),
+        ),
+        TestDefinition(
+            "Receiver sensitivity",
+            "Nothing yet: a sender held at one known PA level while the "
+            "attenuated receiver reports what it hears, so a figure belongs "
+            "to a known level rather than to whatever ambient traffic the "
+            "bench had; which reading the receiver takes is not settled",
+            MappingProxyType({
+                "host": ArgumentRule(_required_text, required=True),
+                "sender": ArgumentRule(_selector, required=True),
+                "receiver": ArgumentRule(_selector, required=True),
+                "allow RF transmission": ArgumentRule(_required_true, required=True),
+                "PA level": ArgumentRule(_pa_level, required=True),
+                "duration": DURATION,
+            }),
+            MappingProxyType({"sender": "Ubertooth", "receiver": "Ubertooth"}),
+        ),
         _device_test("BLE monitor", "Monitor BLE traffic", extra={"duration": DURATION}),
         TestDefinition(
             "Spectrum analyzer",
@@ -1672,12 +1758,14 @@ def builtin_catalog() -> TestCatalog:
 
 
 def _accept_rf(definition: TestDefinition) -> TestDefinition:
-    """Accept `rf:` on every test that binds hardware, so a plan can ask for
-    a placement for any of its roles. A test that binds none cannot."""
-    if not definition.hardware_roles or "rf" in definition.arguments:
+    """Accept `rf:` and `weak link:` on every test that binds hardware, so a
+    plan can ask for a placement for any of its roles. A test that binds none
+    cannot."""
+    if not definition.hardware_roles:
         return definition
     arguments = dict(definition.arguments)
-    arguments["rf"] = RF_ARGUMENT
+    arguments.setdefault("rf", RF_ARGUMENT)
+    arguments.setdefault("weak link", WEAK_LINK_ARGUMENT)
     return replace(definition, arguments=MappingProxyType(arguments))
 
 
