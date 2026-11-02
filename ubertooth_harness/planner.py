@@ -140,21 +140,21 @@ class CompiledSuite:
         run of the suite, as ``for_host`` puts that host's not-applicable
         records in every run: no run of its own will ever carry it, and a
         release gate nobody could measure must not pass anywhere. One record
-        per test, and nothing for a test this host runs: that run measured
-        the gate, so another host's absence is not what it should fail on.
+        per test, and nothing for a test any host here runs: that run
+        measures the gate, so an absent host's part of the step is not what
+        another run should fail on.
 
         A test this host was left out of does carry the record, even though
-        it has a not-applicable reason of its own. It could not measure the
-        gate, and nor could the host that is not here, so no run of this
-        suite would fail on it otherwise, and the absence would read as a
-        pass. ``for_host`` then leaves its own record out, as it does for
-        any test blocked on this host.
+        it has a not-applicable reason of its own, as long as no host here
+        runs it: neither this host nor the one that is not here could
+        measure the gate, so no run of this suite would fail on it
+        otherwise, and the absence would read as a pass. ``for_host`` then
+        leaves its own record out, as it does for any test blocked on this
+        host.
         """
         mine = tuple(item for item in self.blocked if item.host == host)
         covered = {item.test_name for item in mine}
-        covered |= {
-            item.test_name for item in self.invocations if item.host == host
-        }
+        covered |= {item.test_name for item in self.invocations}
         absent = []
         for item in self.blocked:
             if item.host not in self.absent_hosts or item.test_name in covered:
@@ -597,13 +597,21 @@ class PlanCompiler:
                         # two is that bench. For a required step that is
                         # missing hardware, not a plan to correct, so it is
                         # recorded and the rest of the suite still compiles.
+                        # The aliases say which bench this is: the same one
+                        # named twice is a host with one device where the
+                        # test needs two, or one whose roles have no default
+                        # of their own and fall back to the same device. Both
+                        # remedies are named, because planning cannot tell
+                        # which was meant.
                         reason = (
-                            "no device of its own for each role: "
+                            "no device of its own for each role ("
                             + ", ".join(
                                 f"{role} from "
                                 + " or ".join(host_choices[host][role])
                                 for role in role_names
                             )
+                            + "); register another, or give the host a "
+                            "default for each role"
                         )
                         if strict_hardware:
                             # The bench is named on purpose here, so this is

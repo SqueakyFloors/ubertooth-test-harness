@@ -273,9 +273,12 @@ class ReleaseGateTests(unittest.TestCase):
 
         (blocked,) = compiled.blocked
         self.assertEqual(("Host_Linux", AFH), (blocked.host, blocked.test_name))
+        # Both remedies, because planning cannot tell a bench with one peer
+        # from a bench whose roles have no default of their own.
         self.assertEqual(
-            "no device of its own for each role: Ubertooth from UT_Linux0, "
-            "acceptor from ESP32_Linux0, initiator from ESP32_Linux0",
+            "no device of its own for each role (Ubertooth from UT_Linux0, "
+            "acceptor from ESP32_Linux0, initiator from ESP32_Linux0); "
+            "register another, or give the host a default for each role",
             blocked.reason,
         )
         self.assertNotIn(AFH, [item.test_name for item in compiled.invocations])
@@ -317,8 +320,8 @@ class ReleaseGateTests(unittest.TestCase):
             self.compile(MAC_ONLY, strict=True)
         with self.assertRaisesRegex(
             PlanningError,
-            f"{AFH}: Host_Linux has no device of its own for each role: "
-            ".*acceptor from ESP32_Linux0, initiator from ESP32_Linux0",
+            f"{AFH}: Host_Linux has no device of its own for each role "
+            r"\(.*acceptor from ESP32_Linux0, initiator from ESP32_Linux0\)",
         ):
             self.compile(ONE_PEER_BOTH_ROLES, strict=True)
         # The bench that has them passes, as CI checks it does.
@@ -536,9 +539,9 @@ class RequiredHardwareArgumentTests(unittest.TestCase):
 
     def test_a_host_that_ran_the_test_is_not_failed_by_an_absent_one(self):
         """A required step may name two hosts and find one of them here.
-        That host's run measured the gate, so an absent host's record is not
-        what it should fail on; `for_host` keeps a host's own record the
-        same way. The run of a host that has neither still carries it."""
+        That host's run measures the gate, so no run of the suite fails on
+        the absent host's part of it, not that host's own and not a third
+        host's: the step was measured on this registry."""
         text = (
             "plan: gate\nsuites:\n  release:\n"
             "    - Host CLI surface:\n        hosts: each\n"
@@ -566,17 +569,15 @@ class RequiredHardwareArgumentTests(unittest.TestCase):
              if item.test_name == AFH],
         )
         self.assertEqual((), compiled.blocked_for_host("Host_Linux"))
-        # A host that did not run it does carry the record: no run of
-        # `Host_Lab` will ever happen here.
-        (blocked,) = compiled.blocked_for_host("Host_Mac")
-        self.assertEqual(("Host_Lab", AFH), (blocked.host, blocked.test_name))
+        self.assertEqual((), compiled.blocked_for_host("Host_Mac"))
 
     def test_a_host_left_out_of_the_test_still_fails_on_an_absent_one(self):
-        """The host that is here cannot measure the gate either, and nor can
-        the host that is not, so its run has to fail on it: with its own
-        not-applicable reason preferred, nothing in this registry would, and
-        the absence would read as a pass. Its own record is dropped, as it is
-        for any test blocked on the host."""
+        """No host here runs the step: this one is left out of it by its
+        platform, and the other is not registered. So this host's run has to
+        fail on it, even though it has a not-applicable reason of its own:
+        otherwise nothing in the registry would, and the absence would read
+        as a pass. Its own record is dropped, as it is for any test blocked
+        on the host."""
         text = (
             "plan: gate\nsuites:\n  release:\n"
             "    - Host CLI surface:\n        hosts: each\n"
@@ -638,8 +639,9 @@ class RequiredHardwareArgumentTests(unittest.TestCase):
         self.assertIn("blocked on Host_Linux", str(caught.exception))
 
     def test_the_registry_refusal_is_the_one_absence_reports(self):
-        """Sanity: the reason a blocked record carries is the registry's own
-        wording, not one the planner invents."""
+        """Sanity: where a lookup is what failed, the reason a blocked record
+        carries is the registry's own wording. (The one reason the planner
+        writes itself is the collision above, where no lookup failed.)"""
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(MissingResource) as caught:
                 registry(directory, NO_PEERS).resolve_hardware(

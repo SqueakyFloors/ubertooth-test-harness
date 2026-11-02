@@ -57,9 +57,11 @@ class MissingRequiredHardware(RegistryError):
     refuses it outright, as it does every other absence.
 
     A plan step may say the same of the hardware it binds, with
-    ``required hardware: true``: there the host or the device is missing in
-    the registry's own words (``MissingResource``), and the planner records
-    it as blocked rather than not applicable.
+    ``required hardware: true``. There the absence is usually the registry's
+    own (``MissingResource``: the host, or a device for a role), and the
+    planner records it as blocked rather than not applicable; a host that
+    can offer only one device for two roles is raised here, since no single
+    lookup failed.
     """
 
 

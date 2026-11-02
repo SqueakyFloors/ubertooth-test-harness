@@ -733,12 +733,16 @@ Ubertooths` on a host with one registered Ubertooth and for `exclusive
 Ubertooth` where another registered board is on no power controller. A step
 may also claim that outcome for the hardware it binds, with
 `required hardware: true` (every test that binds hardware accepts it): the
-absence is still the registry's own `MissingResource`, for the host or for
-the role, and the planner records it as blocked rather than not applicable.
-That is what lets a gate suite name one bench's hardware honestly, and
-`testplans/release.yaml` uses it for `Recover AFH map`; a record for a host
-the registry has not got is carried by every run of the suite, as
-`for_host` carries that host's not-applicable records. The argument decides
+absence is usually the registry's own `MissingResource`, for the host or for
+a role, and the planner records it as blocked rather than not applicable; a
+host that can offer only one device for two roles raises
+`MissingRequiredHardware` from the planner itself, since no single lookup
+failed. That is what lets a gate suite name one bench's hardware honestly,
+and `testplans/release.yaml` uses it for `Recover AFH map`; a record for a
+host the registry has not got is carried by the runs of the hosts that are
+here, as `for_host` carries that host's not-applicable records, unless some
+host here runs that test, in which case a run of this suite measures the
+gate and none of them fails on it. The argument decides
 absence only: what a host here cannot run at all is judged first, unchanged.
 The step
 is recorded as `hostneeds.Blocked` (`CompiledSuite.blocked`,

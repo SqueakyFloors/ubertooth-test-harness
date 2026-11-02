@@ -161,9 +161,10 @@ class _Run:
             e.get("details", {}) for e in self.events
             if e["event_type"] == "not_applicable"
         ]
-        # Required tests this bench has not got the hardware for
-        # (planner.py): also left out before the run, but the run fails
-        # rather than passing with the gate unmeasured.
+        # Required tests whose hardware is not registered (planner.py): on
+        # this host, or on a host this registry has not got at all. Also
+        # left out before the run, but the run fails rather than passing
+        # with the gate unmeasured.
         self.blocked = [
             e.get("details", {}) for e in self.events
             if e["event_type"] == "blocked"

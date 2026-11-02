@@ -210,8 +210,9 @@ the first few steps it left out. A host this registry has not got never runs
 anything of its own, so what it left out is recorded in the runs of the hosts
 that are here, and `run-suite --dry-run` lists it; one record per test, so a
 host that runs that test, or has its own reason for leaving it out, keeps its
-own. A blocked record for such a host is carried the same way, by every run
-of the suite.
+own. A blocked record for such a host is carried the same way, by the runs of
+the hosts that are here, unless one of them runs that test: that run measures
+what the step is about, so none of them fails on the absent host's part of it.
 
 What a host here cannot run is decided first, and has not changed: a platform
 the step does not list, and a board placed differently from what the test
@@ -785,7 +786,7 @@ python -m ubertooth_harness validate-plan testplans/release.yaml \
   --hardware hardware.yaml --suite release
 python -m ubertooth_harness run-suite \
   --plan testplans/release.yaml --suite release \
-  --hardware hardware.yaml --host Host_Mac \
+  --hardware hardware.yaml --host Host_Linux \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref main --output runs
 ```
 

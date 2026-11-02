@@ -1122,7 +1122,7 @@ class NamedTestSequencer:
         artifacts. Cases it cannot run are left out before anything runs and
         recorded as not applicable, with ``not_applicable`` (whole tests the
         planner left out of this run: what this host cannot run, and what
-        this bench has not got the hardware for).
+        this registry has not got the hardware for).
 
         ``blocked`` is the required tests this run cannot run because the
         hardware they are about is not registered (hostneeds.Blocked):
