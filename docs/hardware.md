@@ -261,10 +261,15 @@ holds the other.
   registered (a `serial device`, where one is recorded, must be the stable
   `/dev/serial/by-id` path, not `/dev/ttyUSB<n>`, which is assignment order).
 - `programs:` is the one board it is wired to. A registry is refused when that
-  board is not registered, is a host, is attached to another host (leases are
-  local to a host, so a pair across two of them would hold nothing), already
-  has another programmer, or is the programmer itself, and when the pairing
-  loops back on itself.
+  board is not registered, is not a device the harness leases (a host, a hub:
+  there would be no lock to take for it), is attached to another host (leases
+  are local to a host, so a pair across two of them would hold nothing),
+  already has another programmer, or is the programmer itself, and when the
+  pairing loops back on itself. Two programmers may not share one serial,
+  since the serial is what names the lease.
+- A chain is allowed and is held as one set, for a bench that wires a
+  programmer to another programmer's own header: holding any member holds all
+  of them.
 - Holding either member holds both, in one all-or-nothing attempt in the
   harness's own lock order, whichever one was named; naming both is harmless.
   That covers `scripts/lab/hold`, `ubertooth-harness lease`, a run that uses

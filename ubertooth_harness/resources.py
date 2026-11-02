@@ -164,6 +164,18 @@ _PROGRAMMER_IDENTITY_KEYS = ("serial", "serial device")
 _PROGRAMMER_SERIAL = re.compile(r"^[0-9A-Za-z_.:+-]{1,64}$")
 
 
+def _leased_types() -> tuple[str, ...]:
+    """The device types the harness leases, which a pair member must be.
+
+    Imported here rather than at the top of the module: ``leases`` needs
+    nothing of the registry (it works on resources it is handed), and one
+    direction of dependency is what keeps it that way.
+    """
+    from ubertooth_harness.leases import LEASED_TYPES
+
+    return tuple(LEASED_TYPES)
+
+
 def _validate_programmer(resource) -> None:
     """A debug programmer: its own serial, and the one device it programs."""
     alias = resource.alias
@@ -268,6 +280,15 @@ class ResourceRegistry(Protocol):
         """Every device permanently wired to this one (a debug programmer and
         the device it programs), which is held with it."""
 
+    def describe_pairing(self, alias: str, named: str) -> str:
+        """Why holding ``named`` holds ``alias`` too, as a clause."""
+
+    def expand_pairs(
+        self, aliases: Sequence[str]
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The aliases to hold for these, deduplicated and in a deterministic
+        order, and one clause per alias the pairing added."""
+
     def hardware(self, host: str, resource_type: str) -> tuple[str, ...]:
         """Every resource of this type attached to the host, by alias."""
 
@@ -338,6 +359,13 @@ class FileResourceRegistry:
                 raise RegistryError(
                     f"resource {alias}.power must name a controller and a port"
                 )
+            programs = value.get(PROGRAMS_FIELD)
+            if PROGRAMS_FIELD in value and programs is None:
+                # Written with nothing after it. Kept as the empty string, so
+                # validation sees a pairing that was meant and left empty
+                # rather than a resource with no pairing at all, which is
+                # every resource but a programmer.
+                programs = ""
             placement = None
             if value.get("rf") is not None:
                 try:
@@ -356,7 +384,7 @@ class FileResourceRegistry:
                 power=MappingProxyType(dict(power)),
                 driver=value.get("driver"),
                 rf=placement,
-                programs=value.get(PROGRAMS_FIELD),
+                programs=programs,
             )
         return cls(resources)
 
@@ -531,18 +559,22 @@ class FileResourceRegistry:
             if target is None:
                 continue
             alias = resource.alias
+            # The type first: a resource that may not be wired to anything is
+            # that mistake whatever it named, including a `programs:` line
+            # with nothing after it (load() keeps one as the empty string, so
+            # it is not read as a resource with no pairing at all).
+            if resource.type != DEBUG_PROGRAMMER:
+                raise RegistryError(
+                    f"resource {alias} is a {resource.type}, which does not "
+                    f"'{PROGRAMS_FIELD}' another device; only a "
+                    f"{DEBUG_PROGRAMMER} is wired to one"
+                )
             # Checked before any lookup: a YAML list or mapping is not even
             # hashable, and is the mistake of naming more than one target.
             if not isinstance(target, str) or not target:
                 raise RegistryError(
                     f"resource {alias} must name the one device it "
                     f"{PROGRAMS_FIELD} by alias"
-                )
-            if resource.type != DEBUG_PROGRAMMER:
-                raise RegistryError(
-                    f"resource {alias} is a {resource.type}, which does not "
-                    f"'{PROGRAMS_FIELD}' another device; only a "
-                    f"{DEBUG_PROGRAMMER} is wired to one"
                 )
             if target == alias:
                 raise RegistryError(
@@ -552,10 +584,15 @@ class FileResourceRegistry:
                 raise RegistryError(
                     f"{DEBUG_PROGRAMMER} {alias} programs unknown device '{target}'"
                 )
-            if self.resources[target].type == "Host":
+            if self.resources[target].type not in _leased_types():
+                # A pair is held as one, so a target no lock can be named
+                # after (a host, a hub) would be accepted here and then
+                # refuse every command that named either member, naming a
+                # resource the person never asked for.
                 raise RegistryError(
                     f"{DEBUG_PROGRAMMER} {alias} programs {target}, which is a "
-                    "Host; a pair is two devices attached to one host"
+                    f"{self.resources[target].type}; a pair is two devices the "
+                    f"harness leases ({', '.join(_leased_types())})"
                 )
             if self.resources[target].attached_to != resource.attached_to:
                 raise RegistryError(

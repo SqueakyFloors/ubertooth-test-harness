@@ -165,10 +165,48 @@ class PairRegistry(PairTestCase):
             "programs unknown device 'UT_Nope'",
         )
 
-    def test_a_host_cannot_be_a_target(self):
+    def test_a_target_the_harness_cannot_lease_is_refused(self):
+        """There would be no lock to take for it, so every command naming
+        either member would fail, naming a resource nobody asked for."""
+        for target, what in (("Host_Linux", "Host"),
+                             ("Hub0", "USB power controller")):
+            with self.subTest(target=target):
+                reason = self.refuse(
+                    PROGRAMMER.replace("programs: UT_Debug", f"programs: {target}"),
+                    f"which is a {what}",
+                )
+                self.assertIn("a pair is two devices the harness leases", reason)
+
+    def test_every_leasable_type_may_be_a_target(self):
+        """The refusal above is about the lock, not about the board."""
+        self.assertIn("Ubertooth", leases.LEASED_TYPES)
+        registry = self.load(
+            PROGRAMMER.replace("Prog0", "Prog1")
+            .replace("programs: UT_Debug", "programs: Prog0")
+            .replace(PROGRAMMER_SERIAL, "B111BB11")
+            + PROGRAMMER
+        )
+        self.assertEqual(("Prog1", "UT_Debug"), registry.pair_members("Prog0"))
+
+    def test_a_programs_line_with_nothing_after_it_is_refused(self):
+        """Present and empty is a pairing left half written, not no pairing.
+
+        On any other resource type it is the type that is refused, which is
+        the mistake there: nothing but a programmer is wired to a device.
+        """
         self.refuse(
-            PROGRAMMER.replace("programs: UT_Debug", "programs: Host_Linux"),
-            "which is a Host",
+            PROGRAMMER.replace("programs: UT_Debug", "programs:"),
+            "must name the one device it programs by alias",
+        )
+        self.refuse(
+            PROGRAMMER
+            + "  UT_Null:\n"
+              "    type: Ubertooth\n"
+              "    attached to: Host_Linux\n"
+              "    programs:\n"
+              "    identity:\n"
+              "      serial: bbbb1111bbbb1111bbbb1111bbbb1111\n",
+            "only a Debug programmer is wired to one",
         )
 
     def test_a_pair_must_be_on_one_host(self):

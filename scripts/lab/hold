@@ -209,9 +209,14 @@ def main(argv: list[str] | None = None) -> int:
     except (RegistryError, leases.LeaseError) as error:
         return _fail(error)
 
+    # Said here, whichever way the locks are taken below: the delegate is
+    # given the expanded devices, so it has nothing left to explain. Before
+    # the attempt, which is also when a wait for any of them starts.
+    for clause in pairing:
+        print(f"note: {clause}, so it is held too", file=sys.stderr)
+
     # With nothing extra to take, this is purely a wrapper: the harness holds
-    # every lock, decides the host lock, runs the command, and says itself
-    # which devices a pair brought in (it expands the same way).
+    # every lock, decides the host lock, and runs the command.
     if not extra:
         return leases.exit_status(
             subprocess.call(
@@ -219,11 +224,6 @@ def main(argv: list[str] | None = None) -> int:
                 env=child_environment(),
             )
         )
-
-    # Taken here, so the note the delegate would have printed is printed
-    # here instead, before the attempt and any wait.
-    for clause in pairing:
-        print(f"note: {clause}, so it is held too", file=sys.stderr)
 
     # Otherwise every lock is taken here, in one all-or-nothing attempt in the
     # harness's own order, rather than nesting a second attempt inside this
