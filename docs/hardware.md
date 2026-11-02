@@ -267,24 +267,24 @@ anything. A mechanism that cannot be missing this way (`btmgmt`,
 `bluetoothctl`, or `/sys/class/bluetooth/<device>/address`) is worth
 considering once a bench exists to test one on.
 
-**The two tools need privileges nothing else here does.** The reads the
-harness makes of the controller, `hciconfig <device>` and
-`hcitool -i <device> con`, are ioctls any user may make. What the tools
-themselves do is not: an inquiry, a page, a remote name read, a clock read
-and a channel-map read all go over a raw HCI socket, which Linux allows only
-to a process holding `CAP_NET_RAW` and `CAP_NET_ADMIN`. Everything else in
-the harness runs as an ordinary user, so an adapter bench needs one of:
+**These cases need privileges nothing else here does.** Everything they run
+talks to the controller over a raw Bluetooth HCI socket, which Linux allows
+only to a process holding `CAP_NET_RAW`: `ubertooth-scan` and
+`ubertooth-follow` for the inquiry, the page and the clock and channel-map
+reads, and `hciconfig` and `hcitool` for the reads the harness makes around
+them. The commands that change the controller's state want `CAP_NET_ADMIN`
+too. Everything else in the harness runs as an ordinary user, so an adapter
+bench needs one of:
 
-- the capabilities set on the two binaries
-  (`sudo setcap cap_net_raw,cap_net_admin+ep <path>/ubertooth-scan`, and the
-  same for `ubertooth-follow`) — which has to be redone for every build,
-  since a `--build` run puts fresh binaries in its own run prefix;
+- the capabilities on every one of those four binaries
+  (`sudo setcap cap_net_raw,cap_net_admin+ep <path>`) — which has to be
+  redone for each build of the two fork tools, since a `--build` run puts
+  fresh binaries in its own run prefix;
 - or the run made by a user or service that already holds them.
 
-Without that, the adapter reads pass and the tool fails on its own, with
-`error: cannot open Bluetooth device <device>` and a permission reason.
-`hostneeds.Needs` has no way to express a capability, so nothing checks this
-before the run.
+Without it the first step of the first case fails, on `hciconfig`, which is
+at least early and obvious. `hostneeds.Needs` has no way to express a
+capability, so nothing checks this before the run.
 
 What is still unknown, and what the first real run on a bench will settle, is
 in [`docs/tests.md`](tests.md) under `Bluetooth inquiry scan` and

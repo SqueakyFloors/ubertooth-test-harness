@@ -128,7 +128,10 @@ INQUIRY_MIN_S = 8 * 1.28
 # driver's own deadline, which fails with its message.
 NAME_READS_S = 60.0
 # What -x adds, which is the one allowance here that is not a worst case.
-# `extra_info()` is called for every device the inquiry answered and, per
+# `extra_info()` is called for every device the inquiry answered AND for
+# every survey result whose UAP the sweep recovered, which the pair's own
+# piconet is on any working run -- those go to the `00:00:<UAP>:<LAP>`
+# address the tool assembles, so each costs a page as well. Per
 # device, connects (25 s), sleeps a second, and reads the name (25 s), the
 # version (20 s) and up to two feature pages (20 s each): about 113 s if a
 # device fails every read. The number of devices is whatever is in range, so
@@ -197,22 +200,6 @@ _EXTENDED_ADDRESS = re.compile(r"^\tBD Address:  (?P<address>\S+)$")
 _EXTENDED_NAME = re.compile(r"^\tDevice Name: (?P<name>.*)$")
 _EXTENDED_LMP = re.compile(
     r"^\tLMP Version: .+ \(0x[0-9a-f]+\) LMP Subversion: 0x[0-9a-f]+$")
-
-# What libubertooth says when the capture's own USB stream died, or when the
-# board would not give it up at the end. Both make a tool exit 1, which is
-# how every other case here catches them; the -x case, which takes either
-# status for a reason of its own, forbids these lines instead.
-CAPTURE_FAILED = (
-    # rx_xfer_status(): a transfer error, a board that left the bus, or an
-    # overflow.
-    r"(?m)^error: receive transfer failed: ",
-    # The same path for a stalled receive endpoint, which
-    # ubertooth_report_unsupported_request() reports by name.
-    r"(?m)^error: could not receive the capture\b",
-    # stop_ubertooth(): the mode was left running on the board.
-    r"(?m)^warning: the receive transfer did not finish;",
-)
-
 
 # ---------------------------------------------------------------------------
 # The adapter, from the registry
@@ -479,7 +466,7 @@ def _session_argv(acceptor, initiator, command, *, timeout, min_seconds,
 
 def _tool_case(*, case_id, name, serial, hci, acceptor, initiator, command,
                seconds, needs, expected_state, check=None, patterns=(),
-               returncodes=(0,), forbidden=(), interrupt=False, extra_s=0.0,
+               returncodes=(0,), interrupt=False, extra_s=0.0,
                floor_s=0.0, files=(), verify=()):
     """One tool run against the adapter while the ESP32 pair streams.
 
@@ -524,7 +511,6 @@ def _tool_case(*, case_id, name, serial, hci, acceptor, initiator, command,
              mutates=True,
              expected_returncodes=tuple(returncodes),
              output_patterns=tuple(patterns),
-             forbidden_patterns=tuple(forbidden),
              output_check=check),
         _stop(serial),
         *verify,
@@ -553,19 +539,9 @@ def _tool_case(*, case_id, name, serial, hci, acceptor, initiator, command,
     )
 
 
-def _pair_report(acceptor, initiator, *, exit_status=r"0") -> tuple[str, ...]:
-    """The driver's report, with the tool's exit status the case accepts.
-
-    ``_pair_patterns`` pins a zero exit, which is right for every case but
-    ``-x``: there the tool's status also reflects the devices it reached,
-    which includes devices this bench does not own, so the case takes either
-    and the checks over its output are what decide it.
-    """
-    return tuple(
-        rf"(?m)^command exit: {exit_status} after \d+\.\d s$"
-        if pattern.startswith(r"(?m)^command exit:") else pattern
-        for pattern in _pair_patterns(acceptor, initiator)
-    )
+def _pair_report(acceptor, initiator) -> tuple[str, ...]:
+    """The driver's report of the session, which pins a zero exit."""
+    return _pair_patterns(acceptor, initiator)
 
 
 # ---------------------------------------------------------------------------
@@ -627,16 +603,19 @@ def inquiry_scan_cases(arguments, resources, resource_identities):
         # it is the one part of this tool that transmits to whatever the
         # inquiry answered, rather than only listening.
         #
-        # Either exit status is accepted, because the tool exits 1 when any
-        # part of any device's report could not be fetched and the devices it
-        # asks include whatever else in range answered the inquiry. The same
-        # status also means a capture stream that died or a board that would
-        # not give the mode up, which this case would otherwise accept: the
-        # survey results show the sweep decoded the piconet at some point,
-        # not that the stream lasted, and the board answers a stop normally
-        # after a failed stream, so no later step reports it either. So the
-        # lines libubertooth prints for both are forbidden here, which is the
-        # exit status this case gives up read back off the output.
+        # A zero exit, like every other case. The tool's status is one bit
+        # for several things: a part of any device's report that could not be
+        # fetched, a capture stream that died, or a board that would not give
+        # its mode up. Accepting 1 to allow for the first would accept the
+        # other two as well -- the survey results show only that the sweep
+        # decoded the piconet at some point, and a board answers a stop
+        # normally after a failed stream, so no later step would report one --
+        # and the lines libubertooth prints are not all pinnable, since the
+        # refused-stop path reports through a libusb error that names no
+        # request. So the status is kept, and the cost is stated: a device in
+        # range that answers the inquiry and then refuses a read fails this
+        # case for a reason that is not the bench's. That is one more reason
+        # -x is comprehensive-only and wants a quiet room.
         cases.append(scan(
             "-s", "-x", case_id="extended-report",
             name=f"ubertooth-scan -s -x reports the acceptor's name and LMP "
@@ -644,11 +623,9 @@ def inquiry_scan_cases(arguments, resources, resource_identities):
             check=_all(inquiry_found(acceptor["address"], acceptor_name),
                        extended_report(acceptor["address"], acceptor_name),
                        scan_results_list(central)),
-            returncodes=(0, 1),
-            forbidden=CAPTURE_FAILED,
             extra_s=(INQUIRY_S + NAME_READS_S + BOARD_SETUP_S
                      + EXTENDED_REPORT_S),
-            patterns=_pair_report(acceptor, initiator, exit_status="[01]"),
+            patterns=report,
             expected_state=(f"the extended report of {acceptor['address']} held "
                             f"{acceptor_name} and an LMP version, and the scan "
                             f"results listed LAP {central}")))
