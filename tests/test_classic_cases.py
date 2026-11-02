@@ -480,6 +480,19 @@ class RegistryTests(unittest.TestCase):
                 arguments("Capture known Classic device"), {},
                 {**IDENTITIES,
                  "acceptor": {**IDENTITIES["acceptor"], "LAP": "2a1b2b"}})
+        # The name follows from the address too, so a note that disagrees is
+        # refused the same way: `Classic btbr console` looks for exactly that
+        # name in the peer's Extended Inquiry Response.
+        with self.assertRaisesRegex(
+            StateCaseError,
+            "the acceptor's registered name is UT-ESP32-OTHER, but its "
+            "BD_ADDR C8:85:41:2A:1B:2A gives UT-ESP32-2A1B2A"
+        ):
+            known_classic_cases(
+                arguments("Capture known Classic device"), {},
+                {**IDENTITIES,
+                 "acceptor": {**IDENTITIES["acceptor"],
+                              "name": "UT-ESP32-OTHER"}})
 
     def test_a_bridge_serial_is_taken_as_the_board_reports_it(self):
         # udev puts the USB iSerial string in the by-id name as the device

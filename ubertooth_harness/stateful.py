@@ -28,6 +28,16 @@ def artifact_key(label: str) -> str:
     """Context key of a manifest artifact's path, by image label."""
     return f"artifact {label}"
 
+
+# Image labels of the two firmware images a run can carry, as a case asks for
+# them in StateCase.artifacts. They are what plan.image_label() makes of the
+# artifact names cli.py records, TEST_BUILD_ARTIFACT and BTBR_BUILD_ARTIFACT
+# in build.py; tests/test_btbr_cases.py checks the two agree. They live here,
+# not beside those names, because build.py reaches the catalog through the run
+# manifest and a case module importing it would close that circle.
+APPLICATION_IMAGE_LABEL = "test_build"
+BTBR_IMAGE_LABEL = "btbr_build"
+
 _CASE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{0,95}$")
 
 Context = Mapping[str, str]

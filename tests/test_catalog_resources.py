@@ -232,21 +232,24 @@ class BuildNeedsTests(unittest.TestCase):
             name: catalog.get(name).required_build_options() for name in catalog.names
         }
         self.assertEqual(
-            {"DFU images", "DFU image checks"},
+            {"DFU images", "DFU image checks", "Classic btbr console"},
             {name for name, need in needed.items() if need.firmware_build},
         )
         self.assertEqual(
-            {"Python tools"},
+            {"Python tools", "Classic btbr console"},
             {name for name, need in needed.items() if need.python_tools},
         )
         # Refused without the image, rather than leaving a case out: every
-        # case of it writes the run's own image and reads it back.
+        # case of these writes an image the run builds and reads it back, and
+        # the btbr console also drives a tool only a --with-python build
+        # installs.
         self.assertEqual(
-            {"DFU images"},
+            {"DFU images", "Classic btbr console"},
             {name for name, need in required.items() if need.firmware_build},
         )
         self.assertEqual(
-            set(), {name for name, need in required.items() if need.python_tools}
+            {"Classic btbr console"},
+            {name for name, need in required.items() if need.python_tools},
         )
 
     def test_the_images_a_step_names_come_from_the_plan_entry(self):
