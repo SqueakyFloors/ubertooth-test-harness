@@ -37,7 +37,11 @@ from ubertooth_harness.manifest import (
     build_run_manifest,
 )
 from ubertooth_harness.plan import load_plan
-from ubertooth_harness.planner import PlanCompiler, TestInvocation
+from ubertooth_harness.planner import (
+    PlanCompiler,
+    PlanningError,
+    TestInvocation,
+)
 from ubertooth_harness.power import PortState, PowerControllerError, SimulatedPowerController
 from ubertooth_harness.preflight import PreflightCheck
 from ubertooth_harness.resources import FileResourceRegistry, RegistryError
@@ -885,7 +889,7 @@ class RunRequirementTests(unittest.TestCase):
         self._dir = tempfile.TemporaryDirectory()
         root = Path(self._dir.name)
         self.registry = FileResourceRegistry.load(registry_file(root))
-        plan = root / "power.yaml"
+        plan = self.plan = root / "power.yaml"
         plan.write_text(
             Path("testplans/power.yaml").read_text(encoding="utf-8")
             .replace("Ubertooth: default", f"Ubertooth: {BOARD}")
@@ -905,6 +909,32 @@ class RunRequirementTests(unittest.TestCase):
         self.assertEqual(CONTROLLER, invocation.power_cycle.controller_alias)
         self.assertEqual(PORT, invocation.power_cycle.port)
         self.assertEqual(BOARD, invocation.power_cycle.resource_alias)
+
+    def test_a_bench_that_cannot_switch_the_board_blocks_the_step(self):
+        """The port is what the test is about, so a bench that cannot switch
+        it does not leave the step out as not applicable -- that would read
+        as a pass for a check nobody made. The step is recorded as blocked,
+        every unrelated step still compiles, and the run it belonged to
+        fails (#269, #273). This plan holds that step alone, so there is
+        nothing left to run and the compile says so, naming the reason.
+        """
+        text = HARDWARE.replace(
+            "    power: {controller: Hub_StarTech, port: 1}\n", "", 1)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "hardware.yaml"
+            path.write_text(text, encoding="utf-8")
+            registry = FileResourceRegistry.load(path)
+            compiler = PlanCompiler(self.catalog, registry)
+            plan = load_plan(self.plan, self.catalog)
+            with self.assertRaises(PlanningError) as caught:
+                compiler.compile_suite(plan, "power")
+        message = str(caught.exception)
+        self.assertIn("blocked on Host_Linux", message)
+        self.assertIn("has no power mapping", message)
+        # With the bench as it really is, nothing is blocked.
+        self.assertEqual((), PlanCompiler(
+            self.catalog, self.registry).compile_suite(
+                load_plan(self.plan, self.catalog), "power").blocked)
 
     def test_the_run_holds_the_host_lock(self):
         self.assertTrue(leases.needs_host_lock(self.invocations, self.catalog))
