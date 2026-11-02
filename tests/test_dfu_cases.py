@@ -893,6 +893,30 @@ class DfuWrittenImageTests(unittest.TestCase):
         self.assertEqual([field.offset for field in record[1:]],
                          [field.offset + field.size for field in record[:-1]])
 
+    def test_a_block_in_a_format_this_reader_does_not_know_is_left_alone(self):
+        """A reader that cannot read the block makes no check, which is what
+        lets a bootloader tolerate an image newer than itself. The tool fills
+        in nothing it cannot read either, so those bytes stay the file's."""
+        body = bytearray(firmware(image_check=True))
+        struct.pack_into("<H", body,
+                         dfuimage.IMAGE_CHECK_OFFSET + dfuimage.IMAGE_CHECK_OFF_FORMAT, 2)
+        image = signed(bytes(body[:-dfuimage.SUFFIX_LENGTH]))
+        self.assertFalse(dfuimage.carries_image_check(dfuimage.image_block(image, 0)))
+        self.assertEqual((dfuimage.VECTOR_CHECKSUM_FIELD,), dfuimage.written_fields(image))
+        written = dfuimage.written_image(image)
+        self.assertEqual(image[0xE0:0x100], written[0xE0:0x100])
+
+    def test_an_image_that_already_carries_the_right_checksum_keeps_it(self):
+        """ubertooth-dfu(1): the word is written over rather than checked, so
+        an image carrying the right one is unchanged by it."""
+        body = bytearray(firmware())
+        block = dfuimage.image_block(bytes(body), 0)
+        struct.pack_into("<I", body, dfuimage.VECTOR_CHECKSUM_OFFSET,
+                         dfuimage.vector_checksum(block))
+        image = signed(bytes(body[:-dfuimage.SUFFIX_LENGTH]))
+        self.assertEqual([], dfuimage.suffix_problems(image))
+        self.assertEqual(image, dfuimage.written_image(image))
+
     def test_a_short_image_has_no_field_to_compare(self):
         """The tool pads the block it writes, so a file that ends before a
         field has nothing to compare there. Such an image is refused by -d
@@ -977,8 +1001,8 @@ class DfuReadbackLengthTests(unittest.TestCase):
         odd = dfuimage.readback_plan("Reading back 1024 bytes, 0x4000-0x43ff: part "
                                      "0x25011722 (LPC1754) has 128 KiB of flash\n")
         self.assertEqual(
-            ["the read-back covers 1024 bytes, which is no Ubertooth part's "
-             "application region (16384, 49152, 114688, 245760, 507904)"],
+            ["the read-back covers 1024 bytes, which is no application region "
+             "in the fork's part table (16384, 49152, 114688, 245760, 507904)"],
             odd.problems())
         # A plan that does not add up fails the comparison as well.
         self.assertIn("0x4100-0x1fffe is not 114688 bytes",
@@ -1084,6 +1108,24 @@ class DfuReadbackRunTests(unittest.TestCase):
         self.assertEqual(["write-read-back"], failed(events))
         self.assertIn("vector checksum at 0x0401c", summary.failure_reason)
         self.assertIn("flash still differs after the rewrite", summary.failure_reason)
+
+    def test_a_cleanup_whose_read_back_reports_no_range_does_not_rewrite(self):
+        """Nothing a rewrite can fix: the next read-back would say no more,
+        so the cleanup fails rather than spending a flash cycle."""
+        image = firmware(image_check=True)
+        board = FakeDfuBoard(image, no_plan_line=True)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "test.dfu"
+            path.write_bytes(image)
+            with redirect_stdout(io.StringIO()) as out:
+                code = dfuimage.restore(board._board(SERIAL), path, REVISION,
+                                        root / "r.bin")
+        self.assertEqual(1, code)
+        self.assertIn("Restore: the read-back did not report the range it covers",
+                      out.getvalue())
+        self.assertEqual([], [c for c in board.commands
+                              if c[0] == "ubertooth-dfu" and "-d" in c])
 
     def test_a_tool_that_reports_no_range_fails_the_read_back_step(self):
         """An earlier -u said nothing about what it was reading. The step

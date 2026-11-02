@@ -458,9 +458,13 @@ def written_fields(image: bytes) -> tuple[WrittenField, ...]:
                  if field.offset + field.size <= len(image))
 
 
-_READBACK_RE = re.compile(
+# plan_upload()'s line, as both the step that records it and the parser that
+# reads the fields out of it match it, so the two cannot drift apart. The
+# step wraps this in its own (?P<value>...) group.
+READBACK_LINE_PATTERN = (
     r"Reading back (?P<length>\d+) bytes, "
     r"0x(?P<start>[0-9a-fA-F]+)-0x(?P<end>[0-9a-fA-F]+): *(?P<part>[^\n]*)")
+_READBACK_RE = re.compile(READBACK_LINE_PATTERN)
 
 
 class ReadbackPlan(NamedTuple):
@@ -484,20 +488,25 @@ class ReadbackPlan(NamedTuple):
                             f"{self.length} bytes")
         if self.length not in READBACK_LENGTHS:
             lengths = ", ".join(str(length) for length in READBACK_LENGTHS)
+            # A part the fork's table has grown since PART_FLASH_SIZES was
+            # written would land here, with the lengths it does know named,
+            # which is the drift this is meant to report rather than pass.
             problems.append(f"the read-back covers {self.length} bytes, which is "
-                            f"no Ubertooth part's application region ({lengths})")
+                            "no application region in the fork's part table "
+                            f"({lengths})")
         return problems
 
 
 def readback_plan(output: str) -> ReadbackPlan | None:
-    """The range the last -u run in ``output`` reported, or None for none.
+    """The range the -u run in ``output`` reported, or None for none.
 
     The line goes to standard error with the rest of the tool's progress, so
-    a caller passes it whatever the command printed on both streams.
+    a caller passes it whatever the command printed on both streams. The
+    first match is taken, as the step that records the line takes it, and
+    plan_upload() prints it once per command: a retried read-back reuses the
+    length it settled before the first attempt rather than planning again.
     """
-    found = None
-    for found in _READBACK_RE.finditer(output):
-        pass
+    found = _READBACK_RE.search(output)
     if found is None:
         return None
     return ReadbackPlan(int(found["length"]), int(found["start"], 16),
@@ -858,7 +867,14 @@ def restore(board: Board, image: Path, revision: str, readback: Path) -> int:
         print("Restore: board did not return to its application")
         return 1
     data = image.read_bytes()
-    if readback_problems(readback.read_bytes(), data, plan=read.plan):
+    problems = readback_problems(readback.read_bytes(), data, plan=read.plan)
+    if problems and read.plan is None:
+        # A read-back that said nothing about what it covers cannot be
+        # compared at all, and the next one will say no more, so a rewrite
+        # would spend a flash cycle on a shared board for nothing.
+        print(f"Restore: {'; '.join(problems)}")
+        return 1
+    if problems:
         print("Flash differs from the test image; rewriting it")
         failure = board.write(image)
         if failure:
@@ -1068,9 +1084,11 @@ def _main(args, board_factory) -> int:
         plan = readback_plan(args.reported)
         data = Path(args.readback).read_bytes()
         problems = readback_problems(data, Path(args.image).read_bytes(), plan=plan)
-        if problems or plan is None:
+        if problems:
             print("Read-back mismatch: " + "; ".join(problems))
             return 1
+        # A --reported that named no range is one of those problems, so by
+        # here the command did report one and the verdict can quote it.
         print(f"Read-back covers 0x{plan.start:x}-0x{plan.end:x}: {plan.part}")
         print(f"Read-back: {len(data)} bytes, image and 0xff padding match, with the "
               "vector checksum and image check record -d fills in")

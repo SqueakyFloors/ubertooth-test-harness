@@ -68,10 +68,10 @@ _PROGRAMMING = r"firmware programming attempt"
 # cover it, because the length follows the part and so differs between
 # boards: 114688 bytes on a 128 KiB part, 245760 on a 256 KiB one. The
 # comparison takes the length from this line rather than assuming a part, so
-# the step records the whole line and fails if the tool printed none.
+# the step records the whole line and fails if the tool printed none. The
+# line's shape comes from dfuimage, which reads the fields back out of it.
 READBACK_RANGE_KEY = "read-back range"
-_READBACK_RANGE_PATTERN = (
-    r"(?P<value>Reading back \d+ bytes, 0x[0-9a-f]+-0x[0-9a-f]+: [^\n]*)")
+_READBACK_RANGE_PATTERN = rf"(?P<value>{dfuimage.READBACK_LINE_PATTERN})"
 # ...and this one once the image is accepted, before it opens a device.
 _DEVICE_OPENED = r"DFU \+\d+\.\d+s: operation started"
 # A write, a read-back. Helper steps that run device commands take their
