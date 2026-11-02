@@ -2649,7 +2649,11 @@ and that itself fails about once in twenty. The board coming back into its
 application after the write is the proof that what is in the flash now is
 startable. The cleanup runs whatever happened: it powers the port on if it is
 off, then writes the image and reads the revision, so a failed case still
-ends with a board on the test image.
+ends with a board on the test image. It writes even where the recovery step
+already did, which is one write more than a passing run needs: the cleanup
+cannot see what the steps did, and a board that started the unstartable image
+answers with the same revision as the test image, so a verified write costs
+less than being wrong about which it is.
 
 **Known limits.** A pass says what the bootloader in that board's flash does,
 and that bootloader is not what the run built: it cannot be written over USB,

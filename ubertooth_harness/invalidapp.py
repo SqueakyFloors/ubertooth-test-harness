@@ -69,6 +69,14 @@ What elimination cannot tell: an Ubertooth nobody registered. A stranger in
 its own DFU bootloader, attached while the board under test is off the bus,
 looks exactly like the board. The run assumes the registry describes the
 bench, as leases and power isolation do.
+
+One more thing it cannot tell, and the one worth knowing before reading a
+pass: a board whose P4 entry pin is bridged or stuck low enters its
+bootloader on every cold boot before the application is looked at at all
+(firmware/bootloader/bootloader.cpp). Such a board passes this test without
+saying anything about the image or the check -- and it is the state the
+documented recovery leaves a board in, so a board recovered that way has to
+have the bridge taken off before it is used here again.
 """
 
 from __future__ import annotations
@@ -250,10 +258,13 @@ def ensure_power_on(
                 return ""
             read_off = True
             log(f"Port {port} power: off; switching it back on")
+            # Every driver reads the port back as part of the write and
+            # raises if it did not take (power.py), so a write that returns
+            # is the proof. A confirming read of our own could only fail
+            # where the port is in fact on, which would then be reported as
+            # the one thing it is not.
             controller.set_power_enabled(port, True)
-            if not controller.snapshot(port).power_enabled:
-                raise PowerControllerError(f"port {port} did not come back on")
-            log(f"Port {port} power: on")
+            log(f"Port {port} power: on (the write was read back)")
             return ""
         # BaseException as well: a signal arriving here must not end the
         # command with the port switched off. The handler that raised it has
@@ -418,8 +429,11 @@ def power_cycle(
             waited = wait_for_enumeration(
                 enumerator, off, removal_deadline_s, settle_s=settle_s, **timing
             )
-            log(f"Board off the bus after {waited:.1f}s, and still gone "
-                f"{settle_s:g}s later")
+            # The wait includes the settle hold, so this is how long until
+            # the board was gone and had stayed gone, not how long it took
+            # to go.
+            log(f"Board off the bus and still gone {settle_s:g}s later "
+                f"({waited:.1f}s in all)")
         # preserved_power_state restored the port here, reading it back.
         log(f"Port {target.port} power restored")
         try:
@@ -431,12 +445,16 @@ def power_cycle(
                 f"{error}; "
                 + _diagnose(enumerator, state, controller, target.port)
             ) from error
-        log(f"Board back on the bus after {waited:.1f}s as a DFU bootloader "
-            "device, not as its application")
+        log(f"Board back on the bus as a DFU bootloader device, not as its "
+            f"application, and still there {settle_s:g}s later "
+            f"({waited:.1f}s in all)")
     except InvalidAppError as error:
         failure = str(error)
     except (PowerControllerError, EnumerationError, OSError) as error:
-        failure = f"power cycle failed: {error}"
+        # A restoration that failed on the way out of the block replaces the
+        # error the body raised, so what the body failed on is carried here
+        # rather than left in __context__, where nothing prints it.
+        failure = f"power cycle failed: {error}{_while_handling(error)}"
     except PowerCycleInterrupted as error:
         failure = f"power cycle interrupted: {error}"
     finally:
@@ -456,6 +474,14 @@ def power_cycle(
         return 1
     log("Power cycle: the bootloader refused the unstartable image, as it must")
     return 0
+
+
+def _while_handling(error: BaseException) -> str:
+    """The error this one replaced, if it replaced one."""
+    cause = error.__context__
+    if cause is None or error.__suppress_context__:
+        return ""
+    return f"; while handling {type(cause).__name__}: {cause}"
 
 
 def _describe(state: BoardState) -> str:

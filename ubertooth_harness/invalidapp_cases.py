@@ -179,18 +179,22 @@ def _steps(serial, guards, board_alias, controller_alias):
 def _cleanup(serial, guards, board_alias, controller_alias):
     """Always: the port powered, then the board back on the test image.
 
-    The port comes first, because a board whose port is off cannot be
-    recovered, and because this is what restores power when the cycle step's
-    own command was killed outright -- which the harness itself does, with
-    SIGKILL, if that command outlives its deadline. (A SIGKILL of the whole
-    run is different: no cleanup runs then, and the port is switched on by
-    hand, as it is after a killed power-isolation run. The next run cannot do
-    it, because preflight reads the board's serial before any case.)
+    Both steps run whatever happened before them, as every cleanup step
+    does. The port comes first because the image step needs a powered board,
+    so where the port was the problem this is what puts it right; it is also
+    what restores power when the cycle step's own command was stopped, which
+    the harness does at a step deadline. (A SIGKILL of the whole run is
+    different: no cleanup runs then, and the port and the board are put
+    right by hand. The next run cannot do it, because preflight reads the
+    board's serial before any case.)
 
     The port step reads before it writes, so the ordinary path changes
-    nothing; the image step always writes, since a board that started the
-    unstartable image reports the same revision as the test image and the
-    two cannot be told apart by a revision.
+    nothing. The image step always writes. On the path where the case's own
+    recovery step has already written and verified the image that is one
+    more write than is needed, and it is still what this does: the cleanup
+    cannot see what the steps did, a board that started the unstartable
+    image reports the same revision as the test image, and a verified write
+    costs less than being wrong about which of those it is.
     """
     return (
         helper_step("restore-port-power", "Board's port is powered",

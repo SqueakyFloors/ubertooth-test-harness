@@ -316,7 +316,7 @@ class PowerCycleTests(unittest.TestCase):
     def test_a_bootloader_that_refuses_the_image_passes(self):
         code, output = cycle(self.controller, self.bus)
         self.assertEqual(0, code, output)
-        self.assertIn("Board off the bus after", output)
+        self.assertIn("Board off the bus and still gone", output)
         self.assertIn("Port 1 power restored", output)
         self.assertIn("back on the bus", output)
         self.assertIn("Power cycle: the bootloader refused", output)

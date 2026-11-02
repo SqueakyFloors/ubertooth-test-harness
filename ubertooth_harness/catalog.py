@@ -1741,10 +1741,12 @@ def builtin_catalog() -> TestCatalog:
                     # against the board's own `power:` mapping, which is
                     # where the port comes from.
                     "USB power controller": ArgumentRule(_required_text, required=True),
-                    # Its verdict is a USB enumeration check, which is
-                    # fail-closed on Linux only, like the other tests that
-                    # switch power; a plan says so rather than relying on
-                    # which bench it runs on.
+                    # Stated, not inferred, like every other test that
+                    # switches power. The reader of the bus and the hub's
+                    # driver both differ by platform (the managed hub is
+                    # reached through a Linux serial-device path), and a
+                    # test that can leave a board needing the bench is
+                    # aimed at a bench on purpose.
                     "platforms": ArgumentRule(_platforms, required=True),
                 },
                 # It leaves an unstartable image in the board's flash until
