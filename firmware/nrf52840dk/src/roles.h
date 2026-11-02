@@ -20,7 +20,35 @@
  * when a board reports anything else, so bump it with every change to the
  * firmware's behavior or protocol.
  */
-#define UTDK_FW_VERSION "utdk-1.3.0"
+#define UTDK_FW_VERSION "utdk-1.4.0"
+
+/*
+ * Whether this image's controller can use Channel Selection Algorithm #2
+ * (Bluetooth 5.0). A link uses algorithm 2 only when both ends support it, so
+ * an image without it gives algorithm 1 connections to any peer, which is
+ * what `ubertooth-btle -p` can follow.
+ *
+ * The SoftDevice Controller, the nRF Connect SDK's default, always has
+ * algorithm 2 and offers no way to turn it off. Zephyr's own link layer has
+ * CONFIG_BT_CTLR_CHAN_SEL_2, which chan-sel-1.conf sets to n; that fragment
+ * selects that link layer too. See README.md, "Channel selection algorithm 1".
+ */
+#if defined(CONFIG_BT_LL_SW_SPLIT) && !defined(CONFIG_BT_CTLR_CHAN_SEL_2)
+#define UTDK_CHAN_SEL_2 0
+#else
+#define UTDK_CHAN_SEL_2 1
+#endif
+
+/*
+ * The version the board reports. The two images are told apart by it, so
+ * `nrfdk.py ensure` flashes a board that carries the other one rather than
+ * running a test against a link layer the test did not ask for.
+ */
+#if UTDK_CHAN_SEL_2
+#define UTDK_FW_REPORTED UTDK_FW_VERSION
+#else
+#define UTDK_FW_REPORTED UTDK_FW_VERSION "-chansel1"
+#endif
 
 /* Payload magic and format: see README.md, "Advertising payload". */
 #define UTDK_COMPANY_ID 0xFFFF

@@ -516,7 +516,8 @@
       const item = live.byInvocation.get(String(details.invocation_id));
       if (item) item.target = found ? String(details.summary ?? "") : "no known target";
     } else if (kind === "not_applicable") {
-      // Left out before the run: the host cannot run it (not a skip or failure).
+      // Left out before the run: the host named cannot run it, or this bench
+      // has not got the hardware it binds (not a skip or a failure).
       const name = String(details.test_name ?? "");
       if (!details.invocation_id) {
         let item = live.items.find((entry) => entry.name === name && entry.status === "pending");

@@ -294,19 +294,19 @@ nothing in the harness can catch it.
 | Device | Source | Version | Built with | Flashed with |
 |---|---|---|---|---|
 | Ubertooth One | the [fork's](https://github.com/SqueakyFloors/ubertooth) `firmware/bluetooth_rxtx` | the resolved commit under test | `arm-none-eabi-gcc` | `ubertooth-dfu` |
-| nRF52840 DK | [`firmware/nrf52840dk`](../firmware/nrf52840dk/README.md) | `utdk-1.3.0` | nRF Connect SDK v3.4.1 and its toolchain bundle | `nrfutil device program` |
+| nRF52840 DK | [`firmware/nrf52840dk`](../firmware/nrf52840dk/README.md) | `utdk-1.4.0`, and `utdk-1.4.0-chansel1` for the algorithm 1 image | nRF Connect SDK v3.4.1 and its toolchain bundle | `nrfutil device program` |
 | ESP32 peer | [`firmware/esp32-classic-peer`](../firmware/esp32-classic-peer/README.md) | `utesp-1.5.0` | ESP-IDF v5.5.6 | `esptool`, through `idf.py flash` |
 
 Each firmware README holds the full build and flash procedure, the pinned
 toolchain versions, and the shell command reference. Images are built outside
 the repository and never committed; nothing under `firmware/` is generated.
 
-A device is reflashed when it reports a version other than the one in this
-table, so a change to the DK or peer sources that changes the image has to
-move that version, here and in the driver, or the boards keep the image they
-have. For the DK, CI builds the pull request's image and the image of the
-commit it is against, and fails when they differ with `UTDK_FW_VERSION`
-unchanged
+A device is reflashed when it reports a version other than the one the run
+asks it for, which for a DK is one of the two in this table, so a change to
+the DK or peer sources that changes an image has to move that version, here
+and in the driver, or the boards keep the image they have. For the DK, CI builds both of the pull request's images and both images
+of the commit it is against, and fails when either pair differs with
+`UTDK_FW_VERSION` unchanged
 ([#210](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/210)).
 
 ### Which Ubertooth firmware, and why
@@ -351,7 +351,8 @@ so each is recorded with where its sources come from and its SHA-256.
 | Image | What it is | Version | Source | SHA-256 |
 |---|---|---|---|---|
 | `kgv.dfu` | the known-good Ubertooth firmware that `Flash reliability` alternates against the run's own build | `2020-12-R1` | upstream Ubertooth release `2020-12-R1` | `e3fcb486c6e0ce7cc991bf6439f6dbc0156ed1229c2b95ebfd02198f9675bb11` |
-| `zephyr.hex` | the nRF52840 DK role firmware | `utdk-1.3.0` | this repository, `firmware/nrf52840dk` at that version ([the change that built this image](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/236)) | `0f976c591195ee363307ec51f6c836d07ba3be40d6465c85cd6dec3398fbf288` |
+| `zephyr.hex` | the nRF52840 DK role firmware | `utdk-1.4.0` | this repository, `firmware/nrf52840dk` at that version ([the change that built this image](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/242)) | `f98bb7b7a08eca4ab9999be6b00bface5e441e3de7592ebb7959ad64205f55c0` |
+| `zephyr.hex` (algorithm 1) | the same roles on a controller without channel selection algorithm 2, built with `chan-sel-1.conf` and `chan-sel-1.overlay` | `utdk-1.4.0-chansel1` | the same sources and the same change | `9fac198b2bdb7a46cb63219070f220cbb82fd0507fc369bae79b69fe3451f21b` |
 | `esp32-classic-peer.bin` | the ESP32 Classic peer firmware | `utesp-1.5.0` | this repository, `firmware/esp32-classic-peer` at that version ([the change that built this image](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/268)) | `dc4d1c545d151e9e4aedd00375745a04c1fc9a7ba028da225c22b688c5d3dbad` |
 
 The KGV is the one the repository pins: the plan carries its revision and its

@@ -7,7 +7,7 @@ port (VCOM0, the DK's uart0). Run as a script by the advertiser cases::
 
     python nrfdk.py identify   --jlink SERIAL [--port PATH]
     python nrfdk.py ensure     --jlink SERIAL [--port PATH] [--hex IMAGE]
-                               [--address ADDR] [--role ROLE]
+                               [--address ADDR] [--role ROLE] [--version V]
     python nrfdk.py role       --jlink SERIAL --role advertiser|central|peripheral
     python nrfdk.py advertise  --jlink SERIAL [--port PATH] --chmap 37|38|39|all
                                --interval MS --payload HEX|none [--type nonconn|conn]
@@ -21,11 +21,14 @@ port (VCOM0, the DK's uart0). Run as a script by the advertiser cases::
     python nrfdk.py stop       --jlink SERIAL [--port PATH]
     python nrfdk.py idle       --jlink SERIAL [--port PATH]
     python nrfdk.py status     --jlink SERIAL [--port PATH]
-    python nrfdk.py check-image IMAGE
+    python nrfdk.py check-image [--version V] IMAGE
 
 ``check-image`` is the one command that touches no board: it makes the check
-``ensure`` makes before it flashes, that an image carries FIRMWARE_VERSION, so
-a build can be checked where it is made (scripts/ci.sh firmware-dk).
+``ensure`` makes before it flashes, that an image carries the version asked
+for (FIRMWARE_VERSION by default, and no other known version), so a build can
+be checked where it is made (scripts/ci.sh firmware-dk). ``--version`` on
+either command names the algorithm 1 image instead
+(FIRMWARE_VERSIONS holds both).
 
 ``idle`` is the release command: it leaves the board in the advertiser role
 with every setting back to its boot value, whatever it was doing.
@@ -68,6 +71,9 @@ from ubertooth_harness import targets  # noqa: E402
 # The firmware version the harness expects (firmware/nrf52840dk/src/roles.h
 # UTDK_FW_VERSION; tests/test_nrfdk.py keeps them in step).
 FIRMWARE_VERSION = targets.DK_FIRMWARE
+# Both images built from firmware/nrf52840dk: the default one and the one
+# whose connections hop with channel selection algorithm 1.
+FIRMWARE_VERSIONS = (FIRMWARE_VERSION, targets.DK_FIRMWARE_CHAN_SEL_1)
 # nrfutil and its device command, as installed and validated on the lab host.
 NRFUTIL_VERSION = "8.2.1"
 NRFUTIL_DEVICE_VERSION = "2.23.0"
@@ -118,6 +124,19 @@ _CONNECTION_KEYS = {
 # board still running an earlier image reports a status `ensure` can read,
 # and so gets flashed instead of refused.
 _DATA_MAP_KEYS = {"data_map": str, "data_map_used": int, "data_map_sets": int}
+# Which channel selection algorithm the board can use, and what the live link
+# uses (firmware utdk-1.4.0 and later). Optional for the same reason as the
+# keys above: `ensure` has to read the status of a board running an earlier
+# image to decide to flash it.
+_CHAN_SEL_KEYS = {"chan_sel_2": bool, "chan_sel": str}
+# What `chan_sel` may say: no link, algorithm 1 (this controller has no
+# algorithm 2, so no link of its can use one), or not knowable here (a
+# controller that has algorithm 2 is not told which one was agreed; see
+# firmware/nrf52840dk/src/connection.c).
+CHAN_SEL_NONE = "none"
+CHAN_SEL_1 = "1"
+CHAN_SEL_UNKNOWN = "unknown"
+CHAN_SEL_VALUES = (CHAN_SEL_NONE, CHAN_SEL_1, CHAN_SEL_UNKNOWN)
 ROLES = ("advertiser", "central", "peripheral")
 # The data channels a connection hops over, 0 to 36, of which a channel map
 # has to leave at least two used (Bluetooth Core, Vol 6 Part B, 4.5.8.1: the
@@ -322,9 +341,27 @@ def hex_bytes(path: Path) -> bytes:
 
 
 def check_image(path: Path, version: str = FIRMWARE_VERSION) -> None:
-    if version.encode() not in hex_bytes(path):
+    """The image carries this firmware version, and not another one.
+
+    One version string names one image, so a run never writes an image it
+    cannot then verify. Finding the string is not enough on its own: the
+    default version is the start of the algorithm 1 one, so an image that
+    carries ``utdk-1.4.0-chansel1`` contains ``utdk-1.4.0`` as well. Any other
+    known version the image carries is therefore a refusal.
+    """
+    data = hex_bytes(path)
+    if version.encode() not in data:
         raise NrfDkError(f"{path} does not contain firmware version {version}; "
                          "build it from firmware/nrf52840dk at this harness commit")
+    for other in FIRMWARE_VERSIONS:
+        # Only a version that contains this one can be mistaken for it: the
+        # algorithm 1 version begins with the default one, so an image
+        # carrying the longer string carries the shorter one as well.
+        if other != version and version in other and other.encode() in data:
+            raise NrfDkError(
+                f"{path} carries firmware version {other}, not {version}; build it "
+                "from firmware/nrf52840dk with the files that version needs "
+                "(see its README)")
 
 
 # --------------------------------------------------------------------------
@@ -425,10 +462,15 @@ def parse_status(line: str) -> dict:
     required = dict(_STATUS_KEYS)
     if any(key in status for key in _CONNECTION_KEYS):
         required.update(_CONNECTION_KEYS)
+    if any(key in status for key in _CHAN_SEL_KEYS):
+        required.update(_CHAN_SEL_KEYS)
     for key, kind in required.items():
         value = status.get(key)
         if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
             raise NrfDkError(f"status has no valid '{key}'")
+    if "chan_sel" in status and status["chan_sel"] not in CHAN_SEL_VALUES:
+        raise NrfDkError(f"status reports chan_sel {status['chan_sel']!r}, not one of "
+                         + ", ".join(CHAN_SEL_VALUES))
     return status
 
 
@@ -548,6 +590,14 @@ def _report_connection(status: dict, out) -> None:
         print(f"channel map: {status['data_map']} "
               f"({status['data_map_used']} of {DATA_CHANNELS} channels, set "
               f"{status['data_map_sets']} time(s))", file=out)
+    if all(key in status for key in _CHAN_SEL_KEYS):
+        # Firmware older than utdk-1.4.0 reports neither. "1" is a fact about
+        # the link: a controller without algorithm 2 settles every link it is
+        # part of on algorithm 1, whatever the peer can do.
+        link = ("no link" if status['chan_sel'] == "none"
+                else f"algorithm {status['chan_sel']} on the link")
+        print(f"channel selection: {link}, algorithm 2 "
+              f"{'supported' if status['chan_sel_2'] else 'not built in'}", file=out)
     print(f"traffic: writes {status['writes']} received {status['received']} bytes "
           f"updates {status['updates']} connects {status['connects']} "
           f"disconnects {status['disconnects']}", file=out)
@@ -941,6 +991,13 @@ def main(argv: Sequence[str] | None = None, run: Runner = run_tool) -> int:
     commands["ensure"].add_argument("--hex", type=Path, help="image to flash if needed")
     commands["ensure"].add_argument("--address", help="expected BLE address")
     commands["ensure"].add_argument("--role", default="advertiser", choices=ROLES)
+    # Which of the two images is wanted. There is one image per version
+    # string, so naming the version is how a test asks for the algorithm 1 one
+    # and how a board carrying the other comes to be reflashed.
+    for command in (commands["ensure"], image_parser):
+        command.add_argument("--version", default=FIRMWARE_VERSION,
+                             choices=FIRMWARE_VERSIONS,
+                             help="the firmware version the image must carry")
     advertise_parser = commands["advertise"]
     advertise_parser.add_argument("--chmap", required=True, choices=sorted(CHMAP_BITS))
     advertise_parser.add_argument("--interval", required=True, type=int, help="ms")
@@ -967,15 +1024,16 @@ def main(argv: Sequence[str] | None = None, run: Runner = run_tool) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "check-image":
-            check_image(args.hex)
+            check_image(args.hex, args.version)
             print(f"image: {args.hex}")
-            print(f"firmware version: {FIRMWARE_VERSION}")
+            print(f"firmware version: {args.version}")
             return 0
         dk = resolve(args.jlink, args.port, run, args.alias)
         if args.command == "identify":
             identify(dk)
         elif args.command == "ensure":
-            ensure(dk, args.hex, args.address, wanted_role=args.role)
+            ensure(dk, args.hex, args.address, version=args.version,
+                   wanted_role=args.role)
         elif args.command == "advertise":
             advertise(dk, args.chmap, args.interval, args.payload, args.type)
         elif args.command == "stop":
