@@ -254,7 +254,9 @@ runs. The run then finishes `failed`: a gate like these is named on purpose on
 the bench that has the hub or the second board, so a quiet "not applicable"
 would read as a pass for something nobody measured. The record
 is a `blocked` event in run.jsonl, a `Blocked` section in report.md,
-`blocked_tests` in the run summary, and `blocked` in the web GUI's failures;
+`blocked_tests` in the run summary, and `blocked` in the web GUI's failures.
+A run that was cancelled still ends `canceled`, with the blocked test named in
+its reason: nothing after the cancellation ran either. The record is
 `run-suite --dry-run` lists them and exits 1, because a dry run that exits 0
 says this host can run the suite. Each record belongs to the host it is
 about, so another bench's missing hub does not fail this run.

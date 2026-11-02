@@ -372,6 +372,14 @@ class FileResourceRegistry:
         for resource in self.resources.values():
             if resource.power:
                 controller_alias = resource.power.get("controller")
+                # Checked before the lookup: a YAML value of any other type
+                # (a list, a mapping) is not even hashable, and must be
+                # reported as the registry mistake it is.
+                if not isinstance(controller_alias, str):
+                    raise RegistryError(
+                        f"resource {resource.alias} power controller must be "
+                        "a registered alias"
+                    )
                 if controller_alias not in self.resources:
                     raise RegistryError(
                         f"resource {resource.alias} has unknown power controller"

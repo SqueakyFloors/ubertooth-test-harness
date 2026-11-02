@@ -465,19 +465,26 @@ class ConfigurationErrorTests(unittest.TestCase):
         """Half a mapping, and a mapping written with nothing in it, are a
         registry to correct, so they must not reach planning and be recorded
         as a board on no controller. No `power:` at all is that absence."""
-        half = {
-            "has unknown power controller": "    power: {port: 1}\n",
-            "power port must be a nonnegative integer":
-                "    power: {controller: Hub_Linux0}\n",
-            r"power must name a controller and a port": "    power: {}\n",
-        }
+        half = (
+            ("    power: {}\n", "power must name a controller and a port"),
+            ("    power: {port: 1}\n",
+             "power controller must be a registered alias"),
+            ("    power: {controller: Hub_Linux0}\n",
+             "power port must be a nonnegative integer"),
+            # Neither of these is even hashable or a name, so both have to be
+            # refused before the alias lookup rather than crashing it.
+            ("    power: {controller: [], port: 1}\n",
+             "power controller must be a registered alias"),
+            ("    power: {controller: 7, port: 1}\n",
+             "power controller must be a registered alias"),
+        )
         board = """  UT_Linux1:
     type: Ubertooth
     attached to: Host_Linux
     identity: {serial: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
 """
-        for message, mapping in half.items():
-            with self.subTest(message=message):
+        for mapping, message in half:
+            with self.subTest(mapping=mapping.strip()):
                 with self.assertRaisesRegex(RegistryError, message):
                     self.load(ONE_BOARD + board + mapping)
 
@@ -640,6 +647,47 @@ class RunRecordTests(unittest.TestCase):
 
         self.assertEqual(2, summary.blocked_tests)
         self.assertIn("(and 1 more blocked test)", summary.failure_reason)
+
+    def test_a_cancelled_run_still_ends_cancelled(self):
+        """Nothing after the cancellation ran either, so the cancellation is
+        the outcome; the blocked test is still named in the reason."""
+        from tests.test_sequencer import CollectSink, FakeExecutor, run_contract
+        from ubertooth_harness.cancellation import CancellationToken
+        from ubertooth_harness.sequencer import NamedTestSequencer
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = write(
+                directory, (HOST_STEP, EXCLUSIVE_STEP),
+                ONE_BOARD + UNMAPPED_SECOND_BOARD,
+            )
+            registry = FileResourceRegistry.load(root / "hardware.yaml")
+            compiled = PlanCompiler(builtin_catalog(), registry).compile_suite(
+                load_plan(root / "plan.yaml"), "release"
+            )
+            invocation = TestInvocation(
+                "001-Host version", "Host version", "Host_Linux",
+                {"hosts": "each"}, {},
+            )
+            manifest, checks = run_contract(root, invocation)
+            token = CancellationToken()
+            token.cancel("stopped by hand")
+
+            summary = NamedTestSequencer(
+                FakeExecutor(), event_sink=CollectSink()
+            ).run(
+                (invocation,), root, run_id="named-run", manifest=manifest,
+                preflight_checks=checks, cancellation=token,
+                blocked=compiled.blocked_for_host("Host_Linux"),
+            )
+
+            self.assertEqual("canceled", summary.status)
+            self.assertFalse(summary.passed)
+            self.assertEqual(1, summary.blocked_tests)
+            self.assertIn("stopped by hand", summary.failure_reason)
+            self.assertIn(
+                "Exclusive Ubertooth topology: blocked on Host_Linux",
+                summary.failure_reason,
+            )
 
     def test_nothing_blocked_still_passes(self):
         summary, events, report = self.run_suite(

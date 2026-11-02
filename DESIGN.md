@@ -730,7 +730,8 @@ is recorded as `hostneeds.Blocked` (`CompiledSuite.blocked`,
 `blocked_for_host`) and produces no invocation, so the rest of the suite
 compiles and runs; the sequencer emits a `blocked` event per record, counts
 them as `blocked_tests`, and finishes the run `failed`, since a gate that was
-never measured must not read as a pass. A blocked step takes no sequence
+never measured must not read as a pass; a cancelled run still ends `canceled`,
+with the blocked test named in its reason. A blocked step takes no sequence
 number, so the invocation IDs of the steps that do run stay consecutive.
 `strict_hardware=True` refuses it as it refuses the other absences, naming the
 step. A suite left with no runnable invocation still raises `PlanningError`,
