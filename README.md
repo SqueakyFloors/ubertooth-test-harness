@@ -315,7 +315,7 @@ A plan asks for a placement per hardware role:
       coverage: smoke
       duration: 10s
       rf:
-        Ubertooth: {min_attenuation_db: 10}
+        Ubertooth: {min_attenuation_db: 20, max_attenuation_db: 20}
 ```
 
 A requirement takes `min_attenuation_db`, `max_attenuation_db`, and `antenna`,
@@ -354,22 +354,32 @@ since an ordinary board is what every other role gets anyway.
 that need the bench's weak-link board: error flags and recovery under bit
 errors, the `ubertooth-rx -e` threshold, follow on a marginal link, a
 board-to-DK capture with the receiver attenuated, transmit power steps, and
-receiver sensitivity. It is not runnable, and not for want of code: most of
-those tests already exist and pass on a strong link, and what each one is
-waiting on is a measurement at the attenuation that would set its floors.
-`ubertooth_harness/weaklink.py` names the measurement per check.
+receiver sensitivity. It is not runnable: two entries have no implementation,
+and the other seven name a test that already exists but whose floors were set
+over whatever link it last ran, so each needs a run over this link before
+they mean anything here. `ubertooth_harness/weaklink.py` names what each
+check is waiting on, and two of them want a new assertion as well as a
+measurement.
 
-Tests whose cases need an ordinary link ask for one themselves, so a plan need
-not: every test that takes a capture, runs a survey, or follows a live
-connection requires `antenna: true` with no attenuation on its `Ubertooth`
-role, which keeps it off an attenuated board. Those are `Classic Bluetooth
-receive`, `Raw receive`, `BLE extcap capture`, `BLE extcap in tshark`,
-`Capture known BLE advertiser`, `Capture known BLE connection`, `Follow a BLE
-connection across its end`, `Classic capture record fields`, `Capture known
-Classic device`, `Follow Classic Bluetooth piconet`, and `Recover AFH map`
-(`catalog.RF_DEFAULTS`). A plan's `rf:` or `weak link:` for a role overrides
-that default, which is how one of those tests is pointed at the attenuated
-board on purpose.
+A **runnable** plan may only ask for a link a figure has been taken over:
+exactly one attenuation, and one the bench has been measured at, today 20 dB
+alone. A bare `min_attenuation_db` is refused there too, because which board
+it binds depends on what the bench happens to hold. `validate-plan` and
+`run-suite` both apply that, so a suite is refused before any board is
+touched.
+
+Some tests ask for an ordinary link themselves, so a plan need not:
+`Classic Bluetooth receive`, `Raw receive`, `BLE extcap capture`, `BLE extcap
+in tshark`, `Capture known BLE advertiser`, `Capture known BLE connection`,
+`Follow a BLE connection across its end`, `Classic capture record fields`,
+`Capture known Classic device`, `Follow Classic Bluetooth piconet`, and
+`Recover AFH map` require `antenna: true` with no attenuation on their
+`Ubertooth` role (`catalog.RF_DEFAULTS`), which keeps those captures,
+surveys, and followed connections off an attenuated board. That is a list,
+not a rule: other tests take captures too and carry no default, so read
+`RF_DEFAULTS` rather than inferring from what a test does. A plan's `rf:` or
+`weak link:` for a role overrides the default, which is how one of these
+tests is pointed at the attenuated board on purpose.
 
 Every run records the placement of each board it used that records one, in
 `run.jsonl`: on each invocation of the `manifest` record

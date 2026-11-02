@@ -8,12 +8,14 @@ plan: Weak-link receiver
 # Not runnable, for two reasons. `Transmit power steps` and `Receiver
 # sensitivity` have no implementation at all, which on its own keeps a plan
 # naming them out of `run-suite`. The other seven name a test that already
-# exists and works on a strong link; what each is missing is one measurement,
-# so that the test's floors and tolerances belong to the weak link rather
-# than to the strong one they were set on. The four 40 dB entries would be
-# refused by `check_runnable` even in a plan marked runnable, because the
-# bench has never been measured at 40 dB
-# (weaklink.MEASURED_ATTENUATIONS_DB).
+# exists, and each needs a run over this link before its floors mean
+# anything here: they were set over whatever link the test last ran. Two of
+# the seven need more than a measurement, and say so below: the `-e`
+# threshold wants a case that compares what different `-e` values find, and
+# the record-flag entries want a check that a flag fired rather than only
+# that the fields agree. The four 40 dB entries would be refused by
+# `check_runnable` even in a plan marked runnable, because the bench has
+# never been measured at 40 dB (weaklink.MEASURED_ATTENUATIONS_DB).
 #
 # weaklink.CHECKS names the measurement each one needs, and docs/tests.md
 # says per test what a weak link changes for it. An entry moves into the plan

@@ -1047,11 +1047,13 @@ RF_DEFAULTS: Mapping[str, Mapping[str, PlacementRequirement]] = MappingProxyType
         "Capture known BLE advertiser",
         "Capture known BLE connection",
         "Follow a BLE connection across its end",
-        # The three Classic peer tests were left out when this list was
-        # written, though each one is a capture or a followed connection and
-        # wants an ordinary link for the same reason as the rest. On a bench
-        # whose default board is the attenuated one they would otherwise
-        # select it silently.
+        # The three Classic peer tests: each one follows a piconet the ESP32
+        # pair holds, and wants an ordinary link for the same reason as the
+        # rest. On a bench whose default board is the attenuated one they
+        # would otherwise select it silently. This list is still not every
+        # test that takes a capture (`Interrupting a capture` and the soaks
+        # carry no default), so it is a list of the tests that declare the
+        # need, not a rule derived from what a test does.
         "Capture known Classic device",
         "Follow Classic Bluetooth piconet",
         "Recover AFH map",
@@ -1251,6 +1253,10 @@ def builtin_catalog() -> TestCatalog:
                 "duration": DURATION,
             }),
             MappingProxyType({"sender": "Ubertooth", "receiver": "Ubertooth"}),
+            # Two boards transmitting and receiving on a named channel, so the
+            # host's other boards are read before and after, as the range test
+            # does.
+            guards_other_ubertooths=True,
         ),
         TestDefinition(
             "Receiver sensitivity",
@@ -1268,6 +1274,7 @@ def builtin_catalog() -> TestCatalog:
                 "duration": DURATION,
             }),
             MappingProxyType({"sender": "Ubertooth", "receiver": "Ubertooth"}),
+            guards_other_ubertooths=True,
         ),
         _device_test("BLE monitor", "Monitor BLE traffic", extra={"duration": DURATION}),
         TestDefinition(

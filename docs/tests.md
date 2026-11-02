@@ -102,13 +102,17 @@ elsewhere. The attenuation a run used is not read back from the argument: the
 planner records the placement of each board it bound, and the report quotes
 that beside the figures.
 
-A **runnable** plan may only point a test at an attenuation the bench has been
-measured at, today 20 dB alone (`weaklink.MEASURED_ATTENUATIONS_DB`); any
-other is a plan error naming what is missing. A test's floors were set over
-whatever link it last ran, so running it behind an uncharacterized attenuator
-would judge it against figures taken elsewhere.
+A **runnable** plan may only ask for a link a figure has been taken over:
+either no attenuation at all, or exactly one attenuation the bench has been
+measured at, today 20 dB alone (`weaklink.MEASURED_ATTENUATIONS_DB`). A test's
+floors were set over whatever link it last ran, so running it behind an
+uncharacterized attenuator would judge it against figures taken elsewhere. A
+bare `min_attenuation_db`, which only `rf:` can write, is refused there as
+well, since which board it binds depends on what the bench holds.
+`validate-plan` applies this to a whole plan and `run-suite` to the suite it
+is about to run, so a suite is refused before a board is touched.
 [`testplans/weak-link.yaml`](../testplans/weak-link.yaml) is where those
-entries wait, and it says what each one needs measured.
+entries wait, and it says what each one needs.
 
 **Coverage profiles.** A test with a `coverage:` argument takes `smoke` or
 `comprehensive`. Smoke keeps one case per behavior; comprehensive adds the
@@ -1927,7 +1931,9 @@ and both declaring both roles, because the comprehensive coverage exchanges
 them. `coverage:` and a required `duration:`; the pair streams 200 bytes every
 20 ms whatever the duration is. Linux only: a peer is reached through
 `/dev/serial/by-id`. Nothing flashes a peer, so each board must already run
-`utesp-1.0.0` or a later 1.x image, which mandatory preflight checks.
+`utesp-1.0.0` or a later 1.x image, which mandatory preflight checks. The
+Ubertooth defaults to needing an ordinary link, so a plan has to say
+`weak link:` to point it at the attenuated board.
 
 **Expected outcome.** Smoke runs 2 cases: `ubertooth-rx -z` lists the
 central's LAP in its survey results, and a run with no target reports at least
@@ -1970,7 +1976,8 @@ the tool while the pair streams.
 
 **Hardware and arguments.** As `Capture known Classic device`: one `Ubertooth`
 and two ESP32 Classic peers as `acceptor` and `initiator`, `coverage:`, a
-required `duration:`, Linux only.
+required `duration:`, Linux only, and an ordinary link for the Ubertooth by
+default.
 
 **Expected outcome.** Smoke runs 2 cases: `-l <central LAP> -u <central UAP>`
 reports at least ten packet lines and none of another LAP, and `-l`/`-u` for
@@ -2230,9 +2237,10 @@ attenuated or more distant receiver) if a run's skirt makes it ambiguous.
 `Ubertooth` and two ESP32 Classic peers as `acceptor` and `initiator`,
 `coverage:`, a required `duration:` (the capture window), Linux only. The
 peers must run `utesp-1.3.0` or a later 1.x image, which is where `afh` and
-the link map arrived; an older one fails the case naming what it found. No
-`rf:` default, so a plan may place the receiver anywhere; two minutes is the
-capture window the classic plan uses. The release plan does not name it:
+the link map arrived; an older one fails the case naming what it found. The
+Ubertooth defaults to needing an ordinary link, as the other two Classic
+tests do, so a plan asking for the attenuated receiver has to say so; two
+minutes is the capture window the classic plan uses. The release plan does not name it:
 every entry there runs on each registered host, and naming the one host the
 peers are attached to would fail planning on the others.
 

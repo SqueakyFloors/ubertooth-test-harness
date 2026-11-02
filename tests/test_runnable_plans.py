@@ -13,7 +13,7 @@ from ubertooth_harness.plan import (
     check_runnable,
     load_plan,
     unimplemented_tests,
-    unmeasured_attenuations,
+    unjudgeable_attenuations,
 )
 from ubertooth_harness.planner import PlanCompiler
 from ubertooth_harness.resources import FileResourceRegistry
@@ -107,7 +107,7 @@ class RunnablePlanTests(unittest.TestCase):
                 # at (both are what check_runnable refuses).
                 self.assertTrue(
                     unimplemented_tests(plan, catalog)
-                    or unmeasured_attenuations(plan, catalog),
+                    or unjudgeable_attenuations(plan, catalog),
                     path.name,
                 )
         self.assertEqual(["backlog.yaml", "mac-polling.yaml", "weak-link.yaml"],
@@ -144,7 +144,16 @@ class RunnablePlanTests(unittest.TestCase):
             (path, suite) for path, suite in suites
             if _asks_for_attenuation(load_plan(path, catalog), suite, catalog)
         ]
-        self.assertIn((PLANS / "range.yaml", "range-weak-link"), skipped)
+        # Which suites the predicate takes out is itself reviewed: only the
+        # weak-link plan's own suites and `range-weak-link`. Adding a
+        # `weak link:` step to `classic`, `ble` or `release` would otherwise
+        # drop that whole suite from this check without anyone noticing.
+        self.assertEqual(
+            [(PLANS / "range.yaml", "range-weak-link")]
+            + [(PLANS / "weak-link.yaml", suite)
+               for suite in load_plan(PLANS / "weak-link.yaml", catalog).suites],
+            sorted(skipped),
+        )
         compiled = []
         for path, suite in suites:
             if (path, suite) in skipped:

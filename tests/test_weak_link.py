@@ -11,8 +11,9 @@ from ubertooth_harness.plan import (
     PlanError,
     check_runnable,
     load_plan,
+    check_suite_runnable,
     unimplemented_tests,
-    unmeasured_attenuations,
+    unjudgeable_attenuations,
 )
 from ubertooth_harness.planner import PlanCompiler, PlanningError
 from ubertooth_harness.resources import FileResourceRegistry
@@ -277,18 +278,81 @@ class WeakLinkPlanTests(unittest.TestCase):
                          unimplemented_tests(plan, catalog))
         self.assertEqual(
             {
-                "Classic capture record fields": (40.0,),
-                "Capture known BLE connection": (40.0,),
-                "Capture known Classic device": (40.0,),
-                "Classic Bluetooth receive": (40.0,),
+                "Classic capture record fields":
+                    ("Ubertooth needs 40 dB, which is not measured",),
+                "Capture known BLE connection":
+                    ("Ubertooth needs 40 dB, which is not measured",),
+                "Capture known Classic device":
+                    ("Ubertooth needs 40 dB, which is not measured",),
+                "Classic Bluetooth receive":
+                    ("Ubertooth needs 40 dB, which is not measured",),
             },
-            dict(unmeasured_attenuations(plan, catalog)),
+            dict(unjudgeable_attenuations(plan, catalog)),
         )
         # `runnable: false` is what makes check_runnable pass on it; the same
-        # plan marked runnable is refused.
+        # plan marked runnable is refused, for the implementation first.
         check_runnable(plan, catalog)
-        with self.assertRaises(PlanError):
+        with self.assertRaisesRegex(PlanError, "no implementation"):
             check_runnable(replace(plan, runnable=True), catalog)
+
+    def test_run_suite_refuses_each_suite_of_it_whatever_the_flag_says(self):
+        """`runnable: false` says a plan may name these entries, not that a
+        run may judge them, so the per-suite check does not consult it."""
+        catalog = builtin_catalog()
+        plan = load_plan(WEAK_LINK_PLAN, catalog)
+        with self.assertRaisesRegex(PlanError, "no implementation"):
+            check_suite_runnable(plan, "weak-link-20db", catalog)
+        with self.assertRaisesRegex(
+            PlanError, r"no figure has been taken over.*40 dB, which is not measured"
+        ):
+            check_suite_runnable(plan, "weak-link-40db", catalog)
+        # Every suite of every committed runnable plan passes the same check,
+        # `range-weak-link` (20 dB) included.
+        for path in sorted(PLANS.glob("*.yaml")):
+            other = load_plan(path, catalog)
+            if not other.runnable:
+                continue
+            for suite in other.suites:
+                with self.subTest(f"{path.name}:{suite}"):
+                    check_suite_runnable(other, suite, catalog)
+
+    def test_a_loose_lower_bound_is_refused_in_a_runnable_plan(self):
+        """`rf:` can write a bare `min_attenuation_db`, and on a bench that
+        later gains a stronger attenuator that would bind it: the figures
+        would belong to a link nobody chose. Only `weak link:`'s exact pin,
+        or no attenuation at all, can be judged."""
+        for spelling, expected in (
+            ("{min_attenuation_db: 20}", "at least 20 dB"),
+            ("{min_attenuation_db: 20, max_attenuation_db: 40}",
+             "at least 20 dB and at most 40 dB"),
+            ("{max_attenuation_db: 40}", "at most 40 dB"),
+            ("{antenna: true}", "any attenuation"),
+        ):
+            with self.subTest(spelling):
+                with self.assertRaisesRegex(PlanError, "does not pin the attenuation"):
+                    check_runnable(self._runnable_with(f"rf: {{Ubertooth: {spelling}}}"),
+                                   builtin_catalog())
+        # An ordinary board, and the measured exact pin, are both fine.
+        for spelling in ("{max_attenuation_db: 0, antenna: true}",
+                         "{min_attenuation_db: 20, max_attenuation_db: 20}"):
+            with self.subTest(spelling):
+                check_runnable(self._runnable_with(f"rf: {{Ubertooth: {spelling}}}"),
+                               builtin_catalog())
+
+    def _runnable_with(self, argument):
+        directory = tempfile.mkdtemp()
+        path = Path(directory) / "runnable.yaml"
+        path.write_text(
+            "plan: Guessing\n"
+            "suites:\n"
+            "  s:\n"
+            "    - Classic Bluetooth receive:\n"
+            "        hosts: [Host_Linux]\n"
+            "        coverage: smoke\n"
+            "        duration: 5s\n"
+            f"        {argument}\n"
+        )
+        return load_plan(path, builtin_catalog())
 
     def test_a_runnable_plan_cannot_ask_for_an_unmeasured_attenuation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -304,7 +368,9 @@ class WeakLinkPlanTests(unittest.TestCase):
                 "        weak link: {Ubertooth: 40}\n"
             )
             with self.assertRaisesRegex(
-                PlanError, r"Classic Bluetooth receive at 40 dB"
+                PlanError,
+                r"Classic Bluetooth receive: Ubertooth needs 40 dB, "
+                r"which is not measured",
             ) as raised:
                 check_runnable(load_plan(path, builtin_catalog()), builtin_catalog())
         self.assertIn("measured at 20 dB", str(raised.exception))

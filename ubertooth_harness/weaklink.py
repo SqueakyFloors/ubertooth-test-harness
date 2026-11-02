@@ -101,6 +101,39 @@ def unmeasured(attenuations_db) -> tuple[float, ...]:
     }))
 
 
+def unjudgeable(want: PlacementRequirement) -> str:
+    """Why no run could judge a test bound by this requirement, or ''.
+
+    A run's figures belong to the link the board actually sat on, so a
+    requirement a run may judge has to leave exactly one attenuated link
+    possible, at a figure the bench has been measured at. Three cases:
+
+    * it admits no attenuation at all (an ordinary board, the baseline every
+      test already runs over) — judgeable;
+    * it pins one attenuation, which must be a measured one;
+    * it leaves a band open above 0 dB, so which link a run used would depend
+      on which board the bench happens to hold. ``weak link:`` always pins,
+      but ``rf:`` can write a bare ``min_attenuation_db``, and on a bench
+      that later gains a stronger attenuator that would quietly bind it.
+    """
+    low, high = want.min_attenuation_db, want.max_attenuation_db
+    if high is not None and high <= 0:
+        return ""
+    if low is not None and low == high:
+        return "" if measured(low) else f"needs {low:g} dB, which is not measured"
+    bound = []
+    if low is not None:
+        bound.append(f"at least {low:g} dB")
+    if high is not None:
+        bound.append(f"at most {high:g} dB")
+    return (
+        "does not pin the attenuation ("
+        + (" and ".join(bound) or "any attenuation")
+        + "), so which link a run judged would depend on the bench; give one "
+        "figure the bench is measured at"
+    )
+
+
 def describe_attenuations(attenuations_db) -> str:
     """``20 dB``, ``30 and 40 dB``, ``20, 30 and 40 dB``."""
     figures = [f"{value:g}" for value in attenuations_db]
@@ -235,9 +268,9 @@ CHECKS: tuple[Check, ...] = (
     Check(
         "HEC and CRC error flags, Classic",
         "Classic capture record fields", "Ubertooth", 40.0,
-        "a capture holding records the flags actually fired on, and what the "
-        "test's floors for headers whose HEC passed should be over such a "
-        "link; today's floors were set on a strong one",
+        "a capture holding records a flag actually fired on, plus a check "
+        "that one did: today's cases require the fields to agree, not that "
+        "any header failed its HEC, and the floors were set over a strong link",
     ),
     Check(
         "HEC and CRC error flags, BLE",
@@ -254,8 +287,9 @@ CHECKS: tuple[Check, ...] = (
     Check(
         "Access-code error threshold (ubertooth-rx -e)",
         "Classic Bluetooth receive", "Ubertooth", 40.0,
-        "packets carrying 1 to 5 access-code errors, so a higher -e can be "
-        "shown to find more packets without finding false ones",
+        "packets carrying 1 to 5 access-code errors, and a case that compares "
+        "what different -e values find: today's -e 0 and -e 4 cases only "
+        "require that no packet exceeded the limit",
     ),
     Check(
         "Follow a marginal Classic piconet",

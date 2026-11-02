@@ -51,7 +51,9 @@ from ubertooth_harness.manifest import (
     build_run_manifest,
 )
 from ubertooth_harness.hostneeds import planned_capabilities, split_cases
-from ubertooth_harness.plan import PlanError, check_runnable, image_label, load_plan
+from ubertooth_harness.plan import (
+    PlanError, check_runnable, check_suite_runnable, image_label, load_plan,
+)
 from ubertooth_harness import pytools
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.planner import PlanCompiler, PlanningError
@@ -794,6 +796,11 @@ def _run_suite(args: argparse.Namespace) -> int:
     external_template = _external_template(args)
     catalog = builtin_catalog()
     plan = load_plan(args.plan, catalog)
+    # Refuse a suite this run could not judge before any board is touched: a
+    # test with no implementation, or one pointed at a link no figure has
+    # been taken over. `runnable: false` lets a plan name those entries; it
+    # does not make them runnable, so the flag is not consulted here.
+    check_suite_runnable(plan, args.suite, catalog)
     registry = FileResourceRegistry.load(args.hardware)
     host = registry.get(args.host)
     if host.type != "Host":

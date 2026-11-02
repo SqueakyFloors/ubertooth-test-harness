@@ -395,15 +395,25 @@ second role, so a figure from a run always belongs to one attenuation; a plan
 that wants two placements says so with `rf:`, and a test takes one argument or
 the other, never both. The attenuation a run used is not read back from the
 argument: `resource_placements` carries the placement of every board the
-planner bound, which is what a report quotes.
+planner bound, which is what a report quotes — for the boards that record a
+placement. A board with no `rf:` is absent from that record, so under
+`weak link:` the ordinary roles usually leave no trace of having been
+ordinary; what the record shows is the attenuated side and what every role
+was required to be (`placement_requirements`).
 
-`plan.check_runnable` refuses a runnable plan that points a test at an
-attenuation outside `weaklink.MEASURED_ATTENUATIONS_DB`, alongside its older
-refusal of a test with no implementation. A test's floors were set over
-whatever link it last ran, so an uncharacterized attenuator would have it
-judged against figures from elsewhere. `weaklink.CHECKS` is the list of
-weak-link checks and the measurement each one still needs; none is in a
-runnable plan, and `testplans/weak-link.yaml` is where they wait. The requirement
+`weaklink.unjudgeable` is what a run has to pass: a requirement may leave no
+attenuated link possible (an ordinary board) or pin exactly one attenuation,
+which must be in `weaklink.MEASURED_ATTENUATIONS_DB`. A requirement that
+leaves a band open above 0 dB, which `rf:` can write and `weak link:` cannot,
+is refused too, because which board it binds depends on what the bench
+happens to hold. `plan.check_runnable` applies that to a whole plan for
+`validate-plan`, honoring `runnable: false`; `plan.check_suite_runnable`
+applies it to the one suite a `run-suite` is about to run and does not
+consult the flag, since `runnable: false` says a plan may name those entries,
+not that a run may judge them. Both also refuse a test with no
+implementation. `weaklink.CHECKS` is the list of weak-link checks and what
+each one still needs; none is in a runnable plan, and
+`testplans/weak-link.yaml` is where they wait. The requirement
 narrows `ResourceRegistry.resolve_hardware` before the selector is read, and
 is filtered by the role as well, so a unit that could never take the role is
 not offered as the one that satisfies the placement: `default` prefers the
