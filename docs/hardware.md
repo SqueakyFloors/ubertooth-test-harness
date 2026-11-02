@@ -352,7 +352,7 @@ so each is recorded with where its sources come from and its SHA-256.
 |---|---|---|---|---|
 | `kgv.dfu` | the known-good Ubertooth firmware that `Flash reliability` alternates against the run's own build | `2020-12-R1` | upstream Ubertooth release `2020-12-R1` | `e3fcb486c6e0ce7cc991bf6439f6dbc0156ed1229c2b95ebfd02198f9675bb11` |
 | `zephyr.hex` | the nRF52840 DK role firmware | `utdk-1.3.0` | this repository, `firmware/nrf52840dk` at that version ([the change that built this image](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/236)) | `0f976c591195ee363307ec51f6c836d07ba3be40d6465c85cd6dec3398fbf288` |
-| `esp32-classic-peer.bin` | the ESP32 Classic peer firmware | `utesp-1.5.0` | this repository, `firmware/esp32-classic-peer` at that version ([the change that built this image](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/268)) | `86df2fc55590cbc9c9330bba781a605884ee94c2b928308993df8f246d066f5f` |
+| `esp32-classic-peer.bin` | the ESP32 Classic peer firmware | `utesp-1.5.0` | this repository, `firmware/esp32-classic-peer` at that version ([the change that built this image](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/268)) | `dc4d1c545d151e9e4aedd00375745a04c1fc9a7ba028da225c22b688c5d3dbad` |
 
 The KGV is the one the repository pins: the plan carries its revision and its
 hash ([`testplans/slow.yaml`](../testplans/slow.yaml),
@@ -368,7 +368,10 @@ flashes an ESP32 peer, so a run fails instead when one reports a version
 older than the test needs. The hashes above let a bench confirm it holds the
 same image this repository's sources produce. Each was built as its firmware
 README says; a reproducible build is not claimed, so compare the version
-first and the hash second.
+first and the hash second. The same sources do build the same peer image
+twice, but the ESP32 image holds the line numbers its error checks report,
+so even a comment added above one of them gives a different hash for the
+same version.
 
 Record any other image a bench keeps the same way, in its own private notes:
 
