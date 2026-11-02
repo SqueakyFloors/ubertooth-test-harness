@@ -24,7 +24,7 @@ commit listed for that ref, and the runner runs exactly that commit, so a
 stale or differently configured runner checkout cannot substitute another
 one; the commit is recorded in ``run.json``.
 
-Target runners connect to ``/ws/runner`` and speak protocol v4
+Target runners connect to ``/ws/runner`` and speak protocol v5
 (``ubertooth_harness/protocol.py``), decoded strictly. Each run is stored as a
 flat directory ``<results dir>/<run_id>/`` holding ``run.json`` (the
 controller's record), ``run.jsonl`` (the runner's events appended as received,
@@ -207,7 +207,7 @@ class Target:
 
 _RUN_FIELDS = (
     "run_id", "target", "request_id", "ref", "commit", "plan", "suite", "tests",
-    "build", "flash_build",
+    "build", "flash_build", "with_firmware", "with_python",
     "status", "created_at", "finished_at", "exit_code", "reason",
     "runner_run_directory", "report", "report_error", "cancel_requested", "adopted",
     "learned_durations",
@@ -237,6 +237,11 @@ class Run:
     # The boards were flashed with the build first (only with build; runs
     # stored before protocol 3 did not flash).
     flash_build: bool = False
+    # The build also built the firmware image and the Python tools (only with
+    # build; runs stored before protocol 5 could ask for neither, so a record
+    # without these fields loads with both false, which is what it did).
+    with_firmware: bool = False
+    with_python: bool = False
     status: str = "running"
     created_at: str = dataclasses.field(default_factory=_now)
     finished_at: str | None = None
@@ -820,6 +825,8 @@ class Controller:
                 commit=fields["commit"], plan=fields["plan"], suite=fields["suite"],
                 tests=list(fields["tests"]), build=fields["build"],
                 flash_build=fields["flash_build"],
+                with_firmware=fields["with_firmware"],
+                with_python=fields["with_python"],
             )
             self.runs[run_id] = run
             self._persist(run)
@@ -1133,10 +1140,23 @@ class Controller:
     async def start_run(
         self, host: str, *, ref: str, plan: str, suite: str,
         tests: list[str], build: bool, commit: str | None = None,
-        flash_build: bool = True,
+        flash_build: bool = True, with_firmware: bool = False,
+        with_python: bool = False,
     ) -> Run:
-        # Checked first: everything after it runs without yielding until the
-        # request is recorded as pending.
+        # Refused before anything else: run-suite takes neither option
+        # without --build, so such a request could only start a run that
+        # fails at once. The protocol refuses it too (its encode below), but
+        # the caller gets the option's own name from here.
+        for option, wanted in (
+            ("with_firmware", with_firmware), ("with_python", with_python),
+        ):
+            if wanted and not build:
+                raise ControllerError(
+                    f"{option} requires build: run-suite refuses "
+                    f"--{option.replace('_', '-')} without --build", 422
+                )
+        # Checked first of what can wait: everything after it runs without
+        # yielding until the request is recorded as pending.
         commit = await self.resolve_ref(ref, commit)
         target, link = self._target_link(host)
         if target.active_run_id is not None:
@@ -1155,6 +1175,9 @@ class Controller:
             ref=ref, commit=commit, plan=plan, suite=suite, tests=list(tests),
             # Flashing applies only to a run that builds (#135).
             build=build, flash_build=bool(build and flash_build),
+            # Each one asked for without build was refused above, so these
+            # are what the caller asked for (#257).
+            with_firmware=with_firmware, with_python=with_python,
         )
         try:
             text = encode_controller_message("run", request_id=request_id, **fields)
@@ -1487,7 +1510,11 @@ ENDPOINTS = {
     ),
     "GET /api/targets": "registered targets",
     "GET /api/targets/{host}": "one target",
-    "POST /api/targets/{host}/runs": "start a run: {ref, commit, plan, suite, tests, build}",
+    "POST /api/targets/{host}/runs": (
+        "start a run: {ref, commit, plan, suite, tests, build, flash_build, "
+        "with_firmware, with_python}; flash_build is recorded false without "
+        "build, and with_firmware or with_python without build is refused"
+    ),
     "GET /api/runs": "runs, newest first (?target=HOST)",
     "GET /api/runs/{run_id}": (
         "one run with its events, failure summary, planned invocations and "
@@ -1502,7 +1529,8 @@ ENDPOINTS = {
     ),
     "POST /api/runs/{run_id}/cancel": "cancel an active run: {reason}",
     "WS /ws/live": "live target and run updates (?run_id=ID adds that run's events)",
-    "WS /ws/runner": "target runner protocol v4",
+    # From PROTOCOL_VERSION, so the next bump cannot leave it stale.
+    "WS /ws/runner": f"target runner protocol v{PROTOCOL_VERSION}",
 }
 
 
@@ -1522,6 +1550,10 @@ def create_app(controller: Controller):
         build: bool = False
         # Flash the boards with the build first: the default when building.
         flash_build: bool = True
+        # Build the firmware image and the Python tools as well; each one
+        # needs build, and is refused (422) without it.
+        with_firmware: bool = False
+        with_python: bool = False
 
     class CancelRequest(BaseModel):
         model_config = ConfigDict(extra="forbid", strict=True)
@@ -1602,7 +1634,8 @@ def create_app(controller: Controller):
         run = await controller.start_run(
             host, ref=request.ref, plan=request.plan, suite=request.suite,
             tests=request.tests, build=request.build, commit=request.commit,
-            flash_build=request.flash_build,
+            flash_build=request.flash_build, with_firmware=request.with_firmware,
+            with_python=request.with_python,
         )
         return {"run": run.view()}
 
@@ -1625,7 +1658,15 @@ def create_app(controller: Controller):
             "run": view, "events": events, "failures": failure_summary(view, events),
             "invocations": planned_invocations(events, estimates=estimates),
             "stages": run_stage_estimates(
-                estimates, events, run.target, build=run.build
+                estimates, events, run.target, build=run.build,
+                # A run that flashes its boards builds the firmware for that
+                # whether it asked for the image or not (run-suite turns
+                # --with-firmware on for it), and a firmware build is the
+                # longer kind; the run's own build_started record replaces
+                # this guess as soon as it arrives. Nothing turns the Python
+                # tools on by itself, so that one is what was asked for.
+                with_firmware=run.with_firmware or run.flash_build,
+                with_python=run.with_python,
             ),
         }
 

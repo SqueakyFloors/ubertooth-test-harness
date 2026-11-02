@@ -892,6 +892,98 @@ class PeerArguments(Bench):
         self.assertEqual("50", pairs["--min-writes"])
         self.assertEqual(["--", "ubertooth-rx", "-z", "-t", "30"], argv[-5:])
 
+    def test_audio_passes_both_roles_the_packet_type_and_the_command(self):
+        args, command = peer.parse_args([
+            "audio", "ESP0", "ESP1", "--hardware", str(self.registry),
+            "--type", "ev3", "--min-frames", "1000",
+            "--min-seconds", "25", "--", "ubertooth-rx", "-l", "e9c5ba",
+        ])
+        registry = self.load_registry()
+        argv = peer.esp32peer_argv(
+            args, {"acceptor": registry.get("ESP0"), "initiator": registry.get("ESP1")},
+            command,
+        )
+        self.assertEqual("audio", argv[2])
+        pairs = dict(zip(argv, argv[1:]))
+        self.assertEqual("00:11:22:33:44:55", pairs["--acceptor-address"])
+        self.assertEqual("00:11:22:33:44:66", pairs["--initiator-address"])
+        self.assertEqual("ev3", pairs["--type"])
+        self.assertEqual("1000", pairs["--min-frames"])
+        self.assertEqual("25.0", pairs["--min-seconds"])
+        # A stream option has no meaning for an audio link, so it is not sent.
+        for absent in ("--period", "--payload", "--min-writes"):
+            self.assertNotIn(absent, argv)
+        self.assertEqual(["--", "ubertooth-rx", "-l", "e9c5ba"], argv[-4:])
+
+    def test_an_audio_option_not_given_is_left_to_the_delegate(self):
+        args, command = peer.parse_args(
+            ["audio", "ESP0", "ESP1", "--hardware", str(self.registry), "--", "true"]
+        )
+        registry = self.load_registry()
+        argv = peer.esp32peer_argv(
+            args, {"acceptor": registry.get("ESP0"), "initiator": registry.get("ESP1")},
+            command,
+        )
+        for absent in ("--type", "--min-frames", "--min-seconds",
+                       "--timeout"):
+            self.assertNotIn(absent, argv)
+
+    def test_the_script_refuses_a_packet_type_it_has_no_name_for(self):
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as caught, redirect_stderr(err):
+            peer.parse_args([
+                "audio", "ESP0", "ESP1", "--hardware", str(self.registry),
+                "--type", "ev4", "--", "true",
+            ])
+        self.assertEqual(2, caught.exception.code)
+
+    def test_the_script_refuses_a_negative_frame_floor(self):
+        # Refused before anything is held, so no board is taken and reset for
+        # a command line that cannot check anything.
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as caught, redirect_stderr(err):
+            peer.parse_args([
+                "audio", "ESP0", "ESP1", "--hardware", str(self.registry),
+                "--min-frames", "-1", "--", "true",
+            ])
+        self.assertEqual(2, caught.exception.code)
+        self.assertIn("--min-frames cannot be negative", err.getvalue())
+
+    def test_audio_holds_the_pair_and_the_capturing_board_together(self):
+        args, _command = peer.parse_args([
+            "audio", "ESP0", "ESP1", "--hardware", str(self.registry),
+            "--with", "UT0", "--", "true",
+        ])
+        argv = peer.hold_argv(args, ["ESP0", "ESP1", "UT0"], ["inner"])
+        self.assertIn("ESP0,ESP1,UT0", argv)
+
+    def test_audio_without_a_command_is_a_usage_error(self):
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as caught, redirect_stderr(err):
+            peer.parse_args(["audio", "ESP0", "ESP1", "--hardware", str(self.registry)])
+        self.assertEqual(2, caught.exception.code)
+        # No separator at all, so the usage line is what names both sessions.
+        self.assertIn("peer stream|audio <acceptor> <initiator>", err.getvalue())
+
+    def test_audio_with_a_separator_and_nothing_after_it_names_the_command(self):
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as caught, redirect_stderr(err):
+            peer.parse_args([
+                "audio", "ESP0", "ESP1", "--hardware", str(self.registry), "--",
+            ])
+        self.assertEqual(2, caught.exception.code)
+        self.assertIn("audio needs the command to run after --", err.getvalue())
+
+    def test_one_board_cannot_be_both_peers_of_an_audio_link(self):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            status = peer.main(
+                ["audio", "ESP0", "ESP0", "--hardware", str(self.registry),
+                 "--", "true"]
+            )
+        self.assertEqual(2, status)
+        self.assertIn("cannot be both peers", err.getvalue())
+
     def test_an_option_not_given_is_left_to_the_delegate(self):
         args, command = peer.parse_args(
             ["stream", "ESP0", "ESP1", "--hardware", str(self.registry), "--", "true"]

@@ -1314,7 +1314,9 @@ the opposite of what the refusal cases forbid.
 **Hardware and arguments.** No board role. `hosts:` and `coverage:`. One case
 compares `-s` against the firmware build's own `.dfu`; it declares that it
 needs the firmware build, so a run without `--build --with-firmware` or a test
-build artifact leaves it out as not applicable.
+build artifact leaves it out as not applicable. A run started through the
+controller or the GUI asks for the image with its own `with_firmware` option,
+which the GUI ticks for a suite holding this test.
 
 **Expected outcome.** Smoke runs 13 cases: `-d` refusing a wrong CRC, a
 truncated image, a binary with no suffix, a text file, a suffix without the
@@ -1354,7 +1356,8 @@ loose matches.
 
 **Hardware and arguments.** No board role. `hosts:` and `coverage:`. The
 `ubertooth-specan-ui` cases declare that they need the Python tools build, so
-a run without `--build --with-python` leaves them out as not applicable; they
+a run without `--build --with-python` (or, through the controller and the
+GUI, its `with_python` option) leaves them out as not applicable; they
 are additionally skipped at run time when the interpreter cannot import numpy,
 qtpy, and a Qt binding, which only running it can tell.
 
@@ -1920,6 +1923,11 @@ applications made of them. A board whose controller sent or received nothing,
 or received packets and not one of them correct, fails: frames handled over a
 link the air never carried would describe a capture of nothing.
 
+The driver also refuses a link that is not the one the case asked for: each
+board has to report an eSCO link of the packet type both were told to ask for
+before the capture starts, and the same link at the end as at the start, so a
+capture taken while the two ends renegotiated is reported rather than matched.
+
 `link 0 opened 0 dropped` on each board is the case's assertion that this was
 one link throughout. A link that went down and came back leaves both boards
 reading `on` either side of the capture and is still two links with a gap in
@@ -2433,7 +2441,11 @@ a write that reached the wrong board is caught rather than inferred.
 every other registered board. Required: `platforms:`, `flashes:` (the total
 number of writes), `image sequence:` (at least two distinct image labels),
 `KGV sha256:`, and `KGV revision:`. The images are supplied as artifacts named
-after the labels. `alternate Ubertooths: true` rotates the writes across every
+after the labels: the run's own build provides `test build` (`--build
+--with-firmware`, or the controller's and the GUI's `with_firmware` option),
+while the known-good image comes from `--artifact "KGV=PATH"`, which only the
+command line passes, so this test runs from the command line; the GUI says so
+for any suite that names it. `alternate Ubertooths: true` rotates the writes across every
 registered Ubertooth on the host, in alias order; then `flashes` must divide
 evenly by the board count, `hosts:` must name its hosts rather than `each`,
 and `Ubertooth: each` is refused. The test establishes the firmware it
@@ -2475,7 +2487,11 @@ suffixing has an exact right answer.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial, with
 every other registered board as guards. `coverage:`. Needs the firmware build
-as the test image, which must report the resolved Ubertooth revision. Writes
+as the test image, which must report the resolved Ubertooth revision; a run
+without one is refused rather than leaving cases out, so it comes from
+`--build --with-firmware` or a `test build` artifact on the command line, and
+from the `with_firmware` option of a controller or GUI run (which the GUI
+holds ticked for a suite that names this test). Writes
 firmware and establishes it, so preflight checks only the board's serial and
 the test must be the last one on that board.
 

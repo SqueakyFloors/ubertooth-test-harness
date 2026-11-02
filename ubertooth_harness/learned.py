@@ -630,9 +630,40 @@ def _units_pair(argument, value) -> tuple[str, float] | None:
     return (argument, number)
 
 
+# The profile a build is learned under, by the two options that add work to
+# it: the firmware image (`run-suite --with-firmware`) and the Python tools
+# (`--with-python`). Every build makes the host tools, so the plain one is
+# named for them. The two profiles without the Python tools keep the names
+# they have always had, so the samples already stored stay where they were
+# learned and the two new profiles fill from the runs that follow.
+BUILD_PROFILES = {
+    (False, False): "host tools",
+    (False, True): "host tools and Python tools",
+    (True, False): "with firmware",
+    (True, True): "with firmware and Python tools",
+}
+
+
+def build_profile(with_firmware, with_python) -> str:
+    """The profile a build is learned under.
+
+    The firmware image and the Python tools are each real extra work (the
+    firmware much the larger of the two), so all four combinations are
+    learned apart and an estimate is only ever shown for the combination a
+    run actually builds. Both options are asked for, with no default: a
+    caller that left one out would key a build that made it as one that did
+    not, which is the mistake this profile exists to avoid.
+    """
+    return BUILD_PROFILES[(bool(with_firmware), bool(with_python))]
+
+
 def _build_profile(details: Mapping) -> str:
-    """A firmware build takes much longer than host tools alone."""
-    return "with firmware" if details.get("with_firmware") else "host tools"
+    # An option a record does not name reads as off, since a build that
+    # could not record it could not be asked for it either. The exception
+    # is a target still running a runner from between the two changes: it
+    # passes --with-python but records nothing of it, so that build's sample
+    # joins the host-tools ones until the newer samples push it out.
+    return build_profile(details.get("with_firmware"), details.get("with_python"))
 
 
 def _host(value, fallback: str) -> str:

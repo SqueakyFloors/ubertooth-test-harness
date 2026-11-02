@@ -542,7 +542,12 @@ class Builder:
         self.publisher.emit(
             "build_started", "running",
             {"prefix": str(plan.prefix), "platform": plan.platform,
-             "with_firmware": plan.with_firmware},
+             "with_firmware": plan.with_firmware,
+             # Which optional parts the build includes, so a reader of the
+             # records, and the learned build estimate, can tell how much
+             # work this build was. The interpreter itself is in the build
+             # manifest; what changes the duration is building for one at all.
+             "with_python": bool(plan.python)},
         )
         try:
             result = self._run_plan(plan)

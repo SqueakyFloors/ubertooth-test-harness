@@ -20,6 +20,7 @@ from unittest.mock import patch
 
 from websockets.asyncio.server import serve
 
+from ubertooth_harness import cli
 from ubertooth_harness.cli import main
 from ubertooth_harness.protocol import (
     PROTOCOL_VERSION,
@@ -218,6 +219,7 @@ def run_request(request_id="r1", **overrides):
     fields = dict(
         request_id=request_id, ref="HEAD", commit=None, plan="local",
         suite="fast", tests=[], build=False, flash_build=True,
+        with_firmware=False, with_python=False,
     )
     fields.update(overrides)
     return encode_controller_message("run", **fields)
@@ -240,7 +242,13 @@ class ProtocolTests(unittest.TestCase):
             "not json": "not json",
             "array": "[]",
             "unknown version": json.dumps({**good, "version": 99}),
-            "previous version": json.dumps({**good, "version": 2}),
+            # The version a controller of the last deploy speaks, the one
+            # after this, and the first there ever was: no negotiation, so
+            # every one of them is refused.
+            "previous version": json.dumps(
+                {**good, "version": PROTOCOL_VERSION - 1}
+            ),
+            "next version": json.dumps({**good, "version": PROTOCOL_VERSION + 1}),
             "version 1": json.dumps({**good, "version": 1}),
             "missing flash_build": json.dumps(
                 {k: v for k, v in good.items() if k != "flash_build"}
@@ -266,6 +274,22 @@ class ProtocolTests(unittest.TestCase):
             "string build": json.dumps({**good, "build": "yes"}),
             "nan": run_request().replace('"build": false', '"build": NaN'),
             "large": json.dumps({**good, "ref": "a" * 70000}),
+            # The two build options: missing, not a boolean, or asked for
+            # without build, which run-suite itself refuses (#257).
+            "missing with_firmware": json.dumps(
+                {k: v for k, v in good.items() if k != "with_firmware"}
+            ),
+            "missing with_python": json.dumps(
+                {k: v for k, v in good.items() if k != "with_python"}
+            ),
+            "string with_firmware": json.dumps({**good, "with_firmware": "yes"}),
+            "numeric with_python": json.dumps({**good, "with_python": 1}),
+            "python interpreter name": json.dumps({**good, "with_python": "python3.12"}),
+            "firmware without build": json.dumps({**good, "with_firmware": True}),
+            "python without build": json.dumps({**good, "with_python": True}),
+            "both without build": json.dumps(
+                {**good, "with_firmware": True, "with_python": True}
+            ),
         }
         for name, text in cases.items():
             with self.subTest(name), self.assertRaises(ProtocolError):
@@ -507,8 +531,11 @@ class RunnerServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(self.fixture.output.exists())
         self.assertIn("builds disabled", self.logs[0])
 
-    async def test_flash_build_maps_to_the_run_suite_options(self):
-        # (build, flash_build) -> the build options run-suite gets (#135).
+    BUILD_OPTIONS = ("--build", "--no-flash-build", "--with-firmware", "--with-python")
+
+    async def test_the_build_options_map_to_the_run_suite_options(self):
+        # (build, flash_build, with_firmware, with_python) -> the build
+        # options run-suite gets (#135, #257).
         libbtbb = self.fixture.root / "libbtbb"
         libbtbb.mkdir()
         started = []
@@ -518,10 +545,16 @@ class RunnerServiceTests(unittest.IsolatedAsyncioTestCase):
             raise OSError("not started in this test")
 
         cases = (
-            ((True, True), ["--build"]),
-            ((True, False), ["--build", "--no-flash-build"]),
-            ((False, True), []),
-            ((False, False), []),
+            ((True, True, False, False), ["--build"]),
+            ((True, False, False, False), ["--build", "--no-flash-build"]),
+            ((False, True, False, False), []),
+            ((False, False, False, False), []),
+            ((True, True, True, False), ["--build", "--with-firmware"]),
+            ((True, True, False, True), ["--build", "--with-python"]),
+            ((True, True, True, True),
+             ["--build", "--with-firmware", "--with-python"]),
+            ((True, False, True, True),
+             ["--build", "--no-flash-build", "--with-firmware", "--with-python"]),
         )
         with patch(
             "ubertooth_harness.runner_service.asyncio.create_subprocess_exec", fake_exec
@@ -530,17 +563,90 @@ class RunnerServiceTests(unittest.IsolatedAsyncioTestCase):
                 controller, libbtbb_source=libbtbb, libbtbb_ref="abc1234",
             ):
                 await controller.next("register")
-                for index, ((build, flash), expected) in enumerate(cases):
-                    with self.subTest(build=build, flash_build=flash):
+                for index, (asked, expected) in enumerate(cases):
+                    build, flash, firmware, python = asked
+                    with self.subTest(build=build, flash_build=flash,
+                                      with_firmware=firmware, with_python=python):
                         await controller.send(run_request(
                             request_id=f"r{index}", build=build, flash_build=flash,
+                            with_firmware=firmware, with_python=python,
                         ))
                         await controller.next("run_rejected")
                         options = [
                             item for item in started[-1]
-                            if item in ("--build", "--no-flash-build")
+                            if item in self.BUILD_OPTIONS
                         ]
                         self.assertEqual(expected, options)
+
+    async def test_the_command_line_means_what_it_does_from_the_command_line(self):
+        """run-suite's own parser reads the runner's argv as the issue's
+        documented command line (`--build --with-firmware --with-python`)."""
+        libbtbb = self.fixture.root / "libbtbb"
+        libbtbb.mkdir()
+        started = []
+
+        async def fake_exec(*argv, **_kwargs):
+            started.append(argv)
+            raise OSError("not started in this test")
+
+        with patch(
+            "ubertooth_harness.runner_service.asyncio.create_subprocess_exec", fake_exec
+        ):
+            async with StubController() as controller, self.running(
+                controller, libbtbb_source=libbtbb, libbtbb_ref="abc1234",
+                allow_power_changes=True,
+            ):
+                await controller.next("register")
+                await controller.send(run_request(
+                    build=True, with_firmware=True, with_python=True,
+                    tests=["Host version"],
+                ))
+                await controller.next("run_rejected")
+        argv = list(started[-1])
+        # sys.executable -m ubertooth_harness run-suite ...
+        self.assertEqual([sys.executable, "-m", "ubertooth_harness"], argv[:3])
+        parsed = cli._parser().parse_args(argv[3:])
+        self.assertEqual("run-suite", parsed.command)
+        self.assertIs(True, parsed.build)
+        self.assertIs(True, parsed.with_firmware)
+        # Bare --with-firmware/--with-python on the command line: with_python
+        # takes the parser's own default interpreter, and no later option of
+        # the runner's is swallowed as its value.
+        self.assertEqual("python3", parsed.with_python)
+        self.assertEqual(["Host version"], parsed.test)
+        self.assertIs(True, parsed.allow_power_changes)
+
+    async def test_the_command_line_reads_the_same_as_its_last_argument(self):
+        """The same, with nothing of the runner's own after --with-python.
+
+        The default runner configuration appends no power option and no
+        external lock, which leaves --with-python last; argparse's optional
+        value must still be its own default there.
+        """
+        libbtbb = self.fixture.root / "libbtbb"
+        libbtbb.mkdir()
+        started = []
+
+        async def fake_exec(*argv, **_kwargs):
+            started.append(argv)
+            raise OSError("not started in this test")
+
+        with patch(
+            "ubertooth_harness.runner_service.asyncio.create_subprocess_exec", fake_exec
+        ):
+            async with StubController() as controller, self.running(
+                controller, libbtbb_source=libbtbb, libbtbb_ref="abc1234",
+            ):
+                await controller.next("register")
+                await controller.send(run_request(
+                    build=True, with_firmware=True, with_python=True,
+                ))
+                await controller.next("run_rejected")
+        argv = list(started[-1])
+        self.assertEqual("--with-python", argv[-1])
+        parsed = cli._parser().parse_args(argv[3:])
+        self.assertEqual("python3", parsed.with_python)
+        self.assertIs(True, parsed.with_firmware)
 
     async def test_startup_log_names_the_libbtbb_builds_use(self):
         libbtbb = self.fixture.root / "libbtbb"

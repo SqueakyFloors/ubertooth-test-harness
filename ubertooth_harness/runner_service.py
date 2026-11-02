@@ -462,6 +462,17 @@ class RunnerService:
             argv.append("--build")
             if not message["flash_build"]:
                 argv.append("--no-flash-build")
+            # The same options the command line takes: --with-firmware
+            # records the run's "test build" image (which tests that check or
+            # write an image need), --with-python builds the Python tools.
+            # The protocol refuses either without build, so there is no
+            # combination here that run-suite would reject.
+            if message["with_firmware"]:
+                argv.append("--with-firmware")
+            if message["with_python"]:
+                # Bare, as the documented command line has it: run-suite
+                # then uses python3 on the target's PATH.
+                argv.append("--with-python")
         if self.config.allow_power_changes:
             argv.append("--allow-power-changes")
         if self.config.external_board_lock is not None:

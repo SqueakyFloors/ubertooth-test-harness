@@ -202,6 +202,14 @@ AUDIO_RELEASE_STATE = {**BOOT_STATE, **AUDIO_BOOT_STATE}
 # timing out here, and a slow one is not cut off mid-command. A link to a
 # board that is awake takes four or five seconds.
 AUDIO_CONNECT_TIMEOUT_S = 40.0
+# `role` takes an audio link and its profile down before it changes anything,
+# which the firmware's README allows about 18 seconds for, so it cannot run
+# on the ordinary command deadline once a session may have a link up.
+ROLE_TIMEOUT_S = 25.0
+# What the link has to be, and what a board reports for a link whose packet
+# type it could not work out. Both EV3 and 2-EV3 are eSCO types.
+AUDIO_ESCO = "esco"
+AUDIO_UNNAMED = "unknown"
 
 # `sco stop` closes the audio link (3 s), then the service level connection
 # (3 s), waits for a frame already with the stack (0.5 s), and stops the
@@ -1006,7 +1014,7 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
     print(f"stream: {payload} bytes every {period} ms", file=out)
     samples: list[dict] = []
     try:
-        initiator_shell.command("role initiator")
+        initiator_shell.command(ROLE_INITIATOR, ROLE_TIMEOUT_S)
         initiator_shell.command(f"spp peer {acceptor_status['address']}")
         initiator_shell.command(f"stream period {period}")
         initiator_shell.command(f"stream payload {payload}")
@@ -1094,15 +1102,19 @@ def audio(acceptor: Peer, initiator: Peer, command: Sequence[str], *,
           settle_s: float = SETTLE_S) -> int:
     """Hold a synchronous audio link up between the pair while ``command`` runs.
 
-    The air then carries reserved-slot voice packets as well as the data the
-    SPP stream puts there, and an ``ev3`` link's payload is at the basic
-    rate, so a receive-only capture can decode it. As with ``stream``, both
-    ports are opened first, which resets both boards.
+    The air then carries reserved-slot voice packets, and the Hands-Free
+    service level connection beside them; this session starts no SPP stream.
+    An ``ev3`` link's payload is at the basic rate, so a receive-only capture
+    can decode it. As with ``stream``, both ports are opened first, which
+    resets both boards.
     """
     out = out or sys.stderr
     if packet_type not in AUDIO_TYPES:
         raise PeerError("the audio packet type must be one of "
                         + ", ".join(AUDIO_TYPES))
+    # A negative floor would check nothing at all.
+    if min_frames < 0:
+        raise PeerError(f"the frame floor cannot be negative, got {min_frames!r}")
     if acceptor.device == initiator.device:
         raise PeerError("the acceptor and the initiator are the same bridge; an "
                         "audio link needs two boards")
@@ -1338,6 +1350,35 @@ def _audio_measured(out, boards, before: dict, after: dict, *,
     return problems
 
 
+def _require_audio_type(status: dict, peer: Peer, packet_type: str) -> None:
+    """The link is an eSCO one, and of the type that was asked for.
+
+    Both boards are checked, because each works out what its link carries
+    from the types it allowed and the packet length its own controller
+    reported. A test that asks for ``ev3`` because it wants a basic-rate
+    payload on the air must not quietly be handed the enhanced-rate type, or
+    a link the board cannot name at all.
+    """
+    link = _audio_field(status, "sco_link", str, peer.label)
+    settled = _audio_field(status, "sco_pkt_type", str, peer.label)
+    length = _audio_field(status, "sco_tx_len", int, peer.label)
+    if AUDIO_UNNAMED in (link, settled) or length == 0:
+        # The board could not read its link back, so it cannot say what is on
+        # the air. With `default` that reading is all there is to go on.
+        raise PeerError(f"the {peer.label} cannot say what its audio link "
+                        f"carries (link {link}, packet type {settled}, "
+                        f"{length} bytes a packet)")
+    if link != AUDIO_ESCO:
+        raise PeerError(f"the {peer.label} reports the link as {link}, not "
+                        f"{AUDIO_ESCO}: an audio session carries voice over an "
+                        f"{AUDIO_ESCO} link")
+    wanted = AUDIO_TYPE_ON_LINK.get(packet_type)
+    if wanted is not None and settled != wanted:
+        raise PeerError(f"the {peer.label} reports an audio link using "
+                        f"{settled}, not the {wanted} both boards were told to "
+                        f"ask for ({length} bytes a packet)")
+
+
 def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
            packet_type, min_frames, min_seconds, timeout, out, settle_s) -> int:
     # The initiator first wherever both boards are worked through: it is
@@ -1382,7 +1423,7 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         if packet_type != AUDIO_TYPE_STACK:
             acceptor_shell.command(f"{SCO_TYPE} {packet_type}")
         acceptor_shell.command(SCO_START, AUDIO_CONNECT_TIMEOUT_S)
-        initiator_shell.command(ROLE_INITIATOR)
+        initiator_shell.command(ROLE_INITIATOR, ROLE_TIMEOUT_S)
         initiator_shell.command(f"spp peer {acceptor_status['address']}")
         if packet_type != AUDIO_TYPE_STACK:
             initiator_shell.command(f"{SCO_TYPE} {packet_type}")
@@ -1406,6 +1447,15 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
             time.sleep(settle_s)
             far = acceptor_shell.status()
         _require_audio_up(far, acceptor, initiator_status["address"])
+        # What each board says its link is, kept to compare with after the
+        # command. The reading rather than the type that was asked for: with
+        # `default` no particular type was asked for, and the link still has
+        # to be the same one at the end as at the start.
+        settled = {}
+        for peer_status, peer in ((linked, initiator), (far, acceptor)):
+            _require_audio_type(peer_status, peer, packet_type)
+            settled[peer.label] = (peer_status["sco_link"],
+                                   peer_status["sco_pkt_type"])
         print(f"audio link: {_audio_field(linked, 'sco_link', str, initiator.label)} "
               f"{_audio_field(linked, 'sco_pkt_type', str, initiator.label)}, "
               f"{_audio_field(linked, 'sco_tx_len', int, initiator.label)} bytes "
@@ -1443,6 +1493,35 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
                 problems.append(str(error))
         problems += _audio_measured(out, boards, before, after,
                                     min_frames=min_frames)
+        # The link the command ran against has to still be the one it was
+        # given: one renegotiated part way through would otherwise pass on
+        # having been right when it came up. A link that is no longer up at
+        # all was reported just above.
+        for peer, _shell in boards:
+            end = after.get(peer.label)
+            if end is None or end["status"].get("sco") != AUDIO_ON:
+                continue
+            # settled holds both boards: it is filled before the command
+            # runs, from the same two.
+            was = settled[peer.label]
+            now = (end["status"].get("sco_link"),
+                   end["status"].get("sco_pkt_type"))
+            if now == was:
+                continue
+            if AUDIO_UNNAMED in now or now[1] is None:
+                # The board says the link is up but cannot read it back, so
+                # it cannot say what is on the air either way.
+                problems.append(
+                    f"after the command ran, the {peer.label} cannot say what "
+                    f"its audio link carries (link {now[0]}, packet type "
+                    f"{now[1]}), where it carried {was[0]} {was[1]} when the "
+                    "command started")
+            else:
+                problems.append(
+                    f"after the command ran, the {peer.label}'s audio link "
+                    f"reads {now[0]} {now[1]}, not the {was[0]} {was[1]} it "
+                    "carried when the command started: the command did not "
+                    "run against one link")
         # The link comes down before the boards are released, so a stop the
         # firmware refuses is reported as itself rather than hidden by the
         # reset that would have cleared it anyway.
