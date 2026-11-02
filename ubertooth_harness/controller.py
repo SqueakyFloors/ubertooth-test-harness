@@ -1529,7 +1529,8 @@ ENDPOINTS = {
     ),
     "POST /api/runs/{run_id}/cancel": "cancel an active run: {reason}",
     "WS /ws/live": "live target and run updates (?run_id=ID adds that run's events)",
-    "WS /ws/runner": "target runner protocol v5",
+    # From PROTOCOL_VERSION, so the next bump cannot leave it stale.
+    "WS /ws/runner": f"target runner protocol v{PROTOCOL_VERSION}",
 }
 
 

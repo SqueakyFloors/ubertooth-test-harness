@@ -11,7 +11,8 @@
   // the Python tools. `need` and `require` are the flags /api/plans sets on
   // a test that leaves cases out without the option, and on one that cannot
   // run without it at all. `cost` is the page's own note for the option,
-  // read once at start and kept as the first sentence of the note.
+  // read once at start and kept as the first sentence of the note; `chosen`
+  // is the operator's own tick, which a suite's need never sets.
   const BUILD_OPTIONS = [
     {
       id: "with-firmware", what: "the run's firmware image",
@@ -278,19 +279,22 @@
 
   // A suite with a test that needs an image no build makes (a published
   // release image) cannot be run from here at all: only the command line
-  // passes one, with --artifact, and the run is refused before its tests.
-  // Said here rather than hidden, because the build options below now cover
-  // every other image a run needs.
+  // passes one, with --artifact. Such a run is refused where the cases are
+  // built, which is after it has built the commits and flashed the boards,
+  // so the warning says that too. Said here rather than hidden, because the
+  // build options below now cover every other image a run needs.
   function artifactWarning(suite) {
     const wanted = Array.isArray(suite.needs_artifacts) ? suite.needs_artifacts : [];
     if (!wanted.length) return "";
     const tests = suite.tests
       .filter((test) => (test.needs_artifacts || []).length)
       .map((test) => test.name);
-    return ` This suite also needs ${wanted.join(", ")}, an image no build makes,`
-      + ` for ${tests.join(", ")}: pass it with run-suite --artifact`
-      + ` "${wanted[0]}=PATH" on the target. A run started here is refused`
-      + " before its tests.";
+    const artifacts = wanted.map((label) => `--artifact "${label}=PATH"`).join(" ");
+    return ` This suite also needs ${wanted.join(", ")},`
+      + ` ${wanted.length > 1 ? "images" : "an image"} no build makes,`
+      + ` for ${tests.join(", ")}: run it on the target with run-suite`
+      + ` ${artifacts}. A run started here builds, flashes the boards, and is`
+      + " then refused before its tests.";
   }
 
   function estimateText(suite) {
@@ -1037,7 +1041,10 @@
       const box = $(option.id);
       const required = neededBy(suite, option.require);
       const needed = neededBy(suite, option.need);
-      box.checked = required.length > 0 || box.checked;
+      // What the operator set, remembered apart from the box: a tick this
+      // suite forces must not follow them to the next suite, which would
+      // build what they never asked for.
+      box.checked = required.length > 0 || option.chosen;
       box.disabled = !build || required.length > 0;
       const sentences = [option.cost];
       if (required.length) {
@@ -1061,8 +1068,14 @@
     $("run-form").addEventListener("submit", submitRun);
     for (const option of BUILD_OPTIONS) {
       option.cost = $(`${option.id}-note`).textContent;
-      // The note says different things for a ticked and an unticked box.
-      $(option.id).addEventListener("change", syncBuildOptions);
+      option.chosen = $(option.id).checked;
+      // Only the operator fires this (a held box is disabled), so it is
+      // their choice that is remembered, and the note says different things
+      // for a ticked and an unticked box.
+      $(option.id).addEventListener("change", () => {
+        option.chosen = $(option.id).checked;
+        syncBuildOptions();
+      });
     }
     $("build").addEventListener("change", syncBuildOptions);
     // Flashing builds the firmware image anyway, which the note says.

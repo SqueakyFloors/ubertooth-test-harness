@@ -2193,6 +2193,9 @@ builds and records the firmware image (`with_firmware`, which passes
 `--with-firmware`) or the Python tools (`with_python`, which passes
 `--with-python`). `run-suite` takes neither of those two without `--build`,
 so a request that asks for one without `build` is refused rather than sent.
+Both are booleans: `with_python` always builds against `python3` on the
+target's PATH, since the request has no way to name another interpreter the
+way `--with-python=PYTHON` does on the command line.
 A run that needs an image a build cannot produce (the published KGV image of
 `Flash reliability`) still has to come from the command line, which is where
 `--artifact` can be passed. When the commit (or ref) is not

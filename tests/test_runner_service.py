@@ -616,6 +616,38 @@ class RunnerServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["Host version"], parsed.test)
         self.assertIs(True, parsed.allow_power_changes)
 
+    async def test_the_command_line_reads_the_same_as_its_last_argument(self):
+        """The same, with nothing of the runner's own after --with-python.
+
+        The default runner configuration appends no power option and no
+        external lock, which leaves --with-python last; argparse's optional
+        value must still be its own default there.
+        """
+        libbtbb = self.fixture.root / "libbtbb"
+        libbtbb.mkdir()
+        started = []
+
+        async def fake_exec(*argv, **_kwargs):
+            started.append(argv)
+            raise OSError("not started in this test")
+
+        with patch(
+            "ubertooth_harness.runner_service.asyncio.create_subprocess_exec", fake_exec
+        ):
+            async with StubController() as controller, self.running(
+                controller, libbtbb_source=libbtbb, libbtbb_ref="abc1234",
+            ):
+                await controller.next("register")
+                await controller.send(run_request(
+                    build=True, with_firmware=True, with_python=True,
+                ))
+                await controller.next("run_rejected")
+        argv = list(started[-1])
+        self.assertEqual("--with-python", argv[-1])
+        parsed = cli._parser().parse_args(argv[3:])
+        self.assertEqual("python3", parsed.with_python)
+        self.assertIs(True, parsed.with_firmware)
+
     async def test_startup_log_names_the_libbtbb_builds_use(self):
         libbtbb = self.fixture.root / "libbtbb"
         libbtbb.mkdir()

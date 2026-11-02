@@ -346,6 +346,13 @@ class BuildNeedsTests(unittest.TestCase):
         )
 
     def test_build_needs_carries_build_options_only(self):
+        # An argument name that is not the test's own would silently name no
+        # image at all, so it is refused where the test is defined.
+        with self.assertRaisesRegex(ValueError, "is not one of its arguments"):
+            TestDefinition(
+                "Elsewhere", "", MappingProxyType({}), MappingProxyType({}),
+                image_labels_argument="image sequence",
+            )
         for field in ("build_needs", "build_required"):
             for other in (Needs(platforms=("linux",)), Needs(host_tools=("tshark",)),
                           Needs(bluez_tools=("ubertooth-scan",))):

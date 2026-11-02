@@ -764,7 +764,10 @@ class PageWiringTests(unittest.TestCase):
         # otherwise the box keeps what the operator set, so nothing is
         # built, or made to fail on a target without the toolchain, for a
         # suite that would only leave cases out.
-        self.assertIn("box.checked = required.length > 0 || box.checked;", body)
+        # The operator's own tick is remembered apart from the box, so a tick
+        # one suite forces does not follow them to the next suite.
+        self.assertIn("box.checked = required.length > 0 || option.chosen;", body)
+        self.assertIn("option.chosen = $(option.id).checked;", self.js)
         self.assertIn("box.disabled = !build || required.length > 0;", body)
         self.assertIn("cannot run without ", body)
         # That suite's note names the cases and invites the tick instead, and
@@ -783,9 +786,15 @@ class PageWiringTests(unittest.TestCase):
             section = self.js[self.js.index(caller):]
             self.assertIn("syncBuildOptions", section[:section.index("\n  }")])
         start = self.js[self.js.index("function start()"):]
-        for control in ('$("build")', '$("flash-build")', "$(option.id)"):
+        for control in ('$("build")', '$("flash-build")'):
             self.assertIn(f'{control}.addEventListener("change", syncBuildOptions)',
                           start)
+        # Each box records the operator's choice, then syncs.
+        self.assertRegex(
+            start,
+            r'\$\(option\.id\)\.addEventListener\("change", \(\) => \{\s*'
+            r'option\.chosen = \$\(option\.id\)\.checked;\s*syncBuildOptions\(\);',
+        )
         self.assertNotIn("syncFlashBuild", self.js)
 
     def test_a_suite_needing_an_image_no_build_makes_says_so(self):
@@ -794,9 +803,11 @@ class PageWiringTests(unittest.TestCase):
         body = self.js[self.js.index("function artifactWarning(suite)"):
                        self.js.index("function syncBuildOptions()")]
         self.assertIn("suite.needs_artifacts", body)
-        self.assertIn("an image no build makes", body)
-        self.assertIn("run-suite --artifact", body)
-        self.assertIn("refused", body)
+        self.assertIn("no build makes", body)
+        self.assertIn('--artifact "${label}=PATH"', body)
+        # What such a run costs before it is refused, so Run is not pressed
+        # expecting a quick refusal.
+        self.assertIn("builds, flashes the boards, and is", body)
         self.assertIn("+ artifactWarning(suite)", self.js)
 
     def test_script_has_no_html_injection_sinks(self):

@@ -3,7 +3,8 @@
 from dataclasses import dataclass, replace
 import re
 from types import MappingProxyType
-from typing import Callable, Mapping, Sequence
+from collections.abc import Sequence
+from typing import Callable, Mapping
 
 from ubertooth_harness.cases import CommandCase, FlashCase, guard_roles
 from ubertooth_harness.hostneeds import (
@@ -346,6 +347,12 @@ class TestDefinition:
     rf_defaults: Mapping[str, PlacementRequirement] | None = None
 
     def __post_init__(self):
+        if (self.image_labels_argument
+                and self.image_labels_argument not in self.arguments):
+            raise ValueError(
+                f"{self.name}: image_labels_argument "
+                f"{self.image_labels_argument!r} is not one of its arguments"
+            )
         for field, declared in (("build_needs", self.build_needs),
                                 ("build_required", self.build_required)):
             unwanted = Needs(
