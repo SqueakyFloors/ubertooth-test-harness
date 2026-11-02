@@ -141,10 +141,18 @@ class CompiledSuite:
         records in every run: no run of its own will ever carry it, and a
         release gate nobody could measure must not pass anywhere. One record
         per test, and nothing for a test this host has a record of its own
-        for, which says more.
+        for, which says more: a test this host ran measured the gate, and a
+        test it was left out of has its own reason, so another host's
+        absence is not what its run should fail on.
         """
         mine = tuple(item for item in self.blocked if item.host == host)
         covered = {item.test_name for item in mine}
+        covered |= {
+            item.test_name for item in self.invocations if item.host == host
+        }
+        covered |= {
+            item.test_name for item in self.not_applicable if item.host == host
+        }
         absent = []
         for item in self.blocked:
             if item.host not in self.absent_hosts or item.test_name in covered:
@@ -587,16 +595,25 @@ class PlanCompiler:
                         # two is that bench. For a required step that is
                         # missing hardware, not a plan to correct, so it is
                         # recorded and the rest of the suite still compiles.
-                        absent_on.add(host)
-                        _record_blocked(
-                            blocked_tests, recorded_blocked, host,
-                            step.test_name,
+                        reason = (
                             "no device of its own for each role: "
                             + ", ".join(
                                 f"{role} from "
                                 + " or ".join(host_choices[host][role])
                                 for role in role_names
-                            ),
+                            )
+                        )
+                        if strict_hardware:
+                            # The bench is named on purpose here, so this is
+                            # a refusal, as every other absence is. Named,
+                            # because a plan author reads it.
+                            raise MissingRequiredHardware(
+                                f"{step.test_name}: {host} has {reason}"
+                            )
+                        absent_on.add(host)
+                        _record_blocked(
+                            blocked_tests, recorded_blocked, host,
+                            step.test_name, reason,
                         )
                 if len(invocations) == step_start and not absent_on:
                     # Every combination put one device in two roles. The

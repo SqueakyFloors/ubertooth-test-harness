@@ -163,11 +163,13 @@ suites:
         duration: 2m
 
     # `Classic btbr console` is deliberately not here, although it is the only
-    # coverage of `ubertooth-btbr` and of the `btbr` firmware image: it writes
-    # the board's firmware, so it has to be the only test of its suite, since
-    # a test after it would run on the image it left behind and mandatory
-    # preflight refuses that. It also needs a run carrying both firmware
-    # images and the Python tools. It lives in the `btbr` suite of
+    # coverage of `ubertooth-btbr` and of the `btbr` firmware image. It cannot
+    # run at all without a run carrying both firmware images and the Python
+    # tools (`--build --with-firmware --with-python`), which a release run of
+    # this plan need not carry, and because it writes the board's firmware
+    # nothing may run on that board after it: mandatory preflight refuses a
+    # test that would run on an image this run put there. It lives in the
+    # `btbr` suite of
     # `testplans/classic.yaml` with the other peer tests, and a release runs
     # that suite as well (README, "Option compositions and stateful
     # transitions").

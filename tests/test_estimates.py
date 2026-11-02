@@ -169,12 +169,14 @@ class EstimateTests(unittest.TestCase):
         # three runs on the Linux bench host. Recover AFH map (smoke, two
         # two-minute captures) adds 520.0 s: it is release coverage, and the
         # one entry that names the bench host its ESP32 Classic peers are on,
-        # which `required hardware: true` makes safe (#250). The suite is the
-        # non-soak release gate; half an hour of test time is the planning
-        # target it is kept inside, not a cap (#250).
+        # which `required hardware: true` makes safe (#250). Half an hour is
+        # the planning target for the non-soak gate rather than a limit of
+        # the code, and the second assertion is the tripwire for it: a change
+        # that takes the gate past half an hour gets a decision instead of
+        # slipping in (#250).
         plans = {plan["name"]: plan for plan in list_plans(REPOSITORY / "testplans")}
         (suite,) = plans["release"]["suites"]
-        self.assertAlmostEqual(1174.6, suite["estimated_s"], delta=0.2)
+        self.assertAlmostEqual(1174.5, suite["estimated_s"], delta=0.2)
         self.assertLessEqual(suite["estimated_s"], 30 * 60)
 
 

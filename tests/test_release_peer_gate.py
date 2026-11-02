@@ -304,7 +304,9 @@ class ReleaseGateTests(unittest.TestCase):
 
     def test_strict_validation_refuses_every_absence(self):
         """`validate-plan --hardware` names the bench on purpose, so a
-        missing peer there is a bench that is not set up as the plan says."""
+        missing peer there is a bench that is not set up as the plan says.
+        Every absence a run would record is a refusal there, including the
+        one peer that cannot fill two roles."""
         with self.assertRaisesRegex(
             PlanningError, "no default ESP32 Classic peer for the acceptor role"
         ):
@@ -313,6 +315,12 @@ class ReleaseGateTests(unittest.TestCase):
             PlanningError, "this registry has no host 'Host_Linux'"
         ):
             self.compile(MAC_ONLY, strict=True)
+        with self.assertRaisesRegex(
+            PlanningError,
+            f"{AFH}: Host_Linux has no device of its own for each role: "
+            ".*acceptor from ESP32_Linux0, initiator from ESP32_Linux0",
+        ):
+            self.compile(ONE_PEER_BOTH_ROLES, strict=True)
         # The bench that has them passes, as CI checks it does.
         self.compile(BENCH, strict=True)
 
@@ -521,6 +529,43 @@ class RequiredHardwareArgumentTests(unittest.TestCase):
             [("Host_Linux", AFH)],
             [(item.host, item.test_name) for item in compiled.blocked],
         )
+
+    def test_a_host_that_ran_the_test_is_not_failed_by_an_absent_one(self):
+        """A required step may name two hosts and find one of them here.
+        That host's run measured the gate, so an absent host's record is not
+        what it should fail on; `for_host` keeps a host's own record the
+        same way. The run of a host that has neither still carries it."""
+        text = (
+            "plan: gate\nsuites:\n  release:\n"
+            "    - Host CLI surface:\n        hosts: each\n"
+            f"    - {AFH}:\n"
+            "        hosts: [Host_Linux, Host_Lab]\n"
+            "        required hardware: true\n"
+            "        Ubertooth: default\n"
+            "        acceptor: default\n"
+            "        initiator: default\n"
+            "        coverage: smoke\n"
+            "        duration: 2m\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "plan.yaml"
+            path.write_text(text, encoding="utf-8")
+            compiled = PlanCompiler(
+                self.catalog, registry(directory, BENCH + MAC_HOST)
+            ).compile_suite(load_plan(path, self.catalog), "release")
+
+        # `Host_Lab` is not here, and `Host_Linux` ran the step.
+        self.assertEqual(("Host_Lab",), compiled.absent_hosts)
+        self.assertEqual(
+            ["Host_Linux"],
+            [item.host for item in compiled.invocations
+             if item.test_name == AFH],
+        )
+        self.assertEqual((), compiled.blocked_for_host("Host_Linux"))
+        # The host that neither ran it nor has a reason of its own does
+        # carry it: no run of `Host_Lab` will ever happen here.
+        (blocked,) = compiled.blocked_for_host("Host_Mac")
+        self.assertEqual(("Host_Lab", AFH), (blocked.host, blocked.test_name))
 
     def test_a_suite_with_only_a_blocked_required_step_is_refused(self):
         """Nothing to run means no run to fail, so planning refuses it and

@@ -120,8 +120,9 @@ suites:
   #
   # This suite is release coverage as well: it is the only test of
   # `ubertooth-btbr` and of the `btbr` image, and `testplans/release.yaml`
-  # cannot hold it, because it writes the board's firmware and so has to be
-  # the only test of its suite. Run it alongside the release plan.
+  # cannot hold it, because it needs both firmware images and the Python
+  # tools, and nothing may run on its board after it. Run it alongside the
+  # release plan.
   btbr:
     - Classic btbr console:
         hosts: [Host_Linux]
