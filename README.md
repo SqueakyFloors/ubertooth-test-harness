@@ -529,10 +529,12 @@ can do. That is why it is in a plan of its own and not in `release.yaml` or
 any other unattended plan. The case's cleanup powers the port on and writes
 the run's image back whatever happened, including when the cycle command
 itself is killed, so an ordinary failure still ends with a usable board. A
-run killed outright (SIGKILL) between the switch-off and the restore is the
-exception: the port stays off and is switched back on by hand, as after a
-killed power-isolation run (above). The next run cannot do it for you —
-preflight reads the board's serial before any case runs, so it fails first.
+run killed outright (SIGKILL) is the exception: it leaves whatever it was in
+the middle of — the port off, or the board in its DFU bootloader with the
+unstartable image in flash — and both are put right by hand, as after a
+killed power-isolation run (above). The next run cannot do it for you:
+preflight reads the board's serial before any case runs, and a board in DFU
+reports none.
 
 ```sh
 python -m ubertooth_harness run-suite \

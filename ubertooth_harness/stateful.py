@@ -25,6 +25,11 @@ EXPECTED_REVISION_KEY = "expected firmware revision"
 # and port a board is registered on is the registry's to say, never a plan's
 # or a case builder's.
 REGISTRY_PATH_KEY = "hardware registry"
+# The port the planner resolved for a test that power-cycles its board
+# (planner.TestInvocation.power_cycle), as "<controller alias> <port>". A
+# step that switches it checks what the registry says now against this, so
+# the port switched is the one the run record names.
+POWER_CYCLE_PORT_KEY = "power cycle port"
 # Which try of a retried group of steps is running, counting from 1.
 ATTEMPT_KEY = "attempt"
 

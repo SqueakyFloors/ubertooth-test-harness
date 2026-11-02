@@ -2508,8 +2508,13 @@ did not reach the flash whole.
 registry, on a `USB power controller` that can switch VBUS per port, plus
 every other registered board as guards. The plan names the controller
 (`USB power controller:`), which must be the one the board is registered on,
-so a bench whose wiring moved fails planning instead of switching whatever is
-on that port; the port itself is only ever read from the registry. The run
+so a plan pointed at the wrong hub fails planning rather than switching
+whatever is on that hub's registered port. The port itself is only ever read
+from the registry, and the port the planner resolved goes into the run record
+and is passed back to the step as a check, so a registry edited mid-run
+switches nothing. A board moved to another port of the same hub is still
+switched where the registry says it is: keeping the registry in step with the
+bench is the bench's job. The run
 needs `--allow-destructive` and `--allow-power-changes` and the run's own
 firmware image (`--build --with-firmware`, or a `test build` artifact), holds
 the host lock throughout, and leases the board and its guards.
@@ -2543,13 +2548,17 @@ unstartable image, the board faults, leaves USB, and needs its P4 entry pin
 bridged by hand — the failure the test exists to catch is also the failure
 nothing in the harness can recover from. So it lives in `testplans/power.yaml`
 and is run by hand with someone at the bench, not in an unattended plan. A
-run killed outright (SIGKILL) between the switch-off and the restore leaves
-the port off, and it has to be switched back on by hand, exactly as a killed
-power-isolation run does (README, "USB power controllers"): the next run
-cannot do it, because preflight reads the board's serial before any case
-runs. What the cleanup step does cover is the case's own command being
-killed — the harness SIGKILLs a step that outlives its deadline — and every
-other way the cycle can end. The one case covers erased vectors; the other unstartable images the
+run killed outright (SIGKILL) leaves whatever it was in the middle of: the
+port off if it was between the switch-off and the restore, and the board in
+its DFU bootloader with the unstartable image in flash if it was anywhere
+between the write and the recovery. Both are put right by hand — switch the
+port on (README, "USB power controllers") and write an image back with
+`ubertooth-dfu -d <image> -r` — because the next run cannot do it for you:
+preflight reads the board's serial before any case runs, and a board in DFU
+reports none. What the cleanup steps do cover is the case's own command being
+stopped: the harness signals a command that outlives its step deadline, with
+SIGTERM and then SIGKILL two seconds later, so the helper's own handlers
+normally restore the port before it goes. The one case covers erased vectors; the other unstartable images the
 harness can build (a misaligned or out-of-RAM stack pointer, an ARM-mode
 reset vector, an entry inside the bootloader) are checked on the host only,
 in the unit tests, because each extra hardware case is another cold boot with
@@ -2559,7 +2568,11 @@ takes no bus path, so if that board left the bus between the check and the
 write, `ubertooth-dfu` writes whichever board a no-selector command would
 reach. The harness cannot prevent that; it catches it instead, by requiring
 every guard board to still run what it ran before the write, and by the run's
-own guard checks afterwards. The hardware run is
+own guard checks afterwards. What neither covers is an Ubertooth nobody
+registered: a stranger in its own DFU bootloader, attached while the board
+under test is off the bus, is indistinguishable from the board and would be
+written. The run assumes the registry describes the bench, as leases and
+isolation do. The hardware run is
 still outstanding
 ([#141](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/141)).
 

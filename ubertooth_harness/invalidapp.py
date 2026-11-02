@@ -28,11 +28,13 @@ The commands:
   it cannot (a controller that has stopped answering), that is what it
   reports, in the loudest line it prints.
 - ``port`` reads the port and switches it back on if it is off. It is the
-  case's first cleanup step, so the cycle command being killed outright
-  still ends with the port powered: the harness itself does that, with
-  SIGKILL, to a command that outlives its step deadline. A SIGKILL of the
-  whole run is beyond any of this -- no cleanup runs then, and that port is
-  switched on by hand, as after a killed power-isolation run.
+  case's first cleanup step, so a cycle command the run stopped still ends
+  with the port powered: the harness signals a command that outlives its
+  step deadline, SIGTERM and then SIGKILL two seconds later, so the cycle
+  normally restores the port itself and this step confirms it. A SIGKILL of
+  the whole run is beyond any of this -- no cleanup runs then, and the port
+  and the board are put right by hand, as after a killed power-isolation
+  run.
 - ``recover`` returns the board to its application with the test image. It
   always writes it, because a board that started the unstartable image
   reports the same revision as the test image, and then waits for the
@@ -225,12 +227,14 @@ def ensure_power_on(
     I/O error that closed the controller's link does not cost the port.
     """
     reason = ""
+    read_off = False  # the port was read, and read as off
     for attempt in range(1, attempts + 1):
         try:
             controller.connect()
             if controller.snapshot(port).power_enabled:
                 log(f"Port {port} power: on")
                 return ""
+            read_off = True
             log(f"Port {port} power: off; switching it back on")
             controller.set_power_enabled(port, True)
             if not controller.snapshot(port).power_enabled:
@@ -245,14 +249,18 @@ def ensure_power_on(
             reason = f"port {port} is not powered: {error}"
             if attempt < attempts:
                 log(f"Port {port}: {error}; trying once more")
-    if switched_off:
+    # Which of the two it is comes from what was read, not from what was
+    # done earlier: a port read as off and not switched back on is off, and
+    # a port that could not be read at all is unknown, whatever this command
+    # switched. Saying "off" for an unknown port sends someone to the bench
+    # for nothing; saying "unknown" for one read as off hides the opposite.
+    if read_off:
         log(f"PORT {port} STILL OFF: {reason}. The board is off the bus until "
             "someone switches it on by hand (README, \"USB power controllers\")")
     else:
-        # Nothing was switched off here, so the port is as some earlier
-        # command left it; what is missing is the confirmation.
-        log(f"PORT {port} NOT CONFIRMED POWERED: {reason}. Nothing was "
-            "switched off here; read the port with ubertooth-harness power")
+        log(f"PORT {port} NOT CONFIRMED POWERED: {reason}."
+            + ("" if switched_off else " Nothing was switched off here;")
+            + " read the port with ubertooth-harness power")
     return reason
 
 
@@ -354,7 +362,6 @@ def power_cycle(
     failure = ""
     unpowered = ""
     switched_off = False
-    restored = False
     try:
         controller.connect()
         before = controller.snapshot(target.port)
@@ -393,9 +400,7 @@ def power_cycle(
             )
             log(f"Board off the bus after {waited:.1f}s, and still gone "
                 f"{settle_s:g}s later")
-        # preserved_power_state restored the port here, reading it back, so
-        # the port is known to be on from this point.
-        restored = True
+        # preserved_power_state restored the port here, reading it back.
         log(f"Port {target.port} power restored")
         try:
             waited = wait_for_enumeration(
@@ -418,16 +423,15 @@ def power_cycle(
         # Whatever happened above, including a signal: the port must be
         # powered when this returns, and the command must say so.
         unpowered = ensure_power_on(controller, target.port, log,
-                                    switched_off=switched_off and not restored)
+                                    switched_off=switched_off)
         _close_quietly(controller)
-    if unpowered and switched_off and not restored:
-        # A port this command switched off and could not switch back on is
-        # the worst outcome there is, so it is what the command reports.
+    if unpowered:
+        # A port that is not known to be powered is the worst outcome there
+        # is, so it is what the command reports, whatever else happened.
         log(f"Power cycle: {unpowered}"
             + (f"; the check itself failed too: {failure}" if failure else ""))
         return 1
-    if failure or unpowered:
-        failure = failure or unpowered
+    if failure:
         log(f"Power cycle: {failure}")
         return 1
     log("Power cycle: the bootloader refused the unstartable image, as it must")
@@ -535,22 +539,26 @@ def recover(
         log(f"Recovery: {failure}")
         return 1
     returned = board.wait_revision()
-    if returned != revision:
-        log(f"Recovery: board answers {returned}, expected {revision}"
-            if returned else
-            "Recovery: board did not return to its application")
-        return 1
     # A write with no selector reaches whichever device answers DFU, and if
     # the board left the bus between the check above and the write,
     # ubertooth-dfu takes the board a no-selector command would -- which on
     # a host with one other board is that board. It cannot be prevented from
-    # here (DFU has no serial and -U has no path form), so it is caught:
-    # every guard must still run what it ran before the write.
+    # here (DFU reports no serial and -U takes no bus path), so it is
+    # caught: every guard must still run what it ran before the write. Read
+    # before the board's own answer is judged, because the case this catches
+    # is one where the board under test does not answer at all.
     written = board.changed_guards(guards)
     if written:
         log("Recovery: the write reached a guard board, not the board under "
             "test: " + "; ".join(written)
-            + ". Write that board's own firmware back before using it")
+            + ". Write that board's own firmware back before using it"
+            + ("" if returned else "; the board under test still does not "
+               "answer in its application"))
+        return 1
+    if returned != revision:
+        log(f"Recovery: board answers {returned}, expected {revision}"
+            if returned else
+            "Recovery: board did not return to its application")
         return 1
     log(f"Recovered: the board started the test image it was written, "
         f"firmware {returned}")
@@ -635,6 +643,10 @@ def _parser() -> argparse.ArgumentParser:
         power.add_argument("--controller",
                            help="registry alias of its USB power controller, "
                                 "as the plan names it")
+        power.add_argument("--expect-port", metavar="'ALIAS PORT'",
+                           help="the controller and port the run recorded; "
+                                "the registry still decides, and a registry "
+                                "that now says another port is refused")
         power.add_argument("--allow-power-changes", action="store_true")
         if name == "cycle":
             power.add_argument(
@@ -688,6 +700,19 @@ def _main(args, board_factory, enumerator_factory, controller_factory,
                               [guard.lower() for guard in args.guard])
         return recover(board, Path(args.image), args.revision)
     registry, target = _registry_target(args.hardware, args.board, args.controller)
+    if args.expect_port:
+        recorded = f"{target.controller_alias} {target.port}"
+        if args.expect_port != recorded:
+            raise InvalidAppError(
+                f"the run recorded {args.expect_port} for {args.board}, and "
+                f"the registry now says {recorded}; nothing was switched"
+            )
+    if install_handlers:
+        # Both commands switch power, so both unwind through their
+        # restoration when the run cancels them rather than stopping where
+        # they stand. The port command only ever switches power on, so its
+        # handlers are there to let it finish and say so.
+        _install_signal_handlers()
     controller = _controller(
         registry, target,
         allow_power_changes=args.allow_power_changes,
@@ -704,8 +729,6 @@ def _main(args, board_factory, enumerator_factory, controller_factory,
             return 1
         print(f"Port: {target.controller_alias} port {target.port} is powered")
         return 0
-    if install_handlers:
-        _install_signal_handlers()
     state = BoardState(
         args.serial.lower(),
         frozenset(guard.lower() for guard in args.guard),

@@ -893,6 +893,9 @@ def _run_suite(args: argparse.Namespace) -> int:
                 "installed; install it, or use --no-flash-build to keep the "
                 "boards' firmware"
             )
+    # Before the dry run too, so a dry run that exits 0 means what the
+    # README says it means: this host can run the suite as asked.
+    _check_power_cycles_allowed(args, catalog, invocations)
     if args.dry_run:
         return _dry_run(
             args, catalog, plan, host, invocations, not_applicable, blocked
@@ -991,38 +994,28 @@ def _dry_run(args, catalog, plan, host, invocations, not_applicable, blocked=())
     return 0
 
 
-def _check_destructive_allowed(args, catalog, invocations) -> None:
-    """Refuse a destructive test nobody asked for on the command line.
+def _check_power_cycles_allowed(args, catalog, invocations) -> None:
+    """Refuse a run that would power-cycle a board without being asked to.
 
-    A test that can leave a board needing its entry pin bridged has to be
-    started by a person who is there. ``--allow-power-changes`` cannot stand
-    for that: a runner service is deployed with it so an exclusive-Ubertooth
-    plan can run, and every run it dispatches then carries it. This option it
-    never passes on.
-    """
-    destructive = sorted({
-        invocation.test_name for invocation in invocations
-        if catalog.get(invocation.test_name).destructive
-    })
-    if destructive and not getattr(args, "allow_destructive", False):
-        raise HarnessError(
-            ", ".join(destructive) + " can leave a board needing recovery at "
-            "the bench; rerun with --allow-destructive, with someone who can "
-            "reach the board"
-        )
+    Two options, checked together so a person is told about both at once,
+    and checked before the run takes a lease or writes a run directory, so a
+    dispatched run that cannot have them fails having touched nothing.
 
-
-def _check_power_cycles_armed(args, invocations) -> None:
-    """Refuse a run whose test switches board power without the opt-in.
-
-    The same option power isolation needs, checked before anything is built
-    or run: a test that power-cycles a board can leave it needing someone at
-    the bench, so it never starts by accident.
+    ``--allow-power-changes`` is the arming power isolation needs as well.
+    ``--allow-destructive`` is this test's own: a runner service is deployed
+    with the first, so every run it dispatches carries it, and the second it
+    never passes on. So a test that can leave a board needing its entry pin
+    bridged is started by a person who is there, and never by a click.
     """
     cycling = [
         invocation for invocation in invocations
         if getattr(invocation, "power_cycle", None) is not None
     ]
+    destructive = [
+        invocation for invocation in invocations
+        if catalog.get(invocation.test_name).destructive
+    ]
+    missing = []
     if cycling and not args.allow_power_changes:
         named = ", ".join(sorted({
             f"{invocation.test_name} ({invocation.power_cycle.resource_alias} on "
@@ -1030,9 +1023,22 @@ def _check_power_cycles_armed(args, invocations) -> None:
             f"{invocation.power_cycle.port})"
             for invocation in cycling
         }))
+        missing.append(
+            f"--allow-power-changes, because {named} power-cycles the board "
+            "it selects"
+        )
+    if destructive and not getattr(args, "allow_destructive", False):
+        named = ", ".join(sorted({i.test_name for i in destructive}))
+        missing.append(
+            f"--allow-destructive, because {named} can leave a board needing "
+            "recovery at the bench"
+        )
+    if missing:
         raise HarnessError(
-            f"{named} power-cycles the board it selects; rerun with "
-            "--allow-power-changes"
+            "this suite needs " + "; and ".join(missing)
+            + ". Rerun with " + " ".join(
+                option.split(",")[0] for option in missing
+            ) + ", with someone who can reach the board"
         )
 
 
@@ -1062,8 +1068,6 @@ def _run_leased(
             isolation.check_ready(
                 invocation.power_isolation, invocation.resources.get("Ubertooth")
             )
-    _check_power_cycles_armed(args, invocations)
-    _check_destructive_allowed(args, catalog, invocations)
     built = None
     publisher = None
     executor = SubprocessCommandExecutor()

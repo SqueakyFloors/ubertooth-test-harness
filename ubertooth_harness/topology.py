@@ -22,6 +22,7 @@ from ubertooth_harness.enumeration import (
 )
 from ubertooth_harness.power import (
     ACRONAME_DRIVER,
+    SIMULATED_DRIVER,
     PowerController,
     RESTORE_FAILURE_PREFIX,
     PowerControllerError,
@@ -80,9 +81,13 @@ def plan_power_cycle(
 
     The port comes from the board's own ``power:`` mapping, so a test can
     never cut a port the registry does not give that board.
-    ``controller_alias``, when a plan names one, must be that controller:
-    a plan that names another hub has the bench wrong, and switching the
-    registered port anyway would take down whatever is really on it.
+    ``controller_alias``, when a plan names one, must be that controller: a
+    plan that names another hub has the bench wrong, and switching the
+    registered port anyway would take down whatever is really on it. The
+    port itself is not in the plan, so a board moved to another port of the
+    same hub is switched where the registry says it is; keeping the registry
+    in step with the bench is the bench's job, and the run records the port
+    it resolved here.
 
     A board with no power mapping, or one behind a controller that cannot
     switch VBUS per port, is hardware this test is about rather than a
@@ -113,6 +118,14 @@ def plan_power_cycle(
         raise RegistryError(f"resource {mapped} is not a USB power controller")
     if controller.attached_to != host:
         raise RegistryError(f"power controller {mapped} is not attached to {host}")
+    if controller.driver == SIMULATED_DRIVER:
+        # A simulated controller reports every write as done and takes no
+        # board off the bus, so a cycle through it would fail at the removal
+        # wait and read as a fault in the board or the hub.
+        raise MissingRequiredHardware(
+            f"controller {mapped} is simulated and cannot power-cycle "
+            f"{selected_alias}"
+        )
     if "per-port VBUS switching" not in controller.capabilities:
         raise MissingRequiredHardware(
             f"controller {mapped} lacks per-port VBUS switching, so "

@@ -42,6 +42,7 @@ from ubertooth_harness.helpersteps import (
 from ubertooth_harness.patterns import IMAGE_NAME_PATTERN
 from ubertooth_harness.stateful import (
     EXPECTED_REVISION_KEY,
+    POWER_CYCLE_PORT_KEY,
     REGISTRY_PATH_KEY,
     Observation,
     StateCase,
@@ -82,14 +83,36 @@ def _registry(context):
     return require(context, REGISTRY_PATH_KEY)
 
 
-def _revision_step(serial, step_id, name, key):
+def _revision_step(serial, step_id, name, key, expected=_revision):
+    """``ubertooth-util -v``, recording the revision it reports.
+
+    ``expected`` compares it with the run's own: the cleanup does that,
+    because by then this test has written that image. The step before the
+    case does not, since the test establishes the firmware it verifies and
+    preflight therefore never required it: the board may be running anything
+    when the case starts, and what the case needs of it is only that it
+    answers in its application.
+    """
     return Step(step_id, name, _util(serial, "-v"),
-                observe=Observation(key, _REVISION_PATTERN, _revision))
+                observe=Observation(key, _REVISION_PATTERN, expected))
+
+
+def _expected_port(context):
+    return require(context, POWER_CYCLE_PORT_KEY)
 
 
 def _power_args(board_alias, controller_alias):
+    """What every power step is given.
+
+    The port is not among them: it comes from the board's own registry
+    entry, read by the helper. What is passed is the port the planner
+    resolved when the run was recorded, as a check -- a registry edited
+    between planning and this step would otherwise switch a port the run
+    record does not name.
+    """
     return ("--hardware", _registry, "--board", board_alias,
-            "--controller", controller_alias, "--allow-power-changes")
+            "--controller", controller_alias,
+            "--expect-port", _expected_port, "--allow-power-changes")
 
 
 def _recover_args(serial, guards):
@@ -102,7 +125,8 @@ def _recover_args(serial, guards):
 def _steps(serial, guards, board_alias, controller_alias):
     return (
         _revision_step(serial, "read-original-revision",
-                       "Read firmware revision", "original revision"),
+                       "Read firmware revision", "original revision",
+                       expected=None),
         helper_step("make", "Write an image the bootloader must refuse",
                     _HELPER, "make", "--image", _image,
                     "--output", case_file(BAD_IMAGE),
