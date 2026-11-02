@@ -117,11 +117,60 @@ DEFAULT_AUDIO_TYPE = "ev3"
 # The two subcommands that hold the pair's link up while another command
 # runs, as opposed to the ones that read or reset one board.
 PAIR_COMMANDS = ("stream", "audio")
-# The oldest image whose shell can choose the audio link's packet type
-# (`sco type`); the audio link itself arrived in utesp-1.1.0.
-AUDIO_FIRMWARE = "utesp-1.4.0"
+# The oldest image whose shell has everything an audio session reads. The
+# link itself arrived in utesp-1.1.0 and `sco type` in utesp-1.4.0;
+# utesp-1.5.0 added the two counters that say how many links a profile has
+# had, which is how a session tells one link that lasted from a second that
+# replaced it (#264).
+AUDIO_FIRMWARE = "utesp-1.5.0"
 # What `status` must report for the link to be up and carrying audio.
 AUDIO_ON = "on"
+# The one value of AUDIO_TYPES that names no packet type, so it promises
+# nothing about what is on the air. Spelled once rather than at each place
+# that compares against it.
+AUDIO_TYPE_STACK = "default"
+# What `sco_pkt_type` reads for each type a caller can ask for by name,
+# which is the specification's spelling rather than the command line's
+# (firmware/esp32-classic-peer/README.md, `sco_pkt_type`). `default` is
+# left out: the choice is the stack's, so no particular type is promised.
+AUDIO_TYPE_ON_LINK = {"ev3": "ev3", "2ev3": "2-ev3"}
+# The session's own shell commands. One source for them, so this module,
+# its tests, and the cases that read its report cannot come to disagree
+# with the firmware about what they are called.
+SCO_START, SCO_STOP, SCO_STATS, SCO_TYPE = (
+    "sco start", "sco stop", "sco stats", "sco type")
+ROLE_INITIATOR = "role initiator"
+# The audio counters a session reads before the command and again after it.
+# What it reports is how far each one moved: a total would include the
+# bring-up, and on a board an earlier session left running it would include
+# that session too (#264).
+AUDIO_FRAME_COUNTERS = ("sco_tx_frames", "sco_tx_errors", "sco_rx_frames",
+                        "sco_rx_bad")
+# How many synchronous links the profile has had, and how many went down
+# again. One link that lasted the whole command leaves both unchanged; a
+# link that dropped and came back, or was renegotiated, moves one of them,
+# which is the difference between a capture of one link and a capture of
+# two with a gap in the middle.
+AUDIO_LINK_COUNTERS = ("sco_connects", "sco_disconnects")
+# The Serial Port Profile's own link counter, read the same way. An audio
+# session brings no SPP link up, so it should not move either.
+SPP_LINK_COUNTERS = ("disconnects",)
+# The controller's own synchronous-packet counters (`sco stats`): the
+# packets that went on the air, as against the frames the application made
+# of them. The firmware's README records a measured reading of all seven.
+AUDIO_PKT_COUNTERS = ("rx_total", "rx_correct", "rx_err", "rx_none",
+                      "rx_lost", "tx_total", "tx_discarded")
+# The audio half of a board's boot state. BOOT_STATE is checked on every
+# 1.x image, and the oldest of those have none of these fields, so an audio
+# session checks both and the rest of the module only the first.
+AUDIO_BOOT_STATE = {
+    "sco": "off", "sco_profile": "none", "sco_codec": "none",
+    "sco_handle": 0, "sco_frame_len": 0, "sco_type": AUDIO_TYPE_STACK,
+    "sco_link": "none", "sco_pkt_type": "none", "sco_tx_frames": 0,
+    "sco_tx_errors": 0, "sco_rx_frames": 0, "sco_rx_bad": 0,
+    "sco_connects": 0, "sco_disconnects": 0,
+}
+AUDIO_RELEASE_STATE = {**BOOT_STATE, **AUDIO_BOOT_STATE}
 # `sco start` on the initiator blocks the shell while the controller starts
 # the hands-free profile (3 s), pages and brings the service level connection
 # up (15 s), opens the audio link (10 s), and, if that failed, puts the
@@ -569,16 +618,26 @@ def stream(acceptor: Peer, initiator: Peer, command: Sequence[str], *,
         acceptor_shell.close()
 
 
-def _release(shell: Shell) -> None:
-    """Leave a board in its boot state, whatever the session did to it.
+def _release(shell: Shell, peer: Peer, expected: dict) -> str:
+    """Leave a board in its boot state; say so when it did not get there.
 
-    Failures here are swallowed: the caller is already reporting what went
-    wrong, and the case's cleanup resets both boards in any event.
+    Returns the reason it did not, or "". A board still carrying a role, a
+    profile, a packet-type choice or a counter of this session's is where
+    the next case starts from, so the release is checked rather than hoped
+    for: this used to swallow every failure, which let a session that could
+    not put a board back read as a pass (#264).
     """
     try:
         shell.reset()
-    except PeerError:
-        pass
+        status = shell.status()
+    except PeerError as error:
+        return f"the {peer.label} was not released to its boot state: {error}"
+    wrong = [f"{key} {status.get(key)!r}, not {value!r}"
+             for key, value in expected.items() if status.get(key) != value]
+    if wrong:
+        return (f"the {peer.label} is not in its boot state after its release "
+                "reset: " + ", ".join(wrong))
+    return ""
 
 
 def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
@@ -622,11 +681,14 @@ def _stream(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         after_initiator = initiator_shell.status()
         after_acceptor = acceptor_shell.status()
     finally:
-        _release(initiator_shell)
-        _release(acceptor_shell)
+        # On the way out of a session that failed, the failure is the whole
+        # report and the case's own cleanup resets both boards again, so
+        # these reasons are only collected for a session that got this far.
+        released = [_release(initiator_shell, initiator, BOOT_STATE),
+                    _release(acceptor_shell, acceptor, BOOT_STATE)]
     _report_traffic(out, initiator.label, after_initiator)
     _report_traffic(out, acceptor.label, after_acceptor)
-    problems = []
+    problems = [reason for reason in released if reason]
     if after_initiator["disconnects"]:
         problems.append(f"the link went down {after_initiator['disconnects']} "
                         "time(s) while the command ran")
@@ -677,23 +739,195 @@ def audio(acceptor: Peer, initiator: Peer, command: Sequence[str], *,
         acceptor_shell.close()
 
 
-def _audio_field(status: dict, key: str, kind, label: str):
-    """One of the audio link's own status fields, which older images lack."""
+def _audio_field(status: dict, key: str, kind, label: str,
+                 where: str = "status"):
+    """One of the audio link's own fields, which older images lack."""
     value = status.get(key)
     if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
-        raise PeerError(f"{label}: status has no valid '{key}'; the audio link "
+        raise PeerError(f"{label}: {where} has no valid '{key}'; the audio link "
                         f"needs {AUDIO_FIRMWARE} or a later 1.x image")
+    return value
+
+
+def _audio_count(values: dict, key: str, label: str,
+                 where: str = "status") -> int:
+    """One counter of the audio link: a whole number, and never negative.
+
+    Every floor this session applies and every figure it reports is
+    arithmetic on these, so a value that is not a number at all, or one
+    below zero, is named here rather than carried into a subtraction that
+    would make nonsense of it.
+    """
+    value = _audio_field(values, key, int, label, where)
+    if value < 0:
+        raise PeerError(f"{label}: {where} reports {key} {value}, and a counter "
+                        "cannot be negative")
     return value
 
 
 def _require_audio_up(status: dict, peer: Peer, address: str) -> None:
     if _audio_field(status, "sco", str, peer.label) != AUDIO_ON:
         raise PeerError(f"the {peer.label}'s audio link to {address} is not up "
-                        f"after 'sco start' (sco {status['sco']})")
+                        f"after '{SCO_START}' (sco {status['sco']})")
+
+
+def _pkt_counters(shell: Shell, peer: Peer) -> dict:
+    """The controller's own synchronous-packet counters, from `sco stats`.
+
+    These count the packets that went on the air, which is what a capture
+    of the link is a capture of; the frame counters in `status` count what
+    the application made of them. Both are read at the same moment, so a
+    session can say what the air carried as well as what the two
+    applications saw of it (#264).
+
+    The command needs a live link, so it belongs inside the session; a
+    board that refuses it says why, and that reason is the session's.
+    """
+    lines = shell.command(SCO_STATS)
+    for line in reversed(lines):
+        if line.startswith("{"):
+            try:
+                counters = json.loads(line)
+            except ValueError as error:
+                raise PeerError(f"{peer.label}: '{SCO_STATS}' answered "
+                                f"{line[:80]!r}, which is not JSON") from error
+            if not isinstance(counters, dict):
+                raise PeerError(f"{peer.label}: '{SCO_STATS}' did not answer a "
+                                "JSON object")
+            return {key: _audio_count(counters, key, peer.label, SCO_STATS)
+                    for key in AUDIO_PKT_COUNTERS}
+    raise PeerError(f"{peer.label}: '{SCO_STATS}' printed no JSON line")
+
+
+def _reading(shell: Shell, peer: Peer) -> dict:
+    """Everything the session measures on one board, at one moment.
+
+    Taken once as late as possible before the command starts and once as
+    soon as it has finished, so every figure the session reports belongs to
+    the command's own window rather than to the whole life of the board.
+    """
+    status = shell.status()
+    return {
+        "status": status,
+        "handle": _audio_count(status, "sco_handle", peer.label),
+        "counters": {
+            key: _audio_count(status, key, peer.label)
+            for key in AUDIO_FRAME_COUNTERS + AUDIO_LINK_COUNTERS
+            + SPP_LINK_COUNTERS
+        },
+        "packets": _pkt_counters(shell, peer),
+    }
+
+
+def _moved(before: dict, after: dict, peer: Peer, where: str) -> dict:
+    """How far each counter moved between two readings of one board.
+
+    A counter that went backwards means the board zeroed it part way
+    through, and no delta can be taken across that, so it is named rather
+    than reported as a figure that would read like a quiet link.
+    """
+    moved = {}
+    for key, start in before.items():
+        end = after[key]
+        if end < start:
+            raise PeerError(f"the {peer.label}'s {where} {key} went backwards, "
+                            f"{start} to {end}: its counters were zeroed while "
+                            "the command ran")
+        moved[key] = end - start
+    return moved
+
+
+def _audio_checks(peer: Peer, status: dict, counters: dict, packets: dict,
+                  handles: tuple[int, int], *, min_frames: int) -> list[str]:
+    """What the command's own window must show for its capture to mean something."""
+    problems = []
+    if status.get("sco") != AUDIO_ON:
+        problems.append(f"the {peer.label}'s audio link read {status.get('sco')} "
+                        f"afterwards, not {AUDIO_ON}")
+    # One link, from the first reading to the last. A link that went down
+    # and came back leaves both ends reading `on` either side of the
+    # command and is still not the one link a capture of it would be of.
+    if counters["sco_connects"] or counters["sco_disconnects"]:
+        problems.append(f"the {peer.label}'s audio link did not stay up while "
+                        f"the command ran: {counters['sco_connects']} opened, "
+                        f"{counters['sco_disconnects']} went down")
+    elif handles[0] != handles[1]:
+        problems.append(f"the {peer.label}'s audio link handle changed from "
+                        f"{handles[0]} to {handles[1]}: the command did not run "
+                        "against one link")
+    if counters["disconnects"]:
+        # The Serial Port Profile's counter. An audio session brings no SPP
+        # link up, so it moving means something else was going on.
+        problems.append(f"the {peer.label}'s data link went down "
+                        f"{counters['disconnects']} time(s) while the command ran")
+    if counters["sco_tx_frames"] < min_frames:
+        problems.append(f"the {peer.label} sent {counters['sco_tx_frames']} audio "
+                        f"frames while the command ran, fewer than the "
+                        f"{min_frames} this test needs")
+    if not counters["sco_rx_frames"]:
+        problems.append(f"the {peer.label} counted no audio frames from the far "
+                        "end while the command ran")
+    # The controller's counters are the air. Frames the application handled
+    # with nothing counted under them would describe a link that was not
+    # there, and a capture taken against it would be of nothing.
+    if not packets["tx_total"]:
+        problems.append(f"the {peer.label}'s controller sent no synchronous "
+                        "packets while the command ran")
+    if not packets["rx_total"]:
+        problems.append(f"the {peer.label}'s controller received no synchronous "
+                        "packets while the command ran")
+    elif not packets["rx_correct"]:
+        problems.append(f"the {peer.label}'s controller received "
+                        f"{packets['rx_total']} synchronous packets while the "
+                        "command ran and not one of them correct")
+    return problems
+
+
+def _audio_measured(out, boards, before: dict, after: dict, *,
+                    min_frames: int) -> list[str]:
+    """Report what each board measured over the command, and what is wrong.
+
+    Every figure is the movement across the command's own window. Printing
+    comes before the link is taken down and the boards are released, so a
+    stop or a release that fails afterwards adds to the report rather than
+    replacing it (#264).
+    """
+    problems = []
+    for peer, _shell in boards:
+        start, end = before.get(peer.label), after.get(peer.label)
+        if start is None or end is None:
+            continue  # the reading itself failed, and said so
+        status = end["status"]
+        try:
+            counters = _moved(start["counters"], end["counters"], peer, "status")
+            packets = _moved(start["packets"], end["packets"], peer, SCO_STATS)
+        except PeerError as error:
+            problems.append(str(error))
+            continue
+        print(f"{peer.label} audio: {status['sco']} {status['sco_pkt_type']}, "
+              f"sent {counters['sco_tx_frames']} received "
+              f"{counters['sco_rx_frames']} frames, "
+              f"{counters['sco_tx_errors']} send errors, "
+              f"{counters['sco_rx_bad']} damaged, link "
+              f"{counters['sco_connects']} opened "
+              f"{counters['sco_disconnects']} dropped", file=out)
+        print(f"{peer.label} packets: controller sent {packets['tx_total']} "
+              f"received {packets['rx_total']}, {packets['rx_correct']} good, "
+              f"{packets['rx_err']} bad, {packets['rx_none']} missing, "
+              f"{packets['rx_lost']} lost, {packets['tx_discarded']} discarded",
+              file=out)
+        problems += _audio_checks(peer, status, counters, packets,
+                                  (start["handle"], end["handle"]),
+                                  min_frames=min_frames)
+    return problems
 
 
 def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
            packet_type, min_frames, min_seconds, timeout, out, settle_s) -> int:
+    # The initiator first wherever both boards are worked through: it is
+    # the board that paged, so it is the one whose end of the link goes
+    # first when the session is taken apart.
+    boards = ((initiator, initiator_shell), (acceptor, acceptor_shell))
     acceptor_shell.wait_ready()
     initiator_shell.wait_ready()
     acceptor_status = check_status(acceptor_shell.status(), acceptor.label,
@@ -722,14 +956,14 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         # the bench uses. `role` takes an audio link down but keeps the
         # chosen type (only `defaults` puts that back), so either order
         # works; this one also works if that ever changes.
-        if packet_type != "default":
-            acceptor_shell.command(f"sco type {packet_type}")
-        acceptor_shell.command("sco start", AUDIO_CONNECT_TIMEOUT_S)
-        initiator_shell.command("role initiator")
+        if packet_type != AUDIO_TYPE_STACK:
+            acceptor_shell.command(f"{SCO_TYPE} {packet_type}")
+        acceptor_shell.command(SCO_START, AUDIO_CONNECT_TIMEOUT_S)
+        initiator_shell.command(ROLE_INITIATOR)
         initiator_shell.command(f"spp peer {acceptor_status['address']}")
-        if packet_type != "default":
-            initiator_shell.command(f"sco type {packet_type}")
-        initiator_shell.command("sco start", AUDIO_CONNECT_TIMEOUT_S)
+        if packet_type != AUDIO_TYPE_STACK:
+            initiator_shell.command(f"{SCO_TYPE} {packet_type}")
+        initiator_shell.command(SCO_START, AUDIO_CONNECT_TIMEOUT_S)
         # Both ends have to report the link, not just the one that paged.
         # The audio link is the Hands-Free Profile's, not the Serial Port
         # Profile's, so `remote` stays empty here: whose link it is, is
@@ -755,43 +989,54 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
               f"every {_audio_field(linked, 'sco_interval', int, initiator.label)} "
               f"slots, up to {acceptor_status['address']} at "
               f"{time.strftime('%H:%M:%SZ', time.gmtime())}", file=out)
+        # The readings the command is measured against, taken as late as
+        # possible before it starts. Everything up to here - the bring-up,
+        # the settle, the status reads - put frames on the air as well, and
+        # those are not frames the command saw.
+        before = {peer.label: _reading(shell, peer) for peer, shell in boards}
         print("command: " + " ".join(command), file=out)
         out.flush()
         status, seconds = _run_command(command, timeout)
-        print(f"command exit: {status} after {seconds:.1f} s", file=out)
-        after_initiator = initiator_shell.status()
-        after_acceptor = acceptor_shell.status()
-    finally:
-        _release(initiator_shell)
-        _release(acceptor_shell)
-    problems = []
-    for peer_status, peer in ((after_initiator, initiator),
-                              (after_acceptor, acceptor)):
-        sent = _audio_field(peer_status, "sco_tx_frames", int, peer.label)
-        received = _audio_field(peer_status, "sco_rx_frames", int, peer.label)
-        print(f"{peer.label} audio: {peer_status['sco']} "
-              f"{peer_status['sco_pkt_type']}, sent {sent} received "
-              f"{received} frames", file=out)
-        if peer_status["sco"] != AUDIO_ON:
-            problems.append(f"the {peer.label}'s audio link read "
-                            f"{peer_status['sco']} afterwards, not {AUDIO_ON}")
-        if sent < min_frames:
-            problems.append(f"the {peer.label} sent {sent} audio frames, fewer "
-                            f"than the {min_frames} this test needs")
-        # This counter is the Serial Port Profile's, and an audio session
-        # brings no SPP link up, so it is normally zero either way; what
-        # says the audio link held is both ends reading `on` afterwards and
-        # the frames they counted.
-        if peer_status["disconnects"]:
-            problems.append(f"the {peer.label}'s link went down "
-                            f"{peer_status['disconnects']} time(s) while the "
-                            "command ran")
+    except PeerError:
+        # Nothing was measured, so the failure is the whole report; the
+        # boards are still put back as far as they will go, and the case's
+        # own cleanup resets them again.
+        for peer, shell in boards:
+            _release(shell, peer, AUDIO_RELEASE_STATE)
+        raise
+    print(f"command exit: {status} after {seconds:.1f} s", file=out)
+
+    # Nothing below raises until the end. A session that measured something
+    # reports all of it, and a stop or a release that fails afterwards is
+    # added to that report rather than taking its place (#264).
+    problems, after = [], {}
+    for peer, shell in boards:
+        try:
+            after[peer.label] = _reading(shell, peer)
+        except PeerError as error:
+            problems.append(str(error))
+    problems += _audio_measured(out, boards, before, after,
+                                min_frames=min_frames)
+    # The link comes down before the boards are released, so a stop the
+    # firmware refuses is reported as itself rather than hidden by the
+    # reset that would have cleared it anyway.
+    for peer, shell in boards:
+        try:
+            shell.command(SCO_STOP, STOP_TIMEOUT_S)
+        except PeerError as error:
+            problems.append(f"the {peer.label} did not stop its audio link: "
+                            f"{error}")
+    for peer, shell in boards:
+        reason = _release(shell, peer, AUDIO_RELEASE_STATE)
+        if reason:
+            problems.append(reason)
     if seconds < min_seconds:
         problems.append(f"{command[0]} ran {seconds:.1f} s, less than the "
                         f"{min_seconds:g} s this test needs: it stopped early")
     if problems:
         raise PeerError("the pair did not carry audio: " + "; ".join(problems))
-    print(f"pair carried audio: {after_initiator['sco_pkt_type']}", file=out)
+    print("pair carried audio: "
+          f"{after[initiator.label]['status']['sco_pkt_type']}", file=out)
     return status
 
 

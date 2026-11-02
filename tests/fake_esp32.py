@@ -10,6 +10,12 @@ import json
 
 from ubertooth_harness import esp32peer
 
+# The two lines the firmware refuses a malformed `sco` line with
+# (SCO_USAGE and SCO_TYPE_USAGE in firmware/esp32-classic-peer/main/peer.h).
+# A unit test reads them out of that header, so these cannot drift from it.
+SCO_USAGE = "sco takes start, stop, stats, or type <ev3|2ev3|default>"
+SCO_TYPE_USAGE = "sco type takes ev3, 2ev3, or default"
+
 # What the ROM prints after every reset, which opening the bridge causes.
 BOOT_LOG = (
     "ets Jul 29 2019 12:21:46",
@@ -34,9 +40,18 @@ class FakePeerFirmware:
         # writes this board reports per `stream on`; the bench numbers are
         # much larger, so a test asks for small floors.
         self.writes_per_stream = 100
-        # Audio frames each board reports per `sco start`, as the writes
-        # above stand for a whole stream.
-        self.frames_per_link = 200
+        # What the audio link carried since the last reading of this board:
+        # a real board counts frames and packets while a session reads it,
+        # so each reading here advances the counters once and a session's
+        # before and after readings differ (see _tick). A session takes two
+        # readings each side of its command, so its deltas are twice these.
+        self.frames_per_read = 100
+        self.packets_per_read = 110
+        # Readings of the controller's counters this board has answered,
+        # and a test's hook to run after the first of them, which is where
+        # a session's command runs (`during_the_command`).
+        self.stats_reads = 0
+        self._hook = None
         self.peer_firmware = None
         self.defaults()
 
@@ -61,13 +76,32 @@ class FakePeerFirmware:
     def _sco_off(self):
         """The audio half of the boot state (firmware README, `sco`)."""
         self.sco = "off"
-        self.sco_type = "default"
+        self.sco_profile = "none"
+        self.sco_codec = "none"
+        self.sco_type = esp32peer.AUDIO_TYPE_STACK
         self.sco_link = "none"
         self.sco_pkt_type = "none"
+        self.sco_handle = 0
+        self.sco_frame_len = 0
         self.sco_tx_frames = 0
+        self.sco_tx_errors = 0
         self.sco_rx_frames = 0
+        self.sco_rx_bad = 0
+        # How many synchronous links this profile has had, and lost. The
+        # firmware zeroes both when a profile starts, so they count this
+        # session's links and nothing earlier.
+        self.sco_connects = 0
+        self.sco_disconnects = 0
         self.sco_tx_len = 0
         self.sco_interval = 0
+        # The controller's own packet counters (`sco stats`), which keep
+        # counting across a link going down and coming back as the real
+        # ones do.
+        self.sco_packets = dict.fromkeys(esp32peer.AUDIO_PKT_COUNTERS, 0)
+        # Which of those a reading advances. The default is a link that is
+        # working: every packet sent, received, and correct. A test moves
+        # the correct ones to the error count to make a link that is not.
+        self.packets_advance = ("rx_total", "rx_correct", "tx_total")
 
     def link(self, other: "FakePeerFirmware") -> None:
         """Let `spp start` on this board connect to ``other``."""
@@ -100,10 +134,17 @@ class FakePeerFirmware:
             "write_errors": self.write_errors, "rx_bytes": self.rx_bytes,
             "connects": self.connects, "disconnects": self.disconnects,
             "last_err": 0,
-            "sco": self.sco, "sco_type": self.sco_type,
+            "sco": self.sco, "sco_profile": self.sco_profile,
+            "sco_codec": self.sco_codec, "sco_type": self.sco_type,
             "sco_link": self.sco_link, "sco_pkt_type": self.sco_pkt_type,
+            "sco_handle": self.sco_handle,
+            "sco_frame_len": self.sco_frame_len,
             "sco_tx_frames": self.sco_tx_frames,
+            "sco_tx_errors": self.sco_tx_errors,
             "sco_rx_frames": self.sco_rx_frames,
+            "sco_rx_bad": self.sco_rx_bad,
+            "sco_connects": self.sco_connects,
+            "sco_disconnects": self.sco_disconnects,
             "sco_tx_len": self.sco_tx_len, "sco_interval": self.sco_interval,
         }
 
@@ -117,6 +158,7 @@ class FakePeerFirmware:
             return [f"ERR {self.refuse[line]}"]
         words = line.split()
         if words == ["status"]:
+            self._tick()
             return [json.dumps(self.status(), separators=(",", ":")), "OK"]
         if words == ["version"]:
             return [self.version, "OK"]
@@ -223,33 +265,87 @@ class FakePeerFirmware:
     # EV3 link carries 30 bytes every 6 slots, a 2-EV3 one 60 every 12.
     _AUDIO_LINK = {"ev3": ("ev3", 30, 6), "2ev3": ("2-ev3", 60, 12)}
 
+    def _tick(self):
+        """What the link carried since this board was last read.
+
+        A board counts while a session is reading it, so a reading of
+        either kind advances the counters here; that is what gives a
+        session's before and after readings something to differ by. The
+        controller's packet counters advance with the frames: on this link
+        one packet carries one frame.
+        """
+        if self.sco != esp32peer.AUDIO_ON:
+            return
+        self.sco_tx_frames += self.frames_per_read
+        self.sco_rx_frames += self.frames_per_read
+        for key in self.packets_advance:
+            self.sco_packets[key] += self.packets_per_read
+
+    def during_the_command(self, hook) -> None:
+        """Run ``hook`` once, where a session's command runs.
+
+        A session reads the controller's counters exactly twice, just
+        before its command and just after it, so firing after the first of
+        those puts whatever the hook does inside the command's own window.
+        """
+        self._hook = hook
+
+    def flap(self):
+        """The link goes down and comes straight back, counted as the
+        firmware counts it: both link counters step and the handle changes.
+        """
+        for board in (self, self.peer_firmware):
+            if board is not None and board.sco == esp32peer.AUDIO_ON:
+                board.sco_connects += 1
+                board.sco_disconnects += 1
+                board.sco_handle += 1
+
     def _sco(self, words):
-        if not words:
-            return ["ERR usage: sco <start|stop|stats|type>"]
-        command, args = words[0], words[1:]
-        if command == "type":
-            if not args or args[0] not in esp32peer.AUDIO_TYPES:
-                return ["ERR sco type takes ev3, 2ev3, or default"]
-            if self.sco != "off":
-                return ["ERR stop the audio profile with \"sco stop\" before "
-                        "choosing a packet type"]
-            self.sco_type = args[0]
-            return ["OK"]
-        if command == "start":
+        """The firmware's `sco` branch, with every arity it refuses.
+
+        A line that is none of the four forms answers one usage line and
+        changes nothing: no role, profile, link, packet type, or counter.
+        The two usage lines are the firmware's own, and
+        tests/test_esp32peer.py reads them out of `main/peer.h` so the two
+        cannot drift apart (#262).
+        """
+        if words == ["start"]:
             return self._sco_start()
-        if command == "stop":
+        if words == ["stop"]:
             self._sco_down()
             return ["OK"]
-        if command == "stats":
-            return [json.dumps({"tx": self.sco_tx_frames,
-                                "rx": self.sco_rx_frames},
-                               separators=(",", ":")), "OK"]
-        return [f"ERR unknown sco command '{command}'"]
+        if words == ["stats"]:
+            return self._sco_stats()
+        if words[:1] == ["type"]:
+            if len(words) != 2:
+                return [f"ERR {SCO_TYPE_USAGE}"]
+            return self._sco_set_type(words[1])
+        return [f"ERR {SCO_USAGE}"]
+
+    def _sco_set_type(self, wanted):
+        if wanted not in esp32peer.AUDIO_TYPES:
+            return [f"ERR {SCO_TYPE_USAGE}"]
+        if self.sco != "off":
+            return ["ERR stop the audio profile with \"sco stop\" before "
+                    "choosing a packet type"]
+        self.sco_type = wanted
+        return ["OK"]
+
+    def _sco_stats(self):
+        if self.sco != esp32peer.AUDIO_ON:
+            return ["ERR no audio link to count packets on"]
+        self._tick()
+        answer = [json.dumps(self.sco_packets, separators=(",", ":")), "OK"]
+        self.stats_reads += 1
+        if self._hook is not None and self.stats_reads == 1:
+            self._hook()
+        return answer
 
     def _sco_start(self):
         if self.role == esp32peer.BOOT_ROLE:
             # The hands-free unit only starts its profile and waits.
             self.sco = "ready"
+            self.sco_profile = "hf"
             return ["OK"]
         far = self.peer_firmware
         if far is None or far.address != self.peer:
@@ -259,17 +355,21 @@ class FakePeerFirmware:
         # Each board states the types it allows and the link uses one both
         # allowed, so two boards asking for the same type get it and
         # anything else falls back to what the stack asks for.
-        wanted = self.sco_type if self.sco_type == far.sco_type else "default"
+        wanted = (self.sco_type if self.sco_type == far.sco_type
+                  else esp32peer.AUDIO_TYPE_STACK)
         name, length, interval = self._AUDIO_LINK.get(wanted,
                                                       self._AUDIO_LINK["2ev3"])
+        self.sco_profile = "ag"
         for board in (self, far):
             board.sco = esp32peer.AUDIO_ON
+            board.sco_codec = "cvsd"
             board.sco_link = "esco"
             board.sco_pkt_type = name
+            board.sco_handle = 1
+            board.sco_frame_len = 120
             board.sco_tx_len = length
             board.sco_interval = interval
-            board.sco_tx_frames += board.frames_per_link
-            board.sco_rx_frames += board.frames_per_link
+            board.sco_connects += 1
         return [f"utesp: sco connected, {name}", "OK"]
 
     def _sco_down(self):

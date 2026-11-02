@@ -41,7 +41,7 @@ The channel is opened with no security (`ESP_SPP_SEC_NONE`), so a link needs
 no pairing and a capture holds only the SDP lookup, the connection, and the
 data.
 
-Firmware version: `utesp-1.4.0` (`UTESP_FW_VERSION` in `main/peer.h`).
+Firmware version: `utesp-1.5.0` (`UTESP_FW_VERSION` in `main/peer.h`).
 
 ## Versions
 
@@ -103,8 +103,8 @@ not part of any answer, so a driver skips them:
 
 | Notice | When |
 |---|---|
-| `utesp: utesp-1.4.0 ready` | after boot, once Bluetooth is up |
-| `utesp: utesp-1.4.0 start failed: <reason>` | after boot, if it is not |
+| `utesp: utesp-1.5.0 ready` | after boot, once Bluetooth is up |
+| `utesp: utesp-1.5.0 start failed: <reason>` | after boot, if it is not |
 | `utesp: spp connected <address>` | a link came up, either role |
 | `utesp: spp disconnected` | the link went down |
 | `utesp: sco connected, <packet type>` | the synchronous audio link came up, and the type it uses |
@@ -155,6 +155,18 @@ A bad value answers `ERR` and changes nothing. A command with the wrong
 number of words, or an unknown one, answers `ERR` too; `help` is the only
 hint, as there is no usage text.
 
+Every branch of the shell reads its operands through one accessor that gives
+`""` for a word the line did not carry, so a line shorter than the command
+expects answers `ERR` from the same refusal as any other malformed line and
+touches nothing. `sco` is where that mattered: before `utesp-1.5.0` a bare
+`sco` line tested a word that had never been parsed
+([#262](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/262)).
+Each `sco` line that is not one of the four it knows answers
+`ERR sco takes start, stop, stats, or type <ev3|2ev3|default>`, except
+`sco type` with the wrong number of operands, which answers
+`ERR sco type takes ev3, 2ev3, or default`; neither changes the role, the
+profile, the link, the chosen packet type, or any counter.
+
 The Bluetooth device name is not settable, and does not need to be: it holds
 the board's own LAP, so it is fixed for the life of the board and different
 from the other one with no setup step at all, `UT-ESP32-<LAP>`. Register it
@@ -170,7 +182,7 @@ mistaken for its own.
 `status` reports every field on one line, whichever role is running:
 
 ```json
-{"role":"initiator","fw":"utesp-1.4.0","bt":true,"address":"20:50:0D:E9:C5:BA","lap":"e9c5ba","uap":"0d","nap":"2050","name":"UT-ESP32-E9C5BA","discoverable":true,"spp_server":false,"connecting":false,"connected":true,"peer":"C8:85:41:2A:1B:2A","remote":"C8:85:41:2A:1B:2A","stream":true,"period_ms":20,"payload_len":200,"counter":1483,"writes":1483,"write_errors":0,"rx_bytes":0,"connects":1,"disconnects":0,"last_err":0,"sco":"off","sco_profile":"none","sco_codec":"none","sco_handle":0,"sco_frame_len":0,"sco_tx_frames":0,"sco_tx_errors":0,"sco_rx_frames":0,"sco_rx_bad":0,"sco_type":"default","sco_link":"none","sco_pkt_type":"none","sco_tx_len":0,"sco_rx_len":0,"sco_interval":0,"sco_retrans_window":0,"sco_types_supported":"003d","afh":"ffffffffff0000000000","afh_used":40,"afh_link":"fefffffeff0000000000","afh_link_used":38,"afh_mode":"on","afh_link_error":""}
+{"role":"initiator","fw":"utesp-1.5.0","bt":true,"address":"20:50:0D:E9:C5:BA","lap":"e9c5ba","uap":"0d","nap":"2050","name":"UT-ESP32-E9C5BA","discoverable":true,"spp_server":false,"connecting":false,"connected":true,"peer":"C8:85:41:2A:1B:2A","remote":"C8:85:41:2A:1B:2A","stream":true,"period_ms":20,"payload_len":200,"counter":1483,"writes":1483,"write_errors":0,"rx_bytes":0,"connects":1,"disconnects":0,"last_err":0,"sco":"off","sco_profile":"none","sco_codec":"none","sco_handle":0,"sco_frame_len":0,"sco_tx_frames":0,"sco_tx_errors":0,"sco_rx_frames":0,"sco_rx_bad":0,"sco_connects":0,"sco_disconnects":0,"sco_type":"default","sco_link":"none","sco_pkt_type":"none","sco_tx_len":0,"sco_rx_len":0,"sco_interval":0,"sco_retrans_window":0,"sco_types_supported":"003d","afh":"ffffffffff0000000000","afh_used":40,"afh_link":"fefffffeff0000000000","afh_link_used":38,"afh_mode":"on","afh_link_error":""}
 ```
 
 - `address`: the BD_ADDR, split out as `lap`, `uap` and `nap` as well,
@@ -322,6 +334,7 @@ decodes CVSD, so no test compares payloads today.
 | `sco_frame_len` | the frame size the controller asked for, in bytes |
 | `sco_tx_frames`, `sco_tx_errors` | frames the stack took, and frames it refused |
 | `sco_rx_frames`, `sco_rx_bad` | frames received, and how many of those the controller marked damaged |
+| `sco_connects`, `sco_disconnects` | synchronous links this profile has had, and how many went down again; both zero while one link has been up throughout |
 | `sco_type` | the packet type the next link will ask for: `default`, `ev3`, or `2ev3` |
 | `sco_link` | `none` (no link), `sco`, `esco`, or `unknown` |
 | `sco_pkt_type` | the packet type the live link is using (see below) |

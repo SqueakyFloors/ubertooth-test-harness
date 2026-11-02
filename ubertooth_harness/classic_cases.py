@@ -106,8 +106,12 @@ PAIR_SETUP_S = (
 # The audio bring-up sends four more commands than the stream's and reads
 # one more status, and `sco start` on the initiator pages, starts the
 # hands-free profile, and opens the audio link, which the firmware allows
-# much longer than an ordinary command.
-AUDIO_SETUP_S = (PAIR_SETUP_S + 5 * esp32peer.COMMAND_TIMEOUT_S
+# much longer than an ordinary command. The session then reads each board
+# twice either side of the command - a status and the controller's packet
+# counters each time - and takes the link down on both before releasing
+# them, which is nine more commands again.
+AUDIO_SETUP_S = (PAIR_SETUP_S + 12 * esp32peer.COMMAND_TIMEOUT_S
+                 + 2 * esp32peer.STOP_TIMEOUT_S
                  + esp32peer.AUDIO_CONNECT_TIMEOUT_S)
 # One identify or reset: an open with its reset, then a status read.
 PEER_TIMEOUT_S = esp32peer.BOOT_TIMEOUT_S + 4 * esp32peer.COMMAND_TIMEOUT_S
@@ -118,10 +122,10 @@ PEER_TIMEOUT_S = esp32peer.BOOT_TIMEOUT_S + 4 * esp32peer.COMMAND_TIMEOUT_S
 # carries the same payload as enhanced rate.
 AUDIO_TYPE = "ev3"
 # How the boards name each type back, which is the specification's spelling
-# rather than the command line's (firmware/esp32-classic-peer/README.md,
+# rather than the command line's. One source for it, in the driver that
+# talks to the boards (firmware/esp32-classic-peer/README.md,
 # `sco_pkt_type`).
-REPORTED_AUDIO_TYPES = {"ev3": "ev3", "2ev3": "2-ev3"}
-AUDIO_PACKET_TYPE = REPORTED_AUDIO_TYPES[AUDIO_TYPE]
+AUDIO_PACKET_TYPE = esp32peer.AUDIO_TYPE_ON_LINK[AUDIO_TYPE]
 # What libbtbb names an EV3 packet. The four header bits cannot tell an EV3
 # from an HV3 or a 3-EV3, so this one name covers all three
 # (bredrrecord.TYPE_NAMES).
@@ -408,11 +412,23 @@ def _pair_patterns(acceptor, initiator, *, audio=False) -> tuple[str, ...]:
         # The boards report it with the hyphen the specification uses
         # (`2-ev3`), which is not how the command line spells it.
         settled = re.escape(AUDIO_PACKET_TYPE)
+        # Each board's figures are the movement across the command's own
+        # window, and `link 0 opened 0 dropped` is what says the capture
+        # was of one link rather than of two with a gap in the middle
+        # (#264). The controller's packet counters are the air; the frames
+        # beside them are what the two applications made of it.
+        measured = tuple(
+            rf"(?m)^{role} audio: on {settled}, sent \d+ received \d+ frames, "
+            rf"\d+ send errors, \d+ damaged, link 0 opened 0 dropped$"
+            for role in ("initiator", "acceptor")
+        ) + tuple(
+            rf"(?m)^{role} packets: controller sent \d+ received \d+, \d+ good, "
+            rf"\d+ bad, \d+ missing, \d+ lost, \d+ discarded$"
+            for role in ("initiator", "acceptor")
+        )
         return common + (
             rf"(?m)^audio link: esco {settled}, \d+ bytes every \d+ slots, ",
-            rf"(?m)^initiator audio: on {settled}, sent \d+ received \d+ frames$",
-            rf"(?m)^acceptor audio: on {settled}, sent \d+ received \d+ frames$",
-        ) + exited + (rf"(?m)^pair carried audio: {settled}$",)
+        ) + measured + exited + (rf"(?m)^pair carried audio: {settled}$",)
     return common + (r"(?m)^link: up to ",) + exited + (
         r"(?m)^pair streamed: yes$",)
 
