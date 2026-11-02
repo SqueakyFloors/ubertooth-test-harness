@@ -1157,6 +1157,17 @@ class DfuReadbackRunTests(unittest.TestCase):
         self.assertEqual(1, len([command for command in board.commands
                                  if command[0] == "ubertooth-dfu" and "-d" in command]))
 
+    def test_a_build_that_reports_the_range_and_fills_nothing_in_fails_on_the_field(self):
+        """Fork 10c3381 to 31228b0: the range is reported, the fields are not
+        filled in, so the dump equals the file and the vector checksum alone
+        is named. An image of that era carries no image check block."""
+        board, code, output = self.restore_with(image_check=False,
+                                                no_first_block_fill=True)
+        self.assertEqual(1, code)
+        self.assertIn("Flash differs from the test image; rewriting it", output)
+        self.assertIn("Restore: flash still differs after the rewrite: vector "
+                      "checksum at 0x0401c is 0x00000000, expected 0x", output)
+
     def test_a_tool_that_reports_nothing_and_fills_nothing_in_rewrites_once(self):
         """A -u that says nothing about its range, with a -d that fills in
         nothing: the flash really does differ from the image as today's -d

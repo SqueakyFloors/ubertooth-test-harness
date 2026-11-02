@@ -82,15 +82,15 @@ ACCEPTED_BCD_DFU = (0x0100, 0x0101)
 SIGNATURE = b"UFD"
 BLOCK_SIZE = 256
 APPLICATION_OFFSET = 0x4000
-# How much flash a -u read-back covers (fork 10c3381, #257). It follows the
-# part, which differs between boards: dfu_upload_length() in
-# host/ubertooth-tools/src/dfu_recovery.c takes the flash size behind the
-# part identification number and subtracts the bootloader's region. That
-# number is readable only while the board is still running its application,
-# so a board already in the bootloader, and a part the host has no entry
-# for, get the size the firmware is linked for instead
-# (DFU_ASSUMED_FLASH_SIZE). The sizes below are the LPC175x/176x flash sizes
-# in that file's part table.
+# How much flash a -u read-back covers (fork 10c3381,
+# SqueakyFloors/ubertooth#257). It follows the part, which differs between
+# boards: dfu_upload_length() in host/ubertooth-tools/src/dfu_recovery.c
+# takes the flash size behind the part identification number and subtracts
+# the bootloader's region. That number is readable only while the board is
+# still running its application, so a board already in the bootloader, and a
+# part the host has no entry for, get the size the firmware is linked for
+# instead (DFU_ASSUMED_FLASH_SIZE). The sizes below are the LPC175x/176x
+# flash sizes in that file's part table.
 PART_FLASH_SIZES = (32 * 1024, 64 * 1024, 128 * 1024, 256 * 1024, 512 * 1024)
 ASSUMED_FLASH_SIZE = 128 * 1024
 
@@ -112,9 +112,9 @@ READBACK_LENGTHS = tuple(sorted(
     {upload_length(size) for size in PART_FLASH_SIZES} - {0}))
 
 # What ubertooth-dfu fills in as it writes an image's first block, for the
-# bootloader's checks (fork 31228b0, #1037, and d91bb06, #1048):
-# prepare_first_block() in host/ubertooth-tools/src/ubertooth-dfu.c, and the
-# image check block's
+# bootloader's checks (fork 31228b0, SqueakyFloors/ubertooth#1037, and
+# d91bb06, #1048): prepare_first_block() in
+# host/ubertooth-tools/src/ubertooth-dfu.c, and the image check block's
 # layout in host/libubertooth/src/ubertooth_interface.h. An image this tree
 # builds leaves both empty, and these are the only bytes the tool writes
 # over, so a read-back holds the file everywhere else.
@@ -591,6 +591,7 @@ class Readback(NamedTuple):
 
     failure: str
     plan: ReadbackPlan | None
+
 
 # Per-command timeouts. The step that runs a device command gets a timeout
 # derived from these (worst_case_s), so it never kills the helper mid-flash.

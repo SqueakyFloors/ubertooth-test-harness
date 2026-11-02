@@ -2409,9 +2409,13 @@ its dump measured against a guess.
 
 All three arrived on the fork's main after the earlier releases, so the case
 expects them: the range line in `10c3381`
-([ubertooth#233](https://github.com/SqueakyFloors/ubertooth/issues/233)), the
-vector checksum in `31228b0` and the image check record in `d91bb06`
-([ubertooth#242](https://github.com/SqueakyFloors/ubertooth/issues/242)).
+([ubertooth#257](https://github.com/SqueakyFloors/ubertooth/pull/257)), the
+vector checksum in `31228b0`
+([ubertooth#1037](https://github.com/SqueakyFloors/ubertooth/pull/1037)) and
+the image check record in `d91bb06`
+([ubertooth#1048](https://github.com/SqueakyFloors/ubertooth/pull/1048)), the
+last two for the bootloader checks of
+[ubertooth#242](https://github.com/SqueakyFloors/ubertooth/issues/242).
 Against a build between `31228b0` and `d91bb06` the case still passes: the
 image check block arrived in `d91bb06` on both sides at once, so an image
 from that window carries none and there is no record to fill in or to check.
@@ -2424,7 +2428,8 @@ have worked out, so equalling the file is not enough.
 One.** Such a `-u` reads a fixed 0x4000-0x3ffff whatever the part has, and on
 the 128 KiB part the board is built from that asks for flash above the end of
 it, which faults the bootloader until the board is power-cycled
-([ubertooth#233](https://github.com/SqueakyFloors/ubertooth/issues/233)). The
+([ubertooth#233](https://github.com/SqueakyFloors/ubertooth/issues/233), which
+`10c3381` closed). The
 case reports it as a failed `-u` and a cleanup that cannot reach the board,
 not as a comparison it could make.
 
