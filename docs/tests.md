@@ -2389,6 +2389,24 @@ proves the refusal happened before the write rather than after a partial one.
 `-s` is checked against the build's own `.dfu` byte for byte, so the host-side
 suffixing has an exact right answer.
 
+A read-back is compared with the image as `-d` writes it, which is not quite
+the file. `ubertooth-dfu` fills in two things in the image's first block for
+the bootloader's own checks: the LPC vector checksum at 0x1c, and, in an
+image that carries an image check block, the record of the download at
+0xea-0xf7 inside it. Those fields are checked against what the writer should
+have worked out -- the eight vector words adding up to zero, the flags, the
+length of the region written and its complement, and the checksum that makes
+the whole region add up to zero -- rather than passed over, so a board that
+kept the file's empty values fails. Every other byte has to match the file.
+How long a dump is follows the part: 114688 bytes above the bootloader on a
+128 KiB part, 245760 on a 256 KiB one, and the size the firmware is linked
+for when the part cannot be read, which includes every board already in the
+bootloader. The `read-back` step records the range the command printed
+(`Reading back 114688 bytes, 0x4000-0x1ffff: part 0x25011722 (LPC1754) has
+128 KiB of flash`) and the comparison takes the length from there, so no part
+is assumed; a tool that prints no range fails that step rather than having
+its dump measured against a guess.
+
 **Hardware and arguments.** One `Ubertooth`, selected by full serial, with
 every other registered board as guards. `coverage:`. Needs the firmware build
 as the test image, which must report the resolved Ubertooth revision; a run
