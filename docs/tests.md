@@ -2037,6 +2037,112 @@ access code that matched and a record's header decodes without a clock of the
 piconet. Whether the clock recovery should manage it is the fork's question,
 not this test's.
 
+## Recover AFH map
+
+**What it does.** The same two peers hold a piconet whose Adaptive Frequency
+Hopping map is chosen rather than discovered, and `ubertooth-afh` has to work
+that map out from the air: a 40-channel map and the 20-channel minimum, each
+compared with the map the piconet's leader reports the link really hopping
+over.
+
+**Theory of operation.** `ubertooth-afh` marks a channel used when it finds
+the piconet's access code on it, so the map it ends up with is a measurement
+of where it met the piconet. The peers make that answer knowable: `afh` on the
+initiator, which leads the piconet, tells its controller which channels to
+keep, and `status` reports both the map the controller took and the map the
+live link is hopping over.
+
+Three things make the comparison honest, and the cases do all three.
+
+The map in force is not the map asked for. These controllers drop channels 0,
+24, and 78 of their own accord, so a board told to keep channels 0 to 39 leads
+a link hopping over 38 of them. The comparison uses the link's own map, and
+the driver refuses a link whose map is not a subset of the requested one,
+because that is not the piconet the case set up.
+
+The map has to hold still. A leader may classify channels again while the link
+is up, and then no one map describes the capture. The driver reads the link's
+map at the start, the middle, and the end of the capture, and a reading that
+differs from the others fails the case with all three printed.
+
+Access-code errors have to be off. With the tool's default of two allowed bit
+errors the bench saw it mark the whole band used, because ambient traffic
+matches 64 bits within two often enough; with `-e 0` the same bench found
+every kept channel inside a minute. So these cases run `-e 0`, and that
+measurement, not the default, is the reason.
+
+What is left is the channel edge, which is physics rather than software. A
+receiver a few tens of centimeters from the piconet reads enough energy from
+the channels beside the kept block to decode packets there, so the recovered
+map comes out wider than the one in force: the bench's 40-channel run
+recovered 57 channels against the 38 in force, the extras being the band next
+to the block and a thinner scattering above it. The
+comparison therefore judges two measures with tolerances rather than demanding
+an exact match, and a plan can ask for a sharper edge with `rf:` (an
+attenuated or more distant receiver) if a run's skirt makes it ambiguous.
+
+**Hardware and arguments.** As `Capture known Classic device`: one
+`Ubertooth` and two ESP32 Classic peers as `acceptor` and `initiator`,
+`coverage:`, a required `duration:` (the capture window), Linux only. The
+peers must run `utesp-1.3.0` or a later 1.x image, which is where `afh` and
+the link map arrived; an older one fails the case naming what it found. No
+`rf:` default, so a plan may place the receiver anywhere; two minutes is the
+capture window the classic plan uses. The release plan does not name it:
+every entry there runs on each registered host, and naming the one host the
+peers are attached to would fail planning on the others.
+
+**Expected outcome.** Smoke runs 2 cases, one per map: channels 0 to 39, and
+channels 30 to 49, the twenty the spec allows at least and the firmware's own
+floor. Each one sets the map, brings the link up, runs `ubertooth-afh -e 0 -r`
+for the capture window, and then judges the recovery:
+
+- at least 90% of the channels the link was hopping over are in the recovered
+  map. Finding a channel means the sweep and the hop sequence met on it, so
+  the last one or two of a map are a matter of luck in a window this long:
+  the bench's two 120-second runs found 37 of 38 and 19 of 20, each missing a
+  different single channel, and their per-minute series went 31 of 38 after a
+  minute to 37 after two. The floor leaves room for one more than that and
+  still fails a recovery that stopped working;
+- at most 70% of the channels out of force are marked used, which is what
+  separates a recovery from a tool marking everything used. The same runs
+  marked 49% and 22%. The share is left unjudged, and said to be, when fewer
+  than ten channels are out of force.
+
+The measurement is printed either way, because a run that missed a tolerance
+is still the measurement of what the tool did: the requested map, the map in
+force with its three readings, the recovered map, the channels found and
+missing, the stray channels, and a line per minute of the capture showing what
+the map had grown to by then. Comprehensive runs 3, adding the tool's other
+path: `-t <duration>` detects the map for that long and prints it as
+`AFH map: 0x...`. That map gets a looser stray ceiling of its own, 90%: the
+detection phase fills a single channel gap between two channels it has seen,
+and never drops a channel once seen, so its map is an upper bound. Two runs
+bracket how wide: 71% of the channels out of force on an earlier `-t 60` run
+of the bench session that measured the peers' maps, and 32% on this test's own
+`-t 120` run. 90% clears both and still fails a map that marks the whole band
+used. Selectivity proper is what the two `-r` cases measure.
+
+A capture and its comparison are one retried group, run up to twice: whether
+a channel was heard depends on where the sweep and the hop sequence met, and
+the peers keep making the traffic, so a second window costs only its own time.
+Each attempt writes its own pair of files, so the run directory holds what
+every window measured.
+The cleanup is the same as the other peer cases: both peers reset to their
+boot state, the Ubertooth's channel, squelch, and LEDs restored.
+
+**Known limits.** The tolerances are the bench's, not the tool's: the stray
+ceiling says the recovery is selective, not how selective, and a receiver
+placed differently will measure a different skirt. A pass says the tool found
+almost all the channels in use within one capture window of this length, not
+that it found every one, and not that it would find them in a shorter window:
+the two measured runs were each one channel short of the whole map at two
+minutes and still climbing. The capture is stopped by the harness rather than
+by the tool, because `ubertooth-afh` watches for map changes until it is
+signalled; the map-change path itself is therefore not checked, only that the
+map did not change. `-m`, the removal threshold, is left at its default, so a
+channel the piconet stops using inside a capture is not something these cases
+measure.
+
 ## CLI usage smoke
 
 **What it does.** Nothing yet: a catalog entry for exercising host tool usage
@@ -2255,25 +2361,6 @@ name it.
 
 **Known limits.** Needs a device in setup mode as the transmitter, which is
 not a registered fixture.
-
-## Recover AFH map
-
-**What it does.** Nothing yet: a catalog entry for recovering a Classic
-Bluetooth AFH map from a known piconet.
-
-**Theory of operation.** Not established beyond the tool's own behavior.
-`Classic Bluetooth receive` covers the no-piconet path of `ubertooth-afh`,
-where the expected answer is that it says so and exits 2.
-
-**Hardware and arguments.** One `Ubertooth` and a required `piconet:`
-resource.
-
-**Expected outcome.** No implementation; only a `runnable: false` plan may
-name it.
-
-**Known limits.** The piconet it needs is on the bench now, as the two ESP32
-Classic peers; what is missing is the case
-([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)).
 
 ## Recover a BLE connection promiscuously
 

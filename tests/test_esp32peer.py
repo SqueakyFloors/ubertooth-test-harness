@@ -3,12 +3,16 @@
 import io
 import json
 import re
+import subprocess
 import sys
+import tempfile
+import time
+from unittest import mock
 import unittest
 import unittest.mock
 from pathlib import Path
 
-from ubertooth_harness import esp32peer
+from ubertooth_harness import afhmap, esp32peer
 from tests import fake_esp32
 from tests.fake_esp32 import FakePeerFirmware, FakePeerPort, opener, shell
 
@@ -1199,6 +1203,230 @@ class _captured:
 
 def _captured_stderr():
     return _captured("stderr")
+
+
+class ChannelMapTests(unittest.TestCase):
+    """--map: the piconet is held to a map, and both maps are reported."""
+
+    HALF_BAND = afhmap.hex_from_channels(range(0, 40))
+    # What the fake controller leaves of it, as the bench's do: it drops
+    # channels 0, 24, and 78 of its own accord.
+    IN_FORCE = afhmap.hex_from_channels(set(range(0, 40)) - {0, 24})
+
+    # A command that prints one map line and waits to be interrupted, as
+    # ubertooth-afh -r does; it exits 0 on the interrupt, as that does.
+    TOOL = (sys.executable, "-c",
+            "import signal, sys, time\n"
+            "signal.signal(signal.SIGINT, lambda *_a: sys.exit(0))\n"
+            "print('1000 ' + '1' * 39 + '0' * 41)\n"
+            "sys.stdout.flush()\n"
+            "time.sleep(30)\n")
+
+    def _stream(self, directory, *, wanted=None, command=None, **options):
+        """One session on a map; the command's own output is captured too."""
+        if wanted is None:
+            wanted = self.HALF_BAND
+        acceptor_firmware, initiator_firmware = _pair(
+            version=esp32peer.AFH_MINIMUM_FIRMWARE)
+        acceptor_firmware.version = esp32peer.AFH_MINIMUM_FIRMWARE
+        acceptor, initiator = _peers(acceptor_firmware, initiator_firmware)
+        report = io.StringIO()
+        paths = {"map_report": str(Path(directory) / "peer.json"),
+                 "command_output": str(Path(directory) / "maps.txt")}
+        options.setdefault("timeout", 20.0)
+        with _captured_stdout() as captured:
+            status = esp32peer.stream(
+                acceptor, initiator, command or self.TOOL, out=report,
+                settle_s=0.0, min_writes=10, wanted_map=wanted,
+                interrupt_after=0.4, **paths, **options)
+            written = captured()
+        return status, report.getvalue(), initiator_firmware, paths, written
+
+    def test_a_map_is_set_on_the_initiator_before_the_link_comes_up(self):
+        with tempfile.TemporaryDirectory() as directory:
+            status, report, initiator, _paths, _out = self._stream(directory)
+        self.assertEqual(0, status)
+        # Before `spp start`, so the leader announces it as the link opens.
+        self.assertLess(initiator.commands.index(f"afh {self.HALF_BAND}"),
+                        initiator.commands.index("spp start"))
+        self.assertIn(f"channel map requested: {self.HALF_BAND} used 40", report)
+        self.assertIn("channel map in force: stable", report)
+        self.assertIn("pair streamed: yes", report)
+
+    def test_the_link_map_is_read_at_the_start_the_middle_and_the_end(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _status, report, _initiator, paths, _out = self._stream(directory)
+            written = json.loads(Path(paths["map_report"]).read_text())
+        for at in esp32peer.SAMPLE_POINTS:
+            self.assertIn(f"channel map in force at the {at} ", report)
+        self.assertEqual(list(esp32peer.SAMPLE_POINTS),
+                         [sample["at"] for sample in written["samples"]])
+        self.assertEqual([self.IN_FORCE] * 3,
+                         [sample["link"] for sample in written["samples"]])
+        self.assertEqual([38] * 3, [sample["used"] for sample in written["samples"]])
+        self.assertEqual(self.HALF_BAND, written["requested"])
+        self.assertEqual(40, written["requested_used"])
+        # The middle reading is taken while the command is running.
+        self.assertGreater(written["samples"][1]["seconds"], 0.0)
+        self.assertLess(written["samples"][1]["seconds"],
+                        written["samples"][2]["seconds"])
+
+    def test_a_link_map_that_changes_under_the_command_fails_the_session(self):
+        other = afhmap.hex_from_channels(range(0, 30))
+        acceptor_firmware, initiator_firmware = _pair(
+            version=esp32peer.AFH_MINIMUM_FIRMWARE)
+        acceptor_firmware.version = esp32peer.AFH_MINIMUM_FIRMWARE
+        # The link's map is read once per sample, and the reads in between
+        # (the link check and the traffic reads) take the earlier entries.
+        initiator_firmware.link_maps = [self.IN_FORCE] * 2 + [other] * 8
+        acceptor, initiator = _peers(acceptor_firmware, initiator_firmware)
+        with tempfile.TemporaryDirectory() as directory, _captured_stdout(), \
+                self.assertRaisesRegex(
+            esp32peer.PeerError, "channel map changed under the command"
+        ):
+            esp32peer.stream(acceptor, initiator, self.TOOL,
+                             out=io.StringIO(), settle_s=0.0, min_writes=10,
+                             wanted_map=self.HALF_BAND, interrupt_after=0.4,
+                             timeout=20.0,
+                             map_report=str(Path(directory) / "peer.json"),
+                             command_output=str(Path(directory) / "maps.txt"))
+
+    def test_a_controller_that_will_not_report_the_links_map_is_reported(self):
+        acceptor_firmware, initiator_firmware = _pair(
+            version=esp32peer.AFH_MINIMUM_FIRMWARE)
+        acceptor_firmware.version = esp32peer.AFH_MINIMUM_FIRMWARE
+        initiator_firmware.link_error = "the controller does not know this link"
+        acceptor, initiator = _peers(acceptor_firmware, initiator_firmware)
+        with _captured_stdout(), self.assertRaisesRegex(
+            esp32peer.PeerError,
+            "could not be read at the start of the command: the controller does"
+        ):
+            esp32peer.stream(acceptor, initiator, self.TOOL, out=io.StringIO(),
+                             settle_s=0.0, min_writes=10,
+                             wanted_map=self.HALF_BAND, interrupt_after=0.4,
+                             timeout=20.0)
+
+    def test_firmware_without_the_channel_map_commands_is_refused(self):
+        acceptor_firmware, initiator_firmware = _pair()
+        acceptor, initiator = _peers(acceptor_firmware, initiator_firmware)
+        with self.assertRaisesRegex(
+            esp32peer.PeerError,
+            f"initiator runs {esp32peer.MINIMUM_FIRMWARE}, and the harness needs "
+            f"{esp32peer.AFH_MINIMUM_FIRMWARE}"
+        ):
+            esp32peer.stream(acceptor, initiator, TRUE, out=io.StringIO(),
+                             settle_s=0.0, wanted_map=self.HALF_BAND)
+        # Nothing was asked of the controller.
+        self.assertNotIn(f"afh {self.HALF_BAND}", initiator_firmware.commands)
+
+    def test_a_map_no_piconet_may_use_is_refused_before_a_board_is_opened(self):
+        for value, reason in (
+            ("ffff", "must be 20 hex digits"),
+            ("ff" * 9 + "80", "reserved 80th bit"),
+            (afhmap.hex_from_channels(range(19)), "needs at least 20 channels"),
+        ):
+            with self.subTest(value), self.assertRaisesRegex(
+                esp32peer.PeerError, reason
+            ):
+                esp32peer.channel_map(value)
+
+    def test_off_is_every_channel_and_is_reported_as_the_map_it_sets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _status, report, initiator, paths, _out = self._stream(
+                directory, wanted=esp32peer.AFH_OFF)
+            written = json.loads(Path(paths["map_report"]).read_text())
+        self.assertIn(f"afh {esp32peer.AFH_OFF}", initiator.commands)
+        self.assertEqual(79, written["requested_used"])
+        self.assertIn("channel map requested: ffffffffffffffffff7f used 79", report)
+
+    def test_the_commands_output_is_saved_and_still_passed_through(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _status, _report, _initiator, paths, written = self._stream(directory)
+            saved = Path(paths["command_output"]).read_text()
+        expected = "1000 " + "1" * 39 + "0" * 41 + "\n"
+        self.assertEqual(expected, saved)
+        self.assertEqual(expected, written)
+
+    def test_a_command_that_runs_until_it_is_signalled_is_interrupted_on_time(self):
+        with tempfile.TemporaryDirectory() as directory:
+            status, report, _initiator, _paths, _out = self._stream(directory)
+        self.assertEqual(0, status)
+        self.assertRegex(report, r"(?m)^command interrupted after [0-9.]+ s$")
+        self.assertRegex(report, r"(?m)^command exit: 0 after [0-9.]+ s$")
+
+    def test_a_command_that_ignores_the_interrupt_is_not_left_running(self):
+        # The interrupt is the planned end of the capture, so the command
+        # gets its own grace from there; one that will not stop is killed and
+        # the reason says it was the stopping that failed, not the window.
+        deaf = (sys.executable, "-c",
+                "import signal, time\n"
+                "signal.signal(signal.SIGINT, signal.SIG_IGN)\n"
+                "time.sleep(60)\n")
+        with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(
+            esp32peer.PeerError,
+            f"did not stop within {esp32peer.INTERRUPT_TIMEOUT_S:g}s of the "
+            "interrupt"
+        ):
+            self._stream(directory, command=deaf, timeout=120.0)
+
+    def test_a_command_that_overruns_its_own_deadline_says_so(self):
+        # No interrupt asked for: the deadline is the whole command's, and
+        # the reason names it.
+        quiet = (sys.executable, "-c", "import time; time.sleep(60)")
+        report = io.StringIO()
+        with _captured_stdout(), self.assertRaisesRegex(
+            esp32peer.PeerError, "did not finish within 1s"
+        ):
+            esp32peer._run_command_watched(quiet, timeout=1.0, out=report)
+
+    def test_a_sample_that_fails_mid_capture_does_not_leave_the_tool_running(self):
+        # A link that drops under the capture makes the middle read fail. A
+        # capture tool left running would hold the board past the step and
+        # into the retry, so the command is stopped before the error goes up.
+        marker = Path(tempfile.mkdtemp()) / "still-running"
+        child = (sys.executable, "-c",
+                 "import signal, sys, time\n"
+                 "signal.signal(signal.SIGINT, lambda *_a: sys.exit(0))\n"
+                 f"open({str(marker)!r}, 'w').close()\n"
+                 "time.sleep(60)\n")
+
+        def fails(_elapsed):
+            # Wait for the child to be up before failing the sample: a loaded
+            # machine can take longer to start an interpreter than the sample
+            # interval, and the point of the test is what happens to a
+            # command that is running.
+            deadline = time.monotonic() + 10.0
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            raise esp32peer.PeerError("the controller does not know this link")
+
+        started = []
+        real_popen = subprocess.Popen
+
+        def record(*args, **options):
+            child_process = real_popen(*args, **options)
+            started.append(child_process)
+            return child_process
+
+        report = io.StringIO()
+        with mock.patch.object(esp32peer.subprocess, "Popen", record), \
+                _captured_stdout(), self.assertRaisesRegex(
+            esp32peer.PeerError, "does not know this link"
+        ):
+            esp32peer._run_command_watched(
+                child, timeout=30.0, interrupt_after=10.0, sample_at=0.3,
+                sample=fails, out=report)
+        self.assertTrue(marker.exists())  # it really started
+        # The command was stopped and reaped before the error went up.
+        (ran,) = started
+        self.assertIsNotNone(ran.poll())
+
+    def test_a_map_report_without_a_map_is_a_usage_error(self):
+        acceptor_firmware, initiator_firmware = _pair()
+        acceptor, initiator = _peers(acceptor_firmware, initiator_firmware)
+        with self.assertRaisesRegex(esp32peer.PeerError, "--map-report needs --map"):
+            esp32peer.stream(acceptor, initiator, TRUE, out=io.StringIO(),
+                             settle_s=0.0, map_report="/dev/null")
 
 
 class _captured_stdout:
