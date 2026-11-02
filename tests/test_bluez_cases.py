@@ -21,6 +21,7 @@ from ubertooth_harness.bluez_cases import (
     follow_over_hci_cases,
     AFH_READ_S,
     BOARD_SETUP_S,
+    CAPTURE_FAILED,
     EXTENDED_REPORT_S,
     FOLLOW_SETUP_S,
     INQUIRY_MIN_S,
@@ -747,14 +748,43 @@ class ToolPatternTests(unittest.TestCase):
                 self.assertRegex(f"command exit: {status} after 30.1 s",
                                  re.compile(exits[0]))
 
-    def test_every_other_case_pins_a_zero_exit(self):
+    def test_the_extended_report_case_forbids_a_dead_capture_stream(self):
+        """It gives up the exit status, so it reads the reason off the output.
+
+        The board answers a stop normally after a failed stream, so no later
+        step would report one.
+        """
+        step = steps(scan_cases("comprehensive")["extended-report"])["pair-and-run"]
+        self.assertEqual(CAPTURE_FAILED, step.forbidden_patterns)
+        for line in (
+            "error: receive transfer failed: Transfer error. (1)",
+            "error: could not receive the capture: the board is no longer "
+            "attached",
+            "warning: the receive transfer did not finish; the board is left "
+            "in its mode",
+        ):
+            with self.subTest(line):
+                self.assertTrue(
+                    any(re.search(pattern, line)
+                        for pattern in step.forbidden_patterns), line)
+        # A report that failed for a device's own reason is not one of them.
+        for line in ("error: reading the LMP version failed",
+                     "error: cannot create connection: Host is down"):
+            with self.subTest(line):
+                self.assertFalse(
+                    any(re.search(pattern, line)
+                        for pattern in step.forbidden_patterns), line)
+
+    def test_every_other_case_pins_a_zero_exit_and_forbids_nothing(self):
         for cases in (scan_cases("comprehensive"), follow_cases("comprehensive")):
             for case_id, case in cases.items():
                 if case_id == "extended-report":
                     continue
                 with self.subTest(case_id):
                     step = steps(case)["pair-and-run"]
+                    # A dead stream makes the tool exit 1, which these catch.
                     self.assertEqual((0,), step.expected_returncodes)
+                    self.assertEqual((), step.forbidden_patterns)
 
 
 class AdapterHelperTests(unittest.TestCase):

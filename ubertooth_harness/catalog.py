@@ -993,8 +993,8 @@ ESTIMATES: Mapping[str, Mapping[str, Estimate]] = MappingProxyType({
     # ESTIMATE_PENDING_HW. Unlike the scan, this tool bounds nothing itself:
     # the driver ends the command, so a case costs its whole window whatever
     # the page really took. The window is the duration plus FOLLOW_SETUP_S
-    # (52 s), and 3.6 s more for -a, so the fixed part is the allowance plus
-    # the pair's bring-up: smoke 2 * 52 + 3.6 + 2 * 20 of bring-up and about
+    # (52 s), and 3.4 s more for -a, so the fixed part is the allowance plus
+    # the pair's bring-up: smoke 2 * 52 + 3.4 + 2 * 20 of bring-up and about
     # 8 s of board reads and cleanup each, comprehensive three cases of the
     # same.
     "Follow Classic piconet over HCI": _profiles(

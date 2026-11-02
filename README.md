@@ -1482,7 +1482,10 @@ and is leased like a board, under `bluez-<address without its colons>`:
 the name is attach order, so the address is what names the lock too. The
 cases need
 `hciconfig` and `hcitool` on the host, declared as host tools the harness
-does not install.
+does not install, and the two tools themselves need `CAP_NET_RAW` and
+`CAP_NET_ADMIN`, which nothing else in the harness does: a raw HCI socket is
+privileged, so an adapter bench has to grant them (see
+[`docs/hardware.md`](docs/hardware.md)).
 
 [`testplans/hci.yaml`](testplans/hci.yaml) holds the two tests that bind it,
 `Bluetooth inquiry scan` and `Follow Classic piconet over HCI`, on the same

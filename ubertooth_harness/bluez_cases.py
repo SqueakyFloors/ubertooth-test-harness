@@ -198,6 +198,21 @@ _EXTENDED_NAME = re.compile(r"^\tDevice Name: (?P<name>.*)$")
 _EXTENDED_LMP = re.compile(
     r"^\tLMP Version: .+ \(0x[0-9a-f]+\) LMP Subversion: 0x[0-9a-f]+$")
 
+# What libubertooth says when the capture's own USB stream died, or when the
+# board would not give it up at the end. Both make a tool exit 1, which is
+# how every other case here catches them; the -x case, which takes either
+# status for a reason of its own, forbids these lines instead.
+CAPTURE_FAILED = (
+    # rx_xfer_status(): a transfer error, a board that left the bus, or an
+    # overflow.
+    r"(?m)^error: receive transfer failed: ",
+    # The same path for a stalled receive endpoint, which
+    # ubertooth_report_unsupported_request() reports by name.
+    r"(?m)^error: could not receive the capture\b",
+    # stop_ubertooth(): the mode was left running on the board.
+    r"(?m)^warning: the receive transfer did not finish;",
+)
+
 
 # ---------------------------------------------------------------------------
 # The adapter, from the registry
@@ -464,8 +479,8 @@ def _session_argv(acceptor, initiator, command, *, timeout, min_seconds,
 
 def _tool_case(*, case_id, name, serial, hci, acceptor, initiator, command,
                seconds, needs, expected_state, check=None, patterns=(),
-               returncodes=(0,), interrupt=False, extra_s=0.0, floor_s=0.0,
-               files=(), verify=()):
+               returncodes=(0,), forbidden=(), interrupt=False, extra_s=0.0,
+               floor_s=0.0, files=(), verify=()):
     """One tool run against the adapter while the ESP32 pair streams.
 
     ``seconds`` is the capture window: the tool's own ``-t`` where it has
@@ -509,6 +524,7 @@ def _tool_case(*, case_id, name, serial, hci, acceptor, initiator, command,
              mutates=True,
              expected_returncodes=tuple(returncodes),
              output_patterns=tuple(patterns),
+             forbidden_patterns=tuple(forbidden),
              output_check=check),
         _stop(serial),
         *verify,
@@ -613,11 +629,14 @@ def inquiry_scan_cases(arguments, resources, resource_identities):
         #
         # Either exit status is accepted, because the tool exits 1 when any
         # part of any device's report could not be fetched and the devices it
-        # asks include whatever else in range answered the inquiry. But it
-        # also exits 1 when its own capture stream died or the board refused
-        # the teardown, so this case requires both halves of the scan to have
-        # worked -- the acceptor's report and the piconet in the survey
-        # results -- rather than the report alone.
+        # asks include whatever else in range answered the inquiry. The same
+        # status also means a capture stream that died or a board that would
+        # not give the mode up, which this case would otherwise accept: the
+        # survey results show the sweep decoded the piconet at some point,
+        # not that the stream lasted, and the board answers a stop normally
+        # after a failed stream, so no later step reports it either. So the
+        # lines libubertooth prints for both are forbidden here, which is the
+        # exit status this case gives up read back off the output.
         cases.append(scan(
             "-s", "-x", case_id="extended-report",
             name=f"ubertooth-scan -s -x reports the acceptor's name and LMP "
@@ -626,6 +645,7 @@ def inquiry_scan_cases(arguments, resources, resource_identities):
                        extended_report(acceptor["address"], acceptor_name),
                        scan_results_list(central)),
             returncodes=(0, 1),
+            forbidden=CAPTURE_FAILED,
             extra_s=(INQUIRY_S + NAME_READS_S + BOARD_SETUP_S
                      + EXTENDED_REPORT_S),
             patterns=_pair_report(acceptor, initiator, exit_status="[01]"),

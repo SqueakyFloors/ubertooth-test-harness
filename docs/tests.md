@@ -2219,6 +2219,18 @@ is the scan's `-t`. Linux only: the tool is built just with libbluetooth, and
 the peers are reached through `/dev/serial/by-id`. The cases also need
 `hciconfig` and `hcitool` on the host. Lives in the `hci` plan.
 
+**It needs privileges the rest of the harness does not.** The harness runs as
+an ordinary user, and the two reads it makes of the controller itself
+(`hciconfig`, `hcitool con`) are ioctls any user may make. The tool's own
+work is not: an inquiry, a page, a remote name read and a clock read go over
+a raw HCI socket, which Linux allows only to a process with `CAP_NET_RAW`
+and `CAP_NET_ADMIN`. So on a bench set up as `docs/hardware.md` describes,
+with the runner as its ordinary user, the adapter reads pass and the tool
+fails with its own `cannot open Bluetooth device` line. The capability has to
+be granted to `ubertooth-scan` and `ubertooth-follow`, or the run made with
+it; `hostneeds.Needs` has no way to say so, so nothing checks it before the
+run and the first case is where it shows.
+
 **Expected outcome.** Smoke runs two cases: `-s` alone, where the inquiry
 must report the acceptor at its registered address under its firmware name,
 and no `-s`, where the scan results must name the central's LAP and carry at
@@ -2230,16 +2242,19 @@ own, so three patterns over the whole output would let another device's
 `LMP Version:` line stand in for a missing one. That case takes either exit
 status: `-x` exits 1 when any part of any device's report could not be
 fetched, and the devices it asks include whatever else in range answered the
-inquiry. The tool also exits 1 when its own capture stream died or the
-board refused the teardown, so that case requires the piconet in the survey
-results as well — which shows the sweep decoded it, not that the stream
-survived to the end. A stream that died after that is caught by the step
-after it, which asks the board to stop and reports what it finds. Every case also
+inquiry. The same status also means a capture stream that died, or a
+board that would not give the mode up. Requiring the piconet in the survey
+results does not rule either out — the results show the sweep decoded it at
+some point — and the board answers a stop normally after a failed stream, so
+no later step would report it. So that case forbids the lines libubertooth
+prints for both, which buys back the exit status it gives up. Every case also
 requires the driver's own
 report — both peers' addresses, the central's LAP and UAP, a link that came
 up, and a pair that streamed — so a capture of nothing cannot pass as a
-capture of a quiet piconet. Each case resets both peers, checks the adapter
-holds no link to either, and restores the board's channel, squelch, and LEDs.
+capture of a quiet piconet. Each case then checks the adapter holds no link
+and is still itself, resets both peers, and restores the board's channel,
+squelch, and LEDs — the adapter reads first, because a peer reset drops every
+link that peer holds.
 
 **Known limits.** **Nothing here has run against a real adapter.** No bench
 has a Bluetooth controller
@@ -2266,7 +2281,7 @@ devices land in the run record, which is why no run output is committed.
 its per-device report for every device the inquiry answered, and per device
 that is a connect (25 s), a name read (25 s), a version read (20 s), the
 features and the first extended feature page (20 s each), the clock offset
-and channel map (1 s each), and dropping the link again (10 s). That is about 143 seconds a device if every
+and channel map (1 s each), and dropping the link again (10 s). That is about 123 seconds a device if every
 read fails, and another 20 for each further extended feature page it reports.
 The case allows four minutes for it, which with the window and the inquiry
 puts its whole deadline at 356 seconds; that covers two devices behaving
@@ -2352,7 +2367,8 @@ BR/EDR PCAP that the record decoder then reads: at least ten records, each
 carrying the central's LAP as its own and as its reference address, since a
 capture of the right size says nothing about whose packets are in it. As with
 the scan, every case requires the pair's own report, reads the adapter before
-and after, resets both peers, and restores the board.
+the tool and again first thing in the cleanup, then resets both peers and
+restores the board.
 
 **`-l` and `-u` without `-t` are deliberately not exercised.** The tool then
 has four of the six address bytes and asks BlueZ to connect to
