@@ -23,9 +23,10 @@ suites:
         coverage: smoke
         duration: 90s
 
-    - Bluetooth inquiry scan:
-        Bluetooth adapter: required
-        Ubertooth: default
+    # `Bluetooth inquiry scan` has left this plan: it is implemented, with
+    # `Follow Classic piconet over HCI`, in testplans/hci.yaml. Both bind a
+    # `Bluetooth adapter`, which no bench has yet, so a bench without one
+    # leaves them out of a run as not applicable.
 
     # The lab hub can switch board power now (#2); the test is #141.
     - Reset into invalid application:

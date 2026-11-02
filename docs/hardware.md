@@ -22,6 +22,7 @@ a device, switching a hub port, the udev rule), and
 | Ubertooth One | the device under test: receive, transmit, range, flash | libusb, selected by its full 32-hex-digit serial (`-U`) |
 | nRF52840 DK (PCA10056) | Bluetooth LE peer: advertiser, central, and peripheral | the on-board J-Link: SWD to flash, its virtual COM port for the shell |
 | ESP32-WROOM-32E | Classic Bluetooth (BR/EDR) peer pair: SPP link and data | a CP2102N USB-to-UART bridge, for both flashing and the shell |
+| A host Bluetooth adapter | the controller the two BlueZ-only tools drive | BlueZ, by the `hciN` name the kernel gave it (`-b`) |
 | Acroname USBHub3+ | per-port USB power and data, with VBUS readback | the BrainStem API over the hub's own USB control link |
 | StarTech managed hub | per-port USB power, no measurement | its built-in serial management controller |
 | A plain powered hub | carries devices that need no power control | nothing: it has no control interface at all |
@@ -208,6 +209,68 @@ By hand, [`scripts/lab/peer`](../scripts/lab/README.md) names the boards by
 their registry aliases, holds them, and runs that module, which is how a
 capture against the pair is taken outside a run: `peer stream` for the data
 link and `peer audio` for the voice link.
+
+### A host Bluetooth adapter (BlueZ)
+
+**No bench has one yet**
+([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)).
+This section says what one has to be and how it is registered, so a bench can
+be set up and the two tests that bind it run for the first time; nothing here
+has been measured.
+
+Two of the fork's host tools are built only when libbluetooth is found, and
+both drive a Bluetooth controller of the host's as well as an Ubertooth:
+
+- `ubertooth-scan` runs that controller's inquiry (`-s`) and reads the name
+  and, with `-x`, the version and features of each device it reaches;
+- `ubertooth-follow` reads the controller's clock, pages a target to read the
+  target's clock offset, and with `-a` reads the channel map of the link it
+  made, then follows that piconet with the Ubertooth.
+
+An Ubertooth cannot stand in for either: it has no HCI interface, and the
+clock and the map come over HCI from a controller joined to the link. So an
+ordinary USB Bluetooth adapter, of any make BlueZ drives, is the whole
+requirement. BR/EDR is what both tools use; Bluetooth LE support is not
+needed. It must be up (`hciconfig <device> up`) and not claimed by anything
+else, which in practice means `bluetoothd` left alone and no `bluetoothctl`
+session holding it.
+
+Registered as a `Bluetooth adapter` with two identity keys: `hci device`, the
+`hciN` name BlueZ gave it, which is what the tools take with `-b`, and
+`BD_ADDR`, the address `hciconfig <device>` reports for it. An optional
+`description` is a note for a person reading the registry. It takes no roles:
+one host has one controller for these tools.
+
+The `hciN` number is the order the kernel attached controllers in, not a
+property of the adapter, so the address is what identifies it. Every case
+reads `hciconfig <device>` first and fails, naming what it found, if the
+address is not the registered one, rather than driving whatever took the
+name, and what names its lock. An adapter is leased like a board, under
+`bluez-<address without its colons>`: one
+controller answers one inquiry at a time and holds one link to a target, so
+two tests using it at once would read each other's results.
+
+The cases also run `hcitool -i <device> con`, before the tool and again at
+the start of the cleanup, to catch a link to a peer that a run left up.
+
+`hciconfig` and `hcitool` are declared as host tools the harness does not
+install, so a host without them leaves the cases out rather than failing
+them — **and that is a trap worth knowing**: they are BlueZ's older tools and
+some distributions have moved them out of the main `bluez` package, so a bench
+that has an adapter but not them runs the `hci` plan with every case left out
+and the run passes having exercised nothing. Install them with the adapter,
+and read a run's `Not applicable` section before believing it proved
+anything. A mechanism that cannot be missing this way (`btmgmt`,
+`bluetoothctl`, or `/sys/class/bluetooth/<device>/address`) is worth
+considering once a bench exists to test one on.
+
+What is still unknown, and what the first real run on a bench will settle, is
+in [`docs/tests.md`](tests.md) under `Bluetooth inquiry scan` and
+`Follow Classic piconet over HCI`. One caution belongs here too:
+`ubertooth-scan` pages every piconet its sweep heard to read its name, and
+`-x` fetches a report from every device the inquiry answered. On a site with
+other people's Bluetooth devices in range, that transmits to them. Run it
+where that is acceptable.
 
 ### Acroname USBHub3+
 
@@ -578,7 +641,10 @@ permissions of an already-open device node.
 `python3.12-venv`), then `python3 bootstrap.py`; the fork's host-tool build
 prerequisites; `arm-none-eabi-gcc` for any run that builds firmware or flashes
 a board; BlueZ, which `ubertooth-scan` and `ubertooth-follow` need and which
-exists on Linux only; `tshark` from the distribution (no GUI) for
+exists on Linux only, with the `hciconfig` and `hcitool` commands, which the
+two tests that bind a `Bluetooth adapter` read the controller's own state
+with (some distributions ship them in a separate package of deprecated
+tools); `tshark` from the distribution (no GUI) for
 `BLE extcap in tshark`, which is not applicable on a host without it.
 Add `--with-acroname` to `bootstrap.py` on a host with an Acroname hub.
 Install the peer SDKs only on the host that builds the peer

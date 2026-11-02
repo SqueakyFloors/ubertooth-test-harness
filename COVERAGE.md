@@ -326,12 +326,12 @@ Combinations: two or more of `-f`/`-r`/`-i`: last one wins (`do_mode` is overwri
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
 | `-h` | help | Covered | Host CLI surface (exit 0 since fork `12211ce`, fork #406; it was 1); Linux only: not applicable on macOS (no BlueZ); required in a Linux `--build` run (the tool must be in the run prefix, #40), checked in CI |
-| `-s` | BlueZ HCI scan | Hard | Needs a Bluetooth adapter and discoverable peers |
-| `-x` | extended inquiry | Hard | Same |
-| `-t <s>` | scan time | Hard | Same |
-| `-e <0-4>` | max access-code errors | Hard | Same |
-| `-b <hciN>` | HCI device | Hard | Same |
-| `-U<0-7>` | select device | Hard | Same (Bluetooth inquiry scan is in the backlog) |
+| `-s` | BlueZ HCI scan | Hard | Bluetooth inquiry scan (`hci` plan, smoke) runs it and checks the inquiry reported a registered ESP32 peer by address and name. Written but never run: no bench has a Bluetooth adapter ([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)), and the plan is not in the release gate until a real run passes |
+| `-x` | extended inquiry | Hard | Bluetooth inquiry scan (comprehensive): the peer's address, name and LMP version in the extended report. The case takes either exit status, because `-x` exits 1 when any device's report fails and it asks every device the inquiry answered. Same wait for an adapter |
+| `-t <s>` | scan time | Hard | Bluetooth inquiry scan: every case bounds its sweep with it. Not the whole run: the alarm is armed after the BlueZ inquiry, so `-s` adds one on top. Same wait for an adapter |
+| `-e <0-4>` | max access-code errors | Hard | Needs a Bluetooth adapter; no case passes it, so the tool's default of two allowed bit errors is what the survey runs with |
+| `-b <hciN>` | HCI device | Hard | Bluetooth inquiry scan: the adapter the registry names. Same wait for an adapter |
+| `-U<0-7>` | select device | Hard | Bluetooth inquiry scan: the registered board's full serial. Same wait for an adapter |
 
 A stray word, `-h stray`, a bare `-`, and `-- -x` are refused with `error: unexpected argument '<word>'` and exit 1 before any HCI device or board (one argument rule, `ubertooth-scan.md` ARGUMENTS): Covered (Refused command lines, no Ubertooth; `scan stray` in smoke, the rest comprehensive; Linux only).
 
@@ -340,15 +340,16 @@ A stray word, `-h stray`, a bare `-`, and `-- -x` are refused with `error: unexp
 | Option | Meaning (short) | Status | Harness test / notes |
 |---|---|---|---|
 | `-h` | help | Covered | Host CLI surface (exit 0 since fork `12211ce`, fork #406; it was 1); Linux only: not applicable on macOS (no BlueZ); required in a Linux `--build` run (the tool must be in the run prefix, #40), checked in CI |
-| `-l<LAP>` | target LAP | Hard | Needs a BR/EDR piconet and an adapter (backlog) |
+| `-t <bdaddr>` | target address | Hard | Follow Classic piconet over HCI (`hci` plan, smoke): the ESP32 piconet's central, paged from the adapter, then followed. Written but never run: no bench has a Bluetooth adapter ([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)), and the plan is not in the release gate until a real run passes |
+| `-l<LAP>` | target LAP | Hard | Deliberately not exercised: the page then goes to a guessed `00:00:` address, and whether it arrives is not knowable in advance, since a page carries only the LAP and the UAP ([fork #316](https://github.com/SqueakyFloors/ubertooth/issues/316)). `docs/tests.md` says why there is no case |
 | `-u<UAP>` | target UAP | Hard | Same |
-| `-U<0-7>` | select device | Hard | Same |
+| `-U<0-7>` | select device | Hard | Follow Classic piconet over HCI: the registered board's full serial. Same wait for an adapter |
 | `-r<file>` | PCAPNG capture | Partial | Capture needs a piconet (Hard). Refused command lines (no Ubertooth, smoke, Linux only: not applicable on macOS): a stray word, `-h`, or `-e 9` after it creates no file and leaves an existing one unchanged |
-| `-q<file>` | PCAP capture | Partial | Capture needs a piconet (Hard). Refused command lines (no Ubertooth, smoke, Linux only: not applicable on macOS): a stray word, `-h`, or `-e 9` after it creates no file and leaves an existing one unchanged; `-q` twice with a stray word is refused with `error: option '-q' given more than once` and creates neither file |
-| `-e <n>` | max access-code errors | Hard | Same |
+| `-q<file>` | PCAP capture | Partial | Follow Classic piconet over HCI (comprehensive) writes one, checks its link type and packet count, and decodes every record against the central's LAP, but has never run (no adapter). Refused command lines (no Ubertooth, smoke, Linux only: not applicable on macOS): a stray word, `-h`, or `-e 9` after it creates no file and leaves an existing one unchanged; `-q` twice with a stray word is refused with `error: option '-q' given more than once` and creates neither file |
+| `-e <n>` | max access-code errors | Hard | Needs an adapter and a piconet; no case passes it, so the tool's default applies |
 | `-d <file>` | binary dump | Partial | Capture needs a piconet (Hard). Refused command lines (no Ubertooth, smoke, Linux only: not applicable on macOS): a stray word, `-h`, or `-e 9` after it creates no file and leaves an existing one unchanged; `-d` twice with `-h` (comprehensive) |
-| `-a` | enable AFH | Hard | Same |
-| `-b <hciN>` | HCI device | Hard | Same |
+| `-a` | enable AFH | Hard | Follow Classic piconet over HCI (smoke): the map of the link the page made is read over HCI, printed, and handed to the board. Which channels it holds is not checked, because it is the map of that link rather than of the pair's own piconet. Same wait for an adapter |
+| `-b <hciN>` | HCI device | Hard | Follow Classic piconet over HCI: the adapter the registry names. Same wait for an adapter |
 | `-w <slots>` | USB delay | Hard | Same |
 
 A stray word with no file option, `-h stray`, a bare `-`, and `-- -x` are refused with `error: unexpected argument '<word>'` and exit 1 before any HCI device or board (one argument rule, `ubertooth-follow.md` ARGUMENTS): Covered (Refused command lines, no Ubertooth; `follow stray` in smoke, the rest comprehensive; Linux only).
@@ -452,7 +453,12 @@ A test that fails cleanly (device verified restored, guards unchanged) no longer
   [#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)),
   BLE connection (`ubertooth-btle -f/-p` with real traffic, `-t`), E-GO
   skateboard, Uberducky.
-- **Needs a host Bluetooth adapter / BlueZ:** `ubertooth-scan`, `ubertooth-follow` (Linux).
+- **Needs a host Bluetooth adapter / BlueZ:** `ubertooth-scan`,
+  `ubertooth-follow` (Linux). Both now have tests, Bluetooth inquiry scan and
+  Follow Classic piconet over HCI in the `hci` plan, written against what the
+  two tools document and print. No bench has an adapter, so neither has run:
+  the plan stays out of the release gate until a real run passes
+  ([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)).
 - **Needs a second Ubertooth:** the `ubertooth-util -n`/`-e`/`-m` range test
   (Two-device range test, `range` plan), `-U all` and no-selector listing
   (Multi-board selection).
@@ -497,8 +503,10 @@ Next, harness work:
     ([#250](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/250)):
     Recover AFH map, on the same pair held to a chosen channel map
     (`utesp-1.3.0` or later).
-    Bluetooth inquiry scan is still a backlog entry: `ubertooth-scan` needs a
-    host Bluetooth adapter.
+    Bluetooth inquiry scan and Follow Classic piconet over HCI are
+    implemented (#88), in the `hci` plan, on the same pair plus a
+    `Bluetooth adapter`. Neither has run: no bench has an adapter, so the
+    plan is not in the release gate yet.
     The fixtures each needs are tracked as `hardware needed` issues: BLE
     advertiser [#86](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/86),
     BLE connection [#87](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/87),

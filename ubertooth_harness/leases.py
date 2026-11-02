@@ -412,21 +412,44 @@ def board_key(alias: str, identity: Mapping) -> str:
     return serial
 
 
-# nRF52840 DKs (BLE test devices) and ESP32 Classic peers are leased too, by
-# J-Link serial and by USB bridge serial. Both keys are prefixed, so neither
-# can clash with an Ubertooth's bare 32 hex digits, with the host lock, or
-# with `takeover`, which would name the takeover lock's own file; a CP2102N
-# bridge serial is 32 hex digits itself.
+# nRF52840 DKs (BLE test devices), ESP32 Classic peers, and the host
+# Bluetooth adapter are leased too, by J-Link serial, by USB bridge serial,
+# and by HCI device name. Every one of those keys is prefixed, so none can
+# clash with an Ubertooth's bare 32 hex digits, with the host lock, or with
+# `takeover`, which would name the takeover lock's own file; a CP2102N bridge
+# serial is 32 hex digits itself.
 # A key becomes a file name, so it may hold nothing that would reach
 # another directory or need quoting.
 _LOCK_NAME = re.compile(r"^[0-9A-Za-z_.:+-]{1,64}$")
+# A 48-bit address with its colons taken out, which is what names an adapter's
+# lock; the registry has already refused anything else (resources.py).
+_ADAPTER_ADDRESS = re.compile(r"^[0-9a-f]{12}$")
 DK_TYPE = "nRF52840 DK"
 PEER_TYPE = "ESP32 Classic peer"
-LEASED_TYPES = ("Ubertooth", DK_TYPE, PEER_TYPE)
+ADAPTER_TYPE = "Bluetooth adapter"
+LEASED_TYPES = ("Ubertooth", DK_TYPE, PEER_TYPE, ADAPTER_TYPE)
 
 
 def resource_key(resource) -> str:
-    """Lock-file key of a leasable resource (Ubertooth, DK, or ESP32 peer)."""
+    """Lock-file key of a leasable resource (Ubertooth, DK, ESP32 peer, or
+    host Bluetooth adapter)."""
+    if resource.type == ADAPTER_TYPE:
+        # The controller's own address, not its `hci device` name: hciN is the
+        # order the kernel attached controllers in, so two hosts that share a
+        # lease directory would both key their own adapter as hci0. Every
+        # other key here is an identity for the same reason.
+        #
+        # One adapter answers one inquiry at a time and holds one link to a
+        # target, so two tests using it at once would read each other's
+        # results.
+        address = str(resource.identity.get("BD_ADDR", "") or "").strip()
+        key = address.replace(":", "").lower()
+        if not _ADAPTER_ADDRESS.fullmatch(key):
+            raise LeaseError(
+                f"{resource.alias} needs a 'BD_ADDR' in the hardware registry "
+                f"to be leased; registered '{address}'"
+            )
+        return f"bluez-{key}"
     if resource.type == DK_TYPE:
         serial = str(resource.identity.get("jlink serial", "") or "").strip()
         if not serial.isdigit():

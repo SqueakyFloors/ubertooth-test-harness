@@ -672,7 +672,7 @@ printed, never another device's address.
 A case or a whole test declares what it needs from the host in one place
 (`ubertooth_harness/hostneeds.py`, `Needs`): a host platform (also the plan's
 `platforms:` argument, which every test accepts), a tool built only with
-BlueZ, the Python tools build,
+BlueZ, a host program the harness does not install, the Python tools build,
 or a firmware build. It is resolved before anything runs, from the host's
 registry platform and the run's options and build manifest. What the host
 cannot run is left out and recorded as `not applicable on <host>: <reason>`,
@@ -690,7 +690,8 @@ fail the run.
 
 | Needs | Cases | Not applicable when |
 |---|---|---|
-| BlueZ (`ubertooth-scan`, `ubertooth-follow`) | `Host CLI surface` scan and follow `-h`; every `follow` and `scan` case of `Refused command lines` | macOS (no BlueZ): Linux only; on Linux, a run that uses installed tools without them on `PATH` (a Linux `--build` configures with `REQUIRE_ALL=ON` and fails unless both are in the run prefix, so its cases are required) |
+| BlueZ (`ubertooth-scan`, `ubertooth-follow`) | `Host CLI surface` scan and follow `-h`; every `follow` and `scan` case of `Refused command lines`; every case of `Bluetooth inquiry scan` and `Follow Classic piconet over HCI` | macOS (no BlueZ): Linux only; on Linux, a run that uses installed tools without them on `PATH` (a Linux `--build` configures with `REQUIRE_ALL=ON` and fails unless both are in the run prefix, so its cases are required) |
+| host tools the harness does not install (`tshark`, `hciconfig`, `hcitool`) | `BLE extcap in tshark`; every case of `Bluetooth inquiry scan` and `Follow Classic piconet over HCI` | the program is not on the host's `PATH` |
 | Python tools build | `Python tools` `ubertooth-specan-ui -h` | the run has no `--build --with-python` |
 | firmware build | `DFU image checks` `sign-test-build` | the run has no `--build --with-firmware` and no `--artifact "test build=PATH"` (a `--build` run that flashes its boards builds the firmware anyway, so the case applies there) |
 | platform | any plan entry with `platforms:`, which every test accepts (the `exclusive` and `mac-polling` plans list Linux only; `Flash reliability`, `Exclusive Ubertooth topology`, and `MAC polling soak` must state it) | the host's platform is not listed |
@@ -751,6 +752,8 @@ python -m ubertooth_harness run-suite \
 | `Follow Classic Bluetooth piconet` | `classic` plan; the same two peers and the same bring-up: `ubertooth-rx -l <central LAP> -u <central UAP>` must report at least ten packet lines and none of another LAP (libbtbb is asked for one access code), and `-l`/`-u` for the peer that is *not* the central must report no packet at all | adds `-l` without `-u` (the UAP is recovered from the air) and `-l -u -q` (PCAP with link type 255) |
 | `Classic capture record fields` | `classic` plan; the same two peers and the same bring-up, but the check is inside the capture files: `bredrrecord.py` decodes every `LINKTYPE_BLUETOOTH_BREDR_BB` record of a `-l <central LAP> -u <central UAP> -q -r` capture, and each must carry the central's LAP and that LAP and UAP as its reference address, with every flag that describes a field in the record agreeing with that field, its access-code errors inside the limit the run allowed, and, where it holds a payload, that payload's length field agreeing with the bytes it holds and its CRC, recomputed with the reference UAP, agreeing with the one it carries (the bench's own traffic records no payload, so what fires live is the headers, addresses and flags), and the PCAPNG naming the central's LAP and UAP as the address it was following; the same with the peers' roles swapped must carry the other board's LAP instead | adds an EV3 audio link (`sco type ev3`, so the voice payload is on the air at the basic rate), whose records must include an `HV3/EV3/3-EV3` packet, and a survey, whose records must include one carrying a UAP the survey recovered for itself |
 | `Recover AFH map` | `classic` plan; the same two peers, with the initiator's controller told to keep a chosen set of channels before the link comes up, so the piconet's Adaptive Frequency Hopping map is known: `ubertooth-afh -e 0 -r` then runs for `duration` and must work that map out from the air. The map the link is really hopping over is read from the leader's controller at the start, the middle and the end of the capture and must be the same all three times; the recovered map must hold at least 90% of the channels in force and mark at most 70% of the channels out of force used. Two maps: channels 0 to 39, and the 20-channel minimum. Afterwards both peers are reset and the Ubertooth restored, as above | adds the tool's other path, `-t <duration>`, whose `AFH map:` line is judged on the channels it found, its stray channels reported with a looser ceiling because that map fills channel gaps and never drops a channel |
+| `Bluetooth inquiry scan` | `hci` plan, **never run on hardware** (no bench has a `Bluetooth adapter`, [#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)), so this describes what the cases check rather than a measured result: an Ubertooth, a `Bluetooth adapter`, and the two ESP32 Classic peers on one host. The adapter is read with `hciconfig` (up, and at the registered address: `hciN` is attach order) and `hcitool con` (no link to either peer), before the tool and again at the start of the cleanup. `esp32peer.py stream` then holds the pair's link while `ubertooth-scan -b <device> -t <duration>` runs. `-s` must make the adapter's inquiry report the acceptor at its registered address under the name the peer firmware derives from its LAP; without `-s` the Ubertooth's sweep must report the piconet by the central's LAP with the `AFH map:` line that follows each result. `-t` bounds the sweep only -- the tool arms that alarm after the inquiry -- so the deadline allows for a whole inquiry and a name page per device | adds `-s -x`, which must hold the acceptor's address, name and LMP version in its own report block, and the piconet in the survey results; either exit status, because `-x` exits 1 when any device's report fails and it asks every device in range |
+| `Follow Classic piconet over HCI` | `hci` plan, **never run on hardware** (same adapter, same issue): `ubertooth-follow -t <central address> -b <device>` pages the piconet's leader from the adapter, reads its clock offset, and follows it; at least ten packet lines, all with the central's LAP. `-a` must additionally report `AFH map read: <n> of 79 channels in use` and print the map. The tool has no capture timeout (its `-t` is the target address), so the driver interrupts it, and the window it is given is the capture plus the page (25 s) and the clock reads, which all happen before the capture starts. `-l`/`-u` without `-t` is deliberately not exercised | adds `-q`, whose PCAP every record of must carry the central's LAP as its own and its reference address, with a passing header HEC |
 | `DFU images` | writes the selected board's firmware; slow plan (not fast): `-d <test image> -r`, then `-u -r` reads back the image padded with 0xff; `-s` on the image without its suffix gives the build's `.dfu` | `firmware` plan (not release): adds `-s` refusing a `.dfu`; seven bad images (wrong CRC, truncated, no suffix, text, no `UFD`, wrong vendor, wrong product) refused before a device is opened (fork #198, #199, fixed in e8edd15), the board still in its application with the same flash (read back); `-s` refuses a suffixed `.bin` and accepts a read-only one (fork #200, fixed in 9d710fe). At 6fee30c `-d <image> -r` exits 1 after a good flash (fork #267, fixed in 89d9197), so the write cases fail there |
 | `BLE mode conflicts` | no `coverage` argument; release plan | every combination of `ubertooth-btle -f -n -p` must be rejected before sniffing |
 | `Ubertooth util conflicts` | no `coverage` argument; requires `allow RF transmission: true`; release plan | every pair of `-q -n -e -t -x -I` must be rejected with the fork's `error: options ... cannot be combined` before a mode starts |
@@ -787,8 +790,11 @@ command output.
 Not checked or restored, because no option the cases use can read it: the
 modulation (the firmware stop returns it to basic rate), the BR/EDR target
 address and LE advertising channel (cleared by a mode stop), the BLE
-follow target, and the E-GO capture length and access code (`Raw receive`
-sets `ubertooth-ego -l1`/`-l48`/`-a`; a later `-l`/`-a` or `-r` replaces them).
+follow target, the E-GO capture length and access code (`Raw receive`
+sets `ubertooth-ego -l1`/`-l48`/`-a`; a later `-l`/`-a` or `-r` replaces them),
+and the board's AFH channel map, which `Follow Classic piconet over HCI`
+leaves set in its `-a` case (`ubertooth-follow` without `-a` clears it, and
+no `ubertooth-util` option reads or writes it).
 The BLE access address (reset to 8e89bed6 by `-r`) is read with
 `ubertooth-btle -a`: `BLE settings` records and restores it; other cases leave
 it alone.
@@ -1445,6 +1451,52 @@ harness takes external board locks
 
 The peers have no switchable power on this bench, so nothing power-cycles
 one: a board that stops answering needs someone at it.
+
+### The host Bluetooth adapter and the BlueZ-only tools
+
+Two of the fork's host tools, `ubertooth-scan` and `ubertooth-follow`, are
+built only when libbluetooth is found, and both drive a Bluetooth controller
+of the host's as well as an Ubertooth: the scan runs that controller's
+inquiry, and the follow reads its clock, pages a target for the target's
+clock offset, and with `-a` reads the channel map of the link it made. An
+Ubertooth cannot stand in for one. Register the controller as a
+`Bluetooth adapter`:
+
+```yaml
+  BT_Linux0:
+    type: Bluetooth adapter
+    attached to: Host_Linux
+    identity:
+      hci device: hci0
+      BD_ADDR: "00:1A:7D:DA:71:13"
+```
+
+`hci device` is the name BlueZ gave it, which the tools take with `-b`, and
+`BD_ADDR` is the address `hciconfig <device>` reports. The `hciN` number is
+attach order rather than a property of the adapter, so the address is what
+identifies it: every case reads the device first and fails, naming what it
+found, if the address is not the registered one. An adapter takes no roles
+and is leased like a board, under `bluez-<address without its colons>`:
+the name is attach order, so the address is what names the lock too. The
+cases need
+`hciconfig` and `hcitool` on the host, declared as host tools the harness
+does not install.
+
+[`testplans/hci.yaml`](testplans/hci.yaml) holds the two tests that bind it,
+`Bluetooth inquiry scan` and `Follow Classic piconet over HCI`, on the same
+ESP32 pair: the pair gives the adapter a discoverable device to find and the
+Ubertooth a piconet to sweep for.
+
+**No bench has an adapter yet**
+([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)),
+so neither test has run. Their checks are written to what the two tools
+document and print, and the `hci` plan is deliberately not in
+`release.yaml`: it moves into the release suites once a real run passes.
+What the first real run has to settle is in
+[`docs/tests.md`](docs/tests.md), per case. Every step of the plan binds the
+adapter, so running it on a bench without one is refused, naming the missing
+resource; in a suite that holds other work the two tests are left out as not
+applicable, like any other hardware a registry has not got.
 
 ## Sharing boards: leases
 

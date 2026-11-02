@@ -108,6 +108,9 @@ AFH_MINIMUM_FIRMWARE = "utesp-1.3.0"
 BAUD = 115200
 ROLES = ("acceptor", "initiator")
 BOOT_ROLE = "acceptor"
+# What the firmware names a board, before the LAP it ends with; see
+# device_name() below.
+DEVICE_NAME_PREFIX = "UT-ESP32-"
 # What the firmware's status reports after a reset, from its README: the
 # acceptor role with its server listening and discoverable, no link, nothing
 # streaming, the default stream settings, and every counter zero. The
@@ -313,6 +316,19 @@ def address_parts(address: str) -> tuple[str, str]:
     a case that cannot name the piconet must not run.
     """
     return targets.lap_uap(normalize_address(address))
+
+
+def device_name(address: str) -> str:
+    """The Bluetooth device name the firmware gives a board at this address.
+
+    The firmware builds it from the LAP, the lowest three bytes of the
+    address (`UT-ESP32-%02X%02X%02X` of bytes 3 to 5 in
+    firmware/esp32-classic-peer/main/bt_peer.c), so a test that asks an
+    inquiry what it found knows the answer in advance without reading the
+    board. tests/test_esp32peer.py keeps this in step with that source.
+    """
+    lap, _uap = address_parts(address)
+    return f"{DEVICE_NAME_PREFIX}{lap.upper()}"
 
 
 def default_device(bridge_serial: str) -> str:

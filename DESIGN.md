@@ -898,6 +898,10 @@ does:
 | `nRF52840 DK` | Bluetooth LE | `ubertooth_harness/nrfdk.py` | `firmware/nrf52840dk` |
 | `ESP32 Classic peer` | Classic Bluetooth (BR/EDR) | `ubertooth_harness/esp32peer.py` | `firmware/esp32-classic-peer` |
 
+A third radio, the host's own Bluetooth controller, is registered too but is
+driven by the tool under test rather than by the harness; it is section 3f
+below.
+
 Both speak the same line shell over a serial port — one command line in,
 data lines out, then one `OK` or `ERR <reason>`, with `status` on a single
 JSON line — so a reader of one driver can read the other. Both are leased
@@ -928,6 +932,49 @@ in a Classic piconet the LAP on the air is the **central's**, and the central
 is whichever board paged. The initiator pages, so the initiator's LAP and UAP
 are what `ubertooth-rx -l` and `-u` take, and exchanging the two role
 bindings moves the piconet to the other board's address.
+
+---
+
+### 3f. The host Bluetooth adapter
+
+A third radio is registered, and it is not one the harness drives to make
+traffic: `Bluetooth adapter`, a Bluetooth controller of the host's that BlueZ
+owns. Two of the fork's host tools are built only with libbluetooth and both
+need one — `ubertooth-scan` runs its inquiry, and `ubertooth-follow` reads its
+clock, pages a target for the target's clock offset, and with `-a` reads the
+channel map of the link it made. An Ubertooth has no HCI interface, so it
+cannot stand in.
+
+It differs from the two radios above in every way that matters to the code,
+which is why it has no driver module and no firmware:
+
+- **The tool drives it, not the harness.** The cases pass `-b <hci device>`
+  and let the tool do the HCI work. What the harness does is read the
+  controller's own state around the run, with BlueZ's `hciconfig` and
+  `hcitool` — declared as host tools the harness does not install, so a host
+  without them leaves the cases out rather than failing them.
+- **Its name is not its identity.** `hciN` is the order the kernel attached
+  controllers in. The registry records both the device name and the address,
+  and every case checks the address first, so an adapter that came back as
+  another `hciN` fails naming what was found instead of the test driving
+  whatever took the name.
+- **It is leased anyway**, under `bluez-<address without its colons>`,
+  for the reason above and not under its name: one controller answers
+  one inquiry at a time and holds one link to a target.
+
+The traffic still comes from the ESP32 pair, so `bluez_cases.py` builds its
+cases out of `esp32peer.py stream` exactly as `classic_cases.py` does, and
+adds the adapter reads around it. The pair serves two purposes at once there:
+both boards are discoverable from boot, so the inquiry has a known device to
+report, and the piconet they hold is what the Ubertooth sweeps for and what
+the follow is pointed at.
+
+No bench has an adapter yet
+([#88](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/88)),
+so those cases have never run. They live in `testplans/hci.yaml`, which is
+not part of `release.yaml` until a real run passes, and `docs/tests.md`
+records per case which outcome is the tool's documented one and which is a
+reading of its source still to be confirmed.
 
 ---
 

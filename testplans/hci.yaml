@@ -1,0 +1,71 @@
+plan: BlueZ tools with a host Bluetooth adapter
+# The two tools the fork builds only with libbluetooth, ubertooth-scan and
+# ubertooth-follow, drive a Bluetooth controller of the host's as well as an
+# Ubertooth. This plan is where they live.
+#
+# Needs a Linux host with an Ubertooth, a `Bluetooth adapter` resource (the
+# controller's hci device name and the address it reports), and the two ESP32
+# Classic peers registered with the acceptor and initiator roles
+# (hardware.example.yaml). The pair holds a Serial Port Profile link and
+# streams over it, so the adapter has a discoverable device to find and the
+# Ubertooth a piconet to sweep for; the Ubertooth only receives. The peers
+# must already run firmware/esp32-classic-peer utesp-1.0.0 or a later 1.x
+# image: nothing here flashes them.
+#
+# This plan is deliberately NOT in release.yaml. No bench has a Bluetooth
+# adapter yet (issue #88), so nothing in it has run against real hardware:
+# the checks are written to what the two tools document and print. A bench
+# that has an adapter runs this plan on its own, and the cases move into the
+# release suites once a real run has passed. docs/tests.md records, per
+# case, which outcome is documented and which is still to be confirmed.
+#
+# 25 s per capture is what the bench needs for a useful count of this
+# piconet, as the classic plan records: the Ubertooth sweeps 79 channels and
+# decodes about one packet of the piconet a second.
+#
+# A `duration:` here is the capture alone, and neither tool's command is that
+# long. `ubertooth-scan` arms the alarm `-t` asks for only after its BlueZ
+# inquiry has run, so `-s` adds a whole inquiry (about 10 s) on top, and both
+# halves page each device they found for its name. `ubertooth-follow` has no
+# capture timeout at all: the driver ends it, and the page (up to 25 s) and
+# the clock reads happen inside the window it is given, so that window is the
+# capture plus the setup. The cases allow for both in their own deadlines; a
+# run of this plan takes a good deal longer than the sum of its durations.
+suites:
+  hci:
+    - Bluetooth inquiry scan:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        Bluetooth adapter: default
+        acceptor: default
+        initiator: default
+        coverage: smoke
+        duration: 25s
+
+    - Follow Classic piconet over HCI:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        Bluetooth adapter: default
+        acceptor: default
+        initiator: default
+        coverage: smoke
+        duration: 25s
+
+  hci-comprehensive:
+    - Bluetooth inquiry scan:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        Bluetooth adapter: default
+        acceptor: default
+        initiator: default
+        coverage: comprehensive
+        duration: 25s
+
+    - Follow Classic piconet over HCI:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        Bluetooth adapter: default
+        acceptor: default
+        initiator: default
+        coverage: comprehensive
+        duration: 25s
