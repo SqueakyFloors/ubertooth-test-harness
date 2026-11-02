@@ -2611,7 +2611,12 @@ Linux cell and no macOS one. Which steps a host runs comes from that run's
 own manifest record, which is what its planner compiled there. Each cell
 carries the status, when it started and finished, how long it took, why it
 failed, the estimate [learned for that host](#learned-durations), and its
-parts (a test's invocations, one per board; a flash's boards).
+parts (a test's invocations, one per board; a flash's boards). A required test
+the planner could not compile on a host ([blocked, not left
+out](#hardware-a-step-is-about-blocked-not-left-out)) has no invocation, so
+its cell is that planning record and reads `blocked`, which ranks worse than
+a pass: a host where one board ran and another was blocked does not read as
+passed.
 
 A run started on one target of its own (`POST /api/targets/{host}/runs`)
 stores no group record and is listed as a **group of one** whose ID is the
