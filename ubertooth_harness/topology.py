@@ -30,7 +30,7 @@ from ubertooth_harness.power import (
     snapshot_ports,
 )
 from ubertooth_harness.resources import (
-    MissingResource,
+    MissingRequiredHardware,
     RegistryError,
     ResourceRegistry,
     STARTECH_DRIVER,
@@ -85,12 +85,11 @@ def plan_power_cycle(
     registered port anyway would take down whatever is really on it.
 
     A board with no power mapping, or one behind a controller that cannot
-    switch VBUS per port, raises MissingResource rather than RegistryError,
-    because another bench may well have it mapped. The planner does not yet
-    turn that into "not applicable" for this test, so today it fails
-    planning there, exactly as an unmapped board does for exclusive
-    isolation; leaving both out instead is
-    [#269](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/269).
+    switch VBUS per port, is hardware this test is about rather than a
+    mistake in the plan, so it raises MissingRequiredHardware: the planner
+    records the step as blocked on that bench and leaves it out of the
+    invocations, and the run it belonged to fails rather than passing
+    without it (#269).
     """
     selected = registry.get(selected_alias)
     if selected.type != "Ubertooth" or selected.attached_to != host:
@@ -100,7 +99,7 @@ def plan_power_cycle(
     mapped = selected.power.get("controller")
     port = selected.power.get("port")
     if mapped is None or port is None:
-        raise MissingResource(
+        raise MissingRequiredHardware(
             f"Ubertooth {selected_alias} has no power mapping, so its port "
             "cannot be switched"
         )
@@ -115,7 +114,7 @@ def plan_power_cycle(
     if controller.attached_to != host:
         raise RegistryError(f"power controller {mapped} is not attached to {host}")
     if "per-port VBUS switching" not in controller.capabilities:
-        raise MissingResource(
+        raise MissingRequiredHardware(
             f"controller {mapped} lacks per-port VBUS switching, so "
             f"{selected_alias} cannot be power-cycled"
         )
@@ -131,6 +130,19 @@ def plan_exclusive_ubertooth(
     host: str,
     selected_alias: str,
 ) -> tuple[PowerIsolationAction, ...]:
+    """The power-off actions that leave ``selected_alias`` the only Ubertooth.
+
+    Empty when the host has no other registered Ubertooth: there is nothing
+    to switch, and the run confirms exclusivity read-only instead.
+
+    Two refusals, told apart by what the plan can do about them. A board on
+    no power controller is hardware this bench has not got
+    (``MissingRequiredHardware``): the test is recorded as blocked and the
+    run fails, but every unrelated test still runs. A `power:` mapping that
+    is there and wrong (a controller that cannot switch a port, a port number
+    the controller has not got) is a registry to correct, and stays a
+    ``RegistryError`` that ends the compile wherever the plan is compiled.
+    """
     selected = registry.get(selected_alias)
     if selected.type != "Ubertooth" or selected.attached_to != host:
         raise RegistryError(
@@ -151,8 +163,12 @@ def plan_exclusive_ubertooth(
         controller_alias = resource.power.get("controller")
         port = resource.power.get("port")
         if controller_alias is None or port is None:
-            raise RegistryError(
-                f"extra Ubertooth {resource.alias} has no power mapping"
+            # This bench cannot switch that board off, so the test cannot have
+            # the one Ubertooth it is about. Absence, not a broken registry: a
+            # `power:` mapping that is there but wrong is a RegistryError below.
+            raise MissingRequiredHardware(
+                f"extra Ubertooth {resource.alias} has no power mapping, so it "
+                f"cannot be switched off to leave {selected_alias} alone"
             )
         controller = registry.get(controller_alias)
         if "per-port VBUS switching" not in controller.capabilities:

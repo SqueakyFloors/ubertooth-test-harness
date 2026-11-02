@@ -268,10 +268,12 @@ device behind one gives up:
   be rebooted over its J-Link (`nrfutil device reset`), and an ESP32 over its
   shell (`reset`) while it still answers at all.
 - **No isolation.** A plan with `exclusive Ubertooth: true` compiles power-off
-  actions for every other registered Ubertooth on the host, and compilation
-  fails if one of them has no valid controller mapping or no per-port VBUS
-  capability. So a bench that mixes switchable and plain hubs cannot run an
-  exclusive plan unless every Ubertooth is on the switchable one.
+  actions for every other registered Ubertooth on the host. A board on no
+  power controller blocks the step, and the run fails on it; a mapping that is
+  there and wrong, including a controller without per-port VBUS switching, is
+  refused outright. So a bench that mixes switchable and plain hubs can run
+  an exclusive plan only for the boards whose every other Ubertooth is on the
+  switchable hub.
 - **No VBUS evidence.** Nothing can say whether a port is really powered.
 
 It is the right place for devices that need no power control and would

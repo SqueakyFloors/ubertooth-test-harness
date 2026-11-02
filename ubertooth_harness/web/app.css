@@ -204,7 +204,8 @@ code { overflow-wrap: anywhere; }
 .status-passed, .status-online {
   color: var(--ok-fg); background: var(--ok-bg); border-color: var(--ok-line);
 }
-.status-failed, .status-error, .status-did-not-finish, .status-lost {
+.status-failed, .status-error, .status-did-not-finish, .status-lost,
+.status-blocked {
   color: var(--bad-fg); background: var(--bad-bg); border-color: var(--bad-line);
 }
 .status-running {
@@ -387,7 +388,9 @@ button.primary:disabled:hover { background: var(--primary); }
   border-left-color: var(--run-fg);
 }
 .check-running .check-name { font-weight: 650; }
-.check-failed, .check-error, .check-did-not-finish { border-left-color: var(--bad-fg); }
+.check-failed, .check-error, .check-did-not-finish, .check-blocked {
+  border-left-color: var(--bad-fg);
+}
 .check-note { color: var(--muted); }
 .reason { color: var(--muted); }
 
