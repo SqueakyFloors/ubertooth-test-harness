@@ -2371,8 +2371,11 @@ consecutive misses:`, and `maximum restarts:`.
 
 **Expected outcome.** No implementation; only a `runnable: false` plan may
 name it. Its resource and power manifest already compiles, including every
-required power-off action; on a host where another registered board is on no
-power controller the step is blocked, as `Exclusive Ubertooth topology` is.
+required power-off action. On a host where another registered board is on no
+power controller the step is blocked, as `Exclusive Ubertooth topology` is;
+since `mac-polling.yaml` holds this one step and selects `Ubertooth: default`,
+that leaves the suite nothing to run and planning refuses it, naming the
+blocked step.
 
 **Known limits.** What counts as a pass is not established beyond the bounds
 the arguments name.

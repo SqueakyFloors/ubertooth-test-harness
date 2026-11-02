@@ -266,8 +266,10 @@ was: the refusal names the blocked step, and there is no run to fail. That is
 what `mac-polling` does on a bench with an unmapped board, since it names one
 step and one board (`Ubertooth: default`). `testplans/exclusive.yaml` names
 one step but `Ubertooth: each`, so the step runs for every board that can be
-left alone, is blocked for the rest, and the run fails — which is also what a
-mixed suite does, the release plan included.
+left alone, is blocked for the rest, and the run fails. A mixed suite — one
+holding a blocked step beside steps that run — behaves the same way; no
+committed plan is one today, since `exclusive Ubertooth` appears only in those
+two and `alternate Ubertooths` in none.
 
 A `power:` mapping that is present but wrong (an unknown controller, a port
 the controller has not got, a controller that cannot switch one) is a registry
@@ -415,8 +417,11 @@ come back after restoration. See [DESIGN.md, "Power-controller boundary"](DESIGN
 the exact rules and error precedence.
 
 Plans requiring `exclusive Ubertooth: true` compile deterministic power-off
-actions for every other registered Ubertooth on the host. Compilation fails if
-an extra board lacks a valid controller mapping or per-port VBUS capability.
+actions for every other registered Ubertooth on the host. An extra board on no
+power controller blocks the step and fails the run (see
+[Hardware a step is about](#hardware-a-step-is-about-blocked-not-left-out));
+a mapping that is there and wrong, including a controller without per-port
+VBUS switching, is refused instead.
 `run-suite` applies those actions only with `--allow-power-changes`; without
 it, the run fails before anything executes. A host with only the selected
 board registered switches nothing and needs no flag (see the read-only check

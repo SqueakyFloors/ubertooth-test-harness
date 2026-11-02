@@ -461,6 +461,26 @@ class ConfigurationErrorTests(unittest.TestCase):
                 with self.assertRaisesRegex(RegistryError, message):
                     self.load(ONE_BOARD + extra)
 
+    def test_half_a_power_mapping_is_refused_when_the_registry_loads(self):
+        """Half a mapping, and a mapping written with nothing in it, are a
+        registry to correct, so they must not reach planning and be recorded
+        as a board on no controller. No `power:` at all is that absence."""
+        half = {
+            "has unknown power controller": "    power: {port: 1}\n",
+            "power port must be a nonnegative integer":
+                "    power: {controller: Hub_Linux0}\n",
+            r"power must name a controller and a port": "    power: {}\n",
+        }
+        board = """  UT_Linux1:
+    type: Ubertooth
+    attached to: Host_Linux
+    identity: {serial: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+"""
+        for message, mapping in half.items():
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(RegistryError, message):
+                    self.load(ONE_BOARD + board + mapping)
+
     def test_a_controller_without_the_capabilities_is_refused_at_load(self):
         hardware = ONE_BOARD.replace(
             "    capabilities: [per-port VBUS switching, power readback]",

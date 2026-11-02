@@ -278,8 +278,11 @@ class Blocked:
     another board off). So it is recorded, every unrelated test still runs,
     and the run fails at the end rather than passing with the gate unmeasured.
 
-    Decided at planning, before anything runs, so there is no invocation and
-    no case: the whole test is blocked for that host.
+    Decided at planning, before anything runs, so it carries no invocation
+    and no case: it is the step that could not be bound. The same test may
+    still have invocations on the same host, where the plan asked for every
+    board and only some of them can be left alone (planner.py,
+    ``CompiledSuite.blocked_for_host``).
     """
 
     host: str

@@ -268,6 +268,14 @@ class FileResourceRegistry:
             ):
                 if not isinstance(field_value, dict):
                     raise RegistryError(f"resource {alias}.{field_name} must be a mapping")
+            if "power" in value and not power:
+                # No `power:` at all is a board on no controller, which the
+                # planner reads as hardware this bench has not got. A written
+                # mapping with nothing in it is a registry half-filled in, so
+                # it is refused here rather than read as that absence.
+                raise RegistryError(
+                    f"resource {alias}.power must name a controller and a port"
+                )
             placement = None
             if value.get("rf") is not None:
                 try:
