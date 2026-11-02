@@ -87,8 +87,10 @@ class FakeDfuBoard:
     (#199), ``double_suffix`` and ``needs_write_access`` (#200),
     ``detach_exit_1`` (#267: -d -r exits 1 after a good flash), and ``bad_readback``,
     ``bad_vector_checksum``, ``no_plan_line`` (a -u that says nothing about
-    the range it covers, as earlier builds did), ``odd_plan_line`` (a -u that
-    reports a range no part has), ``partial_write_on_reject``,
+    the range it covers, as earlier builds did), ``no_first_block_fill`` (a -d
+    that fills in neither field, as builds before fork 31228b0 did),
+    ``odd_plan_line`` (a -u that reports a range no part has),
+    ``partial_write_on_reject``,
     ``reject_exit_zero``, ``stays_in_dfu_after_upload``, ``wrong_sign_vendor``,
     ``dfu_count_extra`` for failures no fork has shown.
 
@@ -111,7 +113,8 @@ class FakeDfuBoard:
     def _program(self, data: bytes):
         """Write ``data`` as -d does: whole blocks, the last one padded, and
         the first block's vector checksum and image check record filled in."""
-        written = dfuimage.written_image(data)
+        written = data if self.flags.get("no_first_block_fill") else \
+            dfuimage.written_image(data)
         padded = -(-len(written) // 256) * 256
         self.flash[:padded] = written + b"\xff" * (padded - len(written))
 
@@ -1151,6 +1154,20 @@ class DfuReadbackRunTests(unittest.TestCase):
                       "checksum at 0x0401c is ", output)
         self.assertEqual(1, len([command for command in board.commands
                                  if command[0] == "ubertooth-dfu" and "-d" in command]))
+
+    def test_a_build_older_than_both_changes_rewrites_once_and_then_fails(self):
+        """A tool from before fork 10c3381 prints no range and fills in
+        neither field, so the flash really does differ from the image as
+        today's -d writes it: the cleanup rewrites once and fails on both."""
+        board, code, output = self.restore_with(no_plan_line=True,
+                                                no_first_block_fill=True)
+        self.assertEqual(1, code)
+        self.assertIn("Flash differs from the test image; rewriting it", output)
+        self.assertEqual(1, len([command for command in board.commands
+                                 if command[0] == "ubertooth-dfu" and "-d" in command]))
+        self.assertIn("Restore: flash still differs after the rewrite: the read-back "
+                      "did not report the range it covers; vector checksum at "
+                      "0x0401c is 0x00000000", output)
 
     def test_a_tool_that_reports_no_range_fails_the_read_back_step(self):
         """An earlier -u said nothing about what it was reading. The step

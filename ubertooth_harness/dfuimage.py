@@ -892,10 +892,15 @@ def restore(board: Board, image: Path, revision: str, readback: Path) -> int:
         if read.failure:
             print(f"Restore: the read-back after the rewrite failed: {read.failure}")
             return 1
-        remaining = readback_problems(readback.read_bytes(), data, plan=read.plan)
-        if remaining:
+        dump = readback.read_bytes()
+        remaining = readback_problems(dump, data, plan=read.plan)
+        if written_problems(dump, data):
             print("Restore: flash still differs after the rewrite: "
                   + "; ".join(remaining))
+            return 1
+        if remaining:
+            # The flash holds the image; it is the read-back that is odd.
+            print("Restore: after the rewrite: " + "; ".join(remaining))
             return 1
     seen = board.wait_revision()
     if seen != revision:
