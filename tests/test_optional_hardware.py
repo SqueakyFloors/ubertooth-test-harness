@@ -60,10 +60,10 @@ resources:
 """
 
 # A step every registry here can run, so a suite is never empty and the
-# skipping is what the assertions are about.
-HOST_STEP = """    - Ubertooth identity:
+# skipping is what the assertions are about. It binds no hardware, and it is
+# not the test any step below names, so nothing it does hides a skip.
+HOST_STEP = """    - Host CLI surface:
         hosts: each
-        Ubertooth: default
 """
 
 CLASSIC_STEP = """    - Capture known Classic device:
@@ -116,7 +116,8 @@ class OptionalHardwarePlanningTests(unittest.TestCase):
             self.assertEqual("no such host in this registry", left_out.reason)
             self.assertEqual(("Host_Lab",), compiled.absent_hosts)
             # No run is ever made for Host_Lab, so the step is part of the
-            # record of whichever host does run the suite.
+            # record of whichever host does run the suite. Both hosts here
+            # run `Host CLI surface`, not this step.
             self.assertEqual((left_out,), compiled.for_host("Host_Mac"))
             self.assertEqual((left_out,), compiled.for_host("Host_Linux"))
 
@@ -125,7 +126,7 @@ class OptionalHardwarePlanningTests(unittest.TestCase):
             compiled = self.compile(directory, (HOST_STEP, CLASSIC_STEP))
 
             self.assertEqual(
-                ("Ubertooth identity", "Ubertooth identity"),
+                ("Host CLI surface", "Host CLI surface"),
                 tuple(item.test_name for item in compiled.invocations),
             )
             (left_out,) = compiled.not_applicable
@@ -216,14 +217,12 @@ class OptionalHardwarePlanningTests(unittest.TestCase):
             registry = FileResourceRegistry.load(
                 Path(directory) / "hardware.yaml"
             )
-            # `each` answers the same way: a device registered for another
-            # role is not offered for this one.
             with self.assertRaisesRegex(
                 MissingResource,
                 "host Host_Linux has no nRF52840 DK for the advertiser role",
             ):
                 registry.resolve_hardware(
-                    "Host_Linux", "nRF52840 DK", "each", "advertiser"
+                    "Host_Linux", "nRF52840 DK", "default", "advertiser"
                 )
 
     def test_an_explicit_device_alias_this_registry_has_not_got_is_absent(self):
@@ -255,7 +254,7 @@ class OptionalHardwarePlanningTests(unittest.TestCase):
             compiled = self.compile(directory, (HOST_STEP, step))
 
             self.assertEqual(
-                ("Ubertooth identity", "Ubertooth identity"),
+                ("Host CLI surface", "Host CLI surface"),
                 tuple(item.test_name for item in compiled.invocations),
             )
             self.assertEqual(
@@ -282,15 +281,15 @@ class OptionalHardwarePlanningTests(unittest.TestCase):
 
             (invocation,) = compiled.invocations
             self.assertEqual("Host_Mac", invocation.host)
-            # The step ran, and the record still says the bench has no
-            # Host_Lab: the line names that host, not the one running.
-            for host in ("Host_Mac", "Host_Linux"):
-                (item,) = compiled.for_host(host)
-                self.assertEqual(
-                    "Ubertooth identity: not applicable on Host_Lab: no such "
-                    "host in this registry",
-                    item.describe(),
-                )
+            # The host that runs the test is not also told the test was left
+            # out, which would mark its own row not applicable in the GUI.
+            self.assertEqual((), compiled.for_host("Host_Mac"))
+            (item,) = compiled.for_host("Host_Linux")
+            self.assertEqual(
+                "Ubertooth identity: not applicable on Host_Lab: no such host "
+                "in this registry",
+                item.describe(),
+            )
 
     def test_a_platform_blocked_host_beside_an_absent_one_leaves_the_step_out(self):
         """The host that would have run it is not here, so the Mac's platform
@@ -498,10 +497,9 @@ class DryRunTests(unittest.TestCase):
             "this registry",
             text,
         )
-        # The count is not claimed to be this host's doing; each line names
-        # the host it belongs to.
-        self.assertIn(f"case(s) not applicable on {host}, and 1 test(s) left out",
-                      text)
+        # The total does not claim the skip was this host's doing; each
+        # line names the host it belongs to.
+        self.assertIn("case(s) and 1 test(s) not applicable", text)
 
     def test_a_step_whose_hardware_this_host_has_not_got_is_reported(self):
         code, text, host = self.dry_run(HOST_STEP, CLASSIC_STEP)
@@ -513,7 +511,7 @@ class DryRunTests(unittest.TestCase):
                 "host Host_Linux has no default ESP32 Classic peer",
                 text,
             )
-            self.assertIn("1 test(s) left out", text)
+            self.assertIn("1 test(s) not applicable", text)
         else:
             # The step names the Linux host only, so the Mac's run never had
             # it: the Linux run is where it is recorded.

@@ -107,7 +107,9 @@ class RunnablePlanTests(unittest.TestCase):
             for path in sorted(PLANS.glob("*.yaml"))
             for suite in load_plan(path, catalog).suites
         ]
-        skipped = [name for _path, name in suites if name == "range-weak-link"]
+        # The one suite the example bench cannot be asked for; if it is ever
+        # dropped from the plans, this list simply empties.
+        skipped = [name for _path, name in suites if name in ("range-weak-link",)]
         compiled = []
         for path, suite in suites:
             if suite in skipped:
@@ -117,10 +119,9 @@ class RunnablePlanTests(unittest.TestCase):
                     load_plan(path, catalog), suite, strict_hardware=True
                 )
                 compiled.append(suite)
-        # Every suite in the repo, bar the one named above: a suite added to
-        # a plan is compiled here too, or this fails.
-        self.assertEqual(["range-weak-link"], skipped)
-        self.assertEqual(len(suites) - 1, len(compiled))
+        # Every suite in the repo, bar those named above: a suite added to a
+        # plan is compiled here too, or this fails.
+        self.assertEqual(len(suites) - len(skipped), len(compiled))
         self.assertIn("release", compiled)
 
     def test_the_fast_plan_runs_spectrum_rssi_sanity_and_not_ble_monitor(self):

@@ -415,14 +415,14 @@ class DryRunTests(unittest.TestCase):
         self.assertIn("not applicable on Host_Local: -s of the test build's binary gives the "
                       "build's .dfu: needs a firmware build", text)
         self.assertIn("    run: ubertooth-util help", text)
-        self.assertRegex(text, r"total: 2 test\(s\), \d+ case\(s\) to run, 3 case\(s\) not "
-                               r"applicable on Host_Local, and 0 test\(s\) left out")
+        self.assertRegex(text, r"total: 2 test\(s\), \d+ case\(s\) to run, 3 case\(s\) and 0 "
+                               r"test\(s\) not applicable")
 
     def test_a_test_build_artifact_makes_the_sign_case_applicable(self):
         code, text = self.dry_run("--artifact", "test build=IMAGE")
         self.assertEqual(0, code)
         self.assertIn("    run: -s of the test build's binary gives the build's .dfu", text)
-        self.assertIn("2 case(s) not applicable on Host_Local, and 0 test(s) left out", text)
+        self.assertIn("2 case(s) and 0 test(s) not applicable", text)
 
 
 if __name__ == "__main__":

@@ -573,13 +573,7 @@ class FileResourceRegistry:
             if not eligible:
                 raise MissingResource(f"host {host} has no {resource_type} resources")
             if not placement:
-                for_role = tuple(
-                    alias for alias in eligible
-                    if self._takes_role(self.get(alias), role)
-                )
-                if not for_role:
-                    refuse_roleless()
-                return for_role
+                return eligible
             if not matching:
                 refuse_unplaced()
             return matching

@@ -209,10 +209,11 @@ the hardware is the step left out.
 
 `validate-plan --hardware <registry>` is the strict one: there the registry
 is named on purpose, so the same absence fails, which is what catches a plan
-entry for hardware a bench is meant to provide. Every committed plan is
+entry for hardware a bench is meant to provide. Every committed suite is
 compiled that way against [`hardware.example.yaml`](hardware.example.yaml) in
-the unit suite (`tests/test_runnable_plans.py`), and CI validates the main
-suites with it as well.
+the unit suite (`tests/test_runnable_plans.py`), bar `range-weak-link`, which
+asks for a board behind an attenuator that the example registry carries
+commented out; CI validates the main suites with it as well.
 
 Two refusals are mistakes in the plan rather than absence, and fail wherever
 the plan is compiled: an alias that differs from a registered one only in

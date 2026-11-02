@@ -23,9 +23,11 @@ from ubertooth_harness.rf import (
 from ubertooth_harness.topology import PowerIsolationAction, plan_exclusive_ubertooth
 
 
-# Any placement at all: used to ask whether a host has a unit that could
-# take a role wherever it sat, which tells absence from a placement it
-# cannot satisfy.
+# Any placement at all: asks ``registry.placed`` whether a host has a unit
+# that could take a role wherever it sat, which tells absence from a
+# placement a unit cannot satisfy. It is falsy, as a requirement that asks
+# for nothing, so it is for ``placed`` only: as ``resolve_hardware``'s
+# ``placement`` it would read as no requirement given.
 ANY_PLACEMENT = PlacementRequirement()
 
 
@@ -89,10 +91,21 @@ class CompiledSuite:
     def for_host(self, host: str) -> tuple[NotApplicable, ...]:
         """What this host's run records: what this host was left out of, and
         what a host the registry has not got was left out of, since no run of
-        its own will ever carry that. Each item names its own host."""
+        its own will ever carry that. Each item names its own host.
+
+        A test this host does run is not reported absent to it: the live
+        checklist matches a planning item to the test by name, so saying
+        both would leave the test's own row marked not applicable. A second
+        step naming the same test for an absent host is then not recorded
+        here, which is the lesser loss.
+        """
+        running = {
+            item.test_name for item in self.invocations if item.host == host
+        }
         return tuple(
             item for item in self.not_applicable
-            if item.host == host or item.host in self.absent_hosts
+            if item.host == host
+            or (item.host in self.absent_hosts and item.test_name not in running)
         )
 
 
@@ -195,12 +208,17 @@ class PlanCompiler:
             resource_type = definition.hardware_roles[role]
             if self.registry.placed(host, resource_type, placement, role):
                 continue
-            if not self.registry.placed(host, resource_type, ANY_PLACEMENT, role):
+            # Only the units that could take the role at all: a host where
+            # none can has not got the hardware, which binding reports in its
+            # own words, and the rest are nothing to do with the placement.
+            candidates = self.registry.placed(
+                host, resource_type, ANY_PLACEMENT, role
+            )
+            if not candidates:
                 continue
-            registered = self.registry.hardware(host, resource_type)
             have = "; ".join(
                 f"{alias} has {describe_placement(self.registry.get(alias).rf)}"
-                for alias in registered
+                for alias in candidates
             )
             return (
                 f"no {resource_type} on this host has {placement.describe()} "
@@ -285,6 +303,9 @@ class PlanCompiler:
                         "it with rf:; all-pairs selection is not implemented"
                     )
                 wanted = definition.placement_requirements(arguments)
+                # What each role could take on each host, for the refusal
+                # when no two roles can have different devices.
+                host_choices: dict[str, dict[str, tuple[str, ...]]] = {}
                 host_selector = arguments.get(
                     "host", arguments.get("hosts", "each")
                 )
@@ -354,6 +375,7 @@ class PlanCompiler:
                 if not bound:
                     continue
                 for host, choices in bound:
+                    host_choices[host] = dict(zip(role_names, choices))
                     combinations = itertools.product(*choices) if choices else [()]
                     for selected in combinations:
                         if len(set(selected)) != len(selected):
@@ -404,8 +426,21 @@ class PlanCompiler:
                             )
                         )
                 if len(invocations) == step_start:
+                    # Every combination put one device in two roles. The
+                    # message names what each role could have taken, since
+                    # that is what has to change: the plan's selectors, or
+                    # the host's defaults.
                     raise PlanningError(
-                        f"{step.test_name}: no valid distinct resource assignment"
+                        f"{step.test_name}: no valid distinct resource "
+                        "assignment: "
+                        + "; ".join(
+                            f"{host}: "
+                            + ", ".join(
+                                f"{role} from {' or '.join(aliases)}"
+                                for role, aliases in roles.items()
+                            )
+                            for host, roles in host_choices.items()
+                        )
                     )
                 self._check_some_case_applies(
                     definition, invocations[step_start:], blocked
@@ -416,9 +451,12 @@ class PlanCompiler:
             # Asking to run a suite this bench has nothing for is still an
             # error: the caller gets told why, test by test, rather than an
             # empty run that looks like a pass.
+            shown = not_applicable[:5]
+            rest = len(not_applicable) - len(shown)
             raise PlanningError(
                 f"suite '{suite}' produced no runnable invocations"
-                + "".join(f"; {item.describe()}" for item in not_applicable)
+                + "".join(f"; {item.describe()}" for item in shown)
+                + (f"; and {rest} more left out" if rest > 0 else "")
             )
         return CompiledSuite(
             tuple(invocations), tuple(not_applicable), tuple(sorted(absent_hosts))
