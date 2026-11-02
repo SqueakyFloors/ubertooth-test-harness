@@ -8,6 +8,21 @@ suites:
         eero: required
         Ubertooth: default
 
+    # The bench has an algorithm 1 connection now: one DK runs the
+    # `-chansel1` image, whose controller has no algorithm 2, so every link it
+    # makes hops with algorithm 1 and its `status` says so. What is not
+    # settled is the outcome: on the bench `-p` recovered the access address
+    # and the CRC init of such a connection and went no further in 90 s, so
+    # the case waits for the hop interval and increment to be reached. See
+    # docs/tests.md.
+    - Recover a BLE connection promiscuously:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        central: default
+        peripheral: default
+        coverage: smoke
+        duration: 90s
+
     - Bluetooth inquiry scan:
         Bluetooth adapter: required
         Ubertooth: default

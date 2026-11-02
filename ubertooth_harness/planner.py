@@ -15,9 +15,20 @@ from ubertooth_harness.hostneeds import (
     unmet,
 )
 from ubertooth_harness.plan import Plan
-from ubertooth_harness.resources import RegistryError, ResourceRegistry
-from ubertooth_harness.rf import describe as describe_placement
+from ubertooth_harness.resources import MissingResource, RegistryError, ResourceRegistry
+from ubertooth_harness.rf import (
+    PlacementRequirement,
+    describe as describe_placement,
+)
 from ubertooth_harness.topology import PowerIsolationAction, plan_exclusive_ubertooth
+
+
+# Any placement at all: asks ``registry.placed`` whether a host has a unit
+# that could take a role wherever it sat, which tells absence from a
+# placement a unit cannot satisfy. It is falsy, as a requirement that asks
+# for nothing, so it is for ``placed`` only: as ``resolve_hardware``'s
+# ``placement`` it would read as no requirement given.
+ANY_PLACEMENT = PlacementRequirement()
 
 
 class PlanningError(ValueError):
@@ -70,11 +81,40 @@ class TestInvocation:
 @dataclass(frozen=True)
 class CompiledSuite:
     invocations: tuple[TestInvocation, ...]
-    # Tests a selected host cannot run (test-wide needs); one per host.
+    # Tests left out: what a selected host cannot run (test-wide needs, RF
+    # placement), and what this registry has not got the hardware for.
     not_applicable: tuple[NotApplicable, ...] = ()
+    # Host aliases a step named that this registry has not got. No run is
+    # ever made for them, so what they left out belongs to the record of
+    # every run of the suite rather than to no record at all.
+    absent_hosts: tuple[str, ...] = ()
 
     def for_host(self, host: str) -> tuple[NotApplicable, ...]:
-        return tuple(item for item in self.not_applicable if item.host == host)
+        """What this host's run records: what this host was left out of, and
+        what a host the registry has not got was left out of, since no run of
+        its own will ever carry that. Each item names its own host.
+
+        One record per test, and nothing about a test this host runs: the
+        live run view matches a planning record to the test by name, so a
+        second record would mark the test's own row not applicable, or show
+        the test twice. A step this host has its own reason for keeps that
+        reason, which says more to the host running it. So a second step
+        naming the same test for an absent host is not recorded here.
+        """
+        mine = tuple(item for item in self.not_applicable if item.host == host)
+        covered = {item.test_name for item in mine}
+        covered |= {
+            item.test_name for item in self.invocations if item.host == host
+        }
+        absent = []
+        for item in self.not_applicable:
+            if item.host not in self.absent_hosts or item.test_name in covered:
+                continue
+            # Two steps may name the same test for two hosts the registry has
+            # not got; this run says it once.
+            covered.add(item.test_name)
+            absent.append(item)
+        return mine + tuple(absent)
 
 
 class PlanCompiler:
@@ -164,6 +204,10 @@ class PlanCompiler:
         Only for a role the plan left to the harness (``default`` or
         ``each``): an explicit alias that cannot satisfy the requirement is a
         mistake in the plan, and ``resolve_hardware`` refuses it.
+
+        A host that could not take the role wherever its units sat is not
+        answered here: that is absence, which binding the role reports in its
+        own words, naming the role rather than a placement.
         """
         for role, placement in wanted.items():
             selector = arguments.get(role, "default")
@@ -172,37 +216,127 @@ class PlanCompiler:
             resource_type = definition.hardware_roles[role]
             if self.registry.placed(host, resource_type, placement, role):
                 continue
-            registered = self.registry.hardware(host, resource_type)
+            # Only the units that could take the role at all: a host where
+            # none can has not got the hardware, which binding reports in its
+            # own words, and the rest are nothing to do with the placement.
+            candidates = self.registry.placed(
+                host, resource_type, ANY_PLACEMENT, role
+            )
+            if not candidates:
+                continue
             have = "; ".join(
                 f"{alias} has {describe_placement(self.registry.get(alias).rf)}"
-                for alias in registered
-            ) or f"no {resource_type} is registered on it"
+                for alias in candidates
+            )
             return (
                 f"no {resource_type} on this host has {placement.describe()} "
                 f"for the {role} ({have})"
             )
         return ""
 
-    def compile_suite(self, plan: Plan, suite: str) -> "CompiledSuite":
-        """Invocations, and the tests each host was left out of (not applicable)."""
+    def _selected_hosts(self, selector, strict: bool):
+        """(hosts to consider, aliases this registry has not got).
+
+        ``each`` covers what the registry has, so nothing can be absent. An
+        explicit list names a bench, and this may not be that bench: each
+        alias is resolved on its own, so the hosts that are here are kept and
+        the others are named. In strict mode every absent alias is named in
+        one refusal, rather than one per run of the command.
+        """
+        if not isinstance(selector, (tuple, list, str)) or selector == "each":
+            return self.registry.resolve_hosts(selector), ()
+        aliases = (selector,) if isinstance(selector, str) else tuple(selector)
+        if not aliases:
+            # The registry's own refusal for an empty selector.
+            return self.registry.resolve_hosts(selector), ()
+        kept: list[str] = []
+        absent: list[str] = []
+        for alias in aliases:
+            try:
+                kept.extend(self.registry.resolve_hosts([alias]))
+            except MissingResource:
+                absent.append(alias)
+        if absent and strict:
+            raise MissingResource(
+                "this registry has no host "
+                + ", ".join(f"'{alias}'" for alias in absent)
+            )
+        return tuple(kept), tuple(absent)
+
+    def _role_choices(self, definition, host, arguments, wanted):
+        """The resources each hardware role may be bound to, per role."""
+        choices = []
+        for role in definition.hardware_roles or {}:
+            resource_type = definition.hardware_roles[role]
+            selector = arguments.get(role, "default")
+            choices.append(
+                self.registry.resolve_hardware(
+                    host, resource_type, selector, role, wanted.get(role),
+                )
+            )
+        return choices
+
+    def compile_suite(
+        self, plan: Plan, suite: str, *, strict_hardware: bool = False
+    ) -> "CompiledSuite":
+        """Invocations, and the tests each host was left out of (not applicable).
+
+        One plan is compiled against every bench's registry, so a step may
+        name a host this registry has not got, or a device no host here has.
+        That is recorded as not applicable and left out, the way a platform
+        mismatch is, rather than ending the compile: otherwise one step for
+        one bench's hardware stops every other bench running the plan at all.
+
+        ``strict_hardware`` makes the same absence an error, which is what
+        ``validate-plan --hardware`` wants: there a registry is named on
+        purpose, so a host or a role it cannot provide is either a typo in
+        the plan or a bench that is not set up as the plan expects.
+        """
         invocations = []
         not_applicable: list[NotApplicable] = []
+        absent_hosts: set[str] = set()
         sequence = 0
         try:
             for step in plan.steps(suite):
                 step_start = len(invocations)
                 definition = self.catalog.get(step.test_name)
                 arguments = step.arguments
+                role_names = tuple(definition.hardware_roles or {})
+                if len(role_names) > 1 and any(
+                    arguments.get(role) == "each" for role in role_names
+                ):
+                    raise PlanningError(
+                        f"{step.test_name}: a multi-role test cannot select a "
+                        "role with 'each'; name each role by alias, or narrow "
+                        "it with rf:; all-pairs selection is not implemented"
+                    )
+                wanted = definition.placement_requirements(arguments)
+                # What each role could take on each host, for the refusal
+                # when no two roles can have different devices.
+                host_choices: dict[str, dict[str, tuple[str, ...]]] = {}
                 host_selector = arguments.get(
                     "host", arguments.get("hosts", "each")
                 )
-                hosts = self.registry.resolve_hosts(host_selector)
-                # Test-wide needs (the plan's platforms: and the definition's)
-                # leave a host out as not applicable; a test no named host can
-                # run is a plan error.
-                eligible_hosts = []
-                left_out = []
-                wanted = definition.placement_requirements(arguments)
+                hosts, absent = self._selected_hosts(host_selector, strict_hardware)
+                absent_hosts.update(absent)
+                # The reason names the host itself: the live run view shows a
+                # planning record by its reason alone, and "this registry has
+                # no such host" there would read as being about the host the
+                # run is on.
+                left_out = [
+                    NotApplicable(
+                        alias, step.test_name,
+                        f"{alias} is not a host in this registry",
+                    )
+                    for alias in absent
+                ]
+                # First what the hosts that are here can run at all: the
+                # plan's platforms: and the definition's needs, then the RF
+                # placement each role must have. A host is left out as not
+                # applicable, and a step no host here can run this way is a
+                # plan error, as it was before hardware absence was recorded.
+                candidates = []
+                blocked: list[NotApplicable] = []
                 for alias in hosts:
                     capabilities = platform_capabilities(
                         alias, self.registry.get(alias).platform
@@ -221,35 +355,40 @@ class PlanCompiler:
                         definition, alias, arguments, wanted
                     )
                     if reason:
-                        left_out.append(NotApplicable(alias, step.test_name, reason))
+                        blocked.append(NotApplicable(alias, step.test_name, reason))
                     else:
-                        eligible_hosts.append(alias)
-                if not eligible_hosts:
+                        candidates.append(alias)
+                left_out.extend(blocked)
+                if not candidates and blocked and not absent:
+                    # Every host the step names is here, and none can run it.
+                    # With an absent host among them the step was written for
+                    # a bench this is not, so it is left out instead.
                     raise PlanningError(
                         f"{step.test_name}: no selected host can run it: "
-                        + "; ".join(f"{item.host}: {item.reason}" for item in left_out)
+                        + "; ".join(f"{item.host}: {item.reason}" for item in blocked)
                     )
+                # Then the hardware itself. A host without the device a role
+                # binds is recorded, and a step no host here has the hardware
+                # for is left out: the step belongs to another bench.
+                bound: list[tuple[str, list]] = []
+                for alias in candidates:
+                    try:
+                        choices = self._role_choices(
+                            definition, alias, arguments, wanted
+                        )
+                    except MissingResource as error:
+                        if strict_hardware:
+                            raise
+                        left_out.append(
+                            NotApplicable(alias, step.test_name, str(error))
+                        )
+                        continue
+                    bound.append((alias, choices))
                 not_applicable.extend(left_out)
-                for host in eligible_hosts:
-                    role_names = tuple(definition.hardware_roles or {})
-                    if len(role_names) > 1 and any(
-                        arguments.get(role) == "each" for role in role_names
-                    ):
-                        raise PlanningError(
-                            f"{step.test_name}: a multi-role test cannot select a "
-                            "role with 'each'; name each role by alias, or narrow "
-                            "it with rf:; all-pairs selection is not implemented"
-                        )
-                    choices = []
-                    for role in role_names:
-                        resource_type = definition.hardware_roles[role]
-                        selector = arguments.get(role, "default")
-                        choices.append(
-                            self.registry.resolve_hardware(
-                                host, resource_type, selector, role,
-                                wanted.get(role),
-                            )
-                        )
+                if not bound:
+                    continue
+                for host, choices in bound:
+                    host_choices[host] = dict(zip(role_names, choices))
                     combinations = itertools.product(*choices) if choices else [()]
                     for selected in combinations:
                         if len(set(selected)) != len(selected):
@@ -300,20 +439,48 @@ class PlanCompiler:
                             )
                         )
                 if len(invocations) == step_start:
+                    # Every combination put one device in two roles. The
+                    # message names what each role could have taken, since
+                    # that is what has to change: the plan's selectors, or
+                    # the host's defaults.
                     raise PlanningError(
-                        f"{step.test_name}: no valid distinct resource assignment"
+                        f"{step.test_name}: no valid distinct resource "
+                        "assignment: "
+                        + "; ".join(
+                            f"{host}: "
+                            + ", ".join(
+                                f"{role} from {' or '.join(aliases)}"
+                                for role, aliases in roles.items()
+                            )
+                            for host, roles in host_choices.items()
+                        )
                     )
                 self._check_some_case_applies(
-                    definition, invocations[step_start:], left_out
+                    definition, invocations[step_start:], blocked
                 )
         except RegistryError as error:
             raise PlanningError(str(error)) from error
         if not invocations:
-            raise PlanningError(f"suite '{suite}' produced no runnable invocations")
-        return CompiledSuite(tuple(invocations), tuple(not_applicable))
+            # Asking to run a suite this bench has nothing for is still an
+            # error: the caller gets told why, test by test, rather than an
+            # empty run that looks like a pass.
+            shown = not_applicable[:5]
+            rest = len(not_applicable) - len(shown)
+            raise PlanningError(
+                f"suite '{suite}' produced no runnable invocations"
+                + "".join(f"; {item.describe()}" for item in shown)
+                + (f"; and {rest} more left out" if rest > 0 else "")
+            )
+        return CompiledSuite(
+            tuple(invocations), tuple(not_applicable), tuple(sorted(absent_hosts))
+        )
 
-    def compile(self, plan: Plan, suite: str) -> tuple[TestInvocation, ...]:
-        return self.compile_suite(plan, suite).invocations
+    def compile(
+        self, plan: Plan, suite: str, *, strict_hardware: bool = False
+    ) -> tuple[TestInvocation, ...]:
+        return self.compile_suite(
+            plan, suite, strict_hardware=strict_hardware
+        ).invocations
 
     def _check_some_case_applies(self, definition, invocations, left_out):
         """A plan error when, by platform alone, no case of the test can run

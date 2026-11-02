@@ -1520,6 +1520,22 @@ def builtin_catalog() -> TestCatalog:
                 extra={"eero": ArgumentRule(_required_text, required=True)},
             ),
             TestDefinition(
+                "Recover a BLE connection promiscuously",
+                "ubertooth-btle -p recovers a live connection between two "
+                "nRF52840 DKs that hops with channel selection algorithm 1",
+                MappingProxyType({
+                    "hosts": HOSTS, "Ubertooth": UBERTOOTH,
+                    "central": ArgumentRule(_selector, default="default"),
+                    "peripheral": ArgumentRule(_selector, default="default"),
+                    "coverage": COVERAGE, "duration": DURATION,
+                }),
+                MappingProxyType({
+                    "Ubertooth": "Ubertooth",
+                    "central": "nRF52840 DK",
+                    "peripheral": "nRF52840 DK",
+                }),
+            ),
+            TestDefinition(
                 "Bluetooth inquiry scan", "Run inquiry with a Bluetooth adapter",
                 MappingProxyType({
                     "hosts": HOSTS,
