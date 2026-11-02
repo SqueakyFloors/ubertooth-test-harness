@@ -45,13 +45,18 @@ self-reset counter into a pass/fail measure for that step; without it a
 self-reset is reported and judged by a person, not failed
 ([`watchdog.py`](../ubertooth_harness/watchdog.py)). `Flash reliability`,
 `Exclusive Ubertooth topology`, and `MAC polling soak` must state their
-platforms.
+platforms. Every test that binds hardware also accepts `rf:`, one placement
+requirement per role, and `required hardware: true`, which says the hardware
+that step names is what the step measures: a registry without it blocks the
+step and fails the run rather than leaving it out ("Hardware a step is
+about", below).
 
 **Hardware the bench has not got.** A step whose `hosts:` name a host this
 registry does not have, or whose hardware roles no selected host can bind (no
 ESP32 Classic peer, no DK, no default for the role, none declaring the role),
 is left out before the run as not applicable, the same way a platform
-mismatch is. So a plan every host runs may still hold a step for hardware
+mismatch is, unless the step carries `required hardware: true`, where it is
+blocked instead. So a plan every host runs may still hold a step for hardware
 only one bench has. What a host that is here cannot run is still a plan
 error: a platform it does not have, and a board placed differently from what
 the test needs, fail planning when every host the step names is here and none
@@ -60,10 +65,14 @@ left out instead).
 `validate-plan --hardware <registry>` refuses the absence too, since there
 the bench is named on purpose (README, "Hardware a registry has not got").
 
-**Hardware a step is about.** Two absences are not left out quietly, because
-the missing hardware is the subject of the test: `alternate Ubertooths` on a
-host with one registered Ubertooth, and `exclusive Ubertooth` where another
-registered board is on no power controller. Such a step is recorded as
+**Hardware a step is about.** Three absences are not left out quietly,
+because the missing hardware is the subject of the test: `alternate
+Ubertooths` on a host with one registered Ubertooth, `exclusive Ubertooth`
+where another registered board is on no power controller, and a step that
+says so itself with `required hardware: true` for the hardware it binds (a
+host with no peer registered, one peer where the test needs two, or a
+registry without that host at all). `testplans/release.yaml` uses the last
+of those for `Recover AFH map`. Such a step is recorded as
 **blocked** before the run; every unrelated step still compiles and runs, and
 the run finishes failed, so a gate nobody measured never reads as a pass.
 `run-suite --dry-run` lists the blocked steps and exits 1. A suite whose only
@@ -2212,7 +2221,8 @@ nothing and hides nothing either: a registry without those peers, or without
 that host, runs every other release test and records this one as blocked, and
 the run finishes failed rather than passing with the recovery unmeasured. Its
 smoke estimate is about 520 s, which takes the release suite to about 1175 s
-(roughly 20 minutes). The third, `-t` case stays in the
+(roughly 20 minutes) on the host it names; a target without the peers plans
+about 655 s of the suite and fails on this step. The third, `-t` case stays in the
 `classic-comprehensive` suite, which a release runs alongside the gate.
 
 **Expected outcome.** Smoke runs 2 cases, one per map: channels 0 to 39, and

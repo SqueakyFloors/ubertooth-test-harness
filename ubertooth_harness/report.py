@@ -596,15 +596,17 @@ def _known(value) -> str:
 
 
 def _blocked_section(run: _Run) -> list[str]:
-    """Required tests that never ran: this bench has not got the hardware
-    they are about, so the run cannot pass without them."""
+    """Required tests that never ran: the hardware they are about is not
+    registered, so the run cannot pass without them. Either this host has
+    not got it, or the step named a host this registry has not got at all."""
     if not run.blocked:
         return []
     lines = [
         "", "## Blocked", "",
-        "Required tests this bench has not got the hardware for. They never "
-        "ran, so the run fails: unlike a not-applicable test, each one is "
-        "about the hardware that is missing.", "",
+        "Required tests whose hardware is not registered: on this host, or "
+        "on a host this registry has not got. They never ran, so the run "
+        "fails: unlike a not-applicable test, each one is about the hardware "
+        "that is missing.", "",
         "| Test | Host | Reason |", "|---|---|---|",
     ]
     for item in run.blocked:

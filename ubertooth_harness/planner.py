@@ -140,18 +140,20 @@ class CompiledSuite:
         run of the suite, as ``for_host`` puts that host's not-applicable
         records in every run: no run of its own will ever carry it, and a
         release gate nobody could measure must not pass anywhere. One record
-        per test, and nothing for a test this host has a record of its own
-        for, which says more: a test this host ran measured the gate, and a
-        test it was left out of has its own reason, so another host's
-        absence is not what its run should fail on.
+        per test, and nothing for a test this host runs: that run measured
+        the gate, so another host's absence is not what it should fail on.
+
+        A test this host was left out of does carry the record, even though
+        it has a not-applicable reason of its own. It could not measure the
+        gate, and nor could the host that is not here, so no run of this
+        suite would fail on it otherwise, and the absence would read as a
+        pass. ``for_host`` then leaves its own record out, as it does for
+        any test blocked on this host.
         """
         mine = tuple(item for item in self.blocked if item.host == host)
         covered = {item.test_name for item in mine}
         covered |= {
             item.test_name for item in self.invocations if item.host == host
-        }
-        covered |= {
-            item.test_name for item in self.not_applicable if item.host == host
         }
         absent = []
         for item in self.blocked:

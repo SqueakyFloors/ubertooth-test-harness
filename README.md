@@ -796,6 +796,8 @@ without them runs the rest of the plan and the run fails on it rather than
 passing with that gate unmeasured (see
 [Hardware a step is about](#hardware-a-step-is-about-blocked-not-left-out)).
 It runs the `smoke` profile there, about 520 s of the plan's roughly 1175 s.
+A target that is not the host it names plans about 655 s of the suite: the
+total counts every step, whichever host it is for (#284).
 
 That step leases both ESP32 Classic bridges for the length of the run, so the
 peer suites below run before or after the release plan, not beside it.

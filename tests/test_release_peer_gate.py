@@ -399,7 +399,11 @@ class ReleaseDryRunTests(unittest.TestCase):
             text,
         )
         self.assertIn("1 test(s) blocked", text)
-        self.assertIn(f"error: 1 required test(s) cannot run on {host}", errors)
+        # The error does not claim the host: on macOS the record is about
+        # `Host_Linux`, which this registry has not got. Its own line above
+        # names the host.
+        self.assertIn("error: 1 required test(s) of release cannot run", errors)
+        self.assertNotIn(f"cannot run on {host}", errors)
         # The rest of the gate is still planned: the one absence does not
         # take the suite away.
         self.assertIn("Host CLI surface", text)
@@ -562,10 +566,51 @@ class RequiredHardwareArgumentTests(unittest.TestCase):
              if item.test_name == AFH],
         )
         self.assertEqual((), compiled.blocked_for_host("Host_Linux"))
-        # The host that neither ran it nor has a reason of its own does
-        # carry it: no run of `Host_Lab` will ever happen here.
+        # A host that did not run it does carry the record: no run of
+        # `Host_Lab` will ever happen here.
         (blocked,) = compiled.blocked_for_host("Host_Mac")
         self.assertEqual(("Host_Lab", AFH), (blocked.host, blocked.test_name))
+
+    def test_a_host_left_out_of_the_test_still_fails_on_an_absent_one(self):
+        """The host that is here cannot measure the gate either, and nor can
+        the host that is not, so its run has to fail on it: with its own
+        not-applicable reason preferred, nothing in this registry would, and
+        the absence would read as a pass. Its own record is dropped, as it is
+        for any test blocked on the host."""
+        text = (
+            "plan: gate\nsuites:\n  release:\n"
+            "    - Host CLI surface:\n        hosts: each\n"
+            f"    - {AFH}:\n"
+            "        hosts: [Host_Lab, Host_Mac]\n"
+            "        platforms: [linux]\n"
+            "        required hardware: true\n"
+            "        Ubertooth: default\n"
+            "        acceptor: default\n"
+            "        initiator: default\n"
+            "        coverage: smoke\n"
+            "        duration: 2m\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "plan.yaml"
+            path.write_text(text, encoding="utf-8")
+            compiled = PlanCompiler(
+                self.catalog, registry(directory, MAC_ONLY)
+            ).compile_suite(load_plan(path, self.catalog), "release")
+
+        self.assertEqual(("Host_Lab",), compiled.absent_hosts)
+        self.assertNotIn(AFH, [item.test_name for item in compiled.invocations])
+        # Host_Mac is left out by platform and has its own record for that.
+        self.assertEqual(
+            ["runs only on Linux, and Host_Mac is macOS"],
+            [item.reason for item in compiled.not_applicable
+             if item.host == "Host_Mac" and item.test_name == AFH],
+        )
+        (blocked,) = compiled.blocked_for_host("Host_Mac")
+        self.assertEqual(("Host_Lab", AFH), (blocked.host, blocked.test_name))
+        self.assertEqual(
+            [], [item for item in compiled.for_host("Host_Mac")
+                 if item.test_name == AFH]
+        )
 
     def test_a_suite_with_only_a_blocked_required_step_is_refused(self):
         """Nothing to run means no run to fail, so planning refuses it and
