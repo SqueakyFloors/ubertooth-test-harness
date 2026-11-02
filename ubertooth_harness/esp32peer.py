@@ -933,6 +933,9 @@ def _audio_measured(out, boards, before: dict, after: dict, *,
             continue  # the reading itself failed, and said so
         status = end["status"]
         try:
+            # Inside the try with the arithmetic: a board that did not
+            # report one of these is this board's problem, and the other
+            # board's figures, the stop, and the release still happen.
             counters = _moved(start["counters"], end["counters"], peer, "status")
             # None where the board could not give its controller's counters,
             # which the reading reported as its own problem.
@@ -943,7 +946,9 @@ def _audio_measured(out, boards, before: dict, after: dict, *,
         except PeerError as error:
             problems.append(str(error))
             continue
-        print(f"{peer.label} audio: {status['sco']} {status['sco_pkt_type']}, "
+        state = _audio_field(status, "sco", str, peer.label)
+        settled = _audio_field(status, "sco_pkt_type", str, peer.label)
+        print(f"{peer.label} audio: {state} {settled}, "
               f"sent {counters['sco_tx_frames']} received "
               f"{counters['sco_rx_frames']} frames, "
               f"{counters['sco_tx_errors']} send errors, "
@@ -968,11 +973,13 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
     # the board that paged, so it is the one whose end of the link goes
     # first when the session is taken apart.
     boards = ((initiator, initiator_shell), (acceptor, acceptor_shell))
-    # Both boards are released on every way out of this function, including
-    # a cancellation or a serial error, which is not a PeerError; the flag
-    # is what keeps the release on the ordinary path, where it happens
-    # after the measurements, from happening twice.
-    released = False
+    released: set[str] = set()
+    # Both boards are released on every way out of this function,
+    # including a cancellation or a serial error, which is not a
+    # PeerError. Which boards that has been done for is tracked by name,
+    # so the ordinary path - where the release happens after the
+    # measurements - cannot release one twice, and an interruption part way
+    # through that loop still releases the board it had not reached.
     acceptor_shell.wait_ready()
     initiator_shell.wait_ready()
     acceptor_status = check_status(acceptor_shell.status(), acceptor.label,
@@ -1071,14 +1078,21 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         for peer, shell in boards:
             try:
                 shell.command(SCO_STOP, AUDIO_STOP_TIMEOUT_S)
-            except PeerError as error:
+            except Exception as error:
+                # Any failure, as in _release: letting a serial error out
+                # of here would throw away the measurements and the reason
+                # the session failed, which is the whole point of stopping
+                # the link at this moment rather than earlier.
                 problems.append(f"the {peer.label} did not stop its audio "
                                 f"link: {error}")
         for peer, shell in boards:
+            # Marked before the attempt, not after: each board gets one
+            # release, so an interruption part way through this loop does
+            # not send the board it was working on through a second one.
+            released.add(peer.label)
             reason = _release(shell, peer, AUDIO_RELEASE_STATE)
             if reason:
                 problems.append(reason)
-        released = True
         if seconds < min_seconds:
             problems.append(f"{command[0]} ran {seconds:.1f} s, less than the "
                             f"{min_seconds:g} s this test needs: it stopped "
@@ -1086,16 +1100,17 @@ def _audio(acceptor, acceptor_shell, initiator, initiator_shell, command, *,
         if problems:
             raise PeerError("the pair did not carry audio: "
                             + "; ".join(problems))
-        print("pair carried audio: "
-              f"{after[initiator.label]['status']['sco_pkt_type']}", file=out)
+        print("pair carried audio: " + _audio_field(
+            after[initiator.label]["status"], "sco_pkt_type", str,
+            initiator.label), file=out)
         return status
     finally:
         # Whatever went wrong - a refused command, a cancellation, a bridge
         # that went away - the boards go back as far as they will go. The
         # failure that brought us here is the report, and the case's own
         # cleanup resets them again.
-        if not released:
-            for peer, shell in boards:
+        for peer, shell in boards:
+            if peer.label not in released:
                 _release(shell, peer, AUDIO_RELEASE_STATE)
 
 

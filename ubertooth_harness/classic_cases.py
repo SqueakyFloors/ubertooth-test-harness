@@ -106,12 +106,15 @@ PAIR_SETUP_S = (
 # The audio bring-up sends four more commands than the stream's and reads
 # one more status, and `sco start` on the initiator pages, starts the
 # hands-free profile, and opens the audio link, which the firmware allows
-# much longer than an ordinary command. The session then reads each board
-# twice either side of the command - a status and the controller's packet
-# counters each time, eight reads where the old one took two - and takes
-# the link down on both before releasing them: ten commands more than the
-# stream session's budget allows for.
-AUDIO_SETUP_S = (PAIR_SETUP_S + 13 * esp32peer.COMMAND_TIMEOUT_S
+# much longer than an ordinary command. So: the five ordinary commands the
+# bring-up adds to the stream session's, the eight readings the session
+# takes (a status and the controller's packet counters on each board,
+# before the command and after it, where the old one took two statuses),
+# and the two `sco stop` calls on their own longer deadline. Only the
+# initiator's `sco start` gets AUDIO_CONNECT_TIMEOUT_S: the acceptor's only
+# starts a profile, which the firmware allows three seconds for, so it is
+# budgeted as an ordinary command.
+AUDIO_SETUP_S = (PAIR_SETUP_S + (5 + 8) * esp32peer.COMMAND_TIMEOUT_S
                  + 2 * esp32peer.AUDIO_STOP_TIMEOUT_S
                  + esp32peer.AUDIO_CONNECT_TIMEOUT_S)
 # One identify or reset: an open with its reset, then a status read.

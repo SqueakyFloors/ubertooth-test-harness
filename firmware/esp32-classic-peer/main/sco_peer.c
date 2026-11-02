@@ -641,7 +641,10 @@ static const char *profile_start(enum peer_role role)
 
     /* Before anything is registered, so that a link the controller reports
      * while this profile is coming up is counted and kept. Zeroing them
-     * afterwards would erase exactly the event a session needs to see. */
+     * afterwards would erase exactly the event a session needs to see. A
+     * start that then fails leaves them zeroed, which is right: there is
+     * no link, and counts from a profile that has gone describe nothing a
+     * reader can line up against. */
     LOCK();
     sc.tx_frames = sc.tx_errors = sc.rx_frames = sc.rx_bad = 0;
     sc.connects = sc.disconnects = 0;

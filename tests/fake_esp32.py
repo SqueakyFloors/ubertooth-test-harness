@@ -303,6 +303,12 @@ class FakePeerFirmware:
         happened while the command was running, whichever board of the pair
         it was registered on.
         """
+        # From zero, so a fixture used for a second session in one test
+        # does not fire the hook on the first board's baseline because the
+        # far board still carries a count from the session before.
+        for board in (self, self.peer_firmware):
+            if board is not None:
+                board.stats_reads = 0
         self._hook = hook
 
     def _fire_hook(self):

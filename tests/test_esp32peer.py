@@ -799,6 +799,34 @@ class AudioCleanupTests(unittest.TestCase):
                     self.assertEqual("off", board.sco)
                     self.assertEqual(esp32peer.BOOT_ROLE, board.role)
 
+    def test_an_interruption_during_the_release_resets_each_board_once(self):
+        """The board already released is not released a second time.
+
+        The release happens after the measurements on the ordinary path, so
+        an interruption can land between the two boards. Each must end up
+        released, and neither twice.
+        """
+        acceptor, initiator = _audio_pair()
+        acceptor_peer, initiator_peer = _peers(acceptor, initiator)
+        plain_reset = initiator.boot
+
+        def interrupt_after_the_initiator():
+            lines = plain_reset()
+            if initiator.resets > 1:
+                raise KeyboardInterrupt
+            return lines
+        initiator.boot = interrupt_after_the_initiator
+        with self.assertRaises(KeyboardInterrupt):
+            esp32peer.audio(acceptor_peer, initiator_peer, TRUE,
+                            out=io.StringIO(), settle_s=0.0, min_frames=10)
+
+        # The initiator's release is where the interruption landed, so it
+        # was tried once; the acceptor's happened in the finally, once.
+        self.assertEqual(2, initiator.resets)
+        self.assertEqual(2, acceptor.resets)
+        self.assertEqual("off", acceptor.sco)
+        self.assertEqual(esp32peer.BOOT_ROLE, acceptor.role)
+
     def test_a_board_is_not_reset_twice_on_the_ordinary_path(self):
         acceptor, initiator = _audio_pair()
         acceptor_peer, initiator_peer = _peers(acceptor, initiator)
@@ -882,11 +910,6 @@ class PeerShellArityTests(unittest.TestCase):
     usage lines PeerShellSourceTests pins to the firmware's own.
     """
 
-    def setUp(self):
-        self.firmware = FakePeerFirmware(version=esp32peer.AUDIO_FIRMWARE)
-        self.shell = fake_esp32.shell(self.firmware)
-        self.shell.wait_ready()
-
     @staticmethod
     def _board(live: bool):
         """A board to send a malformed line to, idle or with a link up.
@@ -965,15 +988,16 @@ class PeerShellArityTests(unittest.TestCase):
         self.assertIn(fake_esp32.SCO_TYPE_USAGE, self._refused("sco type hv3"))
 
     def test_the_four_forms_it_does_know_are_not_refused(self):
+        firmware, shell, _far = self._board(live=False)
         # `type` is the one of the four that works with no link up.
-        self.assertEqual([], self.shell.command("sco type ev3"))
-        self.assertEqual("ev3", self.firmware.status()["sco_type"])
-        for line in ("sco start", "sco stop"):
+        self.assertEqual([], shell.command(f"{esp32peer.SCO_TYPE} ev3"))
+        self.assertEqual("ev3", firmware.status()["sco_type"])
+        for line in (esp32peer.SCO_START, esp32peer.SCO_STOP):
             with self.subTest(line=line):
-                self.shell.command(line)
+                shell.command(line)
         # `stats` needs a live link, and says so rather than any usage line.
         with self.assertRaises(esp32peer.PeerError) as raised:
-            self.shell.command("sco stats")
+            shell.command(esp32peer.SCO_STATS)
         self.assertIn("no audio link to count packets on", str(raised.exception))
 
 
