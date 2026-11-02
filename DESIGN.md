@@ -988,9 +988,13 @@ teaches what its passing tests took.
 **Key:** stage, test name, target host (an invocation's own host wins over
 the run's target), coverage profile, and the value of the scaling argument —
 `duration`, `capture duration`, `flashes`, or preflight's number of checks —
-so a 5 s capture and a 30 s capture are separate. A build that includes the
-firmware would be a key of its own; a runner the controller dispatches builds
-host tools only.
+so a 5 s capture and a 30 s capture are separate. A build's profile slot holds
+what it made, because the firmware image and the Python tools each add work to
+it: `host tools`, `host tools and Python tools`, `with firmware`, and `with
+firmware and Python tools` are four keys. Each option is read from the build's
+own `build_started` record (`with_firmware`, `with_python`), and before that
+record arrives from what the run asked for; a record from before an option was
+recorded does not name it, which reads as off, as that build was.
 
 **Estimate:** the median of the key's last 10 samples once there are 3, so one
 run that queued behind a busy board does not move it. With fewer, the rate learned

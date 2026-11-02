@@ -1663,8 +1663,10 @@ def create_app(controller: Controller):
                 # whether it asked for the image or not (run-suite turns
                 # --with-firmware on for it), and a firmware build is the
                 # longer kind; the run's own build_started record replaces
-                # this guess as soon as it arrives.
+                # this guess as soon as it arrives. Nothing turns the Python
+                # tools on by itself, so that one is what was asked for.
                 with_firmware=run.with_firmware or run.flash_build,
+                with_python=run.with_python,
             ),
         }
 

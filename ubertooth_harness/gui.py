@@ -492,21 +492,33 @@ def planned_invocations(
     return planned
 
 
-def _builds_firmware(events: Sequence[Mapping], requested: bool) -> bool:
-    """Whether this run's build includes the firmware image.
+def _build_options(
+    events: Sequence[Mapping], *, with_firmware: bool, with_python: bool
+) -> dict[str, bool]:
+    """Which optional parts this run's build includes.
 
-    Its own ``build_started`` record when it has one (which also covers a run
-    that built the firmware only because it flashed its boards, and a run
-    adopted from a runner report, which carries no request), else what the
-    run was asked for.
+    Each option comes from the run's own ``build_started`` record when that
+    record names it (which also covers a run that built the firmware only
+    because it flashed its boards, and a run adopted from a runner report,
+    which carries no request), else from what the run was asked for. The two
+    are read one by one because a record written before an option was
+    recorded names only the other.
     """
+    options = {"with_firmware": bool(with_firmware), "with_python": bool(with_python)}
+    pending = set(options)
     for event in events:
+        if not pending:
+            break
         if not isinstance(event, Mapping) or event.get("event_type") != "build_started":
             continue
         details = event.get("details")
-        if isinstance(details, Mapping) and "with_firmware" in details:
-            return bool(details["with_firmware"])
-    return bool(requested)
+        if not isinstance(details, Mapping):
+            continue
+        for option in list(pending):
+            if option in details:
+                options[option] = bool(details[option])
+                pending.discard(option)
+    return options
 
 
 def run_stage_estimates(
@@ -516,6 +528,7 @@ def run_stage_estimates(
     *,
     build: bool = False,
     with_firmware: bool = False,
+    with_python: bool = False,
 ) -> list[dict]:
     """What the run's build and preflight are expected to take, if known.
 
@@ -523,9 +536,10 @@ def run_stage_estimates(
     not finished a run of its own gets an empty list. Preflight scales with
     its number of checks, which the run's manifest record gives; a build is
     listed as soon as the run asks for one or its records show one started.
-    A firmware build is much the longer of the two kinds, so the estimate is
-    looked up for the kind this run builds: what its own ``build_started``
-    record says, else what the run was asked for.
+    The firmware image and the Python tools each add real work to a build
+    (the firmware much the more of it), so the estimate is looked up for the
+    build this run makes: what its own ``build_started`` record says, else
+    what the run was asked for.
     """
     if estimates is None or not host:
         return []
@@ -540,8 +554,8 @@ def run_stage_estimates(
         for event in events
     )
     if building:
-        wanted.append((BUILD_STAGE, build_profile(_builds_firmware(
-            events, with_firmware)), None))
+        wanted.append((BUILD_STAGE, build_profile(**_build_options(
+            events, with_firmware=with_firmware, with_python=with_python)), None))
     if checks is not None:
         # A float, as the stored keys and /api/plans report units.
         wanted.append((PREFLIGHT_STAGE, "", {"argument": PREFLIGHT_UNITS,

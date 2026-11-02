@@ -630,18 +630,35 @@ def _units_pair(argument, value) -> tuple[str, float] | None:
     return (argument, number)
 
 
-def build_profile(with_firmware) -> str:
+# The profile a build is learned under, by the two options that add work to
+# it: the firmware image (`run-suite --with-firmware`) and the Python tools
+# (`--with-python`). Every build makes the host tools, so the plain one is
+# named for them. The two profiles without the Python tools keep the names
+# they have always had, so the samples already stored stay where they were
+# learned and the two new profiles fill from the runs that follow.
+BUILD_PROFILES = {
+    (False, False): "host tools",
+    (False, True): "host tools and Python tools",
+    (True, False): "with firmware",
+    (True, True): "with firmware and Python tools",
+}
+
+
+def build_profile(with_firmware, with_python=False) -> str:
     """The profile a build is learned under.
 
-    A firmware build takes much longer than host tools alone, so the two are
-    learned apart and an estimate is only ever shown for the kind of build a
-    run actually asks for.
+    The firmware image and the Python tools are each real extra work (the
+    firmware much the larger of the two), so all four combinations are
+    learned apart and an estimate is only ever shown for the combination a
+    run actually builds.
     """
-    return "with firmware" if with_firmware else "host tools"
+    return BUILD_PROFILES[(bool(with_firmware), bool(with_python))]
 
 
 def _build_profile(details: Mapping) -> str:
-    return build_profile(details.get("with_firmware"))
+    # A record from before an option existed does not name it, which reads
+    # as false: that is what such a build did.
+    return build_profile(details.get("with_firmware"), details.get("with_python"))
 
 
 def _host(value, fallback: str) -> str:
