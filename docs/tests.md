@@ -2604,9 +2604,9 @@ Device-level testing of `ubertooth-ducky` and `ubertooth-ego` is out of scope
 ([#89](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/89)), by
 the maintainer's scope decision. There is no catalog test and no backlog entry
 for either, and neither is waiting on a fixture: the harness will not drive an
-Uberducky HID peer or a registered E-GO skateboard, and `ubertooth-ducky -q`
-and `-b` and `ubertooth-ego -f`, `-i`, and `-j`, which all transmit, stay
-untested.
+Uberducky HID peer or a registered E-GO skateboard. So `ubertooth-ducky -q`
+and `-b`, which transmit, `ubertooth-ego -i` and `-j`, which transmit, and
+`ubertooth-ego -f`, which needs a skateboard to follow, all stay untested.
 
 What the harness does keep for both tools needs no peer and no transmission:
 
