@@ -613,7 +613,11 @@ class Controller:
                 continue
             groups.append(implicit_group(runs[run.run_id]))
         views = [
-            group_view(group, runs) for group in groups
+            # With the outstanding requests, as every other view of a group
+            # has them: the list is the history, and a group whose child may
+            # still arrive must not read as finished here either.
+            group_view(group, runs, pending=self._pending_hosts(group.group_id))
+            for group in groups
             if target is None or target in group.hosts
         ]
         views.sort(key=lambda view: (view["created_at"], view["group_id"]), reverse=True)
@@ -1618,11 +1622,15 @@ class Controller:
             # saying 409 would read as the caller's mistake.
             raise unexpected[0]
         statuses = {error.status for _host, error in failures}
+        kept = (
+            f"; run group {group.group_id} is kept while a request may still "
+            "be accepted" if group.group_id in self.groups else ""
+        )
         raise ControllerError(
             "no run started: " + "; ".join(
                 f"{host}: {self._failure_detail(host, error)}"
                 for host, error in failures
-            ),
+            ) + kept,
             statuses.pop() if len(statuses) == 1 else 409,
         )
 
@@ -1700,8 +1708,13 @@ class Controller:
 
         Each host's cancel stands on its own, as its run does: a host whose
         runner is away keeps its own reason and the others are still
-        cancelled. Only when not one of them could be cancelled is this a
-        refusal, because then nothing was asked of any runner.
+        cancelled. Only when not one of them could be cancelled, and none is
+        still starting, is this a refusal, because then nothing was asked of
+        any runner and nothing will be.
+
+        A host whose start request is outstanding has no run to cancel yet;
+        it is reported as such, and the child its runner may still accept is
+        cancelled as it arrives.
         """
         group = self.get_group(group_id)
         active = [
@@ -1709,7 +1722,11 @@ class Controller:
             if isinstance(entry.get("run_id"), str)
             and entry["run_id"] in self.runs and self.runs[entry["run_id"]].active
         ]
-        if not active:
+        # A host whose start request is still outstanding has nothing to
+        # cancel yet, but the child it may still accept is cancelled as it
+        # arrives, so asking to cancel the group is not refused here.
+        starting = sorted(self._pending_hosts(group.group_id))
+        if not active and not starting:
             raise ControllerError(
                 f"run group {group.group_id} has no active run", 409
             )
@@ -1727,6 +1744,14 @@ class Controller:
             return_exceptions=True,
         )
         outcomes, failures = [], []
+        for host in starting:
+            outcomes.append({
+                "host": host, "run_id": None, "canceled": False,
+                "error": (
+                    "no run has started on this host yet; one its runner "
+                    "accepts now is canceled as it arrives"
+                ),
+            })
         for (host, run_id), result in zip(active, results):
             # A cancelled result is one child's own cancellation, not this
             # caller's: gather would have raised. It is that host's failure,
@@ -1741,9 +1766,11 @@ class Controller:
                 outcomes.append({
                     "host": host, "run_id": run_id, "canceled": True, "error": None,
                 })
-        if len(failures) == len(active):
+        if active and len(failures) == len(active) and not starting:
             if asked:
-                # Nothing was cancelled after all.
+                # Nothing was cancelled and nothing can be: with a request
+                # still outstanding the cancel stands, because the child it
+                # accepts is cancelled under it.
                 group.cancel_requested = False
                 group.cancel_reason = None
                 self._persist_group(group)
@@ -1777,6 +1804,12 @@ class Controller:
         planned invocations and stage estimates, exactly as
         ``/api/runs/{run_id}`` reports them for a run on its own.
         """
+        # One snapshot of the group, and every host's steps settled against
+        # the status that snapshot carries. A child that ends while this
+        # answer is built is therefore reported as it was, with steps to
+        # match, and the next request shows its end: the answer is never a
+        # status from one moment with steps from another, and a step is never
+        # settled against records that do not show the run over.
         view = self.view_group(group)
         members, per_host = [], {}
         # One host at a time, as /api/runs/{run_id} reads one run: a group of

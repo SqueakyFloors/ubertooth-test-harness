@@ -671,6 +671,9 @@ class GroupStartTests(RunGroupTestCase):
         self.assertEqual(504, status, payload)
         self.assertIn("no run started", payload["detail"])
         self.assertIn("did not answer in time", payload["detail"])
+        # The answer names the group it kept, so a caller can follow it.
+        self.assertIn("is kept while a request may still be accepted",
+                      payload["detail"])
         # Stored, because both requests are still pending. The group is not
         # finished while a child of it may still arrive.
         (group_id,) = list(self.controller.groups)
@@ -694,6 +697,15 @@ class GroupStartTests(RunGroupTestCase):
                          (view["status"], view["hosts_started"], view["complete"]))
         self.assertEqual(["starting", "running"],
                          [member["status"] for member in view["members"]])
+        # The history list says the same as the group's own view.
+        status, payload, _ = await self.http("GET", "/api/run-groups")
+        (listed,) = payload["groups"]
+        self.assertEqual(
+            (view["status"], view["finished_at"],
+             [member["status"] for member in view["members"]]),
+            (listed["status"], listed["finished_at"],
+             [member["status"] for member in listed["members"]]),
+        )
 
     async def test_a_group_no_child_can_join_any_more_is_forgotten(self):
         """A group kept for a pending request goes when that request does."""
@@ -762,6 +774,33 @@ class GroupStartTests(RunGroupTestCase):
         self.assertEqual([], list((self.results / GROUPS_DIR).glob("*.json")))
         status, payload, _ = await self.http("GET", "/api/run-groups")
         self.assertEqual([], payload["groups"])
+
+    async def test_a_group_whose_hosts_are_all_starting_can_be_cancelled(self):
+        """Nothing to cancel yet, but what arrives later is cancelled."""
+        linux, mac = await self.runners()
+        self.controller.reply_timeout_s = 0.3
+        post = await self.start_group([LINUX, MAC])
+        requests = {runner.host: await runner.recv() for runner in (linux, mac)}
+        self.assertEqual(504, (await post)[0])
+        (group_id,) = list(self.controller.groups)
+        status, payload, _ = await self.http(
+            "POST", f"/api/run-groups/{group_id}/cancel", {"reason": "not now"},
+        )
+        self.assertEqual(202, status, payload)
+        self.assertTrue(payload["group"]["cancel_requested"])
+        self.assertEqual(
+            [(LINUX, None, False), (MAC, None, False)],
+            [(item["host"], item["run_id"], item["canceled"])
+             for item in payload["canceled"]],
+        )
+        self.assertIn("canceled as it arrives", payload["canceled"][0]["error"])
+        # A runner that accepts now has its run cancelled at once.
+        await mac.send(
+            "run_accepted", request_id=requests[MAC]["request_id"], run_id="run-2"
+        )
+        late = await mac.recv()
+        self.assertEqual(("cancel", "run-2", "not now"),
+                         (late["type"], late["run_id"], late["reason"]))
 
     async def test_a_child_accepted_after_the_cancel_is_cancelled_too(self):
         """A host that answered late must not run on by itself."""

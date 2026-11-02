@@ -1124,8 +1124,10 @@ shape whatever started a run.
   children.
 - **Cancel applies to the group.** `POST /api/run-groups/{id}/cancel` cancels
   every active child and reports each host's outcome; a host whose runner is
-  away keeps its own reason and the others are still cancelled. Only when not
-  one child could be cancelled is it a refusal.
+  away keeps its own reason and the others are still cancelled, and a host
+  that is still starting has nothing to cancel yet but has the child it
+  accepts next cancelled as it arrives. Only when not one child could be
+  cancelled, and none is starting, is it a refusal.
 - **Per-host step results.** `GET /api/run-groups/{id}` returns one row per
   step — build, flash, preflight, then the tests in planned order — each with
   one cell **per host that runs it, and only those**: a step a host does not

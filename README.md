@@ -2600,7 +2600,9 @@ and passed, otherwise the worst outcome among them — an error, then a
 failure, then a [lost](#controller) run, then a cancel, and a status this
 code does not know ranks as an error.
 `POST /api/run-groups/{group_id}/cancel` cancels every active child and
-reports each host's outcome.
+reports each host's outcome. A host that is still starting has nothing to
+cancel yet; its outcome says so, and the child its runner may still accept
+is cancelled as it arrives.
 
 `GET /api/run-groups/{group_id}` is the per-host result: one row per step —
 build, flash, preflight, then the tests in planned order — each with one cell
@@ -2640,7 +2642,7 @@ Endpoints (JSON unless noted; `GET /` lists them):
 | `POST /api/run-groups` | start a [run group](#run-groups-one-plan-on-several-hosts): the same body as a run plus `{"hosts": ["Host_Linux", "Host_Mac"]}` (at least one, each named once, at most 16). 201 with the group, each member carrying its `run_id` or the `error` that host's start gave; 422 for an unusable request, a ref not in `/api/refs`, or an option that needs `build` without it; when no host started, the one status every host gave (404 an unknown target, 409 busy, 503 a runner away, 504 no answer in time) or 409 where they differ |
 | `GET /api/run-groups[?target=HOST]` | groups, newest first, each with its members; a run of its own is listed as a group of one (`implicit: true`, its ID the run's own) |
 | `GET /api/run-groups/{group_id}` | the group, each member's run with its failure summary, stage estimates and planned invocations (at most 600 of them, since this answer carries one list per host; the whole list stays at `GET /api/runs/{run_id}`), `steps` (one row per build, flash, preflight and test, with one cell per host that runs it) and `progress` (cells planned, cells done, and the summed estimate when every cell has one, which a run that flashes its boards has not got: flashing the run's build is not a learned stage) |
-| `POST /api/run-groups/{group_id}/cancel` | `{"reason": ""}`; 202 with each host's outcome once at least one child was cancelled, 409 when nothing is running; when no child could be cancelled, the one status every host gave (409 busy, 503 runner away, 504 no answer) or 409 where they differ |
+| `POST /api/run-groups/{group_id}/cancel` | `{"reason": ""}`; 202 with each host's outcome once at least one child was cancelled, or once a host is still starting (its outcome says so, and the child its runner may still accept is cancelled as it arrives); 409 when nothing is running and nothing is starting; when no child could be cancelled, the one status every host gave (409 busy, 503 runner away, 504 no answer) or 409 where they differ |
 | `GET /api/runs[?target=HOST]` | runs, newest first |
 | `GET /api/runs/{run_id}` | status, every event, the failure summary (`failures`), `invocations` (from the run's manifest, every planned invocation on the target with `invocation_id`, `test_name`, `estimated_s`, `catalog_estimated_s`, `estimate_source`, `estimate_samples` and `estimate_scaled`; null before the manifest record), and `stages`: the run's build and preflight estimates where its host has learned them |
 | `GET /api/runs/{run_id}/report.md` | the run's report (Markdown) |
