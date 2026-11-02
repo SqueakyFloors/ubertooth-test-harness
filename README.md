@@ -1953,10 +1953,12 @@ UT_Linux1    free
 
 The registry is refused when a pairing cannot be real: a target that is not
 registered, is not a device the harness leases, sits on another host (leases
-are local to one host), or already has a programmer, two programmers sharing
-one serial, a programmer that names itself or more than one target, a
-`programs:` on anything that is not a `Debug programmer`, and a pairing that
-loops back on itself. A chain of pairs is allowed and is held as one set. No test binds a programmer and the harness
+are local to one host), or already has a programmer, a programmer whose
+serial another device is registered with or which spells a file the lease
+directory keeps for itself, a programmer that names itself or more than one
+target, a `programs:` on anything that is not a `Debug programmer`, and a
+pairing that loops back on itself. A chain of pairs is allowed and is held as
+one set. No test binds a programmer and the harness
 never drives one; see
 [`docs/hardware.md`](docs/hardware.md#a-debug-programmer-and-the-board-it-programs).
 

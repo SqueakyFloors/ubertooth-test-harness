@@ -265,8 +265,11 @@ holds the other.
   there would be no lock to take for it), is attached to another host (leases
   are local to a host, so a pair across two of them would hold nothing),
   already has another programmer, or is the programmer itself, and when the
-  pairing loops back on itself. Two programmers may not share one serial,
-  since the serial is what names the lease.
+  pairing loops back on itself. Its serial has to be its own: a programmer
+  may not take a serial another device is registered with, nor one that
+  spells a file the lease directory keeps for itself (`host-power`,
+  `takeover`), because the bench lock name for a programmer is that serial
+  on its own and a lock of one would be read as a lock of the other.
 - A chain is allowed and is held as one set, for a bench that wires a
   programmer to another programmer's own header: holding any member holds all
   of them.

@@ -164,6 +164,41 @@ _PROGRAMMER_IDENTITY_KEYS = ("serial", "serial device")
 _PROGRAMMER_SERIAL = re.compile(r"^[0-9A-Za-z_.:+-]{1,64}$")
 
 
+# The files in a lease directory that are not a device's, by the name a
+# bench lock would spell, and what each one is in a refusal.
+_RESERVED_LEASE_NAMES = MappingProxyType({
+    "host-power": "this host's power/firmware lock",
+    "takeover": "the lease directory's own takeover lock",
+})
+
+
+def _bench_lock_names(resource) -> tuple[str, ...]:
+    """The unprefixed lock names a bench script may use for this device.
+
+    One space, shared by every device: a serial written here is the file
+    `scripts/lab/hold` locks beside the harness's own prefixed key, so a
+    second device with the same serial would be held as the first. An
+    Ubertooth's is its serial (its lease key too), a DK's its J-Link serial
+    as nrfutil and sysfs each print it, a peer's its bridge serial.
+    """
+    identity = resource.identity
+    values = {
+        "Ubertooth": ("serial",),
+        NRF52840_DK: ("jlink serial",),
+        ESP32_CLASSIC_PEER: ("bridge serial",),
+        DEBUG_PROGRAMMER: ("serial",),
+    }.get(resource.type, ())
+    names = []
+    for key in values:
+        serial = str(identity.get(key, "") or "").strip().lower()
+        if not serial:
+            continue
+        names.append(serial)
+        if serial.isdigit():
+            names.append(serial.lstrip("0"))  # nrfutil's form of a J-Link serial
+    return tuple(name for name in names if name)
+
+
 def _leased_types() -> tuple[str, ...]:
     """The device types the harness leases, which a pair member must be.
 
@@ -532,18 +567,30 @@ class FileResourceRegistry:
         written two ways is still one adapter, while the two spellings would
         name two lock files.
 
-        A programmer's serial is chosen by whoever labels the adapter, and
-        the bench's older lock name for it is that serial on its own
-        (``scripts/lab/_bench.plain_serial``), which is also the lock file
-        name of an Ubertooth of that serial. So a programmer may not take
-        the serial of a registered Ubertooth either: holding one would hold
-        the other's lease and report it as the programmer's.
+        A programmer's serial is chosen by whoever labels the adapter, where
+        every other serial is the device's own, and the bench's older lock
+        name for a programmer is that serial on its own
+        (``scripts/lab/_bench.plain_serial``). That name is unprefixed, so it
+        shares one space with every other device's serial and with the lease
+        directory's own files: the serial of a registered Ubertooth is that
+        board's lease file, a DK's or a peer's is that device's bench name,
+        and ``host-power`` or ``takeover`` are the host lock and the takeover
+        lock. A programmer may take none of them, because holding one would
+        hold something else and report it as the programmer's.
+
+        Taken without regard to case throughout. Two spellings of one serial
+        would name two lock files rather than collide, so this refuses a
+        pair of them that could not have collided; a registry edit is the
+        cheaper of the two mistakes.
         """
-        boards = {
-            str(resource.identity.get("serial", "")).strip().lower(): resource.alias
-            for resource in sorted(self.resources.values(), key=lambda r: r.alias)
-            if resource.type == "Ubertooth" and resource.identity.get("serial")
-        }
+        taken = dict(_RESERVED_LEASE_NAMES)
+        for resource in sorted(self.resources.values(), key=lambda r: r.alias):
+            if resource.type == DEBUG_PROGRAMMER:
+                continue  # two of those are the `seen` check below
+            for name in _bench_lock_names(resource):
+                taken.setdefault(
+                    name, f"the serial of {resource.alias} ({resource.type})"
+                )
         seen: dict[str, str] = {}
         for resource in sorted(self.resources.values(), key=lambda r: r.alias):
             if resource.type != DEBUG_PROGRAMMER:
@@ -556,13 +603,12 @@ class FileResourceRegistry:
                     f"registered with the same serial '{written}'; one serial is "
                     "one programmer, whichever way it is written"
                 )
-            if serial in boards:
+            if serial in taken:
                 raise RegistryError(
-                    f"{DEBUG_PROGRAMMER} {resource.alias} and Ubertooth "
-                    f"{boards[serial]} are registered with the same serial "
-                    f"'{written}'; a lock of one would be read as a lock of the "
-                    "other, so give the programmer the serial its own USB "
-                    "descriptor reports"
+                    f"{DEBUG_PROGRAMMER} {resource.alias} is registered with the "
+                    f"serial '{written}', which is already {taken[serial]}; a lock "
+                    "of one would be read as a lock of the other, so give the "
+                    "programmer the serial its own USB descriptor reports"
                 )
             seen[serial] = resource.alias
 

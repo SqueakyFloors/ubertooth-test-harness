@@ -217,12 +217,50 @@ class PairRegistry(PairTestCase):
                 )
                 self.assertIn("Prog0", registry.pair_members(target))
 
-    def test_a_programmer_may_not_take_a_board_s_serial(self):
-        """The bench's older lock name for it is that serial on its own, so
-        it would be the lease file of an Ubertooth of that serial."""
-        self.refuse(
-            PROGRAMMER.replace(f'"{PROGRAMMER_SERIAL}"', TARGET),
-            "Ubertooth UT_Debug are registered with the same serial",
+    def test_a_programmer_may_not_take_a_name_that_is_already_something_s(self):
+        """Its bench lock name is that serial on its own, in one space with
+        every other device's serial and the lease directory's own files."""
+        others = (
+            "  DK_Pair:\n"
+            "    type: nRF52840 DK\n"
+            "    attached to: Host_Linux\n"
+            "    roles: [advertiser]\n"
+            "    identity:\n"
+            '      jlink serial: "000123456789"\n'
+            '      BLE address: "C0:00:00:00:00:01"\n'
+            "  ESP_Pair:\n"
+            "    type: ESP32 Classic peer\n"
+            "    attached to: Host_Linux\n"
+            "    roles: [acceptor, initiator]\n"
+            "    identity:\n"
+            "      bridge serial: a1b2c3d400000000a1b2c3d400000000\n"
+            '      BD_ADDR: "C8:00:00:00:00:01"\n'
+        )
+        for serial, fragment in (
+            (TARGET, "the serial of UT_Debug (Ubertooth)"),
+            ("000123456789", "the serial of DK_Pair (nRF52840 DK)"),
+            # nrfutil prints a J-Link serial without its leading zeros, and
+            # a bench script may name the lock either way.
+            ("123456789", "the serial of DK_Pair (nRF52840 DK)"),
+            ("a1b2c3d400000000a1b2c3d400000000", "the serial of ESP_Pair"),
+            ("host-power", "this host's power/firmware lock"),
+            ("takeover", "the lease directory's own takeover lock"),
+        ):
+            with self.subTest(serial=serial):
+                self.refuse(
+                    PROGRAMMER.replace(f'"{PROGRAMMER_SERIAL}"', f'"{serial}"')
+                    + others,
+                    fragment,
+                )
+
+    def test_a_serial_nothing_else_uses_is_accepted(self):
+        """The refusal above must not be refusing every serial."""
+        registry = self.load(
+            PROGRAMMER.replace(f'"{PROGRAMMER_SERIAL}"', '"host-power-adapter"')
+        )
+        self.assertEqual(
+            "programmer-host-power-adapter",
+            leases.resource_key(registry.get("Prog0")),
         )
 
     def test_a_programs_line_with_nothing_after_it_is_refused(self):
@@ -484,16 +522,21 @@ class PairLocks(PairTestCase):
 
     def test_the_locks_are_taken_in_the_harness_order(self):
         registry = self.load(PROGRAMMER)
+        # Named the programmer, whose key sorts after the board's, so the
+        # expansion order and the lock order really differ here.
+        ordered = self.boards(registry, ["Prog0"])
+        self.assertEqual([PROGRAMMER_KEY, TARGET_KEY], [b.key for b in ordered])
         held = leases.acquire(
-            self.boards(registry, ["UT_Debug"]),
+            ordered,
             leases.holder_info(run_id=None, owner="agent", purpose="test"),
             directory=self.leases, host_lock=True,
         )
         self.addCleanup(held.release)
         keys = [lease.board.key for lease in held.leases]
-        # The host lock first, then the pair's leases in key order, whichever
-        # member was named: the harness's own order, not the order the
-        # expansion produced.
+        # The host lock first, then the pair's leases in key order, which is
+        # the harness's own order and not the order the expansion produced:
+        # naming the programmer puts its key first in the expansion and
+        # second here.
         self.assertEqual(
             [leases.HOST_LOCK.key] + sorted([PROGRAMMER_KEY, TARGET_KEY]), keys
         )
