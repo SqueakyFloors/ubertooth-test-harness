@@ -1920,6 +1920,11 @@ applications made of them. A board whose controller sent or received nothing,
 or received packets and not one of them correct, fails: frames handled over a
 link the air never carried would describe a capture of nothing.
 
+The driver also refuses a link that is not the one the case asked for: each
+board has to report an eSCO link of the packet type both were told to ask for
+before the capture starts, and the same link at the end as at the start, so a
+capture taken while the two ends renegotiated is reported rather than matched.
+
 `link 0 opened 0 dropped` on each board is the case's assertion that this was
 one link throughout. A link that went down and came back leaves both boards
 reading `on` either side of the capture and is still two links with a gap in
