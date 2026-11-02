@@ -2353,20 +2353,23 @@ word and symbol (colour only reinforces it).
   further build options, "Build the firmware image too" (`--with-firmware`)
   and "Build the Python tools too" (`--with-python`); Run starts the whole suite.
   Each of those two carries a note saying what it costs and follows what the
-  chosen suite needs: a suite with a test that cannot run without it (`DFU
-  images`, `Flash reliability`) has it ticked and held there, a suite that
-  would only leave cases out without it (`DFU image checks` without the
-  image, `Python tools` without the Python build) has it ticked for you to
-  untick, and otherwise it is yours to choose; your own tick stands until you
-  pick another suite, where the boxes start again from what that suite needs.
-  Both need Build, and are disabled with a note while Build is unticked.
-  `/api/plans` is where those needs come from: every test and suite carries
-  `needs_firmware_build` and `needs_python_tools` (cases left out without it)
-  and `requires_firmware_build` and `requires_python_tools` (the test cannot
-  run without it), from what the catalog declares. A suite that also needs an
-  image no build makes (`Flash reliability`'s published KGV image) says so
-  under the suite list, with the `--artifact` line to run it with, because a
-  run started from the GUI cannot carry one and would be refused before its
+  chosen suite needs. A suite with a test that cannot run without the option
+  (`DFU images` and `Flash reliability` without the run's image) has it
+  ticked and held there. A suite that would only leave cases out without it
+  (`DFU image checks` without the image, `Python tools` without the Python
+  build) is named in the note, which invites the tick but does not tick it:
+  a build nobody asked for costs time, and the firmware build needs
+  arm-none-eabi-gcc, which a target may not have. Otherwise the box is yours
+  to set, and keeps what you set. Both need Build, and are disabled with a
+  note while Build is unticked. `/api/plans` is where those needs come from:
+  every test and suite carries `needs_firmware_build` and
+  `needs_python_tools` (cases left out without it) and
+  `requires_firmware_build` and `requires_python_tools` (the test cannot run
+  without it), from what the catalog declares and, for a test whose plan
+  entry names its images, from that entry. A suite that also needs an image
+  no build makes (`Flash reliability`'s published KGV image) says so under
+  the suite list, with the `--artifact` line to run it with, because a run
+  started from the GUI cannot carry one and would be refused before its
   tests.
 - **Live run:** the suite's tests as a checklist that ticks from the run's
   events (✓ passed, ✗ failed, … running, ○ pending or not run; always text
@@ -2432,7 +2435,7 @@ Endpoints (JSON unless noted; `GET /` lists them):
 |---|---|
 | `GET /ui/` | the web GUI (HTML, `app.js`, `app.css`) |
 | `GET /api/refs` | `{"repository", "refs": [{"name", "kind", "commit"}], "fetched_at"}` from `git ls-remote` (`kind` is `default`, `branch` or `tag`); 503 if it cannot be listed |
-| `GET /api/plans[?target=HOST]` | every `<plan>.yaml` in `--plans-dir` with its suites, test names, per-test `estimated_s` (one invocation with the step's arguments, else null) and `per_board` (runs once per selected board), the build options each test and suite needs (`needs_firmware_build` and `needs_python_tools`: cases are left out without it; `requires_firmware_build` and `requires_python_tools`: the test cannot run without it at all) and `needs_artifacts` (image labels no build produces, which only `run-suite --artifact` can pass), the suite total when every test has one, `per_board_tests`, and `runnable` (the plan's `runnable` flag; false for plans of planned tests and for a plan that does not load); a plan that does not load is listed with its `error`. With a `target`, `estimated_s` is what that host's own runs measured when enough of them did; `catalog_estimated_s`, `estimate_source` (`learned`, `catalog` or `none`), `estimate_samples` and `estimate_scaled` say which, and `stages` lists the build, preflight and flash durations learned for it (see [Learned durations](#learned-durations)). Without one, nothing is learned and the catalog estimate stands. A `target` whose name is not a host name is refused with 422; the registry is not consulted, so a name no target has registered is answered with whatever has been learned under it, which is normally nothing |
+| `GET /api/plans[?target=HOST]` | every `<plan>.yaml` in `--plans-dir` with its suites, test names, per-test `estimated_s` (one invocation with the step's arguments, else null) and `per_board` (runs once per selected board), the build options each test and suite needs (`needs_firmware_build` and `needs_python_tools`: cases are left out without it; `requires_firmware_build` and `requires_python_tools`: the test cannot run without it at all) and `needs_artifacts` (image labels the step names that no build produces, so only `run-suite --artifact` can pass them), the suite total when every test has one, `per_board_tests`, and `runnable` (the plan's `runnable` flag; false for plans of planned tests and for a plan that does not load); a plan that does not load is listed with its `error`. With a `target`, `estimated_s` is what that host's own runs measured when enough of them did; `catalog_estimated_s`, `estimate_source` (`learned`, `catalog` or `none`), `estimate_samples` and `estimate_scaled` say which, and `stages` lists the build, preflight and flash durations learned for it (see [Learned durations](#learned-durations)). Without one, nothing is learned and the catalog estimate stands. A `target` whose name is not a host name is refused with 422; the registry is not consulted, so a name no target has registered is answered with whatever has been learned under it, which is normally nothing |
 | `GET /api/targets`, `GET /api/targets/{host}` | registry: host, hostname, OS, Python, Ubertooth serials, last heartbeat, `online`/`offline`, connected, active run |
 | `POST /api/targets/{host}/runs` | start a run with the protocol `run` fields: `{"ref", "commit": null, "plan", "suite", "tests": [], "build": false, "flash_build": true, "with_firmware": false, "with_python": false}` (`commit`, optional, is the full commit the caller saw listed for `ref`; `flash_build` applies only with `build` and is recorded false without it; `with_firmware` and `with_python` add `--with-firmware` and `--with-python` to the run's build, and either one without `build` is refused with 422 naming it); 201 with the run (including the `commit` sent to the runner), 409 busy, offline, rejected by the runner, or `ref` moved away from `commit`, 422 invalid, a ref not in `/api/refs` (full commit IDs are accepted), or a name listing several commits, 504 no answer |
 | `GET /api/runs[?target=HOST]` | runs, newest first |
@@ -2472,6 +2475,12 @@ the runs that follow rather than from everything on disk at once.
 
 A sample is keyed by the stage, the test name, the target host (a Linux host
 and a Mac differ, as do two Linux hosts), the coverage profile, and the value
+of the argument the duration scales with. For a build the profile slot holds
+which kind of build it was, `host tools` or `with firmware`, since a firmware
+build takes much the longer of the two; a run's `stages` therefore asks for
+the kind that run builds, which is what its own `build_started` record says,
+or, before that record arrives, whether it asked for the image or will flash
+its boards with it. For a test the profile is its coverage profile and the value
 of the argument the duration scales with (`duration`, `capture duration`,
 `flashes`, or preflight's number of checks), so a 5 s capture and a 30 s
 capture are not mixed. The last 10 samples of each key are kept, and at most

@@ -3,7 +3,7 @@
 from dataclasses import dataclass, replace
 import re
 from types import MappingProxyType
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 
 from ubertooth_harness.cases import CommandCase, FlashCase, guard_roles
 from ubertooth_harness.hostneeds import (
@@ -330,13 +330,13 @@ class TestDefinition:
     # image in their artifacts (or its command needs one), so a run without
     # it is refused rather than leaving a case out. Implies build_needs.
     build_required: Needs = NO_NEEDS
-    # Image labels the test needs that no build produces, so only
-    # ``--artifact "LABEL=PATH"`` can pass them: a published image to compare
-    # against. A run that does not carry them is refused before its tests,
-    # and the controller's run request has no way to send one, so a client
-    # that dispatches runs (the GUI) says so rather than starting a run that
-    # cannot finish.
-    needs_artifacts: tuple[str, ...] = ()
+    # The argument that names the firmware images the run must carry, for a
+    # test whose plan entry decides them (Flash reliability's `image
+    # sequence`). The run's own build makes "test build"; every other label
+    # has to come from --artifact, which only the command line passes, so a
+    # client that dispatches runs (the GUI) reads the labels from the plan
+    # rather than assuming which ones a step names. See image_labels.
+    image_labels_argument: str | None = None
     # Expected wall time by coverage profile (DEFAULT_PROFILE for a test
     # without a coverage argument); see ESTIMATES.
     estimates: Mapping[str, Estimate] | None = None
@@ -378,6 +378,22 @@ class TestDefinition:
             python_tools=self.build_required.python_tools,
             firmware_build=self.build_required.firmware_build,
         )
+
+    def image_labels(self, arguments: Mapping | None = None) -> tuple[str, ...]:
+        """The firmware images these arguments say the run must carry.
+
+        As the plan entry writes them, so a caller can quote one in the
+        ``--artifact "LABEL=PATH"`` a run needs. Empty for a test whose
+        images do not come from an argument, and for arguments that do not
+        carry that one (a plan listing, which reads a step as written rather
+        than normalized).
+        """
+        if not self.image_labels_argument:
+            return ()
+        listed = (arguments or {}).get(self.image_labels_argument)
+        if not isinstance(listed, Sequence) or isinstance(listed, str):
+            return ()
+        return tuple(item for item in listed if isinstance(item, str) and item)
 
     def placement_requirements(
         self, arguments: Mapping
@@ -1267,7 +1283,9 @@ def builtin_catalog() -> TestCatalog:
             MappingProxyType({}),
             command_builder=python_cases.python_tool_cases,
             continue_on_case_failure=True,
-            # ubertooth-specan-ui exists only in the Python tools build.
+            # ubertooth-specan-ui exists only in the Python tools build, and
+            # its cases are left out without one; a test whose every case ran
+            # a Python tool would declare build_required instead.
             build_needs=Needs(python_tools=True),
         ),
         TestDefinition(
@@ -1485,12 +1503,11 @@ def builtin_catalog() -> TestCatalog:
             establishes_firmware=True,
             writes_firmware=True,
             check_arguments=_check_alternation,
-            # Its image sequence names the run's test build in every plan
-            # here, and a run without that image is refused.
-            build_required=Needs(firmware_build=True),
-            # The known-good image it flashes in turn is a published release
-            # image, which no build produces.
-            needs_artifacts=("KGV",),
+            # Which images it flashes is the plan's to say, and a run without
+            # one of them is refused: the run's build makes "test build", and
+            # the known-good image beside it is a published release, which
+            # only --artifact can pass.
+            image_labels_argument="image sequence",
         ),
         stateful_test(
             "DFU images",

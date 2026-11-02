@@ -476,6 +476,38 @@ class PlanTests(ControllerTestCase):
         self.assertEqual((True, False), (firmware["needs_firmware_build"],
                                          firmware["needs_python_tools"]))
 
+    def test_the_images_a_step_names_decide_what_its_suite_needs(self):
+        # Flash reliability's plan entry lists the images it flashes, so a
+        # suite needs the firmware build only where the entry names the run's
+        # own image, and names every other image as one --artifact must pass.
+        entry = (
+            "    - Flash reliability:\n"
+            "        hosts: [Host_Linux]\n"
+            "        platforms: [linux]\n"
+            "        Ubertooth: default\n"
+            "        flashes: 2\n"
+            "        image sequence: [{sequence}]\n"
+            "        KGV sha256: " + "a" * 64 + "\n"
+            "        KGV revision: 2020-12-R1\n"
+        )
+        cases = {
+            "test build, KGV": (True, ["KGV"]),
+            "2020-12-R1, KGV": (False, ["2020-12-R1", "KGV"]),
+        }
+        for sequence, (firmware, artifacts) in cases.items():
+            with self.subTest(sequence=sequence), tempfile.TemporaryDirectory() as d:
+                (Path(d) / "flash.yaml").write_text(
+                    "plan: Flash\nsuites:\n  flash:\n"
+                    + entry.format(sequence=sequence),
+                    encoding="utf-8",
+                )
+                (suite,) = list_plans(Path(d))[0]["suites"]
+                self.assertEqual(
+                    (firmware, firmware, artifacts),
+                    (suite["needs_firmware_build"], suite["requires_firmware_build"],
+                     suite["needs_artifacts"]),
+                )
+
     def test_a_suite_of_tests_that_need_nothing_built_says_so(self):
         fields = ("needs_firmware_build", "needs_python_tools",
                   "requires_firmware_build", "requires_python_tools")
@@ -728,34 +760,32 @@ class PageWiringTests(unittest.TestCase):
     def test_a_suite_that_needs_a_build_option_holds_it_ticked(self):
         body = self.js[self.js.index("function syncBuildOptions()"):
                        self.js.index("function start()")]
-        # Held ticked only for a suite that cannot run without the option; a
-        # suite that would only leave cases out has it ticked and untickable,
-        # and otherwise the operator's own last choice stands.
-        self.assertIn(
-            "box.checked = required.length > 0\n"
-            "        || (option.chosen === null ? needed.length > 0 : option.chosen);",
-            body,
-        )
+        # Ticked and held for a suite that cannot run without the option;
+        # otherwise the box keeps what the operator set, so nothing is
+        # built, or made to fail on a target without the toolchain, for a
+        # suite that would only leave cases out.
+        self.assertIn("box.checked = required.length > 0 || box.checked;", body)
         self.assertIn("box.disabled = !build || required.length > 0;", body)
         self.assertIn("cannot run without ", body)
-        # The note follows the box, so it never invites an untick of a box
-        # the operator has already unticked.
-        self.assertIn("sentences.push(box.checked", body)
-        self.assertIn("Untick to run it without them.", body)
-        # The note keeps the page's own cost sentence, names the tests that
-        # need the option, and says when Build is what is missing.
+        # That suite's note names the cases and invites the tick instead, and
+        # says when flashing builds the image anyway. Every note keeps the
+        # page's own cost sentence and says when Build is what is missing.
+        self.assertIn("needed.length && !box.checked", body)
+        self.assertIn("Tick it to run them.", body)
+        self.assertIn("option.builtByFlash && flashing", body)
         self.assertIn("const sentences = [option.cost];", body)
         self.assertIn('needed.join(", ")', body)
         self.assertIn("Needs Build.", body)
-        # A suite change starts the boxes again from what that suite needs.
-        suite_tests = self.js[self.js.index("function renderSuiteTests()"):
-                              self.js.index("function artifactWarning(")]
-        self.assertIn("for (const option of BUILD_OPTIONS) option.chosen = null;",
-                      suite_tests)
-        # Every path that can change what the suite needs syncs the options.
+        # Every path that can change what is needed or what is ticked syncs
+        # the options: the plan and suite selects (through renderSuiteTests),
+        # Build, Flash, and the boxes themselves.
         for caller in ("function renderSuiteTests()", "function start()"):
             section = self.js[self.js.index(caller):]
-            self.assertIn("syncBuildOptions()", section[:section.index("\n  }")])
+            self.assertIn("syncBuildOptions", section[:section.index("\n  }")])
+        start = self.js[self.js.index("function start()"):]
+        for control in ('$("build")', '$("flash-build")', "$(option.id)"):
+            self.assertIn(f'{control}.addEventListener("change", syncBuildOptions)',
+                          start)
         self.assertNotIn("syncFlashBuild", self.js)
 
     def test_a_suite_needing_an_image_no_build_makes_says_so(self):

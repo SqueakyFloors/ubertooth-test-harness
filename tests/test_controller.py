@@ -1171,7 +1171,10 @@ class MalformedRunnerTests(ControllerTestCase):
             last_event_sequence=None, last_event_type=None,
         )
         for first in ("{bad json", heartbeat, b"\x00binary",
-                      json.dumps({"version": 3, "type": "register"})):
+                      # The version a runner of the last deploy still speaks:
+                      # there is no negotiation, so it is refused here.
+                      json.dumps({"version": PROTOCOL_VERSION - 1,
+                                  "type": "register"})):
             with self.subTest(first=first):
                 self.assertEqual(1008, await self._closed_with(first))
         self.assertEqual({}, self.controller.targets)

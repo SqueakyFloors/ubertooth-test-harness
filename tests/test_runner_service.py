@@ -242,7 +242,13 @@ class ProtocolTests(unittest.TestCase):
             "not json": "not json",
             "array": "[]",
             "unknown version": json.dumps({**good, "version": 99}),
-            "previous version": json.dumps({**good, "version": 2}),
+            # The version a controller of the last deploy speaks, the one
+            # after this, and the first there ever was: no negotiation, so
+            # every one of them is refused.
+            "previous version": json.dumps(
+                {**good, "version": PROTOCOL_VERSION - 1}
+            ),
+            "next version": json.dumps({**good, "version": PROTOCOL_VERSION + 1}),
             "version 1": json.dumps({**good, "version": 1}),
             "missing flash_build": json.dumps(
                 {k: v for k, v in good.items() if k != "flash_build"}

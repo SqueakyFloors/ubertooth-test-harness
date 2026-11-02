@@ -11,12 +11,13 @@
   // the Python tools. `need` and `require` are the flags /api/plans sets on
   // a test that leaves cases out without the option, and on one that cannot
   // run without it at all. `cost` is the page's own note for the option,
-  // read once at start and kept as the first sentence of the note; `chosen`
-  // is the operator's own last tick, null until they make one.
+  // read once at start and kept as the first sentence of the note.
   const BUILD_OPTIONS = [
     {
       id: "with-firmware", what: "the run's firmware image",
       need: "needs_firmware_build", require: "requires_firmware_build",
+      // run-suite builds this anyway when the run flashes a board.
+      builtByFlash: true,
     },
     {
       id: "with-python", what: "the Python tools build",
@@ -271,10 +272,7 @@
       ? `${suite.tests.map((test) => test.name).join(", ")}. ${estimateText(suite)}`
         + artifactWarning(suite)
       : "";
-    // This suite may need build options the last one did not, and the boxes
-    // start again from what it needs rather than from the last suite's
-    // choice.
-    for (const option of BUILD_OPTIONS) option.chosen = null;
+    // This suite may need build options the last one did not.
     syncBuildOptions();
   }
 
@@ -1015,14 +1013,22 @@
 
   // Flash and the two build options need Build: each is disabled, with a
   // note, while Build is unticked. Then, for each build option and the
-  // chosen suite: a suite with a test that cannot run without the option has
-  // it ticked and held there; a suite that would only leave cases out has it
-  // ticked for the operator to untick; a suite that needs neither has it as
-  // the operator left it for this suite (renderSuiteTests clears that when
-  // the suite changes). Every note names the tests concerned.
-  // Called whenever Build, the plan, the suite or the plan list changes.
+  // chosen suite:
+  //
+  // - a suite with a test that cannot run without the option has it ticked
+  //   and held there, since the run would be refused otherwise;
+  // - a suite that would only leave cases out says which, and invites the
+  //   tick, but does not tick it: an option ticked for the operator costs
+  //   build time they did not ask for, and the firmware build also needs a
+  //   toolchain the target may not have, which would turn a run that used
+  //   to pass with those cases left out into one that fails;
+  // - a box the operator has set keeps what they set.
+  //
+  // Called whenever Build, Flash, a box, the plan, the suite or the plan
+  // list changes.
   function syncBuildOptions() {
     const build = $("build").checked;
+    const flashing = build && $("flash-build").checked;
     $("flash-build").disabled = !build;
     $("flash-build-note").hidden = build;
     const suite = findSuite($("plan").value, $("suite").value);
@@ -1031,27 +1037,22 @@
       const box = $(option.id);
       const required = neededBy(suite, option.require);
       const needed = neededBy(suite, option.need);
-      box.checked = required.length > 0
-        || (option.chosen === null ? needed.length > 0 : option.chosen);
+      box.checked = required.length > 0 || box.checked;
       box.disabled = !build || required.length > 0;
       const sentences = [option.cost];
       if (required.length) {
         sentences.push(`The ${suiteName} suite cannot run without ${option.what}: `
-          + `${required.join(", ")}.`);
-      } else if (needed.length) {
-        // Which way round depends on the box: the operator may have
-        // unticked it, and a note must never describe a state it is not in.
-        sentences.push(box.checked
-          ? `Ticked because the ${suiteName} suite would leave cases out without `
-            + `${option.what}: ${needed.join(", ")}. Untick to run it without them.`
-          : `The ${suiteName} suite leaves cases out without ${option.what}: `
-            + `${needed.join(", ")}.`);
+          + `${required.join(", ")}, so it is ticked for this suite.`);
+      } else if (needed.length && !box.checked) {
+        sentences.push(`Without ${option.what} the ${suiteName} suite leaves cases `
+          + `out: ${needed.join(", ")}. Tick it to run them.`);
+        if (option.builtByFlash && flashing) {
+          // run-suite builds the image anyway when the run flashes a board.
+          sentences.push("A run that flashes a board builds the image for that"
+            + " anyway, and records it, so those cases may run without this.");
+        }
       }
-      if (!build) {
-        sentences.push(needed.length
-          ? "Needs Build: without it the run has none of this, and those tests cannot use it."
-          : "Needs Build.");
-      }
+      if (!build) sentences.push("Needs Build.");
       $(`${option.id}-note`).textContent = sentences.join(" ");
     }
   }
@@ -1060,14 +1061,12 @@
     $("run-form").addEventListener("submit", submitRun);
     for (const option of BUILD_OPTIONS) {
       option.cost = $(`${option.id}-note`).textContent;
-      option.chosen = null;
-      // Only a tick of the operator's own: a suite's need never becomes one,
-      // and their choice stands until they change the suite.
-      $(option.id).addEventListener("change", () => {
-        option.chosen = $(option.id).checked;
-      });
+      // The note says different things for a ticked and an unticked box.
+      $(option.id).addEventListener("change", syncBuildOptions);
     }
     $("build").addEventListener("change", syncBuildOptions);
+    // Flashing builds the firmware image anyway, which the note says.
+    $("flash-build").addEventListener("change", syncBuildOptions);
     syncBuildOptions();
     $("refs-reload").addEventListener("click", loadRefs);
     $("plan").addEventListener("change", renderSuites);

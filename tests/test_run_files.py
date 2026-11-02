@@ -17,9 +17,11 @@ import unittest
 from ubertooth_harness.events import RUN_LOG
 from ubertooth_harness.outputfiles import OUTPUT_DIR, OutputFile, saved_output
 from ubertooth_harness.protocol import (
+    CONTROLLER_MESSAGES,
     MAX_FILE_BYTES,
     MAX_FILE_PAGE_BYTES,
     PROTOCOL_VERSION,
+    RUNNER_MESSAGES,
     ProtocolError,
     decode_controller_message,
     decode_runner_message,
@@ -513,10 +515,21 @@ class ProtocolMessageTests(unittest.TestCase):
                     "run_file_refused", request_id="f1", run_id="run-1",
                     status=status, reason="no")
 
-    def test_the_version_says_the_pair_is_there(self):
-        # The protocol has no negotiation, so the pair arrived with a bump:
-        # version 4, and no version since has taken it away.
-        self.assertGreaterEqual(PROTOCOL_VERSION, 4)
+    def test_the_version_carries_the_pair(self):
+        # The protocol has no negotiation, so the pair arrived with a bump
+        # (version 4). What matters since is that the current version still
+        # carries both messages, and that a message of any other version is
+        # refused rather than read as this one.
+        self.assertIn("run_file", CONTROLLER_MESSAGES)
+        self.assertIn("run_file_page", RUNNER_MESSAGES)
+        self.assertIn("run_file_refused", RUNNER_MESSAGES)
+        page = json.loads(encode_runner_message(
+            "run_file_refused", request_id="f1", run_id="run-1", status=404,
+            reason="no"))
+        self.assertEqual(PROTOCOL_VERSION, page["version"])
+        for version in (PROTOCOL_VERSION - 1, PROTOCOL_VERSION + 1):
+            with self.subTest(version=version), self.assertRaises(ProtocolError):
+                decode_runner_message(json.dumps({**page, "version": version}))
 
 
 class RunnerPageTests(unittest.IsolatedAsyncioTestCase):

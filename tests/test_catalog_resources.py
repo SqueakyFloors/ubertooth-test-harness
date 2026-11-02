@@ -232,21 +232,48 @@ class BuildNeedsTests(unittest.TestCase):
             name: catalog.get(name).required_build_options() for name in catalog.names
         }
         self.assertEqual(
-            {"DFU images", "DFU image checks", "Flash reliability"},
+            {"DFU images", "DFU image checks"},
             {name for name, need in needed.items() if need.firmware_build},
         )
         self.assertEqual(
             {"Python tools"},
             {name for name, need in needed.items() if need.python_tools},
         )
-        # Refused without the image, rather than leaving a case out: these
-        # two write or read back the run's own image in every case.
+        # Refused without the image, rather than leaving a case out: every
+        # case of it writes the run's own image and reads it back.
         self.assertEqual(
-            {"DFU images", "Flash reliability"},
+            {"DFU images"},
             {name for name, need in required.items() if need.firmware_build},
         )
         self.assertEqual(
             set(), {name for name, need in required.items() if need.python_tools}
+        )
+
+    def test_the_images_a_step_names_come_from_the_plan_entry(self):
+        # Flash reliability flashes the images its plan entry lists, so what
+        # the run must carry follows that entry rather than a declaration
+        # that could disagree with it.
+        definition = builtin_catalog().get("Flash reliability")
+        self.assertEqual("image sequence", definition.image_labels_argument)
+        self.assertEqual(
+            ("test build", "KGV"),
+            definition.image_labels({"image sequence": ["test build", "KGV"]}),
+        )
+        # Two published images and no build: nothing here says the run must
+        # build an image.
+        self.assertEqual(
+            ("2020-12-R1", "KGV"),
+            definition.image_labels({"image sequence": ["2020-12-R1", "KGV"]}),
+        )
+        # No entry, or one that carries no sequence, names no image; so does
+        # a test whose images do not come from an argument.
+        for arguments in (None, {}, {"image sequence": "test build"},
+                          {"image sequence": [None, 7]}):
+            with self.subTest(arguments=arguments):
+                self.assertEqual((), definition.image_labels(arguments))
+        self.assertEqual(
+            (), builtin_catalog().get("DFU images").image_labels(
+                {"image sequence": ["test build"]})
         )
 
     def test_every_case_need_a_plan_can_reach_is_declared_on_its_test(self):
@@ -308,6 +335,9 @@ class BuildNeedsTests(unittest.TestCase):
         )
         # The cases of the tests this is about were among those compared, so
         # a comparison that reached nothing cannot pass as a clean result.
+        # Flash reliability is not among them: its images come from the plan
+        # entry (test_the_images_a_step_names_come_from_the_plan_entry), and
+        # a FlashCase declares no artifacts of its own.
         self.assertEqual(
             set(),
             {"DFU images", "DFU image checks", "Python tools"} - compared,

@@ -922,10 +922,12 @@ by the REST API and `/ws/live`.
   firmware image too" and "Build the Python tools too" (`--with-firmware`,
   `--with-python`; each explains what it costs, is disabled while build is
   off, and follows what the chosen suite needs: `/api/plans` marks each test
-  and suite `needs_*` where a case would be left out without the option and
-  `requires_*` where the test cannot run without it at all, so the box is
-  ticked for the first and ticked and held for the second; a suite's
-  `needs_artifacts` names an image no build makes, which only `--artifact`
+  and suite `requires_*` where the test cannot run without the option, which
+  ticks the box and holds it, and `needs_*` where a case would be left out
+  without it, where the note names those cases and invites the tick but does
+  not tick it, since an unasked-for build costs time and the firmware build
+  needs a toolchain the target may not have; a suite's `needs_artifacts`
+  names an image no build makes, which only `--artifact`
   passes, and the suite line then says a run started here is refused before
   its tests) → "Run". The controller
   refuses a ref that is not in the list or a full commit ID (422). The run
