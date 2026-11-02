@@ -351,6 +351,39 @@ class BlockedPlanningTests(unittest.TestCase):
                 [item.invocation_id for item in compiled.invocations],
             )
 
+    def test_a_test_blocked_and_not_applicable_is_recorded_once(self):
+        """Two steps of one test on one host: one left out for its RF
+        placement, one blocked. Blocked says more (the run fails on it), and
+        the live run view would otherwise show the test twice."""
+        placed = EXCLUSIVE_STEP.replace(
+            "        hosts: [Host_Linux]", "        hosts: [Host_Linux, Host_Lab]"
+        ) + """        rf:
+          Ubertooth: {min_attenuation_db: 40}
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            compiled = self.compile(
+                directory, (HOST_STEP, placed, EXCLUSIVE_STEP),
+                ONE_BOARD + UNMAPPED_SECOND_BOARD,
+            )
+
+            self.assertEqual(
+                [("Host_Linux", "Exclusive Ubertooth topology")],
+                [(item.host, item.test_name) for item in compiled.blocked],
+            )
+            self.assertEqual(
+                [], [item.test_name for item in compiled.for_host("Host_Linux")]
+            )
+            # The raw planning records are unchanged; only what a run of
+            # this host carries is pruned.
+            self.assertEqual(
+                [("Host_Lab", "Host_Lab is not a host in this registry"),
+                 ("Host_Linux", "no Ubertooth on this host has attenuation of "
+                  "at least 40 dB for the Ubertooth (UT_Linux0 has 0 dB, "
+                  "antenna (not recorded); UT_Linux1 has 0 dB, antenna "
+                  "(not recorded))")],
+                [(item.host, item.reason) for item in compiled.not_applicable],
+            )
+
     def test_a_suite_with_only_a_blocked_step_names_it(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(

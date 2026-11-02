@@ -127,9 +127,17 @@ class CompiledSuite:
         the test twice. A step this host has its own reason for keeps that
         reason, which says more to the host running it. So a second step
         naming the same test for an absent host is not recorded here.
+
+        A test this host has a blocked record for is left out here for the
+        same reason: that record says more (the run fails on it), and two
+        records would show the test twice.
         """
-        mine = tuple(item for item in self.not_applicable if item.host == host)
-        covered = {item.test_name for item in mine}
+        stopped = {item.test_name for item in self.blocked_for_host(host)}
+        mine = tuple(
+            item for item in self.not_applicable
+            if item.host == host and item.test_name not in stopped
+        )
+        covered = {item.test_name for item in mine} | stopped
         covered |= {
             item.test_name for item in self.invocations if item.host == host
         }
@@ -375,7 +383,10 @@ class PlanCompiler:
                 # applicable, and a step no host here can run this way is a
                 # plan error, as it was before hardware absence was recorded.
                 candidates = []
-                blocked: list[NotApplicable] = []
+                # Hosts that are here and cannot run the step at all
+                # (platform, RF placement). Not `blocked` hardware: see
+                # CompiledSuite.blocked, which is a different outcome.
+                host_left_out: list[NotApplicable] = []
                 for alias in hosts:
                     capabilities = platform_capabilities(
                         alias, self.registry.get(alias).platform
@@ -394,17 +405,21 @@ class PlanCompiler:
                         definition, alias, arguments, wanted
                     )
                     if reason:
-                        blocked.append(NotApplicable(alias, step.test_name, reason))
+                        host_left_out.append(
+                            NotApplicable(alias, step.test_name, reason)
+                        )
                     else:
                         candidates.append(alias)
-                left_out.extend(blocked)
-                if not candidates and blocked and not absent:
+                left_out.extend(host_left_out)
+                if not candidates and host_left_out and not absent:
                     # Every host the step names is here, and none can run it.
                     # With an absent host among them the step was written for
                     # a bench this is not, so it is left out instead.
                     raise PlanningError(
                         f"{step.test_name}: no selected host can run it: "
-                        + "; ".join(f"{item.host}: {item.reason}" for item in blocked)
+                        + "; ".join(
+                            f"{item.host}: {item.reason}" for item in host_left_out
+                        )
                     )
                 # Then the hardware itself. A host without the device a role
                 # binds is recorded, and a step no host here has the hardware
@@ -430,11 +445,14 @@ class PlanCompiler:
                 # Recorded per host, and the step produces no invocation for
                 # that host, so the rest of the suite still compiles.
                 step_blocked: list[Blocked] = []
-                # Whether this step hit such an absence at all, which is not
-                # the same as whether it added a record: a second step of the
+                # The hosts that hit such an absence, which is not the same
+                # as the hosts a record was added for: a second step of the
                 # same test on the same host adds none, and must still not be
-                # read as a step whose resources could not be assigned.
-                step_absent = False
+                # read as a host whose resources could not be assigned. Per
+                # host, so another host of the same step that produced no
+                # invocation for its own reason still says so.
+                absent_on: set[str] = set()
+                bound_invocations: set[str] = set()
                 for host, choices in bound:
                     host_choices[host] = dict(zip(role_names, choices))
                     combinations = itertools.product(*choices) if choices else [()]
@@ -476,7 +494,7 @@ class PlanCompiler:
                                 raise MissingRequiredHardware(
                                     f"{step.test_name}: {error}"
                                 ) from error
-                            step_absent = True
+                            absent_on.add(host)
                             # One record per test and host. `Ubertooth: each`
                             # tries every board and each combination may hit
                             # the same absence, and the live run view matches
@@ -491,6 +509,7 @@ class PlanCompiler:
                         # Numbered only once it is an invocation, so the IDs
                         # of a suite with a blocked step stay consecutive.
                         sequence += 1
+                        bound_invocations.add(host)
                         invocations.append(
                             TestInvocation(
                                 invocation_id=f"{sequence:03d}-{step.test_name}",
@@ -509,7 +528,10 @@ class PlanCompiler:
                             )
                         )
                 blocked_tests.extend(step_blocked)
-                if len(invocations) == step_start and not step_absent:
+                unexplained = {
+                    host for host, _choices in bound
+                } - bound_invocations - absent_on
+                if unexplained:
                     # Every combination put one device in two roles. The
                     # message names what each role could have taken, since
                     # that is what has to change: the plan's selectors, or
@@ -524,10 +546,11 @@ class PlanCompiler:
                                 for role, aliases in roles.items()
                             )
                             for host, roles in host_choices.items()
+                            if host in unexplained
                         )
                     )
                 self._check_some_case_applies(
-                    definition, invocations[step_start:], blocked
+                    definition, invocations[step_start:], host_left_out
                 )
         except RegistryError as error:
             raise PlanningError(str(error)) from error

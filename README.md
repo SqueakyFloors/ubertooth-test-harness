@@ -250,9 +250,9 @@ the subject of the test rather than something it merely binds:
 
 Such a step is recorded as **blocked** before anything runs, and it is left
 out of the invocations so every unrelated step in the suite still compiles and
-runs. The run then finishes `failed`: `exclusive.yaml` and the `mac-polling`
-plan are run deliberately on the bench that has the hub, so a quiet "not
-applicable" there would read as a pass for a gate nobody measured. The record
+runs. The run then finishes `failed`: a gate like these is named on purpose on
+the bench that has the hub or the second board, so a quiet "not applicable"
+would read as a pass for something nobody measured. The record
 is a `blocked` event in run.jsonl, a `Blocked` section in report.md,
 `blocked_tests` in the run summary, and `blocked` in the web GUI's failures;
 `run-suite --dry-run` lists them and exits 1, because a dry run that exits 0
@@ -261,11 +261,22 @@ about, so another bench's missing hub does not fail this run.
 `validate-plan --hardware` refuses both outright, as it does every other
 absence.
 
+A suite whose *only* step is blocked is still refused at planning, like any
+other suite this bench can run nothing of: the refusal names the blocked step,
+and there is no run to fail. So this matters for a mixed suite — the release
+plan, or a bench plan of its own — where the steps that can run do. The two
+committed plans that use `exclusive Ubertooth` hold one step each
+(`testplans/exclusive.yaml`, and `mac-polling`, which is `runnable: false`
+until the soak is implemented), so on a bench with an unmapped board they are
+refused rather than run and failed.
+
 A `power:` mapping that is present but wrong (an unknown controller, a port
 the controller has not got, a controller that cannot switch one) is a registry
-to correct rather than a bench without hardware, and is refused when the
-registry loads, before any plan is compiled. A serial too short to select an
-alternated board with is likewise a registry to correct, and fails planning.
+to correct rather than a bench without hardware, so it is refused rather than
+recorded: when the registry loads, where the driver is one the registry knows
+how to check, and otherwise when the plan compiles. A serial too short to
+select an alternated board with is likewise a registry to correct, and fails
+planning.
 
 ### RF placement: where a board sits on the bench
 

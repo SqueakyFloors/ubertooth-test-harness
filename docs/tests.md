@@ -66,10 +66,13 @@ host with one registered Ubertooth, and `exclusive Ubertooth` where another
 registered board is on no power controller. Such a step is recorded as
 **blocked** before the run; every unrelated step still compiles and runs, and
 the run finishes failed, so a gate nobody measured never reads as a pass.
-`run-suite --dry-run` lists the blocked steps and exits 1. A `power:` mapping
+`run-suite --dry-run` lists the blocked steps and exits 1. A suite whose only
+step is blocked is still refused at planning, naming it, since there is
+nothing left to run. A `power:` mapping
 that is present but wrong (an unknown controller, a port the controller has
-not got, a controller that cannot switch one) is a registry to correct and is
-refused when the registry loads, before any plan is compiled.
+not got, a controller that cannot switch one) is a registry to correct, so it
+is refused rather than recorded: when the registry loads where it can be
+checked there, and otherwise when the plan compiles.
 
 **RF placement.** Every test with a hardware role also accepts `rf:`, one
 requirement per role, which says what the role's placement on the bench must
@@ -2336,9 +2339,12 @@ success, failure, or cancellation.
 
 **Known limits.** It needs a switchable hub, so it is Linux-and-power-control
 only. Extra Ubertooths fail closed rather than being ignored: one the registry
-has on no power controller blocks the step and fails the run, and one that
-turns up unregistered during the run fails the isolation check. The follow
-case proves the mode kept running, not that it captured anything.
+has on no power controller blocks the step, and one that turns up unregistered
+during the run fails the isolation check. `testplans/exclusive.yaml` holds
+this step alone, so on a bench with an unmapped board the suite is refused at
+planning; in a mixed suite the step is blocked, the rest runs, and the run
+fails. The follow case proves the mode kept running, not that it captured
+anything.
 
 ## MAC polling soak
 

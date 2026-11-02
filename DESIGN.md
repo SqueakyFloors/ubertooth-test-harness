@@ -732,10 +732,13 @@ compiles and runs; the sequencer emits a `blocked` event per record, counts
 them as `blocked_tests`, and finishes the run `failed`, since a gate that was
 never measured must not read as a pass. A blocked step takes no sequence
 number, so the invocation IDs of the steps that do run stay consecutive.
-`strict_hardware=True` refuses it as it refuses the other absences. A `power:`
-mapping that is present but wrong stays a `RegistryError`, and the registry
-refuses it at load, before any plan is compiled. A name the registry does
-have, used as something it is not, and
+`strict_hardware=True` refuses it as it refuses the other absences, naming the
+step. A suite whose only step is blocked still raises `PlanningError`, as any
+suite with no runnable invocation does. A `power:`
+mapping that is present but wrong stays a `RegistryError`: the registry
+refuses it at load where it knows the controller's driver, and
+`plan_exclusive_ubertooth` refuses it at compile otherwise. A name the
+registry does have, used as something it is not, and
 a name that differs from a registered one only in case, stay plan errors
 everywhere; so does a role or argument name the catalog does not know, which
 is refused at load with no registry at all.
