@@ -45,6 +45,19 @@ class MissingResource(RegistryError):
     """
 
 
+class MissingRequiredHardware(RegistryError):
+    """Hardware a step must have to mean anything, which this bench has not got.
+
+    Absence again, as ``MissingResource`` is, but of the very thing the step
+    exists to exercise: a second Ubertooth to alternate flashes across, or a
+    switchable port to power another board off. Leaving such a step out
+    quietly would read as a pass for a gate that was never measured, so run
+    planning records the step as blocked (``hostneeds.Blocked``), runs
+    everything unrelated, and fails the run. ``validate-plan --hardware``
+    refuses it outright, as it does every other absence.
+    """
+
+
 STARTECH_DRIVER = "startech managed USB hub"
 # Port 4 carries the hub's management controller; only 1-3 are DUT ports.
 STARTECH_PORTS = (1, 2, 3)
@@ -255,6 +268,14 @@ class FileResourceRegistry:
             ):
                 if not isinstance(field_value, dict):
                     raise RegistryError(f"resource {alias}.{field_name} must be a mapping")
+            if "power" in value and not power:
+                # No `power:` at all is a board on no controller, which the
+                # planner reads as hardware this bench has not got. A written
+                # mapping with nothing in it is a registry half-filled in, so
+                # it is refused here rather than read as that absence.
+                raise RegistryError(
+                    f"resource {alias}.power must name a controller and a port"
+                )
             placement = None
             if value.get("rf") is not None:
                 try:
@@ -351,6 +372,14 @@ class FileResourceRegistry:
         for resource in self.resources.values():
             if resource.power:
                 controller_alias = resource.power.get("controller")
+                # Checked before the lookup: a YAML value of any other type
+                # (a list, a mapping) is not even hashable, and must be
+                # reported as the registry mistake it is.
+                if not isinstance(controller_alias, str):
+                    raise RegistryError(
+                        f"resource {resource.alias} power controller must be "
+                        "a registered alias"
+                    )
                 if controller_alias not in self.resources:
                     raise RegistryError(
                         f"resource {resource.alias} has unknown power controller"
