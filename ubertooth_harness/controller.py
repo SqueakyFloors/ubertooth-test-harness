@@ -445,6 +445,9 @@ class Controller:
         # run_file requests awaiting a runner's page or refusal.
         self._pending_files: dict[str, _Pending] = {}
         self._subscribers: set[_Subscriber] = set()
+        # Work started from a message and awaited by nobody, held so that
+        # nothing collects a task while it is still running.
+        self._tasks: set[asyncio.Task] = set()
         self._load_runs()
         self._load_groups()
 
@@ -1136,8 +1139,11 @@ class Controller:
             if group is not None and group.cancel_requested:
                 # The group was cancelled while this host's request was
                 # still outstanding: a child that arrives afterwards is
-                # cancelled too, or it would run on alone.
-                asyncio.ensure_future(self._cancel_late_child(group, run))
+                # cancelled too, or it would run on alone. The task is held
+                # until it ends, so nothing collects it mid-flight.
+                task = asyncio.ensure_future(self._cancel_late_child(group, run))
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
             target.active_run_id = run_id
             pending.resolve(run)
             self._publish_run(run)
@@ -1699,7 +1705,14 @@ class Controller:
         if not group.run_ids() and not self._pending_hosts(group.group_id):
             self._forget_group(group)
             return False
-        self._persist_group(group)
+        try:
+            self._persist_group(group)
+        except Exception as error:  # noqa: BLE001 - the children stand
+            # The children are started and recorded; only the group record
+            # could not be written. Answering 500 would say the opposite, so
+            # the group is reported as it stands and a restart finds each
+            # child as a group of one.
+            self.log(f"could not write group {group.group_id}: {error}")
         self._publish_group(group)
         return bool(group.run_ids())
 
@@ -1888,7 +1901,11 @@ class Controller:
                 stages=stages,
             )
             members.append({
-                **member, "failures": failure_summary(member["run"], events),
+                **member,
+                # Bounded for the same reason as the invocations below: one
+                # of these per host. The whole summary is at
+                # GET /api/runs/{run_id}.
+                "failures": failure_summary(member["run"], events)[:MAX_HOST_PARTS],
                 # Bounded as the steps are: this answer carries one of these
                 # per host, where a run's own answer carries one. The whole
                 # list is still at GET /api/runs/{run_id}.

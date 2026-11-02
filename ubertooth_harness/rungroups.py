@@ -305,6 +305,11 @@ def group_from_record(data: Mapping) -> RunGroup:
         for name in ("run_id", "error"):
             if not isinstance(entry.get(name), (str, type(None))):
                 raise ValueError(f"a member's {name} must be a string or null")
+    run_ids = group.run_ids()
+    if len(set(run_ids)) != len(run_ids):
+        # One run belongs to one host, or it would be counted once per
+        # member and a group of two could read as complete with one child.
+        raise ValueError("two members must not name the same run")
     return group
 
 
@@ -602,11 +607,15 @@ def host_steps(
             name = _label(details.get("test_name"))
             if not name or (name not in tests and len(tests) >= MAX_TEST_STEPS):
                 continue
-            parts = tests.setdefault(name, [])
+            parts = tests.get(name, [])
             if any(part["id"] == name for part in parts):
                 continue
+            # Checked before the step is added, so a record at a bound
+            # cannot leave a step with no part at all, which would read as a
+            # test nobody reached.
             if len(parts) >= MAX_STEP_PARTS or len(by_invocation) >= MAX_HOST_PARTS:
                 continue
+            parts = tests.setdefault(name, parts)
             part = _part(name, name)
             _close(part, BLOCKED, timestamp, _reason(details))
             by_invocation.setdefault(name, part)

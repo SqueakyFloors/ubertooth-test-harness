@@ -473,6 +473,10 @@ class GroupRecordTests(unittest.TestCase):
             # One entry per host, or a host's run could never be recorded.
             {"group_id": "grp-1", "hosts": [LINUX, LINUX],
              "members": [{"host": LINUX}, {"host": LINUX}]},
+            # One run belongs to one host.
+            {"group_id": "grp-1", "hosts": [LINUX, MAC],
+             "members": [{"host": LINUX, "run_id": "run-1"},
+                         {"host": MAC, "run_id": "run-1"}]},
             {"group_id": "grp-1", "build": "yes"},
             {"group_id": "grp-1", "plan": ["fast"]},
             {"group_id": "grp-1", "hosts": [LINUX],
@@ -1045,6 +1049,30 @@ class GroupStartTests(RunGroupTestCase):
         # And the group it was started by says that host never started.
         view = (await self.group(group_id))["group"]
         self.assertEqual("its run was never started", view["members"][1]["error"])
+
+    async def test_a_group_whose_record_cannot_be_written_still_starts(self):
+        """The children are running, so the answer says so."""
+        linux, mac = await self.runners()
+        with patch.object(
+            Controller, "_persist_group", side_effect=OSError("read-only")
+        ):
+            group, _requests, _ids = await self.accepted_group([linux, mac])
+        self.assertEqual(("running", 2), (group["status"], group["hosts_started"]))
+        self.assertEqual(["run-1", "run-2"],
+                         [member["run_id"] for member in group["members"]])
+        self.assertTrue(
+            any("could not write group" in line for line in self.logs), self.logs
+        )
+        # A restart finds each child as a group of one, since the group was
+        # never written.
+        await self.server.stop()
+        await self.start_controller()
+        self.assertEqual({}, self.controller.groups)
+        status, payload, _ = await self.http("GET", "/api/run-groups")
+        self.assertEqual(
+            {"run-1", "run-2"}, {view["group_id"] for view in payload["groups"]}
+        )
+        self.assertTrue(all(view["implicit"] for view in payload["groups"]))
 
     async def test_a_group_record_that_cannot_be_written_is_only_a_log_line(self):
         """A runner session must not fall over on a write to a group record."""
