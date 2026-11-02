@@ -72,7 +72,9 @@ nothing left to run. A `power:` mapping
 that is present but wrong (an unknown controller, a port the controller has
 not got, a controller that cannot switch one) is a registry to correct, so it
 is refused rather than recorded: when the registry loads where it can be
-checked there, and otherwise when the plan compiles.
+checked there, when the plan compiles where planning can tell, and for a
+`driver` no controller is written for, when the run builds its controller,
+before any port is switched.
 
 **RF placement.** Every test with a hardware role also accepts `rf:`, one
 requirement per role, which says what the role's placement on the bench must

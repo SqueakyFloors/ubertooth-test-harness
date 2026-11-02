@@ -255,8 +255,8 @@ the bench that has the hub or the second board, so a quiet "not applicable"
 would read as a pass for something nobody measured. The record
 is a `blocked` event in run.jsonl, a `Blocked` section in report.md,
 `blocked_tests` in the run summary, and `blocked` in the web GUI's failures.
-A run that was cancelled still ends `canceled`, with the blocked test named in
-its reason: nothing after the cancellation ran either. The record is
+A run that was canceled still ends `canceled`, with the blocked test named in
+its reason: nothing after the cancellation ran either.
 `run-suite --dry-run` lists them and exits 1, because a dry run that exits 0
 says this host can run the suite. Each record belongs to the host it is
 about, so another bench's missing hub does not fail this run.
@@ -276,10 +276,12 @@ two and `alternate Ubertooths` in none.
 A `power:` mapping that is present but wrong (an unknown controller, a port
 the controller has not got, a controller that cannot switch one) is a registry
 to correct rather than a bench without hardware, so it is refused rather than
-recorded: when the registry loads, where the driver is one the registry knows
-how to check, and otherwise when the plan compiles. A serial too short to
-select an alternated board with is likewise a registry to correct, and fails
-planning.
+recorded. Where, depends on how far the registry can be judged on its own:
+when it loads, for the drivers it knows how to check; otherwise when the plan
+compiles; and for a `driver` no controller is written for, when the run builds
+its controller, before any port is switched (`unsupported power-controller
+driver`). A serial too short to select an alternated board with is likewise a
+registry to correct, and fails planning.
 
 ### RF placement: where a board sits on the bench
 

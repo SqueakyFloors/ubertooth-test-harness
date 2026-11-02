@@ -730,15 +730,17 @@ is recorded as `hostneeds.Blocked` (`CompiledSuite.blocked`,
 `blocked_for_host`) and produces no invocation, so the rest of the suite
 compiles and runs; the sequencer emits a `blocked` event per record, counts
 them as `blocked_tests`, and finishes the run `failed`, since a gate that was
-never measured must not read as a pass; a cancelled run still ends `canceled`,
+never measured must not read as a pass; a canceled run still ends `canceled`,
 with the blocked test named in its reason. A blocked step takes no sequence
 number, so the invocation IDs of the steps that do run stay consecutive.
 `strict_hardware=True` refuses it as it refuses the other absences, naming the
 step. A suite left with no runnable invocation still raises `PlanningError`,
 naming the blocked step first. A `power:`
 mapping that is present but wrong stays a `RegistryError`: the registry
-refuses it at load where it knows the controller's driver, and
-`plan_exclusive_ubertooth` refuses it at compile otherwise. A name the
+refuses it at load where it knows the controller's driver,
+`plan_exclusive_ubertooth` refuses it at compile where planning can tell, and
+`power.py` refuses a `driver` no controller is written for when the run builds
+that controller, before any port is switched. A name the
 registry does have, used as something it is not, and
 a name that differs from a registered one only in case, stay plan errors
 everywhere; so does a role or argument name the catalog does not know, which

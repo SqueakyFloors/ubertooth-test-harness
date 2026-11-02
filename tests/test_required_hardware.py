@@ -648,7 +648,7 @@ class RunRecordTests(unittest.TestCase):
         self.assertEqual(2, summary.blocked_tests)
         self.assertIn("(and 1 more blocked test)", summary.failure_reason)
 
-    def test_a_cancelled_run_still_ends_cancelled(self):
+    def test_a_canceled_run_still_ends_canceled(self):
         """Nothing after the cancellation ran either, so the cancellation is
         the outcome; the blocked test is still named in the reason."""
         from tests.test_sequencer import CollectSink, FakeExecutor, run_contract
