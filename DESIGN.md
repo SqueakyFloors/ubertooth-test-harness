@@ -734,10 +734,11 @@ Ubertooth` where another registered board is on no power controller. A step
 may also claim that outcome for the hardware it binds, with
 `required hardware: true` (every test that binds hardware accepts it): the
 absence is usually the registry's own `MissingResource`, for the host or for
-a role, and the planner records it as blocked rather than not applicable; a
-host that can offer only one device for two roles raises
-`MissingRequiredHardware` from the planner itself, since no single lookup
-failed. That is what lets a gate suite name one bench's hardware honestly,
+a role, and the planner records it as blocked rather than not applicable. A
+host that can offer only one device for two roles is the planner's own
+finding, since no single lookup failed: it writes that reason itself, and
+raises `MissingRequiredHardware` for it only under `strict_hardware`.
+That is what lets a gate suite name one bench's hardware honestly,
 and `testplans/release.yaml` uses it for `Recover AFH map`; a record for a
 host the registry has not got is carried by the runs of the hosts that are
 here, as `for_host` carries that host's not-applicable records, unless some

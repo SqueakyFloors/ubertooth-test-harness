@@ -214,6 +214,13 @@ own. A blocked record for such a host is carried the same way, by the runs of
 the hosts that are here, unless one of them runs that test: that run measures
 what the step is about, so none of them fails on the absent host's part of it.
 
+A record for a host the registry *does* have belongs to that host's run
+alone, which is the rule for every blocked record. So a bench whose gate host
+is registered but has lost the hardware fails that host's run, and a run of
+the same plan on another of its hosts passes without the gate: the release is
+run on the gate host, or as a run group over the bench, which is where the
+measurement is.
+
 What a host here cannot run is decided first, and has not changed: a platform
 the step does not list, and a board placed differently from what the test
 needs, leave that host out, and a step whose every named host is here and
