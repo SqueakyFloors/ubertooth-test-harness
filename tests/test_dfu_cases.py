@@ -957,10 +957,12 @@ class DfuReadbackLengthTests(unittest.TestCase):
             (plan_line(identified=False), 114688,
              "the part could not be read, so assuming the 128 KiB part this "
              "firmware is linked for"),
-            ("Reading back 114688 bytes, 0x4000-0x1ffff: part 0x26013f37 is not "
+            # An ID the fork's table has no entry for, so the tool falls back
+            # to the size the firmware is linked for.
+            ("Reading back 114688 bytes, 0x4000-0x1ffff: part 0x25001122 is not "
              "known here, so assuming the 128 KiB part this firmware is linked "
              "for\n", 114688,
-             "part 0x26013f37 is not known here, so assuming the 128 KiB part "
+             "part 0x25001122 is not known here, so assuming the 128 KiB part "
              "this firmware is linked for"),
         ):
             with self.subTest(part):
@@ -1155,12 +1157,15 @@ class DfuReadbackRunTests(unittest.TestCase):
         self.assertEqual(1, len([command for command in board.commands
                                  if command[0] == "ubertooth-dfu" and "-d" in command]))
 
-    def test_a_build_older_than_the_range_line_rewrites_once_and_then_fails(self):
-        """A tool from before fork 10c3381 prints no range and fills in
-        nothing, so the flash really does differ from the image as today's -d
-        writes it: the cleanup rewrites once and fails on both. The image of
-        that era carries no image check block either (it arrived with the
-        host's own filling in d91bb06), so the test uses one without."""
+    def test_a_tool_that_reports_nothing_and_fills_nothing_in_rewrites_once(self):
+        """A -u that says nothing about its range, with a -d that fills in
+        nothing: the flash really does differ from the image as today's -d
+        writes it, so the cleanup rewrites once and then fails on both.
+
+        No fork build is this pair -- one older than 10c3381 fills nothing in
+        but cannot read a 128 KiB part back at all (ubertooth#233) -- so this
+        pins the cleanup's own arithmetic rather than a build's behavior.
+        """
         board, code, output = self.restore_with(image_check=False, no_plan_line=True,
                                                 no_first_block_fill=True)
         self.assertEqual(1, code)

@@ -2409,24 +2409,24 @@ its dump measured against a guess.
 
 All three arrived on the fork's main after the earlier releases, so the case
 expects them: the range line in `10c3381`
-([ubertooth#257](https://github.com/SqueakyFloors/ubertooth/issues/257)), the
-vector checksum in `31228b0`
-([ubertooth#1037](https://github.com/SqueakyFloors/ubertooth/issues/1037)),
-and the image check record in `d91bb06`
-([ubertooth#1048](https://github.com/SqueakyFloors/ubertooth/issues/1048)).
-Against a build older than `31228b0` the case fails, and which way says what
-is missing. Before `10c3381` no range is printed, so the `read-back` step
-fails with `read-back range was not reported`; the cleanup then finds flash
-that really does differ from the image as today's `-d` writes it, rewrites
-the image once with that same tool, and fails with `flash still differs after
-the rewrite: the read-back did not report the range it covers; vector
-checksum at 0x0401c is 0x00000000`. Between `10c3381` and `31228b0` the range
-is reported but the checksum is not filled in, so the dump equals the file
-and the comparison fails on that field alone: it is checked against what the
-writer should have worked out, so a dump that merely equals the file is not
-enough. Between `31228b0` and `d91bb06` the case passes, because the image
-check block arrived in `d91bb06` on both sides at once -- an image from that
-window carries none, so there is no record to fill in or to check.
+([ubertooth#233](https://github.com/SqueakyFloors/ubertooth/issues/233)), the
+vector checksum in `31228b0` and the image check record in `d91bb06`
+([ubertooth#242](https://github.com/SqueakyFloors/ubertooth/issues/242)).
+Against a build between `31228b0` and `d91bb06` the case still passes: the
+image check block arrived in `d91bb06` on both sides at once, so an image
+from that window carries none and there is no record to fill in or to check.
+Against one between `10c3381` and `31228b0` it fails on the vector checksum
+alone (`vector checksum at 0x0401c is 0x00000000, expected 0x...`): the dump
+equals the file, and that field is checked against what the writer should
+have worked out, so equalling the file is not enough.
+
+**Do not run this case against a build older than `10c3381` on an Ubertooth
+One.** Such a `-u` reads a fixed 0x4000-0x3ffff whatever the part has, and on
+the 128 KiB part the board is built from that asks for flash above the end of
+it, which faults the bootloader until the board is power-cycled
+([ubertooth#233](https://github.com/SqueakyFloors/ubertooth/issues/233)). The
+case reports it as a failed `-u` and a cleanup that cannot reach the board,
+not as a comparison it could make.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial, with
 every other registered board as guards. `coverage:`. Needs the firmware build
