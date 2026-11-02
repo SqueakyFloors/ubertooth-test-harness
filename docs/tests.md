@@ -2475,9 +2475,10 @@ it is identified by elimination, as the DFU images test does it: exactly one
 serial-less Ubertooth device attached, and every guard board enumerated by
 its own serial.
 
-The LPC vector checksum at offset 0x1c is deliberately not what the image
-gets wrong. The bootloader does not read that word and no host tool writes
-it, so an image that failed only the checksum would start normally.
+Neither checksum is what the image gets wrong, because neither can be: a file
+cannot fail them. `ubertooth-dfu` works both out as it writes the image's
+first block and puts them on the board, so what they catch is an image that
+did not reach the flash whole.
 
 **Hardware and arguments.** One `Ubertooth` with a `power:` mapping in the
 registry, on a `USB power controller` that can switch VBUS per port, plus
@@ -2485,9 +2486,11 @@ every other registered board as guards. The plan names the controller
 (`USB power controller:`), which must be the one the board is registered on,
 so a bench whose wiring moved fails planning instead of switching whatever is
 on that port; the port itself is only ever read from the registry. The run
-needs `--allow-power-changes` and the run's own firmware image
-(`--build --with-firmware`, or a `test build` artifact), holds the host lock
-throughout, and leases the board and its guards. It writes firmware and
+needs `--allow-destructive` and `--allow-power-changes` and the run's own
+firmware image (`--build --with-firmware`, or a `test build` artifact), holds
+the host lock throughout, and leases the board and its guards.
+`--allow-destructive` is a person's decision: the runner service never passes
+it on, so a dispatched run, or a click in the GUI, cannot start this test. It writes firmware and
 establishes it, so preflight checks only the board's serial and the test must
 be the last one on that board.
 
@@ -2526,7 +2529,13 @@ other way the cycle can end. The one case covers erased vectors; the other unsta
 harness can build (a misaligned or out-of-RAM stack pointer, an ARM-mode
 reset vector, an entry inside the bootloader) are checked on the host only,
 in the unit tests, because each extra hardware case is another cold boot with
-the same risk and the same bootloader check behind it. The hardware run is
+the same risk and the same bootloader check behind it. The recovery writes
+without a selector, because a board in its bootloader has no serial and `-U`
+takes no bus path, so if that board left the bus between the check and the
+write, `ubertooth-dfu` writes whichever board a no-selector command would
+reach. The harness cannot prevent that; it catches it instead, by requiring
+every guard board to still run what it ran before the write, and by the run's
+own guard checks afterwards. The hardware run is
 still outstanding
 ([#141](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/141)).
 

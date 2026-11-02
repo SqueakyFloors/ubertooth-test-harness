@@ -605,18 +605,25 @@ class Board:
         )
         return "" if code == 0 else f"read-back exited {code}: {_last_line(output)}"
 
-    def adopt_dfu_device(self) -> str:
+    def adopt_dfu_device(self, revisions: dict | None = None) -> str:
         """"" when the one attached DFU device must be this board, else why not.
 
         DFU mode has no serial, so the board is identified by elimination:
         exactly one DFU device attached and every guard answering in its own
         application. A command without -U can then be aimed at it.
+
+        ``revisions``, if given, receives each guard's revision as it is
+        read, so a caller that is about to write without a selector can
+        check afterwards that no guard was the board it reached.
         """
         count = self.dfu_count()
         if count != 1:
             return f"{count} DFU devices attached; recover the board by hand"
         for guard in self.guards:
-            if self.revision(guard) is None:
+            revision = self.revision(guard)
+            if revisions is not None:
+                revisions[guard] = revision
+            if revision is None:
                 return (f"guard board {guard} does not answer, so the DFU device may be it; "
                         "recover by hand")
         return ""
@@ -626,12 +633,24 @@ class Board:
 
         For a board whose flash holds an application it cannot start, which
         is why it has no serial to select it by. Call adopt_dfu_device()
-        first: without -U this writes whichever device answers DFU.
+        first: without -U this writes whichever device answers DFU, and if
+        none does by the time it runs, ubertooth-dfu takes the board a
+        no-selector command would -- which is why the caller also checks
+        afterwards that every guard still runs what it ran (changed_guards).
         """
         code, output = self._dfu(
             ("ubertooth-dfu", "-d", str(image), "-r"), DFU_WRITE_TIMEOUT_S
         )
         return "" if code == 0 else f"write exited {code}: {_last_line(output)}"
+
+    def changed_guards(self, revisions: dict) -> list[str]:
+        """Guards no longer running what ``revisions`` recorded for them."""
+        changed = []
+        for guard, before in revisions.items():
+            now = self.revision(guard)
+            if now != before:
+                changed.append(f"{guard} ran {before} and now reports {now}")
+        return changed
 
     def leave_dfu(self, path: Path) -> str:
         """Return a board stuck in the DFU bootloader without writing.

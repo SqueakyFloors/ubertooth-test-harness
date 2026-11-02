@@ -3,7 +3,8 @@ suites:
   # Run by hand, with someone who can reach the bench.
   #
   #   run-suite --hardware <registry> --plan testplans/power.yaml \
-  #       --suite power --host Host_Linux --allow-power-changes \
+  #       --suite power --host Host_Linux \
+  #       --allow-power-changes --allow-destructive \
   #       --build --with-firmware
   #
   # The test writes an image the bootloader must refuse to start, cuts the
@@ -17,7 +18,9 @@ suites:
   # bridged by hand at the bench. Nothing the harness can do reaches such a
   # board, so a run nobody is watching could leave one unusable.
   #
-  # Requires: --allow-power-changes, the run's own firmware image
+  # Requires: --allow-destructive (a person passes it; the runner service
+  # never does, so no dispatched run and no GUI click can start this test),
+  # --allow-power-changes, the run's own firmware image
   # (--build --with-firmware, or --artifact "test build=PATH"), and a board
   # with a `power:` mapping on a controller that can switch VBUS per port.
   # The plan names the hub so a bench whose wiring moved fails planning

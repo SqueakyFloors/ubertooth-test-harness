@@ -493,8 +493,17 @@ python -m ubertooth_harness run-suite \
   --plan testplans/power.yaml --suite power \
   --hardware hardware.yaml --host Host_Linux \
   --ubertooth-source /path/to/ubertooth --ubertooth-ref main \
-  --build --with-firmware --output runs --allow-power-changes
+  --build --with-firmware --output runs \
+  --allow-power-changes --allow-destructive
 ```
+
+`--allow-destructive` is what makes this a decision somebody takes: without
+it `run-suite` refuses the test before anything is built.
+`--allow-power-changes` cannot stand for it, because a runner service is
+deployed with that option so an exclusive-Ubertooth plan can run, and then
+passes it to every run it dispatches. `--allow-destructive` it never passes
+on, so no dispatched run, and no click in the GUI, can start a test that
+could leave a board needing the bench.
 
 It writes the board's firmware, so it must be the last test on that board, and
 the run holds the [host lock](#sharing-boards-leases) throughout.

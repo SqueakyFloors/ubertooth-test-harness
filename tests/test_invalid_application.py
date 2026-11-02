@@ -18,6 +18,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest import mock
 
@@ -29,7 +30,12 @@ from ubertooth_harness.enumeration import (
     EnumerationError,
 )
 from ubertooth_harness.flash import HarnessError
-from ubertooth_harness.manifest import FileIdentity, SourceRevision, build_run_manifest
+from ubertooth_harness.manifest import (
+    FileIdentity,
+    InvocationIdentity,
+    SourceRevision,
+    build_run_manifest,
+)
 from ubertooth_harness.plan import load_plan
 from ubertooth_harness.planner import PlanCompiler, TestInvocation
 from ubertooth_harness.power import PortState, PowerControllerError, SimulatedPowerController
@@ -134,15 +140,15 @@ def hub(port=PORT, powered=True):
     )
 
 
-def app_board(image=None, **flags):
+def app_board(image=None, guards=GUARDS, **flags):
     """The fake ubertooth-dfu board, in its application, with this bench's serials."""
-    return FakeDfuBoard(image or firmware(), serial=SERIAL, guards=GUARDS,
+    return FakeDfuBoard(image or firmware(), serial=SERIAL, guards=guards,
                         checks_vectors=True, **flags)
 
 
-def dfu_board(image=None, **flags):
+def dfu_board(image=None, guards=GUARDS, **flags):
     """A board where the write of the unstartable image left it: in DFU."""
-    board = app_board(image, **flags)
+    board = app_board(image, guards, **flags)
     board._program(dfuimage.make_unstartable(invalidapp.UNSTARTABLE_KIND,
                                              image or firmware()))
     board.mode = "dfu"
@@ -304,8 +310,8 @@ class PowerCycleTests(unittest.TestCase):
         self.bus.cold_boot_runs_image = True
         code, output = cycle(self.controller, self.bus)
         self.assertEqual(1, code)
-        self.assertIn("started the image the bootloader should have refused",
-                      output)
+        self.assertIn("so something started", output)
+        self.assertIn("started the image it should have refused", output)
         self.assertIn("write a good one back", output)
         self.assert_powered()
 
@@ -408,6 +414,51 @@ class PowerCycleTests(unittest.TestCase):
         self.assertEqual([PORT], failures)
         self.assertEqual(0, code, output)
         self.assert_powered()
+
+    def test_a_read_that_fails_after_a_verified_restore_is_only_unconfirmed(self):
+        """preserved_power_state restored the port and read it back, so a
+        controller that stops answering after that leaves the port powered;
+        saying it is off would send someone to the bench for nothing.
+
+        The failure is put on the last read of a passing cycle, which is the
+        one ensure_power_on makes on the way out, so the test does not have
+        to count the controller calls the restoration itself makes.
+        """
+        reads = self.count_reads()
+        controller, bus = hub(), None
+        board = dfu_board()
+        bus = FakeBus(controller, board)
+        original = controller.snapshot
+        calls = []
+
+        def fail_on_the_last_read(port):
+            calls.append(port)
+            if len(calls) >= reads:
+                raise PowerControllerError("controller is gone")
+            return original(port)
+
+        controller.snapshot = fail_on_the_last_read
+        code, output = cycle(controller, bus)
+        self.assertEqual(1, code)
+        self.assertIn("NOT CONFIRMED POWERED", output)
+        self.assertNotIn("STILL OFF", output)
+        self.assertTrue(controller.physical_power(PORT))
+
+    def count_reads(self):
+        """How many port reads a passing cycle makes, the last one included."""
+        controller = hub()
+        bus = FakeBus(controller, dfu_board())
+        original = controller.snapshot
+        calls = []
+
+        def counted(port):
+            calls.append(port)
+            return original(port)
+
+        controller.snapshot = counted
+        code, output = cycle(controller, bus)
+        self.assertEqual(0, code, output)
+        return len(calls)
 
     def test_a_port_that_cannot_be_restored_is_the_failure_reported(self):
         original = self.controller.set_power_enabled
@@ -679,6 +730,41 @@ class RecoverTests(unittest.TestCase):
         self.assertEqual(1, code)
         self.assertIn("2 DFU devices attached; recover the board by hand", output)
 
+    def test_a_write_that_reached_a_guard_instead_is_caught(self):
+        """A write with no selector reaches whichever device answers DFU, so
+        if the board left the bus between the check and the write,
+        ubertooth-dfu takes the board a no-selector command would -- which on
+        a host with one other board is that board. The board under test
+        answering afterwards is not enough to call that recovered, so every
+        guard has to still run what it ran.
+        """
+        board = dfu_board(guards=(GUARDS[0],))
+        written = []
+        original = board.run
+
+        def run(argv, **kwargs):
+            command = tuple(argv)
+            if (command[0] == "ubertooth-dfu" and "-d" in command
+                    and "-U" not in command):
+                # The guard got the image; the board under test recovered on
+                # its own, so the revision check below passes.
+                written.append(command)
+                board.mode = "app"
+                return board._result(
+                    command, 0, "", f"Verified firmware revision: {REVISION}\n")
+            if (command[0] == "ubertooth-util" and GUARDS[0] in command
+                    and written):
+                return board._result(
+                    command, 0, f"Firmware version: {REVISION} (API:1.10)\n")
+            return original(argv, **kwargs)
+
+        board.run = run
+        code, output = self.run_recover(board, firmware(), guards=(GUARDS[0],))
+        self.assertEqual(1, code)
+        self.assertIn("the write reached a guard board", output)
+        self.assertIn(GUARDS[0], output)
+        self.assertIn("Write that board's own firmware back", output)
+
     def test_a_guard_that_does_not_answer_stops_the_recovery(self):
         board = dfu_board()
         code, output = self.run_recover(board, firmware(), guards=("ffff",))
@@ -829,6 +915,44 @@ class RunRequirementTests(unittest.TestCase):
             {BOARD, "UT_Linux1", "UT_Linux2"},
             {board.alias for board in boards},
         )
+
+    def test_a_run_that_was_not_asked_for_a_destructive_test_is_refused(self):
+        from ubertooth_harness.cli import _check_destructive_allowed
+        with self.assertRaisesRegex(HarnessError, "can leave a board needing"):
+            _check_destructive_allowed(
+                SimpleNamespace(allow_destructive=False), self.catalog,
+                self.invocations,
+            )
+        _check_destructive_allowed(
+            SimpleNamespace(allow_destructive=True), self.catalog,
+            self.invocations,
+        )
+
+    def test_the_runner_service_never_passes_the_destructive_option_on(self):
+        """A runner is deployed with --allow-power-changes so an exclusive
+        plan can run; it must not be able to start this test as well."""
+        source = Path("ubertooth_harness/runner_service.py").read_text()
+        self.assertIn("--allow-power-changes", source)
+        self.assertNotIn("--allow-destructive", source)
+        self.assertNotIn(
+            "allow_destructive",
+            Path("ubertooth_harness/controller.py").read_text(),
+        )
+
+    def test_the_manifest_records_the_port_the_run_may_switch(self):
+        identity = InvocationIdentity.from_invocation(self.invocations[0])
+        self.assertEqual(
+            {"resource": BOARD, "controller": CONTROLLER, "port": PORT},
+            dict(identity.power_cycle),
+        )
+        self.assertEqual(dict(identity.power_cycle),
+                         identity.to_dict()["power_cycle"])
+
+    def test_another_test_records_no_port(self):
+        other = replace(self.invocations[0], test_name="Ubertooth count",
+                        power_cycle=None)
+        self.assertEqual({}, dict(
+            InvocationIdentity.from_invocation(other).power_cycle))
 
     def test_a_run_without_the_power_opt_in_is_refused(self):
         with self.assertRaisesRegex(HarnessError, "power-cycles the board"):

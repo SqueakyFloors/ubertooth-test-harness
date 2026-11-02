@@ -583,7 +583,10 @@ reads the registry again for the port: the path comes from the case context
 restored on every exit — a failed check, a controller or bus error, SIGTERM,
 SIGINT, or SIGHUP, each turned into an exception so the restoration unwinds —
 and the command's last act is to read the port back and say whether it is
-powered. Restoration still runs in-process, so the case's first cleanup step reads the
+powered; a controller that has stopped answering is the one thing that
+defeats it, and then that is what the command reports. `run-suite` also
+refuses the test without `--allow-destructive`, which the runner service
+never passes on, so no dispatched run can start it. Restoration still runs in-process, so the case's first cleanup step reads the
 port and switches it on before the second writes the run's image back; that
 covers the step's own command being killed, which the executor does with
 SIGKILL when a command outlives its deadline. A SIGKILL of the run itself

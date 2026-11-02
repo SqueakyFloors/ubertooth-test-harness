@@ -392,6 +392,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     run_suite.add_argument("--run-id")
     run_suite.add_argument(
+        "--allow-destructive", action="store_true",
+        help="run a test that can leave a board needing someone at the bench "
+             "(Reset into invalid application). A person passes this; the "
+             "runner service never does, so a dispatched run cannot start one",
+    )
+    run_suite.add_argument(
         "--allow-power-changes",
         action="store_true",
         help="allow real USB power switching for exclusive-Ubertooth tests",
@@ -961,6 +967,27 @@ def _dry_run(args, catalog, plan, host, invocations, not_applicable) -> int:
     return 0
 
 
+def _check_destructive_allowed(args, catalog, invocations) -> None:
+    """Refuse a destructive test nobody asked for on the command line.
+
+    A test that can leave a board needing its entry pin bridged has to be
+    started by a person who is there. ``--allow-power-changes`` cannot stand
+    for that: a runner service is deployed with it so an exclusive-Ubertooth
+    plan can run, and every run it dispatches then carries it. This option it
+    never passes on.
+    """
+    destructive = sorted({
+        invocation.test_name for invocation in invocations
+        if catalog.get(invocation.test_name).destructive
+    })
+    if destructive and not getattr(args, "allow_destructive", False):
+        raise HarnessError(
+            ", ".join(destructive) + " can leave a board needing recovery at "
+            "the bench; rerun with --allow-destructive, with someone who can "
+            "reach the board"
+        )
+
+
 def _check_power_cycles_armed(args, invocations) -> None:
     """Refuse a run whose test switches board power without the opt-in.
 
@@ -1012,6 +1039,7 @@ def _run_leased(
                 invocation.power_isolation, invocation.resources.get("Ubertooth")
             )
     _check_power_cycles_armed(args, invocations)
+    _check_destructive_allowed(args, catalog, invocations)
     built = None
     publisher = None
     executor = SubprocessCommandExecutor()

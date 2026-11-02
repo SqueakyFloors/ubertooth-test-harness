@@ -23,21 +23,30 @@ The commands:
   what makes it unstartable and what still makes it a valid Ubertooth DFU
   file, so the record shows the host had no reason to refuse it.
 - ``cycle`` power-cycles the board's registered port and checks what comes
-  back. It restores the port's power on every exit, including a failed check,
-  an error from the controller or the bus, and SIGTERM or SIGINT.
+  back. It restores the port's power on every exit -- a failed check, an
+  error from the controller or the bus, SIGTERM, SIGINT, SIGHUP -- and when
+  it cannot (a controller that has stopped answering), that is what it
+  reports, in the loudest line it prints.
 - ``port`` reads the port and switches it back on if it is off. It is the
-  case's first cleanup step, so a run killed outright (SIGKILL, which no
-  process can handle) still leaves the port powered.
-- ``recover`` returns the board to its application with the test image: it
-  writes the image to the single attached DFU device, waits for the
-  application, and reads the flash back. It does nothing when the board
-  already runs the test image, so the same command serves as the case's step
-  and as its cleanup.
+  case's first cleanup step, so the cycle command being killed outright
+  still ends with the port powered: the harness itself does that, with
+  SIGKILL, to a command that outlives its step deadline. A SIGKILL of the
+  whole run is beyond any of this -- no cleanup runs then, and that port is
+  switched on by hand, as after a killed power-isolation run.
+- ``recover`` returns the board to its application with the test image. It
+  always writes it, because a board that started the unstartable image
+  reports the same revision as the test image, and then waits for the
+  application to answer with that revision. The flash is not read back; see
+  ``recover`` itself for why. The same command is the case's recovery step
+  and its cleanup.
 
 ``cycle`` and ``port`` need the resource registry (the board's ``power:``
 mapping says which controller and port, never the command line) and
-``--allow-power-changes``, and the run holds the host lock for the whole
-test: nothing else may write firmware or switch power beside it.
+``--allow-power-changes``. That flag is for a person running this helper by
+hand: inside a run the case always passes it, because ``run-suite`` has
+already refused a run that is not armed for power changes, and refused one
+that was not asked for a destructive test. The run holds the host lock for
+the whole test: nothing else may write firmware or switch power beside it.
 
 Identifying the board. A board in its DFU bootloader reports no serial, so
 ``-U`` cannot reach it and USB enumeration cannot name it. It is identified
@@ -54,7 +63,7 @@ from pathlib import Path
 import signal
 import sys
 import time
-from typing import Callable, Sequence
+from typing import Callable
 
 if __package__ in (None, ""):
     # Run as a script: make the package importable.
@@ -292,9 +301,12 @@ def _diagnose(
         return f"the bus could not be read: {error}"
     if state.selected in seen:
         return (
-            "the board started the image the bootloader should have refused: "
-            f"it is enumerated as {state.selected}. Its flash holds an "
-            "unstartable image, so write a good one back before using it"
+            f"the board is enumerated as {state.selected}, so something "
+            "started: either the bootloader started the image it should have "
+            "refused, or what was written is not where the bootloader reads "
+            "it. Either way its flash holds the unstartable image, so write "
+            "a good one back before using it, and read the run's write step "
+            "for what went on the board"
         )
     if not any(is_unidentified(serial) for serial in seen):
         return (
@@ -329,10 +341,11 @@ def power_cycle(
     the bootloader device must come back -- a cold boot in which the
     bootloader refused to start the image in flash.
 
-    The port's power is restored on every exit from this function. The
-    restoration itself is checked by reading the port back, and a port that
-    cannot be restored is the failure the command reports, whatever else
-    happened.
+    The port's power is restored on every exit from this function, and the
+    restoration is checked by reading the port back. One thing can defeat
+    it: a controller that has stopped answering altogether. That is then the
+    failure the command reports, in the loudest line it prints, whatever
+    else happened -- and the case's cleanup step tries again afterwards.
     """
     timing = {
         "poll_interval_s": poll_interval_s, "clock": clock, "sleep": sleep,
@@ -341,6 +354,7 @@ def power_cycle(
     failure = ""
     unpowered = ""
     switched_off = False
+    restored = False
     try:
         controller.connect()
         before = controller.snapshot(target.port)
@@ -379,7 +393,9 @@ def power_cycle(
             )
             log(f"Board off the bus after {waited:.1f}s, and still gone "
                 f"{settle_s:g}s later")
-        # preserved_power_state restored the port here, reading it back.
+        # preserved_power_state restored the port here, reading it back, so
+        # the port is known to be on from this point.
+        restored = True
         log(f"Port {target.port} power restored")
         try:
             waited = wait_for_enumeration(
@@ -402,9 +418,9 @@ def power_cycle(
         # Whatever happened above, including a signal: the port must be
         # powered when this returns, and the command must say so.
         unpowered = ensure_power_on(controller, target.port, log,
-                                    switched_off=switched_off)
+                                    switched_off=switched_off and not restored)
         _close_quietly(controller)
-    if unpowered and switched_off:
+    if unpowered and switched_off and not restored:
         # A port this command switched off and could not switch back on is
         # the worst outcome there is, so it is what the command reports.
         log(f"Power cycle: {unpowered}"
@@ -499,11 +515,12 @@ def recover(
     recovery needs is the revision the board answers with, which is what the
     issue asks for and what `Flash reliability` verifies a write by.
     """
+    guards: dict[str, str | None] = {}
     seen = board.revision()
     if seen is None:
         log("Board does not answer in its application; looking for its "
             "DFU bootloader")
-        failure = board.adopt_dfu_device()
+        failure = board.adopt_dfu_device(guards)
         if failure:
             log(f"Recovery: {failure}")
             return 1
@@ -522,6 +539,18 @@ def recover(
         log(f"Recovery: board answers {returned}, expected {revision}"
             if returned else
             "Recovery: board did not return to its application")
+        return 1
+    # A write with no selector reaches whichever device answers DFU, and if
+    # the board left the bus between the check above and the write,
+    # ubertooth-dfu takes the board a no-selector command would -- which on
+    # a host with one other board is that board. It cannot be prevented from
+    # here (DFU has no serial and -U has no path form), so it is caught:
+    # every guard must still run what it ran before the write.
+    written = board.changed_guards(guards)
+    if written:
+        log("Recovery: the write reached a guard board, not the board under "
+            "test: " + "; ".join(written)
+            + ". Write that board's own firmware back before using it")
         return 1
     log(f"Recovered: the board started the test image it was written, "
         f"firmware {returned}")
@@ -546,10 +575,11 @@ def cycle_worst_s() -> float:
 
 
 def recover_worst_s(guards: int) -> float:
-    """A revision read, the DFU elimination, a write, and the wait after it."""
+    """A revision read, the DFU elimination, a write, the wait after it, and
+    the guard reads on both sides of the write."""
     return (dfuimage.REVISION_TIMEOUT_S
             + dfuimage.DFU_COUNT_TIMEOUT_S
-            + guards * dfuimage.REVISION_TIMEOUT_S
+            + 2 * guards * dfuimage.REVISION_TIMEOUT_S
             + dfuimage.DFU_WRITE_TIMEOUT_S
             + dfuimage.wait_worst_s())
 

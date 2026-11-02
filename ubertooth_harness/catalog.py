@@ -307,6 +307,11 @@ class TestDefinition:
     # The test writes firmware to a board, so run-suite holds the host lock
     # (leases.py) for the run: no power change or other write may overlap it.
     writes_firmware: bool = False
+    # The test can leave a board that needs someone at the bench: it is run
+    # on purpose, by a person, with `run-suite --allow-destructive`, and
+    # never by a dispatched run (the runner does not pass that option on, so
+    # the GUI cannot start it).
+    destructive: bool = False
     # A case of the test switches the selected board's USB power off and on
     # through its registered controller. The planner resolves the port from
     # the board's own registry mapping (planner.TestInvocation.power_cycle),
@@ -1679,6 +1684,7 @@ def builtin_catalog() -> TestCatalog:
                 establishes_firmware=True,
                 writes_firmware=True,
                 switches_power=True,
+                destructive=True,
                 # Every case writes the run's own image, as DFU images does;
                 # a run without one is refused rather than leaving it out.
                 build_required=Needs(firmware_build=True),
