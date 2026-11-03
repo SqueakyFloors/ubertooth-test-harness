@@ -553,7 +553,9 @@ class RegistryTests(unittest.TestCase):
             load_plan(ROOT / "testplans" / "classic.yaml"), "classic")
         with tempfile.TemporaryDirectory() as directory:
             manifest, _ = run_contract(Path(directory), tuple(invocations))
-        checks = PreflightPolicy(registry).compile(invocations, manifest)
+            # Inside the directory: compiling reads the Ubertooth checkout the
+            # manifest names, for the libbtbb its tools must be linked against.
+            checks = PreflightPolicy(registry).compile(invocations, manifest)
         peers = [check for check in checks
                  if check.resource_alias in ("ESP32_Linux0", "ESP32_Linux1")]
         self.assertEqual(2, len(peers))

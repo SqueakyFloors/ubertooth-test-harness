@@ -1254,7 +1254,9 @@ runs the check once against the fork's `main` (`scripts/ci.sh libbtbb-pin`
 runs only that step) and shows the warning on the workflow run; its `build`
 and `run-suite` steps then record it without printing it again
 (`UBERTOOTH_HARNESS_LIBBTBB_PIN_SHOWN`). Nothing fails, since another libbtbb
-can be deliberate.
+can be deliberate; what the run's tools actually load is a separate check that
+does fail (see [Which libbtbb the tools
+load](#which-libbtbb-the-tools-load)).
 Only libbtbb's C library is installed and linked (`-DENABLE_PYTHON=OFF` skips
 its Python tools): the Ubertooth tools need nothing else from it.
 
@@ -1380,6 +1382,65 @@ git-a8e65d9, the tools are git-7388776: flash it with this build (the default
 when building)`; a run without `--build` says to build and flash it, and a
 `--no-flash-build` run to leave that option out.
 
+### Which libbtbb the tools load
+
+The pin above is about what a run *builds*. A run that builds nothing tests
+the installed tools, and those are linked against whatever libbtbb is
+installed on that host, which may be another commit entirely: the fork's
+configure step only looks for a symbol, so neither the build nor the link
+stage can tell two libbtbb commits apart. A behavior-only libbtbb commit
+therefore changes what a run measures while everything about the run still
+reads as correct. One such drift cost a bench session chasing a false
+reproduction of a fork regression ([#294](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/294)).
+
+So mandatory preflight holds the host tools to one libbtbb. Every tool prints
+it on its own version line (`Host tools version: libubertooth 1.07
+(git-6a917ec), libbtbb 1.3 (git-52b2afc)`), where the revision in the second
+pair of brackets is what libbtbb's own build stamped into
+`btbb_get_release()`: the commit the installed library was built from. That
+string comes from a function in libbtbb, so it describes the library the tools
+load and not one they were compiled against. The `Host version` check reads
+that line and requires:
+
+- the libbtbb the run resolved, when it resolved one (`--libbtbb-source` and
+  `--libbtbb-ref`, with or without `--build`), by its full commit;
+- otherwise the `LIBBTBB_REF` the Ubertooth commit under test sets in its own
+  `install.sh`, which is the only statement of which libbtbb that commit is
+  meant to run against. No option is needed, so a `run-suite` started by hand
+  is held to it too. A run from a deployed runner resolves the same commit
+  already, since `scripts/deploy.sh` passes `--libbtbb-source` and
+  `--libbtbb-ref fork-pin` to every run, build or not.
+
+A mismatch fails preflight before any measurement, and the reason names the
+revision the tools reported, the one wanted, where that came from, and how to
+fix it. A library that cannot name a commit fails the same way: one built from
+a tarball reports a release such as `2020-12-R1`, and one built from a
+modified checkout adds a `*`, and neither says it is the pinned commit. Those
+two can only be put right by installing a libbtbb built from a clean checkout
+of that commit, or by running with `--build`; naming a ref cannot help, since
+what the check compares is always a commit. report.md carries a "libbtbb in
+the tools" row with what was required and how it went: `(verified)`,
+`**failed**` with the requirement, or `**not reached**` where the check
+stopped on the tools' own Ubertooth revision before it read the libbtbb half.
+The run record keeps the check, so `ubertooth-harness validate` can repeat it.
+
+An Ubertooth commit from before the fork pinned a libbtbb claims none, so
+there is nothing to check; the run records that and the report row says **not
+checked** with the reason, rather than leaving a reader to guess whether the
+library was verified. A commit whose pin cannot be compared with a revision, a
+branch or tag name or a pin built from a shell variable, refuses the run
+instead, naming `--libbtbb-source` and `--libbtbb-ref` as the way to say which
+library the installed tools hold.
+
+What is compared is an abbreviation of a commit against another abbreviation
+of one, because the library stamps whatever length its own build chose. Either
+side may be the shorter, and the shorter one decides how many digits are
+compared, which is what an abbreviation means: git shortens a hash only as far
+as stays unique in that repository. So a requirement taken from the full
+commit, which is what a run that resolved its own libbtbb has, is still
+satisfied by the library's seven-digit stamp; what the full commit buys is
+that a library reporting more digits must agree on all of them.
+
 ## Source identity, manifest, and mandatory preflight
 
 Every named-suite run requires `--ubertooth-source` and `--ubertooth-ref`. The
@@ -1402,7 +1463,9 @@ immutable resource-bound invocations. The sequencer then generates mandatory
 preflight from the selected resources; it does not depend on optional test-plan
 entries:
 
-- `Host version` once per selected host, matched to the resolved source commit;
+- `Host version` once per selected host, matched to the resolved source
+  commit, and to the libbtbb those tools are linked against (see [Which
+  libbtbb the tools load](#which-libbtbb-the-tools-load));
 - firmware version, compile identity, and registered serial once per selected
   Ubertooth, always selected by serial. The firmware version must be the
   application image (`bluetooth_rxtx`) built from the resolved commit, or the

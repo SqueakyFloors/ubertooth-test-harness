@@ -659,10 +659,15 @@ Validation and preparation have distinct phases:
    stops the run before preflight (#135). The host lock is held while
    writing, then released unless the run needs it later; the firmware build
    is implied.
-5. Mandatory preflight: verify installed host revision and every selected
-   Ubertooth firmware revision (the application image, or the bare revision
-   older firmware prints), compile identity, and registered serial before
-   the first suite test starts.
+5. Mandatory preflight: verify installed host revision, the libbtbb those
+   tools are linked against, and every selected Ubertooth firmware revision
+   (the application image, or the bare revision older firmware prints),
+   compile identity, and registered serial before the first suite test
+   starts. The libbtbb required is the one the run resolved, or, for a run
+   that resolved none, the `LIBBTBB_REF` the Ubertooth commit sets in its own
+   `install.sh`: the build and link stages cannot tell two libbtbb commits
+   apart, so the version line is the only thing that says which decoder the
+   run measured ([#294](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/294)).
 
 The `manifest` record is written to run.jsonl before preflight and snapshots requested
 refs, resolved commits, plan/registry/artifact hashes, target host, normalized

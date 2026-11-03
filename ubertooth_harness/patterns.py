@@ -84,8 +84,26 @@ def serial_pattern(serial: str) -> str:
 # Git abbreviates a commit to as many hex digits as it needs for the hash to
 # be unique in that clone, and it never uses fewer than this many.
 GIT_SHORT_HASH_MIN = 7
+# The longest abbreviation a revision string carries: a sha1 object name in
+# full. A repository using sha256 object names has longer commits, and no
+# build stamps more than this into a revision.
+GIT_HASH_MAX = 40
 
-_GIT_HASH_REVISION = re.compile(rf"\Agit-([0-9a-f]{{{GIT_SHORT_HASH_MIN},40}})\Z")
+_GIT_HASH_REVISION = re.compile(
+    rf"\Agit-([0-9a-f]{{{GIT_SHORT_HASH_MIN},{GIT_HASH_MAX}}})\Z"
+)
+
+
+def commit_revision(commit: str) -> str:
+    """The revision string naming ``commit``, to compare with a reported one.
+
+    A commit longer than a revision string ever carries (a sha256 object
+    name) is cut to GIT_HASH_MAX digits, which ``revision_pattern`` then
+    compares as a prefix of what the build stamped. Without the cut the
+    whole value would be matched literally, and no build would ever report
+    it.
+    """
+    return f"git-{commit.strip().lower()[:GIT_HASH_MAX]}"
 
 
 def revision_pattern(expected: str) -> str:
