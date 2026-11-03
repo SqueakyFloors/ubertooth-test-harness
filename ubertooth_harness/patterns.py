@@ -176,3 +176,25 @@ def compile_info_pattern(expected: str) -> str:
     at the build string itself.
     """
     return rf"\bubertooth\s+{revision_pattern(expected)}\s+\("
+
+
+# btle-extcap's sentence for a capture filter it cannot apply (fork ba3edb15,
+# SqueakyFloors/ubertooth#806, NO_CAPTURE_FILTER in btle-extcap.py). The
+# script prints it twice over: as the answer to Wireshark's filter
+# verification call, and as "warning: <sentence> (got <filter>)" on standard
+# error when a capture is started with a filter anyway, so a reader sees the
+# same sentence either way. Two tests read it (BLE extcap capture and BLE
+# extcap in tshark) and so does the fake script the unit tests run, so the
+# wording lives here once.
+NO_CAPTURE_FILTER = ("this interface does not apply capture filters;"
+                     " use a display filter")
+
+
+def capture_filter_warning(capture_filter: str) -> str:
+    """The warning line a capture started with ``capture_filter`` prints."""
+    return f"warning: {NO_CAPTURE_FILTER} (got {capture_filter})"
+
+
+def capture_filter_warning_pattern(capture_filter: str) -> str:
+    """``capture_filter_warning`` as a pattern anchored to its own line."""
+    return r"(?m)^" + re.escape(capture_filter_warning(capture_filter)) + r"$"

@@ -85,8 +85,10 @@ import time
 
 if __package__:
     from ubertooth_harness import pytools
+    from ubertooth_harness.patterns import NO_CAPTURE_FILTER
 else:  # run as a script: this directory is sys.path[0]
     import pytools
+    from patterns import NO_CAPTURE_FILTER
 
 TSHARK = "tshark"
 # What the plugin's records decode to: Wireshark's own field names.
@@ -574,10 +576,10 @@ def _report(status, stdout, stderr, children, address, pdu_type, min_packets,
             f"Wireshark decoded {rows.advertiser} {name} packet(s) from "
             f"{rows.address}, fewer than {min_packets}")
     if capture_filter is not None:
-        if "applies no capture filter" not in stderr:
+        if NO_CAPTURE_FILTER not in stderr:
             failures.append(
-                "the plugin's warning that it applies no capture filter did not "
-                "reach tshark")
+                f"the plugin's warning that it does not apply capture filters "
+                f"({NO_CAPTURE_FILTER!r}) did not reach tshark")
         if f"(got {capture_filter})" not in stderr:
             failures.append(
                 f"the warning does not name the filter tshark passed on "

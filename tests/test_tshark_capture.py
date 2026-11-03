@@ -27,7 +27,7 @@ import warnings
 from unittest import mock
 
 from tests import fake_extcap
-from ubertooth_harness import advcapture, pytools, tshark_cases, tsharkcapture
+from ubertooth_harness import advcapture, patterns, pytools, tshark_cases, tsharkcapture
 
 ADDRESS = "C3:11:22:33:44:55"
 OTHER = "D0:00:00:00:00:02"
@@ -408,7 +408,7 @@ class CaptureTests(unittest.TestCase):
         code, out = self.capture(capture_filter="btle.length > 20")
 
         self.assertEqual(0, code, out)
-        self.assertIn("applies no capture filter", out)
+        self.assertIn(patterns.NO_CAPTURE_FILTER, out)
         self.assertIn("tshark checks passed", out)
 
     def test_a_plugin_that_says_nothing_about_the_filter_fails_the_check(self):

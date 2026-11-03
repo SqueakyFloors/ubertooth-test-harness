@@ -46,6 +46,7 @@ import sys
 from ubertooth_harness import extcapcapture, pytools
 from ubertooth_harness.cases import CommandCase, guard_roles
 from ubertooth_harness.hostneeds import NO_NEEDS, Needs
+from ubertooth_harness.patterns import capture_filter_warning_pattern
 from ubertooth_harness.receive_cases import seconds_arg
 from ubertooth_harness.stateful import (
     CAPTURE_DIR_KEY,
@@ -66,6 +67,10 @@ _PYTOOLS = str(Path(pytools.__file__).resolve())
 # pytools.py runs the probe and the tool with its own 20 s limits.
 _TIMEOUT_S = 50.0
 EXTCAP_DLT = 256
+# A capture filter for the one case that passes one: a display filter
+# expression, which is what Wireshark hands an extcap program, and which this
+# interface applies to nothing either way.
+_CAPTURE_FILTER = "btle.length > 20"
 
 
 def _case(case_id, name, command, args, patterns, returncodes=(0,)):
@@ -412,15 +417,14 @@ def extcap_capture_cases(arguments, _resources, resource_identities):
                       patterns=(r"(?m)^error: advertising channel index must be 37-39 "
                                 r"\(got 40\)$", r"(?m)^extcap exit: 1 ")),
         # Wireshark's capture filter cannot be applied: the capture starts
-        # anyway and says so on stderr.
+        # anyway and says so on stderr (the wording is the fork's
+        # NO_CAPTURE_FILTER, patterns.py).
         _capture_case(serial, seconds, "extcap-capture-filter",
                       "btle-extcap --capture --extcap-capture-filter (not applied)",
                       stream + ", advertising channel 37, a warning that the filter "
                       "is not applied",
-                      extra=("--extcap-capture-filter", "btle.length > 20"),
-                      patterns=(r"(?m)^warning: this interface applies no capture "
-                                r"filter; filter the packets in Wireshark instead "
-                                r"\(got btle\.length > 20\)$",)),
+                      extra=("--extcap-capture-filter", _CAPTURE_FILTER),
+                      patterns=(capture_filter_warning_pattern(_CAPTURE_FILTER),)),
         # Wireshark's other way of ending a capture: it closes the FIFO, the
         # next packet gets SIGPIPE, and the script exits 0 by itself. The
         # FIFO is closed only after a record has arrived; with none in the
