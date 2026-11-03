@@ -2485,11 +2485,15 @@ given), or `skipped` (the commit names neither `DFU_PARTS` nor
 `dfu_upload_length` anywhere, so it is older than the figures and has none to
 compare with). Only a commit that never had the figures is quiet: a
 comparison that stopped working reports itself, which is the failure this
-check exists to avoid. The CI `build` job runs the same comparison once
-against the fork's `main` and shows it on the workflow run page
-(`scripts/ci.sh dfu-part-table` runs only that step). A difference and an
-unreadable table are also printed
-on
+check exists to avoid. What it cannot see is the arithmetic itself: a fork
+that still names those three figures and works the length out of them
+differently compares as a match, and the read-back step is what catches that,
+by the length the tool really reports. The CI `build` job runs the same
+comparison once against the fork's `main` and shows it on the workflow run
+page (`scripts/ci.sh dfu-part-table` runs only that step); its `build` and
+`run-suite` steps then record it without printing it again
+(`UBERTOOTH_HARNESS_DFU_PART_TABLE_SHOWN`). A difference and an unreadable
+table are also printed on
 stderr and shown in the browser live view; a match and a skip leave the
 report row to say so. Nothing fails on this: the read-back check stays the
 harness's copy, so a length no part explains is still loud, and the warning

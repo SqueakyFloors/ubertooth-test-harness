@@ -422,7 +422,7 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
                      "host/ubertooth-tools/src/dfu_recovery.h"))
         check = check_sources(self._sources(moved))
         self.assertEqual("unchecked", check.status)
-        self.assertIn("DFU_PARTS appears in", check.message)
+        self.assertIn("a part list is defined in", check.message)
         self.assertIn("dfu_parts.c", check.message)
         self.assertIn("which this does not read", check.message)
 
@@ -451,6 +451,67 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
         check = check_sources(self._sources(extra))
         self.assertEqual("unchecked", check.status)
         self.assertIn("dfu_parts_extra.c", check.message)
+
+    def test_a_host_file_that_only_mentions_the_table_is_not_a_second_list(self):
+        """A test that walks the table through its accessors, or a document
+        that names it, holds no list of its own. The fork's own host test
+        already walks it, so reading a mention as a list would report every
+        run unchecked over nothing."""
+        mentions = self._commit_files(
+            {"host/ubertooth-tools/tests/test_dfu_recovery.c":
+             "/* walks DFU_PARTS through dfu_part_at() */\n"
+             "static void test_parts(void) { const struct dfu_part *p = "
+             "dfu_part_at(0); (void)p; }\n",
+             "host/doc/ubertooth-dfu.md":
+             "The part sizes come from DFU_PARTS in the recovery sources.\n"},
+            "files that name the table without holding one")
+        check = check_sources(self._sources(mentions))
+        self.assertEqual("passed", check.status)
+
+    def test_a_comment_in_the_function_is_not_a_use_of_a_figure(self):
+        """Round 4's check read raw text, so a figure left in a comment
+        counted as a use and a fork that had stopped using it compared as a
+        match."""
+        body = UPLOAD_LENGTH_C.replace(
+            "BOOTLOADER_OFFSET + BOOTLOADER_SIZE",
+            "APPLICATION_REGION_START /* was BOOTLOADER_OFFSET + "
+            "BOOTLOADER_SIZE */")
+        commit = self._commit_files(
+            {"host/ubertooth-tools/src/dfu_recovery.c": PART_TABLE_C + body},
+            "the old figures left in a comment")
+        check = check_sources(self._sources(commit))
+        self.assertEqual("unchecked", check.status)
+        self.assertIn("does not name BOOTLOADER_OFFSET or BOOTLOADER_SIZE",
+                      check.message)
+
+    def test_a_commented_out_copy_of_the_function_is_not_the_definition(self):
+        """The other direction: the first match in raw text was an old copy
+        left in a comment, which reported a fork that was perfectly in step."""
+        old = UPLOAD_LENGTH_C.replace("BOOTLOADER_OFFSET + BOOTLOADER_SIZE",
+                                      "SOMETHING_ELSE")
+        commit = self._commit_files(
+            {"host/ubertooth-tools/src/dfu_recovery.c":
+             PART_TABLE_C + "/*\n" + old + "\n*/\n" + UPLOAD_LENGTH_C},
+            "an old copy of the function in a comment")
+        check = check_sources(self._sources(commit))
+        self.assertEqual("passed", check.status)
+
+    def test_the_whole_check_shares_one_deadline(self):
+        """Several git commands, one budget: a per-command timeout would let
+        the check hold a run for a multiple of it, and by then the run has
+        its boards."""
+        clock = iter([0.0, 0.0, 5.0, 14.0, 99.0, 99.0, 99.0])
+        deadline = dfuparts.Deadline(15.0, clock=lambda: next(clock))
+        self.assertEqual(15.0, deadline.remaining())
+        self.assertEqual(10.0, deadline.remaining())
+        self.assertEqual(1.0, deadline.remaining())
+        # Spent, but never zero: a command given no time would raise where
+        # it should run.
+        self.assertGreater(deadline.remaining(), 0)
+        with self.assertRaisesRegex(RuntimeError, "this check is given"):
+            dfuparts.fork_parts_at(
+                self.repo, self.tabled,
+                dfuparts.Deadline(0.0, clock=lambda: 10.0))
 
     def test_the_bootloaders_own_copy_of_the_table_is_not_a_second_list(self):
         """The fork's bootloader keeps the same table to bound its own
@@ -485,8 +546,8 @@ class ForkCheckoutTests(_ForkRepo, unittest.TestCase):
                      PART_TABLE_C + body}, description)
                 check = check_sources(self._sources(commit))
                 self.assertEqual("unchecked", check.status)
-                self.assertIn("works a read-back length out of something other",
-                              check.message)
+                self.assertIn("cannot confirm that the figures read here are "
+                              "the ones a read-back length follows", check.message)
 
     def test_the_figures_must_be_worked_out_somewhere_this_can_see(self):
         commit = self._commit_files(
@@ -682,12 +743,18 @@ class CommandLineTests(_ForkRepo, unittest.TestCase):
         self.assertTrue(out.startswith("::warning title=DFU part table::"), out)
         self.assertIn("LPC17-1M", err)
 
-    def test_a_commit_without_the_figures_and_a_bad_ref_both_warn(self):
-        for ref in (self.untabled, "no-such-ref"):
-            with self.subTest(ref=ref[:7]):
-                code, out, err = self._main(ref)
-                self.assertEqual((0, ""), (code, out))
-                self.assertIn("warning:", err)
+    def test_a_commit_older_than_the_figures_says_so_without_warning(self):
+        """Every release before the part table is such a commit, so warning
+        about it would be warning about nothing."""
+        code, out, err = self._main(self.untabled, github=True)
+        self.assertEqual((0, ""), (code, err))
+        self.assertIn("no part table to compare with", out)
+        self.assertNotIn("::warning", out)
+
+    def test_a_ref_that_cannot_be_read_warns(self):
+        code, out, err = self._main("no-such-ref")
+        self.assertEqual((0, ""), (code, out))
+        self.assertIn("warning:", err)
 
     def test_the_ci_step_runs_it_once_before_the_build(self):
         text = (self.ROOT / "scripts" / "ci.sh").read_text()

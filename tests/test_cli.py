@@ -452,6 +452,9 @@ suites:
             self.assertEqual(["run_started", "libbtbb_pin", "dfu_part_table", "manifest"],
                              kinds[:4])
             self.assertEqual(1, kinds.count("run_started"))
+            # Once, not twice: this run opened its own record, so the
+            # sequencer leaves the comparison to it (#283).
+            self.assertEqual(1, kinds.count("dfu_part_table"))
             # This source is a throwaway repository, not a fork checkout, so
             # it has no DFU part table to compare with (#283).
             self.assertEqual("skipped", events[2]["status"])

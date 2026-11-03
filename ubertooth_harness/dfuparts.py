@@ -31,7 +31,8 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-from typing import NamedTuple, Sequence
+import time
+from typing import Callable, NamedTuple, Sequence
 
 from ubertooth_harness.dfuimage import (
     APPLICATION_OFFSET,
@@ -41,6 +42,11 @@ from ubertooth_harness.dfuimage import (
 )
 
 EVENT = "dfu_part_table"
+
+# Set (to anything) when the check was already shown for this build, so the
+# build and run-suite steps record it without printing it a second and third
+# time, as the libbtbb pin check does.
+SHOWN_ENV = "UBERTOOTH_HARNESS_DFU_PART_TABLE_SHOWN"
 
 # The fork files the figures live in. All of them are read and searched
 # together, so a #define that moves between these headers is still found.
@@ -61,6 +67,12 @@ PART_TABLE_FILES = SOURCE_FILES[:2]
 # reported rather than passed over.
 TREE_MARKERS = ("DFU_PARTS", "dfu_upload_length")
 
+# A part list being defined, rather than the table being mentioned: a test
+# that walks it, a comment, or a document names the symbol without holding a
+# list of its own, and reading those as a second list would report a run
+# unchecked over nothing.
+PART_LIST_DEFINITION = r"DFU_PARTS[A-Za-z0-9_]*[ \t]*\[[^]]*\][ \t]*="
+
 # The part of the tree whose part list decides a read-back length: the host
 # tool's. The bootloader keeps a table of its own to bound its own read-back
 # (firmware/bootloader/flash.h), and a firmware unit test in the fork fails
@@ -70,7 +82,10 @@ HOST_TREE = "host/"
 
 # The function the three figures are read for. Its body has to name them, or
 # the fork works them out from something else and the figures read here are
-# no longer the ones it compiles.
+# no longer the ones it compiles. What this cannot see is the arithmetic
+# itself: a body that still names all three and subtracts one term more
+# compares as a match, and only the read-back step catches that, by the
+# length the tool really reports.
 UPLOAD_LENGTH_FUNCTION = "dfu_upload_length"
 _FUNCTION_BODY = re.compile(
     rf"\b{UPLOAD_LENGTH_FUNCTION}\s*\([^)]*\)\s*\{{(.*?)^\}}", re.S | re.M)
@@ -88,14 +103,34 @@ _FIELDS = re.compile(
 # An integer literal with the suffixes C allows on one: `0x4000`, `128u`.
 _LITERAL = re.compile(r"(0[xX][0-9a-fA-F]+|\d+)[uUlL]*")
 # A fork checkout on an unresponsive filesystem must not hold up a run that
-# already has the bench: this is advisory, so it gives up instead. One read
-# per file in SOURCE_FILES and one search per TREE_MARKERS entry, so the
-# whole check is bounded by five of these.
-GIT_TIMEOUT_S = 10.0
+# already has the bench: this is advisory, so it gives up instead. The budget
+# is for the whole check, not per git command, because it takes several of
+# them (one read per file in SOURCE_FILES, and a search for each thing looked
+# for in the tree). A warm clone takes about two seconds.
+GIT_TIMEOUT_S = 15.0
 
 
 class PartTableUnreadable(RuntimeError):
     """The fork writes one of these figures in a way this module cannot read."""
+
+
+class Deadline:
+    """One budget for a whole check, shared by the git commands it takes.
+
+    A per-command timeout would let a check that takes five of them hold a
+    run for five times as long, and by then the run has its boards.
+    """
+
+    def __init__(self, budget_s: float = GIT_TIMEOUT_S,
+                 clock: Callable[[], float] = time.monotonic):
+        self.budget_s = budget_s
+        self._clock = clock
+        self._ends_at = clock() + budget_s
+
+    def remaining(self) -> float:
+        """What is left, never zero: a command given no time at all would
+        raise where it should run."""
+        return max(self._ends_at - self._clock(), 0.001)
 
 
 class PartEntry(NamedTuple):
@@ -298,16 +333,19 @@ class ForkParts:
         return tuple(labels)
 
 
-def _show(source: Path | str, ref: str, path: str) -> str | None:
+def _show(source: Path | str, ref: str, path: str,
+          deadline: Deadline | None = None) -> str | None:
     """``path`` at ``ref`` of a checkout, or None when that commit has none.
 
     Git runs under ``LC_ALL=C``, since a missing path is told from a failure
     by git's own wording.
     """
+    deadline = deadline or Deadline()
     try:
         result = subprocess.run(
             ["git", "-C", str(source), "show", f"{ref}:{path}"],
-            capture_output=True, text=True, check=False, timeout=GIT_TIMEOUT_S,
+            capture_output=True, text=True, check=False,
+            timeout=deadline.remaining(),
             # A byte that is not valid here is a byte in a C comment: it must
             # not raise out of a check that is only advisory.
             errors="replace",
@@ -317,8 +355,8 @@ def _show(source: Path | str, ref: str, path: str) -> str | None:
         # A run that reaches here already holds its boards, so this gives up
         # rather than waiting on the checkout.
         raise RuntimeError(
-            f"reading {path} at {ref} in {source} took longer than "
-            f"{GIT_TIMEOUT_S:.0f}s"
+            f"reading {path} at {ref} in {source} took longer than the "
+            f"{deadline.budget_s:.0f}s this check is given"
         ) from None
     if result.returncode != 0:
         if "does not exist" in result.stderr or "exists on disk, but not in" in result.stderr:
@@ -329,25 +367,27 @@ def _show(source: Path | str, ref: str, path: str) -> str | None:
     return result.stdout
 
 
-def tree_mentions(source: Path | str, ref: str, pattern: str) -> list[str]:
-    """Files at ``ref`` naming ``pattern``, wherever in the tree they are.
+def tree_mentions(source: Path | str, ref: str, pattern: str,
+                  deadline: Deadline | None = None) -> list[str]:
+    """Files at ``ref`` matching ``pattern``, wherever in the tree they are.
 
     Read on every check, because where these figures are is not something to
-    assume: a tree that names them only in files this does not read has moved
+    assume: a tree that holds them only in files this does not read has moved
     them, and both of those have to be told from a tree that names them
     nowhere, which is simply older than all of this.
     """
+    deadline = deadline or Deadline()
     try:
         result = subprocess.run(
-            ["git", "-C", str(source), "grep", "--name-only", "--fixed-strings",
+            ["git", "-C", str(source), "grep", "--name-only", "--extended-regexp",
              pattern, ref],
             capture_output=True, text=True, check=False, errors="replace",
-            timeout=GIT_TIMEOUT_S, env={**os.environ, "LC_ALL": "C"},
+            timeout=deadline.remaining(), env={**os.environ, "LC_ALL": "C"},
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(
-            f"searching {ref} in {source} for {pattern} took longer than "
-            f"{GIT_TIMEOUT_S:.0f}s"
+            f"searching {ref} in {source} for {pattern} took longer than the "
+            f"{deadline.budget_s:.0f}s this check is given"
         ) from None
     # git grep exits 1 for no match, and above that for a real failure.
     if result.returncode > 1:
@@ -358,7 +398,8 @@ def tree_mentions(source: Path | str, ref: str, pattern: str) -> list[str]:
     return [line.split(":", 1)[-1] for line in result.stdout.splitlines() if line]
 
 
-def fork_parts_at(source: Path | str, ref: str) -> ForkParts | None:
+def fork_parts_at(source: Path | str, ref: str,
+                  deadline: Deadline | None = None) -> ForkParts | None:
     """The part figures at ``ref`` of a fork checkout, or None for none.
 
     None means one thing: this commit names neither TREE_MARKERS anywhere, so
@@ -370,23 +411,25 @@ def fork_parts_at(source: Path | str, ref: str) -> ForkParts | None:
     only a tree that never had them is passed over. Git errors other than a
     missing path raise RuntimeError.
     """
-    texts = {path: _show(source, ref, path) for path in SOURCE_FILES}
+    deadline = deadline or Deadline()
+    texts = {path: _show(source, ref, path, deadline) for path in SOURCE_FILES}
     read = [path for path in SOURCE_FILES if texts[path] is not None]
     # Where the tree keeps these figures, rather than where this module hopes
-    # they are. Read on every check, so a second list in a file this does not
+    # they are. Read on every check, so a part list in a file this does not
     # read is as visible as a table that moved out of the files it reads.
-    marked = {pattern: tree_mentions(source, ref, pattern)
+    marked = {pattern: tree_mentions(source, ref, pattern, deadline)
               for pattern in TREE_MARKERS}
     if not any(marked.values()):
         return None
-    elsewhere = sorted(path for path in set(marked["DFU_PARTS"]) - set(read)
+    defined = tree_mentions(source, ref, PART_LIST_DEFINITION, deadline)
+    elsewhere = sorted(path for path in set(defined) - set(read)
                        if path.startswith(HOST_TREE))
     if elsewhere:
         raise PartTableUnreadable(
-            f"DFU_PARTS appears in {', '.join(elsewhere)}, which this does not "
-            f"read: the flash sizes come from {' and '.join(PART_TABLE_FILES)}, "
-            "so a part list elsewhere in the host tools is one this has not "
-            "compared"
+            f"a part list is defined in {', '.join(elsewhere)}, which this does "
+            f"not read: the flash sizes come from "
+            f"{' and '.join(PART_TABLE_FILES)}, so a part list elsewhere in the "
+            "host tools is one this has not compared"
         )
     joined = "\n".join(texts[path] for path in read)
     parts = parse_part_table(joined)
@@ -421,7 +464,10 @@ def _check_figures_are_the_ones_used(text: str, figures: dict) -> None:
     every length differed. So the function the harness mirrors has to name
     them itself: that is the one place their meaning lives.
     """
-    body = _FUNCTION_BODY.search(text)
+    # Comments first, as the table and the defines are read: a figure named
+    # only in a comment is not a use, and a commented-out copy of the
+    # function is not the definition.
+    body = _FUNCTION_BODY.search(_without_comments(text))
     if body is None:
         raise PartTableUnreadable(
             f"the figures are here, but no {UPLOAD_LENGTH_FUNCTION}() this can "
@@ -432,8 +478,10 @@ def _check_figures_are_the_ones_used(text: str, figures: dict) -> None:
     if unused:
         raise PartTableUnreadable(
             f"{UPLOAD_LENGTH_FUNCTION}() does not name "
-            f"{' or '.join(sorted(unused))} any more, so the fork works a "
-            "read-back length out of something other than the figures read here"
+            f"{' or '.join(sorted(unused))} any more, so this cannot confirm "
+            "that the figures read here are the ones a read-back length "
+            "follows; a rename that leaves the arithmetic alone reads the "
+            "same way"
         )
 
 
@@ -594,8 +642,12 @@ def main(argv=None) -> int:
         message = str(error)
     else:
         if fork is None:
-            message = (f"{label} names neither {' nor '.join(TREE_MARKERS)}, so "
-                       "it has no part table to compare with")
+            # Nothing to warn about: this commit is older than the figures,
+            # which every release before the part table is. The run record
+            # calls this skipped and stays quiet about it too.
+            print(f"{label} names neither {' nor '.join(TREE_MARKERS)}, so it "
+                  "has no part table to compare with")
+            return 0
         else:
             message = drift_warning(fork, fork_label=label)
             if message is None:

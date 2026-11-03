@@ -289,8 +289,13 @@ def _resolve_sources(args: argparse.Namespace):
 
 
 def _terminal_sink() -> TerminalEventSink:
-    """The live stderr stream; quiet about a libbtbb pin check already shown."""
-    quiet = {libbtbbpin.EVENT} if os.environ.get(libbtbbpin.SHOWN_ENV) else set()
+    """The live stderr stream; quiet about a check whose caller already showed
+    it, so a CI job that runs the comparison itself does not print it again
+    for the build and the suite."""
+    quiet = set()
+    for module in (libbtbbpin, dfuparts):
+        if os.environ.get(module.SHOWN_ENV):
+            quiet.add(module.EVENT)
     return TerminalEventSink(sys.stderr, quiet_events=quiet)
 
 

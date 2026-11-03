@@ -150,12 +150,15 @@ check_libbtbb_pin() {
 # The flash sizes a DFU read-back length is checked against are the harness's
 # own copy of the fork's part table, so the fork may have added a part since:
 # warn once with the entry that is missing, do not fail (#283). The build and
-# run-suite steps record the same check in their run.jsonl; this puts it on
-# the workflow run page, where a reader sees it without opening a log.
+# run-suite steps below still record the check in their run.jsonl, without
+# printing it again. This puts it on the workflow run page, where a reader
+# sees it without opening a log.
 check_dfu_part_table() {
     step "DFU part table against the fork's own"
     .venv/bin/python -m ubertooth_harness.dfuparts \
         --ubertooth-source "$1" --ubertooth-ref "${UBERTOOTH_REF:-main}"
+    UBERTOOTH_HARNESS_DFU_PART_TABLE_SHOWN=1
+    export UBERTOOTH_HARNESS_DFU_PART_TABLE_SHOWN
 }
 
 run_build() {
