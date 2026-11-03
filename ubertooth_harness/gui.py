@@ -23,7 +23,12 @@ import re
 import time
 from typing import Awaitable, Callable, Mapping, Sequence
 
-from ubertooth_harness.catalog import CatalogError, TestCatalog, builtin_catalog
+from ubertooth_harness.catalog import (
+    REQUIRED_HARDWARE_ARGUMENT,
+    CatalogError,
+    TestCatalog,
+    builtin_catalog,
+)
 from ubertooth_harness.learned import (
     BUILD_STAGE,
     CATALOG,
@@ -37,7 +42,11 @@ from ubertooth_harness.learned import (
 )
 from ubertooth_harness.manifest import ManifestError, _safe_repository
 from ubertooth_harness.outputfiles import output_file_list
-from ubertooth_harness.hostneeds import TEST_BUILD_LABEL
+from ubertooth_harness.hostneeds import (
+    TEST_BUILD_LABEL,
+    platform_capabilities,
+    unmet,
+)
 from ubertooth_harness.plan import PlanError, TestStep, image_label, load_plan
 from ubertooth_harness.protocol import _git_ref, _name
 
@@ -302,6 +311,224 @@ def estimate_fields(
     }
 
 
+def step_hosts(arguments: Mapping) -> tuple[str, ...]:
+    """The host aliases a plan step names, or () for ``hosts: each``.
+
+    ``hosts:`` is normalized to ``each`` or a tuple of aliases (catalog.py);
+    the planner reads the singular ``host`` first, so this does too.
+    """
+    selector = arguments.get("host", arguments.get("hosts", "each"))
+    if selector == "each":
+        return ()
+    if isinstance(selector, str):
+        return (selector,)
+    return tuple(str(alias) for alias in selector)
+
+
+def omitted_reason(
+    catalog: TestCatalog,
+    test_name,
+    arguments: Mapping,
+    target: str | None,
+    platform: str | None = None,
+) -> str:
+    """Why a run on ``target`` would not run this step, or ``''``.
+
+    What planning decides for the host itself, in the order it decides it
+    (``PlanCompiler.compile_suite``): a step that names hosts is compiled for
+    the hosts it names and for no other, and then a host whose platform the
+    step does not run on is left out as not applicable. ``platform`` is the
+    target's own (the controller has it from the target's registration);
+    without one only the plan's host naming is read, since nothing else here
+    knows what the target is.
+
+    The absences this cannot answer are the ones that need the target's
+    resource registry, which the controller has not got: hardware no host
+    here has, and a board placed differently from what the test needs. Those
+    steps are counted, and the run itself reports them.
+
+    One of those is why a step is reported as left out rather than as the
+    run's undoing: where every host a step names is in that bench's registry
+    and none of them can run it, compiling the suite is a plan error there
+    and the run is refused outright ("no selected host can run it"). Which
+    hosts that bench has is exactly what is not known here, so what is
+    reported is the one answer that holds either way: this target does not
+    run the step.
+    """
+    if not target:
+        return ""
+    hosts = step_hosts(arguments)
+    if hosts and target not in hosts:
+        return f"runs on {', '.join(hosts)}, not on {target}"
+    if not platform:
+        return ""
+    # Exactly what the planner asks of a host before any hardware: the
+    # platform, and the test-wide needs only the platform can decide
+    # (BlueZ-only tools). Every other capability is unknown here, which
+    # hostneeds reads as met.
+    capabilities = platform_capabilities(target, platform)
+    try:
+        needs = catalog.get(test_name).test_needs(arguments)
+    except CatalogError:
+        return ""
+    return next(
+        (unmet(need, capabilities) for need in needs if unmet(need, capabilities)),
+        "",
+    )
+
+
+def bound_hardware(catalog: TestCatalog, test_name) -> str:
+    """The hardware a test binds, role by role, for a reader.
+
+    ``Ubertooth, ESP32 Classic peer (acceptor), ESP32 Classic peer
+    (initiator)``: the resource type each role takes, named with the role
+    except where the role is the type. Empty for a test that binds none.
+    """
+    try:
+        roles = catalog.get(test_name).hardware_roles or {}
+    except CatalogError:
+        return ""
+    return ", ".join(
+        resource_type if role == resource_type else f"{resource_type} ({role})"
+        for role, resource_type in roles.items()
+    )
+
+
+def _hosts_text(hosts: Sequence[str]) -> str:
+    return ", ".join(hosts) if hosts else "no host"
+
+
+def run_plan_check(
+    catalog: TestCatalog,
+    steps: Sequence[TestStep],
+    hosts: Sequence[str],
+    *,
+    platforms: Mapping[str, str | None] | None = None,
+    tests: Sequence[str] = (),
+) -> dict:
+    """What a run of these steps on these hosts would run, and what must
+    stop it being started.
+
+    ``{"runs", "omitted", "blocked", "refusal"}``: how many steps at least
+    one of the hosts would run, the steps none of them would (each with the
+    reason for the first host), the required ones among those, and the one
+    sentence to refuse the run with, or ``''`` when there is nothing to
+    refuse.
+
+    Two things stop a run here, both decided by the plan before anything is
+    leased or built:
+
+    - no host of the run runs a single step of the suite, which run-suite
+      refuses on the target anyway ("no selected invocation");
+    - a step with ``required hardware: true`` whose ``hosts:`` names no host
+      of this run. That argument says the step's own hardware is what it
+      measures, so a bench without it fails the run rather than passing the
+      gate unmeasured (#269, #282) — and a run that was never going to
+      compile the step cannot measure it either, whatever the bench has.
+      Offering it is offering a release gate nobody measures.
+
+    Only the host naming decides that second one, as it decides it in
+    planning: a host left out for its platform is not applicable, which
+    ``required hardware:`` deliberately does not change (#282), so a step
+    this target's platform cannot run is not a refusal here.
+
+    ``tests`` is the run's selected test names where it names any, since
+    run-suite then runs and judges only those. ``platforms`` is each host's
+    platform where it is known.
+    """
+    chosen = set(tests)
+    if chosen and not any(step.test_name in chosen for step in steps):
+        # A selection this suite holds nothing of. The target has its own
+        # copy of the plans, so that is as likely to be a controller whose
+        # copy is older as a selection nothing could run, and the target
+        # refuses what it cannot run in its own words.
+        return {"runs": 0, "omitted": [], "blocked": [], "refusal": ""}
+    runs = 0
+    running: set[str] = set()
+    omitted: list[dict] = []
+    for step in steps:
+        if chosen and step.test_name not in chosen:
+            continue
+        reasons = [
+            omitted_reason(
+                catalog, step.test_name, step.arguments, host,
+                (platforms or {}).get(host),
+            )
+            for host in hosts
+        ]
+        if not hosts or "" in reasons:
+            runs += 1
+            running.add(step.test_name)
+            continue
+        named = step_hosts(step.arguments)
+        omitted.append({
+            "name": step.test_name,
+            "reason": reasons[0],
+            "hosts": list(named),
+            "hardware": bound_hardware(catalog, step.test_name),
+            # Required, and not run here because the plan names other hosts:
+            # the absence `required hardware:` is about. A platform this run
+            # cannot meet is not (see above).
+            "required": (
+                step.arguments.get(REQUIRED_HARDWARE_ARGUMENT) is True
+                and bool(named)
+                and not set(named) & set(hosts)
+            ),
+        })
+    blocked: list[dict] = []
+    for item in omitted:
+        # One entry per test, and nothing for a test some host of this run
+        # runs: that run measures the gate. The planner's own rule
+        # (CompiledSuite.blocked_for_host) is the same shape over a whole
+        # bench, which is a different question: a third registered host
+        # running the step keeps the bench covered, and leaves this run
+        # unable to measure it, which is what this refusal is about.
+        if not item["required"] or item["name"] in running:
+            continue
+        if any(entry["name"] == item["name"] for entry in blocked):
+            continue
+        blocked.append(item)
+    return {
+        "runs": runs, "omitted": omitted, "blocked": blocked,
+        "refusal": _refusal(hosts, runs, omitted, blocked),
+    }
+
+
+def _refusal(
+    hosts: Sequence[str], runs: int, omitted: Sequence[Mapping],
+    blocked: Sequence[Mapping],
+) -> str:
+    """The sentence a run that must not be started is refused with."""
+    where = _hosts_text(hosts)
+    if not hosts:
+        return ""
+    if not runs:
+        named = "; ".join(
+            f"{item['name']} {item['reason']}" for item in omitted[:3]
+        )
+        rest = len(omitted) - 3
+        # A suite with no steps at all (a hand-written plan) has nothing to
+        # name, so it is said without a list rather than with an empty one.
+        return (
+            f"no test of this suite runs on {where}"
+            + (f": {named}" if named else "")
+            + (f"; and {rest} more" if rest > 0 else "")
+        )
+    if blocked:
+        return (
+            f"a run on {where} would not measure what this suite requires: "
+            + "; ".join(
+                f"{item['name']} is required on {_hosts_text(item['hosts'])}"
+                + (f", which needs {item['hardware']} there" if item["hardware"] else "")
+                for item in blocked
+            )
+            + f". Start the suite on {_hosts_text(sorted({host for item in blocked for host in item['hosts']}))}"
+            + " (a run group may take several hosts at once), or choose a"
+            " suite without that step."
+        )
+    return ""
+
+
 def _per_board(catalog: TestCatalog, step: TestStep) -> bool:
     """True when the step runs once per selected board (a role set to each)."""
     try:
@@ -355,11 +582,92 @@ def _build_needs(catalog: TestCatalog, test_name, arguments=None) -> dict:
     }
 
 
+def _total(tests: Sequence[Mapping]) -> float | None:
+    """The tests' estimates added up, or None unless every one has an
+    estimate. 0.0 for no tests at all, which adds up with the other total."""
+    seconds = [test["estimated_s"] for test in tests]
+    if None in seconds:
+        return None
+    return round(float(sum(seconds)), 1)
+
+
+def _suite_view(name: str, tests: Sequence[Mapping], check: Mapping) -> dict:
+    """One suite as /api/plans reports it, for the target the tests were
+    listed for.
+
+    Everything the client acts on is counted over the steps that target
+    would run (``runs_on_target``): the time estimate, the build options to
+    ask for, and the images only ``--artifact`` can pass. What the target
+    does not run costs it nothing and asks nothing of its run. The steps
+    left out are reported beside those, each with the time it would take on
+    the host that does run it, so a total that is smaller than the suite's
+    is accounted for rather than merely smaller.
+
+    ``check`` is ``run_plan_check`` for the same target: whether a run of
+    this suite there may be started at all, and what stops it
+    (``blocked_tests``, the required steps no host of such a run would run,
+    each with the hardware it is about and where). The GUI holds Run for a
+    suite that says no, and the controller refuses it; the reason is one
+    sentence, the same one both show.
+
+    With no target nothing is left out and nothing is refused, so the fields
+    are what they were: the sum of every step in the suite.
+    """
+    running = [test for test in tests if test["runs_on_target"]]
+    omitted = [test for test in tests if not test["runs_on_target"]]
+    return {
+        "name": name,
+        "tests": list(tests),
+        # Only when every test this target runs has one; build and
+        # preflight excluded. None for a suite with no step for the target,
+        # which is a run the target would refuse (it has nothing to run).
+        "estimated_s": _total(running) if running else None,
+        "unestimated_tests": sum(
+            test["estimated_s"] is None for test in running
+        ),
+        "per_board_tests": sum(test["per_board"] for test in running),
+        # True when any test the target runs needs (or cannot run without)
+        # that build option, so a client that dispatches the suite (the GUI)
+        # can ask for it.
+        **{
+            field: any(test[field] for test in running)
+            for field in _BUILD_NEED_FIELDS
+        },
+        # Every image the suite needs that no build produces.
+        "needs_artifacts": sorted(
+            {label for test in running for label in test["needs_artifacts"]}
+        ),
+        # The steps this target does not run: each one's name, why, and what
+        # it would add where it does run.
+        "omitted_tests": [
+            {"name": test["name"], "reason": test["omitted_reason"],
+             "estimated_s": test["estimated_s"]}
+            for test in omitted
+        ],
+        # Their time together: 0.0 when none is left out, None when one of
+        # them has no estimate.
+        "omitted_estimated_s": _total(omitted),
+        # The required steps a run on this target would not run: the gate it
+        # could not measure, with the hardware it is about and the hosts
+        # that have it. Empty with no target given.
+        "blocked_tests": [
+            {"name": item["name"], "hosts": item["hosts"],
+             "hardware": item["hardware"], "reason": item["reason"]}
+            for item in check["blocked"]
+        ],
+        # Whether a run of this suite on this target may be started, and the
+        # one sentence saying why not.
+        "runnable_on_target": not check["refusal"],
+        "not_runnable_reason": check["refusal"],
+    }
+
+
 def list_plans(
     plans_dir: Path,
     *,
     estimates: EstimateStore | None = None,
     target: str | None = None,
+    platform: str | None = None,
 ) -> list[dict]:
     """Every ``<name>.yaml`` plan with its suites, tests and estimates.
 
@@ -379,6 +687,14 @@ def list_plans(
     With a ``target`` host, each test's ``estimated_s`` is what that host's
     own finished runs measured, when enough of them did (see
     ``estimate_fields``); without one it is the catalog estimate, as before.
+
+    A ``target`` also decides which steps the suite's own fields count: a
+    step that target would not run adds nothing to its estimate and asks
+    nothing of its run, and is reported in ``omitted_tests`` instead (see
+    ``omitted_reason`` and ``_suite_view``). ``platform`` is that target's
+    own host platform, which decides a step the target could not run
+    whichever hosts it names. Without a target every step counts, which is
+    the suite's whole time whichever host runs a part of it.
     """
     plans = []
     try:
@@ -397,42 +713,77 @@ def list_plans(
             continue
         suites = []
         for suite, steps in plan.suites.items():
-            tests = [
-                {
+            tests = []
+            for step in steps:
+                reason = omitted_reason(
+                    catalog, step.test_name, step.arguments, target, platform
+                )
+                # A step this target does not run is timed where it does:
+                # for the host it names, when it names exactly one, so the
+                # figure is that host's learned estimate rather than this
+                # target's for a test this target never runs.
+                named = step_hosts(step.arguments)
+                host = target
+                if reason:
+                    host = named[0] if len(named) == 1 else None
+                tests.append({
                     "name": step.test_name,
                     **estimate_fields(catalog, step.test_name, step.arguments,
-                                      estimates=estimates, host=target),
+                                      estimates=estimates, host=host),
                     "per_board": _per_board(catalog, step),
+                    # Whether a run on the target would run this step at all,
+                    # and why not (``omitted_reason``). True for every step
+                    # with no target given.
+                    "runs_on_target": not reason,
+                    "omitted_reason": reason,
                     **_build_needs(catalog, step.test_name, step.arguments),
-                }
-                for step in steps
-            ]
-            seconds = [test["estimated_s"] for test in tests]
-            suites.append({
-                "name": suite,
-                "tests": tests,
-                # Only when every test has one; build and preflight excluded.
-                "estimated_s": (
-                    round(sum(seconds), 1)
-                    if seconds and None not in seconds else None
-                ),
-                "unestimated_tests": seconds.count(None),
-                "per_board_tests": sum(test["per_board"] for test in tests),
-                # True when any test in the suite needs (or cannot run
-                # without) that build option, so a client that dispatches the
-                # suite (the GUI) can ask for it.
-                **{
-                    field: any(test[field] for test in tests)
-                    for field in _BUILD_NEED_FIELDS
-                },
-                # Every image the suite needs that no build produces.
-                "needs_artifacts": sorted(
-                    {label for test in tests for label in test["needs_artifacts"]}
-                ),
-            })
+                })
+            check = run_plan_check(
+                catalog, steps, (target,) if target else (),
+                platforms={target: platform} if target else None,
+            )
+            suites.append(_suite_view(suite, tests, check))
         plans.append({"name": path.stem, "title": plan.name, "error": None,
                       "runnable": plan.runnable, "suites": suites})
     return plans
+
+
+def suite_refusal(
+    plans_dir: Path,
+    plan: str,
+    suite: str,
+    hosts: Sequence[str],
+    *,
+    platforms: Mapping[str, str | None] | None = None,
+    tests: Sequence[str] = (),
+    catalog: TestCatalog | None = None,
+) -> str:
+    """Why a run of this suite on these hosts must not be started, or ``''``.
+
+    One plan file, read the way the runner reads it (an exact name in the
+    plans directory), then ``run_plan_check``. A plan or suite this
+    directory has not got is not judged: the runner refuses an unknown plan
+    in its own words, and a plan the controller cannot read is not a reason
+    to refuse a run the target could carry out with its own copy.
+
+    Every run start calls this, and the plan is read each time, which is a
+    few milliseconds and always the file as it now stands. The catalog is
+    the caller's, because building one allocates enough to be worth holding
+    (see ``Controller.catalog``).
+    """
+    if not _name(plan) or not isinstance(suite, str):
+        return ""  # the protocol refuses the request in its own words
+    path = Path(plans_dir) / f"{plan}.yaml"
+    try:
+        if not path.is_file():
+            return ""
+        catalog = catalog or builtin_catalog()
+        steps = load_plan(path, catalog).steps(suite)
+    except (CatalogError, PlanError, OSError):
+        return ""
+    return run_plan_check(
+        catalog, steps, list(hosts), platforms=platforms, tests=tests
+    )["refusal"]
 
 
 def _manifest_details(events: Sequence[Mapping]) -> Mapping:

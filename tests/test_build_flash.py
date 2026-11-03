@@ -644,6 +644,84 @@ class RunSuiteFlashTests(unittest.TestCase):
         self.assertEqual(2, code)
         self.assertIn("--no-flash-build requires --build", stderr.getvalue())
 
+    def _run_suite(self, *extra):
+        stderr = io.StringIO()
+        stdout = io.StringIO()
+        with redirect_stderr(stderr), redirect_stdout(stdout):
+            code = main([
+                "run-suite", "--plan", str(self.plan()), "--suite", "fast",
+                "--hardware", str(self.hardware), "--host", "Host_Local",
+                "--ubertooth-source", str(self.source), "--ubertooth-ref", "HEAD",
+                "--output", str(self.output), *extra,
+            ])
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_comparing_a_bootloader_needs_a_build(self):
+        """#298: check and update compare against a bootloader built here."""
+        for mode in ("check", "update"):
+            with self.subTest(mode):
+                code, _out, stderr = self._run_suite(f"--bootloader={mode}")
+                self.assertEqual(2, code)
+                self.assertIn(f"--bootloader {mode} compares each board", stderr)
+                self.assertIn("requires --build", stderr)
+
+    def test_updating_a_bench_with_no_programmer_is_refused_before_the_build(self):
+        code, _out, stderr = self._run_suite(
+            "--bootloader=update", "--build",
+            "--libbtbb-source", str(self.source), "--libbtbb-ref", "HEAD",
+        )
+        self.assertEqual(2, code)
+        self.assertIn("only through a debug programmer", stderr)
+        self.assertIn("UT_0 has none", stderr)
+        self.assertIn("--bootloader check", stderr)
+
+    def test_updating_needs_the_run_s_own_firmware_on_the_board(self):
+        """A write happens before preflight, so the board carries this build."""
+        code, _out, stderr = self._run_suite(
+            "--bootloader=update", "--build", "--no-flash-build",
+            "--libbtbb-source", str(self.source), "--libbtbb-ref", "HEAD",
+        )
+        self.assertEqual(2, code)
+        self.assertIn("must be carrying this run's own firmware first", stderr)
+        self.assertIn("drop --no-flash-build", stderr)
+
+    def test_updating_without_the_programmer_command_is_refused(self):
+        with patch("ubertooth_harness.cli.shutil.which", return_value=None):
+            code, _out, stderr = self._run_suite(
+                "--bootloader=update", "--build",
+                "--libbtbb-source", str(self.source), "--libbtbb-ref", "HEAD",
+            )
+        self.assertEqual(2, code)
+        # The registry refusal comes first on this bench; with a programmer
+        # registered the missing tool is what is left.
+        self.assertTrue(
+            "lpc21isp" in stderr or "only through a debug programmer" in stderr,
+            stderr,
+        )
+
+    def test_dry_run_says_what_it_would_do_about_each_board_s_bootloader(self):
+        code, stdout, _err = self._run_suite(
+            "--bootloader=check", "--build", "--dry-run",
+            "--libbtbb-source", str(self.source), "--libbtbb-ref", "HEAD",
+        )
+        self.assertEqual(0, code)
+        self.assertIn("bootloader: check", stdout)
+        self.assertIn(f"UT_0 ({SERIAL_A}): no programmer registered; check-only",
+                      stdout)
+
+    def test_the_run_s_own_bootloader_artifact_name_is_reserved(self):
+        """A given file must not stand in the manifest for the one written."""
+        code, _out, stderr = self._run_suite(
+            "--artifact", "bootloader region=" + str(self.hardware),
+        )
+        self.assertEqual(2, code)
+        self.assertIn("is the run's own bootloader region", stderr)
+
+    def test_recording_is_the_default(self):
+        code, stdout, _err = self._run_suite("--dry-run")
+        self.assertEqual(0, code)
+        self.assertIn("bootloader: record", stdout)
+
     def test_dry_run_names_the_boards_it_would_flash(self):
         stdout = io.StringIO()
         with (

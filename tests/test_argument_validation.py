@@ -9,6 +9,19 @@ MODELED_TOOLS = ("ubertooth-util", "ubertooth-btle")
 STRAY_CASES = {r.case_id for r in transitions.REJECTIONS if "unexpected argument" in r.error}
 
 
+def _error_line(rejection) -> str:
+    """The line a rejection's pattern stands for, as the tool prints it.
+
+    The patterns are regular expressions, and the ones that pin a whole line
+    carry its anchors and an inline flag; a fake echoing the pattern itself
+    would print those too and match nothing. Only the escapes and anchors the
+    harness's own patterns use are undone, which is all a rejection line
+    needs: it is one line of plain text.
+    """
+    text = rejection.error.replace("(?m)", "").replace("\\", "")
+    return text.strip("^$")
+
+
 class ParsingUbertooth(FakeUbertooth):
     """FakeUbertooth plus the argument checks of the other tools (fork sources).
 
@@ -29,11 +42,14 @@ class ParsingUbertooth(FakeUbertooth):
 
     def run(self, argv, *, timeout_s, cancellation=None, on_output=None):
         command = tuple(argv)
-        tool, options = command[0], command[3:]
+        tool = command[0]
+        # The whole command line, because a rejection that brings its own
+        # -U (-U all) is given no selector by the case (Rejection.select).
         rejection = next(
-            (r for r in transitions.REJECTIONS
-             if r.tool == tool and r.options == options), None
+            (r for r in transitions.REJECTIONS if r.argv(self.serial) == command),
+            None,
         )
+        options = rejection.options if rejection is not None else command[3:]
         # FakeUbertooth parses util and btle like the fork; echo the expected
         # error only for the other tools, -U all, and injected regressions.
         modeled = (
@@ -49,8 +65,8 @@ class ParsingUbertooth(FakeUbertooth):
             self._apply(options)
         if rejection.case_id in self.accept:
             return self._result(command, 0, "", "", on_output)
-        message = rejection.error.replace("\\", "")
-        return self._result(command, 1, "", message + "\n", on_output)
+        return self._result(command, 1, "", _error_line(rejection) + "\n",
+                            on_output)
 
 
 class ArgumentValidationTests(unittest.TestCase):
@@ -70,8 +86,17 @@ class ArgumentValidationTests(unittest.TestCase):
         for case in full:
             reject = next(step for step in case.steps if step.step_id == "reject")
             argv = reject.resolve_argv({})
+            rejection = next(item for item in transitions.REJECTIONS
+                             if f"reject-{item.case_id}" == case.case_id)
             with self.subTest(case.case_id):
-                self.assertEqual(["-U", SERIAL], list(argv[1:3]))
+                if rejection.select:
+                    self.assertEqual(["-U", SERIAL], list(argv[1:3]))
+                else:
+                    # -U all is the selector, and a second -U would be
+                    # refused for the repeat instead of for what -U all
+                    # supports (harness #292). No other board is named.
+                    self.assertEqual(["-U", "all"], list(argv[1:3]))
+                    self.assertEqual(1, list(argv).count("-U"))
                 self.assertEqual((1,), reject.expected_returncodes)
                 self.assertTrue(reject.output_patterns)
                 self.assertTrue(reject.forbidden_patterns)

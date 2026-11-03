@@ -11,6 +11,7 @@ from ubertooth_harness import leases
 from ubertooth_harness.resources import RegistryError
 
 PEER_TYPE = leases.PEER_TYPE
+PROGRAMMER_TYPE = leases.PROGRAMMER_TYPE
 HELD_TYPES = tuple(leases.LEASED_TYPES)
 
 # The shortest prefix of a serial a name may be. Bench notes name a board by
@@ -99,9 +100,14 @@ def plain_serial(resource) -> str:
     """The serial a bench's own scripts may name a device's lock file after.
 
     An Ubertooth's lease key is its serial, so there is no second name and
-    this is empty. A DK's and a peer's keys are not their serials, so both
-    names exist and both are taken.
+    this is empty. A DK's, a peer's and a programmer's keys are not their
+    serials, so both names exist and both are taken.
     """
+    if resource.type == PROGRAMMER_TYPE:
+        # As registered, not lowercased: a programmer's serial goes into its
+        # lease key verbatim, and the bench's own lock file is named after
+        # that same string, so another spelling would name another file.
+        return str(resource.identity.get("serial", "") or "").strip()
     if resource.type not in (leases.DK_TYPE, PEER_TYPE):
         return ""
     for key in ("jlink serial", "bridge serial"):
@@ -117,8 +123,18 @@ def board(resource) -> leases.Board:
 
 
 def bench_lock_board(resource) -> leases.Board | None:
-    """The bench's older lock name for this device, when it has a second one."""
+    """The bench's older lock name for this device, when it has a second one.
+
+    The bench's own file keeps the plain serial, which is the whole point of
+    the second name; the lease file taken beside it is prefixed, because an
+    unprefixed name of 32 hex digits is the lease file of an Ubertooth with
+    that serial and a peer's bridge serial is 32 hex digits (harness #290).
+    """
     serial = plain_serial(resource)
     if not serial or serial == lock_key(resource):
         return None
-    return leases.Board(f"{resource.alias} (bench lock)", serial)
+    return leases.Board(
+        f"{resource.alias} (bench lock)",
+        leases.bench_lock_key(serial),
+        external_key=serial,
+    )

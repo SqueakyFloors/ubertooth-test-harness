@@ -3,7 +3,9 @@
 One section per test in the harness catalog
 ([`ubertooth_harness/catalog.py`](../ubertooth_harness/catalog.py)), in catalog
 order. Each heading is the exact catalog name, which is also the name a plan
-writes, so a test without a section here is easy to spot.
+writes, so a test without a section here is easy to spot. The last section,
+`Out of scope: ...`, is the exception: it records what the harness has decided
+not to test, so a missing catalog entry is not mistaken for an oversight.
 
 Each section says what the test does, how it produces a known answer, what
 hardware and arguments it needs, what passes and fails, and what it cannot
@@ -45,13 +47,18 @@ self-reset counter into a pass/fail measure for that step; without it a
 self-reset is reported and judged by a person, not failed
 ([`watchdog.py`](../ubertooth_harness/watchdog.py)). `Flash reliability`,
 `Exclusive Ubertooth topology`, and `MAC polling soak` must state their
-platforms.
+platforms. Every test that binds hardware also accepts `rf:`, one placement
+requirement per role, and `required hardware: true`, which says the hardware
+that step names is what the step measures: a registry without it blocks the
+step and fails the run rather than leaving it out ("Hardware a step is
+about", below).
 
 **Hardware the bench has not got.** A step whose `hosts:` name a host this
 registry does not have, or whose hardware roles no selected host can bind (no
 ESP32 Classic peer, no DK, no default for the role, none declaring the role),
 is left out before the run as not applicable, the same way a platform
-mismatch is. So a plan every host runs may still hold a step for hardware
+mismatch is, unless the step carries `required hardware: true`, where it is
+blocked instead. So a plan every host runs may still hold a step for hardware
 only one bench has. What a host that is here cannot run is still a plan
 error: a platform it does not have, and a board placed differently from what
 the test needs, fail planning when every host the step names is here and none
@@ -60,10 +67,14 @@ left out instead).
 `validate-plan --hardware <registry>` refuses the absence too, since there
 the bench is named on purpose (README, "Hardware a registry has not got").
 
-**Hardware a step is about.** Two absences are not left out quietly, because
-the missing hardware is the subject of the test: `alternate Ubertooths` on a
-host with one registered Ubertooth, and `exclusive Ubertooth` where another
-registered board is on no power controller. Such a step is recorded as
+**Hardware a step is about.** Three absences are not left out quietly,
+because the missing hardware is the subject of the test: `alternate
+Ubertooths` on a host with one registered Ubertooth, `exclusive Ubertooth`
+where another registered board is on no power controller, and a step that
+says so itself with `required hardware: true` for the hardware it binds (a
+host with no peer registered, one peer where the test needs two, or a
+registry without that host at all). `testplans/release.yaml` uses the last
+of those for `Recover AFH map`. Such a step is recorded as
 **blocked** before the run; every unrelated step still compiles and runs, and
 the run finishes failed, so a gate nobody measured never reads as a pass.
 `run-suite --dry-run` lists the blocked steps and exits 1. A suite whose only
@@ -85,6 +96,41 @@ weak or distant link, or keeps a test off an attenuated board. A test whose
 cases need an ordinary link declares that as its own default, so a plan does
 not have to; the plan's `rf:` overrides the default role by role. The sections
 below name the default where a test has one.
+
+**Weak link.** `weak link:` is the shorthand for the usual case, one role at
+an attenuation in dB: `weak link: {Ubertooth: 20}` asks for a board at exactly
+20 dB with its antenna attached, and for an ordinary board for every other
+role of the test, which is what makes the attenuation of a run's figures a
+single number in the plan
+([`weaklink.py`](../ubertooth_harness/weaklink.py)). It names exactly one
+role, because a figure from a run where two boards were attenuated would
+belong to neither attenuation; a plan that really wants two placements has
+`rf:`, and a test takes one argument or the other, never both. Exactly that
+attenuation, not at least: a figure measured behind 20 dB says nothing about a
+bench with 10 dB or 40 dB in the path, so a bench carrying a different
+attenuator is told what the check needs rather than run against numbers taken
+elsewhere. The attenuation a run used is not read back from the argument: the
+planner records the placement of each board it bound, and the report quotes
+that beside the figures.
+
+A **runnable** plan may only ask for a link a figure has been taken over:
+either no attenuation at all, or exactly one attenuation the bench has been
+measured at, today 20 dB and 40 dB (`weaklink.MEASURED_ATTENUATIONS_DB`). A test's
+floors were set over whatever link it last ran, so running it behind an
+uncharacterized attenuator would judge it against figures taken elsewhere. A
+bare `min_attenuation_db`, which only `rf:` can write, is refused there as
+well, since which board it binds depends on what the bench holds.
+`validate-plan` applies this to a whole plan and `run-suite` to the suite it
+is about to run, so a suite is refused before a board is touched.
+The weak-link entries a run has characterized live in the plan they belong
+to, each carrying the figures it was judged against: `ble-weak-link` in
+[`ble.yaml`](../testplans/ble.yaml), `classic-weak-link` in
+[`classic.yaml`](../testplans/classic.yaml), and `range-weak-link` in
+[`range.yaml`](../testplans/range.yaml). None of them changed a threshold:
+each is the committed test pointed at a weak-link receiver.
+[`testplans/weak-link.yaml`](../testplans/weak-link.yaml) holds what is still
+waiting, split into what needs a second nRF52840 DK and what needs a
+measurement or an implementation.
 
 **Coverage profiles.** A test with a `coverage:` argument takes `smoke` or
 `comprehensive`. Smoke keeps one case per behavior; comprehensive adds the
@@ -284,6 +330,75 @@ name it.
 
 **Known limits.** Covered in practice by `Ubertooth identity`.
 
+## Bootloader identity
+
+**What it does.** Nothing as a plan entry: a catalog entry for the bootloader
+read, which mandatory preflight does on every board of every run instead.
+
+**Theory of operation.** A board's bootloader is the first 16 KiB of its
+flash, and `ubertooth-dfu` runs from there, so an ordinary firmware write
+cannot replace it: a board keeps the bootloader it came with until somebody
+installs another one over a programmer on its in-system programming header.
+`ubertooth-util -B` is what reports which one that is, in one line:
+
+```text
+Bootloader: 2.00 git-1a2b3c4, CRC32:0x9d2fe1b4
+Bootloader: no version block (factory or earlier, treated as 1.x), CRC32:0x5f0a73c1
+```
+
+The first form comes from a 48-byte version block the fork's bootloader
+carries at a fixed offset; the second is every board as shipped. The CRC-32 is
+of the whole region, worked out on the board, and is on the line either way.
+
+Preflight reads it for every board whose firmware the run requires, after the
+firmware checks, since firmware older than the read refuses it. What the run
+then requires is `--bootloader`:
+
+- `record`, the default, asks only that the board answered, and records what
+  it said. A bootloader write is physical and cannot be undone over USB, so
+  nothing about one is implicit in a bench or release run.
+- `check` compares the answer with a bootloader built from the run's own
+  Ubertooth source and fails the run when a board is on an older or different
+  one. All three of the version, the build string, and the region hash must
+  agree: two different 2.00 images are two different bootloaders, and the hash
+  is what tells them apart.
+- `update` installs that bootloader on a stale board whose registry pairs it
+  with a debug programmer, then reads `-B` again and requires exactly the
+  identity that was written, and the application still reporting the run's
+  revision. A stale board with no programmer fails and the reason names the
+  missing capability.
+
+"Current" is not the resolved commit's bootloader but the newest commit,
+reachable from it, that touched the sources the bootloader image is built
+from. The build string in the block is the whole repository's revision at
+build time, so an artifact pinned to the resolved commit would differ on every
+unrelated commit and ask for a physical write to every board on most days, for
+no change in behavior. The harness reads the bootloader's own makefile and
+refuses a pin whose paths no longer cover a source the image is built from.
+
+**Hardware and arguments.** One `Ubertooth` per check, selected by full
+serial. `update` also needs a `Debug programmer` paired with the board, with a
+`serial device`, plus `lpc21isp` and `arm-none-eabi-gcc` on the host; see
+"Installing a bootloader through it" in [`hardware.md`](hardware.md).
+
+**Expected outcome.** No implementation as a plan entry; only a
+`runnable: false` plan may name it. As a preflight check: one `-B` per
+selected board, recorded in `run.jsonl` as a `bootloader_identity` record and
+shown in the report's Bootloader section and in the GUI's board list.
+`record` passes on any answer, including a factory bootloader; `check` and
+`update` pass only on the identity the artifact names.
+
+**Known limits.** A run against a fork commit from before `-B` existed has no
+check at all, and records that it had none. The region hash is worked out from
+the artifact, which is the image padded with the 0xff of erased flash and the
+vector checksum filled in; a programmer that wrote the region any other way
+would be caught by the read-back rather than predicted, which is what the
+first hardware test of the update path confirms
+([#298](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/298)).
+There is no one factory hash to compare against: shipped boards each report a
+different one, so a board's own hash is worth recording and another board's
+says nothing about it.
+
 ## Part ID
 
 **What it does.** Nothing yet: a catalog entry for reading the
@@ -409,6 +524,12 @@ and must print none of the mode-start lines, so an accepted argument that
 started a mode is caught even where the exit status would not show it. The
 arguments and messages are taken from the fork's own sources, so the expected
 text is the tool's, not the harness's guess.
+
+Each command names the board it is for with `-U <serial>`, except the two
+`-U all` cases, which bring that selector themselves: no option may be given
+a value twice, so a second `-U` would be refused for the repeat and the case
+could never reach the behavior it is named for. Those two are refused before
+any board is opened, so leaving the selector out takes nothing away.
 
 **Hardware and arguments.** One `Ubertooth`, selected by full serial.
 Guarded, which is what catches the two `-U all` cases if a regression let them
@@ -703,6 +824,16 @@ directions rather than of one board talking to itself. `-m` on the sender then
 reports the lowest PA level and copy number that got through each way; the
 repeater keeps no result of its own, which the test also confirms.
 
+`-n` waits for the round trip and prints that same result block itself, on
+standard output, with its progress on standard error. So the test reads the
+result twice over: `-n`'s standard output must carry those four lines and
+nothing else, and the `-m` read after the test must give the same four
+values, which the case records from `-n` and holds the read to. Its step is
+given longer than the tool's own deadline, so a test the repeater never
+answers is reported by the tool, with its reason, rather than killed by the
+harness; a reply that differs from the request ends `-n` the same way, with
+the byte it differs at on standard error.
+
 Both boards are reset first, so neither can report a stale result, and both
 are set to 2410 MHz, which is neither the boot default nor the value the idle
 reset leaves. That way the channel reads after the test show the idle reset
@@ -717,13 +848,15 @@ rather than `each`. `allow RF transmission: true` is required: both boards
 transmit, the sender at every PA level up to 0 dBm. `maximum PA level:` (0-7,
 default 7) is the highest level the plan accepts for a pass. Guarded.
 
-**Expected outcome.** One case of 35 steps. It passes when the sender's `-m`
-reports four result lines with request and reply PA levels at or below
+**Expected outcome.** One case of 35 steps. It passes when the sender's `-n`
+completes the round trip and reports it, and its `-m` reports those same four
+values afterwards, with request and reply PA levels at or below
 `maximum PA level` and copy numbers 0-15; the repeater answers USB with its RX
 LED on both before and after the test and keeps no result; the sender is idle
 at 2441 MHz once the test ends by itself; `-S` returns the repeater to idle;
 and every setting of both boards is restored. A reply that differs from the
-request fails with the byte and the field it belongs to named.
+request ends `-n` with the tool's own `invalid range test: mismatch on byte N`
+and fails the case there.
 
 **Weak-link responder.** `range.yaml`'s second suite, `range-weak-link`,
 chooses both boards by RF placement instead of by alias: the responder behind
@@ -742,12 +875,38 @@ were all 0 or 1, and five with the roles swapped reported one level 2. The
 suite does not narrow the bound; what it adds is which board answers, and that
 the case runs at all with an attenuated responder.
 
-The responder is pinned to exactly 20 dB with its antenna attached, not a
-range, because that is the one configuration measured. A bench with a
-different attenuator fails planning with the requirement in the message, which
-is more use than a run judged against figures taken elsewhere. Distance cannot
-be pinned, since an `rf` requirement has no distance key, so a board at 20 dB
-much further away is still selected and may need a higher level.
+The suite writes that as `weak link: {responder: 20}`, which pins the
+responder to exactly 20 dB with its antenna attached and the sender to an
+ordinary board. Exactly, not a range, because the figures below belong to one
+attenuation each.
+
+**20 dB against 40 dB, measured 2026-11-02.** One ordinary sender and one
+firmware revision on both sides (`bluetooth_rxtx git-31228b05`, API 1.57,
+verified on each board inside the hold), six rounds per responder, each
+responder about a meter away behind its own attenuator:
+
+| responder | request PA level per round | reply PA level per round |
+|---|---|---|
+| 20 dB | 0, 0, 0, 0, 0, 0 | 0, 0, 0, 1, 1, 0 |
+| 40 dB | 0, 0, 1, 0, 1, 1 | 3, 3, 2, 3, 3, 1 |
+
+All twelve rounds completed with a clean round trip and no `mismatch on
+byte`. The figure that moves is the **reply** PA level — the level the
+attenuated board has to transmit at to be heard — which reaches 1 behind
+20 dB and 3 behind 40 dB. The request level barely moves, because that
+direction is an ordinary sender reaching an attenuated receiver rather than
+the reverse.
+
+Two consequences. 40 dB is a usable measurement point: it neither loses the
+link nor leaves the levels indistinguishable. But reply level 3 is exactly
+`maximum PA level`'s default bound here, so a 40 dB entry would sit on the
+bound and needs that argument raised rather than inherited. The copy numbers
+(`request number`, `reply number`) are not a discriminator at this sample
+size: they ranged over 0 to 15 at both attenuations. A bench with a different attenuator fails planning with the
+requirement in the message, which is more use than a run judged against
+figures taken elsewhere. Distance cannot be pinned, since a placement
+requirement has no distance key, so a board at 20 dB much further away is
+still selected and may need a higher level.
 
 **Known limits.** On an ordinary bench the boards sit centimeters apart, so a
 working link gets through at a low PA level and a pass at level 0 says little
@@ -758,17 +917,122 @@ behavior
 ([ubertooth#677](https://github.com/SqueakyFloors/ubertooth/issues/677)). The
 test needs a second board, so it cannot run on a single-board host.
 
-**The `range-weak-link` suite does not pass on fork main today.** Its one
-recorded run, at 20 dB and about a meter, failed at the step that asserts `-n`
-prints nothing on standard output: `-n` prints `waiting for the repeater...`
-there instead of on standard error
-([ubertooth#1026](https://github.com/SqueakyFloors/ubertooth/issues/1026)).
-That line appears only once the first progress interval has passed. A
-repeater at bench distance answers before then, so the ordinary suite never
-reaches it; one a meter away behind 20 dB does not. The run stops there,
-before `-m` is read, so this suite has never judged a result; the PA levels
-above come from driving `-e`, `-n`, and `-m` by hand. It is committed so the
-fork fix is verified by a suite rather than by a one-off script.
+**The `range-weak-link` suite has never judged a result.** Its one recorded
+run, at 20 dB and about a meter, failed at the `-n` step: `-n` printed
+`waiting for the repeater...` on standard output rather than standard error
+([ubertooth#1026](https://github.com/SqueakyFloors/ubertooth/issues/1026)),
+where the result block is. That line appears only once the first progress
+interval has passed, so a repeater at bench distance answers before it and
+the ordinary suite never saw it; one a meter away behind 20 dB did. The fork
+fixed the stream in `30c4103f`, and this step now requires standard output to
+carry the result block and nothing else, so that regression is still what the
+suite would catch. Nothing has run it since the fix, so it stopped before
+`-m` was read and the PA levels above come from driving `-e`, `-n`, and `-m`
+by hand. It is committed so the fork fix is verified by a suite rather than by
+a one-off script.
+
+## Transmit power steps
+
+**What it does.** Nothing yet: a catalog entry for holding one board's
+transmitter at each PA level the plan lists while the attenuated board reads
+the channel it transmits on, so the RSSI step per level is a figure.
+
+**Theory of operation.** The PA level is the one transmit-side quantity the
+firmware sets directly (`FREND.PA_LEVEL`, 0 for about -25 dBm up to 7 for
+about 0 dBm), so a receiver at a fixed attenuation should read a signal that
+rises with it. Both halves have to be held for that to mean anything: the
+level, which the sender sets with `ubertooth-util -a<level>` before entering
+its continuous transmit mode (`-t`), and the attenuation, which the registry
+records and `weak link:` pins. With neither held, a reading is whatever the
+bench was doing.
+
+The receiver's reading would come from `ubertooth-specan` over a narrow range
+around the sender's channel, read per frequency rather than as a band mean.
+The band mean is what cannot work, and that part is measured: three 10-second
+`ubertooth-specan -g` sweeps per board put the attenuated board 1.1 dB from
+an ordinary one, with 0.1 dB of run-to-run spread, because most of a sweep is
+the receiver's own noise floor
+([#217](https://github.com/SqueakyFloors/ubertooth-test-harness/pull/217)). A
+peak at a frequency a sender is holding is a different measurement from the
+floor across the band.
+
+Why the attenuated board rather than any two boards is the issue's own
+reasoning, not a measurement here: attenuation is what keeps the receiver out
+of saturation at bench distance, and
+[#168](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/168)
+records a receiver at PA 7 from an adjacent board wedging until a power
+cycle. Whether the levels in fact separate on this board at this attenuation
+is one of the things a first run would answer.
+
+**Hardware and arguments.** A `sender` and a `receiver` (both Ubertooth) on
+one named `host:`, a required `allow RF transmission: true` because the sender
+transmits, `PA levels:` (an ascending list of at least two distinct levels
+0-7), a `channel:` in MHz for both boards to hold, and a `duration:`, which
+is the whole test as it is everywhere else rather than a time per level — the
+catalog's wall-time estimate reads it that way. `weak link: {receiver: 20}`
+is how a plan puts the attenuated board on the receiving side.
+
+**Expected outcome.** No implementation; only a `runnable: false` plan may
+name it. What it would judge is the RSSI difference between consecutive
+levels, and nothing has measured that at any attenuation, so the figure is not
+written down here or anywhere else.
+
+**Known limits.** Any figure is specific to this bench: a step measured at
+20 dB and a meter says nothing about another distance or another attenuator,
+which is why the attenuation is pinned rather than bounded. Nothing says yet
+whether the levels separate cleanly enough to put a floor on the step, or
+whether `-t`'s carrier reads the same way as modulated traffic would. The
+continuous transmit mode is also the one mode on this board no test runs
+today: `Ubertooth util conflicts` only checks that `-t` is refused when it is
+combined with another mode. Tracked as part of
+[#168](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/168).
+
+## Receiver sensitivity
+
+**What it does.** Nothing yet: a catalog entry for holding a sender at one
+known PA level while the attenuated board reports what it hears.
+
+**Theory of operation.** Not established, and the gap is on the receiving
+side. What is settled is why a driven sender is needed at all: the figures the
+tools report — `ubertooth-rx`'s `s=`, `n=` and `snr=` beside each packet, and
+`ubertooth-specan`'s RSSI per frequency — mean something only when the
+transmitter's level is known and held. Against ambient traffic the signal is
+whatever happened to be on the air, and how much of a piconet a sweeping
+receiver hears varies widely between runs, which is why the Classic tests
+carry floors rather than counts.
+
+What is not settled is which reading to take, because the two candidates do
+not line up. The per-packet figures come from packet lines, so they need the
+sender to put real Bluetooth packets on the air, and the only level-settable
+transmitter here is an Ubertooth whose continuous transmit mode (`-t`) sends a
+carrier rather than packets. A spectrum reading does work against a carrier,
+but it measures the band, not whether a packet decoded, so it is a transmit
+power measurement again rather than sensitivity. The ESP32 peers do put real
+packets on the air, and their transmit level is not ours to set. Which of
+those three the test should use is the open question.
+
+One thing the record format does help with: a packet line either carries the
+board's own background estimate for its channel or says `none` for both noise
+and ratio, never one of each, so a run can tell a measured floor from an
+absent one.
+
+**Hardware and arguments.** A `sender` and a `receiver` (both Ubertooth) on
+one named `host:`, a required `allow RF transmission: true`, one `PA level:`
+(0-7) for the sender to hold, a `channel:` in MHz for both boards, and a
+`duration:`. `weak link: {receiver: 20}` puts the attenuated board on the
+receiving side.
+
+**Expected outcome.** No implementation; only a `runnable: false` plan may
+name it. The figure it would judge — the level at which packets stop arriving,
+or a floor on the signal — has not been measured from a held transmitter at
+any attenuation.
+
+**Known limits.** One attenuator gives one point, and a sensitivity curve
+wants more: 30 dB and 40 dB would be the second and third. A pass would say
+nothing about absolute sensitivity in dBm either, since the attenuation and
+the path loss at a meter are both known only as the registry records them by
+hand. Tracked as part of
+[#168](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/168).
 
 ## BLE monitor
 
@@ -876,7 +1140,10 @@ value. The Ubertooth defaults to needing an ordinary link (antenna attached,
 no attenuation), so the planner keeps these cases off an attenuated board.
 
 **Expected outcome.** Smoke runs 3 cases: a survey (`-z -t`) that ends by
-itself and lists its results, a `-r` PCAPNG capture, and the AFH no-packets
+itself and lists its results, with the `Survey Results` heading on standard
+error and the addresses on standard output (the heading among the addresses
+is a failure: the fork splits the two streams so that standard output holds
+only what a script parses), a `-r` PCAPNG capture, and the AFH no-packets
 case. Comprehensive runs 14, adding the plain sweep, a fixed channel, the
 explicit `-s` sweep and `-s -c 39` where the channel wins, `-e 0` and `-e 4`,
 a `-q` PCAP capture, a `-d` packet dump, AFH with `-e 2`, AFH `-r` printing
@@ -903,7 +1170,9 @@ records), so the file says which was used. The modulation options are checked
 at their source: the firmware programs the CC2400 MDMCTRL register with a
 known value for basic rate or LE when the stream starts, and the register
 keeps it after the mode stops, so `ubertooth-debug` can read back which
-modulation actually took effect, including which of `-c` and `-l` won.
+modulation actually took effect. A capture uses one demodulator, so `-c` and
+`-l` in one command line are refused rather than ranked; that refusal needs
+no board and is in `Refused command lines`.
 
 The stale-packet case uses the fact that `ubertooth-btle -n` and
 `ubertooth-dump` read the board over different paths, so the two meet only at
@@ -916,16 +1185,17 @@ needing an ordinary link.
 
 **Expected outcome.** Smoke runs 3 cases: full records to a file, the `-b`
 bitstream to a file, and an E-GO receive run on 2440 MHz. Comprehensive runs
-11, adding `-l` LE modulation verified through MDMCTRL, `-l -c` and `-c -l`
-where the last option wins, E-GO capture lengths 1 and 48, an E-GO access
+10, adding `-l` LE and `-c` basic-rate modulation, each verified through
+MDMCTRL, E-GO capture lengths 1 and 48, an E-GO access
 code, the refusal of a bad access code, and the stale-packet case, which
 alternates BLE and BR/EDR five times and requires zero packets from the
 previous mode in every dump and every capture.
 
 **Known limits.** No peer: the E-GO cases print nothing with no skateboard in
-range, so they check that the tool runs and reports nothing malformed. The
-dump cases check record structure and rate, not that the symbols mean
-anything.
+range, so they check that the tool runs and reports nothing malformed. That is
+as far as the harness goes with E-GO on purpose, not for want of a fixture
+(see `Out of scope: Uberducky and E-GO devices`). The dump cases check record
+structure and rate, not that the symbols mean anything.
 
 ## Board state between runs
 
@@ -1061,7 +1331,9 @@ derive the UAP with `-l`, replay into PCAPNG and into PCAP (link type 255, the
 fixture's packet count), a `-d` file that cannot be opened (exit 1, one error
 line, no usage text, nothing created or changed anywhere in the directory),
 and `-s` decoding the same as without it, with `-h` listing `-s` as the
-default. Comprehensive runs 19, adding the survey listing of both piconets,
+default. Comprehensive runs 19, adding the survey listing of both piconets
+(the two addresses on standard output and the `Survey Results` heading on
+standard error),
 a LAP filter, a correct and a wrong `-u`, `-e 0` dropping the packet with an
 error, a `-d` dump compared byte for byte with the fixture, a filtered PCAP,
 an empty file, a file whose last record is cut short (exit 1 after the whole
@@ -1186,15 +1458,17 @@ and that note is forbidden in a refusal.
 they are left out on a host without it.
 
 **Expected outcome.** On a Linux host, smoke runs 45 cases and comprehensive
-65; a macOS host runs 12 fewer in smoke, since the BlueZ-only cases are not
+67; a macOS host runs 12 fewer in smoke, since the BlueZ-only cases are not
 applicable. Every file option of `btle`, `follow`, `rx`, `dump`, `specan`, and
 `dfu` is refused three ways: with a stray word, with `-h` (which exits 0 and
 must still create nothing), and with a bad option value later on the line.
 Beyond that: the extra-capture-file note goes to stderr, so it cannot land in
 a capture written to stdout; a repeated file option is refused with
 `error: option '-r' given more than once` before the stray word and before any
-board lookup; and `scan` and `follow` refuse a stray word with no usage text
-after the message.
+board lookup; `dump -d` with `-c` and `-l` in either order is refused with
+`a capture uses one modulation`, naming both options as they were written,
+before the dump file is opened; and `scan` and `follow` refuse a stray word
+with no usage text after the message.
 
 **Known limits.** Forks from before the no-devices switch ignore it, so the
 first step of every case reads the built library's bytes and the case skips
@@ -1798,7 +2072,11 @@ and both declaring both roles, because the comprehensive coverage exchanges
 them. `coverage:` and a required `duration:`; the pair streams 200 bytes every
 20 ms whatever the duration is. Linux only: a peer is reached through
 `/dev/serial/by-id`. Nothing flashes a peer, so each board must already run
-`utesp-1.0.0` or a later 1.x image, which mandatory preflight checks.
+`utesp-1.0.0` or a later 1.x image, which mandatory preflight checks. The
+Ubertooth defaults to needing an ordinary link, so a plan has to say
+`weak link:` to point it at the attenuated board, as `classic-weak-link`
+does at 40 dB: measured there, the clock was acquired and every decoded
+packet carried the target LAP with none carrying another.
 
 **Expected outcome.** Smoke runs 2 cases: `ubertooth-rx -z` lists the
 central's LAP in its survey results, and a run with no target reports at least
@@ -1841,7 +2119,10 @@ the tool while the pair streams.
 
 **Hardware and arguments.** As `Capture known Classic device`: one `Ubertooth`
 and two ESP32 Classic peers as `acceptor` and `initiator`, `coverage:`, a
-required `duration:`, Linux only.
+required `duration:`, Linux only, and an ordinary link for the Ubertooth by
+default. `classic-weak-link` points it at the 20 dB receiver, where a 25 s
+window decoded 1793 packets at `-e 0` and 2692 at `-e 2`, all of the target
+LAP, with the clock acquired.
 
 **Expected outcome.** Smoke runs 2 cases: `-l <central LAP> -u <central UAP>`
 reports at least ten packet lines and none of another LAP, and `-l`/`-u` for
@@ -2201,11 +2482,37 @@ attenuated or more distant receiver) if a run's skirt makes it ambiguous.
 `Ubertooth` and two ESP32 Classic peers as `acceptor` and `initiator`,
 `coverage:`, a required `duration:` (the capture window), Linux only. The
 peers must run `utesp-1.3.0` or a later 1.x image, which is where `afh` and
-the link map arrived; an older one fails the case naming what it found. No
-`rf:` default, so a plan may place the receiver anywhere; two minutes is the
-capture window the classic plan uses. The release plan does not name it:
-every entry there runs on each registered host, and naming the one host the
-peers are attached to would fail planning on the others.
+the link map arrived; an older one fails the case naming what it found. The
+Ubertooth defaults to needing an ordinary link, as the other two Classic
+tests do, so a plan asking for the attenuated receiver has to say so; two
+minutes is the capture window every plan that holds it uses.
+
+**Attenuation makes this test better, which is unusual here.** Measured
+2026-11-02 against the peers' known 38-channel map, 70 s per leg:
+
+| receiver | channels marked | true found | false | missed |
+|---|---|---|---|---|
+| clear | 53 | 38 / 38 | 15 | 0 |
+| **20 dB** | **38** | **38 / 38** | **0** | **0** |
+| 40 dB | 36 | 36 / 38 | 0 | 2 |
+
+The 20 dB board recovered the map exactly; both clear boards over-marked by
+11 to 15 channels, and 40 dB starts eroding the other way. So
+`classic-weak-link` runs it at 20 dB, where its committed tolerances are met
+with the most room. Note that `-r` prints a timestamp and an 80-bit binary
+map, not an `AFH map: 0x…` line; a grep for the hex form reports "no map" on
+a run that worked.
+
+The release plan holds it too, as the `smoke` profile, and it is the one
+entry there that names a bench host, because the peers are on one host. It
+carries `required hardware: true`, so the naming costs the other benches
+nothing and hides nothing either: a registry without those peers, or without
+that host, runs every other release test and records this one as blocked, and
+the run finishes failed rather than passing with the recovery unmeasured. Its
+smoke estimate is about 520 s, which takes the release suite to about 1175 s
+(roughly 20 minutes) on the host it names; a target without the peers plans
+about 655 s of the suite and fails on this step. The third, `-t` case stays in the
+`classic-comprehensive` suite, which a release runs alongside the gate.
 
 **Expected outcome.** Smoke runs 2 cases, one per map: channels 0 to 39, and
 channels 30 to 49, the twenty the spec allows at least and the firmware's own
@@ -2676,6 +2983,67 @@ proves the refusal happened before the write rather than after a partial one.
 `-s` is checked against the build's own `.dfu` byte for byte, so the host-side
 suffixing has an exact right answer.
 
+A read-back is compared with the image as `-d` writes it, which is not quite
+the file. `ubertooth-dfu` fills in two things in the image's first block for
+the bootloader's own checks: the LPC vector checksum at 0x1c, and, in an
+image that carries an image check block, the record of the download at
+0xea-0xf7 inside it. Those fields are checked against what the writer should
+have worked out -- the eight vector words adding up to zero, the flags, the
+length of the region written and its complement, and the checksum that makes
+the whole region add up to zero -- rather than passed over, so a board that
+kept the file's empty values fails. Every other byte has to match the file.
+How long a dump is follows the part: 114688 bytes above the bootloader on a
+128 KiB part, 245760 on a 256 KiB one, and the size the firmware is linked
+for when the part cannot be read, which includes every board already in the
+bootloader. The `read-back` step records the range the command printed
+(`Reading back 114688 bytes, 0x4000-0x1ffff: part 0x25011722 (LPC1754) has
+128 KiB of flash`) and the comparison takes the length from there, so no part
+is assumed; a tool that prints no range fails that step rather than having
+its dump measured against a guess.
+
+The length still has to be one the fork's part table explains, and the
+harness keeps its own copy of the flash sizes in that table. A length outside
+it fails the step and says which flash size it would belong to (`the read-back
+covers 1032192 bytes, which no part in the harness's copy of the fork's part
+table explains (32 KiB, 64 KiB, 128 KiB, 256 KiB, 512 KiB); that length would
+be the application region of a part with 1024 KiB of flash`), so a part the
+fork added later shows up as the entry to add rather than as an unexplained
+figure. The length also has to follow the part the command itself named: that
+same line gives the flash the part has, so a length that is right for some
+other part in the table and wrong for this one fails too (`the read-back
+covers 16384 bytes, but the command reported a part with 64 KiB of flash,
+whose application region is 49152 bytes`). Every run also reads the table out
+of the fork's checkout at the
+commit under test and records the comparison, so the copy is kept in step
+without waiting for such a board to reach the bench: see the `dfu_part_table`
+record in the README's "DFU images" section.
+
+All three arrived on the fork's main after the earlier releases, so the case
+expects them: the range line in `10c3381`
+([ubertooth#257](https://github.com/SqueakyFloors/ubertooth/pull/257)), the
+vector checksum in `31228b0`
+([ubertooth#1037](https://github.com/SqueakyFloors/ubertooth/pull/1037)) and
+the image check record in `d91bb06`
+([ubertooth#1048](https://github.com/SqueakyFloors/ubertooth/pull/1048)), the
+last two for the bootloader checks of
+[ubertooth#242](https://github.com/SqueakyFloors/ubertooth/issues/242).
+Against a build between `31228b0` and `d91bb06` the case still passes: the
+image check block arrived in `d91bb06` on both sides at once, so an image
+from that window carries none and there is no record to fill in or to check.
+Against one between `10c3381` and `31228b0` it fails on the vector checksum
+alone (`vector checksum at 0x0401c is 0x00000000, expected 0x...`): the dump
+equals the file, and that field is checked against what the writer should
+have worked out, so equalling the file is not enough.
+
+**Do not run this case against a build older than `10c3381` on an Ubertooth
+One.** Such a `-u` reads a fixed 0x4000-0x3ffff whatever the part has, and on
+the 128 KiB part the board is built from that asks for flash above the end of
+it, which faults the bootloader until the board is power-cycled
+([ubertooth#233](https://github.com/SqueakyFloors/ubertooth/issues/233), which
+`10c3381` closed). The
+case reports it as a failed `-u` and a cleanup that cannot reach the board,
+not as a comparison it could make.
+
 **Hardware and arguments.** One `Ubertooth`, selected by full serial, with
 every other registered board as guards. `coverage:`. Needs the firmware build
 as the test image, which must report the resolved Ubertooth revision; a run
@@ -2868,37 +3236,25 @@ name it.
 **Known limits.** Needs a firmware image other than the usual one, so it would
 write firmware and have to be the last test on its board.
 
-## Uberducky HID
+## Out of scope: Uberducky and E-GO devices
 
-**What it does.** Nothing yet: a catalog entry for exercising an Uberducky HID
-fixture.
+Device-level testing of `ubertooth-ducky` and `ubertooth-ego` is out of scope
+([#89](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/89)), by
+the maintainer's scope decision. There is no catalog test and no backlog entry
+for either, and neither is waiting on a fixture: the harness will not drive an
+Uberducky HID peer or a registered E-GO skateboard. So `ubertooth-ducky -q`
+and `-b`, which transmit, `ubertooth-ego -i` and `-j`, which transmit, and
+`ubertooth-ego -f`, which needs a skateboard to follow, all stay untested.
 
-**Theory of operation.** Not established.
+What the harness does keep for both tools needs no peer and no transmission:
 
-**Hardware and arguments.** A required `Uberducky:` resource; no Ubertooth
-role.
+- `Host CLI surface` runs `ubertooth-ducky -h` and `ubertooth-ego -h` and
+  requires exit 0 with the tool's own name in the output.
+- `Argument validation` covers their refusals: `ducky -A36`, `-A40`, a
+  malformed `-a` address, `ego -l0`, `-l49`, and a stray word on each, every
+  one refused with exit 1 and no device change.
+- `Raw receive` runs `ubertooth-ego -r -c 2440` with nothing in range, along
+  with `-l 1`, `-l 48`, and `-a 630f9ffe` accepted and `-a zz` refused, so the
+  receive path and its parsing are exercised without an E-GO present.
 
-**Expected outcome.** No implementation; only a `runnable: false` plan may
-name it.
-
-**Known limits.** Needs an Uberducky fixture
-([#89](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/89)), and
-`ubertooth-ducky` transmits, so a plan would have to allow RF.
-
-## E-GO skateboard capture
-
-**What it does.** Nothing yet: a catalog entry for capturing a registered E-GO
-skateboard.
-
-**Theory of operation.** Not established. `Raw receive` covers
-`ubertooth-ego -r` with nothing in range, where the expected answer is that it
-runs and prints nothing malformed.
-
-**Hardware and arguments.** A required `skateboard:` resource; no Ubertooth
-role.
-
-**Expected outcome.** No implementation; only a `runnable: false` plan may
-name it.
-
-**Known limits.** Needs an E-GO skateboard as a fixture
-([#89](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/89)).
+[`COVERAGE.md`](../COVERAGE.md) carries the per-option status for both tools.

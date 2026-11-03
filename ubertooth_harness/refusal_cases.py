@@ -39,7 +39,9 @@ The BlueZ-only ubertooth-scan and ubertooth-follow must also refuse a stray
 word (the one argument rule): smoke checks a stray word on each, and
 comprehensive adds -h with a stray word, a bare -, and a word after --.
 
-Comprehensive coverage adds the checks that run after the option loop, a
+Comprehensive coverage adds the checks that run after the option loop, the
+pairs of options a tool cannot take together (ubertooth-dump -c with -l: one
+capture uses one demodulator, fork d3429234, fork #650), a
 repeated -d alongside -h, and ubertooth-dfu with an input that cannot be
 used, including
 -s <file.bin> -d <bad image>: since fork f2e06fa (#286) the files that are
@@ -365,6 +367,18 @@ def _comprehensive_cases():
            ("-d", ("file", "new.specan"), "-l", "2480", "-u", "2402"),
            (r"error: lower frequency must not exceed upper frequency",), ("new.specan",),
            "refused (exit 1); new.specan not created")
+    # One capture, one demodulator: -c and -l in one ubertooth-dump command
+    # line used to mean whichever came last, with the other dropped without a
+    # word, and are refused since fork d3429234 (fork #650). The refusal
+    # names both options as the user wrote them, so each order is its own
+    # line, and it comes from the option loop, before the -d file is opened.
+    for first, second in (("-l", "-c"), ("-c", "-l")):
+        simple(f"dump-d-modulation-{second[1:]}-after-{first[1:]}",
+               f"dump -d with {first} {second}", "ubertooth-dump",
+               ("-d", ("file", "new.dump"), first, second),
+               (rf"(?m)^error: {second} cannot be combined with {first}; a capture "
+                r"uses one modulation$",), ("new.dump",),
+               f"refused (exit 1) naming {second} and {first}; new.dump not created")
     # Since fork 47bae592 a -d file is opened once a board is open and its
     # firmware accepted, so that a run refused for either reason leaves no
     # empty file behind (ubertooth-specan.md, DIAGNOSTICS). With no board the

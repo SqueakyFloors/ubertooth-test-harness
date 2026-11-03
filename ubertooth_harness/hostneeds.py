@@ -300,8 +300,11 @@ class Blocked:
     test left out as not applicable can still say something without it; a
     blocked one cannot, because the hardware is the subject of the test (a
     second Ubertooth to alternate flashes across, a switchable port to power
-    another board off). So it is recorded, every unrelated test still runs,
-    and the run fails at the end rather than passing with the gate unmeasured.
+    another board off), or because the plan said so with
+    ``required hardware: true`` for a step whose peer hardware is the point
+    of having it in that suite. So it is recorded, every unrelated test still
+    runs, and the run fails at the end rather than passing with the gate
+    unmeasured.
 
     Decided at planning, before anything runs, so it carries no invocation
     and no case: it is the step that could not be bound. The same test may

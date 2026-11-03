@@ -8,6 +8,7 @@ import time
 from typing import Mapping, Sequence
 
 from ubertooth_harness.cancellation import CancellationToken
+from ubertooth_harness import dfuparts
 from ubertooth_harness.catalog import (
     WATCHDOG_LIMIT_ARGUMENT,
     CatalogError,
@@ -25,15 +26,18 @@ from ubertooth_harness.events import (
 from ubertooth_harness.enumeration import EnumerationError
 from ubertooth_harness.executor import CommandExecutor, CommandResult
 from ubertooth_harness.isolation import IsolationRuntime, IsolationSetupError
-from ubertooth_harness.leases import describe_queued_resource
+from ubertooth_harness.leases import describe_pairing_lease, describe_queued_resource
 from ubertooth_harness.manifest import ManifestError, RunManifest, json_value
 from ubertooth_harness.planner import TestInvocation, alternated_roles
 from ubertooth_harness.power import PowerControllerError
 from ubertooth_harness.preflight import PreflightCheck
+from ubertooth_harness import bootloader as bootloader_identity
+
 from ubertooth_harness.outputfiles import (
     TARGET_SERIAL_STREAM,
     CommandOutput,
     measure,
+    output_of,
     stream_for,
 )
 from ubertooth_harness.rawlog import record_output
@@ -69,6 +73,39 @@ from ubertooth_harness.stateful import (
     artifact_key,
 )
 from ubertooth_harness import transitions
+
+
+def _record_bootloader_identity(publisher, check, result, failure: str) -> None:
+    """Record the bootloader one preflight read found on one board."""
+    found = bootloader_identity.identity_from_match(
+        output_of(result).search(bootloader_identity.IDENTITY_LINE_PATTERN)
+    )
+    expectation = check.bootloader
+    publisher.emit(
+        "bootloader_identity",
+        "failed" if failure else "passed",
+        {
+            "resource": check.resource_alias,
+            # Lower case, as the stage's records and the board leases spell
+            # it: the GUI keys its board list by this, and two spellings of
+            # one serial would be two boards.
+            "serial": str(check.resource_identity.get("serial", "")).lower(),
+            "host": check.host,
+            "mode": expectation.mode,
+            "installed": found.to_dict() if found else None,
+            "expected": (
+                expectation.expected.to_dict() if expectation.expected else None
+            ),
+            "written": False,
+            "status": (
+                "unreadable" if found is None
+                else "current" if expectation.expected is None
+                or found.matches(expectation.expected)
+                else "stale"
+            ),
+            "reason": failure,
+        },
+    )
 
 # File records per output_files event; each is about 180 bytes, so a batch
 # stays well inside the event limit (events.OUTPUT_CHECKS_MAX_BYTES).
@@ -1122,11 +1159,13 @@ class NamedTestSequencer:
         artifacts. Cases it cannot run are left out before anything runs and
         recorded as not applicable, with ``not_applicable`` (whole tests the
         planner left out of this run: what this host cannot run, and what
-        this bench has not got the hardware for).
+        this registry has not got the hardware for).
 
-        ``blocked`` is the required tests the planner could not compile for
-        this host because the hardware they are about is not registered
-        (hostneeds.Blocked). They are recorded before anything runs, every
+        ``blocked`` is the required tests this run cannot run because the
+        hardware they are about is not registered (hostneeds.Blocked):
+        either not on this host, or, for a step naming a host this registry
+        has not got at all, nowhere this run could reach. They are recorded
+        before anything runs, every
         other test runs as usual, and the run finishes failed: a gate that
         was never measured must not read as a pass.
         """
@@ -1267,6 +1306,11 @@ class NamedTestSequencer:
                     manifest.plan_name, manifest.suite, manifest.host, manifest.sources
                 ),
             )
+            # A run that builds records this before its build, where the
+            # caller opened the record; one that uses installed tools has no
+            # earlier record of its own, and the comparison holds for it just
+            # the same (#283).
+            dfuparts.record(publisher, manifest.sources)
         publisher.emit(
             "manifest",
             "passed",
@@ -1293,6 +1337,13 @@ class NamedTestSequencer:
                 record = json_value(queued)
                 publisher.emit("lease_queued", "warning", dict(
                     record, message=describe_queued_resource(record, past=True)
+                ))
+            # And the devices the run never named and held because the
+            # registry says they are wired to ones it did (#289).
+            for paired in manifest.lease_pairings:
+                record = json_value(paired)
+                publisher.emit("lease_pairing", "passed", dict(
+                    record, message=describe_pairing_lease(record)
                 ))
         publisher.emit(
             "host_capabilities",
@@ -1331,6 +1382,10 @@ class NamedTestSequencer:
                     "resource": check.resource_alias,
                     "resource_identity": dict(check.resource_identity),
                     "expected_revision": check.expected_revision,
+                    # Only the host version check has one, and only it says
+                    # which libbtbb the run's tools had to be linked against,
+                    # or why none was required.
+                    **(check.libbtbb.to_details() if check.libbtbb else {}),
                 },
             )
             result = self._run_command(
@@ -1344,6 +1399,12 @@ class NamedTestSequencer:
             )
             failure = check.result_failure(result)
             self._record_output_checks(publisher, result)
+            if check.bootloader is not None:
+                # Which bootloader this board has, as its own record: the
+                # check's pass or failure says whether it was the one the run
+                # wanted, and this says what it is. Every run records it, so
+                # a board's bootloader can be read off any run's log.
+                _record_bootloader_identity(publisher, check, result, failure)
             if failure and check.needs_fallback(result):
                 # The command left the question unanswered, so this fork
                 # commit answers it on the older option: ask that one, and

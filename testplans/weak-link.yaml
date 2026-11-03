@@ -1,0 +1,134 @@
+plan: Weak-link receiver
+# What is left of the weak-link work
+# (SqueakyFloors/ubertooth-test-harness#168) after the measurements of
+# 2026-11-02. The entries that a run has characterized have moved into the
+# plan they belong to:
+#
+#   ble.yaml     ble-weak-link       a DK advertiser capture at 20 and 40 dB
+#   classic.yaml classic-weak-link   piconet follow and AFH recovery at
+#                                    20 dB, UAP/clock recovery and the
+#                                    access-code error threshold at 40 dB
+#   range.yaml   range-weak-link     the two-device range test at 20 dB
+#
+# Each of those carries the figures it was judged against in a comment, and
+# none of them changed a threshold: they are committed tests pointed at a
+# weak-link receiver.
+#
+# What stays here, and why. `weaklink.CHECKS` names the same reasons in code,
+# and `docs/tests.md` says per test what a weak link changes for it.
+runnable: false
+suites:
+  # Blocked on hardware, which is *why* these two are unmeasured: a
+  # connection needs two distinct DKs and the bench registers one declaring
+  # the `central` and `peripheral` roles, so neither entry can be bound at
+  # any attenuation and no figure can be taken. Planning says so rather than
+  # skipping, naming the roles it could not fill distinctly. A second DK
+  # declaring those roles is the whole fix, after which these need one
+  # capture each like any other entry here.
+  weak-link-needs-a-dk-pair:
+    - Capture known BLE connection:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        central: default
+        peripheral: default
+        weak link: {Ubertooth: 40}
+        coverage: smoke
+        duration: 8s
+
+    - Follow a BLE connection across its end:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        central: default
+        peripheral: default
+        weak link: {Ubertooth: 20}
+        duration: 20s
+
+  # Waiting on a measurement, or on a case that does not exist yet. Each of
+  # these was promoted on the sweep's evidence and sent back by review, which
+  # is the gate working: the sweep measured a weak link, not necessarily the
+  # command each of these tests runs.
+  weak-link-unmeasured:
+    # Its smoke cases survey (`-z`) and sweep with no target, so both have to
+    # recover the central's LAP from the air. Every sweep leg passed `-l` and
+    # `-u`, and the sweep records that the supplied UAP was used rather than
+    # guessed, so what was measured is targeting, not recovery.
+    - Capture known Classic device:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        weak link: {Ubertooth: 40}
+        coverage: smoke
+        duration: 25s
+
+    # The sweep compared what `-e 0`, `-e 2` and `-e 4` find by hand, and the
+    # answer was clean. The test cannot make that comparison: its cases only
+    # require that no packet exceeded the limit, which zero packets satisfy,
+    # and this entry binds no peer to produce any. The case has to exist
+    # before the entry means anything.
+    - Classic Bluetooth receive:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        weak link: {Ubertooth: 40}
+        coverage: comprehensive
+        duration: 25s
+
+    # Attenuation makes this test better, measured: at 20 dB the known
+    # 38-channel map came back exactly, 38 of 38 with no false channel, where
+    # both clear boards over-marked by 11 to 15. But smoke runs two maps, and
+    # the other is the 20-channel minimum, which was not measured at any
+    # attenuation and has the least margin of any case here -- a run on an
+    # ordinary link had already missed 1 of its 20. Measure that map at 20 dB
+    # and this entry can move.
+    - Recover AFH map:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        weak link: {Ubertooth: 20}
+        coverage: smoke
+        duration: 2m
+    # The one entry whose answer the bench may not be able to give. A capture
+    # over the 40 dB link was never written to a file, so no record's HEC or
+    # CRC flag has been read there; and the error profile at 40 dB is close
+    # to 20 dB's (74% against 77% err=0), so the flags may simply not fire at
+    # either. Finding out needs a capture file over this link, and a case
+    # that requires a flag to have fired rather than only that the fields
+    # agree. More attenuation than the bench has may be the real answer.
+    - Classic capture record fields:
+        hosts: [Host_Linux]
+        Ubertooth: default
+        acceptor: default
+        initiator: default
+        weak link: {Ubertooth: 40}
+        coverage: smoke
+        duration: 25s
+
+    # No implementation, and a figure nobody has. The sweep's per-source
+    # asymmetry is the warning against guessing one: the Classic peer
+    # separated the two receivers by about 14 dB (-52 against -66) while the
+    # DK separated them by 1 dB (-69.0 against -70.0), so an RSSI step
+    # belongs to a source and a bench geometry, not to the attenuator alone.
+    - Transmit power steps:
+        host: Host_Linux
+        sender: default
+        receiver: default
+        weak link: {receiver: 20}
+        allow RF transmission: true
+        PA levels: [0, 1, 2, 3, 4, 5, 6, 7]
+        channel: 2410
+        duration: 2m
+
+    # No implementation, and the method is still open: the per-packet
+    # signal/noise/ratio figures need real packets, and the one
+    # level-settable sender on this bench emits a carrier. The sweep's RSSI
+    # means are explicitly not sensitivity.
+    - Receiver sensitivity:
+        host: Host_Linux
+        sender: default
+        receiver: default
+        weak link: {receiver: 20}
+        allow RF transmission: true
+        PA level: 0
+        channel: 2410
+        duration: 30s

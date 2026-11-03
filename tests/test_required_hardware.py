@@ -791,7 +791,7 @@ class DryRunTests(unittest.TestCase):
         )
         self.assertIn("1 test(s) blocked", text)
         self.assertIn(
-            f"error: 1 required test(s) cannot run on {host}", errors
+            "error: 1 required test(s) of release cannot run", errors
         )
 
     def test_a_dry_run_with_nothing_blocked_still_exits_zero(self):

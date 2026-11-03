@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -26,6 +27,7 @@ from ubertooth_harness.build import (
     require_tools,
     resolve_python,
 )
+from ubertooth_harness import bootloader
 from ubertooth_harness.cancellation import CancellationToken
 
 from ubertooth_harness.environment import (
@@ -48,7 +50,7 @@ from ubertooth_harness.flash import (
     HarnessError,
 )
 from ubertooth_harness import leases as board_leases
-from ubertooth_harness import libbtbbpin
+from ubertooth_harness import dfuparts, libbtbbpin
 from ubertooth_harness.manifest import (
     FileIdentity,
     GitRevisionResolver,
@@ -56,7 +58,9 @@ from ubertooth_harness.manifest import (
     build_run_manifest,
 )
 from ubertooth_harness.hostneeds import planned_capabilities, split_cases
-from ubertooth_harness.plan import PlanError, check_runnable, image_label, load_plan
+from ubertooth_harness.plan import (
+    PlanError, check_runnable, check_suite_runnable, image_label, load_plan,
+)
 from ubertooth_harness import pytools
 from ubertooth_harness.catalog import builtin_catalog
 from ubertooth_harness.planner import PlanCompiler, PlanningError
@@ -287,8 +291,13 @@ def _resolve_sources(args: argparse.Namespace):
 
 
 def _terminal_sink() -> TerminalEventSink:
-    """The live stderr stream; quiet about a libbtbb pin check already shown."""
-    quiet = {libbtbbpin.EVENT} if os.environ.get(libbtbbpin.SHOWN_ENV) else set()
+    """The live stderr stream; quiet about a check whose caller already showed
+    it, so a CI job that runs the comparison itself does not print it again
+    for the build and the suite."""
+    quiet = set()
+    for module in (libbtbbpin, dfuparts):
+        if os.environ.get(module.SHOWN_ENV):
+            quiet.add(module.EVENT)
     return TerminalEventSink(sys.stderr, quiet_events=quiet)
 
 
@@ -301,6 +310,19 @@ def _record_libbtbb_pin(publisher, sources) -> None:
     check = libbtbbpin.check_sources(sources)
     if check is not None:
         publisher.emit(libbtbbpin.EVENT, check.status, check.details())
+
+
+def _record_dfu_part_table(publisher, sources) -> None:
+    """Record how the flash sizes a DFU read-back is checked against compare
+    with the fork's own part table.
+
+    The harness keeps its own copy of those sizes, so a part the fork adds
+    later would turn a correct read-back into a failure: the record names the
+    entry the copy is missing and the run goes on (#283). A run this command
+    does not open the record for gets it from the sequencer instead, so every
+    run carries it exactly once.
+    """
+    dfuparts.record(publisher, sources)
 
 
 def _record_lease_takeovers(publisher, leases) -> None:
@@ -338,6 +360,21 @@ def _record_lease_queued(publisher, leases) -> None:
         ))
 
 
+def _record_lease_pairings(publisher, pairings) -> None:
+    """Record every device a permanent pairing added to this run's leases (#289).
+
+    A run that asked for a board holds the debug programmer wired to it, and
+    the leases alone do not say why: a reader of the report sees a device the
+    run never named. The clause is carried with the record, so the report,
+    the transcript and the browser view all show the line the by-hand
+    commands print.
+    """
+    for record in pairings or ():
+        publisher.emit("lease_pairing", "passed", dict(
+            record, message=board_leases.describe_pairing_lease(record),
+        ))
+
+
 def _build_command(args: argparse.Namespace) -> int:
     sources = _resolve_sources(args)
     if Path(args.output).exists():
@@ -347,6 +384,7 @@ def _build_command(args: argparse.Namespace) -> int:
     publisher = open_run_publisher(output, generate_run_id(), _terminal_sink())
     publisher.emit("run_started", "running", run_started_details("build", "build", "", sources))
     _record_libbtbb_pin(publisher, sources)
+    _record_dfu_part_table(publisher, sources)
     try:
         result = _build(
             sources, output, args.with_firmware, publisher, args.with_python, run_dir=output
@@ -417,6 +455,14 @@ def _parser() -> argparse.ArgumentParser:
         help="with --build, do not flash the boards with the build's firmware "
         "before preflight (flashing is the default when building; it also "
         "builds the firmware)",
+    )
+    run_suite.add_argument(
+        "--bootloader", choices=bootloader.MODES, default=bootloader.MODE_RECORD,
+        help="what to do about each board's bootloader: record what is "
+        "installed (the default), check it against a bootloader built from "
+        "the run's own source, or install that one on a stale board whose "
+        "registry pairs it with a debug programmer. check and update need "
+        "--build",
     )
     _add_lease_options(run_suite)
 
@@ -694,10 +740,11 @@ def _validate(
 
 def _prepare_run(
     args, plan, invocations, sources, artifacts, run_id, preflight_policy,
-    publisher, run_dir, leases=None,
+    publisher, run_dir, leases=None, pairings=(),
 ):
     """Build (when requested), then the manifest and preflight checks."""
     built = None
+    wrote_firmware = False
     executor = SubprocessCommandExecutor(_test_environment(sources, None))
     if args.build:
         built = _build(
@@ -722,7 +769,23 @@ def _prepare_run(
             )
         # Every test command runs the tools just built, not installed ones.
         executor = SubprocessCommandExecutor(_test_environment(sources, built.plan))
-        _flash_build(args, sources, built, executor, publisher, run_dir, leases)
+        wrote_firmware = _flash_build(
+            args, sources, built, executor, publisher, run_dir, leases
+        )
+    expectation = None
+    mode = getattr(args, "bootloader", None)
+    if mode is not None:
+        expectation, bootloader_artifact = _bootloader_stage(
+            args, sources, built, executor, publisher, run_dir, leases
+        )
+        if bootloader_artifact is not None:
+            artifacts += (
+                FileIdentity.from_path(
+                    bootloader.ARTIFACT_NAME, bootloader_artifact.region_path
+                ),
+            )
+    if wrote_firmware or mode == bootloader.MODE_UPDATE:
+        _release_flash_host_lock(args, leases)
     manifest = build_run_manifest(
         run_id=run_id,
         plan_name=plan.name,
@@ -737,6 +800,7 @@ def _prepare_run(
         leases=leases.to_manifest() if leases is not None else (),
         lease_takeovers=leases.takeovers if leases is not None else (),
         lease_queue_waits=leases.queued if leases is not None else (),
+        lease_pairings=pairings,
     )
     if not args.build:
         fix = BUILD_AND_FLASH_FIX
@@ -744,7 +808,9 @@ def _prepare_run(
         fix = NO_FLASH_FIX
     else:
         fix = FLASH_FIX
-    preflight_checks = preflight_policy.compile(invocations, manifest, firmware_fix=fix)
+    preflight_checks = preflight_policy.compile(
+        invocations, manifest, firmware_fix=fix, bootloader=expectation
+    )
     return manifest, preflight_checks, executor, built
 
 
@@ -764,7 +830,7 @@ def _flash_build(args, sources, built, executor, publisher, run_dir, leases) -> 
         publisher.emit("build_flash_finished", "skipped", {
             "reason": reason, "expected_revision": "", "boards": [],
         })
-        return
+        return False
     ubertooth = next(source for source in sources if source.name == "Ubertooth")
     with _signals_cancel(CancellationToken()) as token:
         BuildFlasher(executor).run(
@@ -772,8 +838,91 @@ def _flash_build(args, sources, built, executor, publisher, run_dir, leases) -> 
             output_dir=run_dir, cancellation=token,
             host_lock=leases is not None and leases.holds_host_lock(),
         )
+    return True
+
+
+def _release_flash_host_lock(args, leases) -> None:
+    """Give this host's firmware lock back, unless the run needs it later.
+
+    Flashing the build and installing a bootloader both write flash and both
+    hold the lock, so it is released after the later of the two rather than
+    between them.
+    """
     if leases is not None and not getattr(args, "keep_host_lock", True):
         leases.release_host_lock()
+
+
+def _bootloader_stage(args, sources, built, executor, publisher, run_dir, leases):
+    """Read, compare, or install each board's bootloader after the firmware.
+
+    Returns what preflight should require of the boards' bootloaders, and the
+    artifact it was compared against (None when the run only records what is
+    installed). The read itself is preflight's; what happens here is the
+    artifact build and, in ``update`` mode, the write.
+    """
+    mode = args.bootloader
+    boards = tuple(getattr(args, "bootloader_boards", ()))
+    ubertooth = next(source for source in sources if source.name == "Ubertooth")
+    if not bootloader.supported_at(ubertooth):
+        # A fork commit from before `ubertooth-util -B`. Nothing can be read,
+        # so nothing is required of the boards; the run says so rather than
+        # failing a check its own tools cannot answer.
+        reason = (
+            f"Ubertooth {ubertooth.short_commit} has no bootloader read "
+            "(ubertooth-util -B)"
+        )
+        if mode in bootloader.COMPARING_MODES:
+            raise HarnessError(f"--bootloader {mode} needs a commit that has it: {reason}")
+        if publisher is not None:
+            publisher.emit("bootloader_stage_finished", "skipped", {
+                "mode": mode, "reason": reason, "expected": None, "boards": [],
+            })
+        return None, None
+    if not boards:
+        if publisher is not None:
+            publisher.emit("bootloader_stage_finished", "skipped", {
+                "mode": mode, "reason": "no board needs the run's firmware",
+                "expected": None, "boards": [],
+            })
+        return None, None
+    if mode != bootloader.MODE_UPDATE:
+        # Nothing here writes flash, and the build below can take minutes, so
+        # the host's firmware lock goes back before it rather than after.
+        _release_flash_host_lock(args, leases)
+    artifact = None
+    if mode in bootloader.COMPARING_MODES:
+        # Inside the run's cancellation, as the build and the flash stage are:
+        # a clone and a `make` take long enough that Ctrl-C has to end the run
+        # as canceled rather than failed, and must not leave `make` running.
+        with _signals_cancel(CancellationToken()) as token:
+            artifact = bootloader.BootloaderArtifactBuilder(executor).build(
+                ubertooth, publisher,
+                checkout=built.plan.work_dir / "src" / "ubertooth",
+                work_dir=run_dir / "bootloader",
+                output_dir=run_dir,
+                cancellation=token,
+            )
+    if mode == bootloader.MODE_UPDATE:
+        with _signals_cancel(CancellationToken()) as token:
+            summary = bootloader.BootloaderUpdater(executor).run(
+                boards, publisher, mode=mode, artifact=artifact,
+                output_dir=run_dir,
+                application_revision=ubertooth.expected_revision,
+                cancellation=token,
+                holds_host_lock=leases is not None and leases.holds_host_lock(),
+            )
+        if summary.status == "canceled":
+            raise FlashCancelled(f"the bootloader stage was canceled: {summary.reason}")
+        if summary.status != "passed":
+            raise HarnessError(summary.reason)
+    return (
+        bootloader.BootloaderExpectation(
+            mode=mode,
+            expected=artifact.identity() if artifact else None,
+            boards={board.alias: board for board in boards},
+        ),
+        artifact,
+    )
 
 
 def _test_environment(sources, plan) -> dict:
@@ -796,6 +945,15 @@ def _test_environment(sources, plan) -> dict:
 def _parse_artifacts(values: list[str]) -> tuple[FileIdentity, ...]:
     artifacts = []
     names = set()
+    if bootloader.ARTIFACT_NAME in {value.split("=", 1)[0] for value in values}:
+        # A run that compares bootloaders records the region it built under
+        # this name, and that is the file it wrote to a board. A given file
+        # under the same name would stand in the manifest for one it is not.
+        raise ManifestError(
+            f"artifact name '{bootloader.ARTIFACT_NAME}' is the run's own "
+            "bootloader region (--bootloader check and update record it); "
+            "use another name"
+        )
     for value in values:
         if "=" not in value:
             raise ManifestError("artifact must use NAME=PATH")
@@ -814,6 +972,11 @@ def _run_suite(args: argparse.Namespace) -> int:
     external_template = _external_template(args)
     catalog = builtin_catalog()
     plan = load_plan(args.plan, catalog)
+    # Refuse a suite this run could not judge before any board is touched: a
+    # test with no implementation, or one pointed at a link no figure has
+    # been taken over. `runnable: false` lets a plan name those entries; it
+    # does not make them runnable, so the flag is not consulted here.
+    check_suite_runnable(plan, args.suite, catalog)
     registry = FileResourceRegistry.load(args.hardware)
     host = registry.get(args.host)
     if host.type != "Host":
@@ -833,12 +996,13 @@ def _run_suite(args: argparse.Namespace) -> int:
         and (not selected_names or invocation.test_name in selected_names)
     )
     # Whole tests left out at planning (hostneeds.py, planner.py): what this
-    # host cannot run, and what this bench has not got the hardware for.
+    # host cannot run, and what this registry has not got the hardware for.
     not_applicable = tuple(
         item for item in compiled.for_host(args.host)
         if not selected_names or item.test_name in selected_names
     )
-    # Required tests this host has not got the hardware for (planner.py):
+    # Required tests whose hardware is not registered (planner.py): on this
+    # host, or on a host this registry has not got at all. They are
     # recorded, everything else runs, and the run ends failed.
     blocked = tuple(
         item for item in compiled.blocked_for_host(args.host)
@@ -878,9 +1042,27 @@ def _run_suite(args: argparse.Namespace) -> int:
         raise HarnessError("--build requires --libbtbb-source and --libbtbb-ref")
     if args.no_flash_build and not args.build:
         raise HarnessError("--no-flash-build requires --build")
+    if args.bootloader in bootloader.COMPARING_MODES and not args.build:
+        raise HarnessError(
+            f"--bootloader {args.bootloader} compares each board against a "
+            "bootloader built from the run's own source, so it requires --build"
+        )
+    if args.bootloader == bootloader.MODE_UPDATE and args.no_flash_build:
+        # A bootloader write happens before preflight, so the application the
+        # board answers `-B` from would be whatever was on it: a board written
+        # here and then turned down by preflight for its firmware is the worst
+        # of both. The run's own firmware goes on first.
+        raise HarnessError(
+            "--bootloader update writes a board's flash before preflight, so "
+            "the board must be carrying this run's own firmware first; drop "
+            "--no-flash-build, or use --bootloader check"
+        )
     args.flash_boards = ()
     # Both images unless the firmware build is turned on only to flash.
     args.firmware_images = FIRMWARE_IMAGES
+    needs_firmware = PreflightPolicy(registry, catalog).boards_needing_firmware(
+        invocations
+    )
     if args.build and not args.no_flash_build:
         # The boards whose firmware preflight requires get the run's own
         # firmware first; that needs the firmware build.
@@ -889,7 +1071,49 @@ def _run_suite(args: argparse.Namespace) -> int:
                 alias,
                 str(registry.get(alias).identity.get("serial", "")).strip().lower(),
             )
-            for alias in PreflightPolicy(registry, catalog).boards_needing_firmware(invocations)
+            for alias in needs_firmware
+        )
+    # The boards whose bootloader this run reads, compares, or installs: the
+    # ones whose firmware preflight requires, which is where the bootloader
+    # read can be answered at all.
+    args.bootloader_boards = bootloader.boards_for_bootloader(
+        registry, needs_firmware
+    )
+    if args.bootloader == bootloader.MODE_UPDATE:
+        without = [
+            board.alias for board in args.bootloader_boards
+            if not board.can_be_programmed
+        ]
+        if without and len(without) == len(args.bootloader_boards):
+            # Say so before a build: on this bench the mode could only ever
+            # fail, and the registry is what has to change.
+            raise HarnessError(
+                "--bootloader update can install a bootloader only through a "
+                "debug programmer the registry pairs with the board, and "
+                + ", ".join(without)
+                + " has none; register the programmer ('programs: <board>' with "
+                "a 'serial device'), or use --bootloader check"
+            )
+    if (
+        args.bootloader in bootloader.COMPARING_MODES
+        and not args.dry_run
+        and "arm-none-eabi-gcc" in missing_tools(_detected_platform(), True)
+    ):
+        raise HarnessError(
+            f"--bootloader {args.bootloader} builds the bootloader from the "
+            "run's own source, and arm-none-eabi-gcc is not installed; install "
+            "it, or use --bootloader record"
+        )
+    if (
+        args.bootloader == bootloader.MODE_UPDATE
+        and not args.dry_run
+        and shutil.which(bootloader.PROGRAMMER_TOOL) is None
+    ):
+        # The programmer command itself. Said before the boards are leased
+        # and the commits built, rather than as a write that never started.
+        raise HarnessError(
+            f"--bootloader update programs a board with {bootloader.PROGRAMMER_TOOL}, "
+            "which is not installed; install it, or use --bootloader check"
         )
     if args.flash_boards and not args.with_firmware:
         # Flashing needs the firmware build, but only the image it writes:
@@ -906,15 +1130,28 @@ def _run_suite(args: argparse.Namespace) -> int:
                 "installed; install it, or use --no-flash-build to keep the "
                 "boards' firmware"
             )
+    # A device the registry says is permanently wired to one of the run's own
+    # (a debug programmer and the board it programs) is held with it. Said
+    # wherever the devices are: a dry run lists what the run would hold, and
+    # the run itself says it before it takes the locks and records it (#289).
+    pairings = board_leases.pairings_for_invocations(invocations, registry)
     if args.dry_run:
         return _dry_run(
-            args, catalog, plan, host, invocations, not_applicable, blocked
+            args, catalog, plan, host, invocations, not_applicable, blocked,
+            pairings,
         )
     artifacts = _parse_artifacts(args.artifact)
     run_id = validate_run_id(args.run_id) if args.run_id else generate_run_id()
     # Power isolation and firmware-writing tests hold the host lock for the
     # whole run; flashing the build first holds it only while writing.
     args.keep_host_lock = board_leases.needs_host_lock(invocations, catalog)
+    # Said as `hold` says it: before the attempt, and so before any wait for
+    # those devices.
+    for record in pairings:
+        print(
+            f"note: {board_leases.pairing_reason(record)}, so it is held too",
+            file=sys.stderr,
+        )
     leases = board_leases.acquire(
         board_leases.boards_for_invocations(invocations, registry),
         board_leases.holder_info(
@@ -923,20 +1160,27 @@ def _run_suite(args: argparse.Namespace) -> int:
         ),
         directory=args.lease_dir,
         wait_s=args.wait_for_boards * 60,
-        # Power isolation and firmware writes hold this host's lock too.
-        host_lock=args.keep_host_lock or bool(args.flash_boards),
+        # Power isolation and firmware writes hold this host's lock too, and
+        # a bootloader write is a firmware write through another port.
+        host_lock=(
+            args.keep_host_lock
+            or bool(args.flash_boards)
+            or args.bootloader == bootloader.MODE_UPDATE
+        ),
         external_template=external_template,
     )
     try:
         return _run_leased(
             args, catalog, plan, registry, invocations, sources, artifacts,
-            run_id, leases, not_applicable, blocked,
+            run_id, leases, not_applicable, blocked, pairings,
         )
     finally:
         leases.release()
 
 
-def _dry_run(args, catalog, plan, host, invocations, not_applicable, blocked=()) -> int:
+def _dry_run(
+    args, catalog, plan, host, invocations, not_applicable, blocked=(), pairings=(),
+) -> int:
     """What run-suite would run on this host and what is not applicable.
 
     Capabilities come from the platform and the run options (hostneeds.py
@@ -966,6 +1210,24 @@ def _dry_run(args, catalog, plan, host, invocations, not_applicable, blocked=())
     elif args.build:
         print("flash before preflight: no ("
               + ("--no-flash-build" if args.no_flash_build else "no board needs it") + ")")
+    print(f"bootloader: {args.bootloader}" + "".join(
+        f"\n  {board.alias} ({board.serial}): "
+        + (
+            f"programmer {board.programmer_alias} on {board.programmer_device}"
+            if board.can_be_programmed
+            else f"programmer {board.programmer_alias}, no serial device registered"
+            if board.has_programmer
+            else "no programmer registered; check-only"
+        )
+        for board in getattr(args, "bootloader_boards", ())
+    ))
+    # A device no test below names, which the run would hold all the same.
+    # Worded as `boards` words it, under the same label.
+    for record in pairings:
+        print(
+            f"pair: {board_leases.pairing_reason(record)}, so the run would hold "
+            "it too"
+        )
     runs = omitted = 0
     for invocation in invocations:
         definition = catalog.get(invocation.test_name)
@@ -995,10 +1257,13 @@ def _dry_run(args, catalog, plan, host, invocations, not_applicable, blocked=())
           f"and {len(not_applicable)} test(s) not applicable"
           + (f", {len(blocked)} test(s) blocked" if blocked else ""))
     if blocked:
+        # Not "on this host": a record may be about a host this registry has
+        # not got, which no run of its own will ever carry. Each line above
+        # names the host it is about.
         print(
-            f"error: {len(blocked)} required test(s) cannot run on {args.host}; "
-            "the run would fail. Register the hardware they need, or run a "
-            "suite without them.",
+            f"error: {len(blocked)} required test(s) of {args.suite} cannot "
+            "run; the run would fail. Register the hardware they need, or run "
+            "a suite without them.",
             file=sys.stderr,
         )
         return 1
@@ -1007,7 +1272,7 @@ def _dry_run(args, catalog, plan, host, invocations, not_applicable, blocked=())
 
 def _run_leased(
     args, catalog, plan, registry, invocations, sources, artifacts, run_id, leases,
-    not_applicable=(), blocked=(),
+    not_applicable=(), blocked=(), pairings=(),
 ) -> int:
     """run-suite once every board the run touches is leased to this process."""
     preflight_policy = PreflightPolicy(registry, catalog)
@@ -1047,14 +1312,16 @@ def _run_leased(
             # took a device over says so whatever happens next.
             _record_lease_takeovers(publisher, leases)
             _record_lease_queued(publisher, leases)
+            _record_lease_pairings(publisher, pairings)
             _record_libbtbb_pin(publisher, sources)
+            _record_dfu_part_table(publisher, sources)
         except BaseException as error:
             _finish_failed_run(publisher, run_dir, str(error) or type(error).__name__)
             raise
     try:
         manifest, preflight_checks, executor, built = _prepare_run(
             args, plan, invocations, sources, artifacts, run_id, preflight_policy,
-            publisher, run_dir if args.build else None, leases,
+            publisher, run_dir if args.build else None, leases, pairings,
         )
     except BaseException as error:
         if publisher is not None:
@@ -1151,6 +1418,18 @@ def _boards_command(args: argparse.Namespace) -> int:
     ]
     # The host lock is local to the host this runs on, like the leases.
     states.append(board_leases.host_lock_state(directory=args.lease_dir))
+    # Which devices come with which: a reader who finds one held by a command
+    # that named only the other needs to see why (the pair is held as one).
+    for state in states:
+        pair = [
+            {
+                "resource": other,
+                "why": registry.describe_pairing(other, state["resource"]),
+            }
+            for other in board_leases.pair_members(registry, state["resource"])
+        ]
+        if pair:
+            state["pair"] = pair
     if args.json:
         print(json.dumps(states, indent=2, sort_keys=True))
         return 0
@@ -1192,6 +1471,10 @@ def _boards_command(args: argparse.Namespace) -> int:
             print(f"{label:<12} held  {board_leases.describe_holder({})}")
         else:
             print(f"{label:<12} free")
+        for member in state.get("pair", ()):
+            # Held with this one, so a holder a reader did not expect is
+            # explained where they see it.
+            print(f"{'':<12} pair:  {member['why']}, so the two are held together")
         if state.get("waiting"):
             # Commands queued for it: a free board with a queue is somebody
             # else's next, and a held one shows how deep the queue is.
@@ -1294,8 +1577,15 @@ def _lease_command(args: argparse.Namespace) -> int:
         raise HarnessError("lease needs a command after --")
     external_template = _external_template(args)
     registry = FileResourceRegistry.load(args.hardware)
+    # A device wired to a debug programmer is held with it, whichever of the
+    # two was named: using one without the other corrupts a test or leaves a
+    # board needing hands on it. Said before the attempt, which is also when
+    # a wait for either of them starts.
+    aliases, pairing = board_leases.expand_pairs(registry, args.boards)
+    for clause in pairing:
+        print(f"note: {clause}, so it is held too", file=sys.stderr)
     boards = []
-    for alias in args.boards:
+    for alias in aliases:
         resource = registry.get(alias)
         if resource.type not in board_leases.LEASED_TYPES:
             raise HarnessError(

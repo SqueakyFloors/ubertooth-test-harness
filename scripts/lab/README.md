@@ -50,16 +50,36 @@ key the harness will use when it does.
 A name that matches two devices is refused rather than resolved to the first
 one, so a short name can never quietly select the wrong device.
 
+A device the registry says is permanently wired to another one -- a board and
+its debug programmer (`programs:` in the registry) -- is held together with
+it, whichever of the two is named, in the same all-or-nothing attempt. Naming
+both is harmless; the note on standard error says which device the pairing
+brought in and why:
+
+```sh
+.venv/bin/python scripts/lab/hold UT_Linux1 -- lpc21isp -control ...
+note: Prog_Linux0 is the programmer wired to UT_Linux1, so it is held too
+```
+
+That replaces nesting one lock inside another by hand, which can wait for the
+second while already holding the first.
+
 `UBERTOOTH_HARNESS_EXTERNAL_BOARD_LOCK` is how a bench whose own scripts lock
 devices with per-device `flock` files keeps both sides honest: every hold
 takes that file too. Point it at the bench's existing lock files.
 
-An Ubertooth's lock file is named after its serial. A DK's and a peer's are
-named after the harness's lease key for them (`nrf52840dk-<serial without
-leading zeros>`, `esp32-<serial>`), because that is what a harness run takes.
-A bench script that names such a lock after the plain serial instead would not
-meet a harness run on the same file, so `hold` takes **both** names for those
-two types.
+An Ubertooth's lock file is named after its serial. A DK's, a peer's and a
+programmer's are named after the harness's lease key for them
+(`nrf52840dk-<serial without leading zeros>`, `esp32-<serial>`,
+`programmer-<serial>`), because that is what a harness run takes. A bench
+script that names such a lock after the plain serial instead would not meet a
+harness run on the same file, so `hold` takes **both** names for those three
+types: the bench's own `board-<plain serial>.lock`, which is the file such a
+script locks, and, beside it, a lease file of its own named
+`bench-<plain serial>` — prefixed, because an unprefixed name of 32 hex
+digits is the lease file of an Ubertooth with that serial, and a peer's
+bridge serial is 32 hex digits
+([#290](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/290)).
 
 That makes every `hold` exclude every other `hold`, whichever name a bench
 script was written against. It does not reach further than that: a
@@ -188,7 +208,10 @@ port's state afterwards so you can see the result.
 
 It holds the port's registered device as well, so it cannot cut power under
 another run or another person, and a device already held is reported with its
-holder's name rather than switched. `--wait SECONDS` sets how long it waits
+holder's name rather than switched. A device wired to a debug programmer
+holds that programmer too, and the other way round: cutting a board's power
+while it is being programmed leaves it needing hands on it. `--wait SECONDS`
+sets how long it waits
 for either lock (two minutes by default, since a run holds the host lock
 across a build and a flash); `--wait 0` reports the holder after about a
 second rather than waiting. `--force`

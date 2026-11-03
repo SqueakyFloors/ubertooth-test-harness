@@ -288,10 +288,23 @@ class LeaseError(RuntimeError):
 
 @dataclass(frozen=True)
 class Board:
-    """One board to lease: its registry alias and the key its lock file uses."""
+    """One board to lease: its registry alias and the key its lock file uses.
+
+    ``external_key`` is the name the bench's own lock file for this device
+    is built from (``external_lock_path``), where that is not the lease key.
+    One device needs the two to differ: the bench's older name for a DK, a
+    peer, or a programmer is the plain serial, and the lease file that goes
+    with it is prefixed so that it cannot be a board's (``bench_lock_key``).
+    """
 
     alias: str
     key: str
+    external_key: str | None = None
+
+    @property
+    def lock_name(self) -> str:
+        """The name the bench's own lock file for this device is built from."""
+        return self.external_key or self.key
 
 
 # The per-host power/firmware lock. Its key cannot clash with a board's,
@@ -359,8 +372,13 @@ def external_lock_template(
 
 
 def external_lock_path(template: str, board: Board) -> Path:
-    """The board's external lock file: the template with its full serial."""
-    return Path(template.replace(SERIAL_FIELD, board.key))
+    """The board's external lock file: the template with its own name in it.
+
+    That name is the lease key for everything the harness leases, and the
+    plain serial for the bench's own older name for a device, whose lease
+    file is prefixed (``Board.external_key``, ``bench_lock_key``).
+    """
+    return Path(template.replace(SERIAL_FIELD, board.lock_name))
 
 
 def read_external_holder(path: Path) -> str:
@@ -420,28 +438,54 @@ def board_key(alias: str, identity: Mapping) -> str:
 # serial is 32 hex digits itself.
 # A key becomes a file name, so it may hold nothing that would reach
 # another directory or need quoting.
-_LOCK_NAME = re.compile(r"^[0-9A-Za-z_.:+-]{1,64}$")
+LOCK_NAME_CHARS = 64
+_LOCK_NAME = re.compile(r"^[0-9A-Za-z_.:+-]{1,%d}$" % LOCK_NAME_CHARS)
+DK_TYPE = "nRF52840 DK"
+PEER_TYPE = "ESP32 Classic peer"
+# A debug programmer wired to one device's debug or programming header. It is
+# leased like a board: programming a device while another command owns it, or
+# using that device while it is being programmed, corrupts a test or leaves
+# the board needing hands on it, so the two are always held together (see
+# expand_pairs).
+PROGRAMMER_TYPE = "Debug programmer"
+# The host's own Bluetooth controller, which the two BlueZ-only tools drive.
+# Leased because one controller answers one inquiry at a time and holds one
+# link to a target, so two commands using it at once would read each other's
+# results.
+ADAPTER_TYPE = "Bluetooth adapter"
+LEASED_TYPES = ("Ubertooth", DK_TYPE, PEER_TYPE, PROGRAMMER_TYPE, ADAPTER_TYPE)
 # A 48-bit address with its colons taken out, which is what names an adapter's
 # lock; the registry has already refused anything else (resources.py).
 _ADAPTER_ADDRESS = re.compile(r"^[0-9a-f]{12}$")
-DK_TYPE = "nRF52840 DK"
-PEER_TYPE = "ESP32 Classic peer"
-ADAPTER_TYPE = "Bluetooth adapter"
-LEASED_TYPES = ("Ubertooth", DK_TYPE, PEER_TYPE, ADAPTER_TYPE)
+# The bench's older lock name for a device whose lease key is not its plain
+# serial (a DK, a peer, a programmer): `scripts/lab/hold` takes that name as
+# well as the key, so a bench script written against the serial is met on the
+# same file. The bench's own file keeps the plain serial, which is what makes
+# that work; the lease file taken beside it is prefixed, because an
+# unprefixed one of 32 hex digits is the lease file of an Ubertooth with that
+# serial, and a CP2102N bridge serial is 32 hex digits (#290). Nothing else
+# can spell this prefix: the four other keys carry their own type's, and an
+# Ubertooth's is 32 hex digits.
+BENCH_LOCK_PREFIX = "bench-"
+
+
+def bench_lock_key(serial: str) -> str:
+    """The lease file taken with the bench's own lock name for a device."""
+    return f"{BENCH_LOCK_PREFIX}{serial}"
 
 
 def resource_key(resource) -> str:
-    """Lock-file key of a leasable resource (Ubertooth, DK, ESP32 peer, or
-    host Bluetooth adapter)."""
+    """Lock-file key of a leasable resource.
+
+    An Ubertooth, a DK, an ESP32 peer, a debug programmer, or the host's
+    Bluetooth adapter.
+    """
     if resource.type == ADAPTER_TYPE:
         # The controller's own address, not its `hci device` name: hciN is the
         # order the kernel attached controllers in, so two hosts that share a
         # lease directory would both key their own adapter as hci0. Every
-        # other key here is an identity for the same reason.
-        #
-        # One adapter answers one inquiry at a time and holds one link to a
-        # target, so two tests using it at once would read each other's
-        # results.
+        # other key here is an identity for the same reason. An adapter has
+        # no serial, so it has no bench lock name beside this one.
         address = str(resource.identity.get("BD_ADDR", "") or "").strip()
         key = address.replace(":", "").lower()
         if not _ADAPTER_ADDRESS.fullmatch(key):
@@ -449,7 +493,7 @@ def resource_key(resource) -> str:
                 f"{resource.alias} needs a 'BD_ADDR' in the hardware registry "
                 f"to be leased; registered '{address}'"
             )
-        return f"bluez-{key}"
+        return _keyed(resource, "BD_ADDR", "bluez-", key)
     if resource.type == DK_TYPE:
         serial = str(resource.identity.get("jlink serial", "") or "").strip()
         if not serial.isdigit():
@@ -457,7 +501,7 @@ def resource_key(resource) -> str:
                 f"{resource.alias} needs a 'jlink serial' in the hardware registry "
                 f"to be leased; registered '{serial}'"
             )
-        return f"nrf52840dk-{int(serial)}"
+        return _keyed(resource, "jlink serial", "nrf52840dk-", str(int(serial)))
     if resource.type == PEER_TYPE:
         # Taken as registered: the same string names the device path, so a
         # board leased under one spelling and opened under another would be
@@ -468,8 +512,120 @@ def resource_key(resource) -> str:
                 f"{resource.alias} needs a 'bridge serial' in the hardware registry "
                 f"to be leased; registered '{serial}'"
             )
-        return f"esp32-{serial}"
+        return _keyed(resource, "bridge serial", "esp32-", serial)
+    if resource.type == PROGRAMMER_TYPE:
+        # Taken as registered, as the peer's is: the serial names the adapter
+        # on USB and in its lock file, so one spelling is one device.
+        serial = str(resource.identity.get("serial", "") or "").strip()
+        if not serial or not _LOCK_NAME.fullmatch(serial):
+            raise LeaseError(
+                f"{resource.alias} needs a 'serial' in the hardware registry to be "
+                f"leased; registered '{serial}'"
+            )
+        return _keyed(resource, "serial", "programmer-", serial)
     return board_key(resource.alias, resource.identity)
+
+
+def max_serial_chars(prefix: str) -> int:
+    """How long a serial may be for every lock name built from it to fit.
+
+    Its lease key carries its type's prefix and the bench's second lock
+    name carries ``bench-``, and both are file names
+    (``LOCK_NAME_CHARS``). The registry refuses a longer serial where it
+    loads, so a bench learns the limit from the field it wrote rather than
+    from the name the harness built.
+    """
+    return LOCK_NAME_CHARS - max(len(prefix), len(BENCH_LOCK_PREFIX))
+
+
+def _keyed(resource, field: str, prefix: str, serial: str) -> str:
+    """The key, once every lock name built from it is one a file can carry.
+
+    The registry refuses such a serial where it loads, so this is the
+    backstop for a registry made in code. A name too long for a lock file
+    is not silently shortened: a ticket records the key, and a reader drops
+    a name that is not one (``waiting_resources``), so the set that ticket's
+    command is waiting for would be read short.
+    """
+    if len(serial) > max_serial_chars(prefix):
+        raise LeaseError(
+            f"{resource.alias} needs a '{field}' of at most "
+            f"{max_serial_chars(prefix)} characters in the hardware registry to "
+            f"be leased, so that its lock file names fit; registered "
+            f"{len(serial)}"
+        )
+    return prefix + serial
+
+
+def pair_members(registry, alias: str) -> tuple[str, ...]:
+    """The devices a registry says are permanently wired to this one.
+
+    A registry that records no pairing at all answers with nothing, which is
+    every bench that has no programmer registered.
+    """
+    members = getattr(registry, "pair_members", None)
+    return tuple(members(alias)) if members is not None else ()
+
+
+def expand_pairs(registry, aliases: Sequence[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """These aliases plus each one's permanently wired pair, and why.
+
+    One expansion for every command that holds devices, so a debug programmer
+    and the device it programs are never held apart, whichever of the two was
+    named. Deduplicated and in a deterministic order (the names as given, then
+    each added alias in alias order), so naming both members is harmless and
+    two commands always ask for the same set. The second tuple is one clause
+    per added alias, for the note a command prints before it takes the locks
+    (``FileResourceRegistry.describe_pairing``).
+    """
+    expand = getattr(registry, "expand_pairs", None)
+    if expand is None:
+        return tuple(dict.fromkeys(aliases)), ()
+    return expand(list(aliases))
+
+
+def pairing_record(alias: str, reason: str) -> dict:
+    """One device a permanent pairing added to a run's leases (#289).
+
+    What a reader of the run needs: the device that was held, and why it
+    came with one the run asked for. The reason is the registry's own
+    clause and names both devices, so there is no second field that could
+    name a different one. No lock file path: the lease directory is private
+    and the devices are what explains the lease. Both fields are bounded,
+    as every field a record carries is: a registry made in code need not
+    have passed the alias checks, and a run record has a per-event size
+    limit (see events.py).
+    """
+    return {
+        "resource": _printable(alias, _RECORDED_HOLDER_CHARS),
+        "reason": _printable(reason, _RECORDED_HOLDER_CHARS),
+    }
+
+
+def pairing_reason(record: Mapping) -> str:
+    """Why this device came with the run's own, as a clause.
+
+    The registry's own words, and what is known of the device where a
+    record carries none (one from somewhere else, or from a registry whose
+    expansion gave no clause). Every line about a pairing is built on this,
+    so none of them can read as a sentence with a hole in it.
+    """
+    reason = str(record.get("reason") or "")
+    if reason:
+        return reason
+    return (
+        f"{record.get('resource') or 'a device'} is wired to a device the run "
+        "named"
+    )
+
+
+def describe_pairing_lease(record: Mapping) -> str:
+    """The one line such a record is reported in, for a run that has ended.
+
+    Past tense: a report, a transcript and the live view are all read after
+    the run has its devices.
+    """
+    return f"{pairing_reason(record)}, so the run held it too"
 
 
 def _observes_every_board(invocation) -> bool:
@@ -483,21 +639,66 @@ def _observes_every_board(invocation) -> bool:
     )
 
 
-def boards_for_invocations(invocations: Iterable, registry) -> tuple[Board, ...]:
-    """Every board the run touches: its roles, power-isolated and observed boards."""
-    found: dict[str, Board] = {}
+def _named_aliases(invocations: Sequence, registry) -> tuple[str, ...]:
+    """Every device the run itself names, deduplicated, in the order found.
+
+    Its roles, the boards it power-isolates, and, for a test that reads
+    every board on the host, those as well. Nothing a pairing adds.
+    """
+    named: list[str] = []
     for invocation in invocations:
-        aliases = [
+        named += [
             alias for alias in invocation.resources.values()
             if registry.get(alias).type in LEASED_TYPES
         ]
-        aliases += [action.resource_alias for action in invocation.power_isolation]
+        named += [action.resource_alias for action in invocation.power_isolation]
         if _observes_every_board(invocation):
-            aliases += list(registry.resolve_hardware(invocation.host, "Ubertooth", "each"))
-        for alias in aliases:
-            board = Board(alias, resource_key(registry.get(alias)))
-            found.setdefault(board.key, board)
+            named += list(registry.resolve_hardware(invocation.host, "Ubertooth", "each"))
+    return tuple(dict.fromkeys(named))
+
+
+def boards_for_invocations(invocations: Sequence, registry) -> tuple[Board, ...]:
+    """Every board the run touches: its roles, power-isolated and observed boards.
+
+    And, for any of them that is one member of a permanently wired pair, the
+    other member: a run that uses or power-cycles a device with a debug
+    programmer on it holds that programmer too (expand_pairs).
+
+    The whole run is expanded in one go, so a device one test names is what
+    the run asked for even where another test's pairing would have added it.
+    """
+    aliases, _why = expand_pairs(registry, _named_aliases(invocations, registry))
+    found: dict[str, Board] = {}
+    for alias in aliases:
+        board = Board(alias, resource_key(registry.get(alias)))
+        found.setdefault(board.key, board)
     return tuple(sorted(found.values(), key=lambda b: b.key))
+
+
+def pairings_for_invocations(invocations: Sequence, registry) -> tuple[dict, ...]:
+    """Why the run holds each device it never named (#289).
+
+    One record per device the pairing added to boards_for_invocations, in
+    that expansion's order. Both read it from the registry, which answers
+    with the aliases to hold and one clause per alias it added, in the same
+    order (``expand_pairs``), and answers the same way twice. So a run
+    reports the devices it leases, in the registry's own wording, which is
+    the wording `hold`, `hub-port` and `boards` print for the same pair;
+    nothing here can word it differently or decide which devices come in.
+    """
+    named = _named_aliases(invocations, registry)
+    held, clauses = expand_pairs(registry, named)
+    added = tuple(alias for alias in held if alias not in named)
+    if len(clauses) != len(added):
+        # A registry whose expansion does not follow expand_pairs' contract
+        # (one clause per added alias, in that order). Each device is still
+        # reported, because the run holds it; without its clause the line
+        # says what is known (describe_pairing_lease), which is better than
+        # giving a device another one's reason.
+        clauses = ("",) * len(added)
+    return tuple(
+        pairing_record(alias, clause) for alias, clause in zip(added, clauses)
+    )
 
 
 def needs_host_lock(invocations: Iterable, catalog) -> bool:
@@ -771,6 +972,11 @@ class TicketQueue:
             if board.key in queued_keys:
                 continue  # one resource, two entries (a lease and its external lock)
             queued_keys.add(board.key)
+            # The key and the alias, which is what a reader of this ticket
+            # uses: the lease files of the set (_blocking) and the names in
+            # the record it may write (queued_record). A lab's own lock file
+            # is never read from a ticket, so the name the bench uses for a
+            # device (Board.external_key) is not recorded here.
             self.waiting_for.append({"key": board.key, "resource": board.alias})
         self.number = time.time_ns()
         self.name = f"{self.number:020d}-{os.getpid()}-{os.urandom(3).hex()}"
@@ -1712,10 +1918,14 @@ def acquire(
     if external_template:
         for board in by_serial:
             path = external_lock_path(external_template, board)
-            own = root / f"{board.key}.lock"
+            # Both of this device's own lease names, which differ only for
+            # the bench's second lock name (Board.external_key): a template
+            # pointing at the lease directory would otherwise take the lease
+            # file of the device that name belongs to as an external lock.
+            own = {root / f"{board.key}.lock", root / f"{board.lock_name}.lock"}
             # realpath, so a symlink to the lease file is caught too: the
             # second flock of one file in one process conflicts with itself.
-            if os.path.realpath(path) == os.path.realpath(own):
+            if os.path.realpath(path) in {os.path.realpath(one) for one in own}:
                 raise LeaseError(
                     f"external board lock {path} is the harness's own lease file; "
                     "point the template at the lab's lock files"

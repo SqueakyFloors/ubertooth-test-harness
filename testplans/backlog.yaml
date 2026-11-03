@@ -36,11 +36,10 @@ suites:
     - Receive-only firmware:
         Ubertooth: default
 
-    - Uberducky HID:
-        Uberducky: required
-
-    - E-GO skateboard capture:
-        skateboard: required
+    # No Uberducky or E-GO entry: device-level testing of ubertooth-ducky and
+    # ubertooth-ego is out of scope (#89), not waiting on a fixture. The
+    # harness keeps host CLI coverage of both tools and `ubertooth-ego -r`
+    # receive. See COVERAGE.md and docs/tests.md.
 
     # Not implemented yet; the known advertiser (#86) is in the ble plan.
     - BLE monitor:

@@ -9,6 +9,8 @@ from typing import Mapping, Sequence
 
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.cases import GUARD_ROLE_PREFIX
+from ubertooth_harness import bootloader as bootloader_identity
+from ubertooth_harness import libbtbbpin
 from ubertooth_harness.manifest import ManifestError, RunManifest
 from ubertooth_harness.planner import TestInvocation
 from ubertooth_harness import esp32peer, nrfdk
@@ -16,6 +18,7 @@ from ubertooth_harness.patterns import (
     APPLICATION_IMAGE,
     FIRMWARE_VERSION_RE,
     HOST_VERSION_TIMEOUT_S,
+    commit_revision,
     compile_info_pattern,
     firmware_version_pattern,
     matched_image,
@@ -57,6 +60,9 @@ NO_FLASH_FIX = (
     "flash it with this build (the default when building: leave out "
     "--no-flash-build, or tick Flash the firmware to the boards first in the GUI)"
 )
+# The check that reads which bootloader is under the firmware above. Its name
+# is what the report and the GUI show, so it is stated once.
+BOOTLOADER_CHECK_NAME = "Bootloader identity"
 
 
 @dataclass(frozen=True)
@@ -88,12 +94,51 @@ class PreflightCheck:
     minimum_api: int | None = None
     # How to fix a firmware revision mismatch; FLASH_FIX when empty.
     fix: str = ""
+    # The libbtbb the host tools must report, for the host version check.
+    # Checked after the patterns above, so its reason can name the revision
+    # the tools reported, not only the pattern that did not match.
+    libbtbb: "LibbtbbIdentity | None" = None
+    # What the run requires of this board's bootloader, for the check that
+    # reads `ubertooth-util -B` (bootloader.py). The identities involved are
+    # not revisions, so this check writes its own reason rather than going
+    # through the firmware wording below.
+    bootloader: bootloader_identity.BootloaderExpectation | None = None
 
     def result_failure(self, result: CommandResult) -> str:
         if result.timed_out:
             return f"{self.name}: command timed out"
         if result.cancelled:
             return f"{self.name}: command canceled"
+        if self.bootloader is not None:
+            # `-B` exits 1 for a board whose firmware refuses the read and for
+            # a version block this host would not read, and the answer itself
+            # says which, so the reason comes from the line rather than the
+            # exit status.
+            output = output_of(result)
+            line = bootloader_identity.IDENTITY_LINE_PATTERN
+            found = output.search(line)
+            output.note_pattern("observed", self.name, line, found)
+            for pattern in self.expected_patterns:
+                if pattern != line:
+                    output.note_pattern(
+                        "expected", self.name, pattern, output.search(pattern)
+                    )
+            installed = bootloader_identity.identity_from_match(found)
+            if installed is None and (
+                result.returncode not in self.accepted_returncodes
+            ):
+                # No line and a status this check does not accept: the read
+                # failed for a reason of its own (no board, a board another
+                # command holds, a libusb error), and naming old firmware
+                # would name the wrong fix. The command's own output is in
+                # the transcript.
+                target = self.resource_alias or self.host
+                return (
+                    f"{self.name}: {target} did not report its bootloader "
+                    f"(ubertooth-util -B exited {result.returncode})"
+                )
+            failure = self.bootloader.failure(self.resource_alias, installed)
+            return f"{self.name}: {failure}" if failure else ""
         if result.returncode not in self.accepted_returncodes:
             return f"{self.name}: command exited {result.returncode}"
         output = output_of(result)
@@ -133,6 +178,22 @@ class PreflightCheck:
                 return (
                     f"{self.name}: identity mismatch for {target}: "
                     f"output does not match {pattern}"
+                )
+        if self.libbtbb is not None and self.libbtbb.required:
+            found = output.search(self.libbtbb.pattern)
+            output.note_pattern(
+                "expected", f"{self.name} libbtbb", self.libbtbb.pattern, found
+            )
+            if found is None:
+                reported = output.search(_LIBBTBB_REPORTED)
+                carries = (
+                    f"libbtbb {reported['value']}" if reported
+                    else "no libbtbb version at all"
+                )
+                return (
+                    f"{self.name}: the host tools on {self.host} report "
+                    f"{carries}, not {self.libbtbb.expected_revision}, which "
+                    f"is {self.libbtbb.origin}: {self.libbtbb.fix}"
                 )
         if self.minimum_api is not None:
             reported = output.search(API_PATTERN)
@@ -188,12 +249,38 @@ _HOST_VERSION_LINE_START = (
 )
 
 
+def libbtbb_version_pattern(expected_revision: str) -> str:
+    """The host version line of tools linked against ``expected_revision``.
+
+    Both versions are on that one line, libbtbb's second, and the revision in
+    its brackets is what libbtbb's own build stamped into
+    ``btbb_get_release()``: the commit the installed library was built from.
+    """
+    return (
+        rf"{_HOST_VERSION_LINE_START}\b.*\blibbtbb[ \t]+\S+[ \t]+"
+        rf"\({revision_pattern(expected_revision)}\)"
+    )
+
+
+# The libbtbb half of that line as it was printed, for a reason that has to
+# name the revision found as well as the one wanted.
+_LIBBTBB_REPORTED = (
+    rf"{_HOST_VERSION_LINE_START}\b[^\n]*?\blibbtbb[ \t]+\S+[ \t]+"
+    r"\((?P<value>[^)\n]*)\)"
+)
+
+
 def host_version_patterns(ubertooth, libbtbb=None) -> tuple[str, ...]:
     """Patterns the host tools' version line must match for the resolved sources.
 
     The line is what `ubertooth-util -V` prints first, and what `-H` printed
     on older fork commits, with or without its label. A trailing `*`
     (modified source) does not match.
+
+    Preflight passes only the Ubertooth source and carries the libbtbb half
+    as a LibbtbbIdentity instead, so its reason can name both revisions and
+    where the expectation came from; the build checks its own tools with both
+    (build.py).
     """
     # Spaces and tabs, not \s, so a match cannot run past the end of that
     # line onto the version of something else.
@@ -202,12 +289,138 @@ def host_version_patterns(ubertooth, libbtbb=None) -> tuple[str, ...]:
         rf"\({revision_pattern(ubertooth.expected_revision)}\)",
     )
     if libbtbb is not None:
-        # Both versions are on that one line, libbtbb's second.
-        patterns += (
-            rf"{_HOST_VERSION_LINE_START}\b.*\blibbtbb[ \t]+\S+[ \t]+"
-            rf"\({revision_pattern(libbtbb.expected_revision)}\)",
-        )
+        patterns += (libbtbb_version_pattern(libbtbb.expected_revision),)
     return patterns
+
+
+# How to put a libbtbb other than the wanted one right, by run kind. The
+# installed-library fixes name building or installing that commit first: a
+# library the run did not resolve is compared against a commit, so a library
+# that reports a release string instead (one built from a tarball) cannot be
+# made to match by naming any ref at all.
+LIBBTBB_INSTALL_FIX = (
+    "install libbtbb built from that commit's checkout over the one the tools "
+    "load, or run with --build so the run builds it; where the installed "
+    "library was built from a different commit on purpose, name that commit "
+    "with --libbtbb-source and --libbtbb-ref"
+)
+LIBBTBB_RESOLVED_FIX = (
+    "install libbtbb built from that commit's checkout over the one the tools "
+    "load, or name the commit the installed library was built from with "
+    "--libbtbb-ref"
+)
+LIBBTBB_BUILT_FIX = (
+    "the run's prefix must come first on PATH and its tools must load the "
+    "libbtbb it built; check the build and run it again"
+)
+LIBBTBB_BUILT_ORIGIN = "the libbtbb this run built"
+LIBBTBB_RESOLVED_ORIGIN = "the libbtbb this run resolved (--libbtbb-ref)"
+
+
+@dataclass(frozen=True)
+class LibbtbbIdentity:
+    """Which libbtbb the run's host tools must report, and where that came from.
+
+    The fork's configure step only looks for a symbol, so neither the build
+    nor the link stage tells two libbtbb commits apart: the version line is
+    the only thing that says which one a tool loads. A run that does not
+    check it can measure a different decoder from the one it reports (#294).
+
+    ``expected_revision`` is empty where the run requires no libbtbb at all,
+    which is itself worth recording: a reader of such a run must be able to
+    see that nothing held its tools to a library, and why.
+    """
+
+    expected_revision: str
+    origin: str
+    fix: str = ""
+
+    @property
+    def required(self) -> bool:
+        return bool(self.expected_revision)
+
+    @property
+    def pattern(self) -> str:
+        return libbtbb_version_pattern(self.expected_revision)
+
+    def describe(self) -> str:
+        """The revision required and where it came from; only for a required
+        identity, since one requiring nothing has no revision to name."""
+        return f"{self.expected_revision}, {self.origin}"
+
+    def to_details(self) -> dict:
+        """What a run record says about this requirement.
+
+        Two different fields, because "this library was required" and "no
+        library was required, for this reason" are different facts and a
+        reader of the run must be able to tell them apart (#294).
+        """
+        if not self.required:
+            return {"libbtbb_not_checked": self.origin}
+        return {"expected_libbtbb": self.describe()}
+
+
+def libbtbb_identity(ubertooth, libbtbb=None, *, built=False) -> LibbtbbIdentity:
+    """Which libbtbb the host tools of this run must be linked against.
+
+    A run that resolved a libbtbb source must load that one, whether it built
+    it (``built``) or named the commit its installed library was built from. A
+    run that resolved none has no libbtbb of its own, so the expectation is
+    the ``LIBBTBB_REF`` the Ubertooth commit under test sets in its own
+    ``install.sh``: the only statement of which libbtbb that commit is meant
+    to run against.
+
+    The full commit is compared wherever one is known, not the abbreviation:
+    a short hash would also accept a longer one that merely starts with it.
+
+    An identity requiring nothing comes back where the Ubertooth commit names
+    no libbtbb at all (fork commits from before the pin landed); nothing is
+    claimed, so nothing is checked, and the run says so. PreflightError is
+    raised where the commit names one that cannot be compared with what the
+    tools report, rather than let a run measure an unverified library.
+    """
+    if libbtbb is not None:
+        return LibbtbbIdentity(
+            commit_revision(libbtbb.commit),
+            LIBBTBB_BUILT_ORIGIN if built else LIBBTBB_RESOLVED_ORIGIN,
+            LIBBTBB_BUILT_FIX if built else LIBBTBB_RESOLVED_FIX,
+        )
+    label = f"Ubertooth {ubertooth.short_commit}"
+
+    def refuse(problem: str) -> PreflightError:
+        return PreflightError(
+            "the libbtbb the run's host tools load cannot be checked: "
+            f"{problem}; name the commit the installed library was built "
+            "from with --libbtbb-source and --libbtbb-ref"
+        )
+
+    try:
+        pin = libbtbbpin.fork_pin_at(ubertooth.source_path, ubertooth.commit)
+    except libbtbbpin.PinUnreadable as error:
+        # A pin the file does name, but as a shell expansion: the problem is
+        # the value, not reading the file, and the message must say so.
+        raise refuse(f"{label} has a pin this cannot use: {error}") from error
+    except (OSError, RuntimeError) as error:
+        raise refuse(f"{label} has an install.sh that could not be read: {error}") \
+            from error
+    if pin is None:
+        return LibbtbbIdentity(
+            "", f"{label} sets no LIBBTBB_REF in install.sh, so the libbtbb "
+            "the tools load was not checked"
+        )
+    if not libbtbbpin.is_commit(pin.ref):
+        # The tools report a commit, so a name that can move is nothing to
+        # compare with: resolving it here would also make the check mean
+        # something different on every run.
+        raise refuse(
+            f"{label} sets LIBBTBB_REF={pin.ref} in install.sh, which is not "
+            "a commit"
+        )
+    return LibbtbbIdentity(
+        commit_revision(pin.ref),
+        f"the LIBBTBB_REF install.sh sets at {label}",
+        LIBBTBB_INSTALL_FIX,
+    )
 
 
 _NRFDK = str(Path(nrfdk.__file__).resolve())
@@ -331,9 +544,15 @@ class PreflightPolicy:
         manifest: RunManifest,
         *,
         firmware_fix: str = "",
+        bootloader: bootloader_identity.BootloaderExpectation | None = None,
     ) -> tuple[PreflightCheck, ...]:
-        """The run's preflight checks; ``firmware_fix`` says how to fix a
-        board whose firmware is not the run's revision (FLASH_FIX by default)."""
+        """The run's preflight checks.
+
+        ``firmware_fix`` says how to fix a board whose firmware is not the
+        run's revision (FLASH_FIX by default). ``bootloader`` adds the
+        bootloader identity check to every board whose firmware this preflight
+        requires; it is left out for a run whose resolved commit cannot report
+        a bootloader at all (bootloader.supported_at)."""
         if not invocations:
             raise PreflightError("preflight requires at least one invocation")
         if not manifest.matches_invocations(invocations):
@@ -343,7 +562,13 @@ class PreflightPolicy:
             libbtbb_source = manifest.source("libbtbb")
         except ManifestError:
             libbtbb_source = None
-        host_patterns = host_version_patterns(ubertooth_source, libbtbb_source)
+        # The Ubertooth half as a pattern; the libbtbb half as an identity of
+        # its own, so a run that builds nothing still has something to hold
+        # the installed library to (#294).
+        host_patterns = host_version_patterns(ubertooth_source)
+        libbtbb = libbtbb_identity(
+            ubertooth_source, libbtbb_source, built=bool(manifest.build)
+        )
 
         established = self._firmware_established_by_suite(invocations)
         # Boards bound only as guards must be present and selectable by serial;
@@ -378,6 +603,7 @@ class PreflightPolicy:
                         fallback_argv=HOST_VERSION_FALLBACK_ARGV,
                         fallback_when_missing=re.escape(HOST_VERSION_LABEL),
                         accepted_returncodes=(0, 1),
+                        libbtbb=libbtbb,
                     )
                 )
             for alias in invocation.resources.values():
@@ -444,6 +670,23 @@ class PreflightPolicy:
                     device_checks += (
                         ("Guard firmware API", common + ("-v",), (r"Firmware version:",)),
                     )
+                if (
+                    bootloader is not None
+                    and alias in tested
+                    and alias not in established
+                ):
+                    # Which bootloader is underneath the firmware this run
+                    # just required. Not for a guard-only board, whose
+                    # firmware may be older than the read, nor for a board a
+                    # firmware-writing test establishes itself: both can be
+                    # carrying firmware that refuses the request.
+                    device_checks += (
+                        (
+                            BOOTLOADER_CHECK_NAME,
+                            bootloader_identity.identity_argv(selected_serial),
+                            bootloader.patterns(),
+                        ),
+                    )
                 for name, argv, patterns in device_checks:
                     sequence += 1
                     checks.append(
@@ -461,10 +704,17 @@ class PreflightPolicy:
                             argv=argv,
                             expected_patterns=patterns,
                             expected_revision=expected,
+                            timeout_s=(
+                                bootloader_identity.IDENTITY_TIMEOUT_S
+                                if name == BOOTLOADER_CHECK_NAME else 5.0
+                            ),
                             minimum_api=(
                                 minimum_api if name == "Guard firmware API" else None
                             ),
                             fix=firmware_fix,
+                            bootloader=(
+                                bootloader if name == BOOTLOADER_CHECK_NAME else None
+                            ),
                         )
                     )
         return tuple(checks)
