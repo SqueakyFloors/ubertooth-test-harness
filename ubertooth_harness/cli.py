@@ -340,6 +340,21 @@ def _record_lease_queued(publisher, leases) -> None:
         ))
 
 
+def _record_lease_pairings(publisher, pairings) -> None:
+    """Record every device a permanent pairing added to this run's leases (#289).
+
+    A run that asked for a board holds the debug programmer wired to it, and
+    the leases alone do not say why: a reader of the report sees a device the
+    run never named. The clause is carried with the record, so the report,
+    the transcript and the browser view all show the line the by-hand
+    commands print.
+    """
+    for record in pairings or ():
+        publisher.emit("lease_pairing", "passed", dict(
+            record, message=board_leases.describe_pairing_lease(record),
+        ))
+
+
 def _build_command(args: argparse.Namespace) -> int:
     sources = _resolve_sources(args)
     if Path(args.output).exists():
@@ -696,7 +711,7 @@ def _validate(
 
 def _prepare_run(
     args, plan, invocations, sources, artifacts, run_id, preflight_policy,
-    publisher, run_dir, leases=None,
+    publisher, run_dir, leases=None, pairings=(),
 ):
     """Build (when requested), then the manifest and preflight checks."""
     built = None
@@ -739,6 +754,7 @@ def _prepare_run(
         leases=leases.to_manifest() if leases is not None else (),
         lease_takeovers=leases.takeovers if leases is not None else (),
         lease_queue_waits=leases.queued if leases is not None else (),
+        lease_pairings=pairings,
     )
     if not args.build:
         fix = BUILD_AND_FLASH_FIX
@@ -914,15 +930,28 @@ def _run_suite(args: argparse.Namespace) -> int:
                 "installed; install it, or use --no-flash-build to keep the "
                 "boards' firmware"
             )
+    # A device the registry says is permanently wired to one of the run's own
+    # (a debug programmer and the board it programs) is held with it. Said
+    # wherever the devices are: a dry run lists what the run would hold, and
+    # the run itself says it before it takes the locks and records it (#289).
+    pairings = board_leases.pairings_for_invocations(invocations, registry)
     if args.dry_run:
         return _dry_run(
-            args, catalog, plan, host, invocations, not_applicable, blocked
+            args, catalog, plan, host, invocations, not_applicable, blocked,
+            pairings,
         )
     artifacts = _parse_artifacts(args.artifact)
     run_id = validate_run_id(args.run_id) if args.run_id else generate_run_id()
     # Power isolation and firmware-writing tests hold the host lock for the
     # whole run; flashing the build first holds it only while writing.
     args.keep_host_lock = board_leases.needs_host_lock(invocations, catalog)
+    # Said as `hold` says it: before the attempt, and so before any wait for
+    # those devices.
+    for record in pairings:
+        print(
+            f"note: {board_leases.pairing_reason(record)}, so it is held too",
+            file=sys.stderr,
+        )
     leases = board_leases.acquire(
         board_leases.boards_for_invocations(invocations, registry),
         board_leases.holder_info(
@@ -938,13 +967,15 @@ def _run_suite(args: argparse.Namespace) -> int:
     try:
         return _run_leased(
             args, catalog, plan, registry, invocations, sources, artifacts,
-            run_id, leases, not_applicable, blocked,
+            run_id, leases, not_applicable, blocked, pairings,
         )
     finally:
         leases.release()
 
 
-def _dry_run(args, catalog, plan, host, invocations, not_applicable, blocked=()) -> int:
+def _dry_run(
+    args, catalog, plan, host, invocations, not_applicable, blocked=(), pairings=(),
+) -> int:
     """What run-suite would run on this host and what is not applicable.
 
     Capabilities come from the platform and the run options (hostneeds.py
@@ -974,6 +1005,13 @@ def _dry_run(args, catalog, plan, host, invocations, not_applicable, blocked=())
     elif args.build:
         print("flash before preflight: no ("
               + ("--no-flash-build" if args.no_flash_build else "no board needs it") + ")")
+    # A device no test below names, which the run would hold all the same.
+    # Worded as `boards` words it, under the same label.
+    for record in pairings:
+        print(
+            f"pair: {board_leases.pairing_reason(record)}, so the run would hold "
+            "it too"
+        )
     runs = omitted = 0
     for invocation in invocations:
         definition = catalog.get(invocation.test_name)
@@ -1018,7 +1056,7 @@ def _dry_run(args, catalog, plan, host, invocations, not_applicable, blocked=())
 
 def _run_leased(
     args, catalog, plan, registry, invocations, sources, artifacts, run_id, leases,
-    not_applicable=(), blocked=(),
+    not_applicable=(), blocked=(), pairings=(),
 ) -> int:
     """run-suite once every board the run touches is leased to this process."""
     preflight_policy = PreflightPolicy(registry, catalog)
@@ -1058,6 +1096,7 @@ def _run_leased(
             # took a device over says so whatever happens next.
             _record_lease_takeovers(publisher, leases)
             _record_lease_queued(publisher, leases)
+            _record_lease_pairings(publisher, pairings)
             _record_libbtbb_pin(publisher, sources)
         except BaseException as error:
             _finish_failed_run(publisher, run_dir, str(error) or type(error).__name__)
@@ -1065,7 +1104,7 @@ def _run_leased(
     try:
         manifest, preflight_checks, executor, built = _prepare_run(
             args, plan, invocations, sources, artifacts, run_id, preflight_policy,
-            publisher, run_dir if args.build else None, leases,
+            publisher, run_dir if args.build else None, leases, pairings,
         )
     except BaseException as error:
         if publisher is not None:

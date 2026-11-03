@@ -364,7 +364,20 @@ without the other spoils a test or leaves a board needing hands on it
 [`docs/hardware.md`](docs/hardware.md#a-debug-programmer-and-the-board-it-programs)).
 Validation requires both members on one host, one programmer per device, and
 no self-pairing or loop; expansion is deduplicated, deterministic, and
-terminates on any graph it is given.
+terminates on any graph it is given. A run also records why it leased a
+device it never named (`leases.pairing_record`, a `lease_pairing` run record
+and a report row), so the explanation the by-hand commands print is not lost
+in a run.
+
+Two resources MUST NOT be held through one file. Validation refuses a
+registry in which two leasable resources would take one lease key
+(`leases.resource_key`, which comes from one identity field where the
+duplicate-identity check compares whole mappings), or in which two devices
+are registered with one plain serial, since that is the name the bench's own
+lock files use (`scripts/lab/hold`). That second name takes a lease file of
+its own under a `bench-` prefix, so a 32-hex-digit serial cannot name the
+lease file of an Ubertooth with that serial, while the bench's own file keeps
+the plain serial it was written against.
 
 The file-backed CLI implementation and future controller implementation share a
 `ResourceRegistry` interface. Validation requires unique aliases/identities,
