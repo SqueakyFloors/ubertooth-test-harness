@@ -610,6 +610,37 @@ class RunGroupTestCase(ControllerTestCase):
 
 class GroupStartTests(RunGroupTestCase):
 
+    async def test_a_group_is_judged_by_its_hosts_together(self):
+        # The release suite's required step names the Linux host its peers
+        # are on. The Mac alone could not measure it, so that group is
+        # refused (#285); the bench together measures it once, which is what
+        # a run group of the release plan is for (#277).
+        linux, mac = await self.runners()
+        status, payload, _ = await (
+            await self.start_group([MAC], plan="release", suite="release")
+        )
+        self.assertEqual(422, status, payload)
+        for part in ("Recover AFH map", "required on Host_Linux"):
+            self.assertIn(part, payload["detail"])
+        group, requests, _ids = await self.accepted_group(
+            [linux, mac], plan="release", suite="release"
+        )
+        self.assertEqual([LINUX, MAC], group["hosts"])
+        self.assertEqual({"release"}, {m["suite"] for m in requests.values()})
+
+    async def test_a_group_is_told_about_the_suite_before_its_hosts(self):
+        # The suite is judged before the hosts are asked, so a group that
+        # could not have measured it is told that rather than told its
+        # hosts are not here; a suite they could measure gets the per-host
+        # answer, as before.
+        status, payload, _ = await (
+            await self.start_group(["Host_Nowhere"], plan="release", suite="release")
+        )
+        self.assertEqual(422, status, payload)
+        self.assertIn("Recover AFH map", payload["detail"])
+        status, payload, _ = await (await self.start_group(["Host_Nowhere"]))
+        self.assertEqual(404, status, payload)
+
     async def test_one_run_per_host_started_together_on_one_commit(self):
         linux, mac = await self.runners()
         group, requests, ids = await self.accepted_group(

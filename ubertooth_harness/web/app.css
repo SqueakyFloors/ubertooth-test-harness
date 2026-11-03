@@ -120,6 +120,13 @@ code { overflow-wrap: anywhere; }
 :focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 
 .hint { color: var(--muted); margin: 0.3rem 0 0; font-size: 0.9rem; }
+/* A hint the operator must read, because it says why Run is held: the same
+   colors as a failed status pill, which meet WCAG AA in both schemes. */
+.hint.warn {
+  color: var(--bad-fg); background: var(--bad-bg);
+  border: 1px solid var(--bad-line); border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+}
 .empty { color: var(--muted); margin: 0; padding: 0.5rem 0; }
 .noscript { max-width: 80rem; margin: 1rem auto; padding: 0 1.25rem; }
 

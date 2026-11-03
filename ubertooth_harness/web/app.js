@@ -52,6 +52,9 @@
     // left cannot replace a newer list.
     plansTarget: "",
     plansWanted: "",
+    // The platform that list was judged by, so a target that registers
+    // after it was fetched is noticed.
+    plansPlatform: null,
     plansToken: 0,
     // ref option value ("<kind>:<name>") -> {name, kind, commit} as listed
     refOptions: new Map(),
@@ -186,10 +189,23 @@
       if (targets.some((target) => target.host === current)) select.value = current;
     }
     // The first target to register, or a selection this update replaced,
-    // changes which host the plans belong to; the estimates and the build
-    // options are that host's. Compared with the target a load is under way
-    // for, so an update while one is in flight does not start another.
-    if (select.value !== state.plansWanted) loadPlans();
+    // changes which host the plans belong to; the estimates, the build
+    // options and whether the suite can be measured there are that host's.
+    // A target that registers while already chosen gains a platform, which
+    // changes the same answers, so that is a reload too. Both are compared
+    // with what a load is under way for, so an update while one is in
+    // flight does not start another.
+    if (select.value !== state.plansWanted
+        || targetPlatform(select.value) !== state.plansPlatform) {
+      loadPlans();
+    }
+  }
+
+  // The registry platform a target registered with, or null for one that
+  // has not registered (which is what /api/plans reports for it).
+  function targetPlatform(host) {
+    const target = host ? state.targets.get(host) : null;
+    return target && target.platform ? target.platform : null;
   }
 
   // ----- run setup ---------------------------------------------------------
@@ -243,18 +259,23 @@
     const target = $("target").value;
     const token = ++state.plansToken;
     state.plansWanted = target;
+    // The platform the controller would judge the steps by: a target that
+    // registers after this list was fetched gains one, which is a reload.
+    const platform = targetPlatform(target);
     const query = target ? `?target=${encodeURIComponent(target)}` : "";
     try {
       const data = await api("GET", `/api/plans${query}`);
       if (token !== state.plansToken) return;  // a later target owns the list
       state.plans = data.plans;
       state.plansTarget = target;
+      state.plansPlatform = platform;
       // A failure from an earlier load is not this list's status.
       $("plan-status").textContent = "";
     } catch (error) {
       if (token !== state.plansToken) return;
       state.plans = [];
       state.plansTarget = target;
+      state.plansPlatform = platform;
       $("plan-status").textContent = `Cannot list plans: ${error.message}`;
     }
     const select = $("plan");
@@ -310,8 +331,32 @@
       ? `${suite.tests.map((test) => test.name).join(", ")}. ${estimateText(suite)}`
         + artifactWarning(suite)
       : "";
-    // This suite may need build options the last one did not.
+    // This suite may need build options the last one did not, and this
+    // target may not be able to measure it at all.
     syncBuildOptions();
+    syncRunButton();
+  }
+
+  // A run the controller would refuse is not offered: a suite no step of
+  // which runs on the chosen target, and one holding a step whose own
+  // hardware is what it measures (`required hardware:`) that names no host
+  // of this run. `/api/plans` answers both for the chosen target, in the
+  // same sentence the controller refuses with, so pressing Run cannot be
+  // the way to find out. Everything else about the bench is the run's to
+  // report: hardware it has not got blocks that step and fails the run,
+  // and the other tests still run (#265, #269).
+  function syncRunButton() {
+    const suite = findSuite($("plan").value, $("suite").value);
+    const reason = suite && suite.runnable_on_target === false
+      ? String(suite.not_runnable_reason || "This target cannot run this suite.")
+      : "";
+    const note = $("run-blocked");
+    // Shown before it is filled: a status region that changes while it is
+    // hidden announces nothing, and a disabled button cannot be focused to
+    // reach its description.
+    note.hidden = !reason;
+    note.textContent = reason;
+    $("run-button").disabled = Boolean(reason);
   }
 
   // A suite with a test that needs an image no build makes (a published
@@ -442,7 +487,9 @@
         status.textContent = `Not started: ${error.message}. The ref list has been reloaded; check the ref and press Run again.`;
       }
     } finally {
-      button.disabled = false;
+      // Not simply enabled again: the suite may be one this target cannot
+      // measure, which holds the button.
+      syncRunButton();
     }
   }
 

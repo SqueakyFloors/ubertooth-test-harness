@@ -786,6 +786,116 @@ class RunTests(ControllerTestCase):
         self.assertEqual(1, len(payload["events"]))
 
 
+class RequiredHardwareTests(ControllerTestCase):
+    """A run that could not measure what its suite requires is refused
+    before a ref is resolved, a board leased, or a commit built (#285).
+
+    The release suite holds one step whose own hardware is what it measures
+    (`required hardware: true`) on the bench host its ESP32 Classic peers
+    are on, so a run on another host would end failed where that host is
+    not in the bench's registry, and pass with the gate unmeasured where it
+    is. Neither is worth starting, and the plan says so on its own.
+    """
+
+    async def test_a_run_that_cannot_measure_the_required_step_is_refused(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner, host="Host_Mac")
+            status, payload, _ = await self.http(
+                "POST", "/api/targets/Host_Mac/runs",
+                {"ref": "main", "plan": "release", "suite": "release"},
+            )
+            self.assertEqual(422, status, payload)
+            for part in ("Recover AFH map", "required on Host_Linux",
+                         "ESP32 Classic peer (acceptor)", "run group"):
+                self.assertIn(part, payload["detail"])
+            # Nothing reached the runner and nothing is outstanding: the
+            # refusal is the whole of what happened.
+            with self.assertRaises(asyncio.TimeoutError):
+                await asyncio.wait_for(runner.ws.recv(), 0.3)
+            self.assertEqual({}, self.controller._pending_runs)
+
+    async def test_a_suite_with_no_test_for_the_target_is_refused(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner, host="Host_Mac")
+            status, payload, _ = await self.http(
+                "POST", "/api/targets/Host_Mac/runs",
+                {"ref": "main", "plan": "classic", "suite": "classic"},
+            )
+            self.assertEqual(422, status, payload)
+            self.assertIn("no test of this suite runs on Host_Mac",
+                          payload["detail"])
+
+    async def test_the_host_the_step_names_still_runs(self):
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner, host="Host_Linux")
+            # The host the step names measures the gate.
+            post = asyncio.create_task(self.http(
+                "POST", "/api/targets/Host_Linux/runs",
+                {"ref": "main", "plan": "release", "suite": "release"},
+            ))
+            message = await runner.recv()
+            await runner.send("run_accepted", request_id=message["request_id"],
+                              run_id="run-1")
+            status, payload, _ = await post
+            self.assertEqual(201, status, payload)
+
+    async def test_a_run_of_the_suites_other_tests_is_not_refused(self):
+        # run-suite runs and judges only the tests a run selects, so a
+        # selection without the required step is a run that measures
+        # everything it asked for.
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner, host="Host_Mac")
+            post = asyncio.create_task(self.http(
+                "POST", "/api/targets/Host_Mac/runs",
+                {"ref": "main", "plan": "release", "suite": "release",
+                 "tests": ["Host CLI surface"]},
+            ))
+            message = await runner.recv()
+            await runner.send("run_accepted", request_id=message["request_id"],
+                              run_id="run-2")
+            status, payload, _ = await post
+            self.assertEqual(201, status, payload)
+
+    async def test_an_unknown_target_is_still_an_unknown_target(self):
+        # A target that never registered is the caller's own mistake, and is
+        # said first, however unmeasurable that suite would be there.
+        status, payload, _ = await self.http(
+            "POST", "/api/targets/Host_Nowhere/runs",
+            {"ref": "main", "plan": "release", "suite": "release"},
+        )
+        self.assertEqual(404, status, payload)
+        self.assertIn("unknown target", payload["detail"])
+
+    async def test_the_suite_is_answered_before_the_targets_state(self):
+        # A request's own faults come before what the target is doing: a
+        # refusal the suite earns does not go away when the target comes
+        # back or finishes its run, so it is the more useful answer. The
+        # ref and the build options are still judged after it, and a suite
+        # the target can measure gets the target's state as before.
+        async with FakeRunner(self.port) as runner:
+            await self.registered(runner, host="Host_Mac")
+            target = self.controller.targets["Host_Mac"]
+            for state, set_state in (
+                ("offline", lambda: setattr(target, "online", False)),
+                ("busy", lambda: setattr(target, "active_run_id", "run-9")),
+            ):
+                with self.subTest(state):
+                    target.online, target.active_run_id = True, None
+                    set_state()
+                    status, payload, _ = await self.http(
+                        "POST", "/api/targets/Host_Mac/runs",
+                        {"ref": "main", "plan": "release", "suite": "release"},
+                    )
+                    self.assertEqual(422, status, payload)
+                    self.assertIn("Recover AFH map", payload["detail"])
+                    # A suite it could measure is answered about its state.
+                    status, payload, _ = await self.http(
+                        "POST", "/api/targets/Host_Mac/runs",
+                        {"ref": "main", "plan": "fast", "suite": "fast"},
+                    )
+                    self.assertEqual(409, status, payload)
+
+
 class ReviewFixTests(ControllerTestCase):
 
     def run_record(self, run_id="run-1"):

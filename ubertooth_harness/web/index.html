@@ -78,8 +78,9 @@
           <label for="with-python">Build the Python tools too</label>
         </div>
         <p id="with-python-note" class="hint">Costs extra build time; builds ubertooth-btbr and ubertooth-specan-ui with python3 on the target, where specan-ui also needs numpy, qtpy and a Qt binding.</p>
+        <p id="run-blocked" class="hint warn" role="status" hidden></p>
         <div class="form-actions">
-          <button type="submit" id="run-button" class="primary">Run</button>
+          <button type="submit" id="run-button" class="primary" aria-describedby="run-blocked">Run</button>
           <p id="run-status" class="hint" role="status" aria-live="polite"></p>
         </div>
       </form>
