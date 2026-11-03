@@ -201,6 +201,23 @@ _EXTENDED_NAME = re.compile(r"^\tDevice Name: (?P<name>.*)$")
 _EXTENDED_LMP = re.compile(
     r"^\tLMP Version: .+ \(0x[0-9a-f]+\) LMP Subversion: 0x[0-9a-f]+$")
 
+# What libubertooth says when the capture's own USB stream died. Every case
+# but one catches that through the tool's exit status; the -x case, which has
+# to accept a non-zero status for a reason of its own, forbids these lines
+# instead. A teardown the board refused is the other reason that status is
+# set, and that leaves the board in its mode, which the `_stop` step after
+# the capture reports.
+CAPTURE_FAILED = (
+    # rx_xfer_status(): a transfer error, a board that left the bus, or an
+    # overflow.
+    r"(?m)^error: receive transfer failed: ",
+    # cb_xfer(): the resubmit that could not be made.
+    r"(?m)^error: resubmitting the receive transfer failed ",
+    # The same path for a stalled receive endpoint, which
+    # ubertooth_report_unsupported_request() reports by name.
+    r"(?m)^error: could not receive the capture\b",
+)
+
 # An established link in `hcitool con`: one line per link, naming its type and
 # its state. `state 1` is BlueZ's connected state; `state 2` is a page still
 # in flight, which is what the scan's own name reads leave behind and what the
@@ -528,9 +545,17 @@ def _tool_case(*, case_id, name, serial, hci, acceptor, initiator, command,
     )
 
 
-def _pair_report(acceptor, initiator) -> tuple[str, ...]:
-    """The driver's report of the session, which pins a zero exit."""
-    return _pair_patterns(acceptor, initiator)
+def _pair_report(acceptor, initiator, *, exit_status=r"0") -> tuple[str, ...]:
+    """The driver's report of the session, with the status the case accepts.
+
+    Every case pins a zero exit but ``-x``, whose status also reflects reads
+    of devices the bench does not own (see the case).
+    """
+    return tuple(
+        rf"(?m)^command exit: {exit_status} after \d+\.\d s$"
+        if pattern.startswith(r"(?m)^command exit:") else pattern
+        for pattern in _pair_patterns(acceptor, initiator)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -592,19 +617,21 @@ def inquiry_scan_cases(arguments, resources, resource_identities):
         # it is the one part of this tool that transmits to whatever the
         # inquiry answered, rather than only listening.
         #
-        # A zero exit, like every other case. The tool's status is one bit
-        # for several things: a part of any device's report that could not be
-        # fetched, a capture stream that died, or a board that would not give
-        # its mode up. Accepting 1 to allow for the first would accept the
-        # other two as well -- the survey results show only that the sweep
-        # decoded the piconet at some point, and a board answers a stop
-        # normally after a failed stream, so no later step would report one --
-        # and the lines libubertooth prints are not all pinnable, since the
-        # refused-stop path reports through a libusb error that names no
-        # request. So the status is kept, and the cost is stated: a device in
-        # range that answers the inquiry and then refuses a read fails this
-        # case for a reason that is not the bench's. That is one more reason
-        # -x is comprehensive-only and wants a quiet room.
+        # Either exit status, which the bench settled. -x fetches a report
+        # from every device the inquiry answered AND from every piconet the
+        # sweep heard, and on this bench most of those are other people's:
+        # a comprehensive run measured seven `reading the extended features
+        # failed: Connection timed out`, seven clock-offset failures and six
+        # AFH-map failures, all of them other devices', and the tool exits 1
+        # if any part of any report could not be fetched. Pinning a zero exit
+        # therefore failed the case for reasons that were not the bench's.
+        #
+        # What the status is given up for is bought back two ways: the lines
+        # libubertooth prints when the capture's own stream died are
+        # forbidden, and a teardown the board refused leaves it in its mode,
+        # which the `_stop` step after the capture reports. The acceptor's own
+        # report block and the piconet in the survey results are what decide
+        # the case.
         cases.append(scan(
             "-s", "-x", case_id="extended-report",
             name=f"ubertooth-scan -s -x reports the acceptor's name and LMP "
@@ -612,9 +639,12 @@ def inquiry_scan_cases(arguments, resources, resource_identities):
             check=_all(inquiry_found(acceptor["address"], acceptor_name),
                        extended_report(acceptor["address"], acceptor_name),
                        scan_results_list(central)),
+            returncodes=(0, 1),
+            forbidden=CAPTURE_FAILED,
             extra_s=(INQUIRY_S + NAME_READS_S + BOARD_SETUP_S
                      + EXTENDED_REPORT_S),
-            patterns=report,
+            patterns=_pair_report(acceptor, initiator,
+                                  exit_status="[01]"),
             expected_state=(f"the extended report of {acceptor['address']} held "
                             f"{acceptor_name} and an LMP version, and the scan "
                             f"results listed LAP {central}")))
