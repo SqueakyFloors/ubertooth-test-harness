@@ -283,11 +283,24 @@ class ManifestTests(unittest.TestCase):
             )
 
 
-def prepare_preflight(directory, *, install_sh=None):
+def prepare_preflight(directory, *, install_sh=None, libbtbb=None, build=None):
+    """Manifest and preflight checks for one host and its board.
+
+    ``libbtbb`` resolves a libbtbb checkout beside the Ubertooth one, as a
+    run given --libbtbb-source does, and ``build`` fills the manifest's build
+    record, as a run that built does.
+    """
     root = Path(directory)
     source_path = root / "source"
     make_git_repo(source_path, install_sh=install_sh)
     source = GitRevisionResolver().resolve("Ubertooth", source_path, "HEAD")
+    sources = (source,)
+    if libbtbb is not None:
+        libbtbb_path = root / "libbtbb"
+        make_git_repo(libbtbb_path)
+        sources += (
+            GitRevisionResolver().resolve("libbtbb", libbtbb_path, "HEAD"),
+        )
     hardware_path = root / "hardware.yaml"
     hardware_path.write_text(HARDWARE)
     plan_path = root / "plan.yaml"
@@ -301,9 +314,10 @@ def prepare_preflight(directory, *, install_sh=None):
         host="Host_Linux",
         plan_path=plan_path,
         hardware_path=hardware_path,
-        sources=(source,),
+        sources=sources,
         invocations=invocations,
         created_at="2026-10-22T00:00:00+00:00",
+        build=build,
     )
     checks = PreflightPolicy(registry).compile(invocations, manifest)
     return root, source, manifest, checks
@@ -642,10 +656,10 @@ class HostToolsLibbtbbTests(unittest.TestCase):
     PIN = "52b2afcb0c4b8b03412dac759aad88debdfb18e2"
     OTHER = "0176769fb4b5b1b4a7d07fd1dbe8e4b0ef4d11c2"
 
-    def host_check(self, install_sh=None):
+    def host_check(self, install_sh=None, **resolved):
         with tempfile.TemporaryDirectory() as directory:
             _root, _source, _manifest, checks = prepare_preflight(
-                directory, install_sh=install_sh
+                directory, install_sh=install_sh, **resolved
             )
         self.assertEqual("Host version", checks[0].name)
         return checks[0]
@@ -889,6 +903,53 @@ class HostToolsLibbtbbTests(unittest.TestCase):
         resolved = libbtbb_identity(ubertooth, libbtbb)
         self.assertEqual(LIBBTBB_RESOLVED_ORIGIN, resolved.origin)
         self.assertNotIn("build", resolved.fix)
+
+    def test_a_resolved_libbtbb_wins_over_the_commits_pin_in_a_whole_run(self):
+        # The path a deployed runner always takes: a libbtbb source resolved
+        # for every run, build or not, so the pin is not what is required.
+        for build, origin in (
+            (None, LIBBTBB_RESOLVED_ORIGIN), ({"toolchain": {}}, LIBBTBB_BUILT_ORIGIN),
+        ):
+            with self.subTest(built=bool(build)):
+                check = self.host_check(
+                    f'LIBBTBB_REF="{self.PIN}"\n', libbtbb="HEAD", build=build,
+                )
+
+                self.assertEqual(origin, check.libbtbb.origin)
+                self.assertNotEqual(
+                    f"git-{self.PIN}", check.libbtbb.expected_revision
+                )
+                self.assertTrue(
+                    check.libbtbb.expected_revision.startswith("git-"),
+                    check.libbtbb.expected_revision,
+                )
+                # The pin is not what the tools are held to any more.
+                self.assertIn(
+                    "report libbtbb git-52b2afc",
+                    check.result_failure(self.answer(check)),
+                )
+
+    def test_a_commit_longer_than_a_revision_string_is_compared_as_a_prefix(self):
+        # A repository using sha256 object names has 64-digit commits, and no
+        # build stamps more than 40 into a revision string: comparing the
+        # whole value would turn down every library.
+        sha256 = "4" * 64
+        libbtbb = SourceRevision(
+            name="libbtbb", source_path="/btbb", repository="example",
+            requested_ref="HEAD", commit=sha256, short_commit=sha256[:12],
+        )
+        ubertooth = SourceRevision(
+            name="Ubertooth", source_path="/src", repository="example",
+            requested_ref="HEAD", commit="a" * 40, short_commit="aaaaaaa",
+        )
+
+        identity = libbtbb_identity(ubertooth, libbtbb, built=True)
+        self.assertEqual(f"git-{sha256[:40]}", identity.expected_revision)
+        self.assertRegex(
+            "Host tools version: libubertooth 1.1 (git-aaaaaaa), "
+            f"libbtbb 1.3 (git-{sha256[:12]})\n",
+            identity.pattern,
+        )
 
     def test_a_pin_is_compared_on_every_digit_it_carries(self):
         # A pin the fork wrote abbreviated identifies only those digits, and

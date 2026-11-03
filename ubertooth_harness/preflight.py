@@ -17,6 +17,7 @@ from ubertooth_harness.patterns import (
     APPLICATION_IMAGE,
     FIRMWARE_VERSION_RE,
     HOST_VERSION_TIMEOUT_S,
+    commit_revision,
     compile_info_pattern,
     firmware_version_pattern,
     matched_image,
@@ -304,6 +305,8 @@ class LibbtbbIdentity:
         return libbtbb_version_pattern(self.expected_revision)
 
     def describe(self) -> str:
+        """The revision required and where it came from; only for a required
+        identity, since one requiring nothing has no revision to name."""
         return f"{self.expected_revision}, {self.origin}"
 
     def to_details(self) -> dict:
@@ -339,7 +342,7 @@ def libbtbb_identity(ubertooth, libbtbb=None, *, built=False) -> LibbtbbIdentity
     """
     if libbtbb is not None:
         return LibbtbbIdentity(
-            f"git-{libbtbb.commit.lower()}",
+            commit_revision(libbtbb.commit),
             LIBBTBB_BUILT_ORIGIN if built else LIBBTBB_RESOLVED_ORIGIN,
             LIBBTBB_BUILT_FIX if built else LIBBTBB_RESOLVED_FIX,
         )
@@ -375,7 +378,7 @@ def libbtbb_identity(ubertooth, libbtbb=None, *, built=False) -> LibbtbbIdentity
             "a commit"
         )
     return LibbtbbIdentity(
-        f"git-{pin.ref.lower()}",
+        commit_revision(pin.ref),
         f"the LIBBTBB_REF install.sh sets at {label}",
         LIBBTBB_INSTALL_FIX,
     )

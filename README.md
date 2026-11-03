@@ -1419,8 +1419,10 @@ modified checkout adds a `*`, and neither says it is the pinned commit. Those
 two can only be put right by installing a libbtbb built from a clean checkout
 of that commit, or by running with `--build`; naming a ref cannot help, since
 what the check compares is always a commit. report.md carries a "libbtbb in
-the tools" row with what was required and whether it was verified, and the run
-record keeps the check so `ubertooth-harness validate` can repeat it.
+the tools" row with what was required and how it went: `(verified)`,
+`**failed**` with the requirement, or `**not reached**` where the check
+stopped on the tools' own Ubertooth revision before it read the libbtbb half.
+The run record keeps the check, so `ubertooth-harness validate` can repeat it.
 
 An Ubertooth commit from before the fork pinned a libbtbb claims none, so
 there is nothing to check; the run records that and the report row says **not
@@ -1430,11 +1432,14 @@ branch or tag name or a pin built from a shell variable, refuses the run
 instead, naming `--libbtbb-source` and `--libbtbb-ref` as the way to say which
 library the installed tools hold.
 
-A pin the fork wrote abbreviated is compared on the digits it carries, which
-is what an abbreviation means: git shortens a hash only as far as stays unique
-in that repository, so a longer hash starting with those digits is the same
-commit. Where the run resolved the libbtbb itself, the full commit is
-compared and no such slack is left.
+What is compared is an abbreviation of a commit against another abbreviation
+of one, because the library stamps whatever length its own build chose. Either
+side may be the shorter, and the shorter one decides how many digits are
+compared, which is what an abbreviation means: git shortens a hash only as far
+as stays unique in that repository. So a requirement taken from the full
+commit, which is what a run that resolved its own libbtbb has, is still
+satisfied by the library's seven-digit stamp; what the full commit buys is
+that a library reporting more digits must agree on all of them.
 
 ## Source identity, manifest, and mandatory preflight
 
