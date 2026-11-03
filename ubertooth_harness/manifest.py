@@ -426,6 +426,10 @@ class RunManifest:
     # because an older command that wants several could not take them all
     # (leases.queued_record); empty when it waited for nobody.
     lease_queue_waits: tuple = ()
+    # Devices the run never named and held because the registry says they
+    # are permanently wired to one it did (leases.pairing_record); empty on
+    # every bench that registers no such pairing.
+    lease_pairings: tuple = ()
 
     @staticmethod
     def hash_file(path: Path | str) -> str:
@@ -488,6 +492,8 @@ class RunManifest:
                if self.lease_takeovers else {}),
             **({"lease_queue_waits": [_plain(item) for item in self.lease_queue_waits]}
                if self.lease_queue_waits else {}),
+            **({"lease_pairings": [_plain(item) for item in self.lease_pairings]}
+               if self.lease_pairings else {}),
         }
 
     def write_atomic(self, path: Path | str) -> None:
@@ -518,6 +524,7 @@ def build_run_manifest(
     leases: Sequence[Mapping] = (),
     lease_takeovers: Sequence[Mapping] = (),
     lease_queue_waits: Sequence[Mapping] = (),
+    lease_pairings: Sequence[Mapping] = (),
 ) -> RunManifest:
     if not sources:
         raise ManifestError("at least one resolved source is required")
@@ -552,4 +559,5 @@ def build_run_manifest(
         leases=tuple(_frozen(item) for item in leases),
         lease_takeovers=tuple(_frozen(item) for item in lease_takeovers),
         lease_queue_waits=tuple(_frozen(item) for item in lease_queue_waits),
+        lease_pairings=tuple(_frozen(item) for item in lease_pairings),
     )

@@ -90,9 +90,18 @@ APPLICATION_OFFSET = 0x4000
 # still running its application, so a board already in the bootloader, and a
 # part the host has no entry for, get the size the firmware is linked for
 # instead (DFU_ASSUMED_FLASH_SIZE). The sizes below are the LPC175x/176x
-# flash sizes in that file's part table.
+# flash sizes in that file's part table. They are a copy of it, so a run
+# reads the fork's own table at the commit under test and warns when the two
+# differ (dfuparts.py, #283).
 PART_FLASH_SIZES = (32 * 1024, 64 * 1024, 128 * 1024, 256 * 1024, 512 * 1024)
 ASSUMED_FLASH_SIZE = 128 * 1024
+
+
+def describe_flash_size(flash_size: int) -> str:
+    """A flash size written as the fork's own messages write it."""
+    if flash_size > 0 and flash_size % 1024 == 0:
+        return f"{flash_size // 1024} KiB"
+    return f"{flash_size} bytes"
 
 
 def upload_length(flash_size: int) -> int:
@@ -601,6 +610,11 @@ READBACK_LINE_PATTERN = (
     r"Reading back (?P<length>\d+) bytes, "
     r"0x(?P<start>[0-9a-fA-F]+)-0x(?P<end>[0-9a-fA-F]+): *(?P<part>[^\n]*)")
 _READBACK_RE = re.compile(READBACK_LINE_PATTERN)
+# The flash figure in that line's tail, whichever way it was reached: "part
+# 0x25011722 (LPC1754) has 128 KiB of flash", and the two assuming forms,
+# "assuming the 128 KiB part this firmware is linked for". Both end in the
+# size, so one pattern reads either.
+_REPORTED_FLASH_RE = re.compile(r"(?P<kib>\d+) KiB")
 
 
 class ReadbackPlan(NamedTuple):
@@ -623,14 +637,52 @@ class ReadbackPlan(NamedTuple):
             problems.append(f"0x{self.start:x}-0x{self.end:x} is not "
                             f"{self.length} bytes")
         if self.length not in READBACK_LENGTHS:
-            lengths = ", ".join(str(length) for length in READBACK_LENGTHS)
+            sizes = ", ".join(describe_flash_size(size) for size in PART_FLASH_SIZES)
             # A part the fork's table has grown since PART_FLASH_SIZES was
-            # written would land here, with the lengths it does know named,
-            # which is the drift this is meant to report rather than pass.
-            problems.append(f"the read-back covers {self.length} bytes, which is "
-                            "no application region in the fork's part table "
-                            f"({lengths})")
+            # written lands here, which is the drift this is meant to report
+            # rather than pass. The flash size this length would belong to
+            # says which entry the copy is missing, rather than leaving a
+            # reader to work it back from the figure; it is put as a
+            # consequence, since a tool that misprinted the length lands here
+            # too and then describes no part at all (#283).
+            implied = describe_flash_size(self.length + APPLICATION_OFFSET)
+            problems.append(f"the read-back covers {self.length} bytes, which no "
+                            "part in the harness's copy of the fork's part table "
+                            f"explains ({sizes}); that length would be the "
+                            f"application region of a part with {implied} of flash")
+        problems += self._length_follows_the_reported_part()
         return problems
+
+    def _length_follows_the_reported_part(self) -> list[str]:
+        """Why the length does not follow the flash size the command named.
+
+        The line says both the length and the flash the part has, so the
+        arithmetic between them can be checked rather than assumed. Without
+        this, a length that is wrong for its part but right for some other
+        part passes: 16384 bytes on a 64 KiB part is the application region
+        of a 32 KiB one, and both are in the table.
+        """
+        flash_size = self.reported_flash_size()
+        if flash_size is None:
+            # Every wording plan_upload() has ends in the flash the figure
+            # came from. One that does not is a line this cannot check the
+            # length against, which is said rather than passed over: it would
+            # otherwise switch this check off without anyone noticing.
+            return ["the read-back line does not say how much flash the part "
+                    f"has, so {self.length} bytes cannot be checked against "
+                    f"it: {self.part!r}"]
+        expected = upload_length(flash_size)
+        if self.length == expected:
+            return []
+        return [f"the read-back covers {self.length} bytes, but the command "
+                f"reported a part with {describe_flash_size(flash_size)} of "
+                f"flash, whose application region is {expected} bytes"]
+
+    def reported_flash_size(self) -> int | None:
+        """The flash the command said the part has, or None when its line
+        named no figure this can read."""
+        found = _REPORTED_FLASH_RE.search(self.part)
+        return int(found["kib"]) * 1024 if found else None
 
 
 def readback_plan(output: str) -> ReadbackPlan | None:

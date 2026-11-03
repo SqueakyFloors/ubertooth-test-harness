@@ -27,6 +27,10 @@ import re
 import subprocess
 import sys
 
+# A checkout on an unresponsive filesystem must not hold up a run that
+# already has its boards: this check only warns, so it gives up instead.
+GIT_TIMEOUT_S = 10.0
+
 
 _ASSIGNMENT = re.compile(
     r"""^(LIBBTBB_URL|LIBBTBB_REF)=(?:"([^"\n]*)"|'([^'\n]*)'|(\S+))\s*(?:#.*)?$""",
@@ -87,13 +91,22 @@ def fork_pin_at(source: Path | str, ref: str) -> ForkPin | None:
     pin that is not a literal ref, raise RuntimeError. Git runs under
     ``LC_ALL=C``, since a missing path is told from a failure by its wording.
     """
-    result = subprocess.run(
-        ["git", "-C", str(source), "show", f"{ref}:install.sh"],
-        capture_output=True, text=True, check=False,
-        # A missing path is told from a git failure by git's own wording, so
-        # the message must not be translated.
-        env={**os.environ, "LC_ALL": "C"},
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(source), "show", f"{ref}:install.sh"],
+            capture_output=True, text=True, check=False, timeout=GIT_TIMEOUT_S,
+            # A byte that is not valid here must not raise out of a check that
+            # only warns.
+            errors="replace",
+            # A missing path is told from a git failure by git's own wording, so
+            # the message must not be translated.
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"reading install.sh at {ref} in {source} took longer than "
+            f"{GIT_TIMEOUT_S:.0f}s"
+        ) from None
     if result.returncode != 0:
         if "does not exist" in result.stderr or "exists on disk, but not in" in result.stderr:
             return None

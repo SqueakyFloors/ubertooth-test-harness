@@ -20,6 +20,7 @@ from ubertooth_harness.events import REPORT, RUN_LOG
 from ubertooth_harness.executor import CommandResult
 from ubertooth_harness.leases import (
     describe_holder,
+    describe_pairing_lease,
     describe_queued_resource,
     describe_takeover,
 )
@@ -449,6 +450,16 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
     loaded = _libbtbb_in_the_tools(run)
     if loaded:
         rows.append(("libbtbb in the tools", loaded))
+    parts = next((e for e in run.events if e["event_type"] == "dfu_part_table"), None)
+    if parts is not None:
+        # Whether the flash sizes a DFU read-back is checked against are the
+        # ones the fork's part table has at the commit under test (#283).
+        status = parts.get("status", "")
+        message = parts.get("details", {}).get("message", "")
+        rows.append((
+            "DFU part table",
+            message if status == "passed" else f"**{status}**: {message}",
+        ))
     build = manifest.get("build") or {}
     if build:
         toolchain = ", ".join(f"{k} {v}" for k, v in sorted(build.get("toolchain", {}).items()))
@@ -551,6 +562,7 @@ def _setup_rows(run: _Run) -> list[tuple[str, str]]:
         ))
     rows.extend(_takeover_rows(manifest))
     rows.extend(_queued_rows(manifest))
+    rows.extend(_pairing_rows(manifest))
     rows.extend(_placement_rows(run))
     if artifacts:
         rows.append((
@@ -602,6 +614,22 @@ def _queued_rows(manifest: Mapping) -> list[tuple[str, str]]:
         # The wait is over by the time a report is read, so the line reads
         # as what happened, not as what is happening.
         "; ".join(describe_queued_resource(item, past=True) for item in queued),
+    )]
+
+
+def _pairing_rows(manifest: Mapping) -> list[tuple[str, str]]:
+    """Devices this run held because they are wired to ones it named (#289).
+
+    The leases above list them like any other, so without this row a reader
+    sees a debug programmer leased by a run that asked for a board. The
+    by-hand commands say it on standard error; a run says it here.
+    """
+    pairings = manifest.get("lease_pairings") or []
+    if not pairings:
+        return []
+    return [(
+        "Leases from a wired pair",
+        "; ".join(describe_pairing_lease(item) for item in pairings),
     )]
 
 
@@ -695,6 +723,90 @@ def _not_applicable_section(run: _Run) -> list[str]:
             f"| {_cell(item.get('host', ''))} | {_cell(item.get('reason', ''))} |"
         )
     return lines
+
+
+def _bootloader_section(run: _Run) -> list[str]:
+    """Which bootloader each board has, and what the run did about it.
+
+    A board keeps its bootloader through every firmware update, so this is a
+    property of the board rather than of the run: it is reported for every
+    run, and a run that installed one says so in the same row.
+    """
+    records = [
+        event.get("details", {}) for event in run.events
+        if event["event_type"] == "bootloader_identity"
+    ]
+    if not records:
+        return []
+    # One row per board. In `update` mode there are two records for a board:
+    # the stage's, which says it wrote one, and preflight's later read, which
+    # says what is there now. The row takes the later identity and keeps the
+    # earlier record's `written` and `previous`, because "this run installed
+    # it" is the fact this section exists to carry.
+    rows: dict[str, dict] = {}
+    for details in records:
+        name = str(details.get("resource") or details.get("serial") or "")
+        earlier = rows.get(name)
+        if earlier is not None and earlier.get("written"):
+            details = {
+                **details,
+                "written": True,
+                "previous": earlier.get("previous"),
+                "status": (
+                    "updated" if details.get("status") == "current"
+                    else details.get("status")
+                ),
+                "reason": details.get("reason") or earlier.get("reason", ""),
+            }
+        rows[name] = details
+    stage = next(
+        (event.get("details", {}) for event in reversed(run.events)
+         if event["event_type"] == "bootloader_stage_finished"), {}
+    )
+    mode = stage.get("mode") or next(
+        (details.get("mode") for details in records if details.get("mode")), ""
+    )
+    expected = next(
+        (details.get("expected") for details in records if details.get("expected")),
+        stage.get("expected"),
+    )
+    lines = [
+        "", "## Bootloader", "",
+        "The first 16 KiB of a board's flash, which an ordinary firmware "
+        "write cannot replace: a board keeps the bootloader it came with "
+        "until somebody installs another one over a programmer on its "
+        "in-system programming header. `ubertooth-util -B` is what reports "
+        "it.", "",
+        f"Mode: `{mode or 'record'}`. "
+        + (
+            "Expected: " + _cell(_bootloader_text(expected))
+            if expected else
+            "Nothing was compared: this run recorded what each board has."
+        ),
+        "",
+        "| Board | Serial | Bootloader | Verdict | Installed by this run | Note |",
+        "|---|---|---|---|---|---|",
+    ]
+    for name, details in rows.items():
+        installed = details.get("installed")
+        lines.append(
+            f"| {_cell(name)} | {_cell(details.get('serial', ''))} "
+            f"| {_cell(_bootloader_text(installed))} "
+            f"| {_cell(details.get('status', ''))} "
+            f"| {'yes' if details.get('written') else 'no'} "
+            f"| {_cell(details.get('reason') or '–')} |"
+        )
+    return lines
+
+
+def _bootloader_text(identity) -> str:
+    """One identity as a reader reads it, from its record."""
+    if not isinstance(identity, Mapping):
+        return "not reported"
+    crc = identity.get("region_crc32") or ""
+    if identity.get("has_version_block"):
+        return f"{identity.get('version', '')} {identity.get('build', '')}, CRC32:{crc}"
+    return f"{identity.get('detail') or identity.get('generation', '')}, CRC32:{crc}"
 
 
 def _watchdog_section(run: _Run) -> list[str]:
@@ -1326,6 +1438,36 @@ def _transcript(run: _Run) -> list[str]:
                 line(event, f"[M] flash before preflight skipped{_reason(details)}")
             else:
                 line(event, f"=== FLASH EXIT: {status}{_reason(details)} ===")
+        elif kind == "bootloader_build_started":
+            pin = details.get("pin", {})
+            line(event, "=== BOOTLOADER BUILD: pinned to "
+                        f"{pin.get('short_commit', '')} ===")
+        elif kind == "bootloader_build_finished":
+            artifact = details.get("artifact", {})
+            built = _bootloader_text(artifact.get("identity")) if artifact else ""
+            line(event, f"=== BOOTLOADER BUILD EXIT: {status}"
+                        + (f", {built}" if built else "")
+                        + f"{_reason(details)} ===")
+        elif kind == "bootloader_stage_started":
+            line(event, f"=== BOOTLOADER {str(details.get('mode', '')).upper()}: "
+                        f"{len(details.get('boards', []))} board(s) ===")
+        elif kind == "bootloader_identity":
+            line(event, f"[M] {details.get('resource')} bootloader "
+                        f"{_bootloader_text(details.get('installed'))} "
+                        f"({details.get('status', '')})"
+                        + (f": {details['reason']}" if details.get("reason") else ""))
+        elif kind == "bootloader_update_started":
+            line(event, f"+++ install bootloader on {details.get('resource')} "
+                        f"through {details.get('programmer')} +++")
+        elif kind == "bootloader_update_finished":
+            line(event, f"--- install bootloader on {details.get('resource')} EXIT: "
+                        f"{status}, now "
+                        f"{_bootloader_text(details.get('installed'))} ---")
+        elif kind == "bootloader_stage_finished":
+            if status == "skipped":
+                line(event, f"[M] bootloader stage skipped{_reason(details)}")
+            else:
+                line(event, f"=== BOOTLOADER EXIT: {status}{_reason(details)} ===")
         elif kind == "preflight_started":
             line(event, "=== PREFLIGHT ===")
         elif kind == "preflight_finished":
@@ -1340,6 +1482,8 @@ def _transcript(run: _Run) -> list[str]:
             line(event, f"[M] {describe_takeover(details)}")
         elif kind == "lease_queued":
             line(event, f"[M] {describe_queued_resource(details, past=True)}")
+        elif kind == "lease_pairing":
+            line(event, f"[M] {describe_pairing_lease(details)}")
         elif kind == "test_finished":
             line(
                 event,
@@ -1816,6 +1960,7 @@ def render_run(events: Sequence[Mapping], *, redact_serials: bool = False, trans
     lines += ["", "## Results", ""] + _results_table(run)
     lines += _known_target_section(run) + _blocked_section(run)
     lines += _not_applicable_section(run)
+    lines += _bootloader_section(run)
     lines += _watchdog_section(run)
     lines += _output_files_section(run)
     if transcript:

@@ -11,7 +11,7 @@ checkoff, and a countdown/ETA in a web GUI.
 > compilation, simulated port restoration, grouped and stateful command cases,
 > per-run builds, and flash reliability as a plan test are implemented. Each run
 > writes one run.jsonl and one report.md. The persistent target runner
-> (protocol v5, outbound-only to a loopback controller) is implemented and
+> (protocol v6, outbound-only to a loopback controller) is implemented and
 > tested against a stub controller. The controller (target registry, run
 > dispatch, results store, REST and live WebSocket API; `127.0.0.1` only) is
 > implemented and tested against scripted runners and the real runner, and it
@@ -63,7 +63,7 @@ checkoff, and a countdown/ETA in a web GUI.
   updates, and (with `?run_id=`) one run's events or (with `?group_id=`) a
   whole group's, to browsers, best effort: a
   browser that falls behind is disconnected, never the runner. `/ws/runner`
-  speaks protocol v5. Each run is a flat directory
+  speaks protocol v6. Each run is a flat directory
   `<results dir>/<run_id>/` (`run.json`, `run.jsonl`, `report.md`), with group
   records in `groups/` beside them and the
   results directory outside the repository by default
@@ -99,11 +99,11 @@ the runner refuses any controller URL whose host is not loopback (`127.0.0.1`,
 connects to the checked address itself, ignores proxies, and follows no HTTP
 redirects.
 
-Implemented protocol, version 5 (`ubertooth_harness/protocol.py`; version 2
+Implemented protocol, version 6 (`ubertooth_harness/protocol.py`; version 2
 added the run's `commit`, version 3 its `flash_build`, version 4 the
 `run_file` request and its answers, version 5 the run's `with_firmware` and
-`with_python`). Every message is one
-JSON text frame `{"version": 5, "type": ..., ...fields}`. Each
+`with_python`, and version 6 its `bootloader`). Every message is one
+JSON text frame `{"version": 6, "type": ..., ...fields}`. Each
 type has an exact field set; the receiver rejects any other version, unknown
 type, missing or extra field, wrongly typed value, or combination of fields
 it could not act on (`with_firmware` or `with_python` without `build`), and
@@ -117,7 +117,7 @@ Controller → target runner:
 
 | Type | Fields |
 |------|--------|
-| `run` | `request_id`, `ref` (git ref name, for the record; no whitespace, no leading `-`), `commit` (the full commit the controller listed for `ref`, which the runner runs; `null` only when the controller could not list refs, and then the runner resolves `ref` in its own Ubertooth checkout), `plan` (name of `<plans dir>/<plan>.yaml`), `suite`, `tests` (exact test names; empty = whole suite), `build` (bool), `flash_build` (bool: with `build`, flash the run's boards with that build's firmware before preflight; false passes `--no-flash-build`; ignored without `build`, and the controller sends and records it false then), `with_firmware` and `with_python` (bool: the run's build also builds and records the firmware image, and builds the Python tools, passing `--with-firmware` and `--with-python`; `run-suite` takes neither without `--build`, so either one true without `build` is rejected as a message the receiver could not act on) |
+| `run` | `request_id`, `ref` (git ref name, for the record; no whitespace, no leading `-`), `commit` (the full commit the controller listed for `ref`, which the runner runs; `null` only when the controller could not list refs, and then the runner resolves `ref` in its own Ubertooth checkout), `plan` (name of `<plans dir>/<plan>.yaml`), `suite`, `tests` (exact test names; empty = whole suite), `build` (bool), `flash_build` (bool: with `build`, flash the run's boards with that build's firmware before preflight; false passes `--no-flash-build`; ignored without `build`, and the controller sends and records it false then), `with_firmware` and `with_python` (bool: the run's build also builds and records the firmware image, and builds the Python tools, passing `--with-firmware` and `--with-python`; `run-suite` takes neither without `--build`, so either one true without `build` is rejected as a message the receiver could not act on), `bootloader` (`record`, `check` or `update`: what the run does about its boards' bootloaders, passed as `--bootloader`; `check` and `update` compare against a bootloader built from the run's own source, which `run-suite` refuses without `--build`, so either one without `build` is rejected the same way) |
 | `cancel` | `run_id`, `reason` |
 | `run_file` | `request_id`, `run_id`, `path` (a path that run's own run.jsonl records), `offset` and `limit` in bytes (`limit` at most 256 KiB, since the page travels in one message) |
 
@@ -364,7 +364,20 @@ without the other spoils a test or leaves a board needing hands on it
 [`docs/hardware.md`](docs/hardware.md#a-debug-programmer-and-the-board-it-programs)).
 Validation requires both members on one host, one programmer per device, and
 no self-pairing or loop; expansion is deduplicated, deterministic, and
-terminates on any graph it is given.
+terminates on any graph it is given. A run also records why it leased a
+device it never named (`leases.pairing_record`, a `lease_pairing` run record
+and a report row), so the explanation the by-hand commands print is not lost
+in a run.
+
+Two resources MUST NOT be held through one file. Validation refuses a
+registry in which two leasable resources would take one lease key
+(`leases.resource_key`, which comes from one identity field where the
+duplicate-identity check compares whole mappings), or in which two devices
+are registered with one plain serial, since that is the name the bench's own
+lock files use (`scripts/lab/hold`). That second name takes a lease file of
+its own under a `bench-` prefix, so a 32-hex-digit serial cannot name the
+lease file of an Ubertooth with that serial, while the bench's own file keeps
+the plain serial it was written against.
 
 The file-backed CLI implementation and future controller implementation share a
 `ResourceRegistry` interface. Validation requires unique aliases/identities,
@@ -677,15 +690,27 @@ Validation and preparation have distinct phases:
    stops the run before preflight (#135). The host lock is held while
    writing, then released unless the run needs it later; the firmware build
    is implied.
+   Once that firmware is current, the run reads which bootloader is under it
+   on the same boards (`ubertooth-util -B`). `--bootloader check` and `update`
+   build that bootloader from the newest commit, reachable from the resolved
+   one, that touched the sources the image is built from, and compare its
+   version, build string and region CRC-32 with what the board reports;
+   `update` installs it on a stale board through the debug programmer the
+   registry pairs with that board, holding the host lock, and requires the
+   read-back to match. A stale board with no programmer fails with the missing
+   capability named: a bootloader is not written over USB here. A failed write
+   is a hard failure and is never retried (#298).
 5. Mandatory preflight: verify installed host revision, the libbtbb those
    tools are linked against, and every selected Ubertooth firmware revision
    (the application image, or the bare revision older firmware prints),
-   compile identity, and registered serial before the first suite test
-   starts. The libbtbb required is the one the run resolved, or, for a run
-   that resolved none, the `LIBBTBB_REF` the Ubertooth commit sets in its own
-   `install.sh`: the build and link stages cannot tell two libbtbb commits
-   apart, so the version line is the only thing that says which decoder the
-   run measured ([#294](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/294)).
+   compile identity, registered serial, and the bootloader under that firmware
+   before the first suite test starts. The libbtbb required is the one the run
+   resolved, or, for a run that resolved none, the `LIBBTBB_REF` the Ubertooth
+   commit sets in its own `install.sh`: the build and link stages cannot tell
+   two libbtbb commits apart, so the version line is the only thing that says
+   which decoder the run measured ([#294](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/294)).
+   The bootloader identity is recorded on every run, and compared only in the
+   two modes above (#298).
 
 The `manifest` record is written to run.jsonl before preflight and snapshots requested
 refs, resolved commits, plan/registry/artifact hashes, target host, normalized
@@ -1332,9 +1357,9 @@ Later (multi-node), Ansible:
    automated build/install, armed physical power control, and generic
    command/soak execution remain.
 3. **Target runner service** — register/heartbeat/run over the wire; test against a
-   stub controller. Implemented (protocol v5, loopback controllers only;
+   stub controller. Implemented (protocol v6, loopback controllers only;
    v2 added the listed commit to `run`, v3 `flash_build`, v4 the `run_file`
-   request and its answers, v5 the run's `with_firmware` and `with_python`;
+   request and its answers, v5 the run's `with_firmware` and `with_python`, v6 its `bootloader`;
    no version interoperates with another).
 4. **Controller + web GUI** — targets, ref dropdown, live checkoff, countdown.
    Implemented: controller (registry, dispatch, results store, REST and live

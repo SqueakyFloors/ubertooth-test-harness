@@ -283,7 +283,11 @@ class HoldLockKeys(Bench):
         # As registered, not lowercased: the bench's own lock file is named
         # after the same string the lease key carries.
         self.assertEqual(PROG_SERIAL, _bench.plain_serial(programmer))
-        self.assertEqual(PROG_SERIAL, _bench.bench_lock_board(programmer).key)
+        second = _bench.bench_lock_board(programmer)
+        # The bench's own file keeps the plain serial; the lease file beside
+        # it is prefixed, so it cannot be an Ubertooth's (harness #290).
+        self.assertEqual(PROG_SERIAL, second.lock_name)
+        self.assertEqual(f"bench-{PROG_SERIAL}", second.key)
 
     def test_a_type_this_does_not_hold_is_refused(self):
         from ubertooth_harness.resources import RegistryError
@@ -859,9 +863,16 @@ class HubPortSwitches(Bench):
         self.assertEqual(f"esp32-{BRIDGE}", hub_port.device_board(peer).key)
 
     def test_a_held_bench_lock_name_also_prevents_switching(self):
-        """A bench script holding only the older name must be met here too."""
+        """A hold of only the older name must be met here too.
+
+        That hold takes the bench's own `board-<plain serial>.lock`, which is
+        where a bench script written against the serial meets it, and the
+        prefixed lease file beside it.
+        """
         holder = leases.acquire(
-            [leases.Board("DK0 (bench lock)", JLINK)],
+            [leases.Board(
+                "DK0 (bench lock)", leases.bench_lock_key(JLINK), external_key=JLINK
+            )],
             leases.holder_info(run_id=None, owner="bob", purpose="a DK session"),
             directory=self.leases,
             external_template=self.template,

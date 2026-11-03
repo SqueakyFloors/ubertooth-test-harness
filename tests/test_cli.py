@@ -374,6 +374,14 @@ suites:
                 e for e in events if e["event_type"] == "manifest"
             )["details"]["manifest"]
             self.assertEqual("HEAD", manifest["sources"][0]["requested_ref"])
+            # A run of installed tools, with neither --build nor a libbtbb
+            # source, still compares the DFU flash sizes with the fork's own
+            # part table, before the manifest (#283). This source is a
+            # throwaway repository, so it has no table to compare with.
+            kinds = [event["event_type"] for event in events]
+            self.assertEqual(["run_started", "dfu_part_table", "manifest"], kinds[:3])
+            self.assertEqual(1, kinds.count("dfu_part_table"))
+            self.assertEqual("skipped", events[1]["status"])
             self.assertEqual(
                 hashlib.sha256(artifact.read_bytes()).hexdigest(),
                 manifest["artifacts"][0]["sha256"],
@@ -441,8 +449,20 @@ suites:
             events = [json.loads(line) for line in
                       (output / "pin-cli-run" / "run.jsonl").read_text().splitlines()]
             kinds = [event["event_type"] for event in events]
-            self.assertEqual(["run_started", "libbtbb_pin", "manifest"], kinds[:3])
+            # The bootloader stage records that it did nothing: this fixture's
+            # fork source has no `ubertooth-util -B` for it to read.
+            self.assertEqual(
+                ["run_started", "libbtbb_pin", "dfu_part_table",
+                 "bootloader_stage_finished", "manifest"],
+                kinds[:5],
+            )
             self.assertEqual(1, kinds.count("run_started"))
+            # Once, not twice: this run opened its own record, so the
+            # sequencer leaves the comparison to it (#283).
+            self.assertEqual(1, kinds.count("dfu_part_table"))
+            # This source is a throwaway repository, not a fork checkout, so
+            # it has no DFU part table to compare with (#283).
+            self.assertEqual("skipped", events[2]["status"])
             self.assertEqual("warning", events[1]["status"])
             self.assertEqual("0" * 40, events[1]["details"]["fork_pin_ref"])
             self.assertEqual("passed", events[-1]["status"])

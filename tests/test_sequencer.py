@@ -159,6 +159,9 @@ class SequencerTests(unittest.TestCase):
             self.assertEqual(
                 [
                     "run_started",
+                    # Every run compares the DFU flash sizes with the fork's
+                    # own part table, before the manifest (#283).
+                    "dfu_part_table",
                     "manifest",
                     "host_capabilities",
                     "preflight_started",
@@ -466,6 +469,63 @@ class RetriedStepTests(unittest.TestCase):
             [("prepare",), ("clean",)],
             [command for command in executor.commands
              if command != ("ubertooth-util", "-V")])
+
+
+class LeasePairingRecords(unittest.TestCase):
+    """A run that opens its own record still says why it held a pair (#289).
+
+    A run with no build has no publisher until the sequencer starts, so the
+    sequencer is what emits the lease records from the manifest. Without
+    this the explanation would be missing from exactly the runs a bench
+    makes most often.
+    """
+
+    def test_the_sequencer_emits_the_pairing_from_the_manifest(self):
+        from ubertooth_harness.leases import pairing_record
+
+        record = pairing_record(
+            "Prog_Linux0", "Prog_Linux0 is the programmer wired to UT_Linux1"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sink = CollectSink()
+            invocation = TestInvocation(
+                "001-Host version", "Host version", "Host_Mac", {}, {},
+            )
+            manifest, checks = run_contract(root, invocation)
+            summary = NamedTestSequencer(FakeExecutor(), event_sink=sink).run(
+                (invocation,), root, run_id="named-run",
+                manifest=replace(manifest, lease_pairings=(record,)),
+                preflight_checks=checks,
+            )
+            self.assertTrue(summary.passed)
+            events = [
+                json.loads(line) for line
+                in (root / "run.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+        pairings = [e for e in events if e["event_type"] == "lease_pairing"]
+        self.assertEqual(1, len(pairings), [e["event_type"] for e in events])
+        details = pairings[0]["details"]
+        self.assertEqual("Prog_Linux0", details["resource"])
+        self.assertEqual(
+            "Prog_Linux0 is the programmer wired to UT_Linux1, so the run held "
+            "it too",
+            details["message"],
+        )
+
+    def test_a_run_with_no_pairing_says_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            invocation = TestInvocation(
+                "001-Host version", "Host version", "Host_Mac", {}, {},
+            )
+            manifest, checks = run_contract(root, invocation)
+            NamedTestSequencer(FakeExecutor(), event_sink=CollectSink()).run(
+                (invocation,), root, run_id="named-run", manifest=manifest,
+                preflight_checks=checks,
+            )
+            text = (root / "run.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn("lease_pairing", text)
 
 
 if __name__ == "__main__":

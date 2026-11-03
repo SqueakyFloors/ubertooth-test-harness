@@ -5,6 +5,7 @@
 #   scripts/ci.sh build   build the fork's host tools into a temporary prefix
 #   scripts/ci.sh all     both
 #   scripts/ci.sh libbtbb-pin   only the build's libbtbb pin check
+#   scripts/ci.sh dfu-part-table  only the build's DFU part table check
 #   scripts/ci.sh firmware-dk   build the nRF52840 DK role firmware (needs docker)
 #
 # firmware-dk builds both DK images and compares each with the one another
@@ -146,6 +147,20 @@ check_libbtbb_pin() {
     export UBERTOOTH_HARNESS_LIBBTBB_PIN_SHOWN
 }
 
+# The flash sizes a DFU read-back length is checked against are the harness's
+# own copy of the fork's part table, so the fork may have added a part since:
+# warn once with the entry that is missing, do not fail (#283). The build and
+# run-suite steps below still record the check in their run.jsonl, without
+# printing it again. This puts it on the workflow run page, where a reader
+# sees it without opening a log.
+check_dfu_part_table() {
+    step "DFU part table against the fork's own"
+    .venv/bin/python -m ubertooth_harness.dfuparts \
+        --ubertooth-source "$1" --ubertooth-ref "${UBERTOOTH_REF:-main}"
+    UBERTOOTH_HARNESS_DFU_PART_TABLE_SHOWN=1
+    export UBERTOOTH_HARNESS_DFU_PART_TABLE_SHOWN
+}
+
 run_build() {
     step "build"
     [ -x .venv/bin/python ] || "$PYTHON" bootstrap.py
@@ -161,6 +176,7 @@ run_build() {
     fi
 
     check_libbtbb_pin "$ut"
+    check_dfu_part_table "$ut"
     .venv/bin/python -m ubertooth_harness build \
         --ubertooth-source "$ut" --ubertooth-ref "${UBERTOOTH_REF:-main}" \
         --libbtbb-source "$bb" --libbtbb-ref "${LIBBTBB_REF:-$LIBBTBB_PIN}" \
@@ -571,8 +587,10 @@ case "${1:-}" in
     build) run_build ;;
     # Only the pin check of the build, against UBERTOOTH_SOURCE (tests).
     libbtbb-pin) check_libbtbb_pin "${UBERTOOTH_SOURCE:?UBERTOOTH_SOURCE is required}" ;;
+    # Only the part table check of the build, against UBERTOOTH_SOURCE (tests).
+    dfu-part-table) check_dfu_part_table "${UBERTOOTH_SOURCE:?UBERTOOTH_SOURCE is required}" ;;
     firmware-dk) run_firmware_dk ;;
     all) run_test; run_build ;;
-    *) echo "usage: scripts/ci.sh test|build|all|libbtbb-pin|firmware-dk" >&2; exit 2 ;;
+    *) echo "usage: scripts/ci.sh test|build|all|libbtbb-pin|dfu-part-table|firmware-dk" >&2; exit 2 ;;
 esac
 step "${1} passed"
