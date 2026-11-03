@@ -87,6 +87,17 @@ def registry(directory) -> FileResourceRegistry:
     return FileResourceRegistry.load(path)
 
 
+def one_step_plan(test_name, body):
+    """A one-step runnable plan, for exercising the runnable gates."""
+    directory = tempfile.mkdtemp()
+    path = Path(directory) / "p.yaml"
+    path.write_text(
+        "plan: One\nsuites:\n  s:\n"
+        f"    - {test_name}:\n        hosts: [Host_Linux]\n" + body
+    )
+    return load_plan(path, builtin_catalog())
+
+
 def requirements_of(test_name, arguments):
     """What a plan entry's arguments require of each role's placement."""
     definition = builtin_catalog().get(test_name)
@@ -289,16 +300,22 @@ class WeakLinkPlanTests(unittest.TestCase):
         )
         check_runnable(plan, catalog)
 
-    def test_the_dk_pair_suite_is_blocked_by_hardware_not_by_a_measurement(self):
-        """Both entries ask for 20 or 40 dB, which are measured, so nothing
-        in the harness refuses them: what is missing is a second DK. A bench
-        that has one binds them, which is what makes this a hardware limit
-        and not a harness one."""
+    def test_the_dk_pair_suite_is_blocked_by_hardware_first(self):
+        """These two are unmeasured *because* they are unrunnable: a
+        connection needs two distinct DKs and the bench registers one, so no
+        figure can be taken at any attenuation. Both facts hold, and the
+        hardware one is the cause: give a bench a second DK and the entries
+        bind, which is what the fixture here has."""
         catalog = builtin_catalog()
         plan = load_plan(WEAK_LINK_PLAN, catalog)
+        # Unmeasured, like every other entry in the waiting plan.
         self.assertEqual(
-            {}, dict(unjudgeable_attenuations(plan, catalog,
-                                              "weak-link-needs-a-dk-pair")))
+            ["Capture known BLE connection",
+             "Follow a BLE connection across its end"],
+            sorted(unjudgeable_attenuations(
+                plan, catalog, "weak-link-needs-a-dk-pair")),
+        )
+        # But implemented, and bindable the moment a second DK exists.
         self.assertEqual(
             (), unimplemented_tests(plan, catalog, "weak-link-needs-a-dk-pair"))
         with tempfile.TemporaryDirectory() as directory:
@@ -342,13 +359,20 @@ class WeakLinkPlanTests(unittest.TestCase):
                 with self.assertRaisesRegex(PlanError, "does not pin the attenuation"):
                     check_runnable(self._runnable_with(f"rf: {{Ubertooth: {spelling}}}"),
                                    builtin_catalog())
-        # An ordinary board, and either measured exact pin, are all fine.
+        # An ordinary board, and an exact pin this test is measured at, are
+        # both fine. The advertiser capture is the test measured at 20 and
+        # 40 dB, so it is the one that can carry an exact pin.
+        advertiser = ("        advertiser: default\n        coverage: smoke\n"
+                      "        duration: 5s\n        interval: 100\n"
+                      "        payload: c0ffee\n")
         for spelling in ("{max_attenuation_db: 0, antenna: true}",
                          "{min_attenuation_db: 20, max_attenuation_db: 20}",
                          "{min_attenuation_db: 40, max_attenuation_db: 40}"):
             with self.subTest(spelling):
-                check_runnable(self._runnable_with(f"rf: {{Ubertooth: {spelling}}}"),
-                               builtin_catalog())
+                check_runnable(one_step_plan(
+                    "Capture known BLE advertiser",
+                    advertiser + f"        rf: {{Ubertooth: {spelling}}}\n"),
+                    builtin_catalog())
 
     def _runnable_with(self, argument):
         directory = tempfile.mkdtemp()
@@ -396,9 +420,6 @@ class MeasuredSuiteTests(unittest.TestCase):
         ],
         ("classic.yaml", "classic-weak-link"): [
             ("Follow Classic Bluetooth piconet", 20.0),
-            ("Recover AFH map", 20.0),
-            ("Capture known Classic device", 40.0),
-            ("Classic Bluetooth receive", 40.0),
         ],
         ("range.yaml", "range-weak-link"): [
             ("Two-device range test", 20.0),
@@ -425,37 +446,74 @@ class MeasuredSuiteTests(unittest.TestCase):
                                           want.min_attenuation_db))
                 self.assertEqual(sorted(expected), sorted(found))
 
-    def test_no_promoted_entry_asks_for_e4_at_twenty_decibels(self):
-        """The sweep saw `-e 4` collapse to single digits on the 20 dB board
-        twice, while the 40 dB board was unaffected. Unexplained, so the
-        comprehensive `-e` entry is the 40 dB one."""
+    def test_the_gate_is_per_test_not_per_bench(self):
+        """40 dB is measured for a BLE advertiser capture and not for a
+        Classic capture file, so a bench-wide list would admit the second on
+        the first's evidence. This is the distinction the gate has to make."""
         catalog = builtin_catalog()
-        plan = load_plan(PLANS / "classic.yaml", catalog)
-        for step in plan.steps("classic-weak-link"):
-            if step.test_name != "Classic Bluetooth receive":
-                continue
-            arguments = catalog.get(step.test_name).normalize_arguments(
-                step.arguments)
-            # The -e cases are comprehensive-only, so a comprehensive entry
-            # is what runs -e 4; it must be the 40 dB one.
-            if arguments["coverage"] == "comprehensive":
-                self.assertEqual({"Ubertooth": 40.0},
-                                 {r: v for r, v in arguments["weak link"].items()})
+        self.assertTrue(weaklink.measured(40))
+        self.assertTrue(weaklink.measured_for(
+            "Capture known BLE advertiser", "Ubertooth", 40))
+        self.assertFalse(weaklink.measured_for(
+            "Classic capture record fields", "Ubertooth", 40))
+        accepted = one_step_plan(
+            "Capture known BLE advertiser",
+            "        advertiser: default\n        coverage: smoke\n"
+            "        duration: 5s\n        interval: 100\n"
+            "        payload: c0ffee\n        weak link: {Ubertooth: 40}\n")
+        check_runnable(accepted, catalog)
+        refused = one_step_plan(
+            "Classic capture record fields",
+            "        acceptor: default\n        initiator: default\n"
+            "        coverage: smoke\n        duration: 25s\n"
+            "        weak link: {Ubertooth: 40}\n")
+        with self.assertRaisesRegex(
+            PlanError, "measured on this bench but not for this test"
+        ):
+            check_runnable(refused, catalog)
 
-    def test_the_promoted_entries_change_no_threshold(self):
-        """Each is the committed test pointed at another board: the arguments
-        it carries are the ordinary ones, with `weak link:` added."""
+    def test_a_role_is_part_of_the_evidence(self):
+        """The range test is measured at 20 dB for its `responder`, so the
+        same attenuation asked of its `sender` is not covered."""
+        self.assertTrue(weaklink.measured_for(
+            "Two-device range test", "responder", 20))
+        self.assertFalse(weaklink.measured_for(
+            "Two-device range test", "sender", 20))
+
+    def test_every_promoted_entry_matches_its_ordinary_counterpart(self):
+        """"No threshold moved" means what it says: each promoted entry's
+        normalized arguments equal a named ordinary entry's, bar the weak
+        link and whatever the comment in the plan explains."""
         catalog = builtin_catalog()
-        for name, suite in (("ble.yaml", "ble-weak-link"),
-                            ("classic.yaml", "classic-weak-link")):
-            plan = load_plan(PLANS / name, catalog)
-            for step in plan.steps(suite):
-                with self.subTest(f"{suite}:{step.test_name}"):
-                    bare = dict(step.arguments)
-                    bare.pop("weak link")
-                    # Normalizing without the weak link must still be valid,
-                    # which it would not be if the entry had moved a bound.
-                    catalog.get(step.test_name).normalize_arguments(bare)
+        # (promoted plan, suite, ordinary plan, suite, allowed differences)
+        pairs = [
+            ("ble.yaml", "ble-weak-link", "ble.yaml", "ble",
+             "Capture known BLE advertiser", set()),
+            ("classic.yaml", "classic-weak-link", "classic.yaml", "classic",
+             "Follow Classic Bluetooth piconet", set()),
+        ]
+        for name, suite, oname, osuite, test, allowed in pairs:
+            definition = catalog.get(test)
+            ordinary = next(
+                definition.normalize_arguments(step.arguments)
+                for step in load_plan(PLANS / oname, catalog).steps(osuite)
+                if step.test_name == test
+            )
+            promoted = [
+                definition.normalize_arguments(step.arguments)
+                for step in load_plan(PLANS / name, catalog).steps(suite)
+                if step.test_name == test
+            ]
+            self.assertTrue(promoted, f"{suite} has no {test} entry")
+            for arguments in promoted:
+                differ = {
+                    key for key in set(arguments) | set(ordinary)
+                    if arguments.get(key) != ordinary.get(key)
+                }
+                with self.subTest(f"{suite}:{test}"):
+                    self.assertEqual(
+                        {"weak link"} | allowed, differ,
+                        f"{test} in {suite} differs from {osuite} by {differ}")
 
 
 class CheckTableTests(unittest.TestCase):
@@ -511,9 +569,9 @@ class CheckTableTests(unittest.TestCase):
             if want.min_attenuation_db
         }
         pending = [check for check in weaklink.CHECKS if check.pending]
-        # Five of the ten are still pending; each names what it waits on and
-        # is carried by the not-runnable plan rather than merely described.
-        self.assertEqual(5, len(pending))
+        # Eight are still pending; each names what it waits on and is carried
+        # by the not-runnable plan rather than merely described.
+        self.assertEqual(8, len(pending))
         for check in pending:
             with self.subTest(check.item):
                 self.assertTrue(check.needs)

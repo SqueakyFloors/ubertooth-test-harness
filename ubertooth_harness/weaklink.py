@@ -44,9 +44,9 @@ on different images and an A/B that ignores that measures the firmware.
 **The range test** (2026-11-02, six rounds per responder, one ordinary
 sender): the responder's reply PA level, which is what the attenuated board
 must transmit at to be heard, reaches 1 behind 20 dB and 3 behind 40 dB, with
-every round a clean round trip. Reply level 3 is `maximum PA level`'s own
-default bound, so a 40 dB range entry has to raise that argument rather than
-inherit it. The copy numbers run over most of their 0 to 15 range at both, so
+every round a clean round trip. Reply level 3 is the bound both `range.yaml`
+suites set by hand (the argument's own default is 7), so a 40 dB range entry
+would sit on the bound those suites apply. The copy numbers run over most of their 0 to 15 range at both, so
 they discriminate nothing at that sample size. Earlier, at 20 dB only
 (harness PR #217): a full-band `specan` mean moved 1.1 dB between the
 attenuated board and an ordinary one with 0.1 dB of spread, so a band mean
@@ -60,8 +60,10 @@ test):
 * a known Classic piconet is decoded at both, with every packet carrying the
   target LAP and none carrying another, and the clock acquired at 20 and
   40 dB;
-* `-e` is honoured exactly at both: an `-e 0` leg holds `err=0` records and
-  nothing else, `-e 2` tops out at 2 and `-e 4` at 4;
+* `-e` is honoured exactly where it could be read: an `-e 0` leg holds
+  `err=0` records and nothing else, and `-e 2` tops out at 2 at both
+  attenuations. `-e 4` topping out at 4 is established at 40 dB and on a
+  clear board, not at 20 dB, where it collapsed (below);
 * **40 dB is not an error regime.** Its error profile sits close to 20 dB's
   (74% against 77% `err=0` at `-e 2`) on a comparable packet count while
   reading about 14 dB lower, so the link still has margin there. Damaged
@@ -72,9 +74,12 @@ test):
 * AFH map recovery is *better* attenuated: the 20 dB board recovered a known
   38-channel map exactly, 0 false and 0 missed, where both clear boards
   over-marked by 11 to 15 channels. 40 dB begins to erode the other way,
-  losing two edge channels;
-* neither attenuated board produced a pegged record in 6861 packets, where a
-  clear board pegged on 23 to 41% of its own.
+  losing two edge channels. Only that map was measured; the 20-channel
+  minimum the smoke profile also runs was not;
+* neither attenuated board produced a pegged record, where a clear board
+  pegged on 23 to 41% of its own. (The sweep reports that as 0 of 6861
+  packets; its own per-leg table sums to 10130 across the attenuated legs,
+  so take the zero rather than the total.)
 
 One measured caveat sits in the code below rather than in prose: at 20 dB,
 `-e 4` collapsed to single-digit packet counts twice, minutes after the same
@@ -101,11 +106,11 @@ from ubertooth_harness.rf import NORMAL_LINK, PlacementError, PlacementRequireme
 # Attenuations the bench has been MEASURED at, in dB. A runnable plan may
 # only point a test at one of these (plan.check_runnable).
 #
-# Fitted is not measured, and this list tracks the second. Both of these have
-# had captures taken over them, not just a range round trip, which is what
-# lets a capture test be judged there (see the section above). The
-# maintainer's attenuators stack in 1, 3, 5, 10, 20 and 30 dB steps, so these
-# are the points measured so far rather than fixed limits.
+# Attenuations the bench has been measured at *for something*, in dB. This is
+# not the gate: measured is per test, so a figure here only means some test
+# has figures at it. `CHECKS` carries which, and `unjudgeable()` reads that.
+# The maintainer's attenuators stack in 1, 3, 5, 10, 20 and 30 dB steps, so
+# these are the points measured so far rather than fixed limits.
 MEASURED_ATTENUATIONS_DB: tuple[float, ...] = (20.0, 40.0)
 # Asked for and still uncharacterized: the second point that would turn the
 # 20-against-40 figures into a curve.
@@ -133,26 +138,41 @@ def unmeasured(attenuations_db) -> tuple[float, ...]:
     }))
 
 
-def unjudgeable(want: PlacementRequirement) -> str:
-    """Why no run could judge a test bound by this requirement, or ''.
+def unjudgeable(
+    want: PlacementRequirement, test: str = "", role: str = ""
+) -> str:
+    """Why no run could judge this test in this role here, or ''.
 
     A run's figures belong to the link the board actually sat on, so a
     requirement a run may judge has to leave exactly one attenuated link
-    possible, at a figure the bench has been measured at. Three cases:
+    possible, at a figure *this test* has figures for. Three cases:
 
     * it admits no attenuation at all (an ordinary board, the baseline every
       test already runs over) — judgeable;
-    * it pins one attenuation, which must be a measured one;
+    * it pins one attenuation, and ``CHECKS`` records a measurement of this
+      test in this role there;
     * it leaves a band open above 0 dB, so which link a run used would depend
       on which board the bench happens to hold. ``weak link:`` always pins,
       but ``rf:`` can write a bare ``min_attenuation_db``, and on a bench
       that later gains a stronger attenuator that would quietly bind it.
+
+    Per test, not per bench, and that distinction is the whole point: 40 dB
+    is measured for a BLE advertiser capture and not for a Classic capture
+    file, so a bench-wide list would admit the second on the first's
+    evidence. ``MEASURED_ATTENUATIONS_DB`` is only for messages.
     """
     low, high = want.min_attenuation_db, want.max_attenuation_db
     if high is not None and high <= 0:
         return ""
     if low is not None and low == high:
-        return "" if measured(low) else f"needs {low:g} dB, which is not measured"
+        if measured_for(test, role, low):
+            return ""
+        if measured(low):
+            return (
+                f"needs {low:g} dB, which is measured on this bench but not "
+                f"for this test in this role; weaklink.CHECKS records what is"
+            )
+        return f"needs {low:g} dB, which is not measured"
     bound = []
     if low is not None:
         bound.append(f"at least {low:g} dB")
@@ -162,7 +182,19 @@ def unjudgeable(want: PlacementRequirement) -> str:
         "does not pin the attenuation ("
         + (" and ".join(bound) or "any attenuation")
         + "), so which link a run judged would depend on the bench; give one "
-        "figure the bench is measured at"
+        "figure this test is measured at"
+    )
+
+
+def measured_for(test: str, role: str, attenuation_db: float) -> bool:
+    """True when ``CHECKS`` records a measurement of this test, in this role,
+    at this attenuation."""
+    return any(
+        check.test == test
+        and check.weak_role == role
+        and check.attenuation_db == float(attenuation_db)
+        and not check.pending
+        for check in CHECKS
     )
 
 
@@ -293,29 +325,65 @@ class Check:
 # that have no implementation yet, so this table is the list of plan entries
 # rather than a list of code to write.
 #
-# None of them is in a runnable plan: each needs one measurement first, named
-# in `needs`. `testplans/weak-link.yaml` carries them all, and
-# `docs/tests.md` says per test what a weak link changes for it.
+# A check with an empty `needs` has figures behind it and sits in a runnable
+# plan; `unjudgeable()` reads this table, so promoting one is the single edit
+# that makes its entry runnable. The rest wait in
+# `testplans/weak-link.yaml`, which says why per entry, and `docs/tests.md`
+# says per test what a weak link changes for it.
 CHECKS: tuple[Check, ...] = (
+    # The range test is where the attenuated board was first characterized
+    # (#217 at 20 dB, re-measured against 40 dB in 2026-11-02's A/B). Its
+    # entry is `range-weak-link`, which has been runnable since #276.
+    Check(
+        "Two-device range test over a weak link",
+        "Two-device range test", "responder", 20.0, "",
+    ),
+    # Measured 2026-11-02: about 1175 advertisements at 20 dB and 1228 at
+    # 40 dB, every one with a valid CRC and none failing, against a floor of
+    # a fifth of those expected. The smoke profile is broader than the one
+    # leg measured (it also captures on 38 and 39, checks their absence
+    # elsewhere, and follows with `-f`), so the margin rather than a
+    # like-for-like figure is what carries those cases; see testplans/ble.yaml.
     Check(
         "Board-to-DK capture with an attenuated receiver",
         "Capture known BLE advertiser", "Ubertooth", 20.0, "",
     ),
     Check(
+        "Board-to-DK capture with an attenuated receiver",
+        "Capture known BLE advertiser", "Ubertooth", 40.0, "",
+    ),
+    # Measured 2026-11-02 with the command this test runs: `-l <LAP> -u <UAP>`
+    # targeted, 1793 packets at `-e 0` and 2692 at `-e 2`, all of the target
+    # LAP and none of another, clock acquired.
+    Check(
         "Follow a marginal Classic piconet",
         "Follow Classic Bluetooth piconet", "Ubertooth", 20.0, "",
     ),
-    Check(
-        "AFH map recovery on a weak link",
-        "Recover AFH map", "Ubertooth", 20.0, "",
-    ),
+    # --- still waiting, each on something named -------------------------------
     Check(
         "UAP and clock recovery under errors",
-        "Capture known Classic device", "Ubertooth", 40.0, "",
+        "Capture known Classic device", "Ubertooth", 40.0,
+        "a measurement of the command this test actually runs. Its smoke "
+        "cases survey and sweep without a target, so the LAP has to be "
+        "recovered from the air; every sweep leg passed -l and -u, and the "
+        "sweep says the supplied UAP was used rather than guessed, so it "
+        "measured targeting and not recovery",
     ),
     Check(
         "Access-code error threshold (ubertooth-rx -e)",
-        "Classic Bluetooth receive", "Ubertooth", 40.0, "",
+        "Classic Bluetooth receive", "Ubertooth", 40.0,
+        "a case that compares what different -e values find. The sweep made "
+        "that comparison by hand; the test still only requires that no "
+        "packet exceeded the limit, which zero packets satisfy, and the "
+        "entry binds no peer to produce any",
+    ),
+    Check(
+        "AFH map recovery on a weak link",
+        "Recover AFH map", "Ubertooth", 20.0,
+        "a measurement of the 20-channel minimum map, which is half of the "
+        "smoke profile and has the least margin of any case here. Only the "
+        "38-channel map was measured at 20 dB, where recovery was exact "
+        "(38 of 38, no false channel)",
     ),
     Check(
         "HEC and CRC error flags, Classic",

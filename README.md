@@ -384,18 +384,29 @@ since an ordinary board is what every other role gets anyway.
 that need the bench's weak-link board: error flags and recovery under bit
 errors, the `ubertooth-rx -e` threshold, follow on a marginal link, a
 board-to-DK capture with the receiver attenuated, transmit power steps, and
-receiver sensitivity. It is not runnable: two entries have no implementation,
-and the other seven name a test that already exists but whose floors were set
-over whatever link it last ran, so each needs a run over this link before
-they mean anything here. `ubertooth_harness/weaklink.py` names what each
-check is waiting on, and two of them want a new assertion as well as a
-measurement.
+receiver sensitivity.
 
-A **runnable** plan may only ask for a link a figure has been taken over:
-exactly one attenuation, and one the bench has been measured at, today 20 dB
-alone. A bare `min_attenuation_db` is refused there too, because which board
-it binds depends on what the bench happens to hold. `validate-plan` and
-`run-suite` both apply that, so a suite is refused before any board is
+The entries a run has characterized live in the plan they belong to, each
+carrying the figures it was judged against: `ble-weak-link` in
+[`ble.yaml`](testplans/ble.yaml) (a known DK advertiser at 20 and 40 dB),
+`classic-weak-link` in [`classic.yaml`](testplans/classic.yaml) (a known
+piconet followed at 20 dB), and `range-weak-link` in
+[`range.yaml`](testplans/range.yaml). None of them changed a threshold: each
+is the committed test pointed at a weak-link receiver.
+[`testplans/weak-link.yaml`](testplans/weak-link.yaml) holds the rest, split
+into what needs a second nRF52840 DK and what needs a measurement or an
+implementation, and `ubertooth_harness/weaklink.py` names what each is
+waiting on.
+
+A **runnable** plan may only ask for a link a figure has been taken over, and
+that is judged **per test** rather than per bench: the requirement must pin
+exactly one attenuation, and `weaklink.CHECKS` must record a measurement of
+that test, in that role, there. 40 dB is measured for a BLE advertiser
+capture and not for a Classic capture file, so a bench-wide list would have
+admitted the second on the first's evidence. A bare `min_attenuation_db` is
+refused as well, because which board it binds depends on what the bench
+happens to hold. `validate-plan` applies this to a whole plan and `run-suite`
+to the suite it is about to run, so a suite is refused before a board is
 touched.
 
 Some tests ask for an ordinary link themselves, so a plan need not:
