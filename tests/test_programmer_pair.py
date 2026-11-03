@@ -703,14 +703,39 @@ class PairRunRecords(PairTestCase):
         registry = self.load(PROGRAMMER)
         pairings = leases.pairings_for_invocations(self.using_the_target(), registry)
         self.assertEqual(
-            [{"resource": "Prog0", "named": "UT_Debug",
+            [{"resource": "Prog0",
               "reason": "Prog0 is the programmer wired to UT_Debug"}],
             [dict(record) for record in pairings],
         )
         # The registry's own wording, so a run says what `hold` and `boards`
-        # say about the same pair.
+        # say about the same pair, and the clause names both devices, so no
+        # second field of the record can name another one.
         self.assertEqual(
             pairings[0]["reason"], registry.describe_pairing("Prog0", "UT_Debug")
+        )
+
+    def test_a_chain_of_pairs_is_recorded_in_the_registry_s_own_words(self):
+        """A programmer wired to another programmer's header: one set.
+
+        The run names the board at one end and holds every member, so each
+        record has to say how that member comes to be there.
+        """
+        chain = (
+            PROGRAMMER.replace("Prog0", "Prog1")
+            .replace("programs: UT_Debug", "programs: Prog0")
+            .replace(PROGRAMMER_SERIAL, "B111BB11")
+        )
+        registry = self.load(PROGRAMMER + chain)
+        records = leases.pairings_for_invocations(self.using_the_target(), registry)
+        self.assertEqual(
+            [("Prog0", "Prog0 is the programmer wired to UT_Debug"),
+             ("Prog1", "Prog1 is wired to UT_Debug through a programmer pair")],
+            [(record["resource"], record["reason"]) for record in records],
+        )
+        self.assertEqual(
+            {"Prog0", "Prog1", "UT_Debug"},
+            {board.alias for board
+             in leases.boards_for_invocations(self.using_the_target(), registry)},
         )
 
     def test_a_run_that_named_both_members_added_nothing(self):
@@ -894,7 +919,6 @@ class PairRunRecords(PairTestCase):
         self.assertEqual(1, kinds.count("lease_pairing"), kinds)
         details = events[kinds.index("lease_pairing")]["details"]
         self.assertEqual("Prog0", details["resource"])
-        self.assertEqual("UT_Free", details["named"])
         self.assertEqual(
             "Prog0 is the programmer wired to UT_Free, so the run held it too",
             details["message"],
@@ -904,7 +928,7 @@ class PairRunRecords(PairTestCase):
         """A record from elsewhere, or an older one, is only being shown."""
         self.assertEqual(
             "Prog0 is wired to UT_Debug, so the run held it too",
-            leases.describe_pairing_lease({"resource": "Prog0", "named": "UT_Debug"}),
+            leases.describe_pairing_lease({"resource": "Prog0", "reason": "Prog0 is wired to UT_Debug"}),
         )
         self.assertEqual(
             "Prog0 is wired to a device this run named, so the run held it too",

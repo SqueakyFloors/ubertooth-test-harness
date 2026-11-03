@@ -471,8 +471,7 @@ class LeasePairingRecords(unittest.TestCase):
         from ubertooth_harness.leases import pairing_record
 
         record = pairing_record(
-            "Prog_Linux0", "UT_Linux1",
-            "Prog_Linux0 is the programmer wired to UT_Linux1",
+            "Prog_Linux0", "Prog_Linux0 is the programmer wired to UT_Linux1"
         )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -495,7 +494,6 @@ class LeasePairingRecords(unittest.TestCase):
         self.assertEqual(1, len(pairings), [e["event_type"] for e in events])
         details = pairings[0]["details"]
         self.assertEqual("Prog_Linux0", details["resource"])
-        self.assertEqual("UT_Linux1", details["named"])
         self.assertEqual(
             "Prog_Linux0 is the programmer wired to UT_Linux1, so the run held "
             "it too",

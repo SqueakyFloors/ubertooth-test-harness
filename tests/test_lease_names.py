@@ -237,6 +237,25 @@ class OneBenchLockNameOneDevice(NamesTestCase):
         self.assertIn("DK_A (nRF52840 DK)", reason)
         self.assertIn("ESP_A (ESP32 Classic peer)", reason)
 
+    def test_a_serial_that_spells_another_device_s_lease_name_is_refused(self):
+        """The bench's own files are named after either kind of name.
+
+        A programmer's serial is chosen by whoever labels the adapter and
+        may be any name a file can carry, so it may be the very name
+        another device's lease uses; the bench would then have one file for
+        the two of them.
+        """
+        reason = self.refuse(
+            peer("ESP_A", BRIDGE),
+            programmer("Prog_A", f"esp32-{BRIDGE}", "ESP_A"),
+        )
+        self.assertIn("Prog_A (Debug programmer)", reason)
+        self.assertIn("ESP_A", reason)
+        self.assertIn("lock of one would be read as a lock of the other", reason)
+        # The lease files themselves do not collide, which is why this needs
+        # a check of its own.
+        self.assertNotEqual(f"esp32-{BRIDGE}", f"programmer-esp32-{BRIDGE}")
+
     def test_a_board_may_not_take_a_name_the_lease_directory_keeps(self):
         """`host-power` and `takeover` are the lease directory's own files."""
         for serial, what in (

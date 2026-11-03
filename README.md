@@ -1958,10 +1958,11 @@ ubertooth-harness lease --external-board-lock '/var/lock/board-{serial}.lock' \
 The template is an absolute path (or starts with `~/`) with exactly one
 `{serial}`, replaced by the board's lock key, the same key its lease file
 uses: an Ubertooth's full 32-hex-digit serial in lowercase, or
-`nrf52840dk-<J-Link serial without leading zeros>` for a DK.
-([`scripts/lab/hold`](scripts/lab/README.md) takes one more file per DK, peer
-and programmer, the bench's own older name for it: that one is the plain
-serial.) No other brace;
+`nrf52840dk-<J-Link serial without leading zeros>` for a DK,
+`esp32-<bridge serial>` for a Classic peer, `programmer-<serial>` for a debug
+programmer. ([`scripts/lab/hold`](scripts/lab/README.md) takes one more file
+per DK, peer and programmer, the bench's own older name for it: that one is
+the plain serial.) No other brace;
 `--external-board-lock` overrides the variable and
 `--external-board-lock ''` turns it off for one command. Unset, nothing
 changes. Each external lock is an exclusive `flock` on that file, taken in
@@ -2030,8 +2031,8 @@ runs by hand say on standard error which device the pairing brought in and why
 too`), so a holder nobody asked for is never a mystery, and `boards` prints
 the pairing under both devices. A run says the same line on standard error
 before it takes the locks, and carries it in its record: a `lease_pairing`
-record in run.jsonl (the device, the one the run named, and why the two come
-together), a line in the transcript, a "Leases from a wired pair" row in
+record in run.jsonl (the device, and the registry's own clause, which names
+both), a line in the transcript, a "Leases from a wired pair" row in
 report.md, and the same line in the browser's live view, so a reader of a
 report never finds a programmer among the leases of a run that asked for a
 board ([#289](https://github.com/SqueakyFloors/ubertooth-test-harness/issues/289)):

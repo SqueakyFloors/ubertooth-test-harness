@@ -601,6 +601,11 @@ class FileResourceRegistry:
         a device registered under a name of the harness's own is a mistake
         whoever reads that registry next should not have to know about.
 
+        The bench's own files are named after either of the two, so they are
+        checked once more as one space at the end: a programmer's serial is
+        chosen by whoever labels the adapter and may be any name a file can
+        carry, including one that spells another device's lease key.
+
         The lease files are the second space: a lease key is a file name in
         the lease directory (``leases.resource_key``), and the identity
         check above compares whole identity mappings while a key comes from
@@ -658,7 +663,7 @@ class FileResourceRegistry:
                     "bench's own lock file for a device is named after its plain "
                     "serial, so a lock of one would be read as a lock of the other"
                 )
-        keys: dict[str, str] = {}
+        keys: dict[str, tuple[str, str]] = {}
         for resource in ordered:
             if resource.type not in _leased_types():
                 continue
@@ -666,13 +671,47 @@ class FileResourceRegistry:
             if key is None:
                 continue
             if key.lower() in keys:
+                held_by, spelling = keys[key.lower()]
+                if spelling == key:
+                    raise RegistryError(
+                        f"{held_by} and {resource.alias} would both be leased as "
+                        f"'{key}'; one lease file is one device, so the two would "
+                        "be held in turn through it while everything that reads "
+                        "the registry treated them as two devices"
+                    )
                 raise RegistryError(
-                    f"{keys[key.lower()]} and {resource.alias} would both be "
-                    f"leased as '{key}'; one lease file is one device, so the two "
-                    "would be held in turn through it while everything that reads "
-                    "the registry treated them as two devices"
+                    f"{held_by} and {resource.alias} would be leased as "
+                    f"'{spelling}' and '{key}', which are one name written two "
+                    "ways; one device is registered once, whichever way its "
+                    "serial is written"
                 )
-            keys[key.lower()] = resource.alias
+            keys[key.lower()] = (resource.alias, key)
+        # The bench's own lock files, whose names are both of the above: a
+        # device's lease key, or its plain serial where `scripts/lab/hold`
+        # takes a second name for it (`Board.lock_name`). Two devices in one
+        # of those names would be held through one of the bench's files even
+        # where neither pair of names above collided -- a programmer may be
+        # registered with any lock-name-safe serial, including one that
+        # spells another device's lease key.
+        files: dict[str, tuple[str, str]] = {}
+        for resource in ordered:
+            this = f"{resource.alias} ({resource.type})"
+            names = {}
+            key = _lease_key_of(resource)
+            if key is not None:
+                names[key.lower()] = f"the lease name of {this}"
+            for name, _written in _bench_lock_names(resource):
+                names.setdefault(name, f"the serial of {this}")
+            for name, what in names.items():
+                held_by, other = files.get(name, (resource.alias, ""))
+                if held_by == resource.alias:
+                    files.setdefault(name, (resource.alias, what))
+                    continue
+                raise RegistryError(
+                    f"the bench's own lock file for {this} would be the one for "
+                    f"{held_by}: '{name}' is both {other} and {what}, so a lock "
+                    "of one would be read as a lock of the other"
+                )
 
     def _validate_pairs(self) -> None:
         """Permanently wired pairs: one target each, on one host, no loop.

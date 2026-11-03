@@ -528,19 +528,20 @@ def expand_pairs(registry, aliases: Sequence[str]) -> tuple[tuple[str, ...], tup
     return expand(list(aliases))
 
 
-def pairing_record(alias: str, named: str, reason: str) -> dict:
+def pairing_record(alias: str, reason: str) -> dict:
     """One device a permanent pairing added to a run's leases (#289).
 
-    What a reader of the run needs: the device that was held, the device the
-    run asked for, and why the two come together. No lock file path: the
-    lease directory is private and the devices are what explains the lease.
-    Each field is bounded, as every field a record carries is: a registry
-    made in code need not have passed the alias checks, and a run record has
-    a per-event size limit (see events.py).
+    What a reader of the run needs: the device that was held, and why it
+    came with one the run asked for. The reason is the registry's own
+    clause and names both devices, so there is no second field that could
+    name a different one. No lock file path: the lease directory is private
+    and the devices are what explains the lease. Both fields are bounded,
+    as every field a record carries is: a registry made in code need not
+    have passed the alias checks, and a run record has a per-event size
+    limit (see events.py).
     """
     return {
         "resource": _printable(alias, _RECORDED_HOLDER_CHARS),
-        "named": _printable(named, _RECORDED_HOLDER_CHARS),
         "reason": _printable(reason, _RECORDED_HOLDER_CHARS),
     }
 
@@ -553,15 +554,10 @@ def describe_pairing_lease(record: Mapping) -> str:
     """
     reason = str(record.get("reason") or "")
     if not reason:
-        # A record from somewhere else, or one written before the clause was
-        # carried: it still reads as a sentence, with or without the device
-        # the run asked for.
-        resource = record.get("resource") or "a device"
-        named = record.get("named")
-        reason = (
-            f"{resource} is wired to {named}" if named
-            else f"{resource} is wired to a device this run named"
-        )
+        # A record from somewhere else, or one whose clause was dropped: it
+        # still reads as a sentence, with what is known.
+        reason = f"{record.get('resource') or 'a device'} is wired to a device " \
+                 "this run named"
     return f"{reason}, so the run held it too"
 
 
@@ -634,15 +630,9 @@ def pairings_for_invocations(invocations: Sequence, registry) -> tuple[dict, ...
         # says what is known (describe_pairing_lease), which is better than
         # giving a device another one's reason.
         clauses = ("",) * len(added)
-    records = []
-    for alias, clause in zip(added, clauses):
-        # Which device the run asked for, for a reader who wants the pair
-        # rather than the sentence. The clause above is what is shown.
-        source = next(
-            (other for other in named if alias in pair_members(registry, other)), ""
-        )
-        records.append(pairing_record(alias, source, clause))
-    return tuple(records)
+    return tuple(
+        pairing_record(alias, clause) for alias, clause in zip(added, clauses)
+    )
 
 
 def needs_host_lock(invocations: Iterable, catalog) -> bool:
